@@ -195,6 +195,40 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
 
 3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head. Set ``fused_kernel_options.impl_backend`` to ``liger`` to use Liger's fused scaled cross entropy, or keep the default ``torch`` backend to use verl's native chunked ``FusedLinearForPPOFunction``. The ``liger`` backend falls back to the native implementation when Liger is not installed.
 
+   For Megatron, enable both ``use_fused_kernels`` and ``use_liger`` to select
+   Liger's public tensor-parallel output-head operator instead of Verl's Triton
+   implementation. Verl passes the full token tensor to the public API without
+   exposing chunking or padding controls. When LCK is installed, Verl sizes its
+   immutable workspace once from the existing actor/reference maximum-token
+   limits; Liger remains responsible for selecting the native implementation or
+   its fallback.
+
+   Configure the same maximum-token limits for colocated actor/reference
+   engines and on every rank. The workspace capacity is
+   ``max(max_token_len_per_gpu, infer_max_token_len_per_gpu) * context_parallel_size``
+   and cannot change after initialization. With fixed-size microbatches these
+   token settings do not limit the batch itself: choose them to cover the
+   largest packed output-head input, including Megatron's alignment padding.
+   Verl does not resize the workspace from observed microbatch shapes.
+
+   .. code-block:: bash
+
+      uv sync --extra megatron --extra vllm  # replace vllm with the selected rollout backend
+      uv pip install /path/to/liger_cute_kernels-0.8.3-<platform>.whl
+
+   .. code-block:: yaml
+
+      actor_rollout_ref:
+        model:
+          use_fused_kernels: true
+          use_liger: true
+
+   The optional ``liger-cute-kernels`` wheel enables Liger's native
+   CUTLASS/CuTe tensor-parallel implementation when the installed wheel
+   supports the current GPU and CUDA runtime. Backend selection remains inside
+   Liger; Verl calls the same public API whether Liger selects the native
+   implementation or its fallback.
+
 Forward prefetch in FSDP training backend
 ----------------------
 

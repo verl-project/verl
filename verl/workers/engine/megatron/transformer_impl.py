@@ -100,6 +100,47 @@ def _resolve_fused_temperature(temperature: float | torch.Tensor) -> float:
     return max(float(values[0].item()), 1e-8)
 
 
+def _resolve_megatron_fused_kernel_backend(model_config: HFModelConfig) -> str:
+    return "liger_tp" if model_config.use_liger else "triton"
+
+
+def _configure_liger_tp_runtime(model, engine_config: McoreEngineConfig) -> bool:
+    model = unwrap_model(model)
+    if hasattr(model, "language_model"):
+        model = model.language_model
+    if not getattr(model, "post_process", False):
+        return False
+
+    output_layer = getattr(model, "output_layer", None)
+    weight = getattr(output_layer, "weight", None)
+    if weight is None and getattr(model, "share_embeddings_and_output_weights", False):
+        weight = model.shared_embedding_or_output_weight()
+    if weight is None:
+        raise RuntimeError("Liger TP-FLSCE requires a local output-layer weight on the post-process stage")
+
+    token_limits = [
+        value
+        for value in (
+            engine_config.max_token_len_per_gpu,
+            engine_config.infer_max_token_len_per_gpu,
+        )
+        if value is not None
+    ]
+    if not token_limits:
+        raise RuntimeError("Liger TP-FLSCE requires an existing max-token limit in the Megatron engine config")
+    max_tokens = max(token_limits) * engine_config.context_parallel_size
+
+    from verl.utils.kernel.linear_cross_entropy import configure_liger_tp_flsce
+
+    return configure_liger_tp_flsce(
+        max_tokens=max_tokens,
+        hidden_size=weight.shape[1],
+        local_vocab_size=weight.shape[0],
+        process_group=mpu.get_tensor_model_parallel_group(),
+        device=weight.device,
+    )
+
+
 def _validate_dcp_world_size(dpcp_size: int) -> None:
     """Validate the topology accepted by Megatron-Core's dynamic group builder."""
     if dpcp_size < 2 or dpcp_size % 2 != 0:
@@ -531,10 +572,19 @@ class MegatronEngine(BaseEngine):
             self.engine_config.use_fused_kernels = False
             return
 
+        impl_backend = _resolve_megatron_fused_kernel_backend(self.model_config)
         from verl.models.mcore.model_forward_fused import patch_fused_forward
 
+        if impl_backend == "liger_tp" and self.param_dtype == torch.bfloat16:
+            for model in self.module:
+                if _configure_liger_tp_runtime(model, self.engine_config):
+                    break
+
         for model in self.module:
-            patch_fused_forward(model)
+            patch_fused_forward(
+                model,
+                impl_backend=impl_backend,
+            )
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config

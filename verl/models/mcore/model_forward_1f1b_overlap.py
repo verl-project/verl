@@ -27,6 +27,7 @@ from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
+from .model_forward_fused import _gather_fused_hidden_states, _get_fused_impl_backend
 from .util import postprocess_packed_seqs, postprocess_packed_seqs_for_dict_output
 
 
@@ -86,7 +87,6 @@ def gptmodel_forward_1f1b_overlap(
             the output layer, and computes language model loss when labels are provided.
             """
             from megatron.core import parallel_state
-            from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
 
             in_inference_mode = inference_context is not None and not self.training
             if in_inference_mode:
@@ -187,8 +187,12 @@ def gptmodel_forward_1f1b_overlap(
                     hidden_states=hidden_states,
                     attentions=None,
                 )
-                if self.config.sequence_parallel:
-                    hidden_states = gather_from_sequence_parallel_region(hidden_states)
+                impl_backend = _get_fused_impl_backend(model)
+                hidden_states = _gather_fused_hidden_states(
+                    hidden_states,
+                    self.config.sequence_parallel,
+                    impl_backend,
+                )
                 logprobs, entropy = linear_cross_entropy(
                     hidden_states,
                     self.output_layer.weight,
@@ -196,6 +200,7 @@ def gptmodel_forward_1f1b_overlap(
                     temperature,
                     "none",
                     parallel_state.get_tensor_model_parallel_group(),
+                    impl_backend=impl_backend,
                 )
                 output.entropy = entropy
                 output.log_probs = logprobs

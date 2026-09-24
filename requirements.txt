@@ -4,7 +4,7 @@ codetiming
 datasets
 dill
 hydra-core
-liger-kernel>=0.8.2
+liger-kernel>=0.8.3
 numpy>=2.0.0
 pandas
 peft

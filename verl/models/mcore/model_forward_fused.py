@@ -39,6 +39,7 @@ from verl.utils.model import CausalLMOutputForPPO
 from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
+_FUSED_IMPL_BACKEND_ATTR = "_verl_fused_impl_backend"
 _HOOK_MODE = "hook"
 _LEGACY_MODE = "legacy"
 
@@ -73,11 +74,32 @@ def _use_output_processor_hook(model: torch.nn.Module) -> bool:
     return _get_fused_forward_mode(model) == _HOOK_MODE
 
 
+def _get_fused_impl_backend(model: torch.nn.Module) -> str:
+    model = unwrap_model(model)
+    if hasattr(model, "language_model"):
+        model = model.language_model
+    return getattr(model, _FUSED_IMPL_BACKEND_ATTR, "triton")
+
+
+def _gather_fused_hidden_states(hidden_states: Tensor, sequence_parallel: bool, impl_backend: str) -> Tensor:
+    if not sequence_parallel:
+        return hidden_states
+
+    # Liger TP-FLSCE already reduces dHidden across vocabulary shards. Its
+    # sequence-parallel gather must only split that gradient in backward.
+    tensor_parallel_output_grad = impl_backend.lower() not in ("liger", "liger_tp")
+    return gather_from_sequence_parallel_region(
+        hidden_states,
+        tensor_parallel_output_grad=tensor_parallel_output_grad,
+    )
+
+
 @dataclass
 class FusedOutputProcessorContext:
     """Context passed through Megatron's native output-processor hook."""
 
     temperature: float
+    impl_backend: str = "triton"
 
 
 def fused_output_processor(
@@ -99,14 +121,12 @@ def fused_output_processor(
         attentions=None,
     )
 
-    if config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
 
     temperature = context.temperature
+    hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         weight,
@@ -114,6 +134,7 @@ def fused_output_processor(
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=context.impl_backend,
     )
 
     if has_config_logger_enabled(config):
@@ -146,10 +167,15 @@ def _get_patching_model(model: torch.nn.Module):
     return model.language_model
 
 
-def patch_fused_forward(model: torch.nn.Module):
+def patch_fused_forward(
+    model: torch.nn.Module,
+    *,
+    impl_backend: str = "triton",
+):
     model = _get_patching_model(model)
     if model is None:
         return
+    setattr(model, _FUSED_IMPL_BACKEND_ATTR, impl_backend)
 
     mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
     if mode is None:
@@ -230,13 +256,21 @@ def fused_forward_model_gen(vision_model: bool = False):
 
         if _use_output_processor_hook(model):
             input_args.pop("temperature", None)
+            impl_backend = _get_fused_impl_backend(model)
             output_orig: CausalLMOutputForPPO = model(
                 **input_args,
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+                output_processor_context=FusedOutputProcessorContext(
+                    temperature=temperature,
+                    impl_backend=impl_backend,
+                ),
             )
         else:
-            output_orig: CausalLMOutputForPPO = model(**input_args)
+            impl_backend = _get_fused_impl_backend(model)
+            output_orig: CausalLMOutputForPPO = model(
+                **input_args,
+                impl_backend=impl_backend,
+            )
 
         if post_process:
             # output_orig is in type of CausalLMOutputForPPO
@@ -331,13 +365,22 @@ def fused_forward_model_engine(vision_model: bool = False):
             **model_kwargs,
         )
         if _use_output_processor_hook(model):
+            impl_backend = _get_fused_impl_backend(model)
             output_orig: CausalLMOutputForPPO = model(
                 **forward_kwargs,
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+                output_processor_context=FusedOutputProcessorContext(
+                    temperature=temperature,
+                    impl_backend=impl_backend,
+                ),
             )
         else:
-            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
+            impl_backend = _get_fused_impl_backend(model)
+            output_orig: CausalLMOutputForPPO = model(
+                temperature=temperature,
+                impl_backend=impl_backend,
+                **forward_kwargs,
+            )
 
         if not post_process:
             return output_orig
@@ -392,6 +435,7 @@ def _fused_GPTModel_forward(
     inference_params: Optional[BaseInferenceContext] = None,
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
+    impl_backend: str = "triton",
     padding_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
@@ -454,8 +498,7 @@ def _fused_GPTModel_forward(
         attentions=None,
     )
 
-    if model.config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+    hidden_states = _gather_fused_hidden_states(hidden_states, model.config.sequence_parallel, impl_backend)
 
     # Get the output weight - use embedding weight if output_layer is None or weight is shared
     if hasattr(model, "output_layer") and model.output_layer is not None and model.output_layer.weight is not None:
@@ -471,6 +514,7 @@ def _fused_GPTModel_forward(
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=impl_backend,
     )
 
     if has_config_logger_enabled(model.config):
