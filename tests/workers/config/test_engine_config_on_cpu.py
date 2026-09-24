@@ -70,3 +70,26 @@ class TestFSDPEngineConfigCPU:
         test_policy = {"layer_class": "TransformerBlock"}
         config = FSDPEngineConfig(wrap_policy=test_policy)
         assert config.wrap_policy == test_policy
+
+
+@pytest.mark.parametrize("param_offload", [False, True])
+def test_step_optimizer_offload_config(param_offload):
+    config = FSDPEngineConfig(
+        strategy="fsdp2", optimizer_offload=True, optimizer_offload_step=True, param_offload=param_offload
+    )
+    assert config.optimizer_offload_step is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"strategy": "fsdp"}, {"optimizer_offload": False}, {"offload_policy": True}, {"forward_only": True}],
+)
+def test_step_optimizer_offload_rejects_unsupported_config(overrides):
+    kwargs = {"strategy": "fsdp2", "optimizer_offload": True, "optimizer_offload_step": True}
+    kwargs.update(overrides)
+    with pytest.raises(ValueError, match="manual optimizer_offload"):
+        FSDPEngineConfig(**kwargs)
+
+
+def test_step_optimizer_offload_is_opt_in():
+    assert FSDPEngineConfig().optimizer_offload_step is False
