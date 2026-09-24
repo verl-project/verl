@@ -64,6 +64,7 @@ from verl.utils.tokenizer import (
     get_processor_token_id,
 )
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+from verl.utils.transformers_compat import normalize_mm_processor_kwargs
 from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
@@ -240,7 +241,9 @@ class AgentLoopBase(ABC):
         self.dataset_cls = dataset_cls
         self.data_config = data_config.config
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
-        self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
+        self.mm_processor_kwargs = normalize_mm_processor_kwargs(
+            self.processor, self.data_config.get("mm_processor_kwargs", {})
+        )
         # Continuous Token is the only rollout tokenization path for agent loops.
         # The model family (boundary handling) is inferred by exact lookup of the
         # root Hugging Face config's model_type. Unrecognized models use the
@@ -509,7 +512,9 @@ class AgentLoopWorker:
         self.processor = self.model_config.processor
         hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
         self.hf_model_type: str | None = hf_model_type if isinstance(hf_model_type, str) else None
-        self.mm_processor_kwargs = config.data.get("mm_processor_kwargs", {})
+        self.mm_processor_kwargs = normalize_mm_processor_kwargs(
+            self.processor, config.data.get("mm_processor_kwargs", {})
+        )
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
