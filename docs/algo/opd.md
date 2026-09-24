@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 05/26/2026.
+Last updated: 09/09/2026.
 
 ## Background
 
@@ -276,7 +276,11 @@ Distillation divergence to use. Default: `"k3"`.
 
 Two registered families:
 
-- **Top-k** (`forward_kl_topk`): forward KL using the teacher's top-k logits.
+- **Top-k**:
+  - `forward_kl_topk`: the existing truncated forward-KL contribution on the
+    teacher's top-k support.
+  - `forward_kl_topk_tail`: a coarse-grained forward KL that additionally
+    collapses every non-top-k token into one aggregate tail bucket.
 - **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
   `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
   computed from the student's `log_probs` and the teacher's single
@@ -286,7 +290,8 @@ Two registered families:
 
 `k` for top-k distillation losses. Default: `32`.
 
-Only used when `loss_mode` requires top-$k$ (e.g. `forward_kl_topk`). Drives both
+Only used when `loss_mode` requires top-$k$ (e.g. `forward_kl_topk` or
+`forward_kl_topk_tail`). Drives both
 the teacher's `prompt_logprobs` request size and (for vLLM) the engine's
 `max_logprobs` cap.
 
@@ -317,6 +322,16 @@ Lower clamp on log probabilities used inside divergence computations, to
 prevent `log q − log p` from blowing up when `p` or `q` are near zero.
 Default: `null`.
 
+`forward_kl_topk_tail` requires this option to be `null`. Per-entry clamping
+changes the probability mass of the selected tokens and would invalidate the
+coarse-grained KL definition.
+
+### `distillation.distillation_loss.tail_mass_eps` (float)
+
+Minimum student probability mass used for the aggregate non-top-k bucket in
+`forward_kl_topk_tail`. Default: `1e-6`. This only guards `log(0)` when the
+student top-k mass rounds to one in finite precision.
+
 ### `distillation.distillation_loss.use_policy_gradient` (bool)
 
 How the distillation signal is applied. `true` corresponds to PG OPD, `false` to GKD OPD. Default: `false`.
@@ -327,7 +342,8 @@ How the distillation signal is applied. `true` corresponds to PG OPD, `false` to
 - `use_policy_gradient=False` + `loss_mode="k1"` $\to$ `ValueError`. The k1 loss
   has no gradient through the teacher logprob, so backpropagating it directly
   is meaningless.
-- `use_policy_gradient=True` + `loss_mode="forward_kl_topk"` $\to$ warning. The
+- `use_policy_gradient=True` with either teacher-top-k forward KL mode $\to$
+  warning. The
   PG update only moves $\nabla_\theta\log\pi_\theta(y_t|s_t)$ for the sampled token $y_t$, so the top-$k$
   distributional signal is largely unused.
 
@@ -410,6 +426,33 @@ $$
 
 The reason GKD OPD is implemented only over the teacher top-$k$ logits is because current inference servers return log-probabilities for the sampled token and the teacher top-$k$ tokens, but do not support gathering log-probabilities at arbitrary token IDs. Therefore, the implementation supports teacher-top-$k$ forward KL, but not student-top-$k$ reverse KL.
 
+The truncated objective above is not itself a KL between normalized
+distributions: both the teacher and student top-$k$ masses can be smaller than
+one, so an individual token loss can be negative. The existing
+`forward_kl_topk` mode clamps those negative per-token values to zero, which
+keeps the scalar loss well behaved but discards the gradient of every token
+whose student top-$k$ mass exceeds the teacher's.
+
+`forward_kl_topk_tail` preserves the same teacher request and adds one
+aggregate category for every token outside the teacher top-$k$. Let
+$P_k=\sum_{v\in T_k}\nu(v\mid s_t)$ and
+$Q_k=\sum_{v\in T_k}\pi_\theta(v\mid s_t)$. Its loss is
+
+$$
+\mathcal{L}_{\mathrm{tail}}^{(k)}(s_t)
+=
+\sum_{v\in T_k}
+\nu(v\mid s_t)
+\log\frac{\nu(v\mid s_t)}{\pi_\theta(v\mid s_t)}
++
+(1-P_k)\log\frac{1-P_k}{1-Q_k}.
+$$
+
+This is the exact KL after coarse-graining the vocabulary into the $k$
+selected tokens plus one tail bucket. It is non-negative and is a lower bound
+on the full-vocabulary forward KL. It does not recover how teacher probability
+is distributed among individual tail tokens.
+
 To use GKD OPD, set `loss_mode=forward_kl_topk`, choose `topk`, and disable policy-gradient distillation:
 
 ```yaml
@@ -420,7 +463,24 @@ distillation:
       use_policy_gradient: false
 ```
 
-Do not use `forward_kl_topk` with `use_policy_gradient=true`. The top-$k$ loss contains distributional information for many teacher-preferred tokens, but a policy-gradient update only acts through the sampled token:
+To use the tail-aware coarse-grained objective without any additional overhead
+in the teacher log-probability computation (the teacher request and payload are
+unchanged):
+
+```yaml
+distillation:
+   distillation_loss:
+      loss_mode: forward_kl_topk_tail
+      topk: 128
+      log_prob_min_clamp: null
+      tail_mass_eps: 1.0e-6
+      use_policy_gradient: false
+```
+
+Do not use `forward_kl_topk` or `forward_kl_topk_tail` with
+`use_policy_gradient=true`. These top-$k$ losses contain distributional
+information for many teacher-preferred tokens, but a policy-gradient update
+only acts through the sampled token:
 
 $$
 \nabla_\theta \mathcal{L}_{\mathrm{PG}}
@@ -587,6 +647,18 @@ These metrics are logged for top-$k$ loss modes such as `forward_kl_topk`.
 - `actor/distillation/teacher_mass_min` / `actor/distillation/teacher_mass_max`  
   Minimum and maximum teacher mass on the teacher top-$k$ tokens within the batch.
 
+- `actor/distillation/tail_loss`
+  Mean contribution of the aggregate non-top-k bucket. Emitted by
+  `forward_kl_topk_tail`.
+
+- `actor/distillation/topk_loss`
+  Mean contribution from the teacher top-$k$ tokens before adding the aggregate
+  tail bucket. Emitted by `forward_kl_topk_tail`.
+
+- `actor/distillation/teacher_tail_mass` / `actor/distillation/student_tail_mass`
+  Mean probability mass outside the teacher-selected top-$k$ support. Emitted
+  by `forward_kl_topk_tail`.
+
 - `actor/distillation/overlap_ratio`
   Average fraction of teacher top-$k$ tokens that also appear in the student's
   top-$k$ tokens, computed as
@@ -748,6 +820,7 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/experimental/agent_loop/agent_loop.py` — `AgentLoopWorker._compute_teacher_logprobs`; per-sample teacher dispatch from `_agent_loop_postprocess`, packs `teacher_logprobs` into the rollout output
 - `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk`
 - `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk`
+- `verl/trainer/distillation/tail_kl.py` — shared tail-bucket value and analytic logit-gradient helpers
 - `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
 - `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool
