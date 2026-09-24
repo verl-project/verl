@@ -1120,6 +1120,7 @@ class AgentLoopWorker:
         # Keep a stable set of keys so downstream batch concat stays consistent across agent loops.
         extra_fields = {}
         default_extra_keys = {
+            "response_truncated",
             "turn_scores",
             "tool_rewards",
             "min_global_steps",

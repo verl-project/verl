@@ -458,3 +458,47 @@ async def test_agent_loop_pad_token_ids_empty_with_non_zero_pad_id():
     # attention_mask should be all zeros
     expected_attention_mask = torch.zeros((1, 8), dtype=torch.long)
     torch.testing.assert_close(result["attention_mask"], expected_attention_mask)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_flag", [True, False, None])
+@pytest.mark.parametrize("response_cap", [2, 8])
+async def test_single_turn_truncation_reaches_both_batch_formats(backend_flag, response_cap):
+    class Server(_FakeServerManager):
+        async def generate(self, *args, **kwargs):
+            return TokenOutput(token_ids=[11, 12, 13], is_truncated=backend_flag)
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {"prompt_length": 16, "response_length": response_cap},
+                "model": {"path": "dummy-model", "tokenizer_path": "dummy-model"},
+            },
+            "data": {"apply_chat_template_kwargs": {}},
+        }
+    )
+    loop = SingleTurnAgentLoop(
+        trainer_config=DictConfigWrap(config),
+        server_manager=Server(),
+        tokenizer=_FakeTokenizer(),
+        processor=None,
+        dataset_cls=RLHFDataset,
+        data_config=DictConfigWrap(config.data),
+    )
+    output = await loop.run({}, raw_prompt=[{"role": "user", "content": "hi"}])
+    expected = True if response_cap == 2 else backend_flag
+    # V1 serializes the unpadded AgentLoopOutput into TransferQueue.
+    assert output.as_dict()["extra_fields"]["response_truncated"] is expected
+    internal = _to_internal(
+        output_prompt_ids=output.prompt_ids,
+        output_response_ids=output.response_ids,
+        output_response_mask=output.response_mask,
+        metrics=output.metrics,
+        extra_fields=output.extra_fields,
+        num_turns=output.num_turns,
+        prompt_len=16,
+        response_len=response_cap,
+    )
+    worker = type("Worker", (), {"reward_loop_worker_handles": None})()
+    batch = AgentLoopWorker._postprocess(worker, inputs=[internal])
+    assert batch.non_tensor_batch["response_truncated"].tolist() == [expected]

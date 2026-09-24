@@ -315,6 +315,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
+            final_output.is_truncated = output.is_truncated
 
             # carry the initial prefill's prefix-cache hit count forward
             if num_cached_tokens is None:
@@ -331,6 +332,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
                 if len(final_output.token_ids) >= original_max_tokens:
                     final_output.stop_reason = "length"
+                    # A resumed/aborted request can exhaust the cumulative budget here.
+                    # Preserve an explicit normal stop (EOS exactly at the budget).
+                    if output.stop_reason in ("aborted", "abort") or output.is_truncated is None:
+                        final_output.is_truncated = True
                     break
 
             # 4. check stop reason

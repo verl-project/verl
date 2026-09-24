@@ -1,7 +1,7 @@
 Verl LLM Best Practices (DAPO + Qwen3-235B)
 ===========================================
 
-Last updated: 11/03/2025.
+Last updated: 09/17/2026.
 
 Purpose
 -------
@@ -128,7 +128,7 @@ Parameter Reference
   - ``actor_rollout_ref.rollout.name``:
     Rollout backend. Verl currently supports ``vllm`` and ``sglang``—benchmark and tune according to your infrastructure.
   - ``actor_rollout_ref.rollout.response_length`` / ``data.max_response_length``:
-    Maximum generated tokens (rollout setting takes precedence). Larger values improve quality but consume more memory and latency. Monitor ``clip_ratio``; values above 0.1 often mean you are truncating too much.
+    Maximum generated tokens (rollout setting takes precedence). Larger values improve quality but consume more memory and latency. Monitor ``clip_ratio``; values above 0.1 often mean you are truncating too much. The built-in agent loops use backend termination metadata for ``response_length/clip_ratio``, including per-request limits imposed by ``max_model_len``. A normal stop at the configured length is not truncation. Tool trajectories also count length-limited turns and termination at the agent's response budget. Custom backends or agent loops without this metadata retain the legacy length-based estimate.
   - ``actor_rollout_ref.rollout.gpu_memory_utilization``:
     Target GPU memory usage during rollout. Push it as high as possible without triggering OOM; with parameter/gradient/optimizer offload enabled, 0.8–0.9 is common.
   - ``actor_rollout_ref.rollout.tensor_model_parallel_size``:
