@@ -70,6 +70,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     build_mtp_speculative_config,
     extract_prompt_logprobs,
     get_vllm_max_lora_rank,
+    merge_hf_overrides,
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
@@ -304,6 +305,8 @@ class vLLMHttpServer:
             set_expandable_segments(True)
 
         quantization, hf_overrides = self._apply_quantization()
+        user_hf_overrides = engine_kwargs.pop("hf_overrides", None)
+        hf_overrides = merge_hf_overrides(hf_overrides, user_hf_overrides, self.model_config.lm_head_dtype)
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):

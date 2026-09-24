@@ -119,13 +119,21 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
-        temperature=temperature,
-    )
+    fused_backend = getattr(self, "_verl_fused_kernels_backend", "torch")
+    if getattr(self, "_verl_lm_head_dtype", None) == "float32":
+        log_probs, entropy = self.lm_head(
+            hidden_states,
+            token_ids=rolled_labels,
+            temperature=temperature,
+            fused_backend=fused_backend,
+        )
+    else:
+        log_probs, entropy = FusedLinearForPPO(impl_backend=fused_backend)(
+            hidden_states=hidden_states,
+            vocab_weights=self.lm_head.weight,
+            input_ids=rolled_labels,
+            temperature=temperature,
+        )
 
     return CausalLMOutputForPPO(
         log_probs=log_probs,
@@ -186,13 +194,21 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    log_probs, entropy = linear_cross_entropy(
-        hidden_states,
-        self.lm_head.weight,
-        rolled_labels,
-        temperature,
-        "none",
-    )
+    if getattr(self, "_verl_lm_head_dtype", None) == "float32":
+        log_probs, entropy = self.lm_head(
+            hidden_states,
+            token_ids=rolled_labels,
+            temperature=temperature,
+            fused_backend="triton",
+        )
+    else:
+        log_probs, entropy = linear_cross_entropy(
+            hidden_states,
+            self.lm_head.weight,
+            rolled_labels,
+            temperature,
+            "none",
+        )
 
     return CausalLMOutputForPPO(
         log_probs=log_probs,

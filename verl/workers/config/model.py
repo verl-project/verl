@@ -138,6 +138,9 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # output projection dtype; null preserves the backend default
+    lm_head_dtype: Optional[str] = None
+
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
 
@@ -146,6 +149,11 @@ class HFModelConfig(BaseConfig):
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):
+        if self.lm_head_dtype not in (None, "float32"):
+            raise ValueError(
+                f"Unsupported lm_head_dtype={self.lm_head_dtype!r}. Supported values are null and 'float32'."
+            )
+
         import_external_libs(self.external_lib)
 
         if self.hf_config_path is None:
