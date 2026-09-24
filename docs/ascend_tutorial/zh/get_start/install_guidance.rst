@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 2026/08/13.
+Last updated: 2026/09/17.
 
 关键更新
 --------
@@ -122,7 +122,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    sudo yum install -y Ascend-cann-toolkit-9.1.0
    sudo yum install -y Ascend-cann-A3-ops-9.1.0
    # 安装后验证
-   source /usr/local/Ascend/ascend-toolkit/set_env.sh
+   source "${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
    python3 -c "import acl;print(acl.get_soc_name())"
 
 源码安装
@@ -130,16 +130,35 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 
 我们提供了基于conda一键部署 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_ , 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决
 
+.. doctest: installation-vllm-environment
+
 .. code:: bash
 
    # 注意：在 x86 平台安装时，pip 需要配置额外的源，指令如下：
    # pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
    # 使能CANN环境， 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
-   source /usr/local/Ascend/ascend-toolkit/set_env.sh
-   source /usr/local/Ascend/nnal/atb/set_env.sh
-   conda create -n verl-vllm-npu python=3.12 -y
-   conda activate verl-vllm-npu
-   git clone --recursive https://github.com/verl-project/verl.git
+   source "${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+   source "${ATB_ENV_SCRIPT:-/usr/local/Ascend/nnal/atb/set_env.sh}"
+   conda create --prefix "${VERL_CONDA_PREFIX:-$HOME/.conda/envs/verl-vllm-npu}" python=3.12 -y
+   conda activate "${VERL_CONDA_PREFIX:-$HOME/.conda/envs/verl-vllm-npu}"
+
+下载仓库（SGLang 安装也复用此步骤）。默认使用上游仓库；测试时可以通过
+``VERL_REPOSITORY`` 指向待测 checkout，通过 ``VERL_REVISION`` 指定提交。
+
+.. doctest: installation-checkout
+
+.. code:: bash
+
+   git clone --no-local --recursive "${VERL_REPOSITORY:-https://github.com/verl-project/verl.git}" verl
+   if [ -n "${VERL_REVISION:-}" ]; then
+       git -C verl checkout --detach "$VERL_REVISION"
+       git -C verl submodule update --init --recursive
+   fi
+
+.. doctest: installation-vllm-install
+
+.. code:: bash
+
    bash verl/scripts/install_vllm_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh
@@ -196,7 +215,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    sudo yum install -y Ascend-cann-toolkit-8.5.0
    sudo yum install -y Ascend-cann-A3-ops-8.5.0
    # 安装后验证
-   source /usr/local/Ascend/ascend-toolkit/set_env.sh
+   source "${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
    python3 -c "import acl;print(acl.get_soc_name())"
 
 源码安装
@@ -204,16 +223,24 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 
 我们提供了基于conda一键部署 `安装脚本 <../../../../scripts/install_sglang_mcore_npu.sh>`_ , 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决
 
+.. doctest: installation-sglang-environment
+
 .. code:: bash
 
    # 注意：在 x86 平台安装时，pip 需要配置额外的源，指令如下：
    # pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
    # 使能CANN环境， 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
-   source /usr/local/Ascend/ascend-toolkit/set_env.sh
-   source /usr/local/Ascend/nnal/atb/set_env.sh
-   conda create -n verl-sgl-npu python=3.11 -y
-   conda activate verl-sgl-npu
-   git clone --recursive https://github.com/verl-project/verl.git
+   source "${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+   source "${ATB_ENV_SCRIPT:-/usr/local/Ascend/nnal/atb/set_env.sh}"
+   conda create --prefix "${VERL_CONDA_PREFIX:-$HOME/.conda/envs/verl-sgl-npu}" python=3.11 -y
+   conda activate "${VERL_CONDA_PREFIX:-$HOME/.conda/envs/verl-sgl-npu}"
+
+然后执行上文的下载仓库步骤，并安装 SGLang 后端：
+
+.. doctest: installation-sglang-install
+
+.. code:: bash
+
    bash verl/scripts/install_sglang_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_sglang_mcore_npu.sh
@@ -240,6 +267,36 @@ SGLang 使用注意事项
    # 使能推理 EP 时需要
    export SGLANG_DEEPEP_BF16_DISPATCH=1
 
+源码构建所需的系统工具
+--------------------
+
+在已经安装驱动、CANN 和 ATB 的容器中，源码编译还需要下列系统工具。
+Conda 需要预先安装并初始化。以下步骤不安装或更新宿主机驱动。
+
+Ubuntu：
+
+.. doctest: installation-prerequisites-ubuntu
+
+.. code:: bash
+
+   apt-get update
+   apt-get install -y gcc g++ cmake libnuma-dev wget git curl unzip build-essential ca-certificates
+
+openEuler（须自行准备兼容的 CANN、Conda 基础容器）：
+
+.. doctest: installation-prerequisites-openeuler
+
+.. code:: bash
+
+   yum install -y gcc gcc-c++ cmake numactl-devel wget git curl unzip make ca-certificates
+
+文档自动化测试
+--------------
+
+安装测试在独立临时 Conda 环境中执行上述代码块，然后运行一个 GRPO step。
+测试说明和可用硬件矩阵见仓库中的 ``tests/e2e/doctests/README.md``。
+RST 中的 ``doctest:`` 注释用于定位代码块，不影响文档渲染。
+
 附录
 ----------------
 
@@ -254,5 +311,3 @@ verl 中昇腾暂不支持生态库如下：
 | ``flash_attn``   | 不支持通过独立 ``flash_attn`` 包使能 flash       |
 |                  | attention 加速，支持通过 transformers 使用       |
 +------------------+--------------------------------------------------+
-
-

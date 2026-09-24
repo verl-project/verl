@@ -1,7 +1,7 @@
 昇腾快速上手说明
 =================
 
-**Last updated:** 2026/07/14.
+**Last updated:** 2026/09/17.
 
 关键更新
 --------
@@ -60,15 +60,26 @@ A3 每卡含 2 die，A2 每卡 1 die，如果在 A3 机器上跑示例，需要�
 
 脚本中的默认读取权重路径为 ``~/models/Qwen/Qwen3-0.6B``
 
-建议将权重放在该路径下，或者修改脚本中MODEL_PATH指向本地路径
+建议将权重放在该路径下，或者设置 MODEL_PATH 指向本地路径：
+
+.. doctest: quickstart-model
+
+.. code-block:: bash
+
+   export MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen/Qwen3-0.6B}"
+   test -f "$MODEL_PATH/config.json"
 
 
 数据准备
 ~~~~~~
 
+.. doctest: quickstart-data
+
 .. code-block:: bash
 
-   python3 examples/data_preprocess/gsm8k.py --local_dataset_path /download/path/hf_data/gsm8k/
+   python3 examples/data_preprocess/gsm8k.py \
+       --local_dataset_path "${GSM8K_DATASET_PATH:-/download/path/hf_data/gsm8k/}" \
+       --local_save_dir "${GSM8K_OUTPUT_DIR:-$HOME/data/gsm8k}"
 
 gsm8k原始数据集需自行从huggingface上下载
 
@@ -88,10 +99,12 @@ gsm8k原始数据集需自行从huggingface上下载
 
 使能CANN环境：如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
 
+.. doctest: quickstart-environment
+
 .. code-block:: bash
 
-   source /usr/local/Ascend/ascend-toolkit/set_env.sh
-   source /usr/local/Ascend/nnal/atb/set_env.sh
+   source "${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+   source "${ATB_ENV_SCRIPT:-/usr/local/Ascend/nnal/atb/set_env.sh}"
 
 Quick Start 当前提供四种常用训推后端组合。用户可根据训练后端和 rollout 后端选择对应脚本
 
@@ -106,19 +119,51 @@ Quick Start 当前提供四种常用训推后端组合。用户可根据训练�
    * - vLLM + FSDP2
      - FSDP2
      - vLLM-Ascend
-     - bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+     - 见下方 ``fsdp2_vllm`` 命令
    * - vLLM + Megatron
      - Megatron
      - vLLM-Ascend
-     - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
+     - 见下方 ``megatron_vllm`` 命令
    * - SGLang + FSDP2
      - FSDP2
      - SGLang
-     - bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
+     - 见下方 ``fsdp2_sglang`` 命令
    * - SGLang + Megatron
      - Megatron
      - SGLang
-     - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
+     - 见下方 ``megatron_sglang`` 命令
+
+fsdp2_vllm：
+
+.. doctest: quickstart-fsdp2_vllm
+
+.. code-block:: bash
+
+   bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+
+megatron_vllm：
+
+.. doctest: quickstart-megatron_vllm
+
+.. code-block:: bash
+
+   bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
+
+fsdp2_sglang：
+
+.. doctest: quickstart-fsdp2_sglang
+
+.. code-block:: bash
+
+   bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
+
+megatron_sglang：
+
+.. doctest: quickstart-megatron_sglang
+
+.. code-block:: bash
+
+   bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
 脚本内具体参数说明详见 `训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics.md>`_
 
@@ -153,4 +198,3 @@ vLLM 后端脚本转换为 SGLang
 
    # chunked_prefill 默认关闭
    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
-

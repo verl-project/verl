@@ -1,0 +1,8 @@
+{
+  "extra": {"quickstart_image_repository": "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl"},
+  "profiles": [
+    {"id": "a2-ubuntu-vllm", "device": "a2", "os": "ubuntu", "runner": "linux-aarch64-a2b3-8", "devices": 8, "backend": "vllm", "quickstart_image": "{{ quickstart_image_repository }}:latest-vllm-910b-ubuntu", "dockerfile": "docker/ascend/Dockerfile.ascend_9.1.0_a2", "source_install": true},
+    {"id": "a3-ubuntu-vllm", "device": "a3", "os": "ubuntu", "runner": "linux-aarch64-a3-8", "devices": 8, "backend": "vllm", "quickstart_image": "{{ quickstart_image_repository }}:latest-vllm-a3-ubuntu", "dockerfile": "docker/ascend/Dockerfile.ascend_9.1.0_a3", "source_install": true},
+    {"id": "a3-ubuntu-sglang", "device": "a3", "os": "ubuntu", "runner": "linux-aarch64-a3-8", "devices": 8, "backend": "sglang", "quickstart_image": "{{ quickstart_image_repository }}:latest-sglang-a3-ubuntu", "dockerfile": "docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3", "source_install": true}
+  ]
+}
