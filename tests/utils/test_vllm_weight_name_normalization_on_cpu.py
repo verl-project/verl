@@ -24,6 +24,7 @@ list. Imports *only* from ``verl.workers.rollout.vllm_rollout.utils`` (deps
 stubbed) to prove the receiver is decoupled from ``megatron_peft_utils``.
 """
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -730,3 +731,91 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
     assert loaded == ["q.weight", "k.weight"]
+
+
+# ---------------------------------------------------------------------------
+# The standard (non-quantized) sync stages unquantized MoE layers whose kernel prep
+# reshaped the expert weights, and folds them back after the last bucket
+# (verl-project/verl#7978: FlashInfer TRT-LLM bf16 MoE keeps w13/w2 in a 4-D layout).
+# These stub the receiver and the staging module, so they run without vLLM.
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_receiver(monkeypatch, buckets):
+    fake_bwt = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_bwt.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiver(buckets)
+    monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer", fake_bwt)
+
+
+def _install_fake_moe_staging(monkeypatch, events, staged_layers):
+    fake_loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
+    fake_loader_utils.process_weights_after_loading = lambda *a, **k: events.append("process_weights_after_loading")
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.utils", fake_loader_utils)
+
+    def _stage(model):
+        events.append("stage")
+        return list(staged_layers)
+
+    @contextlib.contextmanager
+    def _fold(layers):
+        events.append(f"fold:{len(layers)}")
+        yield
+        events.append("fold:done")
+
+    fake_refit = types.ModuleType("verl.utils.vllm.vllm_moe_refit_utils")
+    fake_refit.stage_unquantized_moe_params = _stage
+    fake_refit.fold_unquantized_moe_params = _fold
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm.vllm_moe_refit_utils", fake_refit)
+
+
+def _staging_sync_worker(model):
+    worker = _make_worker(model)
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-moe-staging.sock"
+    return worker
+
+
+def test_standard_sync_stages_moe_layers_before_the_buckets_and_folds_them_after(monkeypatch):
+    """The loads stream into the staged views bucket by bucket: the tensors handed to load_weights
+    are the receiver's views into its reused buffer, with no copies held past the bucket."""
+    events = []
+    _install_fake_moe_staging(monkeypatch, events, staged_layers=["experts"])
+    bucket_buffer = torch.zeros(2)
+    views = [bucket_buffer[0:1], bucket_buffer[1:2]]
+    _install_fake_receiver(monkeypatch, [([("q.weight", views[0])], False), ([("k.weight", views[1])], True)])
+    model = _FakeModel({"q.weight": torch.empty(0), "k.weight": torch.empty(0)})
+    loaded = []
+
+    def _load(weights):
+        for name, tensor in weights:
+            events.append(f"load:{name}")
+            loaded.append(tensor)
+
+    model.load_weights = _load
+    _staging_sync_worker(model).update_weights_from_ipc(peft_config=None, base_sync_done=False)
+
+    assert events == [
+        "stage",
+        "load:q.weight",
+        "load:k.weight",
+        "fold:1",
+        "process_weights_after_loading",
+        "fold:done",
+    ]
+    assert [t.data_ptr() for t in loaded] == [v.data_ptr() for v in views]
+
+
+def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
+    events = []
+    _install_fake_moe_staging(monkeypatch, events, staged_layers=["experts"])
+    _install_fake_receiver(monkeypatch, [([("lora.A.weight", torch.ones(1))], True)])
+    worker = _staging_sync_worker(_FakeModel({"q.base_layer.weight": torch.empty(0)}))
+    worker.add_lora = lambda request: events.append("add_lora")
+    worker.remove_lora = lambda lora_id: None
+
+    worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
+
+    assert events == ["add_lora"]
