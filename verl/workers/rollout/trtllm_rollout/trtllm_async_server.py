@@ -335,6 +335,8 @@ class TRTLLMHttpServer:
         sampling_params["max_tokens"] = max_tokens
         # TorchSampler: logprobs=0 means sampled-token logprob; TRTLLMSampler: logprobs=1
         _want_logprobs = sampling_params.pop("logprobs", False)
+        if sampling_params.pop("topk_log_probs", 0):
+            raise NotImplementedError("rollout.topk_log_probs (score centering) is supported by the vLLM rollout only.")
         if self._use_torch_sampler:
             sampling_params["logprobs"] = 0 if _want_logprobs else None
         else:

@@ -138,6 +138,25 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
+def extract_response_topk_logprobs(logprobs: list[dict], k: int) -> tuple[list[list[int]], list[list[float]]]:
+    """Sampler top-k head per generated token, ordered by rank; the sampled token is kept only inside the head."""
+    ids_ls, log_probs_ls = [], []
+    for logprobs_dict in logprobs:
+        # We get either top-k logprobs or top-k plus the sampled logprob (if sampled token is not in top-k)
+        assert len(logprobs_dict) in (k, k + 1), len(logprobs_dict)
+        ids = [0] * k
+        log_probs = [0.0] * k
+        for token_id, token_logprob in logprobs_dict.items():
+            rank = token_logprob.rank
+            if rank > k:
+                continue  # the sampled token is not in the top-k
+            ids[rank - 1] = int(token_id)
+            log_probs[rank - 1] = token_logprob.logprob
+        ids_ls.append(ids)
+        log_probs_ls.append(log_probs)
+    return ids_ls, log_probs_ls
+
+
 def _get_rollout_targets(config_file: str, server_addresses: list[str]) -> list[str]:
     """Merge new rollout server addresses into the existing Prometheus rollout targets."""
     try:

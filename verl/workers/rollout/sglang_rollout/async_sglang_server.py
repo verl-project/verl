@@ -581,6 +581,8 @@ class SGLangHttpServer:
         )
         sampling_params["max_new_tokens"] = max_new_tokens
         return_logprob = sampling_params.pop("logprobs", False)
+        if sampling_params.pop("topk_log_probs", 0):
+            raise NotImplementedError("rollout.topk_log_probs (score centering) is supported by the vLLM rollout only.")
 
         # vLLM-style "prompt_logprobs=K" from the distillation teacher: request
         # input-token logprobs for every position (top-K when K>0, sampled-token

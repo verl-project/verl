@@ -165,6 +165,44 @@ def test_agent_loop_output_as_dict_promotes_teacher_fields_without_mutating_mode
     assert output.extra_fields["teacher_logprobs"] == [-0.1, -0.2]
 
 
+def test_agent_loop_output_as_dict_promotes_rollout_topk_fields():
+    output = AgentLoopOutput(
+        prompt_ids=[1, 2, 3],
+        response_ids=[4, 5],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[4, 9], [5, 8]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+        },
+    )
+
+    fields = output.as_dict()
+
+    # Unpadded full-sequence layout: row P-1+r holds response token r's head, other rows the dummy head.
+    assert fields["rollout_topk_ids"].shape == (5, 2) and fields["rollout_topk_ids"].dtype == torch.int32
+    assert fields["rollout_topk_log_probs"].shape == (5, 2) and fields["rollout_topk_log_probs"].dtype == torch.float32
+    assert fields["rollout_topk_ids"][2].tolist() == [4, 9] and fields["rollout_topk_ids"][3].tolist() == [5, 8]
+    assert fields["rollout_topk_ids"][0].tolist() == [0, 1]
+    assert fields["extra_fields"] == {}
+    assert output.extra_fields["response_topk_ids"] == [[4, 9], [5, 8]]
+
+
+def test_agent_loop_output_as_dict_rejects_multi_turn_rollout_topk():
+    output = AgentLoopOutput(
+        prompt_ids=[1],
+        response_ids=[2, 3],
+        response_mask=[1, 1],
+        num_turns=4,
+        metrics=AgentLoopMetrics(),
+        extra_fields={"response_topk_ids": [[2, 9], [3, 8]], "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]]},
+    )
+
+    with pytest.raises(ValueError, match="single-turn"):
+        output.as_dict()
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
     captured_kwargs: dict[str, Any] = {}
@@ -362,7 +400,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
 
         def __init__(self):
             self.tokenizer = _FakeTokenizer()
-            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4, "topk_log_probs": 0})
             self.processor = None
             self.mm_processor_kwargs = {}
             self.reward_loop_worker_handles = None
@@ -402,6 +440,86 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_postprocess_skips_rollout_topk_on_validate_on_cpu():
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
+        distillation_enabled = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4, "topk_log_probs": 128})
+            self.processor = None
+            self.mm_processor_kwargs = {}
+            self.reward_loop_worker_handles = None
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+        extra_fields={},
+    )
+
+    # Validation rollouts request no sampler head (generate_sequences sets topk_log_probs=0),
+    # so postprocess must not look for it even though the config still has topk_log_probs > 0.
+    internal = await AgentLoopWorker._agent_loop_postprocess(
+        _DummyWorker(),
+        output,
+        validate=True,
+        raw_prompt=[{"role": "user", "content": "hi"}],
+    )
+
+    assert internal.rollout_topk_ids is None
+    assert internal.rollout_topk_log_probs is None
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_postprocess_rejects_multi_turn_rollout_topk_on_cpu():
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
+        distillation_enabled = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4, "topk_log_probs": 2})
+            self.processor = None
+            self.mm_processor_kwargs = {}
+            self.reward_loop_worker_handles = None
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        num_turns=3,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+        },
+    )
+
+    # The sampler head is laid out over one prompt and one response, so tool or
+    # user turns in between would misalign it with the trainer's logits.
+    with pytest.raises(ValueError, match="single-turn"):
+        await AgentLoopWorker._agent_loop_postprocess(
+            _DummyWorker(),
+            output,
+            validate=False,
+            raw_prompt=[{"role": "user", "content": "hi"}],
+        )
 
 
 class _FakeTokenizerCustomPad:

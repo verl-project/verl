@@ -1349,6 +1349,9 @@ class RayPPOTrainer:
                 and not distillation_loss_cfg.use_task_rewards
                 and not distillation_loss_cfg.use_policy_gradient
             )
+        score_centering = bool(
+            self.config.actor_rollout_ref.actor.policy_loss.get("rollout_correction", {}).get("score_centering", False)
+        )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1359,6 +1362,7 @@ class RayPPOTrainer:
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
             distillation_only=distillation_only,
+            score_centering=score_centering,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,

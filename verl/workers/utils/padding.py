@@ -91,6 +91,13 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         data["teacher_logprobs"] = teacher_logprobs_nested
         data["teacher_ids"] = teacher_ids_nested
 
+    # (bsz, seqlen, k) sampler top-k heads for score centering
+    for key in ("rollout_topk_ids", "rollout_topk_log_probs"):
+        value = data.get(key, None)
+        if value is not None and not value.is_nested:
+            value_rmpad = index_first_axis(value.unsqueeze(-1).flatten(0, 1), indices)
+            data[key] = torch.nested.nested_tensor_from_jagged(value_rmpad.squeeze(-1), offsets=cu_seqlens)
+
     return data
 
 

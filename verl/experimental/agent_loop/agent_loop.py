@@ -158,6 +158,26 @@ class AgentLoopOutput(BaseModel):
             output["teacher_ids"] = teacher_ids
         if teacher_logprobs is not None:
             output["teacher_logprobs"] = teacher_logprobs
+        response_topk_ids, response_topk_log_probs = (
+            extra_fields.pop("response_topk_ids", None),
+            extra_fields.pop("response_topk_log_probs", None),
+        )
+        if response_topk_ids is not None and response_topk_log_probs is not None:
+            from verl.trainer.ppo.score_centering import pad_rollout_topk
+
+            if self.num_turns > 2:
+                raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
+            prompt_length, response_length = output["prompts"].size(0), output["responses"].size(0)
+            rollout_topk_ids, rollout_topk_log_probs = pad_rollout_topk(
+                response_topk_ids,
+                response_topk_log_probs,
+                k=len(response_topk_ids[0]),
+                prompt_width=prompt_length,
+                response_width=response_length,
+                response_length=response_length,
+            )
+            output["rollout_topk_ids"] = rollout_topk_ids.squeeze(0)
+            output["rollout_topk_log_probs"] = rollout_topk_log_probs.squeeze(0)
         return output
 
 
@@ -184,6 +204,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded log probabilities from teacher model for prompt/response tokens."""
     teacher_ids: Optional[torch.Tensor] = None
     """Padded token ids corresponding to the teacher log probabilities."""
+    rollout_topk_ids: Optional[torch.Tensor] = None
+    """Padded sampler top-k token ids over the full sequence, for score centering."""
+    rollout_topk_log_probs: Optional[torch.Tensor] = None
+    """Padded sampler top-k log-probs over the full sequence, for score centering."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
@@ -593,6 +617,7 @@ class AgentLoopWorker:
             top_k=config.top_k,
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
+            topk_log_probs=config.topk_log_probs,
         )
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
@@ -605,6 +630,8 @@ class AgentLoopWorker:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
+            # the trainer never consumes the sampler head on validation rollouts
+            sampling_params["topk_log_probs"] = 0
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
@@ -845,6 +872,23 @@ class AgentLoopWorker:
                 pad_token_id=self.tokenizer.pad_token_id,
             )
 
+        rollout_topk_ids = rollout_topk_log_probs = None
+        if self.rollout_config.topk_log_probs and not validate:
+            from verl.trainer.ppo.score_centering import pad_rollout_topk
+
+            if output.num_turns > 2:
+                raise ValueError("rollout.topk_log_probs supports the single-turn agent loop only.")
+            if "response_topk_ids" not in output.extra_fields:
+                raise ValueError("rollout.topk_log_probs is set but the rollout returned no sampler top-k head.")
+            rollout_topk_ids, rollout_topk_log_probs = pad_rollout_topk(
+                output.extra_fields.pop("response_topk_ids"),
+                output.extra_fields.pop("response_topk_log_probs"),
+                k=self.rollout_config.topk_log_probs,
+                prompt_width=prompt_output["input_ids"].shape[1],
+                response_width=response_output["input_ids"].shape[1],
+                response_length=len(output.response_ids),
+            )
+
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],
@@ -859,6 +903,8 @@ class AgentLoopWorker:
             mm_processor_kwargs=output.mm_processor_kwargs,
             teacher_logprobs=teacher_logprobs,
             teacher_ids=teacher_ids,
+            rollout_topk_ids=rollout_topk_ids,
+            rollout_topk_log_probs=rollout_topk_log_probs,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
             metrics=output.metrics,
@@ -1076,6 +1122,11 @@ class AgentLoopWorker:
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
+        if inputs[0].rollout_topk_ids is not None:
+            optional_outputs["rollout_topk_ids"] = torch.cat([input.rollout_topk_ids for input in inputs], dim=0)
+            optional_outputs["rollout_topk_log_probs"] = torch.cat(
+                [input.rollout_topk_log_probs for input in inputs], dim=0
+            )
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]

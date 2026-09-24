@@ -56,6 +56,7 @@ from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
+    extract_response_topk_logprobs,
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
@@ -620,7 +621,8 @@ class vLLMHttpServer:
         assert 1 <= max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        topk_log_probs = sampling_params.pop("topk_log_probs", 0)
+        sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
@@ -724,6 +726,10 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+        if sampling_params.logprobs:
+            extra_fields["response_topk_ids"], extra_fields["response_topk_log_probs"] = extract_response_topk_logprobs(
+                final_res.outputs[0].logprobs, sampling_params.logprobs
+            )
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:

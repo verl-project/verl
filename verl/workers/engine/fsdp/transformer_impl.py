@@ -1143,14 +1143,16 @@ class EngineTrainModeCtx(BaseEngineCtx):
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict):
-        if self.pad_to_length and tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False):
-            # Every top-K path re-derives the teacher tensors' layout from the *unpadded* packed
-            # length and slices them with the Ulysses rule only, which does not know about the
-            # static pad, so teacher and student token streams would silently misalign.
+        distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
+        if self.pad_to_length and (distillation_use_topk or score_centering):
+            # Every top-K path re-derives the teacher/rollout tensors' layout from the *unpadded*
+            # packed length and slices them with the Ulysses rule only, which does not know about
+            # the static pad, so the token streams would silently misalign.
             raise RuntimeError(
-                "pad_to_length is not supported with top-K distillation: the teacher tensors are "
-                "sliced with the Ulysses pad rule, which does not know about the static pad. "
-                "Disable pad_to_length for distillation runs."
+                "pad_to_length is not supported with top-K distillation or score centering: the "
+                "teacher/rollout top-k tensors are sliced with the Ulysses pad rule, which does "
+                "not know about the static pad. Disable pad_to_length for these runs."
             )
 
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
@@ -1339,11 +1341,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
+        score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
+            )
+        if score_centering and use_fused_kernels:
+            raise NotImplementedError(
+                "score_centering=True is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the full logits tensor score centering needs."
             )
 
         model_output = {}
@@ -1409,7 +1417,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         )
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
-                if distillation_use_topk:
+                if distillation_use_topk or score_centering:
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():
@@ -1422,9 +1430,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if not distillation_only:
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    inplace_backward = True
-                    if calculate_entropy:
-                        inplace_backward = False
+                    # entropy and the score centering hook reuse the logits in their backward
+                    inplace_backward = not (calculate_entropy or score_centering)
                     log_probs = logprobs_from_logits(
                         logits=logits_rmpad,
                         labels=input_ids_rmpad_rolled,
@@ -1508,7 +1515,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # (log_probs is also not gathered) and pad_size is only
                     # populated in output_args along the use_remove_padding=True
                     # path of prepare_model_inputs.
-                    if distillation_use_topk:
+                    if distillation_use_topk or score_centering:
                         outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                         for k, v in outputs.items():
                             v = v.squeeze(0)
@@ -1519,7 +1526,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=not score_centering,
+                        )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:

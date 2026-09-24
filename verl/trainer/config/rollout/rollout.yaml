@@ -244,6 +244,10 @@ multi_turn:
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: True
 
+# Sampler top-k log-probs per generated token, needed by algorithm.rollout_correction.score_centering.
+# 0 disables; the paper uses 128 (32 also matches). vLLM only for now, single-turn agent loop only.
+topk_log_probs: 0
+
 # [Experimental] agent loop based rollout configs
 agent:
 

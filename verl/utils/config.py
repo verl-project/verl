@@ -85,6 +85,49 @@ def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -
         )
 
 
+def _validate_score_centering_config(config: DictConfig) -> None:
+    algorithm_rc = config.algorithm.get("rollout_correction") or {}
+    policy_loss = config.actor_rollout_ref.actor.policy_loss
+    actor_rc = policy_loss.get("rollout_correction") or {}
+    algorithm_sc = algorithm_rc.get("score_centering", False)
+    actor_sc = actor_rc.get("score_centering", False)
+    if not (algorithm_sc or actor_sc):
+        return
+    if not (algorithm_sc and actor_sc):
+        raise ValueError(
+            "score centering must be enabled on both algorithm.rollout_correction.score_centering and "
+            "actor_rollout_ref.actor.policy_loss.rollout_correction.score_centering."
+        )
+    actor = config.actor_rollout_ref.actor
+    if actor.get("strategy") not in ("fsdp", "fsdp2"):
+        raise ValueError(
+            "score centering is implemented for the FSDP engine only; "
+            f"got actor_rollout_ref.actor.strategy={actor.get('strategy')!r}."
+        )
+    if actor.get("use_fused_kernels", False):
+        raise ValueError("score centering needs the full logits; set actor_rollout_ref.actor.use_fused_kernels=False.")
+    if (config.get("distillation") or {}).get("enabled", False):
+        raise ValueError("score centering cannot be combined with distillation.enabled=True.")
+    if policy_loss.get("loss_mode") != "bypass_mode":
+        raise ValueError("score centering requires actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode.")
+    if config.actor_rollout_ref.rollout.get("topk_log_probs", 0) <= 0:
+        raise ValueError("score centering requires actor_rollout_ref.rollout.topk_log_probs > 0.")
+    actor_prefix = "actor_rollout_ref.actor.policy_loss.rollout_correction"
+    if actor_rc.get("rollout_is", None) not in (None, "token"):
+        raise ValueError(f"score centering requires {actor_prefix}.rollout_is=None or 'token'.")
+    if actor_rc.get("rollout_is_batch_normalize", False):
+        raise ValueError(f"score centering requires {actor_prefix}.rollout_is_batch_normalize=False.")
+    # The actor reads its own subtree with these defaults, so it must agree with the driver's.
+    defaults = {"bypass_mode": False, "loss_type": "ppo_clip", "rollout_is": None, "rollout_is_threshold": 2.0}
+    for key, default in defaults.items():
+        actor_value, algorithm_value = actor_rc.get(key, default), algorithm_rc.get(key, default)
+        if actor_value != algorithm_value:
+            raise ValueError(
+                f"score centering requires {actor_prefix}.{key} ({actor_value!r}) to match "
+                f"algorithm.rollout_correction.{key} ({algorithm_value!r})."
+            )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -164,6 +207,7 @@ def validate_config(
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
     _validate_router_replay_config(actor_config, config.algorithm.get("rollout_correction", None))
+    _validate_score_centering_config(config)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:
