@@ -49,6 +49,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
+from verl.trainer.ppo.reward_variance_filter import apply_reward_variance_filter
 from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
@@ -1658,6 +1659,11 @@ class RayPPOTrainer:
                             batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
                             # IS and off-policy metrics already have rollout_corr/ prefix
                             metrics.update(is_metrics)
+
+                        reward_variance_filtering = self.config.algorithm.get("reward_variance_filtering", None)
+                        if reward_variance_filtering and reward_variance_filtering.get("enable", False):
+                            batch, filter_metrics = apply_reward_variance_filter(batch, reward_variance_filtering)
+                            metrics.update(filter_metrics)
 
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(

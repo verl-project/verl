@@ -62,6 +62,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
+from verl.trainer.ppo.reward_variance_filter import apply_reward_variance_filter
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import (
     Role,
@@ -1771,6 +1772,14 @@ class PPOTrainer(ABC):
             data, is_metrics = compute_rollout_correction_and_add_to_batch(data, rollout_corr_config)
             metrics.update(is_metrics)
 
+        reward_variance_filtering = self.config.algorithm.get("reward_variance_filtering", None)
+        reward_variance_filtering_enabled = bool(
+            reward_variance_filtering and reward_variance_filtering.get("enable", False)
+        )
+        if reward_variance_filtering_enabled:
+            data, filter_metrics = apply_reward_variance_filter(data, reward_variance_filtering)
+            metrics.update(filter_metrics)
+
         # 3. compute advantages
         data = compute_advantage_for_multi_trajectories(
             data,
@@ -1787,8 +1796,9 @@ class PPOTrainer(ABC):
         fields = ["advantages", "returns"]
         if self.config.algorithm.use_kl_in_reward:
             fields.append("token_level_rewards")
-        if rollout_correction:
+        if rollout_correction or reward_variance_filtering_enabled:
             fields.append("response_mask")
+        if rollout_correction:
             if "rollout_is_weights" in data.batch:
                 fields.append("rollout_is_weights")
 

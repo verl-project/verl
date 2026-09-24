@@ -17,7 +17,13 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = [
+    "AlgoConfig",
+    "FilterGroupsConfig",
+    "KLControlConfig",
+    "RewardVarianceFilteringConfig",
+    "RolloutCorrectionConfig",
+]
 
 
 @dataclass
@@ -58,6 +64,31 @@ class FilterGroupsConfig(BaseConfig):
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
     max_inflight_gen_batches: int = 1
+
+
+@dataclass
+class RewardVarianceFilteringConfig(BaseConfig):
+    """Reward-variance-aware top-p or top-k prompt-group filtering."""
+
+    enable: bool = False
+    strategy: str = "top_p"
+    top_p: float = 0.9
+    top_k: int = 1
+    include_zero: bool = False
+    variance_ddof: int = 1
+    selection_eps: float = 0.01
+
+    def __post_init__(self):
+        if self.strategy not in ("top_p", "top_k"):
+            raise ValueError(f"strategy must be 'top_p' or 'top_k', got {self.strategy!r}")
+        if not 0.0 < self.top_p <= 1.0:
+            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
+        if self.top_k < 1:
+            raise ValueError(f"top_k must be positive, got {self.top_k}")
+        if self.variance_ddof < 0:
+            raise ValueError(f"variance_ddof must be non-negative, got {self.variance_ddof}")
+        if self.selection_eps < 0.0:
+            raise ValueError(f"selection_eps must be non-negative, got {self.selection_eps}")
 
 
 @dataclass
@@ -634,6 +665,7 @@ class AlgoConfig(BaseConfig):
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
+        reward_variance_filtering (RewardVarianceFilteringConfig): Post-rollout prompt-group filtering configuration.
         rollout_correction (Optional[RolloutCorrectionConfig]): Rollout Correction configuration.
             Addresses off-policy issues from policy mismatch, model staleness, and general distribution shifts.
 
@@ -662,6 +694,7 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    reward_variance_filtering: RewardVarianceFilteringConfig = field(default_factory=RewardVarianceFilteringConfig)
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
