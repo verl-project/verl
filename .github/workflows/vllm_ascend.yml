@@ -81,6 +81,7 @@ jobs:
       options: >-
         --shm-size 16g
     env:
+      VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # Patch Megatron in the driver as well as workers.
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TRANSFORMERS_VERBOSITY: 'error'

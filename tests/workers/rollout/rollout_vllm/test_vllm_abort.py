@@ -46,6 +46,11 @@ def test_vllm_abort():
     print("\n[1] Initializing Ray...")
     import ray
 
+    # Initialize PyTorch and external adaptors before Ray to avoid native import-order crashes.
+    # Check https://gitcode.com/cann/runtime/issues/1016 for details
+    # Should be reverted after the issue is fixed
+    from verl.utils.tokenizer import normalize_token_ids
+
     ray.init(
         runtime_env={
             "env_vars": {
@@ -62,8 +67,6 @@ def test_vllm_abort():
         # ==================== Create Config ====================
         print("\n[2] Creating config...")
         from hydra import compose, initialize_config_dir
-
-        from verl.utils.tokenizer import normalize_token_ids
 
         config_dir = os.path.abspath("verl/verl/trainer/config")
         if not os.path.exists(config_dir):
