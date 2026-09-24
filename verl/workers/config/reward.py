@@ -49,7 +49,6 @@ class RewardManagerConfig(BaseConfig):
     module: Optional[ModuleConfig] = field(default_factory=ModuleConfig)
 
     def __post_init__(self):
-        super().__post_init__()
         if self.source == "register":
             from verl.experimental.reward_loop.reward_manager.registry import REWARD_MANAGER
 
