@@ -1,13 +1,13 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 08/27/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
 
 .. warning::
-   Agent Loop is ready for use, but the API may change in future releaes.
+   Agent Loop is ready for use, but the API may change in future releases.
 
 Agent Loop is designed as general interface for multi-turn rollout and agentic reinforcement learning.
 
@@ -44,7 +44,9 @@ could do whatever user wants, such as
 
    class AgentLoopBase(ABC):
        @abstractmethod
-       async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+       async def run(
+           self, sampling_params: dict[str, Any], **kwargs
+       ) -> AgentLoopOutput | list[AgentLoopOutput]:
            """Run agent loop to interact with LLM server and environment.
 
            Args:
@@ -52,12 +54,19 @@ could do whatever user wants, such as
                **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
 
            Returns:
-               AgentLoopOutput: Agent loop output.
+               AgentLoopOutput | list[AgentLoopOutput]: One output for a regular
+                   trajectory, or an ordered list of outputs for multiple training
+                   segments belonging to the same logical trajectory.
            """
            raise NotImplementedError
 
-After running user defined loop, run method should return ``AgentLoopOutput``, including prompt token ids,
-response token ids, and response mask.
+After running the user-defined loop, ``run`` should return an ``AgentLoopOutput``
+including prompt token ids, response token ids, and response mask. The V1
+TransferQueue adapter also accepts an ordered list of ``AgentLoopOutput`` values.
+It writes each value as a separate training row, computes the reward from the
+last value, and broadcasts the final output's GRPO advantage to all values in
+the same logical trajectory. The legacy batch adapter intentionally keeps the
+single-output contract.
 
 .. code:: python
 
@@ -70,10 +79,97 @@ response token ids, and response mask.
        """Response token ids including LLM generated token, tool response token."""
        response_mask: list[int]
        """Response mask, 1 for LLM generated token, 0 for tool response token."""
+       loss_weight: Optional[float] = None
+       """Optional positive multiplier for this output's policy-gradient loss."""
+
+``loss_weight`` is optional and defaults to neutral ``1.0``. It is a **relative**
+per-sample multiplier: the rollout adapters pass it through unchanged, the trainer
+validates it (finite, positive; padding rows with no valid response tokens are
+zeroed) and then rescales the weights of each training batch to mean ``1.0`` over
+rows, once, over the global batch (``verl.utils.trajectory.normalize_loss_weight_global``).
+Rescaling preserves every ratio ``w_i / w_j``. A batch whose weights are already
+all equal is returned bit-identical, so single-output loops are unaffected. Because
+of this rescaling ``loss_weight`` is not suitable for carrying an absolute scale
+(e.g. an importance ratio); use it to express *how much of the batch* a sample
+should account for.
+
+The (rescaled) weight is applied to every per-sample term of the actor loss --
+policy gradient, entropy bonus and KL penalty alike -- so that down-weighting a
+row reduces its KL and entropy pressure by the same factor as its policy
+gradient. Weighting only the policy-gradient term would leave a multi-row
+trajectory under ``N`` times the KL and entropy pressure of a single-row one.
+Critic value targets are not weighted. A consequence worth knowing when tuning
+``entropy_coeff`` is that down-weighted rows contribute proportionally less
+entropy pressure per token than they would unweighted.
+
+**Two different objectives, two different weights.** A multi-output trajectory can
+mean two things, and they call for different weights under ``seq-mean-token-mean``
+(the mode that normalizes by *row* count and is therefore sensitive to how many
+rows a trajectory produces):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Objective
+     - When
+     - ``loss_weight`` for row ``j`` of an ``N``-row trajectory
+   * - **session-equal** -- every logical trajectory counts once, regardless of how many
+       rows it produced
+     - Gateway sessions that materialise several branches; equal-credit segments
+     - ``1 / N``
+   * - **partition-preserving** -- the loss equals what the *unsplit* trajectory would
+       have produced
+     - one long episode cut into context-bounded segments of unequal length
+     - ``T_j / mean_k(T_k)`` where ``T_j`` is the number of trainable (``response_mask``)
+       tokens in row ``j``
+
+``1 / N`` is *not* partition-preserving unless the segments have equal token
+counts: for a 1000-token episode cut 100 / 900 with per-token losses 0.2 / 0.8,
+the unsplit ``seq-mean-token-mean`` loss is 0.74, ``1 / N`` gives 0.50, and
+``T_j / mean(T)`` gives 0.74. Pick the objective first, then the weight.
+
+Under ``token-mean``, ``token-sum`` and ``seq-mean-token-sum`` the aggregation
+normalizes by tokens (or not at all), so splitting a trajectory is already
+partition-preserving with ``loss_weight = 1.0``; a weight is only needed there
+if the *session-equal* objective is wanted.
+
+.. warning::
+   The right weight depends on ``actor.loss_agg_mode``, which the rollout adapter
+   does not know. verl therefore defaults every output to ``1.0`` rather than
+   guessing ``1 / N`` -- under the default ``token-mean`` mode a ``1 / N`` default
+   would silently shrink the trajectory's gradient contribution by a factor of
+   ``N``. When a multi-output loop stores rows without an explicit weight, the V1
+   adapter logs a warning once per row count so the choice stays visible. If the
+   agent loop hard-codes a weight and ``loss_agg_mode`` is later changed, the
+   objective changes silently; deriving the weight in the trainer from a declared
+   weighting mode is a planned follow-up.
+
+.. note::
+   **What the mean-1.0 rescaling does and does not guarantee.** Raw ``1 / N``
+   weights shrink the whole loss by ``mean(w)`` and that factor drifts with each
+   step's mix of long and short trajectories -- a silent, drifting learning-rate
+   change. Rescaling to ``mean_rows(w) = 1`` removes it exactly for aggregation
+   modes that normalize by rows (``seq-mean-token-mean``). For token-normalized
+   modes (``token-mean``) the effective scale is the *token-weighted* mean of
+   ``w``, which equals 1 only when ``w`` is uncorrelated with row length; a batch
+   of ``{100 tokens, w=2}`` + ``{1000 tokens, w=0.5}`` has ``mean_rows(w) = 1``
+   but scales the ``token-mean`` loss by 0.51. The rescaling is still packing-
+   and mix-invariant in every mode -- it just does not promise an unchanged
+   magnitude outside row-normalized aggregation.
+
+Each list element is stored as an independent training row. Consequently,
+``ppo_mini_batch_size`` continues to count stored rows, not logical
+trajectories; expanding a trajectory into more segments increases the number
+of rows and optimizer mini-batches. Training logs expose the applied weight
+range and the segment-to-session ratio under
+``training/trajectory/`` so experiments can keep this change explicit when
+comparing update counts or throughput.
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/agent_loop_output.svg?raw=true
 
-.. note:: AgentLoopOutput only output one trajectory for a given prompt, multiple trajectories output is still under discussion.
+.. note:: Multiple outputs from one ``run`` call are supported by the V1
+   TransferQueue adapter. They are intended for ordered segments of one logical
+   trajectory, rather than an alternative spelling of ``rollout.n``.
 
 Architecture Design
 -------------------
