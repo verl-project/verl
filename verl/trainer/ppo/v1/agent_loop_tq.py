@@ -157,7 +157,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
 
-        await self._compute_score(outputs, kwargs=kwargs)
+        await self._compute_score(outputs, kwargs=kwargs, validate=validate)
 
         final_output = outputs[-1]
         # TODO: Support output:list[AgentLoopOutput]
