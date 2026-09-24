@@ -26,6 +26,7 @@ import os
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -33,6 +34,8 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.utils import tensordict_utils as tu
+from verl.workers.engine.megatron import transformer_impl as mti
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
 _VOCAB_SIZE = 8
@@ -115,3 +118,70 @@ def test_megatron_logits_processor_without_topk_always_computes_log_probs():
     assert "log_probs" in ret
     for k in _DISTILLATION_KEYS:
         assert k not in ret
+
+
+def test_fused_forward_step_routes_teacher_topk_inputs_to_fused_model():
+    eng = object.__new__(MegatronEngineWithLMHead)
+    eng.engine_config = SimpleNamespace(
+        use_fused_kernels=True,
+        pad_to_length=False,
+        use_remove_padding=True,
+        dynamic_context_parallel=False,
+    )
+    eng.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(),
+        tokenizer=SimpleNamespace(pad_token_id=0),
+    )
+    eng.tf_config = SimpleNamespace()
+    eng.prepare_model_inputs = lambda batch: {
+        "input_ids": batch["input_ids"],
+        "attention_mask": None,
+        "loss_mask": batch["loss_mask"],
+        "multi_modal_inputs": {},
+        "routed_experts": None,
+    }
+
+    teacher_ids = torch.tensor([[[2, 3], [3, 4], [4, 5]]])
+    teacher_logprobs = torch.tensor([[[-0.1, -0.2], [-0.3, -0.4], [-0.5, -0.6]]])
+    batch = TensorDict(
+        {
+            "input_ids": torch.tensor([[1, 2, 3]]),
+            "loss_mask": torch.ones(1, 3, dtype=torch.bool),
+            "temperature": torch.tensor([0.7]),
+            "teacher_ids": teacher_ids,
+            "teacher_logprobs": teacher_logprobs,
+        },
+        batch_size=[1],
+    )
+    tu.assign_non_tensor(batch, distillation_use_topk=True, distillation_only=True)
+
+    clamp = -12.0
+    distillation_config = SimpleNamespace(distillation_loss=SimpleNamespace(log_prob_min_clamp=clamp))
+    loss_function = partial(lambda **_kwargs: None, distillation_config=distillation_config)
+    captured = {}
+
+    def fused_forward(**kwargs):
+        captured.update(kwargs)
+        return {"distillation_losses": torch.zeros(1, 3)}
+
+    model = SimpleNamespace(config=SimpleNamespace(experimental_attention_variant=None))
+    with (
+        patch("verl.workers.engine.megatron.transformer_impl.get_device_id", return_value="cpu"),
+        patch("verl.workers.engine.megatron.transformer_impl.unwrap_model", return_value=model),
+        patch.object(
+            MegatronEngineWithLMHead,
+            "_get_context_parallel_layout",
+            return_value="zigzag",
+        ),
+        patch.object(mti.RouterReplayHelper, "is_replay_backward_action", return_value=False),
+        patch.object(mti.RouterReplayHelper, "is_replay_forward_action", return_value=False),
+        patch.object(mti.RouterReplayHelper, "is_r2_record_action", return_value=False),
+        patch("verl.models.mcore.get_mcore_forward_fused_model_engine_fn", return_value=fused_forward),
+    ):
+        output, _ = eng.forward_step(iter([batch]), model, loss_function, lambda **_kwargs: None)
+
+    assert "distillation_losses" in output
+    torch.testing.assert_close(captured["teacher_topk_ids"], teacher_ids)
+    torch.testing.assert_close(captured["teacher_topk_log_probs"], teacher_logprobs)
+    assert captured["distillation_only"] is True
+    assert captured["log_prob_min_clamp"] == clamp
