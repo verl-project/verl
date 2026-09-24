@@ -646,6 +646,79 @@ class TestCpuActivityAlwaysCollected(unittest.TestCase):
         self.assertEqual(contents, ["cuda"])
 
 
+class TestPluginProfilerActivityHook(unittest.TestCase):
+    """A platform-supplied ``torch.profiler`` activity is added only when both
+    ``torch_profiler_activity()`` and ``torch_profiler_content_name()`` return non-``None``, and
+    (if ``contents`` is non-empty) the content name is one of the requested keywords."""
+
+    def _mock_platform(self, activity, content_name):
+        platform = MagicMock()
+        platform.torch_profiler_activity.return_value = activity
+        platform.torch_profiler_content_name.return_value = content_name
+        return platform
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_added_for_empty_or_matching_contents(self, mock_profile, mock_get_platform):
+        mock_get_platform.return_value = self._mock_platform(torch.profiler.ProfilerActivity.XPU, "xpu")
+        for contents in ([], ["xpu"]):
+            with self.subTest(contents=contents):
+                mock_profile.reset_mock()
+                get_torch_profiler(contents=list(contents), save_path="/tmp/test", rank=0)
+                activities = mock_profile.call_args[1]["activities"]
+                self.assertIn(torch.profiler.ProfilerActivity.XPU, activities)
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_excluded_for_non_matching_contents(self, mock_profile, mock_get_platform):
+        mock_get_platform.return_value = self._mock_platform(torch.profiler.ProfilerActivity.XPU, "xpu")
+        get_torch_profiler(contents=["stack"], save_path="/tmp/test", rank=0)
+        activities = mock_profile.call_args[1]["activities"]
+        self.assertNotIn(torch.profiler.ProfilerActivity.XPU, activities)
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_excluded_when_content_name_missing(self, mock_profile, mock_get_platform):
+        # Regression guard: an activity hook without a paired content name must never be added,
+        # even for empty `contents`.
+        mock_get_platform.return_value = self._mock_platform(torch.profiler.ProfilerActivity.XPU, None)
+        get_torch_profiler(contents=[], save_path="/tmp/test", rank=0)
+        activities = mock_profile.call_args[1]["activities"]
+        self.assertNotIn(torch.profiler.ProfilerActivity.XPU, activities)
+
+    @patch("verl.utils.profiler.torch_profile.get_platform")
+    @patch("torch.profiler.profile")
+    def test_excluded_when_activity_missing(self, mock_profile, mock_get_platform):
+        mock_get_platform.return_value = self._mock_platform(None, "xpu")
+        get_torch_profiler(contents=["xpu"], save_path="/tmp/test", rank=0)
+        activities = mock_profile.call_args[1]["activities"]
+        self.assertEqual(activities, [torch.profiler.ProfilerActivity.CPU])
+
+
+class TestPluginContentNameConfigValidation(unittest.TestCase):
+    """``TorchProfilerToolConfig.__post_init__`` must only whitelist a platform's
+    ``torch_profiler_content_name()`` keyword when ``torch_profiler_activity()`` is also
+    non-``None`` -- otherwise a config naming that keyword passes validation here but
+    ``get_torch_profiler()`` silently drops it (see ``TestPluginProfilerActivityHook``)."""
+
+    def _mock_platform(self, activity, content_name):
+        platform = MagicMock()
+        platform.torch_profiler_activity.return_value = activity
+        platform.torch_profiler_content_name.return_value = content_name
+        return platform
+
+    @patch("verl.utils.profiler.config.get_platform")
+    def test_content_name_allowed_when_activity_present(self, mock_get_platform):
+        mock_get_platform.return_value = self._mock_platform(torch.profiler.ProfilerActivity.XPU, "xpu")
+        TorchProfilerToolConfig(contents=["xpu"], discrete=False)
+
+    @patch("verl.utils.profiler.config.get_platform")
+    def test_content_name_rejected_when_activity_missing(self, mock_get_platform):
+        mock_get_platform.return_value = self._mock_platform(None, "xpu")
+        with self.assertRaises(AssertionError):
+            TorchProfilerToolConfig(contents=["xpu"], discrete=False)
+
+
 def _role_profiler_omegaconf(tool="torch", enable=True, discrete=False, contents=("cpu", "cuda")):
     """Mimic a per-role ``profiler`` OmegaConf sub-tree (identical across ref/ref.yaml and
     critic/critic.yaml).

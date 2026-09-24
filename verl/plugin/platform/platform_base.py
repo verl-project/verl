@@ -14,7 +14,10 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from types import ModuleType
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    import torch
 
 
 class PlatformBase(abc.ABC):
@@ -188,6 +191,27 @@ class PlatformBase(abc.ABC):
     def profiler_stop(self) -> None:
         """Stop the device profiler (no-op on unsupported platforms)."""
         ...
+
+    def torch_profiler_activity(self) -> Optional["torch.profiler.ProfilerActivity"]:
+        """Return this platform's ``torch.profiler`` device activity, if any.
+
+        Lets a platform request its own device-activity be collected by
+        ``verl/utils/profiler/torch_profile.py::get_torch_profiler`` when the
+        matching name (see :meth:`torch_profiler_content_name`) appears in
+        ``profiler.tool_config.torch.contents``. Return ``None`` (default) if
+        this platform has no ``torch.profiler.ProfilerActivity`` member (the
+        ``cuda`` activity is handled separately and is unaffected by this hook).
+        """
+        return None
+
+    def torch_profiler_content_name(self) -> Optional[str]:
+        """Return the ``contents`` keyword that requests this platform's activity.
+
+        E.g. ``"xpu"`` for Intel XPU. Paired with :meth:`torch_profiler_activity`;
+        both must be non-``None`` for the activity to be added. Return ``None``
+        (default) to opt out.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # vllm integration
