@@ -34,7 +34,9 @@ class CheckpointConfig(BaseConfig):
         save_contents (list[str]): What to include in saved checkpoints.
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
-        async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now;
+            ``ActorConfig.__post_init__`` rejects it for any other training strategy, because only
+            ``MegatronCheckpointManager`` writes ``latest_checkpointed_iteration.txt`` after an async save.
         strict (bool): Whether to perform strict validation during weight export
         save_lora_only (bool): When True and the model has LoRA adapters, only
             save LoRA adapter weights instead of the full model state dict.

@@ -13,14 +13,20 @@
 # limitations under the License.
 
 import os
+import tempfile
 import unittest
 
+from verl.trainer.config import CheckpointConfig
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import (
     ActorConfig,
     FSDPActorConfig,
     McoreActorConfig,
+    McoreCheckpointConfig,
     OptimizerConfig,
+    TorchTitanActorConfig,
+    VeOmniActorConfig,
 )
 
 
@@ -250,6 +256,62 @@ class TestActorConfig(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             config.validate(n_gpus=16, train_batch_size=512)
         self.assertIn("must be >= n_gpus", str(cm.exception))
+
+
+class TestCheckpointAsyncSaveStrategy(unittest.TestCase):
+    """``checkpoint.async_save`` is only implemented by the Megatron backend.
+
+    ``MegatronCheckpointManager`` writes ``latest_checkpointed_iteration.txt``
+    itself once the async writes complete, which is why the PPO trainers skip
+    writing it when ``async_save`` is set. ``FSDPCheckpointManager`` (fsdp /
+    fsdp2 / veomni) has no ``async_save`` handling at all, so on those backends
+    the tracker would be written by nobody and ``resume_mode=auto`` would
+    silently start from scratch. Reject the combination up front instead.
+    """
+
+    @staticmethod
+    def _kwargs(**overrides):
+        kwargs = dict(
+            use_dynamic_bsz=True,
+            optim=OptimizerConfig(lr=0.1),
+            rollout_n=1,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_non_megatron_strategies_reject_async_save(self):
+        for cls, strategy in (
+            (ActorConfig, "fsdp"),
+            (FSDPActorConfig, "fsdp"),
+            (FSDPActorConfig, "fsdp2"),
+            (VeOmniActorConfig, "veomni"),
+            (TorchTitanActorConfig, "torchtitan"),
+        ):
+            with self.subTest(cls=cls.__name__, strategy=strategy):
+                with self.assertRaises(ValueError) as cm:
+                    cls(**self._kwargs(strategy=strategy, checkpoint=CheckpointConfig(async_save=True)))
+                message = str(cm.exception)
+                self.assertIn("async_save", message)
+                self.assertIn(strategy, message)
+
+    def test_megatron_strategy_allows_async_save(self):
+        config = McoreActorConfig(**self._kwargs(checkpoint=McoreCheckpointConfig(async_save=True)))
+        self.assertTrue(config.checkpoint.async_save)
+
+    def test_non_megatron_strategy_allows_sync_save(self):
+        config = FSDPActorConfig(**self._kwargs(strategy="fsdp", checkpoint=CheckpointConfig(async_save=False)))
+        self.assertFalse(config.checkpoint.async_save)
+
+    def test_missing_tracker_makes_auto_resume_start_from_scratch(self):
+        """Pin the consequence the guard exists to prevent."""
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "global_step_3"))
+            # checkpoint data is on disk, but without the tracker it is unreachable
+            self.assertIsNone(find_latest_ckpt_path(root))
+
+            with open(os.path.join(root, "latest_checkpointed_iteration.txt"), "w") as f:
+                f.write("3")
+            self.assertEqual(find_latest_ckpt_path(root), os.path.join(root, "global_step_3"))
 
 
 if __name__ == "__main__":

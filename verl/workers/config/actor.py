@@ -43,6 +43,10 @@ __all__ = [
     "TorchTitanActorConfig",
 ]
 
+# Training strategies whose checkpoint manager implements ``checkpoint.async_save``, i.e. the ones
+# that write ``latest_checkpointed_iteration.txt`` themselves once the async writes complete.
+ASYNC_SAVE_STRATEGIES = frozenset({"megatron"})
+
 
 @dataclass
 class RouterReplayConfig(BaseConfig):
@@ -218,6 +222,21 @@ class ActorConfig(BaseConfig):
         ]
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
+
+        # Asynchronous checkpointing is implemented by MegatronCheckpointManager only. The PPO
+        # trainers skip writing ``latest_checkpointed_iteration.txt`` whenever ``async_save`` is
+        # set, because that manager writes the tracker itself once the async writes land. No other
+        # checkpoint manager does, so on any other backend the tracker is written by nobody,
+        # ``find_latest_ckpt_path`` returns None, and ``trainer.resume_mode=auto`` silently
+        # restarts from scratch. Fail at startup instead of discarding a run at resume time.
+        if self.checkpoint.get("async_save", False) and self.strategy not in ASYNC_SAVE_STRATEGIES:
+            raise ValueError(
+                f"[actor] checkpoint.async_save=True is not supported with strategy='{self.strategy}'. "
+                f"Asynchronous checkpointing is only implemented for {sorted(ASYNC_SAVE_STRATEGIES)}; "
+                "on other backends nothing writes latest_checkpointed_iteration.txt, so "
+                "trainer.resume_mode=auto would silently restart training from scratch. "
+                "Set actor.checkpoint.async_save=False."
+            )
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""
