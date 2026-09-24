@@ -16,6 +16,7 @@ Apply monkey-patch function to models
 """
 
 import sys
+import warnings
 from types import SimpleNamespace
 from typing import Optional
 
@@ -35,6 +36,28 @@ from verl.utils.ulysses import (
 
 _PREFIX_GROUPER_PATCHED = False
 _PREFIX_GROUPER_SUPPORTED_ATTENTIONS = {"flash_attention_2", "flash_attention_3", "sdpa", "flex_attention", "eager"}
+
+
+def _resolve_fused_kernels_backend(fused_kernels_backend: Optional[str]) -> Optional[str]:
+    """Select a fused-kernel backend that is supported by the current device.
+
+    Triton-Ascend currently cannot compile verl's CUDA-oriented linear
+    cross-entropy kernel on some Ascend devices. The native torch backend
+    computes the same outputs without relying on the Triton kernel, so it is a
+    safe fallback when Triton is explicitly requested on NPU.
+    """
+    if fused_kernels_backend == "triton":
+        from verl.utils.device import is_torch_npu_available
+
+        if is_torch_npu_available(check_device=False):
+            warnings.warn(
+                "Triton fused kernels are not supported on Ascend NPU; falling back to the torch backend.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return "torch"
+
+    return fused_kernels_backend
 
 
 def _create_prefix_grouper_wrapper(original_fn):
@@ -278,6 +301,7 @@ def patch_forward_with_backends(
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
 
+    fused_kernels_backend = _resolve_fused_kernels_backend(fused_kernels_backend)
     model._verl_fused_kernels_backend = fused_kernels_backend
     if fused_kernels_backend == "triton":
         model.__class__.forward = forward_with_triton_backend_function

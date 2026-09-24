@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 08/24/2026.
+Last updated: 09/22/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -255,6 +255,9 @@ Actor/Rollout/Reference Policy
     "liger". The "torch" backend always uses verl's native output-head implementation;
     select "liger" explicitly to use Liger's fused output-head kernel.
     Default is "torch".
+    On Ascend NPU, selecting "triton" emits a warning and falls back to the
+    native "torch" backend because the Triton-Ascend output-head kernel is
+    not supported.
     While in megatron, we only support "triton" as the
     implementation backend, so there is no need for this option.
 
