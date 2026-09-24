@@ -124,7 +124,7 @@ Actor/Rollout/Reference Policy
       ppo_micro_batch_size_per_gpu: 8
       use_dynamic_bsz: False
       ppo_max_token_len_per_gpu: 16384 # n * ${data.max_prompt_length} + ${data.max_response_length}
-      grad_clip: 1.0
+      grad_clip: null # deprecated, use optim.clip_grad
       clip_ratio: 0.2
       entropy_coeff: 0.0
       use_kl_loss: False # True for GRPO
@@ -289,8 +289,9 @@ Actor/Rollout/Reference Policy
   accumulation, the micro_batch_size_per_gpu for one forward pass, trading speed
   for GPU memory. The value represent the local num per gpu.
 
-- ``actor_rollout_ref.actor.grad_clip``: Gradient clipping for actor
-  updates
+- ``actor_rollout_ref.actor.grad_clip``: Deprecated; use
+  ``actor_rollout_ref.actor.optim.clip_grad``. If set, the value is applied to
+  ``optim.clip_grad`` (overriding it) with a deprecation warning.
 - ``actor_rollout_ref.actor.use_kl_loss``: to use kl loss in actor. When used, we are not applying KL in the reward function.
 
 - ``actor_rollout_ref.actor.clip_ratio``: PPO clip ratio
@@ -711,7 +712,8 @@ Optim
 - ``optim.lr``: Learning rate for the optimizer.
 - ``optim.weight_decay``: Weight decay for the optimizer.
 - ``optim.lr_warmup_steps_ratio``: Ratio of warmup steps to total training steps.
-- ``optim.clip_grad``: Gradient clipping value.
+- ``optim.clip_grad``: Gradient clipping value (max global gradient norm). Must be
+  greater than 0 for the FSDP engine; use ``inf`` to disable clipping.
 - ``optim.lr_scheduler``: Learning rate scheduler type. Options:
 
   - ``cosine``: Cosine learning rate scheduler with warmup (default).

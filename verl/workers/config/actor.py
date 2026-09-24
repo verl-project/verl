@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -30,7 +31,7 @@ from .engine import (
     VeOmniEngineConfig,
 )
 from .model import HFModelConfig
-from .optimizer import OptimizerConfig
+from .optimizer import OptimizerConfig, validate_fsdp_clip_grad
 
 __all__ = [
     "PolicyLossConfig",
@@ -293,7 +294,7 @@ class FSDPActorConfig(ActorConfig):
 
     Args:
         strategy (str): Training strategy set to 'fsdp' for Fully Sharded Data Parallel.
-        grad_clip (float): Gradient clipping threshold.
+        grad_clip (Optional[float]): Deprecated; use ``optim.clip_grad``. If set, it is applied to ``optim.clip_grad``.
         ulysses_sequence_parallel_size (int): [DEPRECATED] Ulysses sequence parallel size for long sequences.
         entropy_from_logits_with_chunking (bool): Whether to compute entropy from logits
             with chunking for memory efficiency.
@@ -305,7 +306,7 @@ class FSDPActorConfig(ActorConfig):
     """
 
     strategy: str = "fsdp"
-    grad_clip: float = 1.0
+    grad_clip: Optional[float] = None
     ulysses_sequence_parallel_size: int = 1
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
@@ -318,6 +319,15 @@ class FSDPActorConfig(ActorConfig):
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
+        if self.grad_clip is not None:
+            warnings.warn(
+                "`actor.grad_clip` is deprecated and is not read by the engine; use `actor.optim.clip_grad`. "
+                "Applying the value to optim.clip_grad.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            validate_fsdp_clip_grad(self.grad_clip)
+            self.optim.clip_grad = self.grad_clip
         self.engine = self.fsdp_config
         # Sync strategy to engine config so engine_workers can pick the right FSDP version.
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always

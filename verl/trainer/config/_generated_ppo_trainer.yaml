@@ -174,7 +174,7 @@ actor_rollout_ref:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
-    grad_clip: 1.0
+    grad_clip: null
     ulysses_sequence_parallel_size: 1
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
@@ -673,7 +673,7 @@ critic:
   forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
   forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
   ulysses_sequence_parallel_size: 1
-  grad_clip: 1.0
+  grad_clip: null
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
