@@ -207,27 +207,61 @@ def quantize_dsv4_fp8_linear(weight, leaf: str, block_size=_FP8_BLOCK_SIZE):
     return fp8_weight, scale
 
 
-def iter_dsv41_engram_rows(name, table, device, chunk_bytes=64 << 20):
-    """Stream logical Engram rows without gathering the full owner-sharded table."""
-    from torch.distributed.tensor import DTensor, Shard
+def iter_dsv41_engram_rows(name, table, device, chunk_bytes=64 << 20, *, module=None, ep_group=None):
+    """Stream logical Engram rows from either DTensor or MCore EP ownership."""
+    if chunk_bytes <= 0:
+        raise ValueError("Engram chunk_bytes must be positive")
 
-    if not isinstance(table, DTensor) or table.device_mesh.ndim != 1 or table.placements != (Shard(0),):
-        raise ValueError("Engram refit requires a one-dimensional row-owner DTensor")
-    mesh = table.device_mesh
-    group = mesh.get_group()
-    local = table.to_local()
-    owner_rows = math.ceil(table.shape[0] / mesh.size())
-    chunk_rows = max(1, chunk_bytes // (table.shape[1] * table.element_size()))
-    for owner in range(mesh.size()):
-        begin = owner * owner_rows
-        end = min(begin + owner_rows, table.shape[0])
+    if module is None:
+        from torch.distributed.tensor import DTensor, Shard
+
+        if not isinstance(table, DTensor) or table.device_mesh.ndim != 1 or table.placements != (Shard(0),):
+            raise ValueError("Engram refit requires a one-dimensional row-owner DTensor")
+        mesh = table.device_mesh
+        group = mesh.get_group()
+        owner_rank = mesh.get_local_rank()
+        global_rows = int(table.shape[0])
+        width = int(table.shape[1])
+        local = table.to_local()
+        owner_rows = math.ceil(global_rows / mesh.size())
+        owner_ranges = [
+            (owner * owner_rows, min((owner + 1) * owner_rows, global_rows)) for owner in range(mesh.size())
+        ]
+    else:
+        if ep_group is None:
+            raise ValueError("MCore Engram streaming requires an expert-parallel process group")
+        group = ep_group
+        owner_rank = torch.distributed.get_rank(group)
+        ep_size = torch.distributed.get_world_size(group)
+        global_rows = int(module.global_num_embeddings)
+        width = int(table.shape[1])
+        local_start, local_end = int(module.row_start), int(module.row_end)
+        if tuple(table.shape) != (local_end - local_start, width):
+            raise ValueError(
+                f"Engram shard {name} has shape {tuple(table.shape)} but owns rows [{local_start}, {local_end})"
+            )
+        base, remainder = divmod(global_rows, ep_size)
+        owner_ranges = []
+        for owner in range(ep_size):
+            start = owner * base + min(owner, remainder)
+            owner_ranges.append((start, start + base + int(owner < remainder)))
+        if (local_start, local_end) != owner_ranges[owner_rank]:
+            raise ValueError(
+                f"Engram shard {name} reports rows [{local_start}, {local_end}); "
+                f"EP rank {owner_rank} should own {owner_ranges[owner_rank]}"
+            )
+
+    chunk_rows = max(1, chunk_bytes // (width * table.element_size()))
+    for owner, (begin, end) in enumerate(owner_ranges):
         for start in range(begin, end, chunk_rows):
             rows = min(chunk_rows, end - start)
-            if mesh.get_local_rank() == owner:
-                chunk = local[start - begin : start - begin + rows].to(device=device).contiguous()
+            if owner == owner_rank:
+                if module is None:
+                    chunk = local[start - begin : start - begin + rows].to(device=device).contiguous()
+                else:
+                    chunk = table[start - begin : start - begin + rows].to(device=device).contiguous()
             else:
-                chunk = torch.empty((rows, table.shape[1]), device=device, dtype=table.dtype)
-            # All actor ranks feed the transport, including ranks that only drain it.
+                chunk = torch.empty((rows, width), device=device, dtype=table.dtype)
             torch.distributed.broadcast(chunk, src=torch.distributed.get_global_rank(group, owner), group=group)
             yield f"{name}.__rows_{start}", chunk
 

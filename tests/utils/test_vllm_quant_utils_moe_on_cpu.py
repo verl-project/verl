@@ -341,3 +341,54 @@ def _engram_owner_refit_worker(rank, rendezvous):
 
 def test_dsv41_engram_chunked_refit_with_uneven_owners(tmp_path):
     torch.multiprocessing.spawn(_engram_owner_refit_worker, args=(str(tmp_path / "init"),), nprocs=2, join=True)
+
+
+def _mcore_engram_owner_stream_worker(rank, rendezvous):
+    import torch.distributed as dist
+
+    _, ns = _load_quant_utils(fused_moe_is_function=True)
+    dist.init_process_group("gloo", init_method="file://" + rendezvous, rank=rank, world_size=2)
+    try:
+        for rows in (17, 1):
+            source = (torch.arange(rows * 64).reshape(rows, 64) % 15 - 7).bfloat16()
+            base, remainder = divmod(rows, 2)
+            row_start = rank * base + min(rank, remainder)
+            row_end = row_start + base + int(rank < remainder)
+            local = source[row_start:row_end].clone()
+            module = types.SimpleNamespace(
+                global_num_embeddings=rows,
+                row_start=row_start,
+                row_end=row_end,
+            )
+
+            calls = []
+            stream = ns["fp8_utils"].iter_dsv41_engram_rows(
+                "layers.1.engram.embed.weight",
+                local,
+                torch.device("cpu"),
+                chunk_bytes=512,
+                module=module,
+                ep_group=dist.group.WORLD,
+            )
+            for name, chunk in stream:
+                start = int(name.rsplit("__rows_", 1)[1])
+                assert chunk.nbytes <= 512
+                torch.testing.assert_close(chunk, source[start : start + len(chunk)], rtol=0, atol=0)
+                calls.append((start, len(chunk)))
+
+            all_calls = [None, None]
+            dist.all_gather_object(all_calls, calls)
+            assert all_calls[0] == all_calls[1]
+            assert sum(count for _, count in calls) == rows
+            torch.testing.assert_close(local, source[row_start:row_end], rtol=0, atol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_dsv41_mcore_engram_chunked_export_with_uneven_owners(tmp_path):
+    torch.multiprocessing.spawn(
+        _mcore_engram_owner_stream_worker,
+        args=(str(tmp_path / "mcore_init"),),
+        nprocs=2,
+        join=True,
+    )
