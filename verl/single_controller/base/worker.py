@@ -277,6 +277,20 @@ class Worker(WorkerHelper):
             # so we need to set local rank when the flag is set.
             device_name = get_resource_name()
             local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
+            # Map physical device ID to logical device index when
+            # ASCEND_RT_VISIBLE_DEVICES (or CUDA_VISIBLE_DEVICES) is set.
+            # Ray reports physical accelerator IDs, but the runtime only sees
+            # the subset of devices listed in the visibility env var.
+            ascend_visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            for visible_env in (ascend_visible, cuda_visible):
+                if visible_env:
+                    visible_ids = [int(x.strip()) for x in visible_env.split(",") if x.strip()]
+                    try:
+                        local_rank = str(visible_ids.index(int(local_rank)))
+                    except ValueError:
+                        pass
+                    break
             os.environ["LOCAL_RANK"] = local_rank
             get_torch_device().set_device(int(local_rank))
 
