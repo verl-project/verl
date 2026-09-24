@@ -15,14 +15,23 @@ fi
 
 DATASET_DIR=${DATASET_DIR:-~/data/gsm8k_sft}
 TRAIN_FILES=${DATASET_DIR}/train.parquet
-VAL_FILES=${DATASET_DIR}/test.parquet
+VAL_FILES=${VAL_FILES-${DATASET_DIR}/test.parquet}
 VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
 backend=${BACKEND:-fsdp}
 
 project_name=verl_sft_test
 
-RESUME_MODE=disable
+RESUME_MODE=${RESUME_MODE:-disable}
+TOTAL_TRAIN_STEP=${TOTAL_TRAIN_STEP:-2}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}
+TEST_FREQ=${TEST_FREQ:-after_each_epoch}
+KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-False}
+
+checkpoint_overrides=()
+if [ "${ASYNC_SAVE:-False}" = "True" ]; then
+    checkpoint_overrides+=(+checkpoint.async_save=True)
+fi
 
 ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-${backend}}
 
@@ -159,7 +168,7 @@ mkdir -p "${ckpts_home}"
 $COMMAND \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
-    data.train_batch_size=128 \
+    data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.pad_mode=${PAD_MODE} \
     data.truncation=error \
     data.use_dynamic_bsz=True \
@@ -168,18 +177,21 @@ $COMMAND \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
     data.ignore_input_ids_mismatch=True \
     ${ENGINE_CONFIG} \
-    trainer.test_freq=after_each_epoch \
+    trainer.test_freq=${TEST_FREQ} \
     trainer.save_freq=-1 \
     trainer.logger=['console','file'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.total_epochs=2 \
-    trainer.total_training_steps=2 \
+    trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     trainer.default_local_dir="${ckpts_home}" \
     trainer.resume_mode=${RESUME_MODE} \
+    "${checkpoint_overrides[@]}"
 
     # trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     # trainer.checkpoint.save_contents=[model,optimizer,extra,hf_model] \
     # trainer.max_ckpt_to_keep=1 \
 
-rm -rf "${ckpts_home:?}/*"
+if [ "${KEEP_CHECKPOINTS}" != "True" ]; then
+    rm -rf "${ckpts_home:?}"/*
+fi

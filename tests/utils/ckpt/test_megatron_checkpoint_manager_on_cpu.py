@@ -29,6 +29,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncRequest
 
 from verl.trainer.config import CheckpointConfig
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -109,6 +110,7 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    async_save=False,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -118,7 +120,7 @@ def _make_manager(
     ckpt_config = CheckpointConfig(
         save_contents=list(save_contents),
         load_contents=list(load_contents),
-        async_save=False,
+        async_save=async_save,
     )
 
     model = _make_mock_model()
@@ -655,3 +657,58 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
 
         mgr.load_checkpoint(ckpt_path)
         mgr.model[0].sharded_state_dict.assert_called_once()
+
+
+class TestAsyncSaveFinalization:
+    @pytest.mark.parametrize("relative_path", ["global_step_3", "global_step_3/actor"])
+    def test_requests_publish_only_after_queue_finalizes_last_request(self, tmp_path, relative_path):
+        mgr = _make_manager(async_save=True)
+        requests = [AsyncRequest(None, (), []), AsyncRequest(None, (), [])]
+        step_dir = tmp_path / relative_path
+        step_dir.mkdir(parents=True)
+        tracker = tmp_path / "latest_checkpointed_iteration.txt"
+
+        class Queue:
+            def __init__(self):
+                self.pending = []
+
+            def schedule_async_request(self, request):
+                self.pending.append(request)
+
+            def maybe_finalize_async_calls(self, blocking=False):
+                if blocking:
+                    for request in self.pending:
+                        for finalize_fn in request.finalize_fns:
+                            finalize_fn()
+                    self.pending.clear()
+
+        mgr._async_calls_queue = Queue()
+        with (
+            patch.object(mgr, "_write_checkpoint_manifest") as manifest,
+            patch.object(mgr, "register_checkpoint") as register,
+            patch("verl.utils.hdfs_io.makedirs"),
+            patch("verl.utils.hdfs_io.copy") as copy,
+        ):
+            mgr._dispatch_finalize(
+                requests,
+                lambda: mgr._finalize_save(
+                    local_path=str(step_dir),
+                    hdfs_path="hdfs://test/checkpoints",
+                    global_step=3,
+                    max_ckpt_to_keep=1,
+                    saved_any_dist_ckpt=True,
+                ),
+            )
+
+            assert mgr._async_calls_queue.pending == requests
+            assert not tracker.exists()
+            copy.assert_not_called()
+            mgr.finalize_async_checkpointing(blocking=False)
+            assert not tracker.exists()
+            mgr.finalize_async_checkpointing(blocking=True)
+
+        manifest.assert_called_once()
+        copy.assert_called_once_with(src=str(step_dir), dst="hdfs://test/checkpoints", dirs_exist_ok=True)
+        register.assert_called_once_with(str(step_dir), 1)
+        assert tracker.read_text() == "3"
+        assert not (tmp_path / "latest_checkpointed_iteration.txt.tmp").exists()
