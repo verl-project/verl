@@ -32,6 +32,54 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 ContextParallelLayout = Literal["zigzag", "contiguous"]
 
+
+def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.Tensor):
+    if not multi_modal_inputs:
+        return None
+
+    from megatron.core.models.deepseek_v41.image_processing import IMAGE, TEXT, ImageInput
+
+    grids = multi_modal_inputs["image_grid_hws"].tolist()
+    type_rows = multi_modal_inputs["vision_token_types"].tolist()
+    pixel_values = multi_modal_inputs["pixel_values"]
+    images = [[] for _ in range(input_ids.shape[0])]
+    grid_index = 0
+    patch_start = 0
+
+    for batch_index, row in enumerate(type_rows):
+        position = 0
+        while position < len(row):
+            if row[position] == TEXT:
+                position += 1
+                continue
+
+            start = position
+            position += 1
+            while position < len(row) and row[position] == IMAGE:
+                while position < len(row) and row[position] == IMAGE:
+                    position += 1
+                position += 1
+            position += 1
+
+            n_vit_h, n_vit_w = grids[grid_index]
+            patch_end = patch_start + n_vit_h * n_vit_w
+            images[batch_index].append(
+                ImageInput(
+                    start,
+                    pixel_values[patch_start:patch_end].to(input_ids.device, non_blocking=True),
+                    n_vit_h,
+                    n_vit_w,
+                    multi_modal_inputs["vision_token_types"][batch_index, start:position].to(
+                        input_ids.device, non_blocking=True
+                    ),
+                )
+            )
+            grid_index += 1
+            patch_start = patch_end
+
+    return images
+
+
 # Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
 # support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
 # duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.

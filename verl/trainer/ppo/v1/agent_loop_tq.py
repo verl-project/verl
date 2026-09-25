@@ -25,12 +25,7 @@ import torch
 import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 
-from verl.experimental.agent_loop import (
-    AgentLoopManager,
-    AgentLoopOutput,
-    AgentLoopWorker,
-    get_trajectory_info,
-)
+from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from verl.utils.tokenizer import build_multimodal_processor_inputs
@@ -206,6 +201,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - index: index of agent loop output
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
+            rollout_routed_experts = output.routed_experts
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
@@ -223,6 +219,19 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
                 # The expanded prompt is everything except the (unchanged) responses.
                 field["prompts"] = input_ids[: input_ids.size(0) - responses.size(0)]
+
+            # vLLM records routes against its model input, where multimodal
+            # placeholders have already expanded into their full token spans.
+            # Normalize only after adopting the actor's matching expanded
+            # input, while preserving the row count so Megatron can still
+            # recognize backends that return compact placeholder routes.
+            if rollout_routed_experts is not None:
+                experts = torch.as_tensor(rollout_routed_experts, dtype=torch.int16).detach().cpu()
+                if experts.ndim != 3:
+                    raise ValueError(
+                        f"routed_experts must have shape [sequence, layers, topk], got {tuple(experts.shape)}"
+                    )
+                field["routed_experts"] = experts[: input_ids.size(0)]
 
             position_ids = self._compute_position_ids(
                 input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs

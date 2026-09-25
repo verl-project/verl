@@ -18,6 +18,7 @@ from enum import Enum
 from functools import wraps
 
 import torch
+import torch.nn.functional as F
 
 try:
     from megatron.core.transformer.moe.moe_utils import (
@@ -351,6 +352,69 @@ def apply_router_replay_patch():
 
     def _router_replay_enabled(config):
         return getattr(config, "enable_routing_replay", False) or getattr(config, "moe_enable_routing_replay", False)
+
+    # V4.1 routes text and image tokens with separate runtime biases and does
+    # not inherit TopKRouter. Preserve that scoring contract while attaching
+    # the same record/replay state used by the standard router.
+    try:
+        from megatron.core.models.deepseek_v41.moe import ModalityRouter
+    except ImportError:
+        ModalityRouter = None
+    if ModalityRouter is not None and not hasattr(ModalityRouter, "_router_replay_patched"):
+        original_modality_init = ModalityRouter.__init__
+        original_modality_routing = ModalityRouter.routing
+
+        @wraps(original_modality_init)
+        def patched_modality_init(self, *args, **kwargs):
+            original_modality_init(self, *args, **kwargs)
+            self.router_replay = RouterReplay() if _router_replay_enabled(self.config) else None
+
+        @wraps(original_modality_routing)
+        def patched_modality_routing(self, logits, image_mask=None, padding_mask=None):
+            if self.router_replay is None:
+                return original_modality_routing(self, logits, image_mask, padding_mask)
+
+            scores = F.softplus(logits.float().reshape(-1, self.num_experts)).sqrt()
+            image = (
+                torch.zeros(scores.shape[0], device=scores.device, dtype=torch.bool)
+                if image_mask is None
+                else image_mask.reshape(-1)
+            )
+            bias = torch.where(
+                image[:, None],
+                self.image_balance.expert_bias.float(),
+                self.text_balance.expert_bias.float(),
+            )
+
+            def _compute_topk(values, topk, num_groups=None, group_topk=None):
+                del num_groups, group_topk
+                return torch.topk(values, k=topk, dim=-1)
+
+            _, indices = self.router_replay.get_replay_topk(
+                scores + bias,
+                self.config.moe_router_topk,
+                default_compute_topk=_compute_topk,
+            )
+            weights = scores.gather(-1, indices)
+            if self.config.moe_router_topk > 1:
+                weights = weights / (weights.sum(-1, keepdim=True) + 1e-20)
+            weights = weights * self.config.moe_router_topk_scaling_factor
+            probs = torch.zeros_like(scores).scatter(-1, indices, weights)
+            route = torch.zeros_like(scores, dtype=torch.bool).scatter(-1, indices, True)
+            counted_route = route
+            if padding_mask is not None:
+                valid = ~padding_mask.reshape(-1, 1)
+                probs = probs * valid
+                counted_route = route & valid
+            if self.training and torch.is_grad_enabled() and self.config.moe_router_enable_expert_bias:
+                with torch.no_grad():
+                    self.text_balance.local_tokens_per_expert.add_((counted_route & ~image[:, None]).sum(0))
+                    self.image_balance.local_tokens_per_expert.add_((counted_route & image[:, None]).sum(0))
+            return probs.to(logits.dtype), route
+
+        ModalityRouter.__init__ = patched_modality_init
+        ModalityRouter.routing = patched_modality_routing
+        ModalityRouter._router_replay_patched = True
 
     # Duplicate replayed routes collapse in routing_map, so the dispatcher must
     # use the number of set entries instead of assuming num_tokens * topk.

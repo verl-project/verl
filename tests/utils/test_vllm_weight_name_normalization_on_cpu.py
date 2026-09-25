@@ -23,6 +23,7 @@ hard-coded list. Imports only from ``vllm_rollout/utils`` (deps stubbed) to
 prove the receiver is decoupled from ``megatron_peft_utils``.
 """
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -34,12 +35,47 @@ import torch
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _vocab_parallel_embedding_stubs():
+    """Stub vLLM's embedding class when this CPU test runs without vLLM."""
+    try:
+        importlib.util.find_spec("vllm.model_executor.layers.vocab_parallel_embedding")
+    except ModuleNotFoundError:
+        pass
+    else:
+        try:
+            import vllm.model_executor.layers.vocab_parallel_embedding  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            return {}
+
+    names = [
+        "vllm",
+        "vllm.model_executor",
+        "vllm.model_executor.layers",
+        "vllm.model_executor.layers.vocab_parallel_embedding",
+    ]
+    stubs = {name: sys.modules.get(name) or types.ModuleType(name) for name in names}
+    stubs[names[-1]].VocabParallelEmbedding = type("VocabParallelEmbedding", (), {})
+    return stubs
+
+
 def _load_weight_update_utils():
     module_path = _REPO_ROOT / "verl/workers/rollout/vllm_rollout/weight_update_utils.py"
     spec = importlib.util.spec_from_file_location("weight_update_utils", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
-    spec.loader.exec_module(module)
+    stubs = _vocab_parallel_embedding_stubs()
+    saved = {name: sys.modules.get(name) for name in stubs}
+    try:
+        sys.modules.update(stubs)
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return module
 
 
@@ -101,6 +137,18 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
     fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
+    fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
+    fake_vllm_quant.process_quanted_weights_after_loading = lambda model, state: None
+
+    fake_vllm_unquant = types.ModuleType("verl.utils.vllm.vllm_unquant_utils")
+    fake_vllm_unquant.stage_unquantized_moe_params = lambda model: []
+    fake_vllm_unquant.fold_unquantized_moe_params = lambda layers: contextlib.nullcontext()
+
+    fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
+    fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
+
+    fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_bucketed_transfer.BucketedWeightReceiver = None
 
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
     # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
@@ -137,6 +185,9 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
+        "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
+        "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
+        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 

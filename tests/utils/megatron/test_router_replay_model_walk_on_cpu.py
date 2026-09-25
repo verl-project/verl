@@ -63,8 +63,7 @@ TOPK = 2
 
 
 class FakeTopKRouter(torch.nn.Module):
-    """Stands in for Megatron's ``TopKRouter``: owns a ``router_replay`` and the 1-based
-    ``layer_number`` its transformer layer assigns it."""
+    """A replay-enabled router with the 1-based layer number assigned by its transformer layer."""
 
     def __init__(self, layer_number):
         super().__init__()
@@ -81,10 +80,9 @@ def _routers(model):
 
 
 @pytest.fixture
-def orphans_then_model(monkeypatch):
+def orphans_then_model():
     """Register routers that never make it into the model, then build the model — the registration
     order an mbridge prebuild produces."""
-    monkeypatch.setattr(router_replay_utils, "TopKRouter", FakeTopKRouter)
     RouterReplay.router_instances.clear()
     orphans = [RouterReplay() for _ in range(NUM_LAYERS)]
     model = _build_model()
@@ -126,7 +124,6 @@ def test_block_indexed_routes_match_moe_ordinal_for_hybrid_model(monkeypatch):
     monkeypatch.setattr(router_replay_utils, "device_name", "cpu")
     monkeypatch.setattr(router_replay_utils, "preprocess_packed_seqs", lambda x, mask, **kwargs: (x, None))
     monkeypatch.setattr(router_replay_utils, "scatter_to_sequence_parallel_region", lambda x: x)
-    monkeypatch.setattr(router_replay_utils, "TopKRouter", FakeTopKRouter)
     RouterReplay.router_instances.clear()
 
     # 5 HF blocks -> 10 Megatron modules. First 2 blocks are dense (MLP), last 3

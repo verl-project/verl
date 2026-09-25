@@ -129,6 +129,11 @@ def test_deepseek_multimodal_inputs_survive_storage_and_padding(monkeypatch):
             prompt_ids=prompt,
             response_ids=[13, 14],
             response_mask=[1, 0],
+            routed_experts=(
+                torch.arange(10, 17, dtype=torch.int16).view(7, 1, 1)
+                if 129264 in prompt
+                else torch.arange(20, 22, dtype=torch.int16).view(2, 1, 1)
+            ),
             metrics=AgentLoopMetrics(),
             extra_fields={},
         )
@@ -139,6 +144,14 @@ def test_deepseek_multimodal_inputs_survive_storage_and_padding(monkeypatch):
     assert not {"pixel_values", "image_grid_hws", "vision_token_types"}.intersection(fields.keys())
     torch.testing.assert_close(fields["responses"][0], torch.tensor([13, 14]))
     assert fields["prompts"][0].numel() == 6
+    torch.testing.assert_close(
+        fields["routed_experts"][0].flatten(),
+        torch.tensor([10, 11, 12, 13, 14, 15, 16], dtype=torch.int16),
+    )
+    torch.testing.assert_close(
+        fields["routed_experts"][1].flatten(),
+        torch.tensor([20, 21], dtype=torch.int16),
+    )
 
     padding, _ = padding_utils.construct_minimal_padding_template(
         fields[0].to_dict(), put.call_args.kwargs["tags"][0], eos_token_id=0
@@ -146,15 +159,26 @@ def test_deepseek_multimodal_inputs_survive_storage_and_padding(monkeypatch):
     samples = [fields[0].to_dict(), fields[1].to_dict(), padding]
     batch = agent_loop_tq.list_of_dict_to_tensordict(samples)
     # Exercise SimpleStorage's actual selection, wire encoding, and result packing.
-    selected = AsyncSimpleStorageManager._select_by_positions(batch["multi_modal_inputs"], [2, 0, 1])
+    positions = [2, 0, 1]
+    selected = AsyncSimpleStorageManager._select_by_positions(batch["multi_modal_inputs"], positions)
+    selected_routes = AsyncSimpleStorageManager._select_by_positions(batch["routed_experts"], positions)
     storage = StorageUnitData(storage_size=len(samples))
-    storage.put_data(decode(encode({"multi_modal_inputs": selected})), [2, 0, 1])
-    received = decode(encode(storage.get_data(["multi_modal_inputs"], [0, 1, 2])))
+    storage.put_data(
+        decode(encode({"multi_modal_inputs": selected, "routed_experts": selected_routes})),
+        positions,
+    )
+    received = decode(encode(storage.get_data(["multi_modal_inputs", "routed_experts"], [0, 1, 2])))
     packed = AsyncSimpleStorageManager._pack_field_values(received["multi_modal_inputs"])
     merged = extract_multi_modal_inputs(packed)
+    packed_routes = AsyncSimpleStorageManager._pack_field_values(received["routed_experts"])
 
     torch.testing.assert_close(merged["pixel_values"], torch.ones((9, 3, 2, 2), dtype=torch.bfloat16))
     torch.testing.assert_close(merged["image_grid_hws"], torch.tensor([[3, 3]]))
     expected_types = torch.full((3, padding_utils.SYNTHETIC_PADDING_SEQ_LEN), -1, dtype=torch.long)
     expected_types[0, 1:5] = torch.tensor([0, 1, 2, 3])
     torch.testing.assert_close(merged["vision_token_types"], expected_types)
+    route_parts = [route.flatten() for route in packed_routes.unbind()]
+    torch.testing.assert_close(route_parts[0], torch.tensor([10, 11, 12, 13, 14, 15, 16], dtype=torch.int16))
+    torch.testing.assert_close(route_parts[1], torch.tensor([20, 21], dtype=torch.int16))
+    assert route_parts[2].numel() == padding_utils.SYNTHETIC_PADDING_SEQ_LEN
+    assert torch.count_nonzero(route_parts[2]) == 0

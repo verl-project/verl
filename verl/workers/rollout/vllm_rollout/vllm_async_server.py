@@ -867,10 +867,12 @@ class vLLMHttpServer:
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # Routing replay's AuxOutput connector requires PAUSED_ALL for cache reset.
+        # vLLM's default abort mode only pauses new requests.
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self.engine.sleep(level=1, mode="keep")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -892,7 +894,7 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         await self.engine.wake_up(tags=["weights"])
 
     async def resume_kv_cache(self):
@@ -1317,7 +1319,7 @@ class vLLMHttpServer:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
-            repetition_penalty=1.0,
+            repetition_penalty=self.config.repetition_penalty,
             max_new_tokens=self.config.response_length,
         )
 
@@ -1449,7 +1451,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         await self.engine.reset_encoder_cache()
 
 

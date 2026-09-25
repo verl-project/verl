@@ -59,6 +59,13 @@ def _config(num_layers=48, moe_layer_freq=1, virtual_pipeline_model_parallel_siz
     )
 
 
+def test_is_moe_layer_uses_hybrid_expert_symbols():
+    config = _config(num_layers=6)
+    config.hybrid_pattern = "VEVEVE"
+
+    assert [rr_utils.is_moe_layer(config, idx) for idx in range(6)] == [False, True, False, True, False, True]
+
+
 def test_get_micro_batch_router_list_supports_local_only_registry(monkeypatch):
     RouterReplay.router_instances = list(range(24))
     tf_config = _config()
@@ -303,6 +310,34 @@ def test_merge_router_topk_indices_requires_bshd_attention_mask(monkeypatch):
         )
 
 
+def test_merge_router_topk_indices_restores_bshd_sequence_major_rows(monkeypatch):
+    recorded = torch.tensor([[10], [20], [11], [21], [0], [22], [0], [0]], dtype=torch.int64)
+    router = _FakeRouter(recorded)
+    input_ids = torch.nested.as_nested_tensor(
+        [torch.ones(2, dtype=torch.int64), torch.ones(3, dtype=torch.int64)], layout=torch.jagged
+    )
+    merged = []
+
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter([(1, router)]))
+    monkeypatch.setattr(rr_utils, "gather_from_sequence_parallel_region", lambda tensor, **_kwargs: tensor)
+
+    rr_utils.merge_router_topk_indices(
+        None,
+        input_ids,
+        merged,
+        _config(num_layers=1),
+        model=object(),
+        data_format="bshd",
+    )
+
+    assert len(merged) == 1
+    assert merged[0].is_nested
+    sample_0, sample_1 = merged[0].unbind()
+    assert torch.equal(sample_0[:, 0, 0], torch.tensor([10, 11], dtype=torch.int16))
+    assert torch.equal(sample_1[:, 0, 0], torch.tensor([20, 21, 22], dtype=torch.int16))
+
+
 def test_empty_model_does_not_hide_missing_moe_routers(monkeypatch):
     monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter(()))
     monkeypatch.setattr(rr_utils, "get_moe_num_layers_to_build", lambda *_args: 2)
@@ -408,6 +443,40 @@ def test_set_router_replay_data_requires_bshd_attention_mask():
 
     with pytest.raises(RuntimeError, match="REPLAY requires attention_mask"):
         rr_utils.set_router_replay_data(routes, None, _config(num_layers=1), model=object())
+
+
+def test_set_router_replay_data_pads_bshd_in_sequence_major_order(monkeypatch):
+    router = _FakeRouter()
+    routes = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([[[10]], [[11]]], dtype=torch.int16),
+            torch.tensor([[[20]], [[21]], [[22]]], dtype=torch.int16),
+        ],
+        layout=torch.jagged,
+    )
+    replay_mask = torch.nested.as_nested_tensor(
+        [torch.tensor([True, True]), torch.tensor([True, False, True])], layout=torch.jagged
+    )
+
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter([(1, router)]))
+
+    rr_utils.set_router_replay_data(
+        routes,
+        None,
+        _config(num_layers=1),
+        replay_mask=replay_mask,
+        model=object(),
+        data_format="bshd",
+        forced_max_seqlen=4,
+    )
+
+    assert torch.equal(router.target_topk_idx[:, 0], torch.tensor([10, 20, 11, 21, 0, 22, 0, 0]))
+    assert torch.equal(
+        router.target_replay_mask,
+        torch.tensor([True, True, True, False, False, True, False, False]),
+    )
 
 
 def _patch_replay_plumbing(monkeypatch, layer_routers):
