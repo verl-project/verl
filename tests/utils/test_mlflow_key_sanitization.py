@@ -64,14 +64,25 @@ class TestMlflowLoggingAdapter(unittest.TestCase):
         adapter = _MlflowLoggingAdapter()
         with patch("mlflow.active_run", return_value=object()), patch("mlflow.end_run") as mock_end_run:
             adapter.finish()
-        mock_end_run.assert_called_once()
+        mock_end_run.assert_called_once_with(status="FINISHED")
+
+    def test_finish_marks_nonzero_exit_codes_failed(self):
+        """Preserve training failures instead of marking failed runs as finished."""
+        adapter = _MlflowLoggingAdapter()
+        for exit_code in (1, 130):
+            with self.subTest(exit_code=exit_code):
+                with patch("mlflow.active_run", return_value=object()), patch("mlflow.end_run") as mock_end_run:
+                    adapter.finish(exit_code=exit_code)
+                mock_end_run.assert_called_once_with(status="FAILED")
 
     def test_finish_skips_when_no_active_run(self):
         """Test that finish() does not call mlflow.end_run() when no run is active."""
         adapter = _MlflowLoggingAdapter()
-        with patch("mlflow.active_run", return_value=None), patch("mlflow.end_run") as mock_end_run:
-            adapter.finish()
-        mock_end_run.assert_not_called()
+        for exit_code in (0, 1):
+            with self.subTest(exit_code=exit_code):
+                with patch("mlflow.active_run", return_value=None), patch("mlflow.end_run") as mock_end_run:
+                    adapter.finish(exit_code=exit_code)
+                mock_end_run.assert_not_called()
 
 
 if __name__ == "__main__":
