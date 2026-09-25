@@ -230,11 +230,6 @@ def _layer_needs_fp8_staging(layer, pristine) -> bool:
         # that the live buffer is no longer in checkpoint layout.
         if getattr(param, "is_shuffled", False) or name in repacked:
             return True
-    # FP8 MoE: _setup_kernel shuffles weights and caches a kernel referencing
-    # them. DeepGEMM doesn't set is_shuffled (only AITER does), so force
-    # staging so the refit re-runs _setup_kernel instead of reading a stale shuffle.
-    if hasattr(layer, "w13_weight") and hasattr(layer, "w2_weight"):
-        return True
     return False
 
 

@@ -39,7 +39,6 @@ from verl.utils.vllm.vllm_quant_utils import (
     process_quanted_weights_after_loading,
 )
 from verl.utils.vllm.vllm_unquant_utils import fold_unquantized_moe_params, stage_unquantized_moe_params
-from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
     drop_tied_alias_updates,
@@ -308,6 +307,10 @@ class vLLMColocateWorkerExtension:
                 staged_moe_layers.extend(stage_unquantized_moe_params(model))
 
         # =========================== step 2: receive weights and update ===========================
+        # Import lazily so the receiver can be selected after this extension is
+        # loaded (and so CPU tests can provide a lightweight transport stub).
+        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
