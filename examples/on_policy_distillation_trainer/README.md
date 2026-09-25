@@ -22,3 +22,10 @@ the single-teacher scripts. The MOPD script exposes per-teacher overrides.
 - `distillation.distillation_loss.loss_mode={k1, k3, forward_kl_topk, ...}`
 - `distillation.distillation_loss.use_policy_gradient=True|False`
 - `distillation.distillation_loss.topk=64`
+- `distillation.share_gpu_group=True` (multi-teacher): place all teachers on the SAME
+  GPUs and wake/sleep teacher engines on demand, so the teacher pool only needs to fit
+  one teacher (requires equal per-teacher world sizes and
+  `inference.free_cache_engine=True` + `inference.enable_sleep_mode=True`).
+  `distillation.max_awake_teachers=N` optionally caps how many teachers stay awake at
+  once (LRU eviction, vLLM sleep level 1). Enabled by default in
+  `run_qwen3_8b_mopd_fsdp.sh` via `TEACHER_SHARE_GPU_GROUP=True`.
