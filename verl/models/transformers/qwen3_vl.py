@@ -28,6 +28,27 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def qwen3_vl_deepstack_process(
+    self,
+    hidden_states: torch.Tensor,
+    visual_pos_masks: torch.Tensor,
+    visual_embeds: torch.Tensor,
+):
+    """Merge visual features without mutating activation-offload views.
+
+    Activation offloading may return a view created by a custom autograd
+    function. In-place indexed assignment to that view is rejected by
+    PyTorch because it would invalidate the custom backward implementation.
+    Clone the hidden states before applying the deepstack update instead.
+    """
+    visual_pos_masks = visual_pos_masks.to(hidden_states.device)
+    visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+    hidden_states = hidden_states.clone()
+    local_this = hidden_states[visual_pos_masks, :] + visual_embeds
+    hidden_states[visual_pos_masks, :] = local_this
+    return hidden_states
+
+
 def get_rope_index(
     processor,
     input_ids: torch.Tensor,

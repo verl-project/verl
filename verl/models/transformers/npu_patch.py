@@ -29,6 +29,8 @@ from transformers.models.qwen3_vl import modeling_qwen3_vl
 from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 from transformers.utils import logging
 
+from verl.models.transformers.qwen3_vl import qwen3_vl_deepstack_process
+
 logger = logging.get_logger(__name__)
 
 
@@ -307,11 +309,13 @@ modeling_qwen3_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 # Patches for Qwen3 VL Model
 modeling_qwen3_vl.Qwen3VLTextRMSNorm.forward = rms_norm_forward_npu
 modeling_qwen3_vl.Qwen3VLTextMLP.forward = silu_forward_npu
+modeling_qwen3_vl.Qwen3VLTextModel._deepstack_process = qwen3_vl_deepstack_process
 
 # Patches for Qwen3-VL MoE Model
 modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
 modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
 modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+modeling_qwen3_vl_moe.Qwen3VLMoeTextModel._deepstack_process = qwen3_vl_deepstack_process
 
 # Patches for Qwen3 Next Model
 modeling_qwen3_next.Qwen3NextSparseMoeBlock.forward = qwen3_next_sparse_moe_block_forward_npu
