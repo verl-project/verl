@@ -370,16 +370,22 @@ def _patch_qwen3_moe():
 def _patch_qwen3_vl():
     from transformers.models.qwen3_vl import modeling_qwen3_vl
 
+    from verl.models.transformers.qwen3_vl import qwen3_vl_deepstack_process
+
     modeling_qwen3_vl.Qwen3VLTextRMSNorm.forward = rms_norm_forward_npu
     modeling_qwen3_vl.Qwen3VLTextMLP.forward = silu_forward_npu
+    modeling_qwen3_vl.Qwen3VLTextModel._deepstack_process = qwen3_vl_deepstack_process
 
 
 def _patch_qwen3_vl_moe():
     from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 
+    from verl.models.transformers.qwen3_vl import qwen3_vl_deepstack_process
+
     modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
     modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
     modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+    modeling_qwen3_vl_moe.Qwen3VLMoeTextModel._deepstack_process = qwen3_vl_deepstack_process
 
 
 def _patch_qwen3_next():
