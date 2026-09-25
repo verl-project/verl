@@ -250,6 +250,18 @@ else:
 # --- Unit test cases (using mock) ---
 
 
+def test_unit_continuous_score_counts_wrong_answer_after_first_ten():
+    """A wrong answer on case 11 must keep the continuous score below 1.0."""
+    from verl.utils.reward_score import sandbox_fusion
+
+    results = [True] * 10 + [False]
+    with patch("verl.utils.reward_score.sandbox_fusion.check_correctness", return_value=(results, [{}] * 11)):
+        score, _ = sandbox_fusion.compute_score(
+            "mock_url", None, 1024, "```python\nprint(1)\n```", {"inputs": [""] * 11, "outputs": [""] * 11}, True
+        )
+    assert score == pytest.approx(10 / 11)
+
+
 @patch("verl.utils.reward_score.sandbox_fusion.utils.call_sandbox_api")
 def test_unit_concurrency_order(mock_call_sandbox_api):
     sandbox_url = "mock_url"
