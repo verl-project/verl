@@ -1145,7 +1145,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             with open(local_latest_checkpointed_iteration, "w") as f:
                 f.write(str(global_step))
 
-        self.register_checkpoint(local_path, max_ckpt_to_keep)
+        # Every rank saves to the shared checkpoint tree, but only rank 0 may
+        # mutate it for retention.
+        if self.rank == 0:
+            self.register_checkpoint(local_path, max_ckpt_to_keep)
 
     def _dispatch_finalize(self, async_requests: list, finalize_save_fn) -> None:
         """Run ``finalize_save_fn`` now, or after all async writes complete.
@@ -1196,8 +1199,12 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         """
         self.previous_global_step = global_step
 
+        # Rank 0 owns retention GC on shared storage. Synchronize before any
+        # rank starts writing the new checkpoint.
         if not self.checkpoint_config.async_save:
-            self.ensure_checkpoint_capacity(max_ckpt_to_keep)
+            if self.rank == 0:
+                self.ensure_checkpoint_capacity(max_ckpt_to_keep)
+            torch.distributed.barrier()
 
         local_path = local_mkdir_safe(local_path)
         # ── 1. Save dist_checkpoint payload ───────────────────────────────────
