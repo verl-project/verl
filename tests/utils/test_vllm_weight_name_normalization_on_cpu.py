@@ -150,9 +150,6 @@ def _load_vllm_rollout_utils():
     fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
     fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
 
-    fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
-    fake_bucketed_transfer.BucketedWeightReceiver = None
-
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
     # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
     # a `lambda: None` stub gets baked into verl.utils.device during this window;
@@ -190,7 +187,6 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
         "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
         "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
-        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
@@ -814,17 +810,23 @@ class _FakeBucketReceiver:
             on_bucket_received(weights, is_last)
 
 
+def _install_fake_receiver(monkeypatch, buckets):
+    # ``update_weights_from_ipc`` imports the receiver lazily, so stub the transport
+    # module itself; a full-name hit in ``sys.modules`` also skips the vLLM-backed
+    # package ``__init__``.
+    fake_transport = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_transport.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiver(buckets)
+    monkeypatch.setitem(sys.modules, fake_transport.__name__, fake_transport)
+
+
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     """A LoRA adapter split across two buckets yields one add_lora with all tensors."""
-    monkeypatch.setattr(
-        _vllm_rollout_utils,
-        "BucketedWeightReceiver",
-        lambda *a, **k: _FakeBucketReceiver(
-            [
-                ([("lora.A.weight", torch.ones(1))], False),
-                ([("lora.B.weight", torch.zeros(1))], True),
-            ]
-        ),
+    _install_fake_receiver(
+        monkeypatch,
+        [
+            ([("lora.A.weight", torch.ones(1))], False),
+            ([("lora.B.weight", torch.zeros(1))], True),
+        ],
     )
 
     model = _FakeModel({"q.base_layer.weight": torch.empty(0)})
@@ -855,15 +857,12 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
 
 def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     """Standard (non-LoRA) base sync loads every bucket immediately (no accumulation)."""
-    monkeypatch.setattr(
-        _vllm_rollout_utils,
-        "BucketedWeightReceiver",
-        lambda *a, **k: _FakeBucketReceiver(
-            [
-                ([("q.weight", torch.ones(1))], False),
-                ([("k.weight", torch.zeros(1))], True),
-            ]
-        ),
+    _install_fake_receiver(
+        monkeypatch,
+        [
+            ([("q.weight", torch.ones(1))], False),
+            ([("k.weight", torch.zeros(1))], True),
+        ],
     )
 
     model = _FakeModel({"q.weight": torch.empty(0), "k.weight": torch.empty(0)})
@@ -906,22 +905,19 @@ def test_update_weights_base_sync_strips_per_expert_leaves(monkeypatch):
     loaded = []
     model.load_weights = lambda weights: loaded.extend(name for name, _ in weights)
 
-    monkeypatch.setattr(
-        _vllm_rollout_utils,
-        "BucketedWeightReceiver",
-        lambda *a, **k: _FakeBucketReceiver(
-            [
-                (
-                    [
-                        ("model.layers.0.mlp.experts.0.gate_proj.base_layer.weight", torch.ones(1)),
-                        ("model.layers.0.mlp.experts.0.up_proj.base_layer.weight", torch.ones(1)),
-                        ("model.layers.0.mlp.experts.0.down_proj.base_layer.weight", torch.ones(1)),
-                        ("model.layers.0.mlp.experts.1.gate_proj.base_layer.weight", torch.ones(1)),
-                    ],
-                    True,
-                )
-            ]
-        ),
+    _install_fake_receiver(
+        monkeypatch,
+        [
+            (
+                [
+                    ("model.layers.0.mlp.experts.0.gate_proj.base_layer.weight", torch.ones(1)),
+                    ("model.layers.0.mlp.experts.0.up_proj.base_layer.weight", torch.ones(1)),
+                    ("model.layers.0.mlp.experts.0.down_proj.base_layer.weight", torch.ones(1)),
+                    ("model.layers.0.mlp.experts.1.gate_proj.base_layer.weight", torch.ones(1)),
+                ],
+                True,
+            )
+        ],
     )
 
     worker = _make_worker(model)
@@ -1046,10 +1042,6 @@ def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
 # (verl-project/verl#7978: FlashInfer TRT-LLM bf16 MoE keeps w13/w2 in a 4-D layout).
 # These stub the receiver and the staging module, so they run without vLLM.
 # ---------------------------------------------------------------------------
-
-
-def _install_fake_receiver(monkeypatch, buckets):
-    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeBucketReceiver(buckets))
 
 
 def _install_fake_moe_staging(monkeypatch, events, staged_layers):
