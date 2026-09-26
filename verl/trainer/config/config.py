@@ -36,6 +36,8 @@ class CheckpointConfig(BaseConfig):
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
         strict (bool): Whether to perform strict validation during weight export
+        hf_export_dtype (Optional[str]): Floating-point dtype for Hugging Face model exports.
+            Uses verl precision names such as 'bf16', 'fp16', and 'fp32'. None preserves the gathered state dict dtype.
         save_lora_only (bool): When True and the model has LoRA adapters, only
             save LoRA adapter weights instead of the full model state dict.
             Dramatically reduces checkpoint size (e.g. ~150 MiB vs ~54 GiB for a
@@ -48,6 +50,7 @@ class CheckpointConfig(BaseConfig):
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
     strict: bool = True
+    hf_export_dtype: Optional[str] = None
     save_lora_only: bool = False
 
 

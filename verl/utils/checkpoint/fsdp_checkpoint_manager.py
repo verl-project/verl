@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
+from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
 from .checkpoint_manager import BaseCheckpointManager
@@ -98,6 +100,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             checkpoint_config=checkpoint_config,
         )
         self.trust_remote_code = trust_remote_code
+        hf_export_dtype = checkpoint_config.get("hf_export_dtype", None) if checkpoint_config else None
+        self.hf_export_dtype = PrecisionType.to_dtype(hf_export_dtype) if hf_export_dtype is not None else None
 
     def _get_lora_train_meta(self, unwrap_model):
         peft_config = getattr(unwrap_model, "peft_config", None)
@@ -441,9 +445,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 else:
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
+                hf_model_config = copy.deepcopy(model_config)
                 with init_empty_weights():
                     save_model = auto_model_cls.from_config(
-                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.trust_remote_code
+                        hf_model_config,
+                        torch_dtype=self.hf_export_dtype or torch.bfloat16,
+                        trust_remote_code=self.trust_remote_code,
                     )
 
                 save_model.to_empty(device="cpu")
@@ -458,6 +465,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                         )
 
                 drop_tied_target_keys(state_dict, save_model, model_config)
+                if self.hf_export_dtype is not None:
+                    for name, tensor in state_dict.items():
+                        if torch.is_floating_point(tensor):
+                            state_dict[name] = tensor.to(dtype=self.hf_export_dtype)
 
                 save_model.save_pretrained(hf_local_path, state_dict=state_dict)
                 log_with_rank(
