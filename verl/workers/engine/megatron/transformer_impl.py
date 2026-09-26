@@ -903,12 +903,25 @@ class MegatronEngine(BaseEngine):
             )
             indices = None
         else:
+            padded_seq_lens = None
+            if tu.get_non_tensor_data(data, "use_dynamic_bsz", default=True) and (
+                not self.engine_config.use_remove_padding or hasattr(self.model_config.hf_config, "vision_config")
+            ):
+                # VLMs materialize dense embeddings before packing, even with remove-padding enabled.
+                padded_seq_lens = data["input_ids"].offsets().diff()
+                if global_max_seqlen is not None:
+                    padded_seq_lens = torch.full_like(padded_seq_lens, global_max_seqlen)
+                tp_size = mpu.get_tensor_model_parallel_world_size()
+                cp_size = mpu.get_context_parallel_world_size()
+                alignment = tp_size * cp_size * (2 if cp_size > 1 else 1)
+                padded_seq_lens = (padded_seq_lens + alignment - 1) // alignment * alignment
             micro_batches, indices = prepare_micro_batches(
                 data=data,
                 dp_group=self.get_data_parallel_group(),
                 num_batches_divided_by=num_batches_divided_by,
                 same_micro_num_in_dp=True,
                 min_num_micro_batch=None,
+                padded_seq_lens=padded_seq_lens,
             )
 
         if num_batches_divided_by is not None:

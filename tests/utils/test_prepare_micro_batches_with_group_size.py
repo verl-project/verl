@@ -242,8 +242,27 @@ def test_force_group_size_1_unchanged():
     assert sorted(all_indices) == list(range(len(seq_lens)))
 
 
-def test_force_group_exceeding_token_limit_raises():
-    batch = _make_batch(seq_lens=[200, 210], force_group_size=2, max_token_len_per_gpu=300)
+@pytest.mark.parametrize("group_size,fixed_width", [(1, False), (2, False), (1, True)])
+def test_padded_token_budget(group_size, fixed_width):
+    seq_lens = [63, 96] + [2] * 6
+    batch = _make_batch(seq_lens, group_size, max_token_len_per_gpu=200)
+    batch["input_ids"] = torch.nested.as_nested_tensor(
+        [row[:n] for row, n in zip(batch["input_ids"], seq_lens, strict=True)], layout=torch.jagged
+    )
+    assert len(prepare_micro_batches(batch)[0]) == 1  # Effective tokens fit, but the dense batch does not.
+    padded_lengths = torch.full((8,), 96) if fixed_width else (torch.tensor(seq_lens) + 7) // 8 * 8
+    micro_batches, indices = prepare_micro_batches(batch, num_batches_divided_by=2, padded_seq_lens=padded_lengths)
+    assert len(micro_batches) > 1 and len(micro_batches) % 2 == 0
+    _verify_group_integrity(indices, group_size, len(seq_lens))
+    for micro_batch, partition in zip(micro_batches, indices, strict=True):
+        assert len(partition) * padded_lengths[partition].max() <= 200
+        for i, row in zip(partition, micro_batch["input_ids"].unbind(), strict=True):
+            torch.testing.assert_close(row, batch["input_ids"][i])
+
+
+@pytest.mark.parametrize("seq_lens,padded_seq_lens", [([200, 210], None), ([100, 110], torch.tensor([160, 160]))])
+def test_force_group_exceeding_token_limit_raises(seq_lens, padded_seq_lens):
+    batch = _make_batch(seq_lens=seq_lens, force_group_size=2, max_token_len_per_gpu=300)
 
     with pytest.raises(ValueError, match="forced group exceeds max_token_len"):
-        prepare_micro_batches(batch)
+        prepare_micro_batches(batch, padded_seq_lens=padded_seq_lens)

@@ -96,6 +96,7 @@ def prepare_micro_batches(
     same_micro_num_in_dp=True,
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
+    padded_seq_lens: torch.Tensor | None = None,
 ):
     """
     Prepare micro batches from data.
@@ -118,6 +119,7 @@ def prepare_micro_batches(
             min_num_micro_batch=min_num_micro_batch,
             use_dynamic_bsz_balance=use_dynamic_bsz_balance,
             force_group_size=force_group_size,
+            padded_seq_lens=padded_seq_lens,
         )
     else:
         total_data_size = len(data)

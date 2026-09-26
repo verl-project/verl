@@ -354,6 +354,7 @@ def rearrange_micro_batches(
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
     force_group_size=1,
+    padded_seq_lens: torch.Tensor | None = None,
 ):
     """
     Split a batch into micro-batches by total token count, with optional DP sync and padding.
@@ -367,6 +368,8 @@ def rearrange_micro_batches(
         min_num_micro_batch (int, optional): force at least this many splits (pads empty ones).
         use_dynamic_bsz_balance (bool, optional): balance the computational workload between micro-batches
         force_group_size (int, optional): force consecutive samples to be in the same micro-batch (for RM training).
+        padded_seq_lens (Tensor, optional): per-sample dense sequence lengths, including caller-required alignment.
+            Also bound batch_size * max(padded_seq_lens) by max_token_len. None preserves packed-token accounting.
 
     Returns:
         List[TensorDict]: the micro-batches.
@@ -424,6 +427,9 @@ def rearrange_micro_batches(
         group_token_lens = seq_len_effective.cpu().tolist()
 
     max_group_token_len = max(group_token_lens)
+    if padded_seq_lens is not None:
+        group_padded_lens = padded_seq_lens.reshape(num_groups, force_group_size).amax(dim=1).cpu().tolist()
+        max_group_token_len = max(max_group_token_len, force_group_size * max(group_padded_lens))
     min_num_groups = num_groups
     if sync_micro_batch_count:
         # Fatal constraints must be agreed on before any rank raises; otherwise peers can hang in the next collective.
@@ -453,6 +459,11 @@ def rearrange_micro_batches(
         within_limit = all(
             sum(group_token_lens[idx] for idx in partition) <= max_token_len for partition in micro_bsz_group_idx
         )
+        if within_limit and padded_seq_lens is not None:
+            within_limit = all(
+                len(partition) * force_group_size * max(group_padded_lens[idx] for idx in partition) <= max_token_len
+                for partition in micro_bsz_group_idx
+            )
         if sync_micro_batch_count:
             within_limit_tensor = torch.tensor([int(within_limit)], device=get_device_name())
             dist.all_reduce(within_limit_tensor, op=dist.ReduceOp.MIN, group=dp_group)
