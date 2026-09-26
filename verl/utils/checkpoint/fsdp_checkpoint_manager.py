@@ -459,7 +459,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 drop_tied_target_keys(state_dict, save_model, model_config)
 
-                save_model.save_pretrained(hf_local_path, state_dict=state_dict)
+                save_model.save_pretrained(
+                    hf_local_path,
+                    state_dict=state_dict,
+                    **(self.checkpoint_config.hf_save_pretrained_kwargs or {}),
+                )
                 log_with_rank(
                     f"Saved hf_model to {os.path.abspath(hf_local_path)}",
                     rank=self.rank,
