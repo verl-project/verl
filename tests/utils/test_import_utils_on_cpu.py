@@ -13,10 +13,13 @@
 # limitations under the License.
 
 import os
+import sys
+import types
 
 import pytest
 
-from verl.utils.import_utils import load_extern_object
+from verl.utils import import_utils
+from verl.utils.import_utils import get_trl_value_head_class, load_extern_object
 
 # Path to the test module
 TEST_MODULE_PATH = os.path.join(os.path.dirname(__file__), "_test_module.py")
@@ -95,3 +98,46 @@ def test_load_extern_object_invalid_module():
         # Clean up the temporary file
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+class _ValueHead:
+    pass
+
+
+def _fake_trl(monkeypatch, *, experimental_ppo: bool, top_level: bool):
+    """Install a fake ``trl`` in sys.modules; ``None`` entries make an import fail."""
+    monkeypatch.setattr(import_utils, "is_trl_available", lambda: True)
+    trl = types.ModuleType("trl")
+    if top_level:
+        trl.AutoModelForCausalLMWithValueHead = _ValueHead
+    monkeypatch.setitem(sys.modules, "trl", trl)
+    if experimental_ppo:
+        ppo = types.ModuleType("trl.experimental.ppo")
+        ppo.AutoModelForCausalLMWithValueHead = _ValueHead
+        monkeypatch.setitem(sys.modules, "trl.experimental", types.ModuleType("trl.experimental"))
+        monkeypatch.setitem(sys.modules, "trl.experimental.ppo", ppo)
+    else:
+        monkeypatch.setitem(sys.modules, "trl.experimental", None)
+        monkeypatch.setitem(sys.modules, "trl.experimental.ppo", None)
+
+
+def test_get_trl_value_head_class_without_trl(monkeypatch):
+    monkeypatch.setattr(import_utils, "is_trl_available", lambda: False)
+    assert get_trl_value_head_class() is None
+
+
+def test_get_trl_value_head_class_from_experimental_ppo(monkeypatch):
+    _fake_trl(monkeypatch, experimental_ppo=True, top_level=False)
+    assert get_trl_value_head_class() is _ValueHead
+
+
+def test_get_trl_value_head_class_from_top_level(monkeypatch):
+    # TRL releases that exported the class at the top level
+    _fake_trl(monkeypatch, experimental_ppo=False, top_level=True)
+    assert get_trl_value_head_class() is _ValueHead
+
+
+def test_get_trl_value_head_class_removed(monkeypatch):
+    # TRL >= 1.13 ships neither location; callers must not crash on import
+    _fake_trl(monkeypatch, experimental_ppo=False, top_level=False)
+    assert get_trl_value_head_class() is None

@@ -51,7 +51,7 @@ except ImportError:
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
-from verl.utils.import_utils import is_trl_available
+from verl.utils.import_utils import get_trl_value_head_class
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
@@ -609,10 +609,7 @@ def patch_valuehead_model(model) -> None:
 
     from transformers import PreTrainedModel
 
-    try:
-        from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
-    except ImportError:
-        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
+    AutoModelForCausalLMWithValueHead = get_trl_value_head_class()
 
     def tie_weights(self: "AutoModelForCausalLMWithValueHead") -> None:
         if isinstance(self.pretrained_model, PreTrainedModel):
@@ -651,17 +648,12 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         )
         return model
     except BaseException as e:
-        if not is_trl_available():
+        AutoModelForCausalLMWithValueHead = get_trl_value_head_class()
+        if AutoModelForCausalLMWithValueHead is None:
             raise RuntimeError(
-                f"model({local_path}) is not a value head model, please install trl to make it valid"
+                f"model({local_path}) is not a value head model, please install trl<1.13 to make it valid "
+                "(trl 1.13 removed AutoModelForCausalLMWithValueHead)"
             ) from e
-
-    assert is_trl_available()
-
-    try:
-        from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
-    except ImportError:
-        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
 
     if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq
