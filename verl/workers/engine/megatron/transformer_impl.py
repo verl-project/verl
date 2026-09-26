@@ -1293,6 +1293,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         unwrapped_model = unwrap_model(model)
         cp_layout = self._get_context_parallel_layout(unwrapped_model)
+        data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
+        forced_max_seqlen = tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None)
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1314,8 +1316,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 )
             replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
-                layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
-                replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
+                layers_topk_idx = align_r3_router_replay_data(
+                    layers_topk_idx,
+                    input_ids,
+                    multi_modal_inputs=multi_modal_inputs,
+                )
+                replay_mask = build_r3_replay_mask(
+                    input_ids,
+                    batch["response_mask"],
+                    multi_modal_inputs=multi_modal_inputs,
+                )
             set_router_replay_data(
                 layers_topk_idx,
                 attention_mask,
@@ -1324,6 +1334,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 replay_mask=replay_mask,
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
+                data_format=data_format,
+                forced_max_seqlen=forced_max_seqlen,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1361,8 +1373,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             from verl.models.mcore import get_mcore_engine_forward_fn
 
             forward_fn = get_mcore_engine_forward_fn(self.model_config.hf_config)
-            data_format = "thd" if self.engine_config.use_remove_padding else "bshd"
-
             logits_processor = partial(
                 self._lm_head_logits_processor,
                 calculate_sum_pi_squared=calculate_sum_pi_squared,
@@ -1401,14 +1411,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 multi_modal_inputs,
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
-                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,
-                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                forced_max_seqlen=forced_max_seqlen,
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
             )
@@ -1423,6 +1432,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vp_rank,
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
+                data_format=data_format,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
@@ -1521,7 +1531,6 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             input_ids,
             multi_modal_inputs,
             value_model=True,
-            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),

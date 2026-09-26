@@ -31,8 +31,10 @@ class _FakeMtpEngine:
     def __init__(self):
         self.mtp_drafter_available = True
         self.sleep_levels_that_discard_mtp_drafter = {2}
+        self.sleep_mode = None
 
-    async def sleep(self, level: int):
+    async def sleep(self, level: int, mode: str = "abort"):
+        self.sleep_mode = mode
         if level in self.sleep_levels_that_discard_mtp_drafter:
             self.mtp_drafter_available = False
 
@@ -68,3 +70,4 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
 
     assert metrics["rollout/spec_accept_rate"] > 0.0
     assert metrics["rollout/spec_accept_length"] > 1.0
+    assert server.engine.sleep_mode == "keep"

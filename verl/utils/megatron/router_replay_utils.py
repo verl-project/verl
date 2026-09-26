@@ -31,7 +31,6 @@ except ImportError:
 from megatron.core import parallel_state as mpu
 from megatron.core.pipeline_parallel.schedules import get_schedule_table
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, scatter_to_sequence_parallel_region
-from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
@@ -45,12 +44,6 @@ from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 
 device_name = get_device_name()
-
-
-def _context_parallel_layout(tf_config) -> str:
-    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
-        return "contiguous"
-    return "zigzag"
 
 
 # from megatron.core.transformer.transformer_block import get_num_layers_to_build
@@ -178,6 +171,12 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: int | None = No
 
 
 def is_moe_layer(tf_config, layer_idx):
+    hybrid_pattern = getattr(tf_config, "hybrid_pattern", None)
+    if isinstance(hybrid_pattern, str):
+        main_pattern = hybrid_pattern.split("/", 1)[0].replace("|", "")
+        if len(main_pattern) == tf_config.num_layers and "E" in main_pattern:
+            return main_pattern[layer_idx] == "E"
+
     moe_layer_freq = getattr(tf_config, "moe_layer_freq", None)
 
     if isinstance(moe_layer_freq, int):
@@ -241,6 +240,7 @@ def merge_router_topk_indices(
     vp_rank=None,
     local_cp_size=None,
     model=None,
+    data_format: str = "thd",
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -258,6 +258,8 @@ def merge_router_topk_indices(
             Megatron parallel state will be used.
         model: The forwarded model chunk. When given, routes are collected from its own routers instead
             of inferring their location in the process-global router registry.
+        data_format: Token layout used by the model. BSHD models record padded sequence-major rows;
+            THD models record packed rows.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
@@ -332,6 +334,29 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
+        if data_format == "bshd":
+            if not input_ids.is_nested:
+                raise TypeError("BSHD router replay recording requires jagged input_ids")
+            batch_size = input_ids.shape[0]
+            if batch_size <= 0 or layers_topk_idx.shape[1] % batch_size:
+                raise RuntimeError(
+                    "BSHD router replay rows cannot be reshaped into a sequence-major batch: "
+                    f"rows={layers_topk_idx.shape[1]}, batch={batch_size}"
+                )
+            padded_seqlen = layers_topk_idx.shape[1] // batch_size
+            restored = layers_topk_idx.squeeze(0).contiguous().view(torch.int16)
+            restored = restored.view(padded_seqlen, batch_size, *restored.shape[1:])
+            lengths = [int(length) for length in input_ids.offsets().diff().tolist()]
+            if any(length > padded_seqlen for length in lengths):
+                raise RuntimeError(
+                    f"BSHD router replay recorded only {padded_seqlen} rows per sample for lengths {lengths}"
+                )
+            parts = [restored[:length, sample].cpu() for sample, length in enumerate(lengths)]
+            mini_layer_topk_idx_list.append(torch.nested.as_nested_tensor(parts, layout=torch.jagged))
+            return
+        if data_format != "thd":
+            raise ValueError(f"Unsupported router replay data format: {data_format}")
+
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         cp_layout = _context_parallel_layout(tf_config)
@@ -377,7 +402,129 @@ def merge_router_topk_indices(
         mini_layer_topk_idx_list.append(layers_topk_idx.cpu())
 
 
-def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+def _get_vision_token_type_rows(
+    multi_modal_inputs,
+    input_lens: list[int],
+) -> list[list[int]] | None:
+    """Return valid DeepSeek-V4.1 vision-type rows, if present.
+
+    V4.1 training inputs contain the expanded image span, while vLLM's routed
+    expert response can still be indexed by the compact placeholder sequence.
+    Keeping this extraction in the replay utility makes the alignment code
+    independent of the particular batch container used by the engine.
+    """
+    if not multi_modal_inputs or "vision_token_types" not in multi_modal_inputs:
+        return None
+
+    vision_token_types = multi_modal_inputs["vision_token_types"]
+    if not isinstance(vision_token_types, torch.Tensor):
+        raise TypeError("vision_token_types must be a tensor for R3 router replay")
+    if vision_token_types.ndim != 2 or vision_token_types.shape[0] != len(input_lens):
+        raise ValueError(
+            "vision_token_types must have shape [batch, sequence] matching input_ids; "
+            f"got {tuple(vision_token_types.shape)} for {len(input_lens)} sequences"
+        )
+    if any(length > vision_token_types.shape[1] for length in input_lens):
+        raise ValueError(
+            "vision_token_types is shorter than the expanded input sequence: "
+            f"types={vision_token_types.shape[1]}, input_lengths={input_lens}"
+        )
+
+    return [
+        vision_token_types[sample, :length].detach().to(device="cpu", dtype=torch.int64).tolist()
+        for sample, length in enumerate(input_lens)
+    ]
+
+
+def _align_r3_multimodal_routes(routes: torch.Tensor, vision_types: list[int]) -> torch.Tensor:
+    """Expand compact V4.1 routes into the actor's image-expanded sequence.
+
+    vLLM currently returns one route row for an image placeholder even though
+    the Megatron V4.1 actor executes one row for every image-span position.
+    The placeholder route cannot be reused for all visual positions because
+    V4.1 uses modality-specific router biases.  Consume that compact row and
+    leave the expanded visual rows as ignored placeholders; the replay mask
+    selects native Megatron routing for those rows.
+    """
+    expanded_len = len(vision_types)
+    route_len = routes.shape[0]
+    image_start_count = sum(kind == 0 for kind in vision_types)
+    image_position_count = sum(kind >= 0 for kind in vision_types)
+    text_count = sum(kind == -1 for kind in vision_types)
+    compact_len = text_count + image_start_count
+    zero = torch.zeros((1, *routes.shape[1:]), dtype=routes.dtype, device=routes.device)
+
+    # A complete expanded response (or its autoregressive final-row omission)
+    # is already position aligned. Keep the actual visual routes in this case;
+    # callers may still choose native visual routing through the replay mask.
+    if route_len in (expanded_len, expanded_len - 1):
+        rows = [routes[index : index + 1] if index < route_len else zero for index in range(expanded_len)]
+        return torch.cat(rows, dim=0)
+
+    # vLLM may emit a different number of rows for an image span than the
+    # actor's expanded sequence.  Text rows stay position-aligned; image rows
+    # are consumed inside the visual span and are ignored by the replay mask.
+    # This covers compact placeholders, partial visual expansion, and a missing
+    # final autoregressive row without reusing a visual route for text.
+    if text_count - 1 <= route_len <= expanded_len:
+        if route_len == compact_len:
+            text_route_count = text_count
+            image_route_count = image_start_count
+        elif route_len == compact_len - 1:
+            text_route_count = text_count - 1
+            image_route_count = image_start_count
+        else:
+            text_route_count = text_count if route_len >= text_count else text_count - 1
+            image_route_count = route_len - text_route_count
+        if image_route_count < 0 or image_route_count > image_position_count:
+            raise RuntimeError(
+                "R3 router replay cannot partition DeepSeek-V4.1 multimodal routes: "
+                f"{route_len} route rows for {expanded_len} expanded tokens, "
+                f"{text_count} text rows and {image_position_count} image rows"
+            )
+        rows = []
+        cursor = 0
+        text_cursor = 0
+        image_cursor = 0
+        for kind in vision_types:
+            if kind == -1:
+                if text_cursor < text_route_count:
+                    rows.append(routes[cursor : cursor + 1])
+                    cursor += 1
+                    text_cursor += 1
+                else:
+                    rows.append(zero)
+            elif image_cursor < image_route_count:
+                # Native V4.1 routing owns visual rows; these values are
+                # retained only to preserve the returned row count.
+                if cursor < route_len:
+                    rows.append(routes[cursor : cursor + 1] if route_len > compact_len else zero)
+                    cursor += 1
+                    image_cursor += 1
+                else:
+                    rows.append(zero)
+            else:
+                rows.append(zero)
+        if cursor != route_len or image_cursor != image_route_count:
+            raise RuntimeError(
+                "V4.1 multimodal router replay did not consume all route rows: "
+                f"consumed={cursor}, routes={route_len}, expanded={expanded_len}, "
+                f"compact={compact_len}, text_routes={text_cursor}, image_routes={image_cursor}"
+            )
+        return torch.cat(rows, dim=0)
+
+    raise RuntimeError(
+        "R3 router replay cannot align DeepSeek-V4.1 multimodal routes: "
+        f"{route_len} route rows for {expanded_len} expanded tokens, "
+        f"{compact_len} compact tokens ({image_start_count} image spans)"
+    )
+
+
+def build_r3_replay_mask(
+    input_ids: torch.Tensor,
+    response_mask: torch.Tensor,
+    multi_modal_inputs=None,
+) -> torch.Tensor:
     """Build a full-sequence replay mask for rollout-captured routes.
 
     Response logprobs are read from shifted model rows, but those rows attend to
@@ -386,6 +533,25 @@ def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -
     response row, whose logits are not used by ``no_padding_2_padding``.
     """
     total_lens = input_ids.offsets().diff()
+    input_lens = [int(length) for length in total_lens.tolist()]
+    vision_rows = _get_vision_token_type_rows(multi_modal_inputs, input_lens)
+    if vision_rows is not None:
+        response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
+        mask_parts = []
+        for sample, (total_len, response_len) in enumerate(zip(input_lens, response_lens.tolist(), strict=True)):
+            replay_len = total_len - 1 if response_len > 0 else 0
+            part = torch.zeros(total_len, dtype=torch.bool, device=total_lens.device)
+            if replay_len:
+                part[:replay_len] = True
+            image_mask = torch.tensor(
+                [kind >= 0 for kind in vision_rows[sample]],
+                dtype=torch.bool,
+                device=part.device,
+            )
+            part &= ~image_mask
+            mask_parts.append(part)
+        return torch.nested.as_nested_tensor(mask_parts, layout=torch.jagged)
+
     response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
     bs = total_lens.size(0)
     values = torch.tensor([True, False], dtype=torch.bool, device=total_lens.device).repeat(bs)
@@ -396,7 +562,11 @@ def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -
     return torch.nested.nested_tensor_from_jagged(mask_values, offsets=input_ids.offsets())
 
 
-def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+def align_r3_router_replay_data(
+    layers_topk_idx: torch.Tensor,
+    input_ids: torch.Tensor,
+    multi_modal_inputs=None,
+) -> torch.Tensor:
     """Align rollout routes with full training inputs one sequence at a time.
 
     Autoregressive rollout records the routes used to predict each generated
@@ -414,8 +584,12 @@ def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.
             f"R3 router replay has {len(route_parts)} route sequences for {len(input_lens)} input sequences"
         )
 
+    vision_rows = _get_vision_token_type_rows(multi_modal_inputs, input_lens)
     aligned_parts = []
     for sample_id, (routes, input_len) in enumerate(zip(route_parts, input_lens, strict=True)):
+        if vision_rows is not None:
+            aligned_parts.append(_align_r3_multimodal_routes(routes, vision_rows[sample_id]))
+            continue
         route_len = routes.shape[0]
         if route_len == input_len:
             aligned_parts.append(routes)
@@ -439,6 +613,8 @@ def set_router_replay_data(
     replay_mask=None,
     local_cp_size=None,
     model=None,
+    data_format: str = "thd",
+    forced_max_seqlen: int | None = None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -458,6 +634,9 @@ def set_router_replay_data(
             unmasked tokens keep native Megatron routes.
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
+        data_format: Token layout used by the model. BSHD replay restores sequence-major padded rows;
+            THD replay uses the existing packed-sequence helpers.
+        forced_max_seqlen: Optional BSHD padding length chosen by the engine for this micro-batch.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -477,7 +656,46 @@ def set_router_replay_data(
         )
 
         replay_mask_rmpad = None
-        if layers_topk_idx.is_nested:
+        if data_format == "bshd":
+            if layers_topk_idx.is_nested:
+                route_parts = list(layers_topk_idx.unbind())
+                lengths = [int(length) for length in layers_topk_idx.offsets().diff().tolist()]
+                if not route_parts:
+                    raise RuntimeError("BSHD router replay requires at least one sequence")
+                max_seqlen = int(forced_max_seqlen) if forced_max_seqlen is not None else max(lengths)
+                if max_seqlen < max(lengths):
+                    raise ValueError(f"forced_max_seqlen={max_seqlen} is smaller than router replay lengths {lengths}")
+                trailing_shape = tuple(route_parts[0].shape[1:])
+                padded = torch.zeros(
+                    (len(route_parts), max_seqlen, *trailing_shape),
+                    dtype=layers_topk_idx.dtype,
+                    device=layers_topk_idx.device,
+                )
+                for sample, (part, length) in enumerate(zip(route_parts, lengths, strict=True)):
+                    padded[sample, :length].copy_(part)
+                layers_topk_idx_rmpad = padded.transpose(0, 1).reshape(1, -1, *trailing_shape)
+
+                if replay_mask is not None:
+                    mask_parts = list(replay_mask.unbind())
+                    if [part.shape[0] for part in mask_parts] != lengths:
+                        raise RuntimeError("BSHD router replay mask lengths do not match route lengths")
+                    padded_mask = torch.zeros(
+                        (len(mask_parts), max_seqlen),
+                        dtype=torch.bool,
+                        device=replay_mask.device,
+                    )
+                    for sample, (part, length) in enumerate(zip(mask_parts, lengths, strict=True)):
+                        padded_mask[sample, :length].copy_(part.bool())
+                    replay_mask_rmpad = padded_mask.transpose(0, 1).reshape(1, -1)
+            else:
+                if attention_mask is None:
+                    raise RuntimeError("router replay REPLAY requires attention_mask for dense BSHD inputs.")
+                layers_topk_idx_rmpad = layers_topk_idx.transpose(0, 1).reshape(1, -1, *layers_topk_idx.shape[2:])
+                if replay_mask is not None:
+                    replay_mask_rmpad = replay_mask.transpose(0, 1).reshape(1, -1)
+        elif data_format != "thd":
+            raise ValueError(f"Unsupported router replay data format: {data_format}")
+        elif layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx,
                 pre_process=True,
@@ -517,10 +735,29 @@ def set_router_replay_data(
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
             dim=0
         )  # layer_num, dynamic_bs_all, topk
-        # When dim-0 covers all layers (e.g. R3, or R2 with all-MoE models),
-        # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
-        # dim-0 only contains MoE layers, index by MoE-layer ordinal.
-        index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+        # vLLM retains dense HF blocks; hybrid Megatron models can expand each
+        # block into multiple modules. R2 instead records only MoE modules.
+        route_count = layers_topk_idx_reshape.shape[0]
+        moe_module_count = sum(1 for i in range(tf_config.num_layers) if is_moe_layer(tf_config, i))
+        if route_count == tf_config.num_layers:
+            route_index = "module"
+        elif route_count == moe_module_count:
+            route_index = "moe"
+        elif moe_module_count < route_count < tf_config.num_layers and tf_config.num_layers % route_count == 0:
+            route_index = "block"
+        else:
+            raise ValueError(
+                f"Cannot map {route_count} route layers to {tf_config.num_layers} modules "
+                f"with {moe_module_count} MoE layers"
+            )
+
+        def _route_idx(layer_idx: int) -> int:
+            """Map a Megatron module index to the captured route-tensor row."""
+            if route_index == "module":
+                return layer_idx
+            if route_index == "block":
+                return layer_idx // (tf_config.num_layers // route_count)
+            return sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
 
         if model is not None:
             model_routers = list(iter_model_routers(model))
@@ -530,7 +767,9 @@ def set_router_replay_data(
             missing_layer_numbers = []
             for layer_number, router in model_routers:
                 layer_idx = layer_number - 1
-                idx = layer_idx if index_by_layer else sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
+                if not is_moe_layer(tf_config, layer_idx):
+                    continue
+                idx = _route_idx(layer_idx)
                 if not 0 <= idx < layers_topk_idx_reshape.shape[0]:
                     missing_layer_numbers.append(layer_number)
                     continue
@@ -550,21 +789,17 @@ def set_router_replay_data(
         offset, end = local_rank_info["start"], local_rank_info["end"]
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
-        # For R2: count MoE layers before `offset` as the starting position.
-        moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
-
         router_offset = 0
         for layer_idx in range(offset, end):
             if not is_moe_layer(tf_config, layer_idx):
                 continue
             router = router_instances_list[router_offset]
-            idx = layer_idx if index_by_layer else moe_idx
+            idx = _route_idx(layer_idx)
             router.set_target_indices(
                 layers_topk_idx_reshape[idx].to(torch.int64),
                 replay_mask=replay_mask_rmpad_split,
             )
             router_offset += 1
-            moe_idx += 1
 
 
 def iter_model_routers(model):
@@ -576,12 +811,13 @@ def iter_model_routers(model):
     can address the wrong objects. Walking the forwarded model reaches each layer's own router.
     """
     for chunk in model if isinstance(model, list | tuple) else [model]:
+        chunk = getattr(chunk, "language_model", chunk)
         # Scope to the decoder: MTP layers restart layer numbering at 1, so they alias decoder
         # layers, and the replay tensor carries no MTP rows. ``mtp`` is a sibling of ``decoder``
         # on both GPTModel and HybridModel, the only two classes that build one.
         for module in getattr(chunk, "decoder", chunk).modules():
             router = getattr(module, "router_replay", None)
-            if isinstance(module, TopKRouter) and router is not None and module.layer_number is not None:
+            if router is not None and getattr(module, "layer_number", None) is not None:
                 yield module.layer_number, router
 
 

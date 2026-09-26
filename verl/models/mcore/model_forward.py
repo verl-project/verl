@@ -22,6 +22,7 @@ from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
 from .util import (
+    build_deepseek_v41_image_inputs,
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
     postprocess_bshd,
@@ -282,14 +283,17 @@ def gptmodel_forward_model_engine(
     """Default forward pass for GPT models with optional sequence packing."""
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
-    pre_process = unwrap_model(model).pre_process
-    post_process = unwrap_model(model).post_process
+    unwrapped_model = unwrap_model(model)
+    model_config = unwrapped_model.config
+    deepseek_v41_multimodal = getattr(model_config, "dsv4_version", None) == "v4.1"
+    pre_process = unwrapped_model.pre_process
+    post_process = unwrapped_model.post_process
 
-    fp8 = unwrap_model(model).config.fp8
+    fp8 = model_config.fp8
     use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
     model_kwargs = {}
-    if "pixel_values" in multi_modal_inputs:
+    if "pixel_values" in multi_modal_inputs and not deepseek_v41_multimodal:
         model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
     if "image_grid_thw" in multi_modal_inputs:
         model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
@@ -417,6 +421,14 @@ def gptmodel_forward_model_engine(
             forced_max_seqlen=forced_max_seqlen,
         )
 
+        if deepseek_v41_multimodal:
+            images = build_deepseek_v41_image_inputs(
+                multi_modal_inputs,
+                input_ids_bshd,
+            )
+            if images is not None:
+                model_kwargs["images"] = images
+
         if mtp_enable_train and post_process:
             args = {}
             # Use input_ids sequence length to ensure label and loss_mask alignment
@@ -451,6 +463,12 @@ def gptmodel_forward_model_engine(
             input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
                 input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen
             )
+        elif deepseek_v41_multimodal:
+            # Native DeepSeek-V4.1 CSA2 accepts only the ordinary causal mask.
+            # Keep the attention mask implicit and route padded tail tokens through
+            # the model's separate padding-mask contract.
+            attention_mask = None
+            model_kwargs["padding_mask"] = ~attention_mask_bshd
         else:
             attention_mask = attention_mask_bshd
 
