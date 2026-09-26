@@ -69,7 +69,7 @@ def is_trl_available():
     return trl_spec is not None
 
 
-def get_trl_value_head_class():
+def get_trl_value_head_class() -> Optional[type]:
     """Return TRL's ``AutoModelForCausalLMWithValueHead``, or None if TRL does not provide it.
 
     TRL moved the class to ``trl.experimental.ppo`` and removed that module in 1.13, so an
