@@ -755,9 +755,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     f"LR scheduler state dict not found in {state_dict.keys()}. Please check the checkpoint file "
                     f"{local_path}."
                 )
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
-                    log_with_rank(f"Loaded LR scheduler checkpoint from {local_path}", rank=self.rank, logger=logger)
+            # Restore whenever the state is present: ``_build_optimizer_state_dict`` always saves it,
+            # and ``use_checkpoint_opt_param_scheduler`` only selects where the scheduler's
+            # hyper-parameters come from (enforced inside megatron's ``OptimizerParamScheduler``),
+            # not whether the schedule resumes at the step it was saved at.
+            if self.lr_scheduler is not None and "lr_scheduler" in state_dict:
+                self.lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
+                log_with_rank(f"Loaded LR scheduler checkpoint from {local_path}", rank=self.rank, logger=logger)
         if self.should_load_extra:
             self.load_rng_states(state_dict["rng_state"])
             log_with_rank(f"Loaded RNG states from {local_path}", rank=self.rank, logger=logger)
@@ -958,11 +962,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     f"LR scheduler state dict not found in {loaded_optim.keys()}. "
                     f"Please check the checkpoint file {optim_dist_path}."
                 )
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.load_state_dict(loaded_optim["lr_scheduler"])
-                    log_with_rank(
-                        f"Loaded LR scheduler checkpoint from {optim_dist_path}", rank=self.rank, logger=logger
-                    )
+            # Restore whenever the state is present: ``_build_optimizer_state_dict`` always saves it,
+            # and ``use_checkpoint_opt_param_scheduler`` only selects where the scheduler's
+            # hyper-parameters come from (enforced inside megatron's ``OptimizerParamScheduler``),
+            # not whether the schedule resumes at the step it was saved at.
+            if self.lr_scheduler is not None and "lr_scheduler" in loaded_optim:
+                self.lr_scheduler.load_state_dict(loaded_optim["lr_scheduler"])
+                log_with_rank(f"Loaded LR scheduler checkpoint from {optim_dist_path}", rank=self.rank, logger=logger)
 
         # ── Load RNG states ─────────────────────────────────────────────────
         if self.should_load_extra:

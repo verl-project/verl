@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 09/20/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -21,9 +21,12 @@ Megatron:
   ``use_dist_checkpointing``: HF weights under ``model/huggingface/`` when the HF path is active,
   Megatron shards under ``model/dist_ckpt/`` when ``use_dist_checkpointing=True``, or **both**
   when a ``bridge`` is present and dist shards are also enabled for the ``model`` slot.
-- ``optimizer`` -- the optimizer state (sharded for both FSDP and Megatron).
-- ``extra`` -- LR scheduler state, RNG states, and (for Megatron) the serialised
-  ``TransformerConfig``.
+- ``optimizer`` -- the optimizer state (sharded for both FSDP and Megatron). For **Megatron** the
+  LR scheduler state travels with the optimizer (it is written into ``optimizer/dist_ckpt/``), so
+  ``optimizer`` must appear in ``load_contents`` for the LR schedule to resume at the step it was
+  saved at.
+- ``extra`` -- RNG states, the LR scheduler state (**FSDP** only -- see ``optimizer`` above for
+  Megatron), and (for Megatron) the serialised ``TransformerConfig``.
 - ``hf_model`` -- the full model in HuggingFace format. **Megatron requires a non-``None`` mbridge
   ``bridge``** (the checkpoint manager checks ``bridge``, not a separate flag) whenever ``hf_model``
   appears in ``save_contents`` or ``load_contents``. In practice the engine supplies the bridge when

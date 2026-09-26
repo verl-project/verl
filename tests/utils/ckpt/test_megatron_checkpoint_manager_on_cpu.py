@@ -109,6 +109,7 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    use_checkpoint_opt_param_scheduler=False,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -147,6 +148,7 @@ def _make_manager(
         optimizer=optimizer,
         optimizer_scheduler=lr_scheduler,
         use_distributed_optimizer=use_distributed_optimizer,
+        use_checkpoint_opt_param_scheduler=use_checkpoint_opt_param_scheduler,
         use_dist_checkpointing=use_dist_checkpointing,
         bridge=bridge,
         peft_cls=peft_cls,
@@ -655,3 +657,83 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
 
         mgr.load_checkpoint(ckpt_path)
         mgr.model[0].sharded_state_dict.assert_called_once()
+
+
+# ===========================================================================
+# Tests: LR scheduler save/restore symmetry
+#
+# The LR scheduler state is written unconditionally by
+# ``_build_optimizer_state_dict``; restoring it must therefore not depend on
+# ``use_checkpoint_opt_param_scheduler`` (which only selects whether the
+# *hyper-parameters* come from the checkpoint or from the config -- megatron's
+# own ``OptimizerParamScheduler.load_state_dict`` enforces that via
+# ``override_opt_param_scheduler``). Skipping the restore silently replays
+# warmup/decay from step 0 on resume.
+# ===========================================================================
+
+
+class TestLRSchedulerRestore:
+    @pytest.fixture(autouse=True)
+    def _tmpdir(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.ckpt_path = os.path.join(self.test_dir, "global_step_1")
+        _make_v2_layout(self.ckpt_path, "optimizer")
+        yield
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @staticmethod
+    def _loaded(with_scheduler=True):
+        sd = {"optimizer": {"step": 1}}
+        if with_scheduler:
+            sd["lr_scheduler"] = {"num_steps": 42, "max_lr": 1e-6}
+        return sd
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_restores_lr_scheduler_by_default(self, mock_load_dc, _mock_meta):
+        """Default config (use_checkpoint_opt_param_scheduler=False) must still resume the schedule."""
+        mock_load_dc.return_value = self._loaded()
+        mgr = _make_manager(load_contents=["optimizer"], use_checkpoint_opt_param_scheduler=False)
+        mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.lr_scheduler.load_state_dict.assert_called_once_with({"num_steps": 42, "max_lr": 1e-6})
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_restores_lr_scheduler_when_flag_enabled(self, mock_load_dc, _mock_meta):
+        mock_load_dc.return_value = self._loaded()
+        mgr = _make_manager(load_contents=["optimizer"], use_checkpoint_opt_param_scheduler=True)
+        mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.lr_scheduler.load_state_dict.assert_called_once_with({"num_steps": 42, "max_lr": 1e-6})
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_absent_lr_scheduler_state_is_tolerated_by_default(self, mock_load_dc, _mock_meta):
+        """Old checkpoints without an LR scheduler entry must still load."""
+        mock_load_dc.return_value = self._loaded(with_scheduler=False)
+        mgr = _make_manager(load_contents=["optimizer"], use_checkpoint_opt_param_scheduler=False)
+        mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.optimizer.load_state_dict.assert_called_once()
+        mgr.lr_scheduler.load_state_dict.assert_not_called()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_absent_lr_scheduler_state_still_raises_when_flag_enabled(self, mock_load_dc, _mock_meta):
+        """Opting into checkpoint scheduler hyper-parameters keeps the strict check."""
+        mock_load_dc.return_value = self._loaded(with_scheduler=False)
+        mgr = _make_manager(load_contents=["optimizer"], use_checkpoint_opt_param_scheduler=True)
+
+        with pytest.raises(AssertionError, match="LR scheduler state dict not found"):
+            mgr.load_checkpoint(self.ckpt_path)
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_no_lr_scheduler_object_does_not_crash(self, mock_load_dc, _mock_meta):
+        mock_load_dc.return_value = self._loaded()
+        mgr = _make_manager(load_contents=["optimizer"], use_checkpoint_opt_param_scheduler=False)
+        mgr.lr_scheduler = None
+        mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.optimizer.load_state_dict.assert_called_once()

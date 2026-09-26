@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 08/24/2026.
+Last updated: 09/21/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -470,14 +470,14 @@ ____________________________________________________
       weight_decay_incr_style: constant # select from constant/linear/cosine
       lr_wsd_decay_style: exponential # select from constant/exponential/cosine
       lr_wsd_decay_steps: null
-      use_checkpoint_opt_param_scheduler: False # use checkpoint optimizer parameter scheduler
+      use_checkpoint_opt_param_scheduler: False # take scheduler hyper-parameters from the checkpoint
 
 
 Notice that there are some differences in APIs between Megatron optimizer and FSDP optimizer.
 
 - Megatron optimizer scheduler names the period after lr_warmup as lr_decay_steps, so the ``lr_scheduler_type`` actually means the style of lr decay after warmup.
 - Megatron optimizer also support weight decay decay mechanism
-- ``use_checkpoint_opt_param_scheduler`` determines whether to use the checkpoint optimizer parameter scheduler. If set to True, the optimizer parameter scheduler will be saved in the checkpoint and loaded from the checkpoint during resuming training.
+- ``use_checkpoint_opt_param_scheduler`` selects where the optimizer parameter scheduler's *hyper-parameters* come from when resuming. The scheduler state is always saved, and its position in the schedule (the step count) is always restored on resume, regardless of this flag. With ``False`` (the default) the configured values for learning rate, warmup and decay win; with ``True`` the values stored in the checkpoint win. verl derives Megatron's ``override_opt_param_scheduler`` as the negation of this flag, so the two are never set together.
 
 For learning rate decay, original Megatron pretrain default option of ``lr_decay_style`` is ``linear``,
 meaning that the learning rate will be linearly decayed from the initial learning rate to ``min_lr`` within the
