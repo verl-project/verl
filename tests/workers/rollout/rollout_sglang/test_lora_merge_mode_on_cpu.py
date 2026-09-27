@@ -20,6 +20,10 @@ release tags in ``sleep``. With ``model.lora.merge=True`` the trainer merges the
 into the base weights and pushes a full weight update (``peft_config=None``), so SGLang
 must stay LoRA-free -- otherwise requests reference an adapter that is never loaded.
 
+``lora_base_kept_on_sleep`` narrows the ``sleep`` case: with ``model.lora.resync_base=True``
+the trainer re-syncs the base on every update, so sleep releases the weights in adapter mode
+too.
+
 Note the two config blocks of ``HFModelConfig``, which are never synced: megatron runs set
 ``model.lora.rank``, fsdp runs set the flat ``model.lora_rank``.
 """
@@ -29,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from verl.workers.rollout.sglang_rollout.utils import lora_served_as_adapter
+from verl.workers.rollout.sglang_rollout.utils import lora_base_kept_on_sleep, lora_served_as_adapter
 
 
 @dataclass
@@ -64,17 +68,35 @@ class TestLoraServedAsAdapter:
         """merge=True on a run without LoRA is still 'no adapter'."""
         assert lora_served_as_adapter(_StubModelConfig(lora={"rank": 0, "merge": True})) is False
 
+    def test_resync_base_still_serves_adapter(self):
+        """resync_base only changes what sleep releases; SGLang still serves the adapter."""
+        assert lora_served_as_adapter(_StubModelConfig(lora={"rank": 16, "resync_base": True})) is True
+
 
 class TestSleepTags:
-    """``SGLangHttpServer.sleep`` releases the weights only when they are not the base of
-    an adapter that gets hot-swapped in place."""
+    """``SGLangHttpServer.sleep`` keeps the weights only when they are the base of an adapter
+    that gets hot-swapped in place and the base is not re-synced on every update."""
 
     @staticmethod
     def _sleep_tags(model_config) -> list[str]:
-        return ["kv_cache"] if lora_served_as_adapter(model_config) else ["kv_cache", "weights"]
+        return ["kv_cache"] if lora_base_kept_on_sleep(model_config) else ["kv_cache", "weights"]
 
     def test_merge_mode_releases_weights(self):
         assert self._sleep_tags(_StubModelConfig(lora={"rank": 16, "merge": True})) == ["kv_cache", "weights"]
 
     def test_adapter_mode_keeps_weights(self):
         assert self._sleep_tags(_StubModelConfig(lora={"rank": 16})) == ["kv_cache"]
+
+    def test_adapter_mode_resync_base_false_keeps_weights(self):
+        assert self._sleep_tags(_StubModelConfig(lora={"rank": 16, "resync_base": False})) == ["kv_cache"]
+
+    def test_megatron_adapter_mode_resync_base_releases_weights(self):
+        model_config = _StubModelConfig(lora={"rank": 16, "resync_base": True})
+        assert self._sleep_tags(model_config) == ["kv_cache", "weights"]
+
+    def test_fsdp_adapter_mode_resync_base_releases_weights(self):
+        model_config = _StubModelConfig(lora_rank=8, lora={"resync_base": True})
+        assert self._sleep_tags(model_config) == ["kv_cache", "weights"]
+
+    def test_resync_base_without_lora_releases_weights(self):
+        assert self._sleep_tags(_StubModelConfig(lora={"rank": 0, "resync_base": True})) == ["kv_cache", "weights"]

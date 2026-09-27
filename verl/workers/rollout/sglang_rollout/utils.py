@@ -90,6 +90,16 @@ def lora_served_as_adapter(model_config) -> bool:
     return lora_enabled and not model_config.lora.get("merge", False)
 
 
+def lora_base_kept_on_sleep(model_config) -> bool:
+    """Whether sleep keeps the base weights on GPU and releases only the kv_cache.
+
+    True in adapter mode (see :func:`lora_served_as_adapter`), where the trainer pushes only
+    the adapter after the first sync. With ``model.lora.resync_base=True`` the trainer re-syncs
+    the base before the adapter on every update, so sleep releases the weights too.
+    """
+    return lora_served_as_adapter(model_config) and not model_config.lora.get("resync_base", False)
+
+
 def sglang_lora_target_modules(target_modules: Any) -> list[str]:
     """Render verl's ``model.target_modules`` as SGLang's ``lora_target_modules``."""
     if target_modules == "all-linear":

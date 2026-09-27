@@ -44,7 +44,7 @@ from verl.workers.rollout.sglang_rollout.utils import (
     DEEPSEEK_V4_FUSION_GROUPS,
     SGLANG_LORA_NAME,
     get_named_tensor_buckets,
-    lora_served_as_adapter,
+    lora_base_kept_on_sleep,
     normalize_peft_config_for_sglang,
 )
 
@@ -200,10 +200,10 @@ class ServerAdapter(BaseRollout):
         self._has_server = (disagg is None or not getattr(disagg, "enabled", False)) or (self._pd_role is not None)
 
         # sleep_level controls what gets released during sleep/release:
-        #   2 (default) = release weights + kv_cache (full sleep, merge path)
+        #   2 (default) = release weights + kv_cache (full sleep, merge path or adapter path with resync_base)
         #   1 = release kv_cache only (keep base weights, adapter path)
         # From config, not assigned after the first sync: sleep() branches on the same predicate.
-        self.sleep_level = 1 if lora_served_as_adapter(self.model_config) else 2
+        self.sleep_level = 1 if lora_base_kept_on_sleep(self.model_config) else 2
 
     async def _init_server_adapter(self):
         if self._engine is not None:
@@ -290,7 +290,7 @@ class ServerAdapter(BaseRollout):
 
         When sleep_level=1 (LoRA adapter mode), only releases kv_cache
         to keep base weights alive across training iterations.
-        When sleep_level=2 (default/merge mode), releases everything.
+        When sleep_level=2 (default/merge mode, or adapter mode with resync_base), releases everything.
         """
         await self._init_server_adapter()
         if self._engine is None:
