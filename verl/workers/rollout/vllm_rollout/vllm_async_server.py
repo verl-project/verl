@@ -900,7 +900,7 @@ class vLLMHttpServer:
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1, mode="keep")
+            await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -1135,6 +1135,7 @@ class vLLMHttpServer:
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
             await self.engine.pause_generation(
+                mode="keep",
                 wait_for_inflight_requests=False,
                 clear_cache=reset_prefix_cache,
             )

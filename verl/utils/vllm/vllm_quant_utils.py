@@ -544,6 +544,9 @@ def process_quanted_weights_after_loading(model, reload_state):
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
+    process_model_weights = getattr(model, "process_weights_after_loading", None)
+    if process_model_weights is not None:
+        process_model_weights()
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
