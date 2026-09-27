@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from verl import DataProto
+from verl.trainer.ppo.pre_advantage_hook import PreAdvantageHook
 
 
 def get_reward_variance_filter_mask(
@@ -123,3 +124,10 @@ def apply_reward_variance_filter(data: DataProto, config: Any) -> tuple[DataProt
     )
     data.batch["response_mask"] = response_mask * keep_mask.unsqueeze(-1)
     return data, metrics
+
+
+class RewardVarianceFilteringHook(PreAdvantageHook):
+    """Built-in pre-advantage hook for RAGEN-2 reward-variance filtering."""
+
+    def __call__(self, data: DataProto, **kwargs) -> tuple[DataProto, dict[str, float]]:
+        return apply_reward_variance_filter(data, self.hook_config)

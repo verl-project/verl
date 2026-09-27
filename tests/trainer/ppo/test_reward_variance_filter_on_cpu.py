@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from verl import DataProto
+from verl.trainer.ppo.pre_advantage_hook import build_pre_advantage_hooks, run_pre_advantage_hooks
 from verl.trainer.ppo.reward_variance_filter import (
     apply_reward_variance_filter,
     get_reward_variance_filter_mask,
@@ -109,3 +110,44 @@ def test_dataproto_filter_masks_complete_groups_without_mutating_rewards():
 
     assert filtered.batch["response_mask"].tolist() == [[1.0, 1.0], [1.0, 1.0], [0.0, 0.0], [0.0, 0.0]]
     torch.testing.assert_close(filtered.batch["token_level_scores"], original_scores)
+
+
+def test_reward_variance_filter_runs_through_generic_pre_advantage_hook():
+    config = SimpleNamespace(
+        trainer={
+            "pre_advantage_hooks": {
+                "reward_variance_filtering": {
+                    "hook_class": "verl.trainer.ppo.reward_variance_filter.RewardVarianceFilteringHook",
+                    "enable": True,
+                    "strategy": "top_p",
+                    "top_p": 0.7,
+                    "top_k": 1,
+                    "include_zero": False,
+                    "variance_ddof": 1,
+                    "selection_eps": 0.0,
+                }
+            }
+        }
+    )
+    data = DataProto.from_single_dict(
+        {
+            "token_level_scores": torch.tensor([[-3.0, 0.0], [3.0, 0.0], [-1.0, 0.0], [1.0, 0.0]]),
+            "response_mask": torch.ones(4, 2),
+            "uid": np.array(["high", "high", "low", "low"], dtype=object),
+        }
+    )
+
+    hooks = build_pre_advantage_hooks(config)
+    filtered, metrics = run_pre_advantage_hooks(hooks, data, trainer=object())
+
+    assert len(hooks) == 1
+    assert filtered.batch["response_mask"].tolist() == [[1.0, 1.0], [1.0, 1.0], [0.0, 0.0], [0.0, 0.0]]
+    assert metrics["reward_variance_filtering/num_kept_groups"] == 1.0
+
+
+def test_disabled_pre_advantage_hook_is_not_built():
+    config = SimpleNamespace(
+        trainer={"pre_advantage_hooks": {"disabled": {"hook_class": "unused.Class", "enable": False}}}
+    )
+
+    assert build_pre_advantage_hooks(config) == []

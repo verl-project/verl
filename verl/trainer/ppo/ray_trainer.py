@@ -48,8 +48,8 @@ from verl.trainer.ppo.metric_utils import (
     compute_variance_proxy_metrics,
     process_validation_metrics,
 )
+from verl.trainer.ppo.pre_advantage_hook import build_pre_advantage_hooks, run_pre_advantage_hooks
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.reward_variance_filter import apply_reward_variance_filter
 from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
@@ -330,6 +330,7 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self.pre_advantage_hooks = build_pre_advantage_hooks(config)
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -1660,10 +1661,8 @@ class RayPPOTrainer:
                             # IS and off-policy metrics already have rollout_corr/ prefix
                             metrics.update(is_metrics)
 
-                        reward_variance_filtering = self.config.algorithm.get("reward_variance_filtering", None)
-                        if reward_variance_filtering and reward_variance_filtering.get("enable", False):
-                            batch, filter_metrics = apply_reward_variance_filter(batch, reward_variance_filtering)
-                            metrics.update(filter_metrics)
+                        batch, hook_metrics = run_pre_advantage_hooks(self.pre_advantage_hooks, batch, trainer=self)
+                        metrics.update(hook_metrics)
 
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
