@@ -1,6 +1,6 @@
 # verl Profiler System
 
-Last updated: 09/07/2026.
+Last updated: 09/20/2026.
 
 ## Architecture
 
@@ -47,6 +47,19 @@ Normal step-boundary snapshots remain controlled by `global_profiler.steps` and
 (default: `1`). Set `global_profiler.profile_continuous_steps=False` when using this
 step count so each profiled step contributes one start/stop cycle to the window.
 Training that does not select the `torch_memory` tool is unaffected.
+
+### Memray native-allocation traces
+
+Select `global_profiler.tool=memray` to write native process-allocation traces instead of
+PyTorch allocator snapshots. `torch_memory` and `memray` are mutually exclusive profiler
+tools. Install Memray with `uv sync --extra memray` before selecting it. Configure the trace
+window with `global_profiler.global_tool_config.memray.memory_snapshot_num_steps`.
+
+Memray traces are written as
+`<save_path>/step<step>/memray_rank<rank>_pid<pid>.bin` for a one-step window, or under
+`steps<start>-<end>/` for a multi-step window. Render one with
+`memray flamegraph <trace.bin>`. A trace is flushed only at the end of a completed profiling
+window, so do not expect a complete report after an ungraceful process kill.
 
 ## To Add a new profiling tool
 

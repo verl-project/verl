@@ -25,6 +25,23 @@ from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
 
+_ROLE_PROFILER_TOOLS = frozenset({"npu", "nsys", "torch", "torch_memory", "memray", "precision_debugger"})
+
+
+def build_role_profiler_tool_config(profiler_config: Any) -> Optional[Any]:
+    """Instantiate the selected role-level profiler tool configuration."""
+    tool = profiler_config.get("tool", None)
+    if tool not in _ROLE_PROFILER_TOOLS:
+        return None
+
+    raw_tool_config = profiler_config.get("tool_config", {}).get(tool)
+    if raw_tool_config is None:
+        return None
+
+    from verl.utils.config import omega_conf_to_dataclass
+
+    return omega_conf_to_dataclass(raw_tool_config)
+
 
 @dataclass
 class NsightToolConfig(BaseConfig):
@@ -168,6 +185,28 @@ class TorchMemoryToolConfig(BaseConfig):
             f"trace_alloc_max_entries must be positive, got {self.trace_alloc_max_entries}"
         )
         assert self.stack_depth > 0, f"stack_depth must be positive, got {self.stack_depth}"
+        assert isinstance(self.memory_snapshot_num_steps, int), (
+            f"memory_snapshot_num_steps must be int, got {type(self.memory_snapshot_num_steps)}"
+        )
+        assert self.memory_snapshot_num_steps > 0, (
+            f"memory_snapshot_num_steps must be positive, got {self.memory_snapshot_num_steps}"
+        )
+
+
+@dataclass
+class MemrayToolConfig(BaseConfig):
+    """Memray native process-allocation profiler config.
+
+    Args:
+        memory_snapshot_num_steps (int): Number of profiled RL steps to include in
+            one Memray trace.
+    """
+
+    memory_snapshot_num_steps: int = 1
+    name: str = "memray"
+
+    def __post_init__(self) -> None:
+        """Validate the Memray profile window."""
         assert isinstance(self.memory_snapshot_num_steps, int), (
             f"memory_snapshot_num_steps must be int, got {type(self.memory_snapshot_num_steps)}"
         )

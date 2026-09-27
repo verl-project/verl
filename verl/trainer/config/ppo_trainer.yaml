@@ -323,7 +323,7 @@ global_profiler:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.profiler.ProfilerConfig
 
-  # Profiling tool: choose between nsys, npu, torch, torch_memory, precision_debugger
+  # Profiling tool: choose between nsys, npu, torch, torch_memory, memray, precision_debugger
   tool: null
 
   # profile steps
@@ -433,6 +433,12 @@ global_profiler:
 
       # devices, record_context etc.
       kw_args: {}
+
+    # Record native process allocations. Install the optional `verl[memray]` extra first.
+    memray:
+
+      # Number of profiled RL steps to include in one Memray trace.
+      memory_snapshot_num_steps: 1
 
     # msprobe precision debugger
     precision_debugger:
