@@ -883,6 +883,16 @@ def build_vlm_attn_mask_thd(
     return input_ids_with_pad, attention_mask
 
 
+def is_mrope_position_ids(position_ids: torch.Tensor | None) -> bool:
+    """Whether ``position_ids`` is verl's nested ``(bsz, 4, j)`` (text, t, h, w) MRoPE layout."""
+    return (
+        isinstance(position_ids, torch.Tensor)
+        and position_ids.is_nested
+        and position_ids.dim() == 3
+        and position_ids.size(1) == 4
+    )
+
+
 def build_vlm_attn_mask_bshd(
     input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: int | None = None
 ):

@@ -1411,6 +1411,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
+                position_ids=batch.get("position_ids", None),
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -1531,6 +1532,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
                 else None
             ),
             cp_layout=cp_layout,
+            position_ids=batch.get("position_ids", None),
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
