@@ -61,7 +61,7 @@ def test_response_mask_is_next_token_aligned():
         patch("verl.models.mcore.util.mpu.get_context_parallel_rank", return_value=0),
         patch("verl.models.mcore.util.mpu.get_tensor_model_parallel_world_size", return_value=1),
     ):
-        projection_mask = preprocess_thd_engine(full_mask, need_roll=True)[0]
+        projection_mask = preprocess_thd_engine(full_mask, need_roll=True)[0].to(torch.bool)
 
     expected = torch.tensor([[0, 0, 1, 1, 0, 1, 0, 0], [0, 0, 0, 1, 0, 1, 1, 0]], dtype=torch.bool).reshape(1, -1)
     torch.testing.assert_close(projection_mask, expected)
@@ -124,9 +124,12 @@ def test_unfused_sequence_parallel_gathers_before_selection():
 
 
 @pytest.mark.parametrize("sequence_parallel", [False, True])
-def test_fused_projection_matches_dense_values_and_gradients(sequence_parallel):
+@pytest.mark.parametrize("empty", [False, True])
+def test_fused_projection_matches_dense_values_and_gradients(sequence_parallel, empty):
     torch.manual_seed(42)
     mask = torch.tensor([[False, True, False, True, True, False]])
+    if empty:
+        mask.zero_()
     labels = torch.tensor([[0, 1, 2, 3, 4, 0]])
     initial_hidden = torch.randn(6, 1, 3)
     initial_weight = torch.randn(5, 3)
@@ -164,7 +167,7 @@ def test_fused_projection_matches_dense_values_and_gradients(sequence_parallel):
     torch.testing.assert_close(sparse[1][mask], dense[1][mask])
     torch.testing.assert_close(sparse[2], dense[2])
     torch.testing.assert_close(sparse[3], dense[3])
-    assert sparse[4] == [int(mask.sum())]
+    assert sparse[4] == [max(1, int(mask.sum()))]
     assert dense[4] == [mask.numel()]
     assert torch.count_nonzero(sparse[0][~mask]) == 0
     assert torch.count_nonzero(sparse[1][~mask]) == 0
