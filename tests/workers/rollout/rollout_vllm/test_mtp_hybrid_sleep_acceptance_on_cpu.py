@@ -124,3 +124,50 @@ def test_kv_cache_release_keeps_adapter_weights_with_resync_base(monkeypatch):
     asyncio.run(server.release_kv_cache())
 
     assert sleep_calls == [(1, False)]
+
+
+class _FakeSleepEngine:
+    """Records sleep level and collective_rpc method names."""
+
+    def __init__(self):
+        self.sleep_levels = []
+        self.rpcs = []
+
+    async def sleep(self, level: int):
+        self.sleep_levels.append(level)
+
+    async def reset_encoder_cache(self):
+        pass
+
+    async def collective_rpc(self, method, timeout=None, args=(), kwargs=None):
+        self.rpcs.append(method)
+
+
+def _hybrid_server(model_config):
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(mtp=None, external_kv_cache_invalidation="reset")
+    server.model_config = model_config
+    server.engine = _FakeSleepEngine()
+    return server
+
+
+def test_hybrid_full_weight_sleep_marks_discarded_weights(monkeypatch):
+    """Merged LoRA is a full weight sync, so hybrid sleep is level 2 and marks workers."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(SimpleNamespace(lora_rank=64, lora={"rank": 64, "merge": True}))
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [2]
+    assert server.engine.rpcs == ["mark_sleep_discarded_weights"]
+
+
+def test_hybrid_lora_adapter_sleep_does_not_mark_discarded_weights(monkeypatch):
+    """Adapter sleep stays at level 1 and must not request a base-weight reload."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(SimpleNamespace(lora_rank=64, lora={"rank": 64, "merge": False}))
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [1]
+    assert server.engine.rpcs == []

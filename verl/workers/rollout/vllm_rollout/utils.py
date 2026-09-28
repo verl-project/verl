@@ -285,6 +285,7 @@ class vLLMColocateWorkerExtension:
         instance._nvfp4_per_token_config = nvfp4_per_token_config
         instance._is_engram_model = any(arch in ENGRAM_MODEL_ARCHITECTURES for arch in architectures)
         instance._engram_weights_loaded = load_format != "dummy"
+        instance._verl_weights_discarded = False
         return instance
 
     def _get_drafter_model(self):
@@ -340,6 +341,10 @@ class vLLMColocateWorkerExtension:
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
 
+    def mark_sleep_discarded_weights(self) -> None:
+        """Level-2 sleep discarded parameter storage. The next full sync reloads it."""
+        self._verl_weights_discarded = True
+
     def update_weights_from_ipc(
         self,
         peft_config: dict = None,
@@ -353,6 +358,27 @@ class vLLMColocateWorkerExtension:
             self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
         # =========================== step 1: prepare for weight loading ===========================
+        # Level 2 frees parameter storage. vLLM restores a full, non-quantized sync by bracketing
+        # load_weights with the layerwise reload. Adapter, QAT, and quantized syncs keep the
+        # upstream reload path (start_reload / finish_reload, or the NPU post-load).
+        discarded = getattr(self, "_verl_weights_discarded", False)
+        use_layerwise_reload = bool(
+            discarded
+            and not (peft_config and base_sync_done)
+            and not is_quantized_model(self.model_runner.vllm_config)
+        )
+        if use_layerwise_reload:
+            from vllm.model_executor.model_loader.reload import (
+                finalize_layerwise_reload,
+                initialize_layerwise_reload,
+            )
+        elif discarded:
+            logger.warning(
+                "vLLM sleep discarded rollout weights, but this sync cannot use the layerwise reload "
+                "(LoRA adapter, QAT, or quantized). Generation may be garbage until a full checkpoint "
+                "reload. See verl-project/verl#7904."
+            )
+
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
         # restores. Repair them before the reload so the rollout routes correctly.
@@ -364,6 +390,10 @@ class vLLMColocateWorkerExtension:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
+        elif use_layerwise_reload:
+            # Owns the kernel layout, so do not also start the direct reload.
+            for model in self._iter_all_models():
+                initialize_layerwise_reload(model)
         elif not is_npu_available:
             # vLLM views the live tensors back to the checkpoint layout the loaders expect (direct reload)
             from vllm.model_executor.model_loader.reload import start_reload
@@ -435,6 +465,11 @@ class vLLMColocateWorkerExtension:
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
+        elif use_layerwise_reload:
+            for model, model_config in self._iter_all_models_with_config():
+                finalize_layerwise_reload(model, model_config)
+            # Leave the flag set if finalize raises, so the next sync retries.
+            self._verl_weights_discarded = False
         elif is_npu_available:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
