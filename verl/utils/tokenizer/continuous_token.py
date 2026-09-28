@@ -1113,12 +1113,14 @@ class VLContinuousTokenMixin:
         *,
         tools: list[dict[str, Any]] | None = None,
         images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
     ) -> MergeResult:
-        """Merge using images ordered across the full updated conversation.
+        """Merge using resolved media ordered across the full updated conversation.
 
-        Bind images to temporary messages so processor rendering leaves caller data untouched.
+        Bind media to temporary messages so processor rendering leaves caller data untouched.
         """
-        if images is None:
+        if images is None and videos is None and audios is None:
             return super().merge_context_tokens(
                 previous_messages,
                 updated_messages,
@@ -1128,22 +1130,29 @@ class VLContinuousTokenMixin:
 
         self._assert_append_only(previous_messages, updated_messages)
         bound_messages = list(updated_messages)
-        image_index = 0
+        resolved_media = {"image": images, "video": videos, "audio": audios}
+        media_indices = {"image": 0, "video": 0, "audio": 0}
         for message_index, message in enumerate(updated_messages):
             content = message.get("content")
             if not isinstance(content, list):
                 continue
             for block_index, block in enumerate(content):
-                if not isinstance(block, dict) or block.get("type") not in ("image", "image_url"):
+                if not isinstance(block, dict):
                     continue
-                if image_index >= len(images):
-                    raise ValueError("Continuous Token images must align with message blocks")
+                media_type = "image" if block.get("type") == "image_url" else block.get("type")
+                values = resolved_media.get(media_type)
+                if values is None:
+                    continue
+                media_index = media_indices[media_type]
+                if media_index >= len(values):
+                    raise ValueError(f"Continuous Token {media_type} data must align with message blocks")
                 if bound_messages[message_index] is message:
                     bound_messages[message_index] = {**message, "content": list(content)}
-                bound_messages[message_index]["content"][block_index] = {**block, "image": images[image_index]}
-                image_index += 1
-        if image_index != len(images):
-            raise ValueError("Continuous Token images must align with message blocks")
+                bound_messages[message_index]["content"][block_index] = {**block, media_type: values[media_index]}
+                media_indices[media_type] += 1
+        for media_type, values in resolved_media.items():
+            if values is not None and media_indices[media_type] != len(values):
+                raise ValueError(f"Continuous Token {media_type} data must align with message blocks")
         return super().merge_context_tokens(
             bound_messages[: len(previous_messages)],
             bound_messages,

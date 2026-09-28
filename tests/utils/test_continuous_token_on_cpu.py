@@ -2303,27 +2303,33 @@ class TestQwenVLMergeContextTokens:
         with pytest.raises(ValueError, match="suffix diff failed"):
             builder.merge_context_tokens(previous, updated, runtime_ids)
 
-    def test_merge_uses_resolved_image_for_url_message(self):
-        """Incremental VL rendering uses the extracted image and emits vision tokens."""
+    def test_merge_uses_resolved_media_for_url_messages(self):
+        """Incremental rendering uses extracted media without changing message URLs."""
+        from verl.utils.tokenizer.continuous_token import VLContinuousTokenBuilder
 
         class NonBooleanImage:
             def __bool__(self):
                 raise AssertionError("resolved images must not be checked for truthiness")
 
         resolved_image = NonBooleanImage()
+        old_video, new_video = object(), object()
+        old_audio, new_audio = object(), object()
+        metadata = {"fps": 2}
         calls = []
 
         class RecordingProcessor(_MockQwenVLProcessor):
-            def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
-                calls.append(images)
-                return super().__call__(text=text, images=images, return_tensors=return_tensors, **kwargs)
+            def __call__(self, *, images=None, videos=None, audio=None, video_metadata=None, **kwargs):
+                calls.append((images, videos, audio, video_metadata))
+                return super().__call__(images=images, **kwargs)
 
-        builder = QwenVLContinuousTokenBuilder(self.tokenizer, RecordingProcessor())
+        builder = VLContinuousTokenBuilder(self.tokenizer, RecordingProcessor())
         previous = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": "https://example.test/old.png"},
+                    {"type": "video", "video": "https://example.test/old.mp4"},
+                    {"type": "audio", "audio": "https://example.test/old.wav"},
                     {"type": "text", "text": "Earlier image"},
                 ],
             }
@@ -2333,33 +2339,46 @@ class TestQwenVLMergeContextTokens:
                 "role": "user",
                 "content": [
                     {"type": "image", "image": "https://example.test/image.png"},
+                    {"type": "video", "video": "https://example.test/new.mp4"},
+                    {"type": "audio", "audio": "https://example.test/new.wav"},
                     {"type": "text", "text": "Look at this"},
                 ],
             }
         ]
 
-        result = builder.merge_context_tokens(previous, updated, [151644, 1000], images=[object(), resolved_image])
+        result = builder.merge_context_tokens(
+            previous,
+            updated,
+            [151644, 1000],
+            images=[object(), resolved_image],
+            videos=[(old_video, metadata), (new_video, metadata)],
+            audios=[old_audio, new_audio],
+        )
 
-        assert calls
-        assert calls[-1] == [resolved_image]
+        assert calls[-1] == ([resolved_image], [new_video], [new_audio], [metadata])
         assert 151655 in result.token_ids
         assert updated[-1]["content"][0]["image"] == "https://example.test/image.png"
+        assert updated[-1]["content"][1]["video"] == "https://example.test/new.mp4"
+        assert updated[-1]["content"][2]["audio"] == "https://example.test/new.wav"
 
-    def test_merge_rejects_mismatched_resolved_media(self):
-        """A resolved media list must cover every image block exactly once."""
+    @pytest.mark.parametrize(
+        ("block_type", "media_name"), [("image", "images"), ("video", "videos"), ("audio", "audios")]
+    )
+    def test_merge_rejects_mismatched_resolved_media(self, block_type, media_name):
+        """Each resolved media list must cover its matching blocks exactly once."""
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": "https://example.test/one.png"},
-                    {"type": "image", "image": "https://example.test/two.png"},
+                    {"type": block_type, block_type: "https://example.test/one"},
+                    {"type": block_type, block_type: "https://example.test/two"},
                 ],
             }
         ]
         builder = QwenVLContinuousTokenBuilder(self.tokenizer, self.processor)
 
         with pytest.raises(ValueError, match="must align with message blocks"):
-            builder.merge_context_tokens([], messages, [151644], images=[object()])
+            builder.merge_context_tokens([], messages, [151644], **{media_name: [object()]})
 
 
 @pytest.mark.parametrize(
