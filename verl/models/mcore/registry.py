@@ -106,14 +106,6 @@ from .model_initializer import (
     Qwen2MoEModel,
     Qwen3MoEModel,
 )
-from .weight_converter import (
-    McoreToHFWeightConverterDense,
-    McoreToHFWeightConverterDpskv3,
-    McoreToHFWeightConverterMixtral,
-    McoreToHFWeightConverterQwen2_5_VL,
-    McoreToHFWeightConverterQwen2Moe,
-    McoreToHFWeightConverterQwen3Moe,
-)
 
 
 class SupportedModel(Enum):
@@ -207,21 +199,6 @@ MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.MIMO: fused_forward_model_gen(),
 }
 
-# Registry for model weight converters
-MODEL_WEIGHT_CONVERTER_REGISTRY: dict[SupportedModel, type] = {
-    SupportedModel.LLAMA: McoreToHFWeightConverterDense,
-    SupportedModel.QWEN2: McoreToHFWeightConverterDense,
-    SupportedModel.QWEN2_MOE: McoreToHFWeightConverterQwen2Moe,
-    SupportedModel.MIXTRAL: McoreToHFWeightConverterMixtral,
-    SupportedModel.DEEPSEEK_V3: McoreToHFWeightConverterDpskv3,
-    SupportedModel.QWEN3: McoreToHFWeightConverterDense,
-    SupportedModel.QWEN3_MOE: McoreToHFWeightConverterQwen3Moe,
-    SupportedModel.QWEN3_5_MOE: McoreToHFWeightConverterQwen3Moe,
-    SupportedModel.QWEN2_5_VL: McoreToHFWeightConverterQwen2_5_VL,
-    SupportedModel.QWEN3_TOKEN_CLASSIFICATION: McoreToHFWeightConverterDense,
-    SupportedModel.LLAMA_TOKEN_CLASSIFICATION: McoreToHFWeightConverterDense,
-}
-
 
 def get_supported_model(model_type: str) -> SupportedModel:
     try:
@@ -287,13 +264,3 @@ def init_mcore_model(
         value=value,
         **extra_kwargs,
     )
-
-
-def get_mcore_weight_converter(hf_config: PretrainedConfig, dtype: torch.dtype) -> Callable:
-    """
-    Get the weight converter for given model architecture.
-    """
-    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
-    model = get_supported_model(hf_config.architectures[0])
-    tfconfig = hf_to_mcore_config(hf_config, dtype)
-    return MODEL_WEIGHT_CONVERTER_REGISTRY[model](hf_config, tfconfig)
