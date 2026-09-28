@@ -31,13 +31,15 @@ def save_dist_checkpointing(
     ckpt_path,
     async_save=False,
     content_metadata=None,
+    fully_parallel_save: bool = True,
 ):
     validate_sharding_integrity = True
     # Get checkpointing strategies
     save_strategy = TorchDistSaveShardedStrategy(backend="torch_dist", version=1)
-    save_strategy = FullyParallelSaveStrategyWrapper(
-        save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-    )
+    if fully_parallel_save:
+        save_strategy = FullyParallelSaveStrategyWrapper(
+            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+        )
 
     # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.14.0/megatron/core/optimizer/distrib_optimizer.py#L1109-L1123
     mcore_ge_014 = version.parse(megatron.core.__version__) >= version.parse("0.14.0")
@@ -53,12 +55,13 @@ def save_dist_checkpointing(
     return dist_checkpointing.save(sharded_state_dict, ckpt_path, **save_kwargs)
 
 
-def load_dist_checkpointing(sharded_state_dict, ckpt_dir):
+def load_dist_checkpointing(sharded_state_dict: dict, ckpt_dir: str, fully_parallel_load: bool = True) -> dict:
     # Get checkpointing strategies
     load_strategy = TorchDistLoadShardedStrategy()
-    load_strategy = FullyParallelLoadStrategyWrapper(
-        load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-    )
+    if fully_parallel_load:
+        load_strategy = FullyParallelLoadStrategyWrapper(
+            load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+        )
 
     # Fix torch.load weights only error
     try:
