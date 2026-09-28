@@ -1350,6 +1350,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
+                position_ids=batch.get("position_ids", None),
             )
         else:
             if not isinstance(temperature, torch.Tensor):

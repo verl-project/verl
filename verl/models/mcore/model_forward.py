@@ -23,8 +23,6 @@ from verl.workers.config import MtpConfig
 
 from .util import (
     build_vlm_attn_mask_bshd,
-    build_vlm_attn_mask_thd,
-    is_mrope_position_ids,
     postprocess_bshd,
     postprocess_bshd_engine,
     postprocess_packed_seqs,
@@ -33,22 +31,8 @@ from .util import (
     preprocess_bshd_engine,
     preprocess_packed_seqs,
     preprocess_thd_engine,
+    preprocess_vlm_thd_engine,
 )
-
-
-def _accepts_packed_thd_vlm_inputs(model) -> bool:
-    """Whether the Megatron-Bridge VLM takes rank-local (CP-sharded) THD inputs.
-
-    Only Qwen3-VL-family models (including Qwen3.5-VL) in Megatron-Bridge >= 0.6 do; other VLMs
-    still need dense BSHD inputs that the model packs itself.
-    """
-    try:
-        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
-    except ImportError:
-        return False
-    return hasattr(qwen3_vl_model, "_is_packed_input_pre_sharded") and isinstance(
-        unwrap_model(model), qwen3_vl_model.Qwen3VLModel
-    )
 
 
 def model_forward_gen(vision_model: bool = False):
@@ -318,43 +302,21 @@ def gptmodel_forward_model_engine(
     batch_size = input_ids.shape[0]
     if data_format == "thd":
         attention_mask = None
-        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
-            input_ids,
-            pre_process=True,
+        thd_kwargs = dict(
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
         )
-
         # Rank-local THD rows + positions for every model and PP stage: rope LLMs only read positions
-        # in MTP; MRoPE positions, when present, are read on every stage. VLMs that cannot take
-        # rank-local THD inputs (and dynamic CP) fall back to dense BSHD inputs the model repacks itself.
+        # in MTP; MRoPE positions, when present, are read on every stage.
+        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
+            input_ids, pre_process=True, **thd_kwargs
+        )
         if vision_model:
-            if _accepts_packed_thd_vlm_inputs(model) and is_mrope_position_ids(position_ids):
-                # verl's (bsz, 4, j) text/t/h/w positions -> Bridge's (3, 1, T) t/h/w in the same row layout
-                mrope_nested = torch.nested.nested_tensor_from_jagged(
-                    position_ids.values()[1:].transpose(0, 1).contiguous(), offsets=input_ids.offsets()
-                )
-                position_ids_rmpad = (
-                    preprocess_thd_engine(
-                        mrope_nested,
-                        pre_process=True,
-                        use_fp8_padding=use_fp8_padding,
-                        local_cp_size=local_cp_size,
-                        pad_to_length_bucket=pad_to_length_bucket,
-                        cp_layout=cp_layout,
-                    )[0]
-                    .permute(2, 0, 1)
-                    .contiguous()
-                )
-            else:
-                input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(
-                    input_ids,
-                    pad_token_id,
-                    packed_seq_params=packed_seq_params,
-                )
-                position_ids_rmpad = None
+            input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
+                model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
+            )
 
         if mtp_loss_normalization_factor is not None:
             packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor

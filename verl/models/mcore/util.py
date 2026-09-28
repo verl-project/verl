@@ -893,6 +893,52 @@ def is_mrope_position_ids(position_ids: torch.Tensor | None) -> bool:
     )
 
 
+def accepts_packed_thd_vlm_inputs(model) -> bool:
+    """Whether the Megatron-Bridge VLM takes rank-local (CP-sharded) THD inputs.
+
+    Only Qwen3-VL-family models (including Qwen3.5-VL) in Megatron-Bridge >= 0.6 do; other VLMs
+    still need dense BSHD inputs that the model packs itself.
+    """
+    from verl.utils.megatron_utils import unwrap_model
+
+    try:
+        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
+    except ImportError:
+        return False
+    return hasattr(qwen3_vl_model, "_is_packed_input_pre_sharded") and isinstance(
+        unwrap_model(model), qwen3_vl_model.Qwen3VLModel
+    )
+
+
+def preprocess_vlm_thd_engine(
+    model,
+    input_ids: torch.Tensor,
+    input_ids_rmpad: torch.Tensor,
+    packed_seq_params: PackedSeqParams,
+    position_ids: torch.Tensor | None,
+    pad_token_id: int,
+    **thd_kwargs,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Build ``(input_ids, attention_mask, position_ids)`` for a VLM THD forward.
+
+    ``input_ids_rmpad`` / ``packed_seq_params`` come from ``preprocess_thd_engine(input_ids,
+    pre_process=True, **thd_kwargs)``. VLMs that take rank-local THD inputs get them as-is plus
+    verl's ``(bsz, 4, j)`` text/t/h/w positions repacked to Bridge's ``(3, 1, T)`` t/h/w in the same
+    row layout; other VLMs get dense BSHD inputs that the model repacks itself.
+    """
+    if accepts_packed_thd_vlm_inputs(model) and is_mrope_position_ids(position_ids):
+        mrope_nested = torch.nested.nested_tensor_from_jagged(
+            position_ids.values()[1:].transpose(0, 1).contiguous(), offsets=input_ids.offsets()
+        )
+        mrope_rmpad = preprocess_thd_engine(mrope_nested, pre_process=True, **thd_kwargs)[0]
+        return input_ids_rmpad, None, mrope_rmpad.permute(2, 0, 1).contiguous()
+
+    input_ids_bshd, attention_mask = build_vlm_attn_mask_thd(
+        input_ids, pad_token_id, packed_seq_params=packed_seq_params
+    )
+    return input_ids_bshd, attention_mask, None
+
+
 def build_vlm_attn_mask_bshd(
     input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: int | None = None
 ):
