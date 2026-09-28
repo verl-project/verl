@@ -994,14 +994,19 @@ class MegatronEngine(BaseEngine):
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if adapter_only:
-            # 3D-MoE (Qwen3.5/3.6 VLM): stack_3d_moe for FusedMoE3DWithLoRA.
-            # 2D-MoE text: expand_shared_outer for vLLM pack_moe.
+            # Keep the model tensor layout and vLLM serving format independent.
+            # 3D models use the existing stack_3d_moe export; 2D models use
+            # experts.w1/w2/w3 only when vLLM's shared-LoRA mode is enabled.
             from verl.workers.rollout.vllm_rollout.utils import is_3d_moe_vllm_model
 
             export_kwargs = {}
             if self.model_config.lora.get("experts_shared_outer_loras", False):
-                if is_3d_moe_vllm_model(self.model_config.hf_config):
+                is_3d_moe = is_3d_moe_vllm_model(self.model_config.hf_config)
+                vllm_shared = getattr(self, "vllm_enable_moe_shared_loras", False)
+                if is_3d_moe:
                     export_kwargs["stack_3d_moe"] = True
+                elif vllm_shared:
+                    export_kwargs["moe_shared_loras"] = True
                 else:
                     export_kwargs["expand_shared_outer"] = True
             per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
