@@ -394,6 +394,9 @@ class AgentLoopBase(ABC):
         response_mask: list[int],
         response_logprobs: Optional[list[float]] = None,
         tools: list[dict] = None,
+        images: Optional[list[Any]] = None,
+        videos: Optional[list[Any]] = None,
+        audios: Optional[list[Any]] = None,
     ):
         """Merge appended context messages into runtime tokens and metadata."""
         merge_result = await self.loop.run_in_executor(
@@ -403,6 +406,9 @@ class AgentLoopBase(ABC):
                 updated_messages,
                 runtime_token_ids,
                 tools=tools,
+                images=images,
+                videos=videos,
+                audios=audios,
             ),
         )
         aligned_response_mask, aligned_response_logprobs = self.continuous_token_builder.align_response_metadata(
