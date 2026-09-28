@@ -373,7 +373,7 @@ Checkpoint Engine 是 verl 用于在训练侧与推理侧之间同步权重的�
 
 昇腾 NPU 上同样支持配置 `actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake`，基于 Mooncake Transfer Engine 以 p2p 方式同步权重。NPU 上需通过 engine_kwargs 将 device 指定为 npu，此时 Transfer Engine 使用 `ascend_direct` 传输协议。
 
-注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)。
+注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/transport/ascend_direct_transport.md)。
 
 #### 参数特性支持
 
