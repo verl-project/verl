@@ -21,6 +21,9 @@ from .utils import check_correctness as apps_check_correctness
 def compute_score(completion, test_cases, continuous=False):
     # try to get code solution from completion. if the completion is pure code, this will not take effect.
     solution = completion.split("```python")[-1].split("```")[0]
+    # Defaults for the non-continuous path, which only sets them when every test passes.
+    success = False
+    metadata_list = None
     try:
         try:
             if not isinstance(test_cases, dict):

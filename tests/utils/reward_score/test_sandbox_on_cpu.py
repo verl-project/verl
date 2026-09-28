@@ -15,10 +15,11 @@
 import asyncio
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 
-from verl.utils.reward_score import default_compute_score, sandbox_fusion
+from verl.utils.reward_score import default_compute_score, prime_code, sandbox_fusion
 from verl.workers.reward_manager.prime import parallel_compute_score_async
 
 prime_math_answers = [
@@ -122,6 +123,20 @@ def test_prime_code():
     for completion, ground_truth, score_ in zip(prime_code_answers, prime_code_gts, prime_code_scores, strict=True):
         score = default_compute_score(data_source, completion, ground_truth)
         assert float(score) == score_
+
+
+@pytest.mark.parametrize(
+    "check_result",
+    [([True, False], [{}]), RuntimeError("sandbox crashed")],
+    ids=["wrong_answer", "check_raises"],
+)
+def test_prime_code_non_continuous_failure(check_result):
+    """With the default continuous=False, a failing program scores False instead of raising."""
+    kwargs = {"side_effect": check_result} if isinstance(check_result, Exception) else {"return_value": check_result}
+    with patch.object(prime_code, "apps_check_correctness", **kwargs):
+        success, metadata = prime_code.compute_score(prime_code_answers[1], prime_code_gts[1])
+    assert success is False
+    assert metadata is None
 
 
 # Use the pytest.mark.skipif decorator to skip the test
