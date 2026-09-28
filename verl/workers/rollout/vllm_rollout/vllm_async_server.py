@@ -1355,7 +1355,8 @@ class vLLMHttpServer:
     def _apply_quantization(self) -> tuple[Optional[str], dict]:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
-        hf_overrides = {}
+        vllm_engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
+        hf_overrides = dict(vllm_engine_kwargs.get("hf_overrides", {}) or {})
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
@@ -1428,7 +1429,11 @@ class vLLMHttpServer:
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
-        if quantization is None and model_quantization_config.get("quant_method") == "fp8":
+        if (
+            quantization is None
+            and "quantization_config" not in hf_overrides
+            and model_quantization_config.get("quant_method") == "fp8"
+        ):
             apply_vllm_quant_patches()
             os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
