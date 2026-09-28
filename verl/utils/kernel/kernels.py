@@ -434,7 +434,7 @@ def efficient_entropy_triton_kernel_epilogue(
         global_logprobs_scalar = tl.sum(global_logprobs, axis=0)
         tl.atomic_add(global_logprobs_scalar_ptr, global_logprobs_scalar)
     elif reduction == 2:
-        global_logprobs_scalar = tl.sum(global_logprobs, axis=0) / num_tokens.to(tl.float32)
+        global_logprobs_scalar = tl.sum(global_logprobs, axis=0) / tl.full((), num_tokens, tl.float32)
         tl.atomic_add(global_logprobs_scalar_ptr, global_logprobs_scalar)
 
 
@@ -556,7 +556,7 @@ def efficient_entropy_triton_epilogue_tp_update(
         logprobs_scalar = tl.sum(logprobs, axis=0)
         tl.atomic_add(logprobs_scalar_ptr, logprobs_scalar)
     elif reduction == 2:
-        logprobs_scalar = tl.sum(logprobs, axis=0) / num_tokens.to(tl.float32)
+        logprobs_scalar = tl.sum(logprobs, axis=0) / tl.full((), num_tokens, tl.float32)
         tl.atomic_add(logprobs_scalar_ptr, logprobs_scalar)
 
 
@@ -860,7 +860,7 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(
         d_logprobs = tl.load(d_logprobs_ptr)
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     else:  # mean
-        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
+        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), tl.full((), num_tokens, tl.float32))
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     d_logprobs = -1 * d_logprobs
 
@@ -1032,7 +1032,7 @@ def efficient_entropy_backward_kernel_d_hidden(
         d_logprobs = tl.load(d_logprobs_ptr)
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     else:
-        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
+        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), tl.full((), num_tokens, tl.float32))
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     d_logprobs = -1 * d_logprobs
 
@@ -1160,7 +1160,7 @@ def efficient_entropy_backward_kernel_d_weight(
             d_logprobs = tl.load(d_logprobs_ptr)
             d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
         else:
-            d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
+            d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), tl.full((), num_tokens, tl.float32))
             d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
         d_logprobs = -1 * d_logprobs
 
@@ -1298,7 +1298,7 @@ def efficient_entropy_backward_kernel_general_d_logits(
         d_logprobs = tl.load(d_logprobs_ptr)
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     else:  # mean
-        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
+        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), tl.full((), num_tokens, tl.float32))
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     d_logprobs = -1 * d_logprobs
 
@@ -1447,7 +1447,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
         d_logprobs = tl.load(d_logprobs_ptr)
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     else:
-        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
+        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), tl.full((), num_tokens, tl.float32))
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     d_logprobs = -1 * d_logprobs
     entropy_b = tl.load(entropy_b_ptr + offs_am * stride_entropy_b, mask=offs_am < num_tokens, other=0.0)
