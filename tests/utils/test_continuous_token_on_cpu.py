@@ -2303,9 +2303,14 @@ class TestQwenVLMergeContextTokens:
         with pytest.raises(ValueError, match="suffix diff failed"):
             builder.merge_context_tokens(previous, updated, runtime_ids)
 
-    def test_merge_uses_resolved_media_for_url_only_messages(self):
-        """Incremental VL rendering must receive resolved media, not URL literals."""
-        resolved_image = object()
+    def test_merge_uses_resolved_image_for_url_message(self):
+        """Incremental VL rendering uses the extracted image and emits vision tokens."""
+
+        class NonBooleanImage:
+            def __bool__(self):
+                raise AssertionError("resolved images must not be checked for truthiness")
+
+        resolved_image = NonBooleanImage()
         calls = []
 
         class RecordingProcessor(_MockQwenVLProcessor):
@@ -2318,7 +2323,7 @@ class TestQwenVLMergeContextTokens:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": "https://example.test/old.png"}},
+                    {"type": "image", "image": "https://example.test/old.png"},
                     {"type": "text", "text": "Earlier image"},
                 ],
             }
@@ -2327,38 +2332,18 @@ class TestQwenVLMergeContextTokens:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}},
+                    {"type": "image", "image": "https://example.test/image.png"},
                     {"type": "text", "text": "Look at this"},
                 ],
             }
         ]
 
-        builder.merge_context_tokens(previous, updated, [151644, 1000], images=[object(), resolved_image])
+        result = builder.merge_context_tokens(previous, updated, [151644, 1000], images=[object(), resolved_image])
 
         assert calls
         assert calls[-1] == [resolved_image]
-
-    def test_media_objects_are_not_checked_for_truthiness(self):
-        """Resolved media objects may reject boolean coercion (as NumPy arrays do)."""
-
-        class NonBooleanMedia:
-            def __bool__(self):
-                raise AssertionError("media must not be coerced to bool")
-
-        media = NonBooleanMedia()
-        processor = _MockQwenVLProcessor()
-        builder = QwenVLContinuousTokenBuilder(self.tokenizer, processor)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": media},
-                    {"type": "text", "text": "Look at this"},
-                ],
-            }
-        ]
-
-        builder.merge_context_tokens([], messages, [151644])
+        assert 151655 in result.token_ids
+        assert updated[-1]["content"][0]["image"] == "https://example.test/image.png"
 
     def test_merge_rejects_mismatched_resolved_media(self):
         """A resolved media list must cover every image block exactly once."""
@@ -2366,8 +2351,8 @@ class TestQwenVLMergeContextTokens:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": "https://example.test/one.png"}},
-                    {"type": "image_url", "image_url": {"url": "https://example.test/two.png"}},
+                    {"type": "image", "image": "https://example.test/one.png"},
+                    {"type": "image", "image": "https://example.test/two.png"},
                 ],
             }
         ]

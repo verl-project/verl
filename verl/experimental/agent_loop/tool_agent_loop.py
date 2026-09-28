@@ -383,19 +383,13 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.messages.extend(add_messages)
 
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-        merge_images = None
-        if agent_data.image_data is not None or new_images_this_turn:
-            merge_images = list(agent_data.image_data or []) + new_images_this_turn
-        merge_kwargs = {"tools": schemas}
-        if merge_images is not None:
-            merge_kwargs["images"] = merge_images
         merge_result, response_mask, response_logprobs = await self.ct_merge_context_msg(
             previous_messages,
             agent_data.messages,
             agent_data.prompt_ids,
             agent_data.response_mask,
             agent_data.response_logprobs if agent_data.response_logprobs else None,
-            **merge_kwargs,
+            tools=schemas,
         )
         if len(response_mask) >= self.response_length:
             return AgentState.TERMINATED

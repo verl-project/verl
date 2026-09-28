@@ -34,48 +34,6 @@ MergeKind = Literal["assistant", "context"]
 logger = logging.getLogger(__name__)
 
 
-def _bind_media_to_messages(
-    messages: list[dict[str, Any]],
-    media: list[Any] | None,
-    *,
-    block_types: frozenset[str],
-    field: str,
-    media_name: str,
-) -> list[dict[str, Any]]:
-    """Bind externally resolved media to copied content blocks in message order."""
-    if media is None:
-        return messages
-
-    bound_messages = list(messages)
-    media_index = 0
-    for message_index, message in enumerate(messages):
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        bound_content = content
-        for block_index, block in enumerate(content):
-            if not isinstance(block, dict) or block.get("type") not in block_types:
-                continue
-            if media_index >= len(media):
-                raise ValueError(
-                    f"Continuous Token {media_name} data must align with message blocks: "
-                    f"found more {media_name} blocks than resolved values"
-                )
-            if bound_content is content:
-                bound_content = list(content)
-            bound_content[block_index] = {**block, field: media[media_index]}
-            media_index += 1
-        if bound_content is not content:
-            bound_messages[message_index] = {**message, "content": bound_content}
-
-    if media_index != len(media):
-        raise ValueError(
-            f"Continuous Token {media_name} data must align with message blocks: "
-            f"found {media_index} blocks but received {len(media)} resolved values"
-        )
-    return bound_messages
-
-
 @dataclass(frozen=True)
 class MergeResult:
     """Merged runtime tokens plus the edits callers need to align metadata.
@@ -226,11 +184,7 @@ class ContinuousTokenBuilder:
         runtime_token_ids: list[int],
         *,
         tools: list[dict[str, Any]] | None = None,
-        images: list[Any] | None = None,
-        videos: list[Any] | None = None,
-        audios: list[Any] | None = None,
     ) -> MergeResult:
-        del images, videos, audios
         appended_messages = updated_messages[len(previous_messages) :]
         appended_ids = self.tokenize_context_incremental_messages(previous_messages, updated_messages, tools=tools)
         return self._merge_context_token_ids(
@@ -1159,16 +1113,12 @@ class VLContinuousTokenMixin:
         *,
         tools: list[dict[str, Any]] | None = None,
         images: list[Any] | None = None,
-        videos: list[Any] | None = None,
-        audios: list[Any] | None = None,
     ) -> MergeResult:
-        """Merge context using externally resolved media when supplied.
+        """Merge using images ordered across the full updated conversation.
 
-        The media lists cover the complete updated conversation. Only appended
-        messages are rebound, so the base append-only checks and boundary logic
-        continue to operate on the original message history.
+        Bind images to temporary messages so processor rendering leaves caller data untouched.
         """
-        if images is None and videos is None and audios is None:
+        if images is None:
             return super().merge_context_tokens(
                 previous_messages,
                 updated_messages,
@@ -1177,31 +1127,26 @@ class VLContinuousTokenMixin:
             )
 
         self._assert_append_only(previous_messages, updated_messages)
-        bound_messages = _bind_media_to_messages(
-            updated_messages,
-            images,
-            block_types=frozenset({"image", "image_url"}),
-            field="image",
-            media_name="image",
-        )
-        bound_messages = _bind_media_to_messages(
-            bound_messages,
-            videos,
-            block_types=frozenset({"video", "video_url"}),
-            field="video",
-            media_name="video",
-        )
-        bound_messages = _bind_media_to_messages(
-            bound_messages,
-            audios,
-            block_types=frozenset({"audio", "audio_url"}),
-            field="audio",
-            media_name="audio",
-        )
-        bound_appended_messages = bound_messages[len(previous_messages) :]
+        bound_messages = list(updated_messages)
+        image_index = 0
+        for message_index, message in enumerate(updated_messages):
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block_index, block in enumerate(content):
+                if not isinstance(block, dict) or block.get("type") not in ("image", "image_url"):
+                    continue
+                if image_index >= len(images):
+                    raise ValueError("Continuous Token images must align with message blocks")
+                if bound_messages[message_index] is message:
+                    bound_messages[message_index] = {**message, "content": list(content)}
+                bound_messages[message_index]["content"][block_index] = {**block, "image": images[image_index]}
+                image_index += 1
+        if image_index != len(images):
+            raise ValueError("Continuous Token images must align with message blocks")
         return super().merge_context_tokens(
-            previous_messages,
-            previous_messages + bound_appended_messages,
+            bound_messages[: len(previous_messages)],
+            bound_messages,
             runtime_token_ids,
             tools=tools,
         )
@@ -1213,10 +1158,8 @@ class VLContinuousTokenMixin:
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") in ("video", "video_url"):
+                    if isinstance(block, dict) and block.get("type") == "video":
                         video_ref = block.get("video")
-                        if video_ref is None:
-                            video_ref = block.get("video_url")
                         if video_ref is not None:
                             videos.append(video_ref)
         return videos
@@ -1564,8 +1507,6 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         *,
         tools: list[dict[str, Any]] | None = None,
         images: list[Any] | None = None,
-        videos: list[Any] | None = None,
-        audios: list[Any] | None = None,
     ) -> MergeResult:
         """Merge tokens: always use processor + prefix diff for VL2.
 
@@ -1575,7 +1516,6 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         self._assert_append_only(previous_messages, updated_messages)
 
         # Always use full render + prefix diff (VL2 has no apply_chat_template)
-        del videos, audios
         all_images = images if images is not None else self._extract_images_from_messages(updated_messages)
         full_token_ids = self._render_via_processor(updated_messages, all_images, add_generation_prompt=True)
 
