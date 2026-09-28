@@ -51,6 +51,12 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.local_logit_regression import (
+    CURRENT_FEATURES_FLAG,
+    OLD_FEATURE_KEYS,
+    OLD_FEATURES_FLAG,
+    is_local_loss,
+)
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
     compute_data_metrics,
@@ -1590,6 +1596,7 @@ class PPOTrainer(ABC):
             return batch
 
         # 1. compute log probs
+        use_local_loss = is_local_loss(self.config.actor_rollout_ref.actor)
         batch.extra_info.update(
             {
                 "calculate_entropy": True,
@@ -1597,20 +1604,33 @@ class PPOTrainer(ABC):
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
         )
+        if use_local_loss:
+            # LOCAL: store the old-policy Top-K support that centres the logits during the update.
+            batch.extra_info[OLD_FEATURES_FLAG] = self.config.actor_rollout_ref.actor.policy_loss.local_topk
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
+        # extra_info persists across calls; a later reference-policy pass must not overwrite the features.
+        batch.extra_info.pop(OLD_FEATURES_FLAG, None)
         assert len(output) == len(batch)
 
         fields = ["entropy", "log_probs", "response_mask"]
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "rollout_log_probs"])
+        if use_local_loss:
+            fields.extend(OLD_FEATURE_KEYS)
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
-        batch = tq.kv_batch_put(
-            keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
-        )
+        put_fields = ["old_log_probs", "entropy"]
+        if use_local_loss:
+            # Response-level features replace the full-sequence ones under the same keys.
+            for key in OLD_FEATURE_KEYS:
+                data[key] = response_from_nested(data[key], data["response_mask"])
+            put_fields.extend(OLD_FEATURE_KEYS)
+        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select(*put_fields))
+        if use_local_loss:
+            data = data.exclude(*OLD_FEATURE_KEYS)
 
         data = DataProto(batch=data.to_padded_tensor())
 
@@ -1797,9 +1817,14 @@ class PPOTrainer(ABC):
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
+        use_local_loss = is_local_loss(self.config.actor_rollout_ref.actor)
+        if use_local_loss:
+            extra_info[CURRENT_FEATURES_FLAG] = True
         batch.extra_info.update(extra_info)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
+        if use_local_loss:
+            batch.extra_info.pop(CURRENT_FEATURES_FLAG, None)
         output = rename_dict(output["metrics"], "actor/")
         output["perf/mfu/actor"] = output.pop("actor/mfu")
         actor_metrics = reduce_metrics(output)

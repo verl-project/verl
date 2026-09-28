@@ -94,19 +94,12 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     return data
 
 
-def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
-    """Slice response from unpad model output.
+def _prompt_and_response_lens(data: TensorDict) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Return per-sample prompt lengths, response lengths and the padded response length.
 
     Args:
-        tensor: a nested tensor or a tensor of shape (total_nnz,*),
-            total_nnz is the total number of tokens across all sequences in the batch
-
-        data: TensorDict with "prompts", "responses", "attention_mask"
-
-    Returns:
-        tensor: sliced response tensor of shape [bsz, max_response_len, *]
+        data: TensorDict with nested "prompts" and "responses", or padded ones with "attention_mask".
     """
-    values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
 
@@ -123,6 +116,23 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
         prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
         response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
         max_response_len = response_ids.shape[1]
+    return prompt_lens, response_lens, max_response_len
+
+
+def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
+    """Slice response from unpad model output.
+
+    Args:
+        tensor: a nested tensor or a tensor of shape (total_nnz,*),
+            total_nnz is the total number of tokens across all sequences in the batch
+
+        data: TensorDict with "prompts", "responses", "attention_mask"
+
+    Returns:
+        tensor: sliced response tensor of shape [bsz, max_response_len, *]
+    """
+    values = tensor.values() if tensor.is_nested else tensor
+    prompt_lens, response_lens, max_response_len = _prompt_and_response_lens(data)
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
@@ -139,6 +149,32 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     output = torch.stack(response_list, dim=0)
     return output
+
+
+def response_to_packed_sequence(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
+    """Place a response-level tensor on the packed full-sequence rows of the model output.
+
+    Inverse of :func:`no_padding_2_padding`: response token ``t`` of a sample lands on the packed row whose
+    logits predict it, ``seq_offset - resp_len - 1 + t``. Rows of prompt tokens and the last token are zero.
+
+    Args:
+        tensor: response-level tensor, nested with shape (bsz, j_resp, *) or padded with shape
+            (bsz, max_response_len, *).
+        data: TensorDict with "prompts", "responses", "attention_mask", as for :func:`no_padding_2_padding`.
+
+    Returns:
+        tensor of shape (total_nnz, *), aligned with the packed input ids.
+    """
+    prompt_lens, response_lens, _ = _prompt_and_response_lens(data)
+    sequence_offsets = (prompt_lens + response_lens).cumsum(dim=0)
+    rows = tensor.unbind() if tensor.is_nested else [tensor[i] for i in range(tensor.shape[0])]
+    reference = rows[0]
+    packed = torch.zeros(
+        (int(sequence_offsets[-1].item()), *reference.shape[1:]), dtype=reference.dtype, device=reference.device
+    )
+    for sample_rows, resp_len, seq_offset in zip(rows, response_lens.tolist(), sequence_offsets.tolist(), strict=True):
+        packed[seq_offset - resp_len - 1 : seq_offset - 1] = sample_rows[:resp_len]
+    return packed
 
 
 def build_attention_mask_from_nested(input_ids: torch.Tensor, max_seq_len: int | None = None) -> torch.Tensor:

@@ -81,13 +81,16 @@ class PolicyLossConfig(BaseConfig):
 
     Args:
         loss_mode (str): Registered policy loss name. Options: 'vanilla', 'dppo_tv', 'dppo_kl', 'gspo', 'sapo',
-            'gpg', 'clip_cov', 'kl_cov', 'geo_mean', 'dro', 'cispo', and 'bypass_mode'.
+            'gpg', 'clip_cov', 'kl_cov', 'geo_mean', 'dro', 'cispo', and 'bypass_mode'. 'local' selects LOCAL
+            (Local-Curvature Advantage Logit Regression), which the FSDP engine computes from Top-K logit features.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
         dro_beta (Optional[float]): Quadratic log-ratio penalty for DRO. Required when loss_mode is 'dro'.
+        local_eta (float): LOCAL target scale eta; the centred logit displacement is regressed onto eta * advantage.
+        local_topk (int): LOCAL Top-K support size K used to centre the logits with the old policy.
         rollout_correction (RolloutCorrectionConfig): Configuration for rollout correction.
     """
 
@@ -98,6 +101,8 @@ class PolicyLossConfig(BaseConfig):
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
     dro_beta: Optional[float] = None
+    local_eta: float = 1.0
+    local_topk: int = 64
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
 
@@ -218,6 +223,22 @@ class ActorConfig(BaseConfig):
         ]
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
+
+        if self.policy_loss.loss_mode == "local":
+            self._validate_local_loss()
+
+    def _validate_local_loss(self):
+        """Check that the LOCAL policy loss can run with this actor configuration."""
+        if self.strategy not in ("fsdp", "fsdp2"):
+            raise ValueError(
+                f"policy_loss.loss_mode='local' needs the FSDP engine (strategy fsdp or fsdp2), got {self.strategy}"
+            )
+        if self.use_fused_kernels:
+            raise ValueError("policy_loss.loss_mode='local' needs full logits; set use_fused_kernels=False")
+        if self.policy_loss.local_topk < 1:
+            raise ValueError(f"policy_loss.local_topk must be positive, got {self.policy_loss.local_topk}")
+        if self.policy_loss.local_eta <= 0:
+            raise ValueError(f"policy_loss.local_eta must be positive, got {self.policy_loss.local_eta}")
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""

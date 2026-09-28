@@ -41,6 +41,12 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.local_logit_regression import (
+    CURRENT_FEATURES_FLAG,
+    OLD_FEATURE_KEYS,
+    OLD_FEATURES_FLAG,
+    is_local_loss,
+)
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -260,9 +266,7 @@ def compute_advantage(
             advantages, returns = adv_estimator_fn(**adv_kwargs_tpo)
             data.batch["advantages"] = advantages
             data.batch["returns"] = returns
-            data.meta_info["tpo_metrics"] = dict(
-                getattr(adv_estimator_fn, "last_diagnostics", {})
-            )
+            data.meta_info["tpo_metrics"] = dict(getattr(adv_estimator_fn, "last_diagnostics", {}))
             return data
         adv_kwargs = {
             "token_level_rewards": data.batch["token_level_rewards"],
@@ -1311,12 +1315,18 @@ class RayPPOTrainer:
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        use_local_loss = is_local_loss(self.config.actor_rollout_ref.actor)
         tu.assign_non_tensor(
             batch_td,
             calculate_entropy=True,
             calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
         )
+        if use_local_loss:
+            # LOCAL: store the old-policy Top-K support that centres the logits during the update.
+            tu.assign_non_tensor(
+                batch_td, **{OLD_FEATURES_FLAG: self.config.actor_rollout_ref.actor.policy_loss.local_topk}
+            )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
         entropy = tu.get(output, "entropy")
@@ -1336,6 +1346,9 @@ class RayPPOTrainer:
             result["routed_experts"] = routed_experts
         if sum_pi_squared is not None:
             result["sum_pi_squared"] = sum_pi_squared.float()
+        if use_local_loss:
+            for key in OLD_FEATURE_KEYS:
+                result[key] = no_padding_2_padding(tu.get(output, key), batch_td)
         old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
@@ -1382,6 +1395,8 @@ class RayPPOTrainer:
             dataloader_kwargs={"shuffle": shuffle},
             compute_loss=True,
         )
+        if is_local_loss(self.config.actor_rollout_ref.actor):
+            tu.assign_non_tensor(batch_td, **{CURRENT_FEATURES_FLAG: True})
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")

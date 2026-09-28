@@ -79,6 +79,14 @@ policy_loss:
   # Must be set to a positive value when policy_loss.loss_mode is "dro".
   dro_beta: null
 
+  # LOCAL (Local-Curvature Advantage Logit Regression) target scale eta, used when loss_mode is "local".
+  # The old-policy-centred logit displacement of each sampled token is regressed onto eta * advantage.
+  local_eta: 1.0
+
+  # LOCAL Top-K support size K: the logits are centred with the old policy renormalised on its K most
+  # probable tokens, which approximates the optimal state-dependent offset.
+  local_topk: 64
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 

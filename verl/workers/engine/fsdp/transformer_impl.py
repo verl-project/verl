@@ -34,6 +34,16 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.ppo.local_logit_regression import (
+    CENTERED_LOGITS_KEY,
+    CURRENT_FEATURES_FLAG,
+    OLD_CENTERED_LOGITS_KEY,
+    OLD_FEATURES_FLAG,
+    OLD_TOPK_IDS_KEY,
+    OLD_TOPK_LOG_PROBS_KEY,
+    compute_old_topk_features,
+    compute_topk_centered_logits,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -68,11 +78,12 @@ from verl.utils.ulysses import (
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_group,
     set_ulysses_sequence_parallel_group,
+    slice_input_tensor,
     ulysses_pad,
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.utils.padding import build_attention_mask_from_nested
+from verl.workers.utils.padding import build_attention_mask_from_nested, response_to_packed_sequence
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, pad_packed_inputs, postprocess_batch_func, prepare_micro_batches
@@ -1138,6 +1149,29 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
+    def _pad_and_slice_packed_rows(self, rows: torch.Tensor, static_pad_size: int) -> torch.Tensor:
+        """Give per-token rows ``(total_nnz, *)`` the static pad and Ulysses split of ``input_ids_rmpad_rolled``."""
+        rows = rows.unsqueeze(0)
+        if static_pad_size:
+            rows = torch.nn.functional.pad(rows, (0, 0) * (rows.dim() - 2) + (0, static_pad_size))
+        if self.use_ulysses_sp:
+            # Pads to a multiple of the SP size, the same tail pad that ulysses_pad gives the input ids.
+            rows = slice_input_tensor(rows, dim=1, padding=True)
+        return rows.squeeze(0)
+
+    def _prepare_local_topk_inputs(self, micro_batch: TensorDict, output_args: dict, static_pad_size=None):
+        """Align the stored old-policy Top-K support with the logits rows of this rank (LOCAL loss).
+
+        ``static_pad_size`` is None on the padded path, which has neither static pad nor Ulysses SP.
+        """
+        topk_ids = response_to_packed_sequence(micro_batch[OLD_TOPK_IDS_KEY], micro_batch)
+        topk_log_probs = response_to_packed_sequence(micro_batch[OLD_TOPK_LOG_PROBS_KEY], micro_batch)
+        if static_pad_size is not None:
+            topk_ids = self._pad_and_slice_packed_rows(topk_ids, static_pad_size)
+            topk_log_probs = self._pad_and_slice_packed_rows(topk_log_probs, static_pad_size)
+        output_args["local_topk_ids"] = topk_ids
+        output_args["local_topk_log_probs"] = topk_log_probs
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
         if self.pad_to_length and tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False):
             # Every top-K path re-derives the teacher tensors' layout from the *unpadded* packed
@@ -1152,6 +1186,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        compute_local_centered_logits = tu.get_non_tensor_data(
+            data=micro_batch, key=CURRENT_FEATURES_FLAG, default=False
+        )
         temperature = micro_batch["temperature"]
         temperature_item = temperature
         temperature_is_one = _is_scalar_unit_temperature(temperature)
@@ -1241,6 +1278,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             # Total right-padding on the global packed sequence.
             output_args["pad_size"] = static_pad_size + sp_pad_size
+            if compute_local_centered_logits:
+                self._prepare_local_topk_inputs(micro_batch, output_args, static_pad_size=static_pad_size)
 
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
             temperature_rmpad = temperature_rmpad.squeeze(0)
@@ -1280,6 +1319,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
                 # we store the per sample temperature
                 output_args["temperature"] = temperature
+                if compute_local_centered_logits:
+                    self._prepare_local_topk_inputs(micro_batch, output_args)
 
                 input_ids = torch.nested.to_padded_tensor(
                     input_ids, padding=pad_token_id, output_size=(batch_size, max_seq_len)
@@ -1341,6 +1382,19 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
             )
+        # LOCAL policy loss: the old-log-prob pass extracts the old-policy Top-K features and the
+        # actor update centres the current logits with them. Both need the full logits.
+        local_topk_k = int(tu.get_non_tensor_data(data=micro_batch, key=OLD_FEATURES_FLAG, default=0) or 0)
+        compute_local_centered_logits = tu.get_non_tensor_data(
+            data=micro_batch, key=CURRENT_FEATURES_FLAG, default=False
+        )
+        if (local_topk_k > 0 or compute_local_centered_logits) and use_fused_kernels:
+            raise NotImplementedError(
+                "policy_loss.loss_mode='local' is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the logits needed for the Top-K features."
+            )
+        local_old_features = None
+        local_centered_logits = None
 
         model_output = {}
 
@@ -1390,6 +1444,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if calculate_sum_pi_squared:
                     sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
 
+                if local_topk_k > 0:
+                    local_old_features = compute_old_topk_features(logits_rmpad, input_ids_rmpad_rolled, local_topk_k)
+                if compute_local_centered_logits:
+                    local_centered_logits = compute_topk_centered_logits(
+                        logits_rmpad,
+                        input_ids_rmpad_rolled,
+                        output_args["local_topk_ids"],
+                        output_args["local_topk_log_probs"],
+                    )
+
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
                         if self.engine_config.entropy_from_logits_with_chunking:
@@ -1435,6 +1499,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 entropy_rmpad = self._gather_and_unpad_packed(entropy_rmpad, pad_size)
             if calculate_sum_pi_squared:
                 sum_pi_squared_rmpad = self._gather_and_unpad_packed(sum_pi_squared_rmpad, pad_size)
+            if local_old_features is not None:
+                local_old_features = tuple(self._gather_and_unpad_packed(x, pad_size) for x in local_old_features)
+            if local_centered_logits is not None:
+                local_centered_logits = self._gather_and_unpad_packed(local_centered_logits, pad_size)
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
@@ -1445,6 +1513,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
                 if calculate_sum_pi_squared:
                     sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
+                if local_old_features is not None:
+                    local_old_features = tuple(
+                        torch.nested.nested_tensor_from_jagged(x, cu_seqlens) for x in local_old_features
+                    )
+                if local_centered_logits is not None:
+                    local_centered_logits = torch.nested.nested_tensor_from_jagged(local_centered_logits, cu_seqlens)
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
@@ -1516,6 +1590,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     log_probs = None
                     if not distillation_only:
                         log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                    if local_topk_k > 0:
+                        local_old_features = tuple(
+                            torch.nested.nested_tensor_from_jagged(x, cu_seqlens)
+                            for x in compute_old_topk_features(logits_rmpad, input_ids_rmpad_rolled, local_topk_k)
+                        )
+                    if compute_local_centered_logits:
+                        local_centered_logits = torch.nested.nested_tensor_from_jagged(
+                            compute_topk_centered_logits(
+                                logits_rmpad,
+                                input_ids_rmpad_rolled,
+                                output_args["local_topk_ids"],
+                                output_args["local_topk_log_probs"],
+                            ),
+                            cu_seqlens,
+                        )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:
@@ -1539,6 +1628,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
             model_output["entropy"] = entropy
         if calculate_sum_pi_squared:
             model_output["sum_pi_squared"] = sum_pi_squared
+        if local_old_features is not None:
+            for key, value in zip(
+                (OLD_TOPK_IDS_KEY, OLD_TOPK_LOG_PROBS_KEY, OLD_CENTERED_LOGITS_KEY), local_old_features, strict=True
+            ):
+                model_output[key] = value
+        if local_centered_logits is not None:
+            model_output[CENTERED_LOGITS_KEY] = local_centered_logits
 
         return model_output
 

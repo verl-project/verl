@@ -20,6 +20,7 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import logging
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -2548,6 +2549,7 @@ def compute_policy_loss_bypass_mode(
 
     return pg_loss, pg_metrics
 
+
 # --- TPO (arXiv:2604.06159) ---------------------------------------------------
 # Imported at module end, after POLICY_LOSS_REGISTRY / ADV_ESTIMATOR_REGISTRY and
 # every helper exist, so tpo_verl's `from ... core_algos import ...` resolves
@@ -2557,4 +2559,4 @@ def compute_policy_loss_bypass_mode(
 try:
     import tpo_verl  # noqa: F401,E402
 except Exception as _tpo_exc:  # pragma: no cover
-    logger.warning("TPO extension not loaded: %s", _tpo_exc)
+    logging.getLogger(__name__).warning("TPO extension not loaded: %s", _tpo_exc)

@@ -184,6 +184,15 @@ def validate_config(
     if config.algorithm.get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
 
+    # LOCAL takes its Top-K features from the recomputed old policy, which bypass mode skips.
+    if config.actor_rollout_ref.actor.get("policy_loss", {}).get("loss_mode", "vanilla") == "local":
+        rollout_correction = config.algorithm.get("rollout_correction", None)
+        if rollout_correction is not None and rollout_correction.get("bypass_mode", False):
+            raise ValueError(
+                "policy_loss.loss_mode='local' needs the old-policy log-prob recomputation; "
+                "disable algorithm.rollout_correction.bypass_mode."
+            )
+
     # critic
     if use_critic:
         critic_config = omega_conf_to_dataclass(config.critic)
