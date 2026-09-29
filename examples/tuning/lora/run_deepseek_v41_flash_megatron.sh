@@ -160,7 +160,6 @@ run python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     actor_rollout_ref.actor.megatron.sequence_parallel=False \
     actor_rollout_ref.actor.megatron.use_megatron_fsdp=False \
     actor_rollout_ref.actor.megatron.param_offload=${PARAM_OFFLOAD} \
