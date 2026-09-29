@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from megatron.core import ModelParallelConfig, mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
@@ -39,7 +38,6 @@ from transformers import PretrainedConfig
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
-from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
 logger = logging.getLogger(__file__)
@@ -337,7 +335,6 @@ class McoreModuleWrapperConfig:
     """Configuration for Mcore module wrapper."""
 
     is_value_model: bool = False
-    share_embeddings_and_output_weights: bool = False
     wrap_with_ddp: bool = True
     use_distributed_optimizer: bool = True
     use_layer_wise_distributed_optimizer: bool = False
@@ -346,7 +343,6 @@ class McoreModuleWrapperConfig:
 
 def make_megatron_module(
     wrap_config: McoreModuleWrapperConfig,
-    tf_config: TransformerConfig,
     hf_config: PretrainedConfig,
     bridge: Any = None,
     provider: Any = None,
@@ -517,62 +513,6 @@ def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
     if not return_list:
         return unwrapped_model[0]
     return unwrapped_model
-
-
-def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerConfig:
-    """[Deprecated] convert config
-
-    Args:
-        hf_config (PretrainedConfig): _description_
-        megatron_config (_type_): _description_
-
-    Returns:
-        TransformerConfig: _description_
-    """
-
-    warnings.warn("[deprecated] use config converter for more model support", stacklevel=2)
-    print(f"megatron config {megatron_config}")
-    dt = PrecisionType.to_dtype(megatron_config.params_dtype)
-    print(f"pipeline_dtype=megatron_config {dt}")
-    qkv_bias = True if "Qwen2ForCausalLM" in hf_config.architectures else getattr(hf_config, "attention_bias", False)
-    overlap_p2p_comm = (
-        mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-        and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
-    )
-    batch_p2p_comm = False
-    transformer_config = TransformerConfig(
-        num_layers=hf_config.num_hidden_layers,
-        hidden_size=hf_config.hidden_size,
-        num_attention_heads=hf_config.num_attention_heads,
-        num_query_groups=hf_config.num_key_value_heads,
-        ffn_hidden_size=hf_config.intermediate_size,
-        #    max_position_embeddings=hf_config.max_position_embeddings,
-        activation_func=F.silu,
-        normalization="RMSNorm",
-        #    rotary_percent=False, # default,
-        gated_linear_unit=True,  # for llama
-        use_cpu_initialization=True,
-        apply_residual_connection_post_layernorm=False,  # check what's this mean
-        add_bias_linear=False,
-        tensor_model_parallel_size=mpu.get_tensor_model_parallel_world_size(),
-        pipeline_model_parallel_size=mpu.get_pipeline_model_parallel_world_size(),
-        virtual_pipeline_model_parallel_size=mpu.get_virtual_pipeline_model_parallel_world_size(),
-        context_parallel_size=mpu.get_context_parallel_world_size(),
-        overlap_p2p_comm=overlap_p2p_comm,
-        batch_p2p_comm=batch_p2p_comm,
-        pipeline_dtype=dt,
-        params_dtype=dt,
-        sequence_parallel=mpu.get_tensor_model_parallel_world_size() > 1,
-        variable_seq_lengths=True,
-        masked_softmax_fusion=True,
-        moe_token_dispatcher_type="alltoall",
-        attention_dropout=hf_config.attention_dropout,
-        hidden_dropout=getattr(hf_config, "hidden_dropout", 0.0),
-        add_qkv_bias=qkv_bias,
-        bf16=dt is torch.bfloat16,
-    )
-
-    return transformer_config
 
 
 def mcore_model_parallel_config(

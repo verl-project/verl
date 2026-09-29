@@ -22,8 +22,8 @@ from typing import Callable
 import torch
 import torch.nn as nn
 
-from .model_forward import gptmodel_forward_model_engine, model_forward_gen
-from .model_forward_fused import fused_forward_model_gen, fused_forward_model_engine
+from .model_forward import gptmodel_forward_model_engine
+from .model_forward_fused import fused_forward_model_engine
 
 
 class SupportedVLM(Enum):
@@ -37,36 +37,12 @@ class SupportedVLM(Enum):
 supported_vlm = [member.value for member in SupportedVLM]
 
 
-def get_mcore_forward_fn(hf_config) -> Callable:
-    """
-    Get the forward function for given model architecture.
-    """
-    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
-    if hf_config.architectures[0] in supported_vlm:
-        return model_forward_gen(True)
-    else:
-        # default to language model
-        return model_forward_gen(False)
-
-
 def get_mcore_engine_forward_fn(hf_config) -> Callable:
     """
     Get the forward function for given model architecture.
     """
     assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
     return gptmodel_forward_model_engine
-
-
-def get_mcore_forward_fused_fn(hf_config) -> Callable:
-    """
-    Get the forward function for given model architecture.
-    """
-    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
-    if hf_config.architectures[0] in supported_vlm:
-        return fused_forward_model_gen(True)
-    else:
-        # default to language model
-        return fused_forward_model_gen(False)
 
 
 def get_mcore_forward_fused_model_engine_fn(hf_config) -> Callable:
@@ -157,46 +133,6 @@ MODEL_INITIALIZER_REGISTRY: dict[SupportedModel, type[BaseModelInitializer]] = {
     SupportedModel.QWEN3_5_MOE: Qwen3MoEModel,
     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: DenseModel,
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: DenseModel,
-}
-
-# Registry for model forward functions
-MODEL_FORWARD_REGISTRY: dict[SupportedModel, Callable] = {
-    SupportedModel.LLAMA: model_forward_gen(),
-    SupportedModel.QWEN2: model_forward_gen(),
-    SupportedModel.QWEN2_MOE: model_forward_gen(),
-    SupportedModel.MIXTRAL: model_forward_gen(),
-    SupportedModel.DEEPSEEK_V3: model_forward_gen(),
-    SupportedModel.LLAMA4: model_forward_gen(),
-    SupportedModel.QWEN3: model_forward_gen(),
-    SupportedModel.QWEN3_MOE: model_forward_gen(),
-    SupportedModel.QWEN3_5_MOE: model_forward_gen(),
-    SupportedModel.QWEN2_5_VL: model_forward_gen(True),
-    SupportedModel.QWEN3_MOE_VL: model_forward_gen(True),
-    SupportedModel.QWEN3_VL: model_forward_gen(True),
-    SupportedModel.GLM4_MOE: model_forward_gen(),
-    SupportedModel.QWEN3_TOKEN_CLASSIFICATION: model_forward_gen(),
-    SupportedModel.LLAMA_TOKEN_CLASSIFICATION: model_forward_gen(),
-    SupportedModel.GPT_OSS: model_forward_gen(),
-    SupportedModel.MIMO: model_forward_gen(),
-}
-
-# Registry for model forward functions
-MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
-    SupportedModel.LLAMA: fused_forward_model_gen(),
-    SupportedModel.QWEN2: fused_forward_model_gen(),
-    SupportedModel.QWEN2_MOE: fused_forward_model_gen(),
-    SupportedModel.MIXTRAL: fused_forward_model_gen(),
-    SupportedModel.QWEN2_5_VL: fused_forward_model_gen(True),
-    SupportedModel.QWEN3_MOE_VL: fused_forward_model_gen(True),
-    SupportedModel.QWEN3_VL: fused_forward_model_gen(True),
-    SupportedModel.LLAMA4: fused_forward_model_gen(),
-    SupportedModel.QWEN3: fused_forward_model_gen(),
-    SupportedModel.QWEN3_MOE: fused_forward_model_gen(),
-    SupportedModel.QWEN3_5_MOE: fused_forward_model_gen(),
-    SupportedModel.DEEPSEEK_V3: fused_forward_model_gen(),
-    SupportedModel.GLM4_MOE: fused_forward_model_gen(),
-    SupportedModel.GPT_OSS: fused_forward_model_gen(),
-    SupportedModel.MIMO: fused_forward_model_gen(),
 }
 
 

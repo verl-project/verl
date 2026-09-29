@@ -438,7 +438,6 @@ class MegatronEngine(BaseEngine):
 
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
-            tf_config=self.tf_config,
             hf_config=self.model_config.hf_config,
             bridge=self.bridge,
             provider=self.provider,

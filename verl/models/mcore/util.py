@@ -25,7 +25,6 @@ from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
 from verl.utils.device import is_npu_available
-from verl.utils.model import CausalLMOutputForPPO
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -209,104 +208,6 @@ def postprocess_packed_seqs(
         output_new[i, attention_mask[i]] = tmp[:s_len]
 
     return output_new
-
-
-def preprocess_bshd(
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    position_ids: torch.Tensor,
-    sequence_parallel: bool = False,
-    pre_process: bool = True,
-):
-    """
-    Remove left padding from input_ids, attention_mask and position_ids
-    return new_input_ids, new_attention_mask, new_position_ids
-    """
-    assert attention_mask.ndim == 2
-    assert position_ids.ndim == 2
-    cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
-    batch_size = input_ids.shape[0]
-    shape = list(input_ids.shape)  # batch_size, seq_len,...
-    seq_lens = attention_mask.sum(dim=1)
-    seq_len = seq_lens.max().item()
-    if sequence_parallel:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
-    shape[1] = seq_len
-    if pre_process:
-        new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
-    new_attention_mask = torch.zeros(
-        dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len)
-    )
-    new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
-    for i in range(batch_size):
-        if pre_process:
-            new_input_ids[i, : seq_lens[i]] = input_ids[i, attention_mask[i]]
-        new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
-        new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
-    if pre_process:
-        return new_input_ids, new_attention_mask, new_position_ids
-    else:
-        return input_ids, new_attention_mask, new_position_ids
-
-
-def postprocess_bshd(
-    result,
-    attention_mask: torch.Tensor,
-    original_attention_mask: torch.Tensor,
-    origin_seqlen: int,
-    post_process: bool = True,
-):
-    """
-    Recover left padding from result
-    return result
-    """
-    if not post_process:
-        return result
-    shape = list(result.shape)
-    batch_size = shape[0]
-    shape[1] = origin_seqlen
-    new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
-    for i in range(batch_size):
-        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
-    return new_result
-
-
-def postprocess_packed_seqs_for_dict_output(
-    labels_mask: torch.Tensor,
-    output: CausalLMOutputForPPO,
-    packed_seq_params: PackedSeqParams,
-    attention_mask: torch.Tensor,
-    batch_size: int,
-    seq_len: int,
-    post_process: bool = True,
-) -> dict[str, torch.Tensor]:
-    """_summary_
-    For fused kernels, the output is a dictionary with keys like 'log_probs', 'entropy', etc.
-    This function post-processes each tensor in the output dictionary.
-    Args:
-        output (CausalLMOutputForPPO): _description_
-        packed_seq_params (PackedSeqParams): _description_
-        attention_mask (torch.Tensor): _description_
-        batch_size (int): _description_
-        seq_len (int): _description_
-        post_process (bool, optional): _description_. Defaults to True.
-    Returns:
-        CausalLMOutputForPPO: _description_
-    """
-    ret = {}
-    output.entropy = output.entropy.view(1, -1)
-    output.log_probs = output.log_probs.view(1, -1)
-    output.log_probs = output.log_probs.masked_fill(~labels_mask, 0.0)
-    ret["entropy"] = postprocess_packed_seqs(
-        output.entropy, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-    )
-    ret["log_probs"] = postprocess_packed_seqs(
-        output.log_probs, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-    )
-    return ret
 
 
 def preprocess_for_mindspeed(input_ids, cu_seqlens_padded, seqlens_in_batch_padded, batch_size):
