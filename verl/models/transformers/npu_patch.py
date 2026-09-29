@@ -382,6 +382,19 @@ def _patch_qwen3_vl_moe():
     modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
 
+def _patch_qwen3_omni_moe():
+    from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe
+
+    # Thinker and Talker use the same packed expert weight layout as Qwen3.5 MoE.
+    modeling_qwen3_omni_moe.Qwen3OmniMoeThinkerTextExperts.forward = qwen3_5_moe_experts_forward_npu
+    modeling_qwen3_omni_moe.Qwen3OmniMoeTalkerTextExperts.forward = qwen3_5_moe_experts_forward_npu
+    modeling_qwen3_omni_moe.Qwen3OmniMoeThinkerTextRMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen3_omni_moe.Qwen3OmniMoeRMSNorm.forward = rms_norm_forward_npu
+    modeling_qwen3_omni_moe.Qwen3OmniMoeThinkerTextMLP.forward = silu_forward_npu
+    modeling_qwen3_omni_moe.Qwen3OmniMoeTalkerTextMLP.forward = silu_forward_npu
+    modeling_qwen3_omni_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+
+
 def _patch_qwen3_next():
     from transformers.models.qwen3_next import modeling_qwen3_next
 
@@ -415,6 +428,7 @@ NPU_PATCHES = {
     "qwen3_moe": _patch_qwen3_moe,
     "qwen3_vl": _patch_qwen3_vl,
     "qwen3_vl_moe": _patch_qwen3_vl_moe,
+    "qwen3_omni_moe": _patch_qwen3_omni_moe,
     "qwen3_next": _patch_qwen3_next,
     "qwen3_5": _patch_qwen3_5,
     "qwen3_5_moe": _patch_qwen3_5_moe,
