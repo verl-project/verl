@@ -31,7 +31,7 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import build_vlm_attn_mask_thd, preprocess_packed_seqs, preprocess_thd_engine
+from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine, preprocess_vlm_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
@@ -269,6 +269,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         local_cp_size: int | None = None,
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
+        position_ids: Tensor | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -280,15 +281,22 @@ def fused_forward_model_engine(vision_model: bool = False):
             config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
         )
 
-        input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
-            input_ids,
-            pre_process=pre_process,
+        thd_kwargs = dict(
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
+        input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
+            input_ids, pre_process=pre_process or vision_model, **thd_kwargs
+        )
+        attention_mask = None
+        position_ids_rmpad = None
+        if vision_model:
+            input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
+                model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
+            )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         model_kwargs = {}
@@ -302,14 +310,6 @@ def fused_forward_model_engine(vision_model: bool = False):
             model_kwargs["pixel_values_videos"] = multi_modal_inputs["pixel_values_videos"].to(input_ids.device)
         if "video_grid_thw" in multi_modal_inputs:
             model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
-
-        attention_mask = None
-        if vision_model:
-            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(
-                input_ids,
-                pad_token_id,
-                packed_seq_params=packed_seq_params,
-            )
 
         labels_rmpad, _, _ = preprocess_thd_engine(
             labels,
@@ -325,7 +325,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
-            position_ids=None,
+            position_ids=position_ids_rmpad,
             packed_seq_params=packed_seq_params,
             labels=labels_rmpad,
             **model_kwargs,

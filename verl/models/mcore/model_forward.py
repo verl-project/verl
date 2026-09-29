@@ -23,7 +23,6 @@ from verl.workers.config import MtpConfig
 
 from .util import (
     build_vlm_attn_mask_bshd,
-    build_vlm_attn_mask_thd,
     postprocess_bshd,
     postprocess_bshd_engine,
     postprocess_packed_seqs,
@@ -32,6 +31,7 @@ from .util import (
     preprocess_bshd_engine,
     preprocess_packed_seqs,
     preprocess_thd_engine,
+    preprocess_vlm_thd_engine,
 )
 
 
@@ -278,6 +278,7 @@ def gptmodel_forward_model_engine(
     cp_layout: str = "zigzag",
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
+    position_ids: torch.Tensor | None = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -300,14 +301,23 @@ def gptmodel_forward_model_engine(
 
     batch_size = input_ids.shape[0]
     if data_format == "thd":
-        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
-            input_ids,
-            pre_process=pre_process or (post_process and mtp_enable_train),
+        attention_mask = None
+        thd_kwargs = dict(
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
         )
+        # Rank-local THD rows + positions for every model and PP stage: rope LLMs only read positions
+        # in MTP; MRoPE positions, when present, are read on every stage.
+        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
+            input_ids, pre_process=True, **thd_kwargs
+        )
+        if vision_model:
+            input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
+                model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
+            )
+
         if mtp_loss_normalization_factor is not None:
             packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
         input_ids_rmpad = input_ids_rmpad.contiguous()
@@ -344,22 +354,13 @@ def gptmodel_forward_model_engine(
         if logits_processor_args and "response_attention_mask" in logits_processor_args:
             logits_processor_args.pop("response_attention_mask")
 
-        # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
-        attention_mask = None
-        if vision_model:
-            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(
-                input_ids,
-                pad_token_id,
-                packed_seq_params=packed_seq_params,
-            )
-
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
 
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
-            position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
+            position_ids=position_ids_rmpad,
             packed_seq_params=packed_seq_params,
             **model_kwargs,
         )

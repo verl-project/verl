@@ -30,7 +30,16 @@ from vllm.outputs import RequestOutput
 from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_quantized_model, load_quanted_weights
+from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
+from verl.utils.vllm.vllm_quant_utils import (
+    apply_vllm_quant_patches,
+    is_quantized_model,
+    load_quanted_weights,
+    prepare_quanted_weights_for_loading,
+    process_quanted_weights_after_loading,
+)
+from verl.utils.vllm.vllm_unquant_utils import fold_unquantized_moe_params, stage_unquantized_moe_params
+from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
     drop_tied_alias_updates,
@@ -251,8 +260,6 @@ class vLLMColocateWorkerExtension:
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
-        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
-
         if self.device is None:
             # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
             # fall back to the worker's local rank on the current accelerator.
@@ -260,13 +267,12 @@ class vLLMColocateWorkerExtension:
 
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
+        staged_moe_layers = []
 
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
         # restores. Repair them before the reload so the rollout routes correctly.
         if torch.version.hip is not None:
-            from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
-
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
 
@@ -287,8 +293,6 @@ class vLLMColocateWorkerExtension:
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
         elif is_quantized_model(self.model_runner.vllm_config):
-            from verl.utils.vllm.vllm_quant_utils import prepare_quanted_weights_for_loading
-
             quant_reload_states = [
                 (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
             ]
@@ -296,6 +300,11 @@ class vLLMColocateWorkerExtension:
             # TODO(wuxibin): not need anymore for newer vllm version.
             for model in self._iter_all_models():
                 patch_vllm_moe_model_weight_loader(model)
+            # A kernel prep that reshapes the expert weights (FlashInfer TRT-LLM, vLLM's default bf16 MoE
+            # backend on SM100) leaves nothing the checkpoint-layout loads fit (#7978): hand them a
+            # checkpoint-layout view over the live storage, folded back after the last bucket.
+            for model in self._iter_all_models():
+                staged_moe_layers.extend(stage_unquantized_moe_params(model))
 
         # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
@@ -345,16 +354,15 @@ class vLLMColocateWorkerExtension:
         elif peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
         elif is_quantized_model(self.model_runner.vllm_config):
-            from verl.utils.vllm.vllm_quant_utils import process_quanted_weights_after_loading
-
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            for model, model_config in self._iter_all_models_with_config():
-                process_weights_after_loading(model, model_config, self.device)
+            with fold_unquantized_moe_params(staged_moe_layers):
+                for model, model_config in self._iter_all_models_with_config():
+                    process_weights_after_loading(model, model_config, self.device)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.

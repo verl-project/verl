@@ -78,6 +78,8 @@ case "${DEVICE}" in
         TP=${TP:-2}
         PP=${PP:-2}
         CP=${CP:-1}
+        # Add hyperparameters to enable CP when CP != 1
+        # +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_algo=megatron_cp_algo
         EP=${EP:-8}
         ETP=${ETP:-1}
         GEN_TP=${GEN_TP:-8}
