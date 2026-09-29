@@ -1,0 +1,75 @@
+name: ascend documentation doctests
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Quick Start backend to execute
+        required: true
+        default: fsdp2_vllm
+        type: choice
+        options:
+          - fsdp2_vllm
+          - megatron_vllm
+          - fsdp2_sglang
+          - megatron_sglang
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test documentation tooling on CPU
+        run: |
+          python -m pip install pytest
+          python -m pytest -q tests/special_sanity/test_doctest_helper.py
+      - name: Select the matching A3 image from doctest config
+        id: plan
+        env:
+          DOCTEST_CASE: ${{ inputs.backend }}
+        run: |
+          python tests/e2e/doctests/scripts/doctest_helper.py plan \
+            --quickstart "$DOCTEST_CASE" --device a3 --os ubuntu > "$RUNNER_TEMP/doctest-plan.json"
+          echo "matrix=$(jq -c '.quickstart' "$RUNNER_TEMP/doctest-plan.json")" >> "$GITHUB_OUTPUT"
+  doctest:
+    needs: plan
+    if: github.repository_owner == 'verl-project'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    container:
+      image: ${{ matrix.image }}
+      options: --shm-size 16g
+    env:
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      TRANSFORMERS_VERBOSITY: error
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check hardware and install current checkout
+        run: |
+          npu-smi info
+          pip install --no-deps -e .
+      - name: Validate installation guidance
+        run: bash tests/e2e/doctests/scripts/run_doctests.sh installation check
+      - name: Run documented Quick Start
+        env:
+          NDEVICES_PER_NODE: ${{ matrix.devices }}
+          DOCTEST_CASE: ${{ matrix.case }}
+        run: |
+          export MODEL_PATH="${HOME}/.cache/models/Qwen/Qwen3-0.6B"
+          export GSM8K_DATASET_PATH="${HOME}/.cache/datasets/openai/gsm8k"
+          bash tests/e2e/doctests/scripts/run_doctests.sh quickstart "$DOCTEST_CASE"
