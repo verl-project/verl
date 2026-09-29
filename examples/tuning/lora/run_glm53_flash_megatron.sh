@@ -5,9 +5,9 @@
 # kept trainable (enable_tower_connector_lora=True, freeze_vision_model=False).
 # FP8 training (hybrid blockwise) is opt-in via the USE_FP8 toggle below.
 #
-# The GLM-5.3-Flash checkpoint contains both FP8 and BF16 tensors; the bridge
-# dequantizes FP8 weights on import, so point MODEL_PATH at a BF16 config
-# (quantization_config removed) for a true BF16 run.
+# The GLM-5.3-Flash checkpoint contains the official quantization metadata and
+# both FP8/BF16-compatible weights. Use that original checkpoint for both
+# modes; BF16 disables vLLM quantization at runtime without rewriting config.
 #
 # Megatron-Bridge must be installed and importable on every node.
 #
@@ -23,11 +23,19 @@ export PYTHONUNBUFFERED=1
 
 ############################### configs ################################
 
+DATA_ROOT=${DATA_ROOT:-${HDFS_ROOT:-$PWD}}
+HDFS_ROOT=${HDFS_ROOT:-$DATA_ROOT}
 MODEL_PATH=${MODEL_PATH:-$HDFS_ROOT/model/GLM-5.3-Flash}
 NNODES=${NNODES:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
 USE_FP8=${USE_FP8:-0}
+if [ "${USE_FP8}" = 1 ]; then
+    # Match the checkpoint/vLLM FP8 block scales. This must be set before any
+    # Transformer Engine import; TE applies it to input, weight, and gradient
+    # block quantizers consistently.
+    export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
+fi
 LORA_MERGE=${LORA_MERGE:-False}
 LORA_DTYPE=${LORA_DTYPE:-bf16}
 
@@ -37,8 +45,10 @@ ROLLOUT_N=${ROLLOUT_N:-8}
 ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
-PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
-ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-10240}
+# Leave headroom above prompt+response: dynamic log-prob computation requires
+# max_token_len to be strictly greater than the longest packed sequence.
+PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 2048))}
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-$PPO_MAX_TOKEN_LEN_PER_GPU}
 
 ACTOR_LR=${ACTOR_LR:-5e-6}
 LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-0}
@@ -61,16 +71,22 @@ REF_ETP=${REF_ETP:-${ACTOR_ETP}}
 REF_CP=${REF_CP:-${ACTOR_CP}}
 
 ROLLOUT_TP=${ROLLOUT_TP:-16}
+ROLLOUT_DP=${ROLLOUT_DP:-1}
 ROLLOUT_EP=${ROLLOUT_EP:-16}
 ROLLOUT_PP=${ROLLOUT_PP:-1}
 ROLLOUT_DCP=${ROLLOUT_DCP:-1}
-ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.35}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-$((1024 * 10))}
-ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
+if [ "${USE_FP8}" = 1 ]; then
+    ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
+else
+    ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-auto}
+fi
 ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-4096}
 ROUTER_REPLAY_MODE=${ROUTER_REPLAY_MODE:-R3}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
+MOE_GROUPED_GEMM=${MOE_GROUPED_GEMM:-True}
 
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-32}
@@ -171,28 +187,22 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_shared_expert_overlap=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=${MOE_GROUPED_GEMM}
     +actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_activation_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.cp_comm_type=allgather
     +actor_rollout_ref.actor.megatron.override_transformer_config.dsa_kernel_backend=cudnn
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.01
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
 )
 
-# Context parallelism needs three extra transformer-config settings for DeepSeek-V4 on top of
-# `context_parallel_size`. Each of them is enforced by Megatron-Core, so without them the run
-# aborts at model build or in the first attention forward. They are appended only when CP > 1.
+# Sequence packing is required for the context-parallel training path.
 CP_ARGS=()
 if [ "${ACTOR_CP}" -gt 1 ]; then
     CP_ARGS=(
-        ++actor_rollout_ref.actor.megatron.override_transformer_config.cp_partition_mode=contiguous
         ++actor_rollout_ref.actor.megatron.override_transformer_config.sequence_packing_scheduler=dp_balanced
         ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank=$(((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH) / ACTOR_CP))
     )
@@ -202,6 +212,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP}
     actor_rollout_ref.rollout.expert_parallel_size=${ROLLOUT_EP}
     actor_rollout_ref.rollout.pipeline_model_parallel_size=${ROLLOUT_PP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
@@ -209,7 +220,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enable_prefix_caching=True
-    actor_rollout_ref.rollout.use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
@@ -274,7 +284,7 @@ EXTRA=(
 
 # FP8 hybrid blockwise training + FP8 rollout. When USE_FP8=1 the actor forward
 # uses E4M3 / backward E5M2 blockwise quantization, and the vLLM rollout runs in
-# FP8 with FP8 KV cache. kda_disable_fp8 and mla_disable_attention_fp8 keep the
+# FP8 with FP8 KV cache. kda_disable_fp8 and mla_proj_disable_quantization keep the
 # KDA and MLA attention paths in BF16 for numerical stability. The TE backward
 # amax_epsilon=1e-12 fix (in Megatron-LM fp8_utils.py) is required to avoid NaN
 # grad_norm from all-zero gradient blocks. TP is forced to 4 to keep the
@@ -286,12 +296,16 @@ if [ "${USE_FP8}" = 1 ]; then
         +actor_rollout_ref.actor.megatron.override_transformer_config.fp8=hybrid
         +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=blockwise
         +actor_rollout_ref.actor.megatron.override_transformer_config.kda_disable_fp8=True
-        +actor_rollout_ref.actor.megatron.override_transformer_config.mla_disable_attention_fp8=True
+        +actor_rollout_ref.actor.megatron.override_transformer_config.mla_proj_disable_quantization=True
         +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
         +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
         +actor_rollout_ref.actor.optim.override_optimizer_config.fp8_recipe=blockwise
     )
     ROLLOUT+=(+actor_rollout_ref.rollout.quantization=fp8)
+else
+    # Keep the official checkpoint config on disk, but force a true BF16
+    # rollout instead of letting vLLM auto-detect its FP8 metadata.
+    ROLLOUT+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config=null)
 fi
 # enforce_eager stays False for both modes (cudagraph auto-enables for Glm5Next).
 ROLLOUT+=(actor_rollout_ref.rollout.enforce_eager=False)
@@ -305,6 +319,11 @@ RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
 if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
     LAUNCH=(uv run --frozen --all-packages --extra vllm --extra megatron python3)
     RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra vllm --extra megatron")
+fi
+if [ "${USE_FP8}" = 1 ]; then
+    # The launcher environment is not guaranteed to be inherited by existing
+    # Ray workers; pass the TE scale policy explicitly to every actor process.
+    RAY+=(+ray_kwargs.ray_init.runtime_env.env_vars.NVTE_FP8_BLOCK_SCALING_FP32_SCALES="'1'")
 fi
 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
