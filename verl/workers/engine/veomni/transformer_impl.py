@@ -14,15 +14,18 @@
 
 
 import logging
+import math
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field, fields
+from functools import wraps
 from typing import Any, Callable, Optional, Sequence
 
 import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
+from veomni.arguments import AcceleratorConfig, MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
@@ -36,6 +39,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import fsdp_version
+from verl.utils.metric import Metric
 from verl.utils.model import convert_weight_keys
 from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.ulysses import (
@@ -49,6 +53,7 @@ from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimiz
 from ..base import BaseEngineCtx, EngineRegistry
 from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngineWithValueHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from .mtp import build_mtp_labels, count_mtp_targets
 from .utils import (
     VL_TYPE2INDEX,
     get_moe_param_handler,
@@ -60,6 +65,17 @@ from .utils import (
 )
 
 logger = logging.getLogger(__file__)
+
+
+def _with_parallel_state(method):
+    """Scope VeOmni collectives to this engine, including checkpoint recompute."""
+
+    @wraps(method)
+    def scoped(self, *args, **kwargs):
+        with parallel_state.use_parallel_state(self.parallel_state):
+            return method(self, *args, **kwargs)
+
+    return scoped
 
 
 def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsImplementationConfig:
@@ -164,13 +180,18 @@ class VeOmniEngine(FSDPEngine):
             data_parallel_replicate_size = dp_size // fsdp_size
             data_parallel_shard_size = fsdp_size
 
-        parallel_state.init_parallel_state(
-            dp_size=dp_size,
-            dp_replicate_size=data_parallel_replicate_size,
-            dp_shard_size=data_parallel_shard_size,
-            extra_parallel_sizes=(self.engine_config.expert_parallel_size,),
-            ulysses_size=self.engine_config.ulysses_parallel_size,
-            dp_mode=self.data_parallel_mode,
+        self.parallel_state = parallel_state.init_parallel_state_from_config(
+            AcceleratorConfig(
+                dp_replicate_size=data_parallel_replicate_size,
+                dp_shard_size=data_parallel_shard_size,
+                ep_size=self.engine_config.expert_parallel_size,
+                ulysses_size=self.engine_config.ulysses_parallel_size,
+                # This descriptor builds only the topology. The unsharded
+                # single-device builder needs real weights, unlike FSDP2's
+                # AcceleratorConfig validator; resolve placement at build time.
+                init_device="meta" if world_size == 1 else self.engine_config.init_device,
+            ),
+            name=None,
         )
 
         if self.engine_config.full_determinism:
@@ -187,11 +208,11 @@ class VeOmniEngine(FSDPEngine):
         # the FSDP engine; the VeOmni engine has the same paths and needs the same guard).
         self._uses_fsdp2_cpu_offload_policy = self.engine_config.enable_fsdp_offload
 
-        self.use_ulysses_sp = parallel_state.get_parallel_state().sp_enabled
+        self.use_ulysses_sp = self.parallel_state.sp_enabled
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_parallel_size
 
         if self.use_ulysses_sp:
-            self.ulysses_parallel_group = parallel_state.get_parallel_state().device_mesh["sp"].get_group()
+            self.ulysses_parallel_group = self.parallel_state.ulysses_group
         else:
             self.ulysses_parallel_group = None
 
@@ -217,6 +238,7 @@ class VeOmniEngine(FSDPEngine):
         self.pad_to_length: bool = self.engine_config.pad_to_length
         self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
 
+    @_with_parallel_state
     def initialize(self):
         """
         Build the model, optimizer, and learning rate scheduler under VeOmni.
@@ -328,6 +350,9 @@ class VeOmniEngine(FSDPEngine):
         )
         log_gpu_memory_usage("After apply async activation offload", logger=logger)
 
+    def _configure_mtp_module(self, module):
+        """LM engines validate/freeze MTP before sharding and optimization."""
+
     def _build_model_optimizer(self):
         # build_foundation_model runs apply_ops_config(ops_implementation)
         # before constructing the model, so per-model device_patch files see
@@ -335,6 +360,9 @@ class VeOmniEngine(FSDPEngine):
         ops_implementation = _build_ops_implementation_config(self.engine_config)
 
         veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+        init_device = self.engine_config.init_device
+        if not self.parallel_state.fsdp_enabled and init_device == "meta":
+            init_device = get_device_name()
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
@@ -343,19 +371,20 @@ class VeOmniEngine(FSDPEngine):
             torch_dtype="float32" if veomni_mixed_precision_config.enable else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
-            init_device=self.engine_config.init_device,
+            init_device=init_device,
         )
         log_gpu_memory_usage("After load base model", logger=logger)
 
+        self._configure_mtp_module(module)
         self._maybe_apply_async_activation_offload(module)
 
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)
         module = build_parallelize_model(
             module,
-            init_device=self.engine_config.init_device,
+            init_device=init_device,
             weights_path=self.model_config.local_path,
-            enable_full_shard=self.engine_config.enable_full_shard,
+            enable_reshard_after_forward=self.engine_config.enable_full_shard,
             mixed_precision=veomni_mixed_precision_config,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
@@ -382,6 +411,7 @@ class VeOmniEngine(FSDPEngine):
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
 
+    @_with_parallel_state
     def optimizer_step(self):
         """
         Perform an optimization step using the optimizer.
@@ -402,6 +432,7 @@ class VeOmniEngine(FSDPEngine):
             self.optimizer.step()
         return grad_norm.item()
 
+    @_with_parallel_state
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
         """
         Perform a forward pass and optionally a backward pass on a batch of data.
@@ -423,6 +454,7 @@ class VeOmniEngine(FSDPEngine):
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+        self._prepare_mtp_batch(data, forward_only)
 
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
@@ -466,15 +498,18 @@ class VeOmniEngine(FSDPEngine):
             if rr_active:
                 self._router_replay.clear()
 
+    def _prepare_mtp_batch(self, data, forward_only):
+        """Only LM engines add an MTP objective."""
+
     def get_data_parallel_rank(self):
-        return parallel_state.get_parallel_state().device_mesh.get_local_rank("dp")
+        return self.parallel_state.dp_rank
 
     def get_data_parallel_size(self):
-        return torch.distributed.get_world_size() // parallel_state.get_parallel_state().ulysses_size
+        return self.parallel_state.dp_size
 
     def get_data_parallel_group(self):
-        if parallel_state.get_parallel_state().ulysses_size > 1:
-            return parallel_state.get_parallel_state().device_mesh.get_group(mesh_dim="dp")
+        if self.parallel_state.ulysses_size > 1:
+            return self.parallel_state.dp_group
         else:
             return torch.distributed.group.WORLD
 
@@ -488,8 +523,8 @@ class VeOmniEngine(FSDPEngine):
         """
         Whether the current rank is the first rank in model parallel group that contains model outputs
         """
-        if parallel_state.get_parallel_state().ulysses_size > 1:
-            is_collect = parallel_state.get_parallel_state().device_mesh["ulysses"].get_local_rank() == 0
+        if self.parallel_state.ulysses_size > 1:
+            is_collect = self.parallel_state.ulysses_rank == 0
         else:
             is_collect = True
         return is_collect
@@ -538,6 +573,7 @@ class VeOmniEngine(FSDPEngine):
         else:
             raise ValueError(f"Invalid device type: {device}")
 
+    @_with_parallel_state
     def save_checkpoint(
         self,
         local_path: str,
@@ -563,6 +599,7 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
 
+    @_with_parallel_state
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
     ) -> None:
@@ -583,6 +620,7 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
+    @_with_parallel_state
     def get_per_tensor_param_shard(self, **kwargs):
         """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
         DTensor export plus veomni's EP declarations. The mechanics live in
@@ -634,7 +672,27 @@ class VeOmniEngine(FSDPEngine):
         # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)
         if converter is not None and hasattr(converter, "export_weights"):
-            return converter.export_weights(self.module), None
+
+            def scoped_export():
+                # Converter generators read the state lazily. Scope every next(),
+                # but restore it before handing a tensor to the external consumer.
+                with parallel_state.use_parallel_state(self.parallel_state):
+                    weights = iter(converter.export_weights(self.module))
+                try:
+                    while True:
+                        with parallel_state.use_parallel_state(self.parallel_state):
+                            try:
+                                item = next(weights)
+                            except StopIteration:
+                                return
+                        yield item
+                finally:
+                    with parallel_state.use_parallel_state(self.parallel_state):
+                        close = getattr(weights, "close", None)
+                        if close is not None:
+                            close()
+
+            return scoped_export(), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
@@ -642,7 +700,7 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
 
-        ps = parallel_state.get_parallel_state()
+        ps = self.parallel_state
         model_type = getattr(self.module.config, "model_type", "default")
         process_func = get_moe_param_handler(model_type, ps.ep_enabled)
 
@@ -692,7 +750,7 @@ class EngineEvalModeCtx(BaseEngineCtx):
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
-        if parallel_state.get_parallel_state().dp_shard_size > 1:
+        if self.engine.parallel_state.dp_shard_size > 1:
             if fsdp_version(self.engine.module) == 1:
                 self.engine.module._handle.reshard(True)
             elif fsdp_version(self.engine.module) == 2:
@@ -835,6 +893,102 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
+    def _get_model_config_path(self):
+        # HFModelConfig already applied overrides and disabled MTP layer counts.
+        # Re-reading config.json here discards both decisions.
+        config = deepcopy(self.model_config.hf_config)
+        mtp = self.model_config.mtp
+        self._supports_mtp = config.model_type in ("qwen3_5", "qwen3_5_moe")
+        self._mtp_train_enabled = (
+            mtp.enable and mtp.enable_train and mtp.mtp_loss_scaling_factor > 0 and not self.engine_config.forward_only
+        )
+        self._mtp_num_depths = 0
+        if (mtp.enable_train or mtp.enable_rollout) and not mtp.enable:
+            raise ValueError("MTP enable_train/enable_rollout requires model.mtp.enable=True.")
+        if not math.isfinite(mtp.mtp_loss_scaling_factor) or mtp.mtp_loss_scaling_factor < 0:
+            raise ValueError("mtp_loss_scaling_factor must be finite and non-negative.")
+        if mtp.enable:
+            if not self._supports_mtp:
+                raise NotImplementedError("VeOmni MTP supports Qwen3.5 dense/MoE ForConditionalGeneration only.")
+            expected_architecture = {
+                "qwen3_5": "Qwen3_5ForConditionalGeneration",
+                "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
+            }[config.model_type]
+            if config.architectures != [expected_architecture]:
+                raise ValueError(f"VeOmni MTP requires architectures=[{expected_architecture!r}].")
+            if self.use_ulysses_sp:
+                raise NotImplementedError("VeOmni MTP requires ulysses_parallel_size=1 (no SP/CP).")
+            if not self.use_remove_padding:
+                raise NotImplementedError(
+                    "Qwen3.5 MTP requires use_remove_padding=True for its varlen decoder kernels."
+                )
+            if self._is_lora:
+                raise NotImplementedError("VeOmni MTP training/loading with LoRA is not supported.")
+            if self._mtp_train_enabled and self.enable_routing_replay:
+                raise NotImplementedError("VeOmni MTP training currently requires router_replay.mode=disabled.")
+            if (
+                self._mtp_train_enabled
+                and getattr(config.text_config, "output_router_logits", False)
+                and getattr(config.text_config, "router_aux_loss_coef", 0) != 0
+            ):
+                raise NotImplementedError(
+                    "VeOmni MTP RL adds the MTP CE objective only; disable output_router_logits "
+                    "or set router_aux_loss_coef=0."
+                )
+            self._mtp_num_depths = int(getattr(config.text_config, "mtp_num_hidden_layers", 0) or 0)
+            if self._mtp_num_depths <= 0:
+                raise ValueError("Enable MTP with a checkpoint/config declaring text_config.mtp_num_hidden_layers > 0.")
+        if self._supports_mtp:
+            config.text_config.mtp_enabled = mtp.enable
+            config.text_config.mtp_loss_weight = mtp.mtp_loss_scaling_factor
+        return config
+
+    def _configure_mtp_module(self, module):
+        head = getattr(module, "mtp", None)
+        if self.model_config.mtp.enable and head is None:
+            raise RuntimeError(
+                "MTP was enabled but VeOmni did not construct a head; install the matching VeOmni changes."
+            )
+        if head is not None and not self._mtp_train_enabled:
+            # Prevent weight decay/missing-gradient handling from touching a
+            # load-only head. Shared embedding/lm_head still train via PPO.
+            head.requires_grad_(False)
+
+    def _prepare_mtp_batch(self, data, forward_only):
+        compute_mtp = self._mtp_train_enabled and not forward_only
+        tu.assign_non_tensor(data, veomni_compute_mtp=compute_mtp)
+        if compute_mtp:
+            count = count_mtp_targets(data, self._mtp_num_depths).to(get_device_id())
+            dist.all_reduce(count, op=dist.ReduceOp.SUM, group=self.get_data_parallel_group())
+            tu.assign_non_tensor(data, veomni_mtp_batch_num_tokens=int(count.item()))
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
+        compute_mtp = self._mtp_train_enabled and not forward_only
+        tu.assign_non_tensor(micro_batch, veomni_compute_mtp=compute_mtp)
+        if not compute_mtp:
+            return super().forward_step(micro_batch, loss_function, forward_only)
+        if loss_function is None:
+            raise ValueError("MTP training requires the policy loss callable.")
+        global_count = tu.get_non_tensor_data(micro_batch, "veomni_mtp_batch_num_tokens", default=None)
+        if global_count is None:
+            raise ValueError("MTP training must run through forward_backward_batch for global target normalization.")
+
+        def loss_with_mtp(*args, **kwargs):
+            if "model_output" not in kwargs:
+                # The same callable may process logits for non-fused distillation.
+                return loss_function(*args, **kwargs)
+            model_output = kwargs["model_output"]
+            mtp_loss = model_output.pop("mtp_loss")
+            local_count = model_output.pop("mtp_num_tokens")
+            loss, metrics = loss_function(*args, **kwargs)
+            normalized_mtp = mtp_loss * (local_count / max(global_count, 1)) * self.get_data_parallel_size()
+            weighted_mtp = normalized_mtp * self.model_config.mtp.mtp_loss_scaling_factor
+            metrics["mtp_loss"] = Metric("sum", normalized_mtp.detach())
+            metrics["mtp_loss_scaled"] = Metric("sum", weighted_mtp.detach())
+            return loss + weighted_mtp, metrics
+
+        return super().forward_step(micro_batch, loss_with_mtp, forward_only)
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)
@@ -846,9 +1000,19 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
         # prepare_model_outputs().squeeze(0) then lands at (total_nnz,).
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
-        if use_fused_kernels and use_remove_padding:
+        if use_fused_kernels:
             input_ids_rmpad = model_inputs["input_ids"]
-            shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+            if use_remove_padding:
+                shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+            else:
+                if self.use_ulysses_sp:
+                    raise NotImplementedError("Padded VeOmni fused forward does not support sequence parallel.")
+                rolled = torch.nested.nested_tensor_from_jagged(
+                    output_args["input_ids_rmpad_rolled"], micro_batch["input_ids"].offsets()
+                )
+                shift_labels = torch.nested.to_padded_tensor(
+                    rolled, padding=0, output_size=tuple(input_ids_rmpad.shape)
+                )
             model_inputs["labels"] = input_ids_rmpad
             model_inputs["shift_labels"] = shift_labels
             model_inputs["return_log_probs"] = True
@@ -858,6 +1022,8 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             # teacher_ids / teacher_logprobs are populated by verl's native
             # distillation pipeline (see verl/trainer/distillation/losses.py).
             distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+            if distillation_use_topk and not use_remove_padding:
+                raise NotImplementedError("VeOmni fused top-K distillation requires use_remove_padding=True.")
             if distillation_use_topk and "teacher_ids" in micro_batch.keys():
                 if "teacher_logprobs" not in micro_batch.keys():
                     raise ValueError(
@@ -877,6 +1043,26 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                     teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1, padding=True)
                 model_inputs["teacher_topk_ids"] = teacher_topk_ids
                 model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
+
+        compute_mtp = tu.get_non_tensor_data(micro_batch, "veomni_compute_mtp", default=False)
+        if self._supports_mtp:
+            # Explicitly disable during old/ref log-prob recompute, even though
+            # both VeOmni engine contexts set module.train() and fused supplies labels.
+            model_inputs["compute_mtp"] = compute_mtp
+        if compute_mtp:
+            if not use_remove_padding:
+                raise NotImplementedError(
+                    "Qwen3.5 MTP requires use_remove_padding=True for its varlen decoder kernels."
+                )
+            labels, count = build_mtp_labels(
+                micro_batch,
+                self._mtp_num_depths,
+                packed=use_remove_padding,
+                sequence_length=model_inputs["input_ids"].shape[-1],
+            )
+            model_inputs["mtp_labels"] = labels
+            model_inputs["mtp_detach_encoder"] = self.model_config.mtp.detach_encoder
+            output_args["mtp_num_tokens"] = count
 
         # Arm router replay for this micro-batch. In REPLAY mode this also
         # reshapes routed_experts with the same pad + Ulysses rule that
@@ -931,6 +1117,13 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
         per-token output.
         """
         model_output = super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func)
+        if tu.get_non_tensor_data(micro_batch, "veomni_compute_mtp", default=False):
+            mtp_loss = getattr(output, "mtp_loss", None)
+            if not isinstance(mtp_loss, torch.Tensor) or mtp_loss.ndim != 0:
+                raise RuntimeError("VeOmni MTP forward must return a scalar output.mtp_loss.")
+            # forward_step consumes these before the nested-output postprocessor.
+            model_output["mtp_loss"] = mtp_loss
+            model_output["mtp_num_tokens"] = output_args["mtp_num_tokens"]
 
         rr = self._router_replay
         if rr is not None and rr.action is RouterReplayAction.RECORD:

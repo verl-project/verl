@@ -1,11 +1,14 @@
 # Multi-Token-Prediction (MTP) Training
 
-MTP uses an auxiliary token-prediction head (speculative / draft head) during training. Currently supported on MiMo-7B-RL with Megatron backend.
+MTP uses an auxiliary token-prediction head (speculative / draft head) during training.
+MiMo uses the Megatron backend. Qwen3.5 dense/MoE can use the VeOmni backend;
+see [VeOmni MTP 接入说明](../../docs/advance/veomni_mtp.md) for configuration and current validation limits.
 
 ## Canonical Scripts
 
 | Script                                                                    | Infer  | Train    | Mode                              | Platform |
 |---------------------------------------------------------------------------|--------|----------|-----------------------------------|----------|
+| `run_qwen3_5_mtp_veomni.sh` | SGLang (base example) | VeOmni | GRPO, fused / non-fused policy, SP=1; static checks only | GPU/NPU model code |
 | `run_mimo_7b_mtp_megatron.sh`                                             | SGLang | Megatron | Sync hybrid-engine                | NVIDIA   |
 | `run_mimo_7b_mtp_rl_vllm_sgl_megatron.sh`                                 | SGLang / vLLM | Megatron | Sync hybrid-engine, slime-aligned RL/EAGLE setup | NVIDIA |
 | `run_mimo_7b_mtp_fully_async_megatron_multinode.sh`                       | SGLang | Megatron | Fully-async split-placement (DAPO)| NVIDIA   |

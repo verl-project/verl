@@ -8,7 +8,10 @@ Last updated: 08/11/2026
 
 Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek series models based on the MTP architecture. The support rules for training and inference engines are as follows:
 
-- **Training Engine**: Only supports the `mbridge/Megatron-Bridge + megatron` combination; other training engines are not compatible at this time;
+- **Training Engine**: The models above use `mbridge/Megatron-Bridge + megatron`.
+  Qwen3.5 dense/MoE also has a VeOmni integration covering both `use_fused_kernels`
+  paths; see [VeOmni MTP 接入说明](veomni_mtp.md). The VeOmni integration is statically
+  checked only and requires SP/CP disabled.
 
 - **Inference Engine**: Compatible with all engines, but the model must be in the corresponding engine's compatibility list;
 
@@ -109,4 +112,3 @@ The experiment was conducted using following data:
 The result: [wandb link](https://wandb.ai/hou-zg-meituan/mimo-7b-sft-mtp?nw=nwuserhouzg)
 
 The presence of mtp layer has limited effect on main loss. However, when MTP layer is detached, the mtp_loss converges to a higher value.
-
