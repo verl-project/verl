@@ -1582,15 +1582,39 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
+    def _lora_configured(self) -> bool:
+        """True when this replica trains a LoRA, merged into the base or served as an adapter."""
+        lora_cfg = getattr(self.model_config, "lora", None) or {}
+        rank = lora_cfg.get("rank", 0) if hasattr(lora_cfg, "get") else 0
+        return getattr(self.model_config, "lora_rank", 0) > 0 or rank > 0
+
+    def _merged_lora(self) -> bool:
+        """True when LoRA is folded into the base weights before the rollout sync."""
+        if not self._lora_configured():
+            return False
+        lora_cfg = getattr(self.model_config, "lora", None) or {}
+        if not hasattr(lora_cfg, "get"):
+            return False
+        return bool(lora_cfg.get("merge", False))
+
     def _resolve_sleep_level(self) -> int:
         """Deepest sleep level whose discarded state a subsequent weight sync can restore.
 
-        MTP drafter-only weights are initialized by vLLM and are not guaranteed
-        to be restored by actor weight sync after level 2 sleep discards them.
-        LoRA normally updates only adapter weights, so it requires level 1.
-        With resync_base, hybrid mode restores discarded base weights on every
-        update and can use level 2. vllm-ascend < 0.30.0 requires level 1 to
-        avoid EP precision issues.
+        Level 2 discards parameter storage. A full checkpoint sync rewrites every
+        parameter, so that is the right level for full-parameter training.
+
+        Adapter sync rewrites only the adapter. With resync_base, hybrid mode
+        restores discarded base weights on every update and can use level 2.
+        Merged LoRA (``model.lora.merge=true``) sends a PEFT export of the base
+        weights, and vLLM is not started with ``enable_lora`` on that path.
+        After a level-2 discard, any parameter that export does not overwrite
+        stays uninitialized and rollout text becomes token soup (#7904). Level 1
+        offloads the parameters and wake restores them; the merged sync then
+        overwrites those restored values.
+
+        MTP drafter-only weights are initialized by vLLM and are not restored by
+        actor weight sync. vllm-ascend < 0.30.0 requires sleep level 1 to avoid
+        EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1615,6 +1639,9 @@ class vLLMHttpServer:
             return 1
         if self.lora_as_adapter:
             return 2 if self.model_config.lora.get("resync_base", False) else 1
+        # Merged LoRA sends a PEFT export, which is not a full refill of a level-2 discard (#7904).
+        if self._merged_lora():
+            return 1
         return 2
 
     def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
@@ -1637,19 +1664,15 @@ class vLLMHttpServer:
     async def _sleep_hybrid(self):
         """Sleep before the hybrid trainer restores weights and adapters.
 
+        LoRA and MTP need level 1; full-parameter training needs level 2.
+
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.
         collective_rpc only reaches the TP workers within a single DP shard,
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
-
-        Level 2 discards parameter storage. Mark the workers so the next full
-        sync reloads it (#7904).
         """
-        level = self._resolve_sleep_level()
-        await self._engine_sleep(level=level)
-        if level >= 2:
-            await self.engine.collective_rpc("mark_sleep_discarded_weights")
+        await self._engine_sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 

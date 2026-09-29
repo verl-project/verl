@@ -151,19 +151,41 @@ def _hybrid_server(model_config):
     return server
 
 
-def test_hybrid_full_weight_sleep_marks_discarded_weights(monkeypatch):
-    """Merged LoRA is a full weight sync, so hybrid sleep is level 2 and marks workers."""
+def test_hybrid_full_param_sleep_discards_weights(monkeypatch):
+    """No LoRA: hybrid sleep stays at level 2. The full checkpoint sync refills discarded params."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(SimpleNamespace(lora_rank=0, lora={"rank": 0}))
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [2]
+    assert server.engine.rpcs == []
+
+
+def test_hybrid_merged_lora_sleep_keeps_weights(monkeypatch):
+    """Merged LoRA must not discard params. The PEFT export is not a full refill (#7904)."""
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
     server = _hybrid_server(SimpleNamespace(lora_rank=64, lora={"rank": 64, "merge": True}))
 
     asyncio.run(server._sleep_hybrid())
 
-    assert server.engine.sleep_levels == [2]
-    assert server.engine.rpcs == ["mark_sleep_discarded_weights"]
+    assert server.engine.sleep_levels == [1]
+    assert server.engine.rpcs == []
 
 
-def test_hybrid_lora_adapter_sleep_does_not_mark_discarded_weights(monkeypatch):
-    """Adapter sleep stays at level 1 and must not request a base-weight reload."""
+def test_hybrid_merged_lora_rank_field_sleep_keeps_weights(monkeypatch):
+    """Megatron sets the rank on ``lora.rank``. Merge still must not discard params."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = _hybrid_server(SimpleNamespace(lora_rank=0, lora={"rank": 64, "merge": True}))
+
+    asyncio.run(server._sleep_hybrid())
+
+    assert server.engine.sleep_levels == [1]
+    assert server.engine.rpcs == []
+
+
+def test_hybrid_lora_adapter_sleep_keeps_weights(monkeypatch):
+    """Adapter sleep stays at level 1. Only the adapter is synced, so base params must survive."""
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
     server = _hybrid_server(SimpleNamespace(lora_rank=64, lora={"rank": 64, "merge": False}))
 
