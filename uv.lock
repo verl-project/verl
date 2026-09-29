@@ -5256,10 +5256,6 @@ fsdp = [
 math = [
     { name = "math-verify" },
 ]
-mcore = [
-    { name = "megatron-bridge" },
-    { name = "megatron-core" },
-]
 megatron = [
     { name = "accelerate" },
     { name = "apex" },
@@ -5460,8 +5456,6 @@ requires-dist = [
     { name = "math-verify", marker = "extra == 'math'" },
     { name = "mathruler", marker = "extra == 'verl-core'" },
     { name = "matplotlib", marker = "extra == 'megatron'" },
-    { name = "megatron-bridge", marker = "extra == 'mcore'", specifier = "==0.6.2", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
-    { name = "megatron-core", marker = "extra == 'mcore'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.19.2" },
     { name = "megatron-bridge", marker = "extra == 'megatron'", specifier = "==0.6.2", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
     { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.19.2" },
     { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.19.2" },
@@ -5552,7 +5546,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "wandb", marker = "extra == 'verl-core'" },
 ]
-provides-extras = ["test", "math", "mcore", "verl-core", "flash-attn-cu130torch213", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "cpu"]
+provides-extras = ["test", "math", "verl-core", "flash-attn-cu130torch213", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "cpu"]
 
 [[package]]
 name = "virtualenv"

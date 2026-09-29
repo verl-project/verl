@@ -28,7 +28,6 @@ requires-python = ">=3.10,<3.13"
 # ---- legacy small extras (kept verbatim from setup.py) ---------------------
 test          = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
 math          = ["math-verify"]
-mcore         = ["megatron-core", "megatron-bridge==0.6.2"]
 
 # Shared runtime deps, included by every backend via `verl[verl-core]`.
 verl-core = [

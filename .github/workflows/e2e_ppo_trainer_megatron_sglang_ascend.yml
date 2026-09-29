@@ -91,8 +91,10 @@ env:
   VERL_USE_UV: 0
 
 jobs:
+  # Re-enable both jobs after the SGLang Ascend CI image provides Python 3.12,
+  # Megatron-Bridge, and the matching MindSpeed-Bridge stack, validated on A3 NPUs.
   e2e_ppo_trainer_megatron-deepseek_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
@@ -173,7 +175,7 @@ jobs:
 
   # Qwen3-0.6B: dense, tie_word_embeddings=True
   e2e_ppo_trainer_megatron-qwen3:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
