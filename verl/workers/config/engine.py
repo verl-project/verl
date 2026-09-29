@@ -142,6 +142,9 @@ class QATEngineConfig(BaseConfig):
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
     activation_observer: str = "static_minmax"
     quantization_config_path: Optional[str] = None
+    # Let weight-only fake-quant run under TE fp8_autocast (real FP8 GEMM). modelopt asserts against
+    # this combination by default; see MegatronEngine.initialize.
+    bypass_te_fp8_assert: bool = False
 
 
 @dataclass

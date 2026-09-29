@@ -144,7 +144,8 @@ qat:
   _target_: verl.workers.config.QATEngineConfig
   # Whether to enable QAT
   enable: false
-  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4)
+  # Quantization mode: "w4a16" (weight-only NVFP4), "w4a4" (NVFP4 weight + activation),
+  # or "mxfp4_experts" (weight-only MXFP4 on routed MoE experts; keep TE fp8_autocast on)
   mode: "w4a16"
   # Group size for blockwise quantization (NVFP4 requires 16)
   group_size: 16
@@ -156,3 +157,5 @@ qat:
   activation_observer: null
   # Path to quantization config JSON for vLLM weight export
   quantization_config_path: null
+  # Let weight-only fake-quant run under TE fp8_autocast (real FP8 GEMM); lifts modelopt's guard.
+  bypass_te_fp8_assert: false
