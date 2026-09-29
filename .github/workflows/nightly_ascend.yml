@@ -36,6 +36,15 @@ on:
   # but only for the main branch
   # For push, for now only anti-patterns are specified so it is more conservative
   # and achieves higher coverage.
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/nightly_ascend.yml"
+      - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp_turbo_npu.sh"
+      - "verl/workers/engine/fsdp/**"
+      - "verl/workers/config/engine.py"
+
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -370,13 +379,13 @@ jobs:
 
   # Test grpo qwen3_5_2b fsdp_turbo vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.schedule == '0 19 * * *' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 80g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -408,6 +417,13 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+      - name: Check host memory before FSDP-Turbo
+        run: |
+          free -h
+          grep -E 'MemTotal|MemAvailable|Mlocked|HugePages' /proc/meminfo
+          ulimit -l
+          cat /sys/fs/cgroup/memory.current 2>/dev/null || true
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend
         run: |
           ray stop --force
