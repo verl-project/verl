@@ -159,10 +159,9 @@ Actor/Rollout/Reference Policy
       checkpoint:
         # What to include in saved checkpoints
         # 'hf_model' saves the full model in HuggingFace format. For Megatron this requires
-        # actor.megatron.use_mbridge=True (the default); 'model' and 'hf_model' then produce
-        # the same HF checkpoint and are deduplicated (saved once). With mbridge disabled,
-        # only the sharded 'model' is supported -- use verl.model_merger after training to
-        # convert it to HF format.
+        # 'model' and 'hf_model' produce the same HF checkpoint by default and
+        # are deduplicated. With use_dist_checkpointing=True, 'model' stores
+        # Megatron shards and 'hf_model' requests a separate HF export.
         save_contents: ['model', 'optimizer', 'extra']
         # For more flexibility, you can specify the contents to load from the checkpoint.
         load_contents: ${actor_rollout_ref.actor.checkpoint.save_contents}
@@ -337,16 +336,11 @@ Actor/Rollout/Reference Policy
     ``model``, ``optimizer``, ``extra`` and ``hf_model``. Default is
     ``['model', 'optimizer', 'extra']``. The extra information includes RNG states (and the
     LR scheduler for FSDP, the ``opt_param_scheduler`` for Megatron).
-    For Megatron, the meaning of ``model`` depends on the active backend
-    (``actor.megatron.use_mbridge``):
-
-    - With ``use_mbridge=True`` (default): both ``model`` and ``hf_model`` save the full model
-      in HuggingFace format under ``${ckpt_path}/model/huggingface/`` via mbridge; if both are
-      listed, the model is saved once (deduplicated).
-    - With ``use_mbridge=False``: ``model`` saves Megatron sharded weights via
-      ``dist_checkpointing`` under ``${ckpt_path}/model/dist_ckpt/``; ``hf_model`` is **not**
-      supported in this mode -- use ``python -m verl.model_merger merge --backend megatron``
-      to convert sharded checkpoints to HF format after training.
+    For Megatron, ``model`` uses HuggingFace format under
+    ``${ckpt_path}/model/huggingface/`` by default. With
+    ``actor.megatron.use_dist_checkpointing=True``, it instead saves Megatron
+    shards under ``${ckpt_path}/model/dist_ckpt/``. Listing ``hf_model`` also
+    writes an HF export through Megatron-Bridge.
 
     For FSDP, ``hf_model`` saves the full HF model on rank 0 in addition to the sharded
     ``model`` shards.

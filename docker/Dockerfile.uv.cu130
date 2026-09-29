@@ -58,7 +58,7 @@
 # from x86_64 (buildx + binfmt: `docker run --privileged --rm tonistiigi/binfmt
 # --install arm64`, then a docker-container builder), but every expensive layer
 # is compute-bound and would run under QEMU: the ~60-package apt install, the
-# GDRCopy source build, megatron-core's pybind11 extension and mbridge in
+# GDRCopy source build and megatron-core's pybind11 extension in
 # `prefetch`, all at emulation speed. If the only arm64 machine you have is
 # remote, attach it as a NATIVE buildx node and drive the build from x86_64 —
 # same command, no emulation. `user@arm-host` below is a PLACEHOLDER: substitute
@@ -342,8 +342,8 @@ RUN printf 'verl\n' > README.md
 # syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
 # sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
 # (/root/.cache/uv) with every wheel & built artifact those backends need from
-# uv.lock. Nothing native is compiled here beyond the git-sourced megatron-core /
-# mbridge: apex / TransformerEngine / flash-attn and megatron-bridge come prebuilt
+# uv.lock. Nothing native is compiled here beyond git-sourced megatron-core:
+# apex / TransformerEngine / flash-attn and megatron-bridge come prebuilt
 # from the verl wheelhouse index, and vllm / sglang / sglang-kernel come prebuilt
 # from PyPI.
 # The `cu130 dev` scope keeps this image to its torch-2.13 world. (The deferred
@@ -399,7 +399,7 @@ FROM prefetch AS final
 # Runtime host compiler — gcc-13 (CUDA 13.0 supports gcc <= 15).
 #
 # `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
-# is fine for the prefetch git-source builds (megatron-core / mbridge compile
+# is fine for the prefetch git-source build (megatron-core compiles
 # with it; every native backend ships prebuilt). But sglang
 # JIT-compiles its custom kernels (e.g. custom_all_reduce_push) at RUNTIME in
 # C++20, which uses std::bit_cast — a libstdc++ feature that only exists in

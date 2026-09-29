@@ -3,8 +3,7 @@ set -xeuo pipefail
 # GB200 config: 2 trainer nodes + 2 rollout nodes, 4 GPUs each (8+8 GPUs total)
 
 # GB200 NCCL WAR for async-RL Megatron: disable NVLS/MNNVL transports so NCCL
-# falls back to IB. Required on GB200 nodes without IMEX channel support, where
-# mbridge `export_weights -> all_gather` otherwise raises ncclUnhandledCudaError 801.
+# falls back to IB on GB200 nodes without IMEX channel support.
 export TLLM_DISABLE_NVLS_MNNVL=1
 
 project_name=${PROJECT_NAME:-'GRPO-Qwen3-30b-Base-MATH-fully-async-trtllm'}

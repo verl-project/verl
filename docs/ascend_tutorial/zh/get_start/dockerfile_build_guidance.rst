@@ -33,7 +33,12 @@ Atlas 800T A3
 Ascend 950PR&DT系列产品
 
 
-A2/A3 最新镜像内各组件版本信息清单
+当前 A2/A3 Megatron 环境以 ``scripts/install_vllm_mcore_npu.sh`` 为基准：
+Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
+Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支（未固定 tag/commit），
+同时安装 TransformerEngineNPU 和 MindSpeed-Ops。SGLang CI 镜像需要重建后才能使用该组合。
+
+A2/A3 vLLM 最新镜像内各组件版本信息清单
 ----------------------------------------------------------------
 
 ================= ============
@@ -51,9 +56,12 @@ Megatron-LM        core_r0.18.0
 MindSpeed          core_r0.18.0
 Megatron-Bridge    0.5.0
 triton-ascend      3.2.2
-SGLang             v0.5.10
-sgl-kernel-npu     2026.02.01
 ================= ============
+
+
+A2/A3 SGLang 镜像使用 CANN ``8.5.0``、Python ``3.11``、torch ``2.8.0``、
+torch_npu ``2.8.0.post2``、SGLang ``v0.5.10`` 和 sgl-kernel-npu ``2026.02.01``。
+Megatron 相关组件采用上面的统一依赖组合，transformers 使用 ``5.10.4``。
 
 
 Ascend 950PR&DT系列产品 最新镜像内各组件版本信息清单

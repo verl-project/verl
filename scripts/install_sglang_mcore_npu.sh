@@ -14,7 +14,7 @@ cd ..
 
 echo "2. install torch & torch_npu & other basic packages"
 pip install torch==2.8.0 torch_npu==2.8.0.post2 torchvision==0.23.0 pyyaml
-pip install pybind11 click==8.2.1 mbridge "numpy<2.0.0" cachetools
+pip install pybind11 click==8.2.1 "numpy<2.0.0" cachetools
 
 
 echo "3. install sgl-kernel-npu from release whl"
@@ -29,15 +29,24 @@ cd ..
 
 if [ $USE_MEGATRON -eq 1 ]; then
     echo "4. install Megatron & MindSpeed"
-    # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron-LM
+    # Install the Megatron and Ascend adapter versions used by the vLLM NPU installer.
     git clone https://gitcode.com/Ascend/MindSpeed.git
-    cd MindSpeed && git checkout core_r0.16.0 && cd ..
-    git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git
-    # 安装 Megatron & MindSpeed
+    cd MindSpeed && git checkout core_r0.18.0 && cd ..
+    git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+
     pip install -e Megatron-LM
     pip install -e MindSpeed
-    # 安装 mbridge
-    pip install mbridge
+    pip install -e MegatronAdaptor
+    pip install -e TransformerEngineNPU --no-build-isolation
+    pip install -e MindSpeed-Ops --no-build-isolation --no-deps
+    pip install -r MindSpeed-Bridge/requirements.txt
+    pip install -e MindSpeed-Bridge --no-deps
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps
 fi
 
 echo "5. install verl "
@@ -45,7 +54,7 @@ cd verl/recipe && git checkout main && cd .. && \
 pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 pip install -v -e . && cd .. &&
 
-echo "6. May need to uninstall timm & check other neccessary packages"
-pip uninstall -y timm 
+echo "6. install remaining packages"
+pip install transformers==5.10.4
 pip install pyyaml uvicorn fastapi pybase64 openai partial_json_parser python-multipart
 echo "Successfully installed all packages"

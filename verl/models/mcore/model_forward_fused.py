@@ -224,7 +224,7 @@ def fused_forward_model_gen(vision_model: bool = False):
             # workaround for supporting sequence packing with context parallelism
             # cp split with sequence packing will make model lose vision token information, so we need to keep
             # the original input_ids and pack them after vision embedding is calculated,
-            # cooporate with mbridge
+            # Preserve the original inputs for the Megatron vision model.
             input_args["input_ids"] = input_ids
             input_args["attention_mask"] = attention_mask
 

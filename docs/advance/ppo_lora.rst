@@ -68,7 +68,6 @@ You need to install and enable Megatron-Bridge for Megatron LoRA support.
 Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using 0.5.0 or later for proper support, and use the following settings to enable Megatron-Bridge:
 
 - ``actor_rollout_ref.actor.megatron.use_mbridge=True``
-- ``actor_rollout_ref.actor.megatron.vanilla_mbridge=False``
 
 **Key Differences from FSDP LoRA:**
 

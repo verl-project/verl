@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 2026/08/13.
+Last updated: 09/29/2026.
 
 关键更新
 --------
@@ -171,10 +171,16 @@ torch_npu     ``2.8.0.post2``                         NPU PyTorch 适配插件
 SGLang        ``v0.5.10``                             高性能 LLM 推理引擎
 triton        ``3.5.0``                               Triton，用于编写自定义算子
 triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
-transformers  ``5.3.0``                               Hugging Face 大模型库，提供模型架构与预训练权重
-Megatron-LM   ``core_r0.16.0``                        大规模分布式训练框架
-MindSpeed     ``core_r0.16.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
+transformers  ``5.10.4``                               Hugging Face 大模型库，提供模型架构与预训练权重
+Megatron-LM   ``core_r0.18.0``                        大规模分布式训练框架
+MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
 ============= ======================================= ===================
+
+昇腾 Megatron 依赖组合以 ``install_vllm_mcore_npu.sh`` 为基准：
+Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
+Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支，
+当前未固定 tag 或 commit。SGLang 安装脚本和当前 CI 镜像构建文件使用同一组合。
+
 
 安装前准备（HDK & CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -255,5 +261,3 @@ verl 中昇腾暂不支持生态库如下：
 | ``flash_attn``   | 不支持通过独立 ``flash_attn`` 包使能 flash       |
 |                  | attention 加速，支持通过 transformers 使用       |
 +------------------+--------------------------------------------------+
-
-

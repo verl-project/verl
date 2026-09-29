@@ -63,10 +63,7 @@ class CustomSaveWorker(ActorRolloutRefWorker):
 
         # ``MegatronEngine`` exposes the bridge that was used to load the base
         # weights; reuse it to export merged HF-format weights.
-        if engine.vanilla_bridge:
-            engine.bridge.save_weights(engine.module, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True)
-        else:
-            engine.bridge.save_hf_weights(engine.module, hf_ckpt_path)
+        engine.bridge.save_hf_weights(engine.module, hf_ckpt_path)
 
         return True
 

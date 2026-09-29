@@ -6,7 +6,7 @@ set -xeuo pipefail
 # pip install nvidia-modelopt
 # MAX_JOBS=32 pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation --no-cache-dir
 # MAX_JOBS=32 pip install git+https://github.com/state-spaces/mamba.git --no-build-isolation --no-cache-dir
-# pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge 
+# pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge
 # pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_dev_r0.16.0
 # unset ROCR_VISIBLE_DEVICES
 # unset PYTORCH_CUDA_ALLOC_CONF
@@ -147,7 +147,6 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
 )
 
 ROLLOUT=(

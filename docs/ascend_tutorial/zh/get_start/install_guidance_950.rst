@@ -60,6 +60,22 @@ MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM 在�
 ============= ================================================= ===================
 
 
+Megatron 训练后端还需安装以下 Bridge 组件：
+
+.. list-table::
+   :header-rows: 1
+
+   * - 依赖
+     - 版本
+     - 说明
+   * - Megatron-Bridge
+     - ``v0.5.0``
+     - 模型构造与 Hugging Face 权重转换
+   * - MindSpeed-Bridge
+     - 仓库默认分支（未固定 tag/commit）
+     - Megatron-Bridge 的昇腾适配
+
+
 安装前准备（ CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -128,8 +144,13 @@ Megatron 训练后端支持
     export PYTHONPATH=$PYTHONPATH:your_path/Megatron-LM
     export PYTHONPATH=$PYTHONPATH:your_path/MindSpeed
 
-    # 安装 mbridge
-    pip install mbridge
+    # 安装 Megatron-Bridge
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps
+
+    # 安装 MindSpeed-Bridge（仓库默认分支）
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    pip install -e MindSpeed-Bridge --no-deps
 
     # 安装 transformers
     pip install transformers==5.10.4

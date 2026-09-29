@@ -739,7 +739,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
 
     ``uv lock`` reads only ``pyproject.toml`` + the declared
     ``[tool.uv.dependency-metadata]``, so it triggers NO source build — the
-    git-sourced megatron-core / mbridge are compiled in step 2, not here (apex /
+    git-sourced megatron-core is compiled in step 2, not here (apex /
     TE / flash-attn ship prebuilt from the wheelhouse, vllm / sglang /
     sglang-kernel prebuilt from PyPI).
 
@@ -790,7 +790,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     # what that combo needs and never removes anything — which also mirrors
     # exactly what a real runtime `uv sync <combo>` does. Only the shared uv
     # cache (UV_CACHE_DIR) is durable: wheels download once and the git-source
-    # builds (megatron-core / mbridge) build once, then later combos hardlink
+    # build (megatron-core) runs once, then later combos hardlink
     # them from the cache instead of rebuilding. Peak disk is one env at a time
     # (each tempdir is torn down before the next).
     for combo in combos:

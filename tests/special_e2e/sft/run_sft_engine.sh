@@ -16,7 +16,6 @@ fi
 DATASET_DIR=${DATASET_DIR:-~/data/gsm8k_sft}
 TRAIN_FILES=${DATASET_DIR}/train.parquet
 VAL_FILES=${DATASET_DIR}/test.parquet
-VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
 backend=${BACKEND:-fsdp}
 
@@ -93,7 +92,6 @@ MEGATRON_ENGINE_CONFIG="\
     engine.context_parallel_size=${CP_SIZE} \
     +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True \
-    engine.vanilla_mbridge=${VANILLA_MBRIDGE} \
     "
 
 TORCHTITAN_ENGINE_CONFIG="\
