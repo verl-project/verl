@@ -868,6 +868,12 @@ class FSDPEngine(BaseEngine):
         else:
             raise ValueError(f"Invalid device type: {device}")
 
+    supports_deferred_checkpoint_retention = True
+
+    def prune_checkpoints(self, max_ckpt_to_keep: int | None = None) -> None:
+        """Prune registered checkpoints after global tracker publication."""
+        self.checkpoint_manager.prune_checkpoints(max_ckpt_to_keep)
+
     def save_checkpoint(
         self,
         local_path: str,

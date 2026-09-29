@@ -43,7 +43,7 @@ from verl.utils.megatron_utils import (
     get_transformer_config_checkpoint_path,
 )
 
-from .checkpoint_manager import BaseCheckpointManager
+from .checkpoint_manager import BaseCheckpointManager, get_checkpoint_tracker_filename
 
 # Setup logging
 logger = logging.getLogger(__file__)
@@ -199,6 +199,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.peft_cls = peft_cls
         self.use_megatron_fsdp = use_megatron_fsdp
         self.rank = torch.distributed.get_rank()
+        self._async_calls_queue = None
+        if self.checkpoint_config.async_save:
+            from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
+
+            self._async_calls_queue = AsyncCallsQueue()
 
         # ``use_dist_checkpointing`` selects Megatron shards for the ``model``
         # slot; HF weights always go through ``bridge`` when requested by
@@ -1086,6 +1091,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         global_step: int,
         max_ckpt_to_keep,
         saved_any_dist_ckpt: bool,
+        update_tracker: bool = True,
     ) -> None:
         """Run post-write bookkeeping: manifest, HDFS upload, tracker, retention.
 
@@ -1111,19 +1117,31 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             # optimizer/, extra/, manifest, transformer_config.json).
             hdfs_io.copy(src=local_path, dst=hdfs_path, dirs_exist_ok=True)
 
-        if self.checkpoint_config.async_save and self.rank == 0:
+        if self.checkpoint_config.async_save and self.rank == 0 and update_tracker:
             log_with_rank(
                 f"Update latest_checkpointed_iteration.txt to step {global_step}",
                 rank=self.rank,
                 logger=logger,
             )
-            local_latest_checkpointed_iteration = os.path.join(
-                os.path.dirname(os.path.dirname(local_path)), "latest_checkpointed_iteration.txt"
-            )
-            with open(local_latest_checkpointed_iteration, "w") as f:
+            # SFT saves at root/global_step_N; PPO saves below
+            # root/global_step_N/actor (or critic). Both publish at root.
+            step_dir = os.path.normpath(local_path)
+            if os.path.basename(step_dir) != f"global_step_{global_step}":
+                step_dir = os.path.dirname(step_dir)
+            tracker_file = get_checkpoint_tracker_filename(os.path.dirname(step_dir))
+            temp_tracker_file = tracker_file + ".tmp"
+            with open(temp_tracker_file, "w") as f:
                 f.write(str(global_step))
+            os.replace(temp_tracker_file, tracker_file)
 
         self.register_checkpoint(local_path, max_ckpt_to_keep)
+
+    def finalize_async_checkpointing(self, blocking: bool = False) -> bool:
+        """Advance the queue on every rank and report whether all saves finished."""
+        if self._async_calls_queue is not None:
+            self._async_calls_queue.maybe_finalize_async_calls(blocking=blocking)
+            return self._async_calls_queue.get_num_unfinalized_calls() == 0
+        return True
 
     def _dispatch_finalize(self, async_requests: list, finalize_save_fn) -> None:
         """Run ``finalize_save_fn`` now, or after all async writes complete.
@@ -1141,14 +1159,20 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         """
         if self.checkpoint_config.async_save and async_requests:
             async_requests[-1].add_finalize_fn(finalize_save_fn)
-            from megatron.core.dist_checkpointing.strategies.base import async_calls
-
+            assert self._async_calls_queue is not None
             for req in async_requests:
-                async_calls.schedule_async_request(req)
+                self._async_calls_queue.schedule_async_request(req)
         else:
             finalize_save_fn()
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self,
+        local_path: str,
+        hdfs_path: str = None,
+        global_step: int = 0,
+        max_ckpt_to_keep=None,
+        update_tracker: bool = True,
+    ):
         """Save a Megatron checkpoint under ``local_path`` (layout schema v2).
 
         Contents are split across three sibling directories so each piece can
@@ -1171,6 +1195,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         fully-complete save (including async dist_checkpointing writes).
         See ``docs/advance/checkpoint.rst`` ("Locating saved contents") for
         the manifest schema.
+
+        Set ``update_tracker=False`` when a caller coordinates multiple roles
+        and publishes their shared resume tracker after all saves complete.
         """
         self.previous_global_step = global_step
 
@@ -1277,5 +1304,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 global_step=global_step,
                 max_ckpt_to_keep=max_ckpt_to_keep,
                 saved_any_dist_ckpt=saved_any_dist_ckpt,
+                update_tracker=update_tracker,
             ),
         )

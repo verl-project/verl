@@ -48,6 +48,7 @@ from verl.single_controller.ray import (
 )
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.async_checkpoint import finalize_async_checkpoint, prepare_async_checkpoint
 from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -465,6 +466,7 @@ class PPOTrainer(ABC):
         self.on_train_begin()
         last_val_metrics = None
         while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
+            finalize_async_checkpoint(self, blocking=False)
             is_last_step = self.global_steps >= self.total_training_steps
             metrics = {}
             self.timing_raw = {}
@@ -521,11 +523,13 @@ class PPOTrainer(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
+                finalize_async_checkpoint(self, blocking=True)
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 return
 
+        finalize_async_checkpoint(self, blocking=True)
         self.on_train_end()
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
@@ -949,6 +953,10 @@ class PPOTrainer(ABC):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
         from verl.utils.fs import local_mkdir_safe
 
+        async_checkpoint = prepare_async_checkpoint(self)
+        # The driver publishes one tracker after actor, critic and auxiliary state finish.
+        save_kwargs = {"update_tracker": False, "defer_retention": True} if async_checkpoint is not None else {}
+
         local_global_step_folder = os.path.join(
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
         )
@@ -976,7 +984,11 @@ class PPOTrainer(ABC):
             else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
         )
         self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            actor_local_path,
+            actor_remote_path,
+            self.global_steps,
+            max_ckpt_to_keep=max_actor_ckpt_to_keep,
+            **save_kwargs,
         )
 
         # save critic
@@ -990,7 +1002,11 @@ class PPOTrainer(ABC):
                 )
             )
             self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
+                critic_local_path,
+                critic_remote_path,
+                self.global_steps,
+                max_ckpt_to_keep=max_critic_ckpt_to_keep,
+                **save_kwargs,
             )
 
         # save dataloader state
@@ -1008,9 +1024,9 @@ class PPOTrainer(ABC):
             )
 
         # write latest checkpointed iteration tracker for atomic resume
-        actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})
-        if actor_ckpt_cfg.get("async_save", False):
-            logger.info("skip write latest_checkpointed_iteration.txt when async_save is True")
+        if async_checkpoint is not None:
+            async_checkpoint.pending_step = self.global_steps
+            logger.info("defer tracker publication until all async checkpoint writes finish")
             self.checkpoint_callback.on_save(
                 trainer=self,
                 global_step=self.global_steps,

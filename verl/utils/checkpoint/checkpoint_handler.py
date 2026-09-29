@@ -65,6 +65,7 @@ class CheckpointHandler:
         resume_from_path=None,
         mode=OrchestrationMode.SPMD,
         lora_train_meta=None,
+        async_save=False,
     ):
         self.default_local_dir = default_local_dir
         self.max_ckpt_to_keep = max_ckpt_to_keep
@@ -75,6 +76,7 @@ class CheckpointHandler:
         self.train_dataloader = train_dataloader
         self.mode = mode
         self.lora_train_meta = lora_train_meta
+        self.async_save = async_save
 
         if self.mode == OrchestrationMode.SPMD:
             self.rank = torch.distributed.get_rank()
@@ -87,22 +89,14 @@ class CheckpointHandler:
         else:
             raise ValueError(f"Unknown {self.mode=}")
 
-    def save_checkpoint(self, step):
-        """Save checkpoint using FSDPCheckpointManager with improved tracking"""
+    def finalize_async_checkpointing(self, blocking: bool = False) -> None:
+        """Advance checkpoint completion on every training rank."""
+        if self.async_save:
+            self.engine.finalize_async_checkpointing(blocking=blocking)
+
+    def _save_auxiliary_state(self, local_global_step_folder: str) -> None:
+        """Write SFT state that must exist before an async save is published."""
         from verl.utils.fs import local_mkdir_safe
-
-        # Determine checkpoint path
-        local_global_step_folder = os.path.join(self.default_local_dir, f"global_step_{step}")
-        if self.rank == 0:
-            print(f"Saving checkpoint to: {local_global_step_folder}")
-
-        # Get max checkpoints to keep
-        max_ckpt_to_keep = self.max_ckpt_to_keep
-
-        # Use checkpoint manager to save
-        self.engine.save_checkpoint(
-            local_path=local_global_step_folder, global_step=step, max_ckpt_to_keep=max_ckpt_to_keep
-        )
 
         # Save dataloader state. Note that we only save the iterator in the train_dataloader.
         # So it's identical in each dp rank.
@@ -123,7 +117,37 @@ class CheckpointHandler:
             torch.save(dataloader_state_dict, dataloader_local_path)
             print(f"Saved dataloader state to: {dataloader_local_path}")
 
+    def save_checkpoint(self, step):
+        """Save the engine and dataloader state, then publish when complete."""
+        # Determine checkpoint path
+        local_global_step_folder = os.path.join(self.default_local_dir, f"global_step_{step}")
         if self.rank == 0:
+            print(f"Saving checkpoint to: {local_global_step_folder}")
+
+        # Get max checkpoints to keep
+        max_ckpt_to_keep = self.max_ckpt_to_keep
+
+        # Finalize completed requests before scheduling another save. Megatron's
+        # completion path contains collectives, so all ranks must enter here.
+        self.finalize_async_checkpointing(blocking=False)
+
+        if self.async_save:
+            # The Megatron finalize callback can run immediately when there are
+            # no dist checkpoint requests, so these files must already exist.
+            self._save_auxiliary_state(local_global_step_folder)
+
+        # Use checkpoint manager to save
+        self.engine.save_checkpoint(
+            local_path=local_global_step_folder,
+            hdfs_path=self.default_hdfs_dir if self.async_save else None,
+            global_step=step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+        )
+
+        if not self.async_save:
+            self._save_auxiliary_state(local_global_step_folder)
+
+        if self.rank == 0 and not self.async_save:
             # Update latest checkpoint tracker (atomic write)
             tracker_file = get_checkpoint_tracker_filename(self.default_local_dir)
             temp_tracker_file = tracker_file + ".tmp"
@@ -133,7 +157,7 @@ class CheckpointHandler:
             print(f"Updated checkpoint tracker: {tracker_file}")
 
         # Copy to HDFS if configured
-        if self.rank == 0 and self.default_hdfs_dir:
+        if self.rank == 0 and self.default_hdfs_dir and not self.async_save:
             hdfs_io.makedirs(self.default_hdfs_dir, exist_ok=True)
             hdfs_io.copy(src=local_global_step_folder, dst=self.default_hdfs_dir, dirs_exist_ok=True)
 

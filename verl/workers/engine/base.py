@@ -270,6 +270,16 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    supports_deferred_checkpoint_retention = False
+
+    def prune_checkpoints(self, max_ckpt_to_keep: int | None = None) -> None:
+        """Apply retention after the driver publishes a complete checkpoint."""
+        raise NotImplementedError(f"{type(self).__name__} does not support deferred checkpoint retention")
+
+    def finalize_async_checkpointing(self, blocking: bool = False) -> bool:
+        """Complete pending async writes and return whether all finished, if supported."""
+        raise NotImplementedError(f"{type(self).__name__} does not support checkpoint.async_save")
+
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True, **kwargs
     ) -> None:
