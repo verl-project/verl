@@ -50,6 +50,7 @@ class TestFSDPEngineConfigCPU:
         config = FSDPEngineConfig()
         assert config.param_offload is False
         assert config.optimizer_offload is False
+        assert config.offload_pin_memory is True
         assert config.fsdp_size == -1
         assert config.use_no_sync_for_gradient_accumulation is True
 

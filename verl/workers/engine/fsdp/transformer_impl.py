@@ -450,7 +450,8 @@ class FSDPEngine(BaseEngine):
         elif self.engine_config.strategy == "fsdp2":
             # - actor: offload_policy
             # - critic: offload_policy
-            # - ref: CPUOffloadPolicy(pin_memory=True)
+            # - ref: offload_policy (forward_only)
+            # offload_pin_memory selects pinned vs pageable host memory for the offloaded params/grads.
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
@@ -459,7 +460,7 @@ class FSDPEngine(BaseEngine):
             if self.engine_config.offload_policy or self.engine_config.forward_only:
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
-                offload_policy = CPUOffloadPolicy(pin_memory=True)
+                offload_policy = CPUOffloadPolicy(pin_memory=self.engine_config.offload_pin_memory)
                 self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {

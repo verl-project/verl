@@ -238,6 +238,13 @@ class FSDPEngineConfig(EngineConfig):
         param_offload (bool): Whether to offload parameters to CPU, default False
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
         offload_policy (bool): Whether to offload policy model parameters, default False
+        offload_pin_memory (bool): Only for FSDP2. Whether the CPU offload policy keeps the offloaded
+            parameters and gradients in pinned host memory. Pinned host memory is allocated by the
+            accelerator's host allocator and is not accounted by the container memory cgroup, so a large
+            pinned working set can fail to allocate on a busy node even though the container memory limit
+            was never reached (on Ascend this surfaces as aclrtMallocHostWithCfg error code 207001).
+            Set False to use pageable host memory: slower H2D copies, but no pinned allocation.
+            default True
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
         fsdp_size (int): FSDP group size. -1 means use all available GPUs.
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
@@ -274,6 +281,9 @@ class FSDPEngineConfig(EngineConfig):
     # fsdp specific flags
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
+    # Only for FSDP2: keep offloaded params/grads in pinned host memory. Pinned host memory is not
+    # accounted by the container cgroup and can fail to allocate on a busy node (NPU: 207001).
+    offload_pin_memory: bool = True
     reshard_after_forward: bool = True
     fsdp_size: int = -1
     forward_prefetch: bool = False
