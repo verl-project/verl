@@ -62,7 +62,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
-from verl.utils.torch_functional import logprobs_from_logits
+from verl.utils.torch_functional import logprobs_from_logits, logprobs_from_logits_sampler
 from verl.utils.ulysses import (
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_group,
@@ -76,6 +76,7 @@ from verl.workers.utils.padding import build_attention_mask_from_nested
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import (
     detach_tree,
+    enable_batch_invariance,
     enable_full_determinism,
     pad_packed_inputs,
     postprocess_batch_func,
@@ -109,6 +110,8 @@ class FSDPEngine(BaseEngine):
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
+
+    _batch_invariant = False
 
     def __init__(
         self,
@@ -153,6 +156,14 @@ class FSDPEngine(BaseEngine):
 
         self._init_device_mesh()
 
+        if self.engine_config.batch_invariant:
+            if self.model_config.use_fused_kernels:
+                raise ValueError(
+                    "batch_invariant does not support use_fused_kernels: the fused kernel computes its own log-probs"
+                )
+            enable_batch_invariance()
+            self._batch_invariant = True
+        # full_determinism runs last so its env settings win over batch invariance
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
 
@@ -1425,7 +1436,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     inplace_backward = True
                     if calculate_entropy:
                         inplace_backward = False
-                    log_probs = logprobs_from_logits(
+                    logprobs_fn = logprobs_from_logits_sampler if self._batch_invariant else logprobs_from_logits
+                    log_probs = logprobs_fn(
                         logits=logits_rmpad,
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
@@ -1519,7 +1531,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                        logprobs_fn = logprobs_from_logits_sampler if self._batch_invariant else logprobs_from_logits
+                        log_probs = logprobs_fn(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:

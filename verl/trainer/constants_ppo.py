@@ -82,6 +82,39 @@ NVTX_INJECTION_ENV = "NVTX_INJECTION64_PATH"
 _NVTX_INJECTION_DISABLED = "/nonexistent/verl-disabled-nvtx-injection.so"
 
 
+# What vLLM's init_batch_invariance() writes: override_envs_for_invariance() plus the cuBLAS pair
+# enable_batch_invariant_mode() sets on SM90/SM100, where cuBLAS is the only matmul path. NCCL and
+# cuBLAS read these when they initialize, so they are exported before the workers start.
+BATCH_INVARIANT_ENV = {
+    "VLLM_BATCH_INVARIANT": "1",
+    "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
+    "VLLM_USE_AOT_COMPILE": "0",
+    "CUBLAS_WORKSPACE_CONFIG": ":16:8",
+    "CUBLASLT_WORKSPACE_SIZE": "1",
+    "NCCL_LAUNCH_MODE": "GROUP",
+    "NCCL_COLLNET_ENABLE": "0",
+    "NCCL_NVLS_ENABLE": "0",
+    "NCCL_P2P_NET_DISABLE": "1",
+    "NCCL_MIN_NCHANNELS": "1",
+    "NCCL_MAX_NCHANNELS": "1",
+    "NCCL_PROTO": "Simple",
+    "NCCL_ALGO": "allreduce:tree",
+    "NCCL_NTHREADS": "1",
+    "NCCL_SOCKET_NTHREADS": "1",
+}
+
+
+def export_batch_invariant_env(full_determinism: bool):
+    """Export BATCH_INVARIANT_ENV into this process so get_ppo_ray_runtime_env() forwards it.
+
+    With full_determinism on, its NCCL_ALGO=Ring wins, matching enable_full_determinism(), which runs
+    after enable_batch_invariance() in the engine.
+    """
+    os.environ.update(BATCH_INVARIANT_ENV)
+    if full_determinism:
+        os.environ["NCCL_ALGO"] = "Ring"
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -147,6 +180,7 @@ def get_ppo_ray_runtime_env(config=None):
         "FLASH_ATTENTION_DETERMINISTIC",
         "NCCL_DETERMINISTIC",
         "NCCL_ALGO",
+        *BATCH_INVARIANT_ENV,
     ):
         val = os.environ.get(key)
         if val is not None:

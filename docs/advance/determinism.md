@@ -2,7 +2,7 @@
 
 **Authors**: Haichuan Hu, Yongxiang Huang, Jiawei Zhang, Nguyen Long
 
-Last updated: 06/16/2026.
+Last updated: 09/29/2026.
 
 ## Overview
 
@@ -75,6 +75,7 @@ If the policy or RM model is not covered by vLLM batch invariance, add `actor_ro
 | `actor_rollout_ref.rollout.max_num_seqs` | `1024` | Rollout | Set to `1` to serialize if the policy model is not covered by vLLM batch invariance |
 | `actor_rollout_ref.rollout.seed` | `42` | Rollout | Base seed; each replica uses `replica_rank + seed` |
 | `actor_rollout_ref.actor.fsdp_config.full_determinism` | `false` | Actor | Enables deterministic PyTorch ops for actor |
+| `actor_rollout_ref.actor.fsdp_config.batch_invariant` | `false` | Actor | Runs the actor under vLLM batch invariance and uses the vLLM sampler log-prob formula; see below |
 | `actor_rollout_ref.ref.fsdp_config.full_determinism` | `false` | Ref model | Enables deterministic PyTorch ops for reference model |
 | `reward.reward_model.rollout.full_determinism` | `false` | Reward model | Enables deterministic RM inference |
 | `reward.reward_model.rollout.max_num_seqs` | `1024` | Reward model | Discriminative RM forced to 1 under full_determinism; set to 1 for generative RM if not covered by batch invariance |
@@ -108,6 +109,16 @@ Set `trainer.use_v1=false` explicitly when enabling `full_determinism`.
 ### Batch invariance
 
 `VLLM_BATCH_INVARIANT=1` makes vLLM outputs independent of batch composition. Coverage is model- and hardware-dependent — see the [vLLM batch invariance docs](https://docs.vllm.ai/en/latest/features/batch_invariance/) (and [tested models](https://docs.vllm.ai/en/latest/features/batch_invariance/#tested-models)). If not covered, set `max_num_seqs=1` to serialize.
+
+### Batch-invariant actor
+
+`actor_rollout_ref.actor.fsdp_config.batch_invariant=true` puts the actor forward under the same batch-invariant setup a vLLM rollout gets from `VLLM_BATCH_INVARIANT=1`, and computes the actor's log-probs with the vLLM sampler formula: fp32 `log_softmax` over the full vocabulary, then gather. This is the training-side half of exact 0-diff train-rollout log-probs: an actor forward built from the same kernels as the rollout can then be compared bitwise with `rollout_log_probs`, using `training/rollout_logprobs_mismatch_count`. It does not by itself make the actor match the rollout; the model's remaining operators (attention, normalization, rope, MoE) still have to be aligned per model. Requires vLLM in the training process. FSDP engine only; `use_fused_kernels` is rejected because the fused kernel computes its own log-probs. Entropy and `sum_pi_squared` keep their usual kernels; the 0-diff target is the log-probs the loss uses.
+
+It works in two places:
+- The entrypoint (`main_ppo`) exports `VLLM_BATCH_INVARIANT=1` and the env vLLM's `init_batch_invariance()` would write (the NCCL settings from `override_envs_for_invariance()`, plus `CUBLAS_WORKSPACE_CONFIG=:16:8` and `CUBLASLT_WORKSPACE_SIZE=1`) before `ray.init()`, and forwards them to all Ray actors. NCCL and cuBLAS read these when they initialize, so they cannot be set from inside the worker. On SM90/SM100 vLLM registers no matmul override: matmul invariance comes only from this cuBLAS workspace setting and cuBLASLt selection, which is why the env must be exported this early. Because `VLLM_BATCH_INVARIANT=1` reaches every worker, the rollout also runs batch-invariant.
+- The FSDP engine calls `init_batch_invariance()` in the worker to install the aten overrides (softmax, log_softmax, mean, bmm, and on SM80 matmul) and the TF32/cuBLASLt settings. The install is process-global: actor and ref share a worker, so the ref forward runs under the same overrides.
+
+If `full_determinism` is also on, its settings are applied last and win: the entrypoint exports `NCCL_ALGO=Ring` instead of `allreduce:tree`, and the engine runs `enable_full_determinism()` after the batch-invariant install. `CUBLAS_WORKSPACE_CONFIG=:16:8` and `NCCL_PROTO=Simple` are the same under both.
 
 For reward specifically:
 - **Discriminative RM** (score-outputting, e.g. Skywork-Reward; no custom reward fn): `max_num_seqs` is **forced to 1** — batch invariance is verified on generation models, not score-outputting RM architectures.
