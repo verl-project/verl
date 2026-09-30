@@ -18,7 +18,7 @@ requires-python = ">=3.10,<3.13"
 #
 # All backends use torch 2.13.0: vllm/sglang/fsdp/megatron on cu130, cpu on cpu
 # wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
-# torchaudio stays at 2.11.0 — its last release, and what vllm 0.29 / sglang
+# torchaudio stays at 2.11.0 — its last release, and what vllm 0.30 / sglang
 # 0.5.20 themselves pin alongside torch 2.13.
 # DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
 # cuDNN/NCCL: torch's wheel pins them, so after `uv lock` sync CUDNN_VERSION /
@@ -89,12 +89,12 @@ vllm = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    # PyPI's 0.29.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
+    # PyPI's 0.30.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
     # no wheelhouse routing and no source build.
-    "vllm==0.29.0",
-    # flashinfer is a transitive dep vllm 0.29 hard-pins to ==0.6.18 (pure-python
+    "vllm==0.30.0",
+    # flashinfer is a transitive dep vllm 0.30 hard-pins to ==0.6.18.post1 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
-    # vllm 0.29 needs transformers>=5.10.4; 5.12.1 is the project-wide pin
+    # vllm 0.30 needs transformers>=5.10.4; 5.12.1 is the project-wide pin
     # (enforced in override-dependencies below).
     "transformers==5.12.1",
 ]
@@ -350,7 +350,7 @@ conflicts = [
 #   * transformers==5.12.1 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
-#     on the package, so this also settles the engines' own pins (vllm 0.29 asks
+#     on the package, so this also settles the engines' own pins (vllm 0.30 asks
 #     >=5.10.4, sglang 0.5.20 hard-pins ==5.12.1). Keep it inside setup.py /
 #     requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.13) and bump all
 #     of them together. Do NOT add
