@@ -66,7 +66,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             top_p=config.top_p,
             top_k=config.top_k,
             repetition_penalty=1.0,
-            logprobs=config.calculate_log_probs,
+            logprobs=self._generation_logprobs(validate=validate),
         )
 
         # override sampling params for validation

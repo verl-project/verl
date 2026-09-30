@@ -23,7 +23,10 @@ distillation_loss:
   # Loss function mode for distillation
   loss_mode: k3
 
-  # If distillation loss requires top-k logits, this is the value of k
+  # If distillation loss requires top-k logits, this is the value of k.
+  # For forward_kl_topk, this is the teacher top-k request/support size.
+  # For reverse_kl_topk, this is the rollout student's top-k support size;
+  # vLLM fixed-token prefill scoring returns teacher logprobs only on that support.
   topk: 32
 
   # Whether to include task rewards alongside distillation loss.
