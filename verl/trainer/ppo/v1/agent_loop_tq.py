@@ -44,9 +44,18 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["temperature"] = 0
 
 
-async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:
+async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> tuple[list[BaseException], int]:
+    """Await every session; return (errors, number of trajectories written).
+
+    A session that returned an empty output list (a legitimate agent-loop result:
+    "nothing here is trainable") writes no trajectory and is not an error. The
+    caller needs the count to tell a group that finished with zero trajectories
+    apart from one that finished with data.
+    """
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    return [result for result in results if isinstance(result, BaseException)]
+    errors = [r for r in results if isinstance(r, BaseException)]
+    written = sum(int(r) for r in results if isinstance(r, int) and not isinstance(r, bool))
+    return errors, written
 
 
 @ray.remote
@@ -130,13 +139,22 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             # Publish a terminal status only after every session settles, so no sibling can write after
             # ReplayBuffer clears a failed group.
-            session_errors = await _settle_session_tasks(tasks)
+            session_errors, written = await _settle_session_tasks(tasks)
             if session_errors:
                 for error in session_errors:
                     logger.error(
                         f"Error in _run_prompt for uid={uid}",
                         exc_info=(type(error), error, error.__traceback__),
                     )
+                status = "failure"
+            elif written == 0:
+                # Every session returned an empty output list. The group holds no
+                # trajectory, so for the ReplayBuffer it is indistinguishable from a
+                # failed one: nothing to sample, nothing to compute a group metric on.
+                # Marking it "finished" would make DAPO's filter_groups raise on the
+                # missing metric; "failure" routes it to the existing clear-and-refill
+                # path.
+                logger.warning(f"All {n} sessions of prompt {uid} returned no output; marking group as failed")
                 status = "failure"
             else:
                 status = "finished"
@@ -147,15 +165,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 await _settle_session_tasks(tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
-    async def _agent_loop_postprocess(
-        self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
-    ) -> None:
-        """Put agent loop outputs into TransferQueue."""
+    async def _agent_loop_postprocess(self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs) -> int:
+        """Put agent loop outputs into TransferQueue; return how many trajectories were written."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]
         outputs = output if isinstance(output, list) else [output]
         if not outputs:
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
-            return
+            return 0
 
         await self._compute_score(outputs, kwargs=kwargs)
 
@@ -225,6 +241,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             tags=tags,
             partition_id="train" if not validate else "val",
         )
+        return len(keys)
 
 
 class AgentLoopManagerTQ(AgentLoopManager):
