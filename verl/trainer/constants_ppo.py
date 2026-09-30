@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _major, _ = get_device_capability()
 # Opt-in GB200 NCCL WAR: set TLLM_DISABLE_NVLS_MNNVL=1 in the launch shell to disable
 # both NCCL_NVLS_ENABLE and NCCL_MNNVL_ENABLE on Blackwell. Required by async-RL
-# Megatron on GB200 nodes without IMEX (mbridge all_gather raises NCCL 801).
+# Megatron on GB200 nodes without IMEX (weight export all_gather raises NCCL 801).
 _gb200_nccl_env = {}
 if (_major or 0) >= 10 and os.environ.get("TLLM_DISABLE_NVLS_MNNVL", "0") == "1":
     _gb200_nccl_env = {"NCCL_NVLS_ENABLE": "0", "NCCL_MNNVL_ENABLE": "0"}

@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 09/23/2026
+Last updated: 09/29/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -168,7 +168,7 @@ FP8 E2E applies FP8 to the entire RL pipeline: forward/backward passes via Trans
 
 - **CUDA 12.9+** (required for block-wise FP8 scaling)
 - **Transformer Engine** with block-wise FP8 support
-- Environment variable: `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1`
+- Environment variable: `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1`, on **Hopper only**. Do not set it on Blackwell (SM100+): there Transformer Engine runs block-wise scaling through MXFP8 GEMMs, whose E8M0 scales hold only an exponent, so it requires power-of-two block scales and stops at the first FP8 quantization with `Assertion failed: pow2_scale ... requires using power of two scaling factors` when the variable is set (see [#6172](https://github.com/verl-project/verl/issues/6172)). Leaving it unset gives power-of-two scales, the Transformer Engine default.
 
 ### Key Configuration
 

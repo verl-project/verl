@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+from hydra import compose, initialize_config_module
 from omegaconf import OmegaConf
 
 import verl.trainer.ppo.v1.trainer_separate_async as trainer_module
@@ -39,6 +40,7 @@ class _RecordingCheckpointManager:
         self.update_calls: list[int] = []
         self.resume_calls = 0
         self.abort_calls = 0
+        self.abort_reject_requests: list[bool] = []
         self.sleep_calls = 0
 
     def update_weights(self, global_steps: int):
@@ -50,9 +52,10 @@ class _RecordingCheckpointManager:
         self.events.append(f"{self.name}_resume")
         self.resume_calls += 1
 
-    def abort_replicas(self):
+    def abort_replicas(self, reject_request: bool = False):
         self.events.append(f"{self.name}_abort")
         self.abort_calls += 1
+        self.abort_reject_requests.append(reject_request)
 
     def sleep_replicas(self):
         self.events.append(f"{self.name}_sleep")
@@ -239,6 +242,9 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert trainer.current_mode == HybridEngineMode.TRAINER
     assert trainer.replay_buffer.wait_calls == [16]
     assert trainer.checkpoint_manager.abort_calls == 1
+    assert trainer.checkpoint_manager.abort_reject_requests == [True], (
+        "leaving rotation must reject late arrivals rather than park them until the replica returns"
+    )
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.balancer_calls == ["add", "clear", "remove"]
     assert trainer.timing_raw["switch_to_trainer"] >= 0.0
@@ -472,3 +478,116 @@ def test_trainer_idle_is_reported():
     assert trainer._step_threshold == 32
     assert trainer._step_sample_wait_seconds == pytest.approx(2.0)
     assert trainer._switch_threshold_ratio == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("hybrid_enabled", [True, False])
+@pytest.mark.parametrize("standalone_memory", ["missing", None, 0.85])
+@pytest.mark.parametrize("interpolated", [False, True])
+def test_setup_standalone_memory_budget(monkeypatch, hybrid_enabled, standalone_memory, interpolated):
+    trainer, created_configs, checkpoint_calls = _memory_budget_setup(
+        monkeypatch, hybrid_enabled, standalone_memory, interpolated=interpolated
+    )
+    original = OmegaConf.to_container(trainer.config, resolve=False)
+
+    trainer._setup()
+
+    standalone_config, start_rank = created_configs[0]
+    expected = 0.85 if standalone_memory == 0.85 else 0.45
+    assert standalone_config.actor_rollout_ref.rollout.gpu_memory_utilization == expected
+    assert trainer.hybrid_config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
+    assert OmegaConf.to_container(trainer.config, resolve=False) == original
+    assert start_rank == (2 if hybrid_enabled else 0)
+    assert checkpoint_calls[0]["replicas"] == ["standalone"]
+    assert checkpoint_calls[0]["actor_wg"] is trainer.actor_rollout_wg
+    assert trainer.current_mode == (HybridEngineMode.ROLLOUT if hybrid_enabled else HybridEngineMode.TRAINER)
+
+
+@pytest.mark.parametrize("hybrid_enabled", [True, False])
+def test_setup_standalone_memory_failure_preserves_config(monkeypatch, hybrid_enabled):
+    trainer, created_configs, checkpoint_calls = _memory_budget_setup(monkeypatch, hybrid_enabled, 0.85, fail_init=True)
+    original = OmegaConf.to_container(trainer.config, resolve=False)
+
+    with pytest.raises(RuntimeError, match="standalone init failed"):
+        trainer._setup()
+
+    assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == 0.85
+    assert OmegaConf.to_container(trainer.config, resolve=False) == original
+    assert trainer.hybrid_config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
+    assert checkpoint_calls == []
+
+
+def _memory_budget_setup(monkeypatch, hybrid_enabled, standalone_memory, *, interpolated=False, fail_init=False):
+    trainer = object.__new__(PPOTrainerSeparateAsync)
+    trainer._enable_hybrid_replicas = hybrid_enabled
+    trainer.config = OmegaConf.create(
+        {
+            "memory": {"hybrid": 0.45, "standalone": 0.85},
+            "actor_rollout_ref": {
+                "rollout": {
+                    "gpu_memory_utilization": "${memory.hybrid}" if interpolated else 0.45,
+                    "name": "vllm",
+                    "prometheus": {"enable": False},
+                    "checkpoint_engine": {
+                        "_target_": "verl.workers.config.CheckpointEngineConfig",
+                        "backend": "nccl",
+                    },
+                }
+            },
+        }
+    )
+    if standalone_memory != "missing":
+        trainer.config.actor_rollout_ref.rollout.standalone_gpu_memory_utilization = (
+            "${memory.standalone}" if interpolated and standalone_memory is not None else standalone_memory
+        )
+    OmegaConf.set_struct(trainer.config, True)
+    created_configs = []
+    checkpoint_calls = []
+
+    def base_setup(self):
+        self.hybrid_config = self.config
+        self.actor_rollout_wg = object()
+        self.llm_server_manager = SimpleNamespace(rollout_replicas=[0, 1] if hybrid_enabled else [])
+
+    def create_standalone(*, config, start_rank):
+        created_configs.append((config, start_rank))
+        if fail_init:
+            raise RuntimeError("standalone init failed")
+        return SimpleNamespace(get_replicas=lambda: ["standalone"])
+
+    def create_checkpoint_manager(**kwargs):
+        checkpoint_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(trainer_module.PPOTrainer, "_setup", base_setup)
+    monkeypatch.setattr(trainer_module.LLMServerManager, "create", create_standalone)
+    monkeypatch.setattr(trainer_module, "CheckpointEngineManager", create_checkpoint_manager)
+    trainer.add_replicas_to_balancer = lambda: None
+    return trainer, created_configs, checkpoint_calls
+
+
+@pytest.mark.parametrize("model_engine", ["dp", "megatron", "veomni", "torchtitan"])
+@pytest.mark.parametrize("hybrid_enabled", [True, False])
+@pytest.mark.parametrize("standalone_memory", ["default", "null", "0.85"])
+def test_setup_standalone_memory_from_hydra_override(monkeypatch, model_engine, hybrid_enabled, standalone_memory):
+    trainer, created_configs, _ = _memory_budget_setup(monkeypatch, hybrid_enabled, None)
+    overrides = [
+        f"model_engine={model_engine}",
+        f"actor_rollout_ref.hybrid_engine={hybrid_enabled}",
+        "actor_rollout_ref.rollout.gpu_memory_utilization=0.45",
+    ]
+    if standalone_memory != "default":
+        overrides.append(f"actor_rollout_ref.rollout.standalone_gpu_memory_utilization={standalone_memory}")
+    with initialize_config_module(config_module="verl.trainer.config", version_base=None):
+        trainer.config = compose(config_name="ppo_trainer", overrides=overrides)
+
+    expected = 0.85 if standalone_memory == "0.85" else 0.45
+    assert trainer.config.actor_rollout_ref.rollout.standalone_gpu_memory_utilization == (
+        None if standalone_memory == "null" else expected
+    )
+    original = OmegaConf.to_container(trainer.config, resolve=False)
+
+    trainer._setup()
+
+    assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == expected
+    assert trainer.config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
+    assert OmegaConf.to_container(trainer.config, resolve=False) == original

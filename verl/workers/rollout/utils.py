@@ -138,9 +138,30 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
+def _get_rollout_targets(config_file: str, server_addresses: list[str]) -> list[str]:
+    """Merge new rollout server addresses into the existing Prometheus rollout targets."""
+    try:
+        with open(config_file) as f:
+            existing_config = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        existing_config = {}
+
+    existing_targets: list[str] = []
+    if isinstance(existing_config, dict):
+        for scrape_config in existing_config.get("scrape_configs", []):
+            if not isinstance(scrape_config, dict) or scrape_config.get("job_name") != "rollout":
+                continue
+            for static_config in scrape_config.get("static_configs", []):
+                if isinstance(static_config, dict):
+                    existing_targets.extend(static_config.get("targets", []))
+
+    return list(dict.fromkeys([*existing_targets, *server_addresses]))
+
+
 def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):
     """
     Update Prometheus configuration file with server addresses and reload on first node.
+    Existing rollout targets in the configuration file are preserved.
 
     server_addresses: vllm or sglang server addresses
 
@@ -153,6 +174,7 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
 
     try:
         # Get Prometheus config file path from environment or use default
+        rollout_targets = _get_rollout_targets(config.file, server_addresses)
         prometheus_config_json = {
             "global": {"scrape_interval": "10s", "evaluation_interval": "10s"},
             "scrape_configs": [
@@ -160,7 +182,7 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
                     "job_name": "ray",
                     "file_sd_configs": [{"files": ["/tmp/ray/prom_metrics_service_discovery.json"]}],
                 },
-                {"job_name": "rollout", "static_configs": [{"targets": server_addresses}]},
+                {"job_name": "rollout", "static_configs": [{"targets": rollout_targets}]},
             ],
         }
 

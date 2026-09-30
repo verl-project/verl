@@ -65,7 +65,7 @@ RUN pip install --no-cache-dir \
     qwen_vl_utils==0.0.14 \
     datasets==5.0.0 \
     accelerate==1.14.0 \
-    TransferQueue==0.1.8 \
+    TransferQueue==0.1.10 \
     flash-linear-attention==0.5.1
 
 RUN pip install --no-cache-dir cupy-rocm-7-0==14.1.1

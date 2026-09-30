@@ -36,7 +36,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
 from verl.models.mcore.util import (
-    get_fp8_padding_options,
     postprocess_packed_seqs,
     postprocess_thd_engine,
     preprocess_packed_seqs,
@@ -333,7 +332,9 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
-        use_fp8_padding, fp8_recipe = get_fp8_padding_options(tf_config)
+        use_fp8_padding = getattr(tf_config, "fp8", None) in ("e4m3", "hybrid")
+        # Same rule as verl.models.mcore.util.get_fp8_padding_options (inlined: CPU tests stub that module).
+        fp8_recipe = getattr(tf_config, "fp8_recipe", None) if use_fp8_padding else None
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -468,7 +469,9 @@ def set_router_replay_data(
 
     with torch.no_grad():
         vp_rank = 0 if vp_rank is None else vp_rank
-        use_fp8_padding, fp8_recipe = get_fp8_padding_options(tf_config)
+        use_fp8_padding = getattr(tf_config, "fp8", None) in ("e4m3", "hybrid")
+        # Same rule as verl.models.mcore.util.get_fp8_padding_options (inlined: CPU tests stub that module).
+        fp8_recipe = getattr(tf_config, "fp8_recipe", None) if use_fp8_padding else None
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size

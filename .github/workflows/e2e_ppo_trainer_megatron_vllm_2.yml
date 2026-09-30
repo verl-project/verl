@@ -49,6 +49,11 @@ on:
       - "!verl/utils/fsdp_utils.py"
       - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
       - "!verl/model_merger/fsdp_model_merger.py"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
   pull_request:
     branches:
       - main
@@ -76,6 +81,11 @@ on:
       - "tests/special_e2e/run_ppo_trainer_megatron.sh"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_megatron_trainer.yaml"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -141,7 +151,7 @@ jobs:
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
-          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True \
           USE_FUSED_KERNELS=True USE_REMOVE_PADDING=True \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=8 \
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh \
@@ -171,7 +181,7 @@ jobs:
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
-          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up
@@ -183,7 +193,7 @@ jobs:
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 LORA_RANK=8 CRITIC_LORA_RANK=8 \
-          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=2 COMMON_ETP=1 INFER_TP=8 \
           USE_DIST_CKPT=False LORA_MERGE=True ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up

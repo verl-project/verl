@@ -32,6 +32,7 @@ package, which provides reference implementations for vendors to adapt:
 - Intel XPU (Data Center GPU Max / Arc)
 - Cambricon MLU (MLU370 / MLU590)
 - MetaX (CUDA-compatible)
+- Google TPU — **experimental, under development**
 
 .. note::
 
@@ -81,7 +82,8 @@ Architecture Overview
     |  |    ├─ "huawei"    → PlatformNPU       (built-in)         |      |
     |  |    ├─ "intel"     → PlatformXPU       (plugin)           |      |
     |  |    ├─ "cambricon" → PlatformMLU       (plugin)           |      |
-    |  |    └─ "metax"     → PlatformMetaX     (plugin)           |      |
+    |  |    ├─ "metax"     → PlatformMetaX     (plugin)           |      |
+    |  |    └─ "tpu"       → PlatformTPU       (plugin)           |      |
     |  |                                                          |      |
     |  +---------------------------------------------------------+      |
     |                                                                    |

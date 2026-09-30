@@ -132,7 +132,6 @@ def test_megatron_bridge_provider_defers_ddp_for_layerwise_muon(megatron_bridge_
     )
     model, _ = make_megatron_module(
         wrap_config=wrap_config,
-        tf_config=_DummyConfig(),
         hf_config=_minimal_hf_config(),
         bridge=object(),
         provider=megatron_bridge_stubs["provider"],
@@ -167,7 +166,6 @@ def test_megatron_bridge_provider_keeps_standard_ddp_without_layerwise(megatron_
     )
     model, _ = make_megatron_module(
         wrap_config=wrap_config,
-        tf_config=_DummyConfig(),
         hf_config=_minimal_hf_config(),
         bridge=object(),
         provider=megatron_bridge_stubs["provider"],
@@ -189,7 +187,6 @@ def test_megatron_bridge_layerwise_rejects_megatron_fsdp(megatron_bridge_stubs):
     with pytest.raises(ValueError, match="incompatible with Megatron FSDP"):
         make_megatron_module(
             wrap_config=wrap_config,
-            tf_config=_DummyConfig(),
             hf_config=_minimal_hf_config(),
             bridge=object(),
             provider=megatron_bridge_stubs["provider"],

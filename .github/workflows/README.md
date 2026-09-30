@@ -122,6 +122,7 @@ works when run by hand, and drive the Ray workers through it via
 | script | extras it picks |
 | --- | --- |
 | `run_ppo_trainer_megatron.sh` | `$ENGINE` + `megatron` + `math` |
+| `run_ppo_trainer_veomni.sh` | `vllm` + `fsdp` + `veomni-sft` + `math`, with Transformers 5.16.1 |
 | `ppo_trainer/run_function_reward.sh` | `$ENGINE` + `fsdp`\|`megatron` (from `STRATEGY`) |
 | `run_one_step_off_policy.sh` | `vllm` + `fsdp`\|`megatron` (from `ACTOR_STRATEGY`) |
 | `run_fully_async_policy_opd.sh` | `vllm` + `megatron` |
@@ -159,6 +160,13 @@ Two cases the lock cannot express, and how they are handled:
 - **A one-step version matrix.** Use `uv run --with pkg==x.y`, which layers the
   version over the synced env for that step only. `model.yml` does this for
   transformers 4.54.1.
+- **VeOmni.** The PPO and SFT LLM/VLM jobs use the git revision pinned in `uv.lock`
+  and `--with transformers==5.16.1` for its generated models. Keep that overlay
+  in each job's `UV_RUN` so all engines in the comparison use the same version.
+  The SFT scripts launch workers with `python -m torch.distributed.run` so the
+  overlay's interpreter is used rather than the base venv's `torchrun` shebang.
+  The PPO launch script passes the same extras and overlay to Ray through
+  `runtime_env.py_executable`, including when launched directly outside CI.
 - **A package that would poison the resolution.** `mlflow` caps `pandas<3` and
   `cryptography<49`, and `ci` shares one resolution fork with every backend, so
   locking it would drag the whole project back to pandas 2.x. `gpu_unit_tests.yml`

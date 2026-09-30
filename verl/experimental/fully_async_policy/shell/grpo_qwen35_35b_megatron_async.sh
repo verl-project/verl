@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
 # Qwen3.5-35B-A3B GRPO with Megatron backend + MTP + Fully Async Policy
-#
+# Using verlai/verl:uv.cu130.dev3 docker image
 # Requirements:
-#     pip install --upgrade transformers==5.5.3
-#     mbridge: make sure https://github.com/ISEEKYAN/mbridge/pull/98 this pr has merged
+#   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
+#   - Install the current uv.lock's megatron and sglang extras, including flash-linear-attention:
+#       uv sync --frozen --extra megatron --extra sglang
+#       source .venv/bin/activate
+#
+# CUDA dependencies from the current uv.lock (Python 3.12):
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#   transformers 5.12.1.
+#
+# Qwen3.5 architecture notes:
+#   This example uses BSHD compute format:
+#     - model.use_remove_padding=False
+#     - actor.megatron.use_remove_padding=False
+#     - actor.use_dynamic_bsz=False
+#   Megatron-Core 0.18.0 and 0.19.2 also support THD for GDN.
+#   The settings above retain BSHD for this example.
 #
 # MTP (Multi-Token Prediction) notes:
 #   - actor_rollout_ref.model.mtp.enable=True        enables MTP module
@@ -141,7 +155,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.model.use_fused_kernels=False \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.megatron.use_remove_padding=False \
     actor_rollout_ref.model.use_remove_padding=False \

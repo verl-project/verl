@@ -23,6 +23,11 @@ on:
       - ".github/workflows/e2e_v1_separate_async.yml"
       - "tests/special_e2e/run_v1_separate_async.sh"
       - "examples/data_preprocess/gsm8k.py"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
   pull_request:
     branches:
       - main
@@ -44,6 +49,11 @@ on:
       - ".github/workflows/e2e_v1_separate_async.yml"
       - "tests/special_e2e/run_v1_separate_async.sh"
       - "examples/data_preprocess/gsm8k.py"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

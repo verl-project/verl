@@ -230,6 +230,16 @@ class PlatformBase(abc.ABC):
             return {"num_gpus": num_gpus}
         return {"resources": {resource_name: num_gpus}}
 
+    def supports_colocated_worker_groups(self) -> bool:
+        """Whether several WorkerGroups can share one accelerator.
+
+        ``True`` for GPU and NPU, where one device is time-shared between processes.
+        ``False`` where a device is instead claimed exclusively by a single process --
+        TPU, whose chips are owned by one process at a time -- which caps colocation at
+        one WorkerGroup.
+        """
+        return True
+
     # ------------------------------------------------------------------
     # IPC support
     # ------------------------------------------------------------------

@@ -16,7 +16,7 @@
 Three things the MXFP8 additions to ``vllm_quant_utils.py`` / ``vllm_fp8_utils.py`` have to get
 right, each checked here without a GPU or a real vLLM:
 
-1. ``is_fp8_model`` / ``is_mxfp8_vllm_cuda`` recognise vLLM's ``ModelOptMxFp8Config`` so the
+1. ``is_quantized_model`` / ``is_mxfp8_vllm_cuda`` recognise vLLM's ``ModelOptMxFp8Config`` so the
    weight sync takes the quantize + stage/reprocess path instead of the plain bf16 path.
 2. ``quant_weights`` under that config goes through ``mxfp8_quantize`` and yields the scale under
    the ModelOpt name ``<weight>_scale`` (blockwise fp8 uses ``_scale_inv``).
@@ -47,6 +47,22 @@ _sibling_spec.loader.exec_module(_helpers)
 
 class _FakeQuantConfig:
     weight_block_size = [128, 128]
+
+
+_EXCLUSION_PATCH = "verl.utils.vllm.mxfp8_exclusion_patch"
+
+
+def _load_exclusion_patch():
+    # ``build_fp8_method_patchers`` imports this sibling lazily, after the stubbed ``verl.utils.vllm``
+    # package used for loading has been removed; registering it by name keeps that import off the real
+    # package ``__init__`` (which needs vLLM). The module itself only touches vLLM inside functions.
+    spec = importlib.util.spec_from_file_location(
+        _EXCLUSION_PATCH, _HERE.parents[1] / "verl/utils/vllm/mxfp8_exclusion_patch.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class _StubVllm:
@@ -134,6 +150,8 @@ class _StubVllm:
                 "moe_kernel": None,
             },
         )
+        self.saved[_EXCLUSION_PATCH] = sys.modules.get(_EXCLUSION_PATCH)
+        mods[_EXCLUSION_PATCH] = _load_exclusion_patch()
         sys.modules.update(mods)
         self.fp8, self.modelopt = fp8, modelopt
         return self
@@ -146,15 +164,15 @@ class _StubVllm:
                 sys.modules[n] = prev
 
 
-def test_is_fp8_model_recognises_modelopt_mxfp8_config():
+def test_is_quantized_model_recognises_modelopt_mxfp8_config():
     module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
     with _StubVllm() as stub:
         mx = stub.modelopt.ModelOptMxFp8Config()
         assert module.is_mxfp8_vllm_cuda(mx)
-        assert module.is_fp8_model(SimpleNamespace(quant_config=mx))
-        assert module.is_fp8_model(SimpleNamespace(quant_config=stub.fp8.Fp8Config()))
+        assert module.is_quantized_model(SimpleNamespace(quant_config=mx))
+        assert module.is_quantized_model(SimpleNamespace(quant_config=stub.fp8.Fp8Config()))
         assert not module.is_mxfp8_vllm_cuda(stub.fp8.Fp8Config())
-        assert not module.is_fp8_model(SimpleNamespace(quant_config=object()))
+        assert not module.is_quantized_model(SimpleNamespace(quant_config=object()))
 
 
 def test_quant_weights_mxfp8_cuda_uses_te_quantizer_and_modelopt_scale_name(monkeypatch):

@@ -51,6 +51,11 @@ on:
       - "tests/special_distributed/test_tensor_dict.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Declare permissions just read content.
 permissions:

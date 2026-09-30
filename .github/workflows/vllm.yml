@@ -64,6 +64,11 @@ on:
       - "verl/trainer/config/generation.yaml"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_trainer.yaml"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

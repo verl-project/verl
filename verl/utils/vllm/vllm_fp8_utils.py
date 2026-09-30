@@ -40,8 +40,6 @@ from unittest.mock import patch
 import torch
 from packaging import version
 
-from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
-
 logger = logging.getLogger(__name__)
 
 
@@ -161,10 +159,11 @@ def replace_parameter_preserve_subclass(
         new_data = new_data.data
 
     old_param = getattr(layer, param_name, None)
-    # FlashInfer TRT-LLM's MXFP8 MoE prep (W13->W31 swap, gate/up row interleave, tile shuffle of weights and
-    # scales) returns tensors with the checkpoint's shape and dtype, so the comparison in
-    # _layer_needs_fp8_staging cannot tell the live buffer is no longer in checkpoint layout. This call is the
-    # one place the rewrite is visible: a same-shaped, same-typed tensor that is not the old storage.
+    # Some kernel preps return tensors with the checkpoint's shape and dtype -- FlashInfer CUTLASS swaps
+    # the gate/up halves of w13 (weights and block scales), FlashInfer TRT-LLM's MXFP8 path interleaves
+    # and tile-shuffles them -- so the comparison in _layer_needs_fp8_staging cannot tell the live buffer
+    # left checkpoint layout. This call is the one place the rewrite is visible: a same-shaped,
+    # same-typed tensor that is not the old storage.
     if (
         param_name in _FP8_REFIT_PARAM_NAMES
         and isinstance(old_param, torch.nn.Parameter)
@@ -225,11 +224,11 @@ def _layer_needs_fp8_staging(layer, pristine) -> bool:
             continue
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
-        # Two backends permute the expert weights while leaving shape and dtype
-        # untouched, so the comparison above cannot see it. ROCm's AITER MoE
-        # sets ``is_shuffled`` on the repacked parameter; FlashInfer TRT-LLM's
-        # MXFP8 MoE sets nothing, so the patched ``replace_parameter`` records
-        # the rewrite itself (``_FP8_REPACKED_ATTR``). Either is the only signal
+        # Some backends permute the expert weights while leaving shape and
+        # dtype untouched, so the comparison above cannot see it. ROCm's AITER
+        # MoE sets ``is_shuffled`` on the repacked parameter; the FlashInfer
+        # preps set nothing, so the patched ``replace_parameter`` records the
+        # rewrite itself (``_FP8_REPACKED_ATTR``). Either is the only signal
         # that the live buffer is no longer in checkpoint layout.
         if getattr(param, "is_shuffled", False) or name in repacked:
             return True
@@ -501,7 +500,16 @@ def build_fp8_method_patchers(vllm_version):
         # ModelOpt's legacy substring exclusion can mistake a router's "gate"
         # for the dense "gate_up_proj". Only explicitly marked, verl-generated
         # MXFP8 configs use strict matching; checkpoint configs keep the original.
-        patchers.extend(build_mxfp8_exclusion_patchers())
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config  # noqa: F401
+        except ImportError:
+            pass  # Older vLLM without ModelOpt MXFP8: no exclusion matcher to patch.
+        else:
+            # Imported only here: the ``verl.utils.vllm`` package init pulls in vLLM,
+            # and CPU tests load this module standalone against a stubbed vLLM.
+            from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
+
+            patchers.extend(build_mxfp8_exclusion_patchers())
 
         # ModelOpt MXFP8 (CUDA): kernel post-processing swizzles weight_scale
         # (or dequantizes the weight to bf16 on the emulation backend), so a

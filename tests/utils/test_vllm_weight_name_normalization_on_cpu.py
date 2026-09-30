@@ -36,12 +36,49 @@ import torch
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _vocab_parallel_embedding_stubs():
+    """Stubs standing in for vLLM's ``VocabParallelEmbedding``, or {} if vLLM is real.
+
+    ``weight_update_utils`` imports that class at module scope for tied-alias
+    detection, so loading it on CPU needs a placeholder. Nothing the CPU tests
+    build is an embedding, so an empty class matches no module and yields no
+    aliases -- the same answer the real class gives for those fakes.
+    """
+    try:
+        importlib.import_module("vllm.model_executor.layers.vocab_parallel_embedding")
+    except ImportError:
+        pass
+    else:
+        return {}
+
+    names = [
+        "vllm",
+        "vllm.model_executor",
+        "vllm.model_executor.layers",
+        "vllm.model_executor.layers.vocab_parallel_embedding",
+    ]
+    stubs = {name: sys.modules.get(name) or types.ModuleType(name) for name in names}
+    stubs[names[-1]].VocabParallelEmbedding = type("VocabParallelEmbedding", (), {})
+    return stubs
+
+
 def _load_weight_update_utils():
     module_path = _REPO_ROOT / "verl/workers/rollout/vllm_rollout/weight_update_utils.py"
     spec = importlib.util.spec_from_file_location("weight_update_utils", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
-    spec.loader.exec_module(module)
+
+    stubs = _vocab_parallel_embedding_stubs()
+    saved = {name: sys.modules.get(name) for name in stubs}
+    try:
+        sys.modules.update(stubs)
+        spec.loader.exec_module(module)
+    finally:
+        for name, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
     return module
 
 
@@ -103,8 +140,21 @@ def _load_vllm_rollout_utils():
 
     fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
-    fake_vllm_quant.is_fp8_model = lambda config: False
+    fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
+    fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
+    fake_vllm_quant.process_quanted_weights_after_loading = lambda model, state: None
+
+    # Tests swap these for recorders on the loaded module via ``monkeypatch.setattr``.
+    fake_vllm_unquant = types.ModuleType("verl.utils.vllm.vllm_unquant_utils")
+    fake_vllm_unquant.stage_unquantized_moe_params = lambda model: []
+    fake_vllm_unquant.fold_unquantized_moe_params = lambda layers: contextlib.nullcontext()
+
+    fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
+    fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
+
+    fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_bucketed_transfer.BucketedWeightReceiver = None
 
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
     # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
@@ -142,6 +192,9 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
+        "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
+        "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
+        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
@@ -219,6 +272,11 @@ class _FakeModel:
     def named_parameters(self, remove_duplicate: bool = False):
         del remove_duplicate
         yield from self._params.items()
+
+    def named_modules(self, remove_duplicate: bool = False):
+        # Flat fake: only the root, so tied-embedding alias detection finds nothing.
+        del remove_duplicate
+        yield "", self
 
     def named_buffers(self):
         return iter(())
@@ -650,15 +708,8 @@ class _FakeBucketReceiver:
 
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     """A LoRA adapter split across two buckets yields one add_lora with all tensors."""
-    # Unlike the resolver tests above (which fully stub sys.modules), this drives the
-    # real update_weights_from_ipc path and imports the actual bucketed_weight_transfer
-    # module, whose package __init__ hard-requires vllm. vllm isn't in the `cpu` extra,
-    # so this is skipped under cpu_unit_tests and run in vllm.yml (the vllm venv).
-    pytest.importorskip("vllm")
-    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
-
     monkeypatch.setattr(
-        bwt,
+        _vllm_rollout_utils,
         "BucketedWeightReceiver",
         lambda *a, **k: _FakeBucketReceiver(
             [
@@ -696,13 +747,8 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
 
 def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     """Standard (non-LoRA) base sync loads every bucket immediately (no accumulation)."""
-    # See the note above: needs the real bucketed_weight_transfer (vllm-backed), which
-    # the `cpu` extra can't provide, so it is skipped here and run in vllm.yml.
-    pytest.importorskip("vllm")
-    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
-
     monkeypatch.setattr(
-        bwt,
+        _vllm_rollout_utils,
         "BucketedWeightReceiver",
         lambda *a, **k: _FakeBucketReceiver(
             [
@@ -733,6 +779,101 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     assert loaded == ["q.weight", "k.weight"]
 
 
+class _FakeTiedModel:
+    """Two qualnames over one shared embedding parameter, as tied models expose."""
+
+    def __init__(self, shared: torch.Tensor, prefix: str = "", mapper=None):
+        from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+
+        # Bypass __init__: it needs a distributed TP group we do not have here.
+        self._embed = object.__new__(VocabParallelEmbedding)
+        self._embed.named_parameters = lambda remove_duplicate=False: iter([("weight", shared)])
+        self._other = torch.nn.Linear(1, 1)
+        self._prefix = prefix
+        if mapper is not None:
+            self.hf_to_vllm_mapper = mapper
+
+    def named_modules(self, remove_duplicate: bool = False):
+        del remove_duplicate
+        yield "", self
+        yield f"{self._prefix}model.embed_tokens", self._embed
+        yield f"{self._prefix}lm_head", self._embed
+        yield "other", self._other
+
+
+def test_tied_embedding_aliases_keeps_first_qualname_canonical():
+    """The first traversed qualname wins; later ones are reported as aliases."""
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import tied_embedding_aliases
+
+    model = _FakeTiedModel(torch.zeros(2))
+
+    # model.embed_tokens is reached first, so only lm_head is an alias.
+    assert tied_embedding_aliases(model) == {"lm_head.weight"}
+
+
+def test_drop_tied_alias_updates_removes_only_the_alias():
+    """vLLM 0.29 rejects a bucket carrying just the alias, so the alias is dropped."""
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import drop_tied_alias_updates
+
+    model = _FakeTiedModel(torch.zeros(2))
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
+
+
+def test_drop_tied_alias_updates_passes_untied_models_through():
+    """No tied embedding means nothing is filtered."""
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import drop_tied_alias_updates
+
+    model = _FakeModel({"q.weight": torch.empty(0)})
+    updates = [("q.weight", torch.ones(1)), ("lm_head.weight", torch.ones(2))]
+
+    assert drop_tied_alias_updates(model, updates) == updates
+
+
+def test_drop_tied_alias_updates_maps_checkpoint_names_before_matching():
+    """Wrapped models name the alias differently than the checkpoint does.
+
+    Qwen3.5-VL sends ``lm_head.weight`` for what vLLM calls
+    ``language_model.lm_head.weight``; matching raw names misses it and vLLM then
+    rejects the bucket.
+    """
+    pytest.importorskip("vllm")
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import drop_tied_alias_updates
+
+    mapper = WeightsMapper(orig_to_new_prefix={"lm_head.": "language_model.lm_head."})
+    model = _FakeTiedModel(torch.zeros(2), prefix="language_model.", mapper=mapper)
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
+
+
+def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
+    """The quantized branch loads per bucket like the standard one, so it must drop the alias too."""
+    pytest.importorskip("vllm")
+    model = _FakeTiedModel(torch.zeros(2))
+    model.named_parameters = lambda remove_duplicate=False: iter(())
+    model.named_buffers = lambda: iter(())
+    worker = _make_worker(model)
+    loaded = []
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "load_quanted_weights",
+        lambda weights, runner, is_drafter=False: loaded.extend(name for name, _ in weights) or [],
+    )
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    worker._update_weights(updates, peft_config=None, base_sync_done=False)
+
+    assert loaded == ["q.weight"]
+
+
 # ---------------------------------------------------------------------------
 # The standard (non-quantized) sync stages unquantized MoE layers whose kernel prep
 # reshaped the expert weights, and folds them back after the last bucket
@@ -742,9 +883,7 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
 
 
 def _install_fake_receiver(monkeypatch, buckets):
-    fake_bwt = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
-    fake_bwt.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiver(buckets)
-    monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer", fake_bwt)
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeBucketReceiver(buckets))
 
 
 def _install_fake_moe_staging(monkeypatch, events, staged_layers):
@@ -762,10 +901,8 @@ def _install_fake_moe_staging(monkeypatch, events, staged_layers):
         yield
         events.append("fold:done")
 
-    fake_refit = types.ModuleType("verl.utils.vllm.vllm_moe_refit_utils")
-    fake_refit.stage_unquantized_moe_params = _stage
-    fake_refit.fold_unquantized_moe_params = _fold
-    monkeypatch.setitem(sys.modules, "verl.utils.vllm.vllm_moe_refit_utils", fake_refit)
+    monkeypatch.setattr(_vllm_rollout_utils, "stage_unquantized_moe_params", _stage)
+    monkeypatch.setattr(_vllm_rollout_utils, "fold_unquantized_moe_params", _fold)
 
 
 def _staging_sync_worker(model):

@@ -52,7 +52,11 @@ defaults:
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
-  # Whether it's a hybrid engine, currently only supports hybrid engine
+  # Whether actor and rollout colocate on the same GPUs (hybrid engine).
+  # Set to False only with the v1 separate_async trainer: no colocated
+  # rollout replicas are created on the training GPUs and rollout is served
+  # exclusively by the standalone rollout pool.
+  # All other trainers require True.
   hybrid_engine: true
 
   # Timeout for operations executed against the process group
@@ -239,13 +243,19 @@ trainer:
     # Asynchronous PPO trainer with colocated trainer and rollout
     colocate_async:
 
-      # Number of warmup batches to add before training loop starts
+      # Number of warmup batches to add before training loop starts.
+      # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
+      # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
+      # part is rounded down to a whole number of gen_batch_size chunks.
       num_warmup_batches: 1
 
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
-      # Number of warmup batches to add before training loop starts
+      # Number of warmup batches to add before training loop starts.
+      # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
+      # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
+      # part is rounded down to a whole number of gen_batch_size chunks.
       num_warmup_batches: 1
 
       # Frequency of parameter synchronization between trainer and rollout
@@ -281,7 +291,10 @@ trainer:
     # Replay buffer sampling strategy
     sampler:
 
-      # Maximum number of model versions that trajectory can span
+      # Maximum number of model versions that trajectory can span.
+      # null disables off-policy version control entirely: no samples are
+      # dropped or awaited for staleness (off-policy degree is then only
+      # bounded by rollout concurrency and feed/consume balance).
       max_off_policy_threshold: 8
 
       # How to handle trajectory that exceeds the maximum number of model versions

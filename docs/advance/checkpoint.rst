@@ -17,17 +17,17 @@ The ``checkpoint.save_contents`` / ``checkpoint.load_contents`` field accepts an
 Megatron:
 
 - ``model`` -- the framework-native model state. For **FSDP** this is the per-rank sharded state;
-  for **Megatron** this follows whether the engine provides a mbridge ``bridge`` and
+  for **Megatron** this follows whether the engine provides a megatron-bridge ``bridge`` and
   ``use_dist_checkpointing``: HF weights under ``model/huggingface/`` when the HF path is active,
   Megatron shards under ``model/dist_ckpt/`` when ``use_dist_checkpointing=True``, or **both**
   when a ``bridge`` is present and dist shards are also enabled for the ``model`` slot.
 - ``optimizer`` -- the optimizer state (sharded for both FSDP and Megatron).
 - ``extra`` -- LR scheduler state, RNG states, and (for Megatron) the serialised
   ``TransformerConfig``.
-- ``hf_model`` -- the full model in HuggingFace format. **Megatron requires a non-``None`` mbridge
+- ``hf_model`` -- the full model in HuggingFace format. **Megatron requires a non-``None`` megatron-bridge
   ``bridge``** (the checkpoint manager checks ``bridge``, not a separate flag) whenever ``hf_model``
   appears in ``save_contents`` or ``load_contents``. In practice the engine supplies the bridge when
-  mbridge is enabled (``use_mbridge=True`` in YAML). If the checkpoint also uses
+  megatron-bridge is enabled (``use_mbridge=True`` in YAML). If the checkpoint also uses
   ``use_dist_checkpointing=True`` for the ``model`` slot, HF export (``model/huggingface/``) is
   written **in addition to** Megatron shards under ``model/dist_ckpt/``. When only the HF ``model``
   path is used (no dist shards for weights), ``model`` and ``hf_model`` refer to the same HF tree
@@ -138,8 +138,8 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
     │   │   ├── ckpt_contents.json       # manifest mapping each saved content (model, optimizer, …) to its on-disk path; see "Locating saved contents" below
     │   │   ├── transformer_config.json  # serialised Megatron TransformerConfig (written when ``extra`` is in save_contents)
     │   │   ├── model
-    │   │   │   ├── huggingface          # HF weights + config + tokenizer (mbridge ``bridge`` + ``model`` / ``hf_model`` in save_contents)
-    │   │   │   └── dist_ckpt            # Megatron model shards when ``use_dist_checkpointing``; PEFT adapter shards may live here with mbridge
+    │   │   │   ├── huggingface          # HF weights + config + tokenizer (megatron-bridge ``bridge`` + ``model`` / ``hf_model`` in save_contents)
+    │   │   │   └── dist_ckpt            # Megatron model shards when ``use_dist_checkpointing``; PEFT adapter shards may live here with megatron-bridge
     │   │   ├── optimizer
     │   │   │   └── dist_ckpt            # optimizer + lr_scheduler shards (written when ``optimizer`` is in save_contents)
     │   │   └── extra
@@ -188,7 +188,7 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
           "backend": {"has_bridge": true, "use_dist_checkpointing": false, "peft": false},
           "save_contents": ["model", "optimizer", "extra"],
           "contents": {
-            "model":              {"path": "model/huggingface",    "format": "huggingface", "backend": "mbridge"},
+            "model":              {"path": "model/huggingface",    "format": "huggingface", "backend": "megatron-bridge"},
             "optimizer":          {"path": "optimizer/dist_ckpt",  "format": "megatron_dist_checkpoint"},
             "lr_scheduler":       {"path": "optimizer/dist_ckpt",  "format": "megatron_dist_checkpoint", "key": "lr_scheduler"},
             "rng_state":          {"path": "extra/dist_ckpt",      "format": "megatron_dist_checkpoint", "key": "rng_state"},
@@ -197,7 +197,7 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
             "tokenizer":          {"path": "model/huggingface",    "format": "huggingface"}
           },
           "directories": {
-            "model/huggingface":   "HuggingFace-format artifacts written via mbridge: model weights, config.json, …",
+            "model/huggingface":   "HuggingFace-format artifacts written via megatron-bridge: model weights, config.json, …",
             "optimizer/dist_ckpt": "Megatron dist_checkpointing shards for the optimizer state …",
             "extra/dist_ckpt":     "Megatron dist_checkpointing shards for extra state (rng_state)."
           },
@@ -210,8 +210,8 @@ Megatron Checkpoint Manager Backends
 Megatron model weights are controlled by two booleans on
 ``actor_rollout_ref.actor.megatron`` (and the symmetric ``critic`` / ``ref`` keys):
 
-- **``use_mbridge`` (default ``True``)** -- when enabled, the Megatron engine builds the mbridge /
-  Megatron-Bridge instance passed into ``MegatronCheckpointManager`` as ``bridge``, which is
+- **``use_mbridge`` (default ``True``)** -- when enabled, the Megatron engine builds the Megatron-Bridge
+  instance passed into ``MegatronCheckpointManager`` as ``bridge``, which is
   **required** for HuggingFace-format model weights under
   ``global_step_${i}/${role}/model/huggingface/``. The manager itself only checks ``bridge is not
   None`` for ``hf_model`` (and other HF model paths).
@@ -220,7 +220,7 @@ Megatron model weights are controlled by two booleans on
   ``model`` slot are written/read under ``global_step_${i}/${role}/model/dist_ckpt/``.
 
 The two flags are **independent**: both may be ``True`` to persist resume-friendly shards **and**
-an HF tree in the same step. Setting ``use_mbridge=False`` disables HF export/load via mbridge;
+an HF tree in the same step. Setting ``use_mbridge=False`` disables HF export/load via megatron-bridge;
 ``use_dist_checkpointing=False`` disables Megatron model shards for the ``model`` slot (unless
 PEFT still needs adapter shards under ``model/dist_ckpt/``).
 
@@ -242,40 +242,40 @@ and ``save_contents`` entry is resolved:
 
 In tabular form:
 
-+-----------------------------+----------------+----------------------------------------------------------+
-| Flags (mbridge / dist_ckpt) | save_contents  | Behaviour                                                |
-+=============================+================+==========================================================+
-| mbridge only                | ``model``      | HF weights under ``model/huggingface/``.                 |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge only                | ``hf_model``   | Same (HF tree); ``model`` / ``hf_model`` deduplicated.   |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge only                | both           | Same HF checkpoint saved **once** (deduplicated).        |
-+-----------------------------+----------------+----------------------------------------------------------+
-| dist_ckpt only              | ``model``      | Sharded weights under ``model/dist_ckpt/``.              |
-+-----------------------------+----------------+----------------------------------------------------------+
-| dist_ckpt only              | ``hf_model``   | **Error** -- ``hf_model`` needs a ``bridge``             |
-|                             |                | (enable mbridge in engine).                              |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge + dist_ckpt         | ``model``      | Sharded weights under ``model/dist_ckpt/`` only (no HF   |
-|                             |                | weight export unless ``hf_model`` is also listed).       |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge + dist_ckpt         | ``model`` +    | Megatron shards **and** HF export (two on-disk trees).   |
-|                             | ``hf_model``   |                                                          |
-+-----------------------------+----------------+----------------------------------------------------------+
++-------------------------------------+---------------+--------------------------------------------------------+
+| Flags (megatron-bridge / dist_ckpt) | save_contents | Behaviour                                              |
++=====================================+===============+========================================================+
+| megatron-bridge only                | ``model``     | HF weights under ``model/huggingface/``.               |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge only                | ``hf_model``  | Same (HF tree); ``model`` / ``hf_model`` deduplicated. |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge only                | both          | Same HF checkpoint saved **once** (deduplicated).      |
++-------------------------------------+---------------+--------------------------------------------------------+
+| dist_ckpt only                      | ``model``     | Sharded weights under ``model/dist_ckpt/``.            |
++-------------------------------------+---------------+--------------------------------------------------------+
+| dist_ckpt only                      | ``hf_model``  | **Error** -- ``hf_model`` needs a ``bridge``           |
+|                                     |               | (enable megatron-bridge in engine).                    |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge + dist_ckpt         | ``model``     | Sharded weights under ``model/dist_ckpt/`` only (no HF |
+|                                     |               | weight export unless ``hf_model`` is also listed).     |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge + dist_ckpt         | ``model`` +   | Megatron shards **and** HF export (two on-disk trees). |
+|                                     | ``hf_model``  |                                                        |
++-------------------------------------+---------------+--------------------------------------------------------+
 
 In all rows above, ``optimizer`` and ``extra`` (when listed in ``save_contents``) are saved through
 ``dist_checkpointing`` into their own directories -- ``optimizer/dist_ckpt/`` and
 ``extra/dist_ckpt/``.  PEFT/LoRA adapter shards are written into ``model/dist_ckpt/`` even with
-the mbridge backend (because mbridge handles only base-model weights), sitting next to the
-mbridge-produced ``model/huggingface/`` tree.
+the megatron-bridge backend (because megatron-bridge handles only base-model weights), sitting next to the
+megatron-bridge-produced ``model/huggingface/`` tree.
 
 Recommended Configurations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **Default / production**: keep ``use_mbridge=True`` and use ``save_contents=['model',
-  'optimizer', 'extra']``. The ``model/huggingface/`` folder produced by mbridge can be loaded
+  'optimizer', 'extra']``. The ``model/huggingface/`` folder produced by megatron-bridge can be loaded
   directly by HuggingFace Transformers without any further conversion step.
-- **HuggingFace-only export**: ``save_contents=['hf_model']`` (mbridge required). Useful when
+- **HuggingFace-only export**: ``save_contents=['hf_model']`` (megatron-bridge required). Useful when
   you only need a deployable HF checkpoint and not a resumable training state.
 - **Pure Megatron sharded model**: ``use_mbridge=False`` and ``use_dist_checkpointing=True``
   with ``save_contents=['model', 'optimizer', 'extra']``. The model goes into ``model/dist_ckpt/``.
@@ -364,7 +364,7 @@ Current implementation use solution 2.
 HuggingFace to Megatron DistCheckpoint details
 ----------------------------------------------
 
-Through ``mbridge``, we can directly save the mcore model to huggingface format during training.
+Through ``megatron-bridge``, we can directly save the mcore model to huggingface format during training.
 No need to convert the model to Megatron dist-checkpoint format.
 
 .. note::
