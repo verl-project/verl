@@ -421,16 +421,13 @@ class LLMServerManager:
         await instance._init_global_load_balancer()
         return instance
 
-    async def _initialize_llm_servers(self, start_rank: int = None):
-        """Initialize the LLM server replicas.
+    def _get_rollout_replica_world_size(self) -> int:
+        """Return the accelerator footprint of one rollout replica.
 
-        Args:
-            start_rank: First ``replica_rank`` to assign.  Defaults to ``self.start_rank``
-                so standalone replicas can avoid Ray named-actor collisions with hybrid
-                replicas (which start at 0) when both coexist (e.g. separate async).
+        Subclasses may override this for custom rollout parallelism without
+        replacing the server initialization lifecycle. Replica implementations
+        must use the same footprint for worker slicing and rank mapping.
         """
-        if start_rank is None:
-            start_rank = self.start_rank
         rollout_world_size = (
             self.rollout_config.tensor_model_parallel_size
             * self.rollout_config.data_parallel_size
@@ -452,6 +449,19 @@ class LLMServerManager:
                 * self.rollout_config.data_parallel_size
                 * self.rollout_config.pipeline_model_parallel_size
             )
+        return rollout_world_size
+
+    async def _initialize_llm_servers(self, start_rank: int = None):
+        """Initialize the LLM server replicas.
+
+        Args:
+            start_rank: First ``replica_rank`` to assign.  Defaults to ``self.start_rank``
+                so standalone replicas can avoid Ray named-actor collisions with hybrid
+                replicas (which start at 0) when both coexist (e.g. separate async).
+        """
+        if start_rank is None:
+            start_rank = self.start_rank
+        rollout_world_size = self._get_rollout_replica_world_size()
         world_size = (
             self.worker_group.world_size
             if self.worker_group
