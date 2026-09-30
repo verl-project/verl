@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 09/21/2026.
+Last updated: 09/30/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -464,7 +464,7 @@ ____________________________________________________
       weight_decay_incr_style: constant # select from constant/linear/cosine
       lr_wsd_decay_style: exponential # select from constant/exponential/cosine
       lr_wsd_decay_steps: null
-      use_checkpoint_opt_param_scheduler: False # take scheduler hyper-parameters from the checkpoint
+      use_checkpoint_opt_param_scheduler: False # configured hyper-parameters win; True uses the checkpoint's. Position resumes either way.
 
 
 Notice that there are some differences in APIs between Megatron optimizer and FSDP optimizer.
