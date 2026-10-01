@@ -646,6 +646,7 @@ class vLLMHttpServer:
         if not sampling_params.get("stop") and not sampling_params.get("bad_words"):
             sampling_params.setdefault("detokenize", False)
 
+        self._preprocess_sampling_params(sampling_params)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
@@ -709,13 +710,14 @@ class vLLMHttpServer:
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
         if not final_res.outputs:
-            return TokenOutput(
+            aborted = TokenOutput(
                 token_ids=[],
                 log_probs=None,
                 routed_experts=None,
                 stop_reason="aborted",
                 extra_fields=extra_fields,
             )
+            return self._postprocess_output(aborted, final_res, sampling_params)
 
         # Prefix-cache hit count for this request; consumers surface it as
         # OpenAI usage.prompt_tokens_details.cached_tokens.
@@ -771,7 +773,7 @@ class vLLMHttpServer:
                 extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
                 extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
                 extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
-        return TokenOutput(
+        output = TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
@@ -779,6 +781,7 @@ class vLLMHttpServer:
             num_preempted=num_preempted,
             extra_fields=extra_fields,
         )
+        return self._postprocess_output(output, final_res, sampling_params)
 
     def _select_decode_peer(self) -> ActorHandle:
         """Round-robin across decode peers."""
@@ -1428,6 +1431,23 @@ class vLLMHttpServer:
         if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
             return 1
         return 2
+
+    def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
+        """Mutate a request's sampling_params in-place after defaults are filled.
+
+        Runs before SamplingParams is built and before the request is admitted, so an
+        exception fails the request without touching the admission gate.
+        """
+
+    def _postprocess_output(
+        self, output: TokenOutput, final_res: RequestOutput, sampling_params: SamplingParams
+    ) -> TokenOutput:
+        """Return the output of a request that reached the engine, including aborted ones.
+
+        Runs after the admission counter is released, so an exception fails only this
+        request. Requests rejected at the admission gate never reach this hook.
+        """
+        return output
 
     async def _sleep_hybrid(self):
         """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
