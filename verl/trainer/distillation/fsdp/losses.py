@@ -78,11 +78,13 @@ def compute_forward_kl_topk(
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
+    forced_max_seqlen: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute forward KL distillation loss using top-k log probabilities.
 
     Args:
         student_logits: (bsz, seqlen/sp_size, vocab_size).
+        forced_max_seqlen: accepted for signature parity with the Megatron path; unused here.
         teacher_topk_log_probs: (bsz, seqlen, topk).
         teacher_topk_ids: (bsz, seqlen, topk).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5

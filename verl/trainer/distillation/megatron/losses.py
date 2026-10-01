@@ -268,6 +268,7 @@ def compute_forward_kl_topk(
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
+    forced_max_seqlen: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute forward KL distillation loss using top-k log probabilities.
 
@@ -276,6 +277,9 @@ def compute_forward_kl_topk(
         teacher_topk_log_probs: (bsz, seqlen, topk).
         teacher_topk_ids: (bsz, seqlen, topk).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+        forced_max_seqlen: raw (unaligned) mini-batch global max seqlen; when set, the BSHD
+            path pads the teacher tensors to it so they align with ``student_logits`` that were
+            padded by ``pad_bshd_to_minibatch_max``. Ignored for the THD path.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -289,8 +293,12 @@ def compute_forward_kl_topk(
         teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
         teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
     else:
-        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
+        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_log_probs, pre_process=True, forced_max_seqlen=forced_max_seqlen
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_ids, pre_process=True, forced_max_seqlen=forced_max_seqlen
+        )
     assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
 
     # 2. compute token-wise KL divergence across tp groups
