@@ -395,6 +395,9 @@ def compute_distillation_loss_reverse_kl_estimator(
     assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
 
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
+    if loss_config.log_prob_min_clamp is not None:
+        student_log_probs = student_log_probs.clamp_min(loss_config.log_prob_min_clamp)
+        teacher_log_probs = teacher_log_probs.clamp_min(loss_config.log_prob_min_clamp)
     distillation_losses = kl_penalty(
         logprob=student_log_probs, ref_logprob=teacher_log_probs, kl_penalty=loss_config.loss_mode
     )
