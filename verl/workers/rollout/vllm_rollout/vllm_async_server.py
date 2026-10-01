@@ -106,6 +106,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        actor_strategy: Optional[str] = None,
     ):
         """
         Args:
@@ -119,6 +120,8 @@ class vLLMHttpServer:
             cuda_visible_devices (str): cuda visible devices.
             disaggregation_role: PD role, or ``"null"`` for normal rollout.
             disaggregation_kv_transfer_config: vLLM KVTransferConfig dict for PD.
+            actor_strategy: Training backend that owns the rollout weight sync
+                (``fsdp``, ``fsdp2``, ``megatron``, ...). Unknown stays unset.
         """
         if disaggregation_role not in ("null", "prefill", "decode"):
             raise ValueError(f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}")
@@ -128,6 +131,8 @@ class vLLMHttpServer:
             )
         self._disaggregation_role = disaggregation_role
         self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
+        # FSDP merged LoRA sleeps at level 1. Megatron merged LoRA stays at level 2.
+        self.actor_strategy = actor_strategy
         # Filled by vLLMPDReplica.set_pd_peer for prefill-side routing.
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_prefill_side_channel_port: Optional[int] = None
@@ -1411,13 +1416,55 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
+    def _lora_configured(self) -> bool:
+        """True when this replica trains a LoRA, merged into the base or served as an adapter."""
+        lora_cfg = getattr(self.model_config, "lora", None) or {}
+        rank = lora_cfg.get("rank", 0) if hasattr(lora_cfg, "get") else 0
+        return getattr(self.model_config, "lora_rank", 0) > 0 or rank > 0
+
+    def _merged_lora(self) -> bool:
+        """True when LoRA is folded into the base weights before the rollout sync."""
+        if not self._lora_configured():
+            return False
+        lora_cfg = getattr(self.model_config, "lora", None) or {}
+        if not hasattr(lora_cfg, "get"):
+            return False
+        return bool(lora_cfg.get("merge", False))
+
+    def _fsdp_peft_merged_lora(self) -> bool:
+        """True when merged LoRA is synced through FSDP's PEFT export.
+
+        ``FSDPEngine._merged_lora_per_tensor_param`` sends
+        ``normalize_peft_param_name(state_dict())``. That drops adapter keys and
+        is not a full refill of a level-2 discard (#7904). ``fsdp_turbo`` uses
+        the same engine. Megatron ``export_hf_weights`` is a full HF export and
+        stays at level 2. An unset strategy stays at level 2 as well: only the
+        PEFT-export backends opt into level 1.
+        """
+        if not self._merged_lora():
+            return False
+        # fsdp / fsdp2 / fsdp_turbo share FSDPEngine's PEFT merge export.
+        return getattr(self, "actor_strategy", None) in {"fsdp", "fsdp2", "fsdp_turbo"}
+
     def _resolve_sleep_level(self) -> int:
         """Deepest sleep level whose discarded state a subsequent weight sync can restore.
 
-        MTP drafter-only weights are initialized by vLLM and are not guaranteed
-        to be restored by actor weight sync after level 2 sleep discards them.
-        lora only update adapter weights, so set sleep level to 1.
-        vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        Level 2 discards parameter storage. A full checkpoint sync rewrites every
+        parameter, so that is the right level for full-parameter training and for
+        Megatron merged LoRA (the bridge exports a complete HF state dict).
+
+        Adapter sync rewrites only the adapter, so it stays at level 1. FSDP
+        merged LoRA (``model.lora.merge=true`` with ``actor.strategy`` in
+        ``fsdp`` / ``fsdp2`` / ``fsdp_turbo``) sends a PEFT export, and vLLM is
+        not started with ``enable_lora`` on that path. After a level-2 discard,
+        any parameter that export does not overwrite stays uninitialized and
+        rollout text becomes token soup (#7904). Level 1 offloads the parameters
+        and wake restores them; the merged sync then overwrites those restored
+        values.
+
+        MTP drafter-only weights are initialized by vLLM and are not restored by
+        actor weight sync. vllm_ascend does not support sleep level 2. Enabling
+        EP during training may lead to accuracy issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1425,12 +1472,21 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        # Adapter sync updates only the adapter. FSDP merged LoRA sends a PEFT
+        # export, which is not a full refill of a level-2 discard (#7904).
+        if (
+            mtp_rollout_enabled
+            or self.lora_as_adapter
+            or self._fsdp_peft_merged_lora()
+            or is_torch_npu_available(check_device=False)
+        ):
             return 1
         return 2
 
     async def _sleep_hybrid(self):
-        """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
+        """HYBRID sleep: adapter LoRA, FSDP merged LoRA, and MTP need level=1.
+
+        Full-parameter training and Megatron merged LoRA use level=2.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
         that sleep is properly propagated to all data-parallel worker processes.
@@ -1452,10 +1508,12 @@ class vLLMReplica(RolloutReplica):
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
         name_suffix: str = "",
+        actor_strategy: Optional[str] = None,
     ):
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
+        self.actor_strategy = actor_strategy
         self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):
@@ -1517,6 +1575,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                actor_strategy=self.actor_strategy,
             )
             self.servers.append(server)
 
