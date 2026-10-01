@@ -483,8 +483,11 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
 
 
 def apply_vllm_quant_patches():
-    """Install the vLLM patches the refit path depends on. Must run pre-engine.
+    """Install vLLM refit patches before engine setup and quant config parsing.
 
+    The opt-in ModelOpt MXFP8 parser wrapper must run when the HF quant config
+    is parsed, so do not defer installation until after parsing. Each model-
+    building worker also needs the patches before constructing layers.
     These have to be in place before the engine builds, because recording each
     layer's checkpoint layout happens inside the patched hook during the
     initial load. The mxfp4 path needs no startup patch -- it derives the
