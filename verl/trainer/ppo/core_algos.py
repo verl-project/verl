@@ -1997,7 +1997,20 @@ def compute_policy_loss_geo_mean(
         )
         pg_losses = pg_losses * seq_is_weights
 
-    pg_loss = torch.mean(pg_losses)
+    # A microbatch contributes to the optimizer-minibatch sequence mean.
+    # Falling back to a local mean is also incorrect when dp_size == 1.
+    global_batch_info = config.global_batch_info
+    global_batch_size = global_batch_info.get("global_batch_size")
+    if global_batch_size is None or global_batch_size <= 0:
+        raise ValueError("geo_mean requires a positive optimizer-minibatch global_batch_size")
+    if global_batch_info.get("dp_size", 1) <= 0:
+        raise ValueError("geo_mean requires a positive dp_size")
+    pg_loss = agg_loss(
+        loss_mat=pg_losses.unsqueeze(-1),
+        loss_mask=(response_mask_sum > 0).unsqueeze(-1).to(pg_losses.dtype),
+        loss_agg_mode="seq-mean-token-sum",
+        **global_batch_info,
+    )
 
     # higher: ratio is too large that need clamp to clip_high (when adv > 0)
     clipped = torch.ne(negative_approx_kl, negative_approx_kl_clamp)
