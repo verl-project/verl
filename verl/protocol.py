@@ -251,8 +251,11 @@ def serialize_tensordict(batch: TensorDict) -> tuple[tuple[int, ...], Optional[s
             encoded_items[k] = serialize_single_tensor(v)
         else:
             layout = str(v.layout).removeprefix("torch.")
+            # record _ragged_idx so the reader can rebuild the exact layout;
+            # may be None for layouts without explicit ragged metadata
+            ragged_idx = getattr(v, "_ragged_idx", None)
             data = [serialize_single_tensor(tensor) for tensor in v.unbind()]
-            encoded_items[k] = (layout, data)
+            encoded_items[k] = (layout, data, ragged_idx)
 
     batch_size = tuple(batch.batch_size)
     device = str(batch.device) if batch.device is not None else None
@@ -276,17 +279,44 @@ def deserialize_tensordict(arr: Any) -> TensorDict:
     batch_size, device, encoded_items = arr
     decoded_items: dict[str, Any] = {}
 
+    # local import to avoid a module-level cycle (mirrors other call sites)
+    from verl.utils import tensordict_utils as tu
+
     for k, v in encoded_items.items():
-        if len(v) == 3:
-            # decode single tensor
-            decoded_items[k] = deserialize_single_tensor(v)
+        # nested tensors are encoded as (layout, data[, ragged_idx]); a 3-tuple
+        # whose first slot is a torch layout string is a nested encoding, any
+        # other 3-tuple is a single-tensor encoding (dtype, shape, data)
+        if len(v) == 3 and v[0] == "jagged":
+            # decode jagged nested tensor with the serialized ragged_idx: rebuild via
+            # nested_tensor_from_tensor_list instead of as_nested_tensor, whose
+            # uniform-input quirk yields ragged@1 for equal-length 2D samples
+            _, data, ragged_idx = v
+            samples = [deserialize_single_tensor(tensor) for tensor in data]
+            if ragged_idx is None:
+                ragged_idx = samples[0].dim()
+            decoded_items[k] = tu.nested_tensor_from_tensor_list(samples, ragged_idx=ragged_idx)
+        elif len(v) == 3 and v[0] == "strided":
+            # strided nested tensor: no explicit ragged metadata is serialized; keep
+            # the original as_nested_tensor path so these payloads round-trip exactly
+            # as before (they may carry layouts the explicit builder cannot express)
+            _, data, _ = v
+            torch_layout = getattr(torch, "strided")
+            decoded_items[k] = torch.nested.as_nested_tensor(
+                [deserialize_single_tensor(tensor) for tensor in data], layout=torch_layout
+            )
         elif len(v) == 2:
-            # decode nested tensor
+            # legacy nested encoding written by older serializers: keep the original
+            # as_nested_tensor path so old payloads round-trip exactly as before.
+            # Uniform-quirk layouts inside legacy payloads are repaired on
+            # consumption by normalize_3d_position_ids.
             layout, data = v
             torch_layout = getattr(torch, layout)
             decoded_items[k] = torch.nested.as_nested_tensor(
                 [deserialize_single_tensor(tensor) for tensor in data], layout=torch_layout
             )
+        elif len(v) == 3:
+            # decode single tensor
+            decoded_items[k] = deserialize_single_tensor(v)
         else:
             raise ValueError(f"Invalid tensor encoding format, expected length 2 or 3, got {len(v)}")
 
