@@ -16,7 +16,7 @@
 Three things the MXFP8 additions to ``vllm_quant_utils.py`` / ``vllm_fp8_utils.py`` have to get
 right, each checked here without a GPU or a real vLLM:
 
-1. ``is_quantized_model`` / ``is_mxfp8_vllm_cuda`` recognise vLLM's ``ModelOptMxFp8Config`` so the
+1. ``is_quantized_model`` / ``is_vllm_modelopt_mxfp8_quant`` recognise vLLM's ``ModelOptMxFp8Config`` so the
    weight sync takes the quantize + stage/reprocess path instead of the plain bf16 path.
 2. ``quant_weights`` under that config goes through ``mxfp8_quantize`` and yields the scale under
    the ModelOpt name ``<weight>_scale`` (blockwise fp8 uses ``_scale_inv``).
@@ -168,10 +168,10 @@ def test_is_quantized_model_recognises_modelopt_mxfp8_config():
     module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
     with _StubVllm() as stub:
         mx = stub.modelopt.ModelOptMxFp8Config()
-        assert module.is_mxfp8_vllm_cuda(mx)
+        assert module.is_vllm_modelopt_mxfp8_quant(mx)
         assert module.is_quantized_model(SimpleNamespace(quant_config=mx))
         assert module.is_quantized_model(SimpleNamespace(quant_config=stub.fp8.Fp8Config()))
-        assert not module.is_mxfp8_vllm_cuda(stub.fp8.Fp8Config())
+        assert not module.is_vllm_modelopt_mxfp8_quant(stub.fp8.Fp8Config())
         assert not module.is_quantized_model(SimpleNamespace(quant_config=object()))
 
 
