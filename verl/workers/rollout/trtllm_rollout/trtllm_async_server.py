@@ -511,6 +511,8 @@ class TRTLLMHttpServer:
 
                 raw = (profiler_config.global_tool_config or {}).get("nsys")
                 tool_config = omega_conf_to_dataclass(raw) if raw is not None else NsightToolConfig()
+            elif profiler_config.tool is not None and get_platform().dist_profiler_cls(profiler_config.tool):
+                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
             elif profiler_config.tool is not None:
                 logger.warning(f"trtllm rollout: unsupported profiler tool '{profiler_config.tool}', disabling")
                 profiler_config = None

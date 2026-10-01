@@ -20,6 +20,8 @@ import os
 import subprocess
 from typing import Callable, Optional
 
+from verl.plugin.platform import get_platform
+
 from ..tracking import RLInsightLogger
 from .config import ProfilerConfig
 
@@ -94,6 +96,9 @@ class DistProfiler:
     - torch: PyTorch torch.profiler wrapper
     - torch_memory: Torch CUDA/NPU memory snapshot dump
     - precision_debugger: msprobe precision debugger
+    - any tool name the current platform's dist_profiler_cls() recognizes
+      (see verl/plugin/platform/platform_base.py), e.g. a hardware plugin's
+      own vendor-specific profiler
     """
 
     def __init__(
@@ -173,6 +178,8 @@ class DistProfiler:
             from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
 
             self._impl = _Precision(precision_cfg=tool_config, rank=rank, save_path=config.save_path)
+        elif self._tool is not None and (_plugin_cls := get_platform().dist_profiler_cls(self._tool)) is not None:
+            self._impl = _plugin_cls(rank=rank, config=config, tool_config=tool_config, **kwargs)
         else:
             # Fallback to a no-op impl
             self._impl = _NoOpProfiler()
