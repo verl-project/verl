@@ -177,8 +177,11 @@ class MultiTurnSFTDataset(Dataset):
 
         # system prompt: <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
         # generation prompt: <|im_start|>assistant\n
+        apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
+        if self.enable_thinking_default is not None:
+            apply_chat_template_kwargs["enable_thinking"] = self.enable_thinking_default
         self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(
-            self.tokenizer, **self.apply_chat_template_kwargs
+            self.tokenizer, **apply_chat_template_kwargs
         )
 
     def __len__(self):
