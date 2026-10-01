@@ -1095,7 +1095,7 @@ class VLContinuousTokenMixin:
                 for block in content:
                     if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
                         image_ref = block.get("image")
-                        if not image_ref:
+                        if image_ref is None:
                             image_url = block.get("image_url")
                             if isinstance(image_url, dict):
                                 image_ref = image_url.get("url")
@@ -1104,6 +1104,61 @@ class VLContinuousTokenMixin:
                         if image_ref is not None:
                             images.append(image_ref)
         return images
+
+    def merge_context_tokens(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
+    ) -> MergeResult:
+        """Merge using resolved media ordered across the full updated conversation.
+
+        Bind media to temporary messages so processor rendering leaves caller data untouched.
+        """
+        if images is None and videos is None and audios is None:
+            return super().merge_context_tokens(
+                previous_messages,
+                updated_messages,
+                runtime_token_ids,
+                tools=tools,
+            )
+
+        self._assert_append_only(previous_messages, updated_messages)
+        bound_messages = list(updated_messages)
+        resolved_media = {"image": images, "video": videos, "audio": audios}
+        media_indices = {"image": 0, "video": 0, "audio": 0}
+        for message_index, message in enumerate(updated_messages):
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block_index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                media_type = "image" if block.get("type") == "image_url" else block.get("type")
+                values = resolved_media.get(media_type)
+                if values is None:
+                    continue
+                media_index = media_indices[media_type]
+                if media_index >= len(values):
+                    raise ValueError(f"Continuous Token {media_type} data must align with message blocks")
+                if bound_messages[message_index] is message:
+                    bound_messages[message_index] = {**message, "content": list(content)}
+                bound_messages[message_index]["content"][block_index] = {**block, media_type: values[media_index]}
+                media_indices[media_type] += 1
+        for media_type, values in resolved_media.items():
+            if values is not None and media_indices[media_type] != len(values):
+                raise ValueError(f"Continuous Token {media_type} data must align with message blocks")
+        return super().merge_context_tokens(
+            bound_messages[: len(previous_messages)],
+            bound_messages,
+            runtime_token_ids,
+            tools=tools,
+        )
 
     def _extract_videos_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
         """Extract video references from OpenAI-style content blocks."""
@@ -1374,7 +1429,7 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
                         image_ref = block.get("image")
-                        if not image_ref:
+                        if image_ref is None:
                             image_url = block.get("image_url")
                             if isinstance(image_url, dict):
                                 image_ref = image_url.get("url")
@@ -1460,6 +1515,7 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         runtime_token_ids: list[int],
         *,
         tools: list[dict[str, Any]] | None = None,
+        images: list[Any] | None = None,
     ) -> MergeResult:
         """Merge tokens: always use processor + prefix diff for VL2.
 
@@ -1469,7 +1525,7 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         self._assert_append_only(previous_messages, updated_messages)
 
         # Always use full render + prefix diff (VL2 has no apply_chat_template)
-        all_images = self._extract_images_from_messages(updated_messages)
+        all_images = images if images is not None else self._extract_images_from_messages(updated_messages)
         full_token_ids = self._render_via_processor(updated_messages, all_images, add_generation_prompt=True)
 
         prefix_len = len(runtime_token_ids)
