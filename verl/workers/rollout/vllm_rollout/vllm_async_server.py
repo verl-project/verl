@@ -1418,6 +1418,9 @@ class vLLMHttpServer:
         to be restored by actor weight sync after level 2 sleep discards them.
         lora only update adapter weights, so set sleep level to 1.
         vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+
+        With resync_base, adapter mode restores the discarded base weights on
+        every update, so it can also use level 2.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1425,8 +1428,10 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        if mtp_rollout_enabled or is_torch_npu_available(check_device=False):
             return 1
+        if self.lora_as_adapter:
+            return 2 if self.model_config.lora.get("resync_base", False) else 1
         return 2
 
     async def _sleep_hybrid(self):

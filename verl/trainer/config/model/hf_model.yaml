@@ -105,6 +105,10 @@ lora:
   # whether to sync weights / refit by either merging LoRA adapters into the base model weights before transferring to vLLM (for better inference speed but more refit time and potential precision loss). If this is False, it will load separate adapters.
   merge: False
 
+  # With merge=False, discard rollout base weights on sleep and re-sync them
+  # before the adapter on every update. Otherwise, keep the base via level-1 sleep.
+  resync_base: False
+
   # LoRA rank (Dimension of the low-rank projection space.). Set to 0 to disable LoRA
   rank: 0  # typical values: 8, 16, 32, 64
   
