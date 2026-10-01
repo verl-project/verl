@@ -691,6 +691,7 @@ class SGLangHttpServer:
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=finish_reason,
+            is_truncated=(finish_reason == "length") if finish_reason is not None else None,
             extra_fields=extra_fields,
         )
 
