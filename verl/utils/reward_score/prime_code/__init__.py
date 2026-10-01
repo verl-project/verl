@@ -29,8 +29,10 @@ def compute_score(completion, test_cases, continuous=False):
             print(f"Error:{e}")
 
         # Complete check on all in-out pairs first. If there is no failure, per-sample test can be skipped.
+        full_res = []
         try:
             res, metadata = apps_check_correctness(in_outs=test_cases, generation=solution, timeout=5, debug=False)
+            full_res = res
             metadata = dict(enumerate(metadata))[0]
             success = all(map(lambda x: x is True, res))
             if success:
@@ -64,6 +66,10 @@ def compute_score(completion, test_cases, continuous=False):
 
                 if test_case_id >= 9:
                     break
+            # The full check stops at the first failing test. If that was a wrong answer on a test beyond the
+            # ones re-run above, count it, so a program already known to be wrong cannot score 1.0.
+            if full_res and full_res[-1] is False and len(full_res) > len(res_list):
+                res_list.append(False)
             res_count = len(res_list) if len(res_list) > 0 else 1
             success = sum(map(lambda x: x is True, res_list)) / res_count
     except Exception:

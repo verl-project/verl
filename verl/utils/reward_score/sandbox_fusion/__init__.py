@@ -100,6 +100,9 @@ def compute_score(
                 score = 0.0
             else:
                 passed_count = sum(1 for r in res_list[:num_to_consider] if r is True)
+                # A wrong answer after the first N cases still counts, so a known-wrong program cannot score 1.0.
+                if passed_count == num_to_consider and any(r is False for r in res_list[num_to_consider:]):
+                    num_to_consider += 1
                 score = passed_count / num_to_consider
             # Return all metadata, even if score is based on the first N
             final_metadata = metadata_list
