@@ -224,6 +224,17 @@ class ToolListWrap:
         self.tools = tools
 
 
+class RolloutContext(BaseModel):
+    """Immutable runtime metadata for one agent-loop invocation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    is_validation: bool
+    """Whether this rollout belongs to evaluation rather than training."""
+    step: int
+    """Trainer dispatch step, not necessarily the model's weight version."""
+
+
 class AgentLoopBase(ABC):
     """An agent loop takes an input message, chat with OpenAI compatible LLM server and interact with various
     environments.
@@ -236,6 +247,8 @@ class AgentLoopBase(ABC):
         dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
         data_config (DictConfigWrap): Dataset config.
         hf_model_type: Root Hugging Face ``model_type`` used for Continuous Token builder selection.
+        rollout_context: Per-rollout runtime metadata supplied by the worker. None for direct
+            construction without runtime context; absence does not imply training mode.
     """
 
     def __init__(
@@ -247,8 +260,10 @@ class AgentLoopBase(ABC):
         dataset_cls: type[RLHFDataset],
         data_config: DictConfigWrap,
         hf_model_type: str | None = None,
+        rollout_context: RolloutContext | None = None,
         **kwargs,
     ):
+        self.rollout_context = rollout_context
         self.config = trainer_config.config
         self.rollout_config = self.config.actor_rollout_ref.rollout
         self.server_manager = server_manager
@@ -468,8 +483,7 @@ class AgentLoopBase(ABC):
 
         Args:
             sampling_params (Dict[str, Any]): LLM sampling params.
-            **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`, plus
-                the reserved ``validate`` boolean from the trainer's rollout context.
+            **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
 
         Returns:
             AgentLoopOutput: Agent loop output.
@@ -685,8 +699,6 @@ class AgentLoopWorker:
         trace: bool = True,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
-        # Runtime validation mode takes precedence over a same-named dataset field.
-        kwargs.pop("validate", None)
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -710,8 +722,9 @@ class AgentLoopWorker:
                 dataset_cls=self.dataset_cls,
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
+                rollout_context=RolloutContext(is_validation=trajectory["validate"], step=trajectory["step"]),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, validate=trajectory["validate"], **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
