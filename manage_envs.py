@@ -121,7 +121,9 @@ so CI composes them freely, e.g.::
 ``prefetch`` scopes the cache warm via the ``cu130`` shortcut so the
 Docker image bakes only its backends. DEFERRED (commented out in
 pyproject.toml until they support torch-2.13 / cu130): the cu12.9 /
-torch-2.9.1 world (veomni, nemoautomodel) and trtllm (a CUDA-13 RC sdist).
+torch-2.9.1 world (nemoautomodel) and trtllm (a CUDA-13 RC sdist).
+VeOmni composes ``fsdp`` with the ``veomni-sft`` add-on on the cu130 stack;
+its current generated models need ``uv run --with transformers==5.16.1``.
 
 CPU architecture
 ----------------
@@ -173,10 +175,9 @@ CU129_BACKENDS: list[str] = []
 DEV_BACKENDS: list[str] = ["cpu"]
 # Conflict-free add-ons layered ON TOP of a backend combo, never synced alone:
 # `math` (math-verify reward), `ci` (GitHub-workflow-only helpers) and
-# `veomni-sft` (the deps-free veomni wheel the SFT tests import — NOT the
-# DEFERRED cu12.9 `veomni` training backend above; this one carries no torch, so
-# it rides on whichever cu130 backend the job synced). They ride along with every
-# `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
+# `veomni-sft` (the deps-free VeOmni package the PPO/SFT tests import; it carries
+# no torch, so it rides on whichever cu130 backend the job synced). They ride
+# along with every `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
 # offline just like a plain backend sync does.
 ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft"]
 ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
@@ -739,7 +740,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
 
     ``uv lock`` reads only ``pyproject.toml`` + the declared
     ``[tool.uv.dependency-metadata]``, so it triggers NO source build — the
-    git-sourced megatron-core / mbridge are compiled in step 2, not here (apex /
+    git-sourced megatron-core is compiled in step 2, not here (apex /
     TE / flash-attn ship prebuilt from the wheelhouse, vllm / sglang /
     sglang-kernel prebuilt from PyPI).
 
@@ -790,7 +791,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     # what that combo needs and never removes anything — which also mirrors
     # exactly what a real runtime `uv sync <combo>` does. Only the shared uv
     # cache (UV_CACHE_DIR) is durable: wheels download once and the git-source
-    # builds (megatron-core / mbridge) build once, then later combos hardlink
+    # build (megatron-core) runs once, then later combos hardlink
     # them from the cache instead of rebuilding. Peak disk is one env at a time
     # (each tempdir is torn down before the next).
     for combo in combos:

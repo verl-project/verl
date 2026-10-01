@@ -118,8 +118,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install pytest pytest-asyncio
-          uv pip install megatron-bridge --no-deps
-          uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          uv pip install megatron-bridge==0.5.0 --no-deps
           uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |

@@ -88,7 +88,7 @@ weights from huggingface checkpoint. If the engine directly uses
 huggingface model definition, it can use function provided by
 ``transformers``. Otherwise, each engine has to write their own
 checkpoint load logic (e.g.,
-`mbridge <https://github.com/ISEEKYAN/mbridge>`__). During model
+`Megatron-Bridge <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`__). During model
 training, each engine has to implement save_checkpoint and
 load_checkpoint that save/load intermediate sharded checkpoint including
 model, optimizer and lr scheduler states. Each engine has to implement a

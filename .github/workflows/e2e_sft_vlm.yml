@@ -99,10 +99,10 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      # No install step: every command below runs through uv, which syncs .venv
-      # from the committed uv.lock (offline, from the image's baked cache).
+      # Every command below runs through uv, which syncs .venv from uv.lock.
+      # VeOmni's generated models require the pinned Transformers overlay.
       # Keep these extras identical across the job so uv never re-syncs torch.
-      UV_RUN: "uv run --frozen --all-packages --extra megatron --extra veomni-sft"
+      UV_RUN: "uv run --frozen --all-packages --extra megatron --extra veomni-sft --with transformers==5.16.1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

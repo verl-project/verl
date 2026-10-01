@@ -97,12 +97,10 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
+          pip install "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@10a26aca258f91a7af3e698cc0db8c6c51705989" --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip install pandas==2.3.3
-          # transformers 5.10.x in the image dropped the cache_position kwarg of
-          # create_causal_mask, breaking veomni 0.1.11's patched qwen2 model; pin back to
-          # the version vllm-ascend in the same image requires.
-          pip install "transformers==5.5.4"
+          # Match the Transformers version used to generate the pinned VeOmni models.
+          pip install "transformers==5.16.1" --index-url https://pypi.tuna.tsinghua.edu.cn/simple/
       - name: Check final pip list
         run: |
           pip list

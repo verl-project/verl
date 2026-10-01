@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
+import inspect
+import os
+from importlib.metadata import version
 
 import torch
 import torch.nn.functional as F
@@ -382,6 +386,135 @@ def _patch_qwen3_vl_moe():
     modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
 
+# Temporary Transformers 5.10.4 workaround.
+#
+# HF transformers PR #45665 removed a blocking CPU-to-device state copy.
+# Restoring the wait at the state-allocation boundary reduced:
+#   - actor time:        113.94 s -> 45.16 s
+#   - allocator retries: 144      -> 0
+#
+# Keep device-local zeros:
+#   - no CPU allocation/copy is needed
+#   - keep this opt-in until a validated upstream/runtime fix replaces it
+#
+# See: https://github.com/huggingface/transformers/pull/45665
+
+_qwen3_next_l2norm = None
+
+
+def _patch_qwen3_next_sync_before_state():
+    """Replace the native fallback before HF constructors bind their callables."""
+    global _qwen3_next_l2norm
+    if version("transformers") != "5.10.4":
+        raise RuntimeError("VERL_QWEN3_NEXT_NPU_SYNC_BEFORE_STATE requires Transformers 5.10.4")
+    from transformers.models.qwen3_next import modeling_qwen3_next as hf
+
+    if hf.torch_chunk_gated_delta_rule is _qwen3_next_chunk_sync_internal:
+        return
+    for function, expected in (
+        (hf.torch_chunk_gated_delta_rule, "1066875a52cdd601582d9b3b8ebb31aa6a3d563de5dc34eb500ae860febbc7d0"),
+        (hf.l2norm, "6bfc53d1a491d0ae3856b85cb7fde1ea2198d5e3ed427953652cf2ede696e6fd"),
+    ):
+        if hashlib.sha256(inspect.getsource(function).encode()).hexdigest() != expected:
+            raise RuntimeError(
+                "Unexpected Qwen3-Next fallback source; use stock Transformers 5.10.4 "
+                "or unset VERL_QWEN3_NEXT_NPU_SYNC_BEFORE_STATE"
+            )
+    _qwen3_next_l2norm = hf.l2norm
+    # The FSDP NPU hook runs before construction. The separate FLA callable, if
+    # available, stays selected; previously constructed instances are unchanged.
+    hf.torch_chunk_gated_delta_rule = _qwen3_next_chunk_sync_internal
+    logger.warning(
+        "Enabled Qwen3-Next NPU sync-before-state workaround (Transformers 5.10.4) "
+        "for newly constructed native-fallback layers. FLA selection is unchanged. "
+        "Unset VERL_QWEN3_NEXT_NPU_SYNC_BEFORE_STATE and restart workers to disable it."
+    )
+
+
+def _qwen3_next_chunk_sync_internal(
+    query,
+    key,
+    value,
+    g,
+    beta,
+    chunk_size=64,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    **kwargs,
+):
+    initial_dtype = query.dtype
+    if use_qk_l2norm_in_kernel:
+        query = _qwen3_next_l2norm(query, dim=-1, eps=1e-6)
+        key = _qwen3_next_l2norm(key, dim=-1, eps=1e-6)
+    query, key, value, beta, g = [
+        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
+    ]
+
+    batch_size, num_heads, sequence_length, k_head_dim = key.shape
+    v_head_dim = value.shape[-1]
+    pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
+    query = F.pad(query, (0, 0, 0, pad_size))
+    key = F.pad(key, (0, 0, 0, pad_size))
+    value = F.pad(value, (0, 0, 0, pad_size))
+    beta = F.pad(beta, (0, pad_size))
+    g = F.pad(g, (0, pad_size))
+    total_sequence_length = sequence_length + pad_size
+    scale = 1 / (query.shape[-1] ** 0.5)
+    query = query * scale
+
+    v_beta = value * beta.unsqueeze(-1)
+    k_beta = key * beta.unsqueeze(-1)
+    # reshape to chunks
+    query, key, value, k_beta, v_beta = [
+        x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, k_beta, v_beta)
+    ]
+    g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
+    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0)
+
+    # chunk decay
+    g = g.cumsum(dim=-1)
+    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+    attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
+    for i in range(1, chunk_size):
+        row = attn[..., i, :i].clone()
+        sub = attn[..., :i, :i].clone()
+        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    value = attn @ v_beta
+    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
+    # restore the removed wait at the state-allocation boundary from HF transformers PR #45665
+    if initial_state is None and value.device.type == "npu":
+        torch.npu.current_stream(value.device).synchronize()
+    last_recurrent_state = (
+        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim, dtype=value.dtype, device=value.device)
+        if initial_state is None
+        else initial_state.to(value)
+    )
+    core_attn_out = torch.zeros_like(value)
+    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1)
+
+    # for each chunk
+    for i in range(0, total_sequence_length // chunk_size):
+        q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
+        attn = q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]
+        v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
+        v_new = v_i - v_prime
+        attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
+        core_attn_out[:, :, i] = attn_inter + attn @ v_new
+        last_recurrent_state = (
+            last_recurrent_state * g[:, :, i, -1, None, None].exp()
+            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+        )
+
+    if not output_final_state:
+        last_recurrent_state = None
+    core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1])
+    core_attn_out = core_attn_out[:, :, :sequence_length]
+    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
+    return core_attn_out, last_recurrent_state
+
+
 def _patch_qwen3_next():
     from transformers.models.qwen3_next import modeling_qwen3_next
 
@@ -423,6 +556,11 @@ NPU_PATCHES = {
 
 def apply_npu_patches():
     """Apply NPU patches for all available models."""
+    # Run before model construction and outside the best-effort loop so an
+    # explicitly enabled workaround cannot silently fail compatibility checks.
+    if os.environ.get("VERL_QWEN3_NEXT_NPU_SYNC_BEFORE_STATE", "0") == "1":
+        _patch_qwen3_next_sync_before_state()
+
     applied_count = 0
     failed_count = 0
     if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:

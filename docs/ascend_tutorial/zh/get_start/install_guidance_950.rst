@@ -1,4 +1,4 @@
-昇腾安装指南(Ascend 950 系列产品)
+昇腾安装指南(Ascend 950PR&DT系列产品)
 =================
 
 Last updated: 09/22/2026.
@@ -17,7 +17,7 @@ Last updated: 09/22/2026.
 框架后端支持说明
 ----------------
 
-当前NPU在Ascend 950 系列产品上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU在Ascend 950PR&DT系列产品上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -58,6 +58,22 @@ vLLM-Ascend   ``0.23.0``                                        NPU vLLM 后端�
 Megatron-LM   ``core_r0.12.0``                                  大规模分布式训练框架                                       
 MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
 ============= ================================================= ===================
+
+
+Megatron 训练后端还需安装以下 Bridge 组件：
+
+.. list-table::
+   :header-rows: 1
+
+   * - 依赖
+     - 版本
+     - 说明
+   * - Megatron-Bridge
+     - ``v0.5.0``
+     - 模型构造与 Hugging Face 权重转换
+   * - MindSpeed-Bridge
+     - 仓库默认分支（未固定 tag/commit）
+     - Megatron-Bridge 的昇腾适配
 
 
 安装前准备（ CANN）
@@ -128,8 +144,13 @@ Megatron 训练后端支持
     export PYTHONPATH=$PYTHONPATH:your_path/Megatron-LM
     export PYTHONPATH=$PYTHONPATH:your_path/MindSpeed
 
-    # 安装 mbridge
-    pip install mbridge
+    # 安装 Megatron-Bridge
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps
+
+    # 安装 MindSpeed-Bridge（仓库默认分支）
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    pip install -e MindSpeed-Bridge --no-deps
 
     # 安装 transformers
     pip install transformers==5.10.4

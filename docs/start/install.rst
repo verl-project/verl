@@ -71,9 +71,8 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
    has). The inference engines
    (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose
    wheels for the pinned versions are already cu130 / torch-2.13 builds. Only the
-   git-sourced ``megatron-core`` (``core_v0.18.0``, paired with
-   ``megatron-bridge`` 0.5.2) and ``mbridge`` are built when the environment is
-   first materialized.
+   git-sourced ``megatron-core`` (``core_v0.19.2``, paired with
+   ``megatron-bridge`` 0.6.2) is built when the environment is first materialized.
 
 Run a job or a test
 :::::::::::::::::::::

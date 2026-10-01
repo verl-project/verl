@@ -1,32 +1,25 @@
 #!/usr/bin/env bash
 # Qwen3.5-122B-A10B MoE GRPO RL with Megatron (four nodes, 8 GPUs, H20, 96G, geo3k dataset)
-# Using verlai/verl:vllm017.latest docker image
+# Using verlai/verl:uv.cu130.dev3 docker image
 # Requirements:
 #   - 32 GPUs (96GB each, e.g. 4x8 H20)
-#   - Additional packages on top of the base image:
-#       pip install --upgrade transformers
-#       pip install flash-linear-attention
-#       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM==0.16.0
+#   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
+#   - flash-linear-attention is installed by the launcher's megatron extra.
+#     The launcher uses dependencies from the current uv.lock.
 #
-# Requirements on Ascend:
-#   - 4 nodes, 16 trainer devices per node
-#   - Additional packages on base image(quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm):
-#       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.0
-#   - MindSpeed==0.16.0
-#   - Megatron-Bridge==de93536e
+# CUDA dependencies from the current uv.lock (Python 3.12):
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
 #
-# Requirements on Ascend (Mindspeed-Bridge):
+# Requirements on Ascend (scripts/install_vllm_mcore_npu.sh baseline):
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
-#   - Megatron-LM==core_v0.18.0
+#   - Megatron-LM==core_r0.18.0
 #   - Megatron-Bridge==v0.5.0
 #   - MindSpeed==core_r0.18.0
 #   - MegatronAdaptor==core_r0.18.0
 #   - TransformerEngineNPU==main
 #   -   pip install decorator pybind11 diffusers
 #   - MindSpeed-Ops==master
-#   - Mindspeed-Bridge==master
+#   - MindSpeed-Bridge: repository default branch (no pinned tag/commit)
 #   - flash-linear-attention-npu==v26.1.0
 #       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
 #   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
@@ -34,14 +27,12 @@
 #       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
 #
 # Qwen3.5 architecture notes:
-#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
-#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
-#     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
-#     - actor.use_dynamic_bsz=False              (required for bshd mode)
-#
-#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
-#   can be set to True for better performance.
+#   This example uses BSHD compute format:
+#     - model.use_remove_padding=False
+#     - actor.megatron.use_remove_padding=False
+#     - actor.use_dynamic_bsz=False
+#   Megatron-Core 0.18.0 and 0.19.2 also support THD for GDN.
+#   The settings above retain BSHD for this example.
 #
 # Tested parallelism config:
 #   GPU (32 GPUs / 4 node): TP=2 PP=2 CP=1 EP=8 ETP=1 GEN_TP=8
@@ -153,7 +144,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -256,7 +246,6 @@ case "${DEVICE}" in
     npu)
         ACTOR+=(
             actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4
-            actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
             actor_rollout_ref.actor.checkpoint.strict=False
             ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto

@@ -1,78 +1,50 @@
-#!/bin/bash
-
-# Usage: 
-# 0. This script is designed to run on Ascend NPUs. Nvidia/AMD GPUs are not supported
-# 1. Start a ray cluster of 32 nodes
-# 2. Run this script to start the training job
-
-# | Dependencies                   | Branch           | Commit ID                                  |
-# | ------------------------------ | ---------------- | ------------------------------------------ |
-# | vllm-project/vllm              | releases/v0.23.0 | `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665` |
-# | vllm-project/vllm-ascend       | releases/v0.23.0 | `dc55ef82f8236585c8f2ee237f5b43507cae8686` |
-# | NVIDIA/Megatron-LM             | core_v0.18.0     | `ba7b5ebce12af60627a80985792a1449ce45f46c` |
-# | Ascend/MindSpeed               | core_r0.18.0     | `1881e01a996074b30d424349237d55a2c608e6b7` |
-# | Ascend/MegatronAdaptor         | core_r0.18.0     | `eb0e5043438dd753099432bc3b3d8e5916ed1844` |
-# | Ascend/TransformerEngineNPU    | main             | `e40ec34036eb7e04ad11b983f8c6b0dc9fcd88f9` |
-# | Ascend/MindSpeed-Ops           | master           | `dbee3f41b156bb051fc046facf69548400be2be1` |
-# | Ascend/MindSpeed-Bridge        | master           | `d82eec3ce2b31deb82cc5474b6813498efded908` |
-# | NVIDIA-NeMo/Megatron-Bridge    | v0.5.0           | `fcbb6031103d0ca845c1a54d4fee55ecfcca17b6` |
-
+#!/usr/bin/env bash
 set -x
 
-# Stop before configuring training if this machine has no available Ascend NPUs.
-if ! python3 -c 'import torch; import torch_npu; raise SystemExit(not torch.npu.is_available())'; then
-    echo "Error: This script requires available Ascend NPUs." >&2
-    exit 1
-fi
+# ---- user-adjustable ----
+# # 0. download HF checkpoint
+hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/glm52_top16_dapo_17k_tuned_weights}
 
-# Project Configuration
-project_name='verl_megatron_dapo_math_17k_examples'
-experiment_name='glm5_2-32nodes'
+echo "[info] hf_weights=${hf_weights}"
 
-# Model Weights Paths
-MODEL_PATH=${WORK_DIR}/glm52_weights
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${experiment_name}"}
+# train_data
+train_files=${TRAIN_FILE:-/root/.cache/modelscope/hub/datasets/lxb007981/GLM-5___2-top16-DAPO-17k-Tuned/dapo-math-17k-8k.verl.jsonl}
+test_files=${TEST_FILE:-/root/.cache/modelscope/hub/datasets/lxb007981/GLM-5___2-top16-DAPO-17k-Tuned/dapo-math-17k-8k.verl.jsonl}
 
-# File System Paths
-TRAIN_FILE=${WORK_DIR}/datasets/dapo-math-17k.parquet
-TEST_FILE=${WORK_DIR}/datasets/dapo-math-17k.parquet
-ROLLOUT_DATA_DIR=${ROLLOUT_DATA_DIR:-"${RAY_DATA_HOME}/rollout_data/${project_name}/${experiment_name}/$(date +%Y%m%d_%H%M%S)"}
-
-NNODES=32
-
+NNODES=2
 # Train config
 PP=8
-TP=8
-EP=64
+TP=4
+EP=4
 ETP=1
 CP=1
 
 INFER_TP=8
-INFER_DP=8
-INFER_EP=64 
+INFER_DP=2
+INFER_EP=16
 
-max_num_seqs=64
+max_num_seqs=32
 
+experiment_name='dsv32-5-32nodes'
 n_gpus_per_node=16
 
-train_batch_size=64
+train_batch_size=16
 ppo_mini_batch_size=16
 n_resp_per_prompt=8
 
 balance_batch=False
 max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 6))
-##########    reward_config    ################
+max_response_length=$((1024 * 8))
+
 enable_overlong_buffer=False
 overlong_buffer_len=512
 overlong_penalty_factor=1.0
 
 
-max_num_batched_tokens=4096
+max_num_batched_tokens=1024
 total_length=$(($max_prompt_length+$max_response_length))
 
-ROLLOUT_IS=${ROLLOUT_IS:-token}
+ROLLOUT_IS=${ROLLOUT_IS:-sequence}
 ROLLOUT_IS_THRESHOLD=${ROLLOUT_IS_THRESHOLD:-2.0}
 ROLLOUT_IS_BATCH_NORMALIZE=${ROLLOUT_IS_BATCH_NORMALIZE:-true}
 ROLLOUT_RS=${ROLLOUT_RS:-token_k1}
@@ -91,31 +63,20 @@ kl_loss_coef=0.002
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 
-# Data Configuration
-DATA_ARGS=(
-    data.train_files="${TRAIN_FILE}"
-    data.val_files="${TEST_FILE}"
+# ---- end user-adjustable ----
+########################### parameter arrays ###########################
+
+DATA=(
+    algorithm.adv_estimator=grpo
+    data.train_files="$train_files"
+    data.val_files="$test_files"
     data.train_batch_size=$train_batch_size
     data.max_prompt_length=$max_prompt_length
     data.max_response_length=$max_response_length
     data.filter_overlong_prompts=False
     data.truncation='left'
-    +data.apply_chat_template_kwargs.enable_thinking=False
-)
-
-# Model Configuration
-MODEL_ARGS=(
-    actor_rollout_ref.nccl_timeout=7200
-    actor_rollout_ref.model.path="${MODEL_PATH}"
-    actor_rollout_ref.model.use_remove_padding=False
-    actor_rollout_ref.model.use_fused_kernels=False
-)
-
-# RL Algorithm Configuration
-ALGORITHM_ARGS=(
-    algorithm.adv_estimator=grpo
     algorithm.use_kl_in_reward=$use_kl_in_reward
-    algorithm.kl_ctrl.kl_coef=$kl_coef
+    +data.apply_chat_template_kwargs.enable_thinking=False
     algorithm.rollout_correction.rollout_is=${ROLLOUT_IS}
     algorithm.rollout_correction.rollout_is_threshold=${ROLLOUT_IS_THRESHOLD}
     algorithm.rollout_correction.rollout_is_batch_normalize=${ROLLOUT_IS_BATCH_NORMALIZE}
@@ -123,15 +84,19 @@ ALGORITHM_ARGS=(
     algorithm.rollout_correction.rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD}
 )
 
-# Actor Model Configuration
-ACTOR_ARGS=(
+MODEL=(
+    actor_rollout_ref.model.path=$hf_weights
+    actor_rollout_ref.model.use_remove_padding=False
+    actor_rollout_ref.model.use_fused_kernels=False
+)
+
+ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss}
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef}
-    actor_rollout_ref.actor.checkpoint.strict=False # MTP layers are unused in both training/rollout and are omitted from exported HF weights
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low}
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high}
     actor_rollout_ref.actor.clip_ratio_c=10.0
@@ -158,8 +123,11 @@ ACTOR_ARGS=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.attention_softmax_in_fp32=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.pad_bshd_to_minibatch_max=False
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
+    actor_rollout_ref.actor.checkpoint.strict=False
+    actor_rollout_ref.actor.checkpoint.save_contents='["model"]'
     +actor_rollout_ref.actor.megatron.override_transformer_config.dsa_grouped_recompute=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
@@ -186,24 +154,10 @@ ACTOR_ARGS=(
     actor_rollout_ref.actor.megatron.router_replay.mode=R3
 )
 
-# Reference Model Configuration
-REF_ARGS=(
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz}
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len}
-    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$PP
-    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$TP
-    actor_rollout_ref.ref.megatron.expert_model_parallel_size=$EP
-    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=$ETP
-    actor_rollout_ref.ref.megatron.param_offload=True
-    actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
-)
-
-# Rollout Configuration
-ROLLOUT_ARGS=(
+ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.50
     actor_rollout_ref.rollout.n=${n_resp_per_prompt}
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=1.0
@@ -221,35 +175,50 @@ ROLLOUT_ARGS=(
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=True
     actor_rollout_ref.rollout.enforce_eager=False
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[2, 4, 8, 16, 24, 32, 64]"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[2, 4, 8, 16, 24, 32]"
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
 )
 
-# Trainer Configuration
-TRAINER_ARGS=(
+REF=(
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz}
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len}
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$PP
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$TP
+    actor_rollout_ref.ref.megatron.expert_model_parallel_size=$EP
+    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=$ETP
+    actor_rollout_ref.ref.megatron.param_offload=True
+    actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
+)
+
+TRAINER=(
     trainer.logger='["console"]'
-    trainer.project_name="${project_name}"
+    trainer.project_name='verl_megatron_gsm8k_examples'
     trainer.experiment_name=$experiment_name
     trainer.n_gpus_per_node=$n_gpus_per_node
     trainer.nnodes=$NNODES
     trainer.save_freq=-1
     trainer.test_freq=-1
-    trainer.default_local_dir="${CKPTS_DIR}"
-    trainer.rollout_data_dir="${ROLLOUT_DATA_DIR}"
     trainer.resume_mode="auto"
     trainer.balance_batch=${balance_batch}
     trainer.device=npu
     trainer.val_before_train=False
-    trainer.total_epochs=100
+    trainer.total_training_steps=15
 )
 
+EXTRA=(
+    --config-name='ppo_megatron_trainer'
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'"
+    actor_rollout_ref.nccl_timeout=7200
+)
+
+########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
-    --config-name='ppo_megatron_trainer' \
-    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'" \
-    "${DATA_ARGS[@]}" \
-    "${MODEL_ARGS[@]}" \
-    "${ACTOR_ARGS[@]}" \
-    "${REF_ARGS[@]}" \
-    "${ROLLOUT_ARGS[@]}" \
-    "${ALGORITHM_ARGS[@]}" \
-    "${TRAINER_ARGS[@]}" 2>&1
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@" 2>&1

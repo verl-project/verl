@@ -1,7 +1,7 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 09/22/2026.
+Last updated: 09/28/2026.
 
 
 镜像获取与公开镜像地址
@@ -13,6 +13,12 @@ Last updated: 09/22/2026.
 
 verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchNPU版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
+verl v0.9.1 的 vLLM 镜像使用 CANN 9.1.0、Python 3.12 和 vLLM 0.23.0，支持 ``linux/amd64`` 和 ``linux/arm64``。对应镜像名如下：
+
+* A2：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12-vllm``
+* A3：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12-vllm``
+* A5（Ascend 950 系列产品）：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-950-ubuntu22.04-py3.12-vllm``
+
 
 
 镜像硬件支持
@@ -20,15 +26,20 @@ verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchN
 
 Atlas 200T A2 Box16
 
-Atlas 900 A2 PODc
+Atlas 900 A2 PoD
 
 Atlas 800T A3
 
-Ascend 950 系列产品
+Ascend 950PR&DT系列产品
 
 
-A2/A3 最新镜像内各组件版本信息清单
-----------------
+当前 A2/A3 Megatron 环境以 ``scripts/install_vllm_mcore_npu.sh`` 为基准：
+Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
+Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支（未固定 tag/commit），
+同时安装 TransformerEngineNPU 和 MindSpeed-Ops。SGLang CI 镜像需要重建后才能使用该组合。
+
+A2/A3 vLLM 最新镜像内各组件版本信息清单
+----------------------------------------------------------------
 
 ================= ============
 组件               版本
@@ -45,13 +56,16 @@ Megatron-LM        core_r0.18.0
 MindSpeed          core_r0.18.0
 Megatron-Bridge    0.5.0
 triton-ascend      3.2.2
-SGLang             v0.5.10
-sgl-kernel-npu     2026.02.01
 ================= ============
 
 
-Ascend 950 系列产品 最新镜像内各组件版本信息清单
-----------------
+A2/A3 SGLang 镜像使用 CANN ``8.5.0``、Python ``3.11``、torch ``2.8.0``、
+torch_npu ``2.8.0.post2``、SGLang ``v0.5.10`` 和 sgl-kernel-npu ``2026.02.01``。
+Megatron 相关组件采用上面的统一依赖组合，transformers 使用 ``5.10.4``。
+
+
+Ascend 950PR&DT系列产品 最新镜像内各组件版本信息清单
+----------------------------------------------------------------
 
 ================= ============
 组件               版本
@@ -103,6 +117,9 @@ A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc
 ============== ==================== ============== ============== ==============================================================
 设备类型         CANN基础镜像版本     推理后端        verl版本       参考文件                                
 ============== ==================== ============== ============== ==============================================================
+A2              9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a2_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2_v0.9.1>`_
+A3              9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a3_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3_v0.9.1>`_
+A5              9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a5_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5_v0.9.1>`_
 A2              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_     
 A3              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_ 
 A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
@@ -137,7 +154,9 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
    # Build the image
    # vLLM
-   docker build -f Dockerfile.ascend_8.5.0_a2 -t verl-ascend:8.5.0-a2 .
+   docker build -f Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
+   # vLLM (verl release/v0.9.1)
+   docker build -f Dockerfile.ascend_9.1.0_a2_v0.9.1 -t verl-ascend:v0.9.1-9.1.0-a2 .
    # SGLang
    docker build -f Dockerfile.ascend.sglang_8.5.0_a2 -t verl-ascend-sglang:8.5.0-a2 .
 
@@ -146,7 +165,8 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 **说明：**
 
-* 以 vLLM 的镜像为例，``Dockerfile.ascend_8.5.0_a2`` 为 Dockerfile 文件名，``verl-ascend:8.5.0-a2`` 中，verl-ascend 为自定义的镜像名称，8.5.0-a2 为自定义的镜像标签
+* 以 vLLM 的镜像为例，``Dockerfile.ascend_9.1.0_a2`` 为 Dockerfile 文件名，``verl-ascend:9.1.0-a2`` 中，verl-ascend 为自定义的镜像名称，9.1.0-a2 为自定义的镜像标签
+* 构建 verl v0.9.1 镜像时，请使用带 ``_v0.9.1`` 后缀的 Dockerfile；A3 和 A5 分别使用清单中对应的 ``a3`` 和 ``a5`` 文件。
 
 容器启动命令模板
 ----------------

@@ -158,8 +158,8 @@ def apply_patch():
     # cannot be built on ROCm (its setup requires nvcc). Install a pure-torch
     # fallback from the central mcore patch entry so every DSA importer picks it
     # up without engine-specific wiring. Callers run this both before model
-    # creation (hf_to_mcore_config_dpskv3) and after it (the mbridge path in
-    # megatron_utils.get_model), which is why the shim also back-fills importers.
+    # creation (hf_to_mcore_config_dpskv3) and after it in
+    # megatron_utils.make_megatron_module, so the shim also back-fills importers.
     apply_fast_hadamard_transform_shim()
 
     import megatron.core
@@ -502,36 +502,6 @@ def apply_patch():
 
     if not mcore_ge_0162:
         MultiLatentAttention.forward = patch_forward
-
-
-def apply_patch_mbridge():
-    try:
-        from megatron.core.utils import get_tensor_model_parallel_group_if_none
-    except ImportError:
-        import warnings
-
-        import megatron.core.utils
-        import torch
-        from megatron.core import parallel_state
-
-        def get_tensor_model_parallel_group_if_none(tp_group, is_expert=False, check_initialized=True):
-            """Issue a deprecation warning if tp_group is None and return the default tp group."""
-            if not torch.distributed.is_initialized():
-                return None
-            if tp_group is None:
-                if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-                    warnings.warn(
-                        "Warning: tp_group is None, using default tp group. Passing tp_group will be mandatory soon",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                if is_expert:
-                    tp_group = parallel_state.get_expert_tensor_parallel_group(check_initialized=check_initialized)
-                else:
-                    tp_group = parallel_state.get_tensor_model_parallel_group(check_initialized=check_initialized)
-            return tp_group
-
-        megatron.core.utils.get_tensor_model_parallel_group_if_none = get_tensor_model_parallel_group_if_none
 
 
 def apply_patch_megatron_v012_with_torch_v28_v29() -> None:

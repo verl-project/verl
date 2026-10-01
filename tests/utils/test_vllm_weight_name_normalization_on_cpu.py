@@ -853,6 +853,27 @@ def test_drop_tied_alias_updates_maps_checkpoint_names_before_matching():
     assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
 
 
+def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
+    """The quantized branch loads per bucket like the standard one, so it must drop the alias too."""
+    pytest.importorskip("vllm")
+    model = _FakeTiedModel(torch.zeros(2))
+    model.named_parameters = lambda remove_duplicate=False: iter(())
+    model.named_buffers = lambda: iter(())
+    worker = _make_worker(model)
+    loaded = []
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "load_quanted_weights",
+        lambda weights, runner, is_drafter=False: loaded.extend(name for name, _ in weights) or [],
+    )
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    worker._update_weights(updates, peft_config=None, base_sync_done=False)
+
+    assert loaded == ["q.weight"]
+
+
 # ---------------------------------------------------------------------------
 # The standard (non-quantized) sync stages unquantized MoE layers whose kernel prep
 # reshaped the expert weights, and folds them back after the last bucket
