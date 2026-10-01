@@ -145,6 +145,7 @@ class CheckpointEngineConfig(BaseConfig):
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
         "max_model_len",
+        "max_num_batched_tokens",
         "load_format",
         "engine_kwargs",
         "prompt_length",
