@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import logging
-import os
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -332,8 +331,6 @@ def _load_vllm():
 
 
 def _load_sglang():
-    os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
-
     try:
         import vllm  # noqa: F401
     except ImportError:
@@ -371,7 +368,6 @@ def _load_sglang():
 
     from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangReplica
 
-    del os.environ["SGLANG_USE_CPU_ENGINE"]
     return SGLangReplica
 
 
