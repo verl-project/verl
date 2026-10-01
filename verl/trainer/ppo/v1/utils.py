@@ -163,7 +163,25 @@ def compute_advantage_for_multi_trajectories(
     the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
     in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
     original ``compute_advantage()`` unchanged.
+
+    Raises:
+        NotImplementedError: if ``algorithm.use_pf_ppo`` is enabled together with GAE.
+            PF-PPO resamples the batch rows, which the v1 write-back cannot represent.
     """
+    if adv_estimator == core_algos.AdvantageEstimator.GAE and config is not None and config.get("use_pf_ppo", False):
+        # compute_advantage() applies PF-PPO by resampling batch rows with replacement
+        # (core_algos.compute_pf_ppo_reweight_data). The caller of this function writes only
+        # `advantages`/`returns` back to the TransferQueue, under the sample keys it read them
+        # with, so resampled rows would be paired with other trajectories' responses and
+        # log-probs. Fail loudly instead of training on silently mismatched advantages.
+        raise NotImplementedError(
+            "algorithm.use_pf_ppo=True is not supported by the v1 trainer with "
+            "algorithm.adv_estimator=gae: PF-PPO resamples the batch, but the v1 trainer writes "
+            "advantages back under the original sample keys, which would pair each trajectory "
+            "with another trajectory's advantage. Run PF-PPO with the v0 trainer "
+            "(trainer.use_v1=False), or set algorithm.use_pf_ppo=False."
+        )
+
     if adv_estimator != core_algos.AdvantageEstimator.GRPO:
         return compute_advantage(
             data,
