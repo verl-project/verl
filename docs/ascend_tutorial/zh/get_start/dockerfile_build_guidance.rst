@@ -17,7 +17,7 @@ verl v0.9.1 的 vLLM 镜像使用 CANN 9.1.0、Python 3.12 和 vLLM 0.23.0，支
 
 * A2：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12-vllm``
 * A3：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12-vllm``
-* A5（Ascend 950 系列产品）：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-950-ubuntu22.04-py3.12-vllm``
+* Ascend 950PR&950DT系列产品：``quay.io/ascend/verl:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-950-ubuntu22.04-py3.12-vllm``
 
 
 
@@ -30,7 +30,7 @@ Atlas 900 A2 PoD
 
 Atlas 800T A3
 
-Ascend 950PR&DT系列产品
+Ascend 950PR&950DT系列产品
 
 
 当前 A2/A3 Megatron 环境以 ``scripts/install_vllm_mcore_npu.sh`` 为基准：
@@ -64,7 +64,7 @@ torch_npu ``2.8.0.post2``、SGLang ``v0.5.10`` 和 sgl-kernel-npu ``2026.02.01``
 Megatron 相关组件采用上面的统一依赖组合，transformers 使用 ``5.10.4``。
 
 
-Ascend 950PR&DT系列产品 最新镜像内各组件版本信息清单
+Ascend 950PR&950DT系列产品 最新镜像内各组件版本信息清单
 ----------------------------------------------------------------
 
 ================= ============
@@ -98,7 +98,7 @@ Dockerfile构建镜像脚本清单
 ============== ==================== ============== ==============================================================
 A2              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
 A3              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
-A5              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5>`_
+950PR&950DT     9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5>`_
 A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
 A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
 A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
@@ -119,7 +119,7 @@ A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc
 ============== ==================== ============== ============== ==============================================================
 A2              9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a2_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2_v0.9.1>`_
 A3              9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a3_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3_v0.9.1>`_
-A5              9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a5_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5_v0.9.1>`_
+950PR&950DT     9.1.0                vLLM          release/v0.9.1 `Dockerfile.ascend_9.1.0_a5_v0.9.1 <https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5_v0.9.1>`_
 A2              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_     
 A3              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_ 
 A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
@@ -166,7 +166,7 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 **说明：**
 
 * 以 vLLM 的镜像为例，``Dockerfile.ascend_9.1.0_a2`` 为 Dockerfile 文件名，``verl-ascend:9.1.0-a2`` 中，verl-ascend 为自定义的镜像名称，9.1.0-a2 为自定义的镜像标签
-* 构建 verl v0.9.1 镜像时，请使用带 ``_v0.9.1`` 后缀的 Dockerfile；A3 和 A5 分别使用清单中对应的 ``a3`` 和 ``a5`` 文件。
+* 构建 verl v0.9.1 镜像时，请使用带 ``_v0.9.1`` 后缀的 Dockerfile；A3 和 950PR&950DT 分别使用清单中对应的 ``a3`` 和 ``a5`` 文件。
 
 容器启动命令模板
 ----------------
