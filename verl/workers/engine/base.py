@@ -441,5 +441,11 @@ class EngineRegistry:
         Raises:
             NotImplementedError: If the engine key in the config does not match any known engines.
         """
+        model_config = kwargs.get("model_config")
+        if getattr(model_config, "lm_head_dtype", None) is not None and backend not in ("fsdp", "fsdp2"):
+            raise ValueError(
+                "lm_head_dtype='float32' is supported only by the FSDP/FSDP2 training engines; "
+                f"got backend={backend!r}."
+            )
         engine_cls = cls.get_engine_cls(model_type, backend)
         return engine_cls(*args, **kwargs)

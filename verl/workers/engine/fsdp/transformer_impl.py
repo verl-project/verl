@@ -31,6 +31,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
+from verl.models.transformers.lm_head import install_fp32_lm_head
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
@@ -262,6 +263,19 @@ class FSDPEngine(BaseEngine):
             torch_dtype = torch.float32 if not self.engine_config.forward_only else torch.bfloat16
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
+        lm_head_dtype = self.model_config.lm_head_dtype
+        if lm_head_dtype == "float32" and self._is_lora:
+            raise RuntimeError("lm_head_dtype='float32' does not currently support LoRA in the FSDP engine.")
+        if lm_head_dtype == "float32" and self.model_config.model_type != "language_model":
+            raise RuntimeError(
+                "lm_head_dtype='float32' currently supports text language models only in the FSDP engine; "
+                f"got model_type={self.model_config.model_type!r}."
+            )
+        if lm_head_dtype == "float32" and device_name != "cuda":
+            raise RuntimeError(
+                "lm_head_dtype='float32' is currently supported by the FSDP engine only on CUDA devices; "
+                f"got {device_name!r}."
+            )
 
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
@@ -321,16 +335,25 @@ class FSDPEngine(BaseEngine):
             )
 
             use_fused_kernels = self.model_config.use_fused_kernels
+            if lm_head_dtype == "float32":
+                install_fp32_lm_head(module)
             apply_monkey_patch(
                 model=module,
                 use_remove_padding=self.use_remove_padding,
                 ulysses_sp_size=self.ulysses_sequence_parallel_size,
                 use_fused_kernels=use_fused_kernels,
                 fused_kernels_backend=fused_kernels_backend,
+                lm_head_dtype=lm_head_dtype,
             )
 
             # some parameters may not in torch_dtype
             module.to(torch_dtype)
+
+            if lm_head_dtype == "float32":
+                backend = fused_kernels_backend if use_fused_kernels else "eager"
+                if backend == "liger":
+                    logger.warning("FP32 lm_head uses the Torch fused implementation instead of Liger.")
+                logger.info("Enabled FP32 lm_head output for FSDP with backend=%s.", backend)
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
