@@ -14,6 +14,7 @@
 import logging
 import os
 
+from verl.trainer.ppo.ray_trainer import begin_spec_decode_counter_window, end_spec_decode_counter_window
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.debug import marked_timer
 
@@ -32,7 +33,11 @@ class PPOTrainerSync(PPOTrainer):
         # update weights after loading checkpoint
         self.checkpoint_manager.update_weights(self.global_steps)
 
+    def on_step_begin(self):
+        begin_spec_decode_counter_window(self)
+
     def on_step_end(self):
+        end_spec_decode_counter_window(self)
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
             self.checkpoint_manager.update_weights(self.global_steps)
