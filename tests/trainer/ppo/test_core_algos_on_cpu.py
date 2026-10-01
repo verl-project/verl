@@ -21,6 +21,7 @@ import torch
 
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
+    agg_loss,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
@@ -34,6 +35,22 @@ from verl.trainer.ppo.core_algos import (
 
 def mock_test_fn():
     pass
+
+
+def test_agg_loss_sequence_modes_ignore_invalid_masked_values():
+    loss_mat = torch.tensor([[1.0, float("nan"), 3.0], [2.0, 4.0, float("nan")]])
+    loss_mask = torch.tensor([[1.0, 0.0, 1.0], [1.0, 1.0, 0.0]])
+
+    expected = {
+        "seq-mean-token-sum": torch.tensor(5.0),
+        "seq-mean-token-sum-norm": torch.tensor(5.0 / 3.0),
+        "seq-mean-token-mean": torch.tensor(2.5),
+    }
+
+    for mode, expected_loss in expected.items():
+        loss = agg_loss(loss_mat=loss_mat, loss_mask=loss_mask, loss_agg_mode=mode)
+        assert torch.isfinite(loss)
+        assert torch.allclose(loss, expected_loss)
 
 
 class TestRegisterAdvEst(unittest.TestCase):
