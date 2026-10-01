@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 10/01/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -49,12 +49,19 @@ could do whatever user wants, such as
 
            Args:
                sampling_params (Dict[str, Any]): LLM sampling params.
-               **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
+               **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`, plus
+                   the reserved ``validate`` boolean from the trainer's rollout context.
 
            Returns:
                AgentLoopOutput: Agent loop output.
            """
            raise NotImplementedError
+
+Custom loops receive ``kwargs["validate"]`` as ``True`` for evaluation and ``False`` for training,
+including initial evaluation before the first training step. This applies to both the standard
+and TransferQueue worker paths. The trainer's rollout context takes precedence over a dataset
+field named ``validate``; custom loops should not infer evaluation mode from sampling parameters
+or the step number. Native postprocessing continues to receive the mode separately.
 
 After running user defined loop, run method should return ``AgentLoopOutput``, including prompt token ids,
 response token ids, and response mask.

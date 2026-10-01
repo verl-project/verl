@@ -468,7 +468,8 @@ class AgentLoopBase(ABC):
 
         Args:
             sampling_params (Dict[str, Any]): LLM sampling params.
-            **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
+            **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`, plus
+                the reserved ``validate`` boolean from the trainer's rollout context.
 
         Returns:
             AgentLoopOutput: Agent loop output.
@@ -684,6 +685,8 @@ class AgentLoopWorker:
         trace: bool = True,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
+        # Runtime validation mode takes precedence over a same-named dataset field.
+        kwargs.pop("validate", None)
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -708,7 +711,7 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput = await agent_loop.run(sampling_params, validate=trajectory["validate"], **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
