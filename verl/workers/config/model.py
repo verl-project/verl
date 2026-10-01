@@ -86,6 +86,9 @@ class HFModelConfig(BaseConfig):
     }
 
     path: str = MISSING
+    # Hugging Face revision (commit SHA preferred over a moving branch). Ignored
+    # when `path` is a local directory. Hub ids without this follow `main`.
+    revision: Optional[str] = None
     local_path: Optional[str] = None
     hf_config_path: Optional[str] = None
     local_hf_config_path: Optional[str] = None
@@ -145,6 +148,13 @@ class HFModelConfig(BaseConfig):
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
+    def hub_revision_kwargs(self, src: Optional[str] = None) -> dict:
+        """Kwargs for transformers/vLLM Hub loads. Empty for local paths."""
+        loc = src if src is not None else self.path
+        if self.revision and loc and not str(loc).startswith("/"):
+            return {"revision": self.revision}
+        return {}
+
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
@@ -158,8 +168,17 @@ class HFModelConfig(BaseConfig):
         # construct tokenizer
         if self.load_tokenizer:
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
-            self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
-            self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+            tok_src = self.local_tokenizer_path
+            self.tokenizer = hf_tokenizer(
+                tok_src,
+                trust_remote_code=self.trust_remote_code,
+                **self.hub_revision_kwargs(tok_src),
+            )
+            self.processor = hf_processor(
+                tok_src,
+                trust_remote_code=self.trust_remote_code,
+                **self.hub_revision_kwargs(tok_src),
+            )
 
         # For base models (e.g. Qwen3.5-2b-Base), the processor may not have a chat_template
         # while the tokenizer does. Sync it so that processor.apply_chat_template() works.
@@ -178,7 +197,9 @@ class HFModelConfig(BaseConfig):
 
         self.local_hf_config_path = copy_to_local(self.hf_config_path, use_shm=self.use_shm)
         self.generation_config = get_generation_config(
-            self.local_hf_config_path, trust_remote_code=self.trust_remote_code
+            self.local_hf_config_path,
+            trust_remote_code=self.trust_remote_code,
+            **self.hub_revision_kwargs(self.local_hf_config_path),
         )
 
         # construct hf_config
@@ -188,6 +209,7 @@ class HFModelConfig(BaseConfig):
                 self.local_hf_config_path,
                 trust_remote_code=self.trust_remote_code,
                 attn_implementation=attn_implementation,
+                **self.hub_revision_kwargs(self.local_hf_config_path),
             )
         except ValueError as error:
             lookup_error = error.__cause__ or error.__context__
