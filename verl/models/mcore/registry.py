@@ -20,7 +20,6 @@ from enum import Enum
 from typing import Callable
 
 import torch
-import torch.nn as nn
 
 from .model_forward import gptmodel_forward_model_engine
 from .model_forward_fused import fused_forward_model_engine
@@ -74,14 +73,6 @@ from .config_converter import (
     hf_to_mcore_config_qwen2moe,
     hf_to_mcore_config_qwen3moe,
 )
-from .model_initializer import (
-    BaseModelInitializer,
-    DeepseekV3Model,
-    DenseModel,
-    MixtralModel,
-    Qwen2MoEModel,
-    Qwen3MoEModel,
-)
 
 
 class SupportedModel(Enum):
@@ -120,21 +111,6 @@ MODEL_CONFIG_CONVERTER_REGISTRY: dict[SupportedModel, Callable[[PretrainedConfig
     SupportedModel.LLAMA_TOKEN_CLASSIFICATION: hf_to_mcore_config_dense,
 }
 
-# Registry for model initializers
-MODEL_INITIALIZER_REGISTRY: dict[SupportedModel, type[BaseModelInitializer]] = {
-    SupportedModel.LLAMA: DenseModel,
-    SupportedModel.QWEN2: DenseModel,
-    SupportedModel.QWEN2_MOE: Qwen2MoEModel,
-    SupportedModel.MIXTRAL: MixtralModel,
-    SupportedModel.DEEPSEEK_V3: DeepseekV3Model,
-    SupportedModel.LLAMA4: DenseModel,
-    SupportedModel.QWEN3: DenseModel,
-    SupportedModel.QWEN3_MOE: Qwen3MoEModel,
-    SupportedModel.QWEN3_5_MOE: Qwen3MoEModel,
-    SupportedModel.QWEN3_TOKEN_CLASSIFICATION: DenseModel,
-    SupportedModel.LLAMA_TOKEN_CLASSIFICATION: DenseModel,
-}
-
 
 def get_supported_model(model_type: str) -> SupportedModel:
     try:
@@ -162,41 +138,3 @@ def hf_to_mcore_config(
     assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
     model = get_supported_model(hf_config.architectures[0])
     return MODEL_CONFIG_CONVERTER_REGISTRY[model](hf_config, dtype, **override_transformer_config_kwargs)
-
-
-def init_mcore_model(
-    tfconfig: TransformerConfig,
-    hf_config: PretrainedConfig,
-    pre_process: bool = True,
-    post_process: bool = None,
-    *,
-    share_embeddings_and_output_weights: bool = False,
-    value: bool = False,
-    **extra_kwargs,  # may be used for vlm and moe
-) -> nn.Module:
-    """
-    Initialize a Mcore model.
-
-    Args:
-        tfconfig: The transformer config.
-        hf_config: The HuggingFace config.
-        pre_process: Optional pre-processing function.
-        post_process: Optional post-processing function.
-        share_embeddings_and_output_weights: Whether to share embeddings and output weights.
-        value: Whether to use value.
-        **extra_kwargs: Additional keyword arguments.
-
-    Returns:
-        The initialized model.
-    """
-    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
-    model = get_supported_model(hf_config.architectures[0])
-    initializer_cls = MODEL_INITIALIZER_REGISTRY[model]
-    initializer = initializer_cls(tfconfig, hf_config)
-    return initializer.initialize(
-        pre_process=pre_process,
-        post_process=post_process,
-        share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-        value=value,
-        **extra_kwargs,
-    )
