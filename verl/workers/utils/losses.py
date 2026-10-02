@@ -37,11 +37,22 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # for each sample, loss mask shape is [1, prompt_length + response_length]
         loss_mask = data["loss_mask"]
 
-        log_prob_flatten = log_prob.values()
-        loss_mask_flatten = loss_mask.values()
+        tpu_padded_log_prob = getattr(log_prob, "_tpu_padded_values", None)
+        if tpu_padded_log_prob is not None:
+            # Unlike CUDA, TPU's XLA compiler recompiles the backward graph whenever tensor shapes
+            # change; keep log_prob at its static bucket-padded shape and zero-pad loss_mask to match.
+            log_prob_flatten = tpu_padded_log_prob
+            loss_mask_flatten = torch.roll(loss_mask.values(), shifts=-1, dims=0)
+            if loss_mask_flatten.shape[0] < log_prob_flatten.shape[0]:
+                pad_len = log_prob_flatten.shape[0] - loss_mask_flatten.shape[0]
+                loss_mask_flatten = torch.nn.functional.pad(loss_mask_flatten, (0, pad_len), value=0)
+            loss_mask_flatten = loss_mask_flatten.to(log_prob_flatten.device)
+        else:
+            log_prob_flatten = log_prob.values()
+            loss_mask_flatten = loss_mask.values()
 
-        # left-shift the loss mask by one token to align with log_prob
-        loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
+            # left-shift the loss mask by one token to align with log_prob
+            loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
 
         # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
         # For FSDP backend, the loss is directly used for backward; while for Megatron backend,

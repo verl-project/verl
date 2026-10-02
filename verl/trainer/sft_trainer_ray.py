@@ -344,7 +344,14 @@ class SFTTrainer:
                 metrics["train/grad_norm"] = metrics.pop("grad_norm")
                 metrics["train/lr"] = metrics.pop("lr")
                 metrics["train/mfu"] = metrics.pop("mfu")
-                metrics["train/global_tokens"] = torch.sum(torch.tensor(batch_seqlens, device=self.device_name)).item()
+                if self.device_name == "tpu":
+                    # On TPU clusters, the Ray driver runs on a CPU-only head node with no TPU device,
+                    # so allocating a tensor with device="tpu" on the driver fails.
+                    metrics["train/global_tokens"] = sum(batch_seqlens)
+                else:
+                    metrics["train/global_tokens"] = torch.sum(
+                        torch.tensor(batch_seqlens, device=self.device_name)
+                    ).item()
                 total_tokens += metrics["train/global_tokens"]
                 metrics["train/total_tokens(B)"] = total_tokens / 1e9
                 tracking.log(data=metrics, step=global_step)
@@ -362,9 +369,18 @@ class SFTTrainer:
                         output = self.training_client.infer_batch(val_data)
                         output = output.get()
                         metrics = tu.get(output, "metrics")
-                        val_losses.append(metrics["loss"])
+                        if self.device_name == "tpu" and isinstance(metrics, list):
+                            # When worker-side all-gather is skipped on TPU, infer_batch returns a list
+                            # of per-rank metric dicts that must be averaged on the driver.
+                            val_losses.append(sum(m["loss"] for m in metrics) / len(metrics))
+                        else:
+                            val_losses.append(metrics["loss"])
 
-                    val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
+                    if self.device_name == "tpu":
+                        # The Ray driver runs on a CPU-only head node where device="tpu" is unavailable.
+                        val_loss = torch.mean(torch.tensor(val_losses, dtype=torch.float32))
+                    else:
+                        val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
 
                     metric = {"val/loss": val_loss.detach().item()}
                     tracking.log(data=metric, step=global_step)

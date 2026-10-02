@@ -245,7 +245,19 @@ def _create_varlen_metadata_for_document(input_batch: torch.Tensor, positions: t
                 torch.tensor([seq_len], dtype=torch.int32, device=device),
             ]
         )
-        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
+        if sample_cu_seqlens.device.type == "tpu":
+            # torch.unique_consecutive is not supported on TPU (no XLA lowering in torch_tpu);
+            # deduplicate consecutive offsets using boolean diff masking instead.
+            if sample_cu_seqlens.numel() > 1:
+                keep_mask = torch.cat(
+                    [
+                        torch.ones(1, dtype=torch.bool, device=device),
+                        sample_cu_seqlens[1:] != sample_cu_seqlens[:-1],
+                    ]
+                )
+                sample_cu_seqlens = sample_cu_seqlens[keep_mask]
+        else:
+            sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
 
         seq_lengths = torch.diff(sample_cu_seqlens)
         all_seq_lengths.append(seq_lengths)
