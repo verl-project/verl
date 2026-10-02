@@ -929,6 +929,20 @@ class RayWorkerGroup(WorkerGroup):
     def world_size(self):
         return self._world_size
 
+    def replace_worker(self, rank: int, new_worker_handle, new_name: Optional[str] = None):
+        """Replace a failed worker handle with a promoted standby worker handle.
+
+        Allows dynamic sub-second failover without recreating the worker group
+        or restarting the Ray cluster.
+        """
+        assert 0 <= rank < len(self._workers), f"Rank {rank} out of bounds for worker count {len(self._workers)}"
+        old_worker = self._workers[rank]
+        self._workers[rank] = new_worker_handle
+        if new_name is not None and rank < len(self._worker_names):
+            self._worker_names[rank] = new_name
+        logger.info(f"RayWorkerGroup {self.name_prefix}: Replaced worker at rank {rank} ({old_worker}) -> {new_worker_handle}")
+
+
 
 """
 Utilities that enables creating workers inside the same ray.Actor,
