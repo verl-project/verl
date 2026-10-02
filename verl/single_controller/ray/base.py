@@ -31,6 +31,7 @@ from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker,
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.device import get_device_name
 from verl.utils.py_functional import temp_env_var
+from verl.utils.ray_utils import run_coroutine_sync
 
 __all__ = ["Worker"]
 
@@ -1115,7 +1116,9 @@ def create_colocated_worker_raw_cls(class_dict: dict[str, RayClassWithInitArgs])
                 f"calling {cls_name}'s {method_name}, but {cls_name} not in fused_worker_dict"
             )
             udc_method = getattr(self.fused_worker_dict[cls_name], method_name)
-            return udc_method(*args, **kwargs)
+            # Sub-worker methods may be ``async def`` (e.g. update_weights); drive the
+            # returned awaitable to completion here instead of returning a bare coroutine.
+            return run_coroutine_sync(udc_method(*args, **kwargs))
 
     renamed_fused_worker_cls = type(class_name_renamed, (FusedWorker,), {})
     renamed_fused_worker_cls.is_fused_worker = True
