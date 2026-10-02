@@ -294,3 +294,31 @@ def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
     assert torch.equal(captured["input_ids"], expected), (
         f"{_adapter_id(forward_fn)}: expected fallback to torch.roll(input_ids), got {captured['input_ids'].tolist()}"
     )
+
+
+@pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=_adapter_id)
+@pytest.mark.parametrize("shape", [(2, 3), (1, 6)], ids=["padded", "packed"])
+def test_fused_adapter_output_shape(forward_fn, shape):
+    """Both fused backends must return batch and sequence dimensions in token order."""
+    model = _make_fake_lm()
+    input_ids = torch.arange(6).reshape(shape)
+    expected_log_probs = -torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]).reshape(shape)
+    expected_entropy = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]).reshape(shape)
+    base_output = _FakeBaseOutput(torch.zeros(*shape, HIDDEN_SIZE))
+
+    with (
+        mock.patch.object(qwen2_vl, "qwen2_vl_forward", return_value=base_output),
+        mock.patch.object(glm4v, "glm4v_forward", return_value=base_output),
+        mock.patch(
+            "verl.utils.experimental.torch_functional.FusedLinearForPPO.forward",
+            return_value=(expected_log_probs, expected_entropy),
+        ),
+        mock.patch(
+            "verl.utils.kernel.linear_cross_entropy.linear_cross_entropy",
+            return_value=(expected_log_probs.flatten(), expected_entropy.flatten()),
+        ),
+    ):
+        output = forward_fn(model, input_ids=input_ids, return_dict=True)
+
+    torch.testing.assert_close(output.log_probs, expected_log_probs)
+    torch.testing.assert_close(output.entropy, expected_entropy)
