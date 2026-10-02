@@ -53,6 +53,9 @@ checkpoint:
   # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
   save_contents: ["model", "optimizer", "extra"]
 
+  # Floating-point dtype for FSDP/VeOmni Hugging Face exports; null preserves the gathered dtype
+  hf_export_dtype: null
+
   # For more flexibility, you can specify the contents to load from the checkpoint.
   load_contents: ${checkpoint.save_contents}
 

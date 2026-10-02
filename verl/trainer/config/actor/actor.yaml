@@ -141,6 +141,9 @@ checkpoint:
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
+  # Floating-point dtype for FSDP/VeOmni Hugging Face exports; null preserves the gathered dtype
+  hf_export_dtype: null
+
   # Whether to perform strict validation during weight export
   strict: True
 
