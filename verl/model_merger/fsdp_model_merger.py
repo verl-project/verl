@@ -116,20 +116,15 @@ class FSDPModelMerger(BaseModelMerger):
         Retrieves sharding information (device_mesh, mesh_dim_names) from a DTensor in the state_dict.
         If no DTensor is found, infers a simple FSDP mesh based on world_size.
         """
-        pivot_key = sorted(list(state_dict.keys()))[0]
-        weight = state_dict[pivot_key]
+        # Persistent buffers may sort before the sharded parameters. Use an
+        # actual DTensor rather than inferring the layout from the first key.
+        for weight in state_dict.values():
+            if isinstance(weight, DTensor):
+                device_mesh = weight.device_mesh
+                return device_mesh.mesh, device_mesh.mesh_dim_names
 
-        if isinstance(weight, DTensor):
-            # get sharding info
-            device_mesh = weight.device_mesh
-            mesh = device_mesh.mesh
-            mesh_dim_names = device_mesh.mesh_dim_names
-        else:
-            # for non-DTensor
-            mesh = np.array([world_size], dtype=np.int64)
-            mesh_dim_names = ("fsdp",)
-
-        return mesh, mesh_dim_names
+        # for non-DTensor
+        return np.array([world_size], dtype=np.int64), ("fsdp",)
 
     def _calculate_shard_configuration(
         self, mesh: np.ndarray, mesh_dim_names: tuple[str, ...]
