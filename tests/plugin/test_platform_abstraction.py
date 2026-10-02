@@ -208,5 +208,14 @@ class TestPlatformRegistry:
             _create_platform("nonexistent_platform")
 
 
+class TestTorchProfilerHooks:
+    """Test the default (no-op) behavior of the torch.profiler plugin hooks."""
+
+    def test_defaults_are_none(self):
+        platform = _make_mock_platform("mock_torch_profiler")()
+        assert platform.torch_profiler_activity() is None
+        assert platform.torch_profiler_content_name() is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

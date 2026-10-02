@@ -230,6 +230,8 @@ VERL_USE_EXTERNAL_PLUGINS=pkg1,pkg2  # only load named entry_points
 | **Profiling** | `nvtx_range(msg)` | Context manager for profiler ranges |
 | | `profiler_start()` | Start device profiler |
 | | `profiler_stop()` | Stop device profiler |
+| | `torch_profiler_activity()` | This platform's `torch.profiler.ProfilerActivity`, or `None` to opt out |
+| | `torch_profiler_content_name()` | `contents` keyword that requests it (e.g. `'xpu'`); must be paired with `torch_profiler_activity()` |
 | **Low-level** | `cudart()` | CUDA runtime API object or `None` |
 | | `check_smi_command(cmd)` | Run SMI command and check exit code |
 

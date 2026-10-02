@@ -24,6 +24,7 @@ from typing import Any, Optional
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
+from verl.plugin.platform import get_platform
 
 
 @dataclass
@@ -127,6 +128,10 @@ class TorchProfilerToolConfig(BaseConfig):
     def __post_init__(self) -> None:
         """config validation logics go here"""
         __support_contents = ["cuda", "cpu", "memory", "shapes", "stack"]
+        plugin_content = get_platform().torch_profiler_content_name()
+        plugin_activity = get_platform().torch_profiler_activity()
+        if plugin_content is not None and plugin_activity is not None:
+            __support_contents = [*__support_contents, plugin_content]
         for content in self.contents:
             assert content in __support_contents, (
                 f"Profiler contents only supports {__support_contents}, but gets {content}"
