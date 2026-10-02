@@ -15,6 +15,7 @@
 from typing import Optional
 
 import torch
+from torch.distributed.tensor import DTensor, Partial
 
 try:
     from liger_kernel.ops import (
@@ -31,6 +32,17 @@ try:
     _FLASH_ATTN_CROSS_ENTROPY_AVAILABLE = True
 except ImportError:
     _FLASH_ATTN_CROSS_ENTROPY_AVAILABLE = False
+
+
+def prepare_fused_linear_weight(hidden_states: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Materialize an FSDP2 LM head before entering a fused autograd function."""
+    compute_dtype = hidden_states.dtype if isinstance(weight, DTensor) else weight.dtype
+    # Move regular CPU weights and offloaded shards before any NCCL gather.
+    weight = weight.to(device=hidden_states.device, dtype=compute_dtype, non_blocking=True)
+    if isinstance(weight, DTensor):
+        # Each DP rank contributes a different weight gradient, not a replica.
+        return weight.full_tensor(grad_placements=[Partial("avg")] * weight.device_mesh.ndim)
+    return weight
 
 
 def _fused_linear_for_ppo_fwd(
@@ -233,6 +245,7 @@ class FusedLinearForPPO(torch.nn.Module):
         input_ids: torch.LongTensor,
         temperature: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        vocab_weights = prepare_fused_linear_weight(hidden_states, vocab_weights)
         input_ids = input_ids.to(torch.int64)
         if self.impl_backend == "torch" or _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None:
             return FusedLinearForPPOFunction.apply(

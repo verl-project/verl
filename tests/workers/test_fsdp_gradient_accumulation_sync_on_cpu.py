@@ -14,6 +14,7 @@
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -24,6 +25,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy, fully_shard
 
+from verl.utils.fsdp_utils import FSDPModule
 from verl.workers.engine.fsdp import transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
 
@@ -80,6 +82,23 @@ def test_gradient_sync_context_restores_fsdp2_after_error(monkeypatch):
         with engine._gradient_sync_context(is_last_micro_batch=False):
             raise RuntimeError("backward failed")
 
+    assert module.events == [False, True]
+
+
+@pytest.mark.parametrize("backend", ["torch", "triton", "liger", None])
+def test_gradient_sync_context_preserves_directly_gathered_head_sync(monkeypatch, backend):
+    module = _FSDP2Module()
+    module._verl_fused_kernels_backend = backend
+    module.lm_head = Mock(spec=FSDPModule)
+    engine = _make_engine(module)
+    monkeypatch.setattr(transformer_impl, "fsdp_version", lambda _: 2)
+
+    with engine._gradient_sync_context(is_last_micro_batch=False):
+        if backend is None:
+            module.lm_head.set_requires_gradient_sync.assert_not_called()
+        else:
+            module.lm_head.set_requires_gradient_sync.assert_called_once_with(True)
+        assert module.events == [False]
     assert module.events == [False, True]
 
 

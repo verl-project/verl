@@ -34,6 +34,8 @@ import typing
 import torch
 import torch.distributed as dist
 
+from verl.utils.experimental.torch_functional import prepare_fused_linear_weight
+
 
 class LinearCrossEntropy(torch.autograd.Function):
     @staticmethod
@@ -116,4 +118,13 @@ class LinearCrossEntropy(torch.autograd.Function):
         return (d_hidden, d_weight, None, None, None, None)
 
 
-linear_cross_entropy = LinearCrossEntropy.apply
+def linear_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: typing.Optional[float] = 1.0,
+    reduction: typing.Optional[str] = "none",
+    dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+) -> list[torch.Tensor]:
+    weight = prepare_fused_linear_weight(hidden, weight)
+    return LinearCrossEntropy.apply(hidden, weight, labels, temperature, reduction, dist_process_group)

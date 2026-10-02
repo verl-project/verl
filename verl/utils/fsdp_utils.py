@@ -570,6 +570,20 @@ def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
     return modules
 
 
+def set_fsdp2_gradient_sync(model, enabled: bool):
+    """Configure accumulation without deferring the directly gathered fused head."""
+    model.set_requires_gradient_sync(enabled)
+    head = getattr(model, "lm_head", None)
+    if (
+        not enabled
+        and getattr(model, "_verl_fused_kernels_backend", None) in ("torch", "triton", "liger")
+        and isinstance(head, FSDPModule)
+    ):
+        # DTensor autograd already averages this head's gradient each micro-batch.
+        # Its forward is bypassed, so FSDP has no unsharded gradient to accumulate.
+        head.set_requires_gradient_sync(True)
+
+
 def apply_fsdp2(model, fsdp_kwargs, config):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
