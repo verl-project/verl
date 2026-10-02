@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from torch.distributed.tensor import DTensor
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLCausalLMOutputWithPast,
     Qwen3VLForConditionalGeneration,
@@ -349,7 +348,7 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
-    from verl.utils.experimental.torch_functional import FusedLinearForPPO
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
@@ -366,16 +365,13 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    vocab_weights = self.lm_head.weight
-    if isinstance(vocab_weights, DTensor):
-        vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
-
-    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=vocab_weights,
-        input_ids=rolled_labels,
-        temperature=temperature,
+    log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
+        hidden_states,
+        rolled_labels,
+        temperature,
+        getattr(self, "_verl_fused_kernels_backend", "torch"),
+        gather_weights=True,
     )
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
@@ -392,7 +388,7 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
-    from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
@@ -408,12 +404,12 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    log_probs, entropy = linear_cross_entropy(
+    log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
         hidden_states,
-        self.lm_head.weight,
         rolled_labels,
         temperature,
-        "none",
+        "triton",
     )
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
