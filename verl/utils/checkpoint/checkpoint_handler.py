@@ -65,6 +65,7 @@ class CheckpointHandler:
         resume_from_path=None,
         mode=OrchestrationMode.SPMD,
         lora_train_meta=None,
+        steps_per_epoch=None,
     ):
         self.default_local_dir = default_local_dir
         self.max_ckpt_to_keep = max_ckpt_to_keep
@@ -75,6 +76,10 @@ class CheckpointHandler:
         self.train_dataloader = train_dataloader
         self.mode = mode
         self.lora_train_meta = lora_train_meta
+        # Number of batches per epoch, i.e. len(train_dataloader). Used to detect
+        # dataloader states saved exactly at an epoch boundary (see
+        # _load_dataloader_state). When None, the detection is disabled.
+        self.steps_per_epoch = steps_per_epoch
 
         if self.mode == OrchestrationMode.SPMD:
             self.rank = torch.distributed.get_rank()
@@ -167,12 +172,42 @@ class CheckpointHandler:
 
         return resume_step
 
+    def _at_epoch_boundary(self) -> bool:
+        """Check whether the resumed checkpoint sits exactly at an epoch boundary.
+
+        Every training step consumes exactly one dataloader batch, so a checkpoint whose
+        global step is a multiple of ``steps_per_epoch`` was saved right after an epoch
+        finished, with the dataloader sampler fully exhausted.
+        """
+        if self.steps_per_epoch is None or self.steps_per_epoch <= 0:
+            return False
+        resume_global_step = getattr(self, "resume_global_step", 0)
+        return resume_global_step > 0 and resume_global_step % self.steps_per_epoch == 0
+
     def _load_dataloader_state(self, checkpoint_path: str):
         """Load dataloader state from checkpoint"""
         dp_rank = self.dp_rank
         dataloader_path = os.path.join(checkpoint_path, f"data_{dp_rank}.pt")
 
         if os.path.exists(dataloader_path):
+            if self._at_epoch_boundary():
+                # The checkpoint was saved right after an epoch finished, so the saved
+                # dataloader state marks the sampler as exhausted. Restoring it would
+                # fast-forward the *next* epoch's sampler by the whole epoch length
+                # (torchdata restores the sampler position via islice), silently skipping
+                # the entire new epoch. Drop the stale state and start the epoch fresh.
+                log_with_rank(
+                    f"Skipping dataloader state restore: global_step={self.resume_global_step} "
+                    f"is at an epoch boundary (steps_per_epoch={self.steps_per_epoch}). "
+                    f"The saved state marks the dataloader as exhausted. "
+                    f"Next epoch will iterate from scratch.",
+                    logger=logger,
+                    rank=self.rank,
+                    level=logging.WARNING,
+                    log_only_rank_0=True,
+                )
+                return
+
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = torch.load(dataloader_path, map_location="cpu", weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)

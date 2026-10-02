@@ -82,6 +82,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             mode=OrchestrationMode.RAY,
+            steps_per_epoch=self.steps_per_epoch,
         )
 
     def _build_config(self):
