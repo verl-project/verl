@@ -106,6 +106,58 @@ def test_r3_alignment_mask_and_dcp_collection():
     assert [part.shape[0] for part in losses[1]["model_output"]["routed_experts"].unbind()] == [3]
 
 
+def test_r3_alignment_expands_deepseek_v41_compact_image_routes():
+    input_ids = _nested([torch.arange(9)])
+    routes = _nested(
+        [
+            torch.arange(10, 15, dtype=torch.int16).reshape(5, 1, 1),
+        ]
+    )
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, -1, 0, 1, 2, 3, -1, -1, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    aligned_part = aligned.unbind()[0].squeeze(-1).squeeze(-1).tolist()
+    assert aligned_part == [10, 11, 0, 0, 0, 0, 13, 14, 0]
+
+    mask = router_utils.build_r3_replay_mask(
+        input_ids,
+        torch.tensor([[1, 1, 1]], dtype=torch.bool),
+        multimodal,
+    )
+    assert mask.unbind()[0].tolist() == [True, True, False, False, False, False, True, True, False]
+
+
+def test_r3_alignment_keeps_full_deepseek_v41_routes_but_uses_native_image_mask():
+    input_ids = _nested([torch.arange(6)])
+    routes = _nested(
+        [
+            torch.arange(20, 26, dtype=torch.int16).reshape(6, 1, 1),
+        ]
+    )
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, 0, 1, 2, 3, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    torch.testing.assert_close(aligned.unbind()[0], routes.unbind()[0])
+
+
+def test_r3_alignment_accepts_partial_deepseek_v41_image_expansion():
+    input_ids = _nested([torch.arange(10)])
+    # The rollout has six text rows and two visual rows, while the actor
+    # expands the image span to four visual positions.
+    routes = _nested([torch.arange(30, 38, dtype=torch.int16).reshape(8, 1, 1)])
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, -1, 0, 1, 2, 3, -1, -1, -1, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    aligned_part = aligned.unbind()[0].squeeze(-1).squeeze(-1).tolist()
+    assert aligned_part == [30, 31, 32, 33, 0, 0, 34, 35, 36, 37]
+
+
 def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     # The nested branch rides all_gather_object, which pickles the tensor, so int16
     # needs no uint8 reinterpretation here.

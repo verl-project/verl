@@ -34,6 +34,11 @@ from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
+
+try:
+    from megatron.core.utils import get_cpu_resident_parameter_ids
+except ImportError:
+    get_cpu_resident_parameter_ids = None
 from transformers import PretrainedConfig
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
@@ -85,9 +90,7 @@ def wrap_model_chunks_with_layerwise_aware_ddp(
     ``tag_params_for_buffer_routing`` + ``compute_full_param_layout`` before DDP
     construction — verl's plain DDP wrap omits this and causes redundant buffers.
     """
-    from megatron.core.distributed import (
-        DistributedDataParallel as DDP,
-    )
+    from megatron.core.distributed import DistributedDataParallel as DDP
     from megatron.core.optimizer.layer_wise_optimizer import (
         LayerWiseDistributedOptimizer,
         tag_params_for_buffer_routing,
@@ -225,8 +228,18 @@ def get_model(
 
     # GPU allocation.
     if transformer_config is None or (not transformer_config.use_cpu_initialization):
-        for model_module in model:
-            model_module.to(f"{get_device_name()}:{get_device_id()}")
+        target = f"{get_device_name()}:{get_device_id()}"
+        if get_cpu_resident_parameter_ids is None:
+            for model_module in model:
+                model_module.to(target)
+        else:
+            for model_module in model:
+                cpu_resident_parameters = get_cpu_resident_parameter_ids(model_module)
+                for p in model_module.parameters():
+                    if id(p) not in cpu_resident_parameters:
+                        p.data = p.data.to(target, non_blocking=True)
+                for b in model_module.buffers():
+                    b.data = b.data.to(target, non_blocking=True)
 
     # Fp16 conversion.
     config: TransformerConfig = get_model_config(model[0])
@@ -501,6 +514,7 @@ except ImportError:
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
+    module_instances = tuple(m for m in module_instances if isinstance(m, type))
     return_list = True
     if not isinstance(model, list):
         model = [model]
@@ -711,16 +725,31 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
             # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
             if load_frozen_params:
                 device_id = get_device_id()
-                for param in model_chunk.module.parameters():
-                    if not param.requires_grad and param.device.type == "cpu":
-                        param.data = param.data.to(device_id, non_blocking=True)
+                if get_cpu_resident_parameter_ids is None:
+                    for param in model_chunk.module.parameters():
+                        if not param.requires_grad and param.device.type == "cpu":
+                            param.data = param.data.to(device_id, non_blocking=True)
+                else:
+                    cpu_resident_parameters = get_cpu_resident_parameter_ids(model_chunk.module)
+                    for param in model_chunk.module.parameters():
+                        if not param.requires_grad and param.device.type == "cpu":
+                            if id(param) not in cpu_resident_parameters:
+                                param.data = param.data.to(device_id, non_blocking=True)
         else:
             # we need this for ref module
             device_id = get_device_id()
-            for _, param in model_chunk.named_parameters():
-                param.data = param.data.to(device_id, non_blocking=True)
-                if param.grad is not None:
-                    param.grad = param.grad.to(device_id, non_blocking=True)
+            if get_cpu_resident_parameter_ids is None:
+                for _, param in model_chunk.named_parameters():
+                    param.data = param.data.to(device_id, non_blocking=True)
+                    if param.grad is not None:
+                        param.grad = param.grad.to(device_id, non_blocking=True)
+            else:
+                cpu_resident_parameters = get_cpu_resident_parameter_ids(model_chunk)
+                for _, param in model_chunk.named_parameters():
+                    if id(param) not in cpu_resident_parameters:
+                        param.data = param.data.to(device_id, non_blocking=True)
+                    if param.grad is not None:
+                        param.grad = param.grad.to(device_id, non_blocking=True)
     get_torch_device().empty_cache()
 
 
@@ -1177,6 +1206,9 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
 
     try:
         from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+
+        if not isinstance(megatron_FSDP, type):
+            from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP as megatron_FSDP
     except ImportError:
         megatron_FSDP = DDP
 
