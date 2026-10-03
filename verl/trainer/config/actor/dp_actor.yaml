@@ -25,8 +25,8 @@ _target_: verl.workers.config.FSDPActorConfig
 # TODO(haibin.lin): switch to fsdp2
 strategy: fsdp
 
-# Gradient clipping for actor updates, specific to the strategy.
-grad_clip: 1.0
+# Deprecated: use optim.clip_grad. If set, its value is applied to optim.clip_grad.
+grad_clip: null
 
 # Sequence parallelism size for Ulysses-style model parallelism
 # oc.select: the default val for ref.ulysses_sequence_parallel_size

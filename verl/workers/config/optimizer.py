@@ -30,6 +30,21 @@ __all__ = [
 ]
 
 
+def validate_fsdp_clip_grad(clip_grad: Optional[float]) -> None:
+    """Reject clip_grad values that torch's clip_grad_norm_ silently mishandles.
+
+    The FSDP and VeOmni engines pass ``clip_grad`` straight to ``clip_grad_norm_(max_norm=...)``,
+    which scales every gradient by ``max_norm / total_norm``: ``0`` zeroes all gradients and a
+    negative value flips their sign, so training "succeeds" while learning nothing or diverging.
+    Use ``float("inf")`` to disable clipping.
+    """
+    if clip_grad is None or not clip_grad > 0:
+        raise ValueError(
+            f"optim.clip_grad must be > 0 for torch-based gradient clipping (got {clip_grad}); "
+            "use float('inf') to disable clipping"
+        )
+
+
 @dataclass
 class OptimizerConfig(BaseConfig):
     """Base optimizer configuration.
@@ -59,6 +74,8 @@ class OptimizerConfig(BaseConfig):
         if self.grad_clip is not None:
             warnings.warn("`grad_clip` is deprecated, use `clip_grad` instead.", DeprecationWarning, stacklevel=2)
             self.clip_grad = self.grad_clip
+        if self.clip_grad is not None and not self.clip_grad >= 0:
+            raise ValueError(f"optim.clip_grad must be >= 0, got {self.clip_grad}")
 
 
 @dataclass
@@ -82,6 +99,10 @@ class VeOmniOptimizerConfig(OptimizerConfig):
     lr_decay_ratio: float = 1.0
     lr_scheduler_type: str = "constant"
     override_optimizer_config: Optional[dict] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        validate_fsdp_clip_grad(self.clip_grad)
 
 
 @dataclass
@@ -121,7 +142,8 @@ class FSDPOptimizerConfig(OptimizerConfig):
             )
             self.lr_scheduler_type = self.warmup_style
         assert self.lr_scheduler_type in ["constant", "cosine"]
-        return super().__post_init__()
+        super().__post_init__()
+        validate_fsdp_clip_grad(self.clip_grad)
 
 
 @dataclass

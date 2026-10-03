@@ -35,5 +35,5 @@ forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null
 # [DEPRECATED] use fsdp_config.ulysses_sequence_parallel_size instead
 ulysses_sequence_parallel_size: 1
 
-# Gradient clipping for critic updates
-grad_clip: 1.0
+# Deprecated: use optim.clip_grad. If set, its value is applied to optim.clip_grad.
+grad_clip: null
