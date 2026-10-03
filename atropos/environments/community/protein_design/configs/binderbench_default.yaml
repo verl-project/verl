@@ -1,0 +1,19 @@
+# Debug Mode - set to true to use mock data instead of actual API calls
+debug_protein_design_calls: false
+
+max_retries_per_internal_step: 100
+
+nim_api_base_url: "https://health.api.nvidia.com/v1"
+api_timeout: 600
+polling_interval: 10
+
+output_dir: "environments/hack0/protein_design_env/outputs"
+
+use_wandb: true
+wandb_name: "binderbench"
+wandb_project: "atropos"
+include_messages: true
+
+dataset_name: "ronig/protein_binding_sequences"
+target_col: "receptor"
+binder_col: "peptide"

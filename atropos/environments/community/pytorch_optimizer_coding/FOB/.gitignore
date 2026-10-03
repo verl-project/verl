@@ -1,0 +1,8 @@
+__pycache__
+.vscode
+data
+lightning_logs
+experiments
+*.ipynb
+experiment.yaml
+condaenv.*.requirements.txt

@@ -1,0 +1,18 @@
+/* IBM Plex Sans for body, IBM Plex Mono for code/pre/monospace */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "IBM Plex Sans", Arial, sans-serif;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono",
+    Menlo, monospace;
+}

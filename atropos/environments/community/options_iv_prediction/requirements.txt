@@ -1,0 +1,6 @@
+pandas
+wandb
+datasets
+tqdm
+yahooquery
+atroposlib
