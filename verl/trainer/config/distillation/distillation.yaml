@@ -61,6 +61,19 @@ n_gpus_per_node: 8
 # Number of nodes in the distillation teacher resource pool
 nnodes: 0
 
+# Whether all teachers' replicas are placed on the SAME GPU bundles (multi-teacher
+# shared GPU group) instead of disjoint sub-pools. Requires every teacher's world_size
+# (num_replicas * per_replica_world_size) to be equal and to match the distillation
+# resource pool size (n_gpus_per_node * nnodes), and every teacher's
+# inference.free_cache_engine=True and inference.enable_sleep_mode=True. Teacher
+# engines start asleep (weights offloaded to CPU, KV cache freed) and are woken on demand.
+share_gpu_group: false
+
+# Maximum number of simultaneously-awake teachers when share_gpu_group is true.
+# null = unlimited (all teachers may stay awake). When the limit is hit, the
+# least-recently-used unpinned teacher is put to sleep (vLLM sleep level 1).
+max_awake_teachers: null
+
 # multi-teacher configs
 teacher_models:
 
