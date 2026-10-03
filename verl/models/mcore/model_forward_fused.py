@@ -33,6 +33,7 @@ from torch import Tensor
 
 from verl.models.mcore.util import preprocess_thd_engine, preprocess_vlm_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+from verl.utils.megatron.param_sync import ensure_fused_weight_ready
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
@@ -105,6 +106,7 @@ def fused_output_processor(
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
+    ensure_fused_weight_ready(weight)
 
     temperature = context.temperature
     logprobs, entropy = linear_cross_entropy(
@@ -384,6 +386,7 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
+    ensure_fused_weight_ready(output_weight)
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         output_weight,
