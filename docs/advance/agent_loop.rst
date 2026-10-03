@@ -173,7 +173,7 @@ After tool_calls extraction, the messages is like this:
 
 Encode the extracted message back is not equal to the original LLM generated response_ids.
 
-Second,  the `decode-encode` may also lead to inconsistency: `Agent-R1 issue#30 <https://github.com/0russwest0/Agent-R1/issues/30#issuecomment-2826155367>`_.
+Second,  the `decode-encode` may also lead to inconsistency: `Agent-R1 issue#30 <https://github.com/AgentR1/Agent-R1/issues/30#issuecomment-2826155367>`_.
 
 **What is the impact of this inconsistency?**
 
