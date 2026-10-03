@@ -48,7 +48,7 @@ import verl.utils.torch_functional as verl_F
 
 compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
-MAX_TEST_CASES = os.environ.get("MAX_TEST_CASES", 5)
+MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 5))
 VERIFY_TORCH_SELF = os.environ.get("VERIFY_TORCH_SELF", False)
 LOW_MEMORY = os.environ.get("LOW_MEMORY", False)
 LOW_MEMORY_DIV_FACTOR = os.environ.get("LOW_MEMORY_DIV_FACTOR", 16)
@@ -203,6 +203,70 @@ class TestLinearCrossEntropy_TensorParallel:
 
         gc.collect()
         torch.cuda.synchronize()
+
+    def verify_all_negative_logits(self):
+        """Check TP max reductions with the large negative offset seen in ChemGraph."""
+        self.cleanup()
+        num_tokens = 32
+        hidden_size = 128
+        local_vocab_size = 1153
+        temperature = 1.0
+
+        hidden_data = torch.zeros((1, num_tokens, hidden_size), dtype=torch.bfloat16, device="cuda")
+        hidden_data[..., 0] = 1
+        hidden_data[..., 1] = 1
+        dist.broadcast(hidden_data, src=0, group=self.group)
+
+        weight_data = torch.zeros((local_vocab_size, hidden_size), dtype=torch.bfloat16, device="cuda")
+        weight_data[:, 0] = -334
+        weight_data[:, 1] = torch.linspace(-1, 1, local_vocab_size, dtype=torch.bfloat16, device="cuda")
+        weight_data[:, 1] += 0.25 * self.local_rank
+        labels = (torch.arange(num_tokens, device="cuda") * 137 % (local_vocab_size * self.world_size)).unsqueeze(0)
+        labels = labels.contiguous()
+        dist.broadcast(labels, src=0, group=self.group)
+
+        reference_hidden = hidden_data.clone().requires_grad_()
+        reference_weight = weight_data.clone().requires_grad_()
+        reference_logprobs, reference_entropy = run_torch_entropy_tp(
+            reference_hidden, reference_weight, labels, temperature, self.group
+        )
+
+        kernel_hidden = hidden_data.clone().requires_grad_()
+        kernel_weight = weight_data.clone().requires_grad_()
+        kernel_logprobs, kernel_entropy = linear_cross_entropy(
+            kernel_hidden, kernel_weight, labels, temperature, "none", self.group
+        )
+
+        assert torch.isfinite(kernel_logprobs).all()
+        assert torch.isfinite(kernel_entropy).all()
+        torch.testing.assert_close(kernel_logprobs, reference_logprobs, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(kernel_entropy, reference_entropy, atol=1e-3, rtol=1e-3)
+
+        grad_logprobs = torch.linspace(-0.5, 0.5, num_tokens, device="cuda")
+        grad_entropy = torch.linspace(0.5, -0.5, num_tokens, device="cuda")
+        reference_grads = torch.autograd.grad(
+            (reference_logprobs, reference_entropy),
+            (reference_hidden, reference_weight),
+            (grad_logprobs, grad_entropy),
+        )
+        kernel_grads = torch.autograd.grad(
+            (kernel_logprobs, kernel_entropy),
+            (kernel_hidden, kernel_weight),
+            (grad_logprobs, grad_entropy),
+        )
+
+        reference_hidden_grad, reference_weight_grad = reference_grads
+        kernel_hidden_grad, kernel_weight_grad = kernel_grads
+        dist.all_reduce(reference_hidden_grad, op=dist.ReduceOp.SUM, group=self.group)
+        dist.all_reduce(kernel_hidden_grad, op=dist.ReduceOp.SUM, group=self.group)
+
+        assert torch.isfinite(kernel_hidden_grad).all()
+        assert torch.isfinite(kernel_weight_grad).all()
+        torch.testing.assert_close(kernel_hidden_grad, reference_hidden_grad, atol=2e-2, rtol=4e-2)
+        torch.testing.assert_close(kernel_weight_grad, reference_weight_grad, atol=2e-2, rtol=4e-2)
+
+        if self.local_rank == 0:
+            print("[PASS]: TP all-negative-logits regression test.")
 
     def generate_hyper(self):
         global LOW_MEMORY, LOW_MEMORY_DIV_FACTOR, MAX_TEST_CASES
@@ -502,6 +566,7 @@ if __name__ == "__main__":
     # set_backward_method(BackwardEnum._Split_Dlogits_N)
 
     test = TestLinearCrossEntropy_TensorParallel()
+    test.verify_all_negative_logits()
     for test_case_idx in range(MAX_TEST_CASES):
         print(f"[INFO] Running test case {test_case_idx}")
         test.initialize(test_case_idx)
