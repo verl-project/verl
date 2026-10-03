@@ -82,6 +82,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             mode=OrchestrationMode.RAY,
+            async_save=self.checkpoint_config.async_save,
         )
 
     def _build_config(self):
@@ -284,6 +285,8 @@ class SFTTrainer:
             "global_batch_size": self.global_batch_size,
             "pad_mode": self.config.data.pad_mode,
             "pad_token_id": self.model_config.tokenizer.pad_token_id,
+            # Let Megatron advance completed writes inside each training batch.
+            "finalize_async_checkpoint": self.checkpoint_config.async_save,
         }
 
         train_time = 0
@@ -371,7 +374,7 @@ class SFTTrainer:
                     last_valid_metric = metric
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
-                    self.ckpt_handler.save_checkpoint(step=global_step)
+                    self.ckpt_handler.save_checkpoint(step=global_step, blocking=is_last_step)
 
                 if is_last_step:
                     print(f"Total time for train steps: {train_time:.2f}s")
