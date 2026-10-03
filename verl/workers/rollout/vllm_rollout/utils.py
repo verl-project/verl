@@ -251,6 +251,17 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    def _post_process_adapter_sync(self) -> int:
+        """Refresh safe model runtime layouts after an adapter-only refit."""
+        processed = 0
+        for model, _ in self._iter_all_models_with_config():
+            process = getattr(model, "process_weights_after_loading", None)
+            if process is None:
+                continue
+            process()
+            processed += 1
+        return processed
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV and other illegal tokens
@@ -356,7 +367,11 @@ class vLLMColocateWorkerExtension:
             modelopt_process_weights_after_loading(self.model_runner.model)
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif peft_config and base_sync_done:
-            logger.info("LoRA adapter sync, no post-process needed")
+            processed = self._post_process_adapter_sync()
+            logger.info(
+                "LoRA adapter sync: ran model post-process for %d model(s)",
+                processed,
+            )
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)

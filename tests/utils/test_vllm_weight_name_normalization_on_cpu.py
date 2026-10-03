@@ -855,6 +855,29 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     torch.testing.assert_close(added[0]["lora.A.weight"], torch.ones(1))
 
 
+def test_adapter_sync_runs_model_post_process(monkeypatch):
+    """Adapter refits refresh safe model runtime layouts."""
+    _install_fake_receiver(monkeypatch, [([("lora.A.weight", torch.ones(1))], True)])
+
+    model = _FakeModel({"q.base_layer.weight": torch.empty(0)})
+    post_process_calls = []
+    model.process_weights_after_loading = lambda: post_process_calls.append(True)
+
+    worker = _make_worker(model)
+    worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(model_type="deepseek_v41")
+    worker.add_lora = lambda request: None
+    worker.remove_lora = lambda lora_id: None
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-adapter-post-process.sock"
+
+    worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
+
+    assert post_process_calls == [True]
+
+
 def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     """Standard (non-LoRA) base sync loads every bucket immediately (no accumulation)."""
     _install_fake_receiver(
@@ -1246,6 +1269,26 @@ def test_strict_loader_per_expert_leaf_plain_re_suffixed(monkeypatch):
     worker = _make_worker(model)
     plain = "model.layers.0.mlp.experts.0.gate_proj.weight"
     assert _resolve(worker, model, plain) == live  # re-suffixed, not routed
+
+
+@pytest.mark.parametrize("leaf", ["weight", "scale"])
+def test_deepseek_v41_unwrapped_expert_base_sync_gets_lora_suffix(monkeypatch, leaf):
+    """Partial LoRA leaves earlier DSV4 experts unwrapped in Bridge, but vLLM
+    wraps their fused MoE base and expects a leaf-position base_layer suffix.
+    """
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_BASE_LAYER_PREFIX", True)
+    _vllm_utils_real._inner_load_weights_is_strict_cache.clear()
+    model = _FakeModel(
+        {"language_model.model.layers.1.ffn.experts.base_layer.routed_experts.w13_weight": torch.empty(0)},
+        mapper=_FakeMapper({"layers.": "language_model.model.layers."}),
+    )
+    model.language_model = types.SimpleNamespace(model=_FakeStrictInner())
+    worker = _make_worker(model)
+    plain = f"layers.1.ffn.experts.0.w1.{leaf}"
+    suffixed = f"layers.1.ffn.experts.0.w1.base_layer.{leaf}"
+    assert _resolve(worker, model, plain) == suffixed
+    assert _resolve(worker, model, suffixed) == suffixed
 
 
 def test_strict_probe_is_cached_per_class():
