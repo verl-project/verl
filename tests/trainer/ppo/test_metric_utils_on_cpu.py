@@ -16,6 +16,8 @@ Tests for the metric utilities in verl.trainer.ppo.metric_utils.
 """
 
 import unittest
+from itertools import combinations
+from math import comb
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -24,6 +26,7 @@ import torch
 from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
     calc_maj_val,
+    compute_best_worst_at_k,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -492,6 +495,47 @@ class TestBootstrapMetric(unittest.TestCase):
             bootstrap_metric([], subset_size=1, reduce_fns=[np.mean])
 
 
+class TestBestWorstAtK(unittest.TestCase):
+    def test_matches_exhaustive_sampling_without_replacement(self):
+        for data in ([0.0, 1.0], [-3.0, 0.5, 2.0], [2.0, -1.0, 2.0], [7.0], [4.0, 4.0]):
+            for k in range(1, len(data) + 1):
+                with self.subTest(data=data, k=k):
+                    samples = np.array(list(combinations(data, k)))
+                    expected = [
+                        (np.mean(extrema), np.std(extrema)) for extrema in (samples.max(axis=1), samples.min(axis=1))
+                    ]
+                    np.testing.assert_allclose(compute_best_worst_at_k(data, k), expected, atol=1e-14)
+
+    def test_binary_scores(self):
+        n, c = 128, 32
+        for k in (1, 2, 8, 64, 128):
+            with self.subTest(k=k):
+                all_incorrect = comb(n - c, k) / comb(n, k)
+                best = 1 - all_incorrect
+                worst = comb(c, k) / comb(n, k)
+                expected = [
+                    (best, np.sqrt(all_incorrect * best)),
+                    (worst, np.sqrt(worst * (1 - worst))),
+                ]
+                np.testing.assert_allclose(compute_best_worst_at_k([0] * (n - c) + [1] * c, k), expected, atol=1e-14)
+
+    def test_large_offset_preserves_std(self):
+        result = compute_best_worst_at_k([1e12, 1e12 + 1, 1e12 + 2], 2)
+        np.testing.assert_allclose([std for _, std in result], [np.sqrt(2 / 9)] * 2, atol=1e-14)
+        np.testing.assert_array_equal([mean for mean, _ in result], [1e12 + 5 / 3, 1e12 + 1 / 3])
+
+    def test_full_sample_has_zero_std(self):
+        self.assertEqual(compute_best_worst_at_k([2, -3, 5, 2], 4), [(5.0, 0.0), (-3.0, 0.0)])
+        for data in ([-1e16, 1.0], [-1e12, 1e-5], [-1.0, 1e16]):
+            with self.subTest(data=data):
+                self.assertEqual(compute_best_worst_at_k(data, len(data)), [(max(data), 0.0), (min(data), 0.0)])
+
+    def test_invalid_input(self):
+        for data, k in (([], 1), ([1], 0), ([1], -1), ([1, 2], 3)):
+            with self.subTest(data=data, k=k), self.assertRaises(ValueError):
+                compute_best_worst_at_k(data, k)
+
+
 class TestCalcMajVal(unittest.TestCase):
     """Tests for the calc_maj_val function."""
 
@@ -528,6 +572,23 @@ class TestCalcMajVal(unittest.TestCase):
 class TestProcessValidationMetrics(unittest.TestCase):
     """Tests for the process_validation_metrics function."""
 
+    def test_best_worst_are_exact_and_seed_independent(self):
+        kwargs = {
+            "data_sources": ["source1"] * 4,
+            "sample_uids": ["prompt1"] * 4,
+            "infos_dict": {"score": [0, 0, 0, 1]},
+        }
+        with patch(
+            "verl.trainer.ppo.metric_utils.bootstrap_metric", side_effect=AssertionError("unexpected bootstrap")
+        ):
+            result = process_validation_metrics(**kwargs, seed=42)
+            self.assertEqual(result, process_validation_metrics(**kwargs, seed=123))
+        metrics = result["source1"]["score"]
+        for k in (2, 4):
+            for name, mean in (("best", k / 4), ("worst", 0.0)):
+                self.assertAlmostEqual(metrics[f"{name}@{k}/mean"], mean)
+                self.assertAlmostEqual(metrics[f"{name}@{k}/std"], np.sqrt(mean * (1 - mean)))
+
     def test_process_validation_metrics_basic(self):
         """Test process_validation_metrics with simple data."""
         data_sources = ["source1", "source1", "source2"]
@@ -560,13 +621,19 @@ class TestProcessValidationMetrics(unittest.TestCase):
             "pred": ["A", "B", "A"],
         }
 
-        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+        with patch("verl.trainer.ppo.metric_utils.bootstrap_metric", wraps=bootstrap_metric) as bootstrap:
+            result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+            self.assertEqual(bootstrap.call_count, 2)  # Only maj@2 and maj@3 use bootstrap.
 
-        # Check that majority voting metrics are present
-        self.assertIn("maj@2/mean", result["source1"]["score"])
-
-        # For bootstrap with n=2, the majority vote could be either A or B
-        # depending on the random sampling, so we don't check the exact value
+        vote_data = [
+            {"pred": pred, "val": val} for pred, val in zip(infos_dict["pred"], infos_dict["score"], strict=True)
+        ]
+        for k in (2, 3):
+            [(mean, std)] = bootstrap_metric(
+                vote_data, k, [lambda sample: calc_maj_val(sample, "pred", "val")], seed=42
+            )
+            self.assertEqual(result["source1"]["score"][f"maj@{k}/mean"], mean)
+            self.assertEqual(result["source1"]["score"][f"maj@{k}/std"], std)
 
     def test_process_validation_metrics_counts_missing_sessions_as_incorrect(self):
         data_sources = ["source1", "source1"]
