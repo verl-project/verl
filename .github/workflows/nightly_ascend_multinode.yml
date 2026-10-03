@@ -1,6 +1,7 @@
 name: nightly_ci_ascend_multinode
 
 on:
+  pull_request:
   schedule:
     - cron: "0 17 * * *"
 
