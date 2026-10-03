@@ -229,7 +229,7 @@ def test_actor_engine(strategy):
     data.batch["ref_log_prob"] = torch.rand_like(responses, dtype=torch.float32)
 
     # construct actor config
-    actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
+    actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=1)
 
     # set ppo loss
     ppo_loss_ = partial(ppo_loss, config=actor_config)
@@ -358,7 +358,7 @@ def test_critic_engine(strategy):
     # update again
     # create critic config
     critic_config = CriticConfig(
-        strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1, model=config.model_config
+        strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=1, model=config.model_config
     )
     value_loss_ = partial(value_loss, config=critic_config)
     wg.set_loss_fn(value_loss_)
@@ -646,7 +646,7 @@ def _split_training_primitives_fsdp_worker(
     )
     engine.initialize()
 
-    actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
+    actor_config = ActorConfig(strategy=strategy, rollout_n=1, ppo_micro_batch_size_per_gpu=1)
     loss_fn = partial(ppo_loss, config=actor_config)
     before = _snapshot_trainable_params(engine.module)
 
