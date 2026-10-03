@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 _current_platform: PlatformBase | None = None
+_RAY_ACCELERATOR_RESOURCE_NAMES = frozenset({"GPU", "NPU"})
 
 
 class PlatformRegistry:
@@ -110,11 +111,37 @@ def _detect_platform_name() -> str:
             logger.debug("Platform '%s' detection failed: %s", name, e)
             continue
 
-    logger.warning(
+    log = logger.debug if _is_cpu_only_ray_worker() else logger.warning
+    log(
         "No supported accelerator detected. Registered: %s. Falling back to 'nvidia'.",
         names,
     )
     return "nvidia"
+
+
+def _is_cpu_only_ray_worker() -> bool:
+    """Return whether this is a Ray worker with no accelerator resources.
+
+    Fail closed so missing Ray installations, drivers, and runtime-context
+    failures retain the existing warning behavior.
+    """
+    try:
+        import ray
+
+        if not ray.is_initialized():
+            return False
+
+        context = ray.get_runtime_context()
+        if context.get_task_id() is None:
+            return False
+
+        assigned_resources = context.get_assigned_resources()
+        return not any(
+            resource_name in _RAY_ACCELERATOR_RESOURCE_NAMES and amount > 0
+            for resource_name, amount in assigned_resources.items()
+        )
+    except Exception:
+        return False
 
 
 def _create_platform(name: str) -> PlatformBase:
@@ -128,7 +155,8 @@ def _create_platform(name: str) -> PlatformBase:
         )
     platform = platform_cls()
     if not platform.is_available():
-        logger.warning(
+        log = logger.debug if _is_cpu_only_ray_worker() else logger.warning
+        log(
             "Platform '%s' (%s) is registered but not available. "
             "This may be due to this ray actor being a CPU-only actor.",
             name,
