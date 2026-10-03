@@ -807,8 +807,7 @@ class RayPPOTrainer:
 
             orig_critic_cfg = critic_cfg
             engine_config: EngineConfig = orig_critic_cfg.engine
-            engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-            engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+            orig_critic_cfg.apply_engine_batching(engine_config)
 
             # Build the critic profiler config via the hydra path (same as the actor / ref / SFT),
             # so its tool_config entries are real dataclass instances the torch/nsys/npu backends can
