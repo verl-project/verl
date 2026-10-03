@@ -20,7 +20,7 @@ from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
@@ -73,6 +73,35 @@ class FullyAsyncTaskRunner:
         role_worker_mapping, ray_worker_group_cls = create_role_worker_mapping(config)
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
+
+        # Pre-compute total_training_steps from config before trainer init.
+        # Megatron's OptimizerParamScheduler requires lr_decay_steps > 0 at __init__ time,
+        # but set_total_train_steps is only called after rollouter init (which happens after
+        # trainer init). Compute the value here to avoid the assertion failure.
+        # This mirrors the logic in v1/trainer_base.py::_init_dataloader.
+        trigger_step = config.async_training.trigger_parameter_sync_step
+        total_training_steps = config.trainer.get("total_training_steps", None)
+        if total_training_steps is None:
+            required_samples = (
+                config.actor_rollout_ref.actor.ppo_mini_batch_size * config.async_training.require_batches
+            )
+            total_rollout_steps = config.rollout.total_rollout_steps
+            total_training_steps = int(total_rollout_steps / (required_samples * trigger_step))
+
+        optim_total_training_steps = total_training_steps * trigger_step
+        try:
+            OmegaConf.set_struct(config, True)
+            with open_dict(config):
+                if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
+                    config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
+                if OmegaConf.select(config, "critic.optim"):
+                    config.critic.optim.total_training_steps = optim_total_training_steps
+        except Exception as e:
+            print(f"[ASYNC MAIN] Warning: Could not set total_training_steps: {e}")
+        print(
+            f"[ASYNC MAIN] total_training_steps={total_training_steps}, "
+            f"optim_total_training_steps={optim_total_training_steps}"
+        )
 
         print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
         self._create_trainer(config)
