@@ -26,6 +26,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -41,6 +42,7 @@ def _engine(**overrides):
         is_mp_src_rank_with_outputs=lambda: False,
         get_data_parallel_rank=lambda: 0,
         get_data_parallel_size=lambda: 1,
+        get_data_parallel_group=lambda: None,
     )
     for key, value in overrides.items():
         setattr(engine, key, value)
@@ -78,9 +80,10 @@ def _record_names(monkeypatch):
 
 
 def test_update_loop_names_each_mini_batch(monkeypatch):
-    mini_batches = [TensorDict({}, batch_size=[]) for _ in range(3)]
+    mini_batches = [TensorDict({}, batch_size=[1]) for _ in range(3)]
     monkeypatch.setattr(tu, "make_iterator", lambda data, **kwargs: iter(mini_batches))
     names = _record_names(monkeypatch)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group: 1)
 
     worker = _worker(_engine())
     worker.train_batch = MagicMock(return_value={})
@@ -103,3 +106,29 @@ def test_forward_only_stage_is_not_a_profiler_step():
 
     assert TrainingWorker.infer_batch(worker, data) is None
     worker.profiler.step.assert_not_called()
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_grouped_update_loop_preserves_uids_and_epoch_coverage(monkeypatch, shuffle):
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group: 1)
+    names = _record_names(monkeypatch)
+    uids = ["a", "a", "a", "b", "c", "c"]
+    data = tu.get_tensordict({"row": torch.arange(len(uids)), "uid": uids})
+    tu.assign_non_tensor(data, num_mini_batch=2, epochs=2, seed=42, dataloader_kwargs={"shuffle": shuffle})
+    worker = _worker(_engine())
+    worker.train_batch = MagicMock(return_value={})
+
+    assert TrainingWorker.train_mini_batch(worker, data) is None
+    batches = [call.args[0] for call in worker.train_batch.call_args_list]
+    assert len(batches) == 4
+    assert names == ["mini_batch0", "mini_batch1", "mini_batch2", "mini_batch3"]
+    assert worker.profiler.step.call_count == 4
+    for epoch in range(2):
+        epoch_batches = batches[epoch * 2 : (epoch + 1) * 2]
+        assert sorted(row for batch in epoch_batches for row in batch["row"].tolist()) == list(range(len(uids)))
+        uid_sets = [set(tu.get(batch, "uid")) for batch in epoch_batches]
+        assert uid_sets[0].isdisjoint(uid_sets[1])
+        assert uid_sets[0] | uid_sets[1] == set(uids)
+    for index, batch in enumerate(batches):
+        assert tu.get(batch, "global_batch_size") == batch.batch_size[0]
+        assert tu.get(batch, "update_lr_scheduler") is (index == len(batches) - 1)
