@@ -100,7 +100,9 @@ def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bo
 
     if is_unit_temperature:
         return logits
-    return logits / temperature.clamp(min=1e-8).to(logits.dtype)
+    # No downstream consumer needs the unscaled model output. Reuse its
+    # storage instead of peaking at two full vocabulary tensors.
+    return verl_F.scale_logits_by_temperature_(logits, temperature)
 
 
 class FSDPEngine(BaseEngine):

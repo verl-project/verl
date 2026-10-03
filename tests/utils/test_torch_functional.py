@@ -26,6 +26,7 @@ from verl.utils.torch_functional import (
     distributed_mean_max_min_std,
     expand_as_nested,
     masked_mean,
+    scale_logits_by_temperature_,
 )
 
 
@@ -148,6 +149,88 @@ def test_calculate_sum_pi_squared_from_logits_extreme_values():
     expected = torch.softmax(logits, dim=-1).pow(2).sum(dim=-1)
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize("temperature", [1.0, 0.7, 1e-10])
+def test_scale_logits_by_temperature_inplace_matches_out_of_place(temperature):
+    """Temperature scaling reuses logits storage and preserves forward/backward numerics."""
+    torch.manual_seed(0)
+    hidden_actual = torch.randn(2, 5, 7, dtype=torch.float64, requires_grad=True)
+    weight_actual = torch.randn(11, 7, dtype=torch.float64, requires_grad=True)
+    hidden_expected = hidden_actual.detach().clone().requires_grad_(True)
+    weight_expected = weight_actual.detach().clone().requires_grad_(True)
+
+    logits_actual = hidden_actual @ weight_actual.T
+    logits_expected = hidden_expected @ weight_expected.T
+    denominator = torch.full((2, 1, 1), temperature, dtype=torch.float32)
+    storage_ptr = logits_actual.data_ptr()
+
+    returned = scale_logits_by_temperature_(logits_actual, denominator)
+    expected = logits_expected / denominator.clamp(min=1e-8).to(logits_expected.dtype)
+
+    assert returned is logits_actual
+    assert returned.data_ptr() == storage_ptr
+    torch.testing.assert_close(returned, expected)
+
+    returned.logsumexp(dim=-1).sum().backward()
+    expected.logsumexp(dim=-1).sum().backward()
+    torch.testing.assert_close(hidden_actual.grad, hidden_expected.grad)
+    torch.testing.assert_close(weight_actual.grad, weight_expected.grad)
+
+
+def test_scale_logits_by_temperature_supports_squeezed_view():
+    """Scaling a ``squeeze(0)`` view keeps autograd correct.
+
+    Every eager call site scales a view rather than the raw model output::
+
+        logits_rmpad = output.logits.squeeze(0)   # (total_nnz, vocab_size)
+        scale_logits_by_temperature_(logits_rmpad, temperature.unsqueeze(-1))
+
+    In-place writes through a view are only safe when no saved tensor is
+    invalidated. That holds here because the LM head is a matmul, whose
+    backward saves its *inputs*, not its output. The torchtitan engine keeps an
+    out-of-place divide for the same pattern, so this test pins down which
+    behaviour the shared helper is expected to have.
+    """
+    torch.manual_seed(0)
+    hidden = torch.randn(3, 6, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(9, 6, dtype=torch.float64, requires_grad=True)
+    hidden_ref = hidden.detach().clone().requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+
+    view = (hidden @ weight.T).unsqueeze(0).squeeze(0)
+    reference = (hidden_ref @ weight_ref.T).unsqueeze(0).squeeze(0)
+    temperature = torch.full((3, 1), 0.7)
+    storage_ptr = view.data_ptr()
+
+    returned = scale_logits_by_temperature_(view, temperature)
+
+    assert returned is view
+    assert returned.data_ptr() == storage_ptr
+    torch.testing.assert_close(returned, reference / temperature.to(reference.dtype))
+
+    returned.logsumexp(dim=-1).sum().backward()
+    (reference / temperature.to(reference.dtype)).logsumexp(dim=-1).sum().backward()
+    torch.testing.assert_close(hidden.grad, hidden_ref.grad)
+    torch.testing.assert_close(weight.grad, weight_ref.grad)
+
+
+def test_scale_logits_by_temperature_rejects_output_saved_for_backward():
+    """The helper must not silently corrupt gradients.
+
+    ``div_`` is only valid when the tensor is not saved for its producer's
+    backward. Softmax saves its output, so scaling it in place must raise
+    rather than return a wrong gradient. This documents that misuse fails
+    loudly, which is what makes the optimisation safe to apply broadly.
+    """
+    torch.manual_seed(0)
+    hidden = torch.randn(2, 4, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(5, 4, dtype=torch.float64, requires_grad=True)
+    saved_output = torch.softmax(hidden @ weight.T, dim=-1)
+
+    scale_logits_by_temperature_(saved_output, torch.tensor([[0.5]]))
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        saved_output.sum().backward()
 
 
 def test_expand_as_nested():

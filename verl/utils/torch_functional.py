@@ -70,6 +70,29 @@ def gather_from_labels(data: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
     return output
 
 
+def scale_logits_by_temperature_(logits: torch.Tensor, temperature: torch.Tensor) -> torch.Tensor:
+    """Scale non-leaf model logits by temperature without duplicating the tensor.
+
+    Eager policy engines materialize a ``(..., vocab_size)`` logits tensor before
+    computing token log-probabilities. An out-of-place division can therefore
+    temporarily require two full vocabulary tensors, which is prohibitive for
+    long sequences and large vocabularies. The unscaled logits are not consumed
+    after temperature scaling, so updating this model output in place preserves
+    the computation while avoiding that peak-memory duplication.
+
+    Args:
+        logits: Non-leaf logits produced by the model's LM head.
+        temperature: Positive temperatures broadcastable to ``logits`` except
+            for the vocabulary dimension. Values are clamped to ``1e-8`` to
+            match the existing eager-engine behavior.
+
+    Returns:
+        The input ``logits`` tensor, scaled in place.
+    """
+    denominator = temperature.clamp(min=1e-8).to(device=logits.device, dtype=logits.dtype)
+    return logits.div_(denominator)
+
+
 def logprobs_from_logits(logits, labels, inplace_backward=True):
     """
     Compute per-token log-probabilities for the given labels.
