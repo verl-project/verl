@@ -155,8 +155,7 @@ def compute_advantage_for_multi_trajectories(
     norm_adv_by_std_in_grpo: bool = True,
     config: Any = None,
 ) -> DataProto:
-    """Compute GRPO advantages from each session's final output. For non-GRPO
-    estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
+    """Compute scalar or vectorized GRPO advantages from each session's final output.
 
     For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
     in advantage computation, and the result is broadcast to the other outputs in
@@ -164,7 +163,7 @@ def compute_advantage_for_multi_trajectories(
     in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
     original ``compute_advantage()`` unchanged.
     """
-    if adv_estimator != core_algos.AdvantageEstimator.GRPO:
+    if adv_estimator not in (core_algos.AdvantageEstimator.GRPO, core_algos.AdvantageEstimator.GRPO_VECTORIZED):
         return compute_advantage(
             data,
             adv_estimator=adv_estimator,
