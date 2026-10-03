@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import ray
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
@@ -338,13 +339,13 @@ class ProfilerConfig(BaseConfig):
         )
 
 
-def rollout_trace_dir(profiler_config: ProfilerConfig, rank: int) -> str:
+def rollout_trace_dir(profiler_config: ProfilerConfig) -> str:
     """Return the directory an inference engine writes the traces of ``rank`` to.
 
     Engine-side profiling is per replica, so each replica gets its own sub-directory of
     ``save_path`` instead of writing into the flat layout the training workers use.
     """
-    return os.path.join(profiler_config.save_path, f"agent_loop_rollout_replica_{rank}")
+    return os.path.join(profiler_config.save_path, f"agent_loop_{ray.get_runtime_context().get_actor_name()}")
 
 
 def rollout_profiler_global_ranks(profiler_config: Optional["ProfilerConfig"]) -> Optional[set[int]]:
@@ -437,7 +438,8 @@ def relocate_rollout_traces(
     if not getattr(profiler_config, "relocate_results", False):
         return []
 
-    src_dir = rollout_trace_dir(profiler_config, rank)
+    lane = ray.get_runtime_context().get_actor_name()
+    src_dir = rollout_trace_dir(profiler_config)
     if not os.path.isdir(src_dir):
         return []
 
@@ -446,11 +448,11 @@ def relocate_rollout_traces(
 
     relocated = []
     for name in sorted(os.listdir(src_dir)):
-        prefix = f"rollout-replica{rank}_"
+        prefix = f"{lane}_"
         local_rank = rollout_trace_local_rank(name, world_size) if world_size else None
         global_rank = base_global_rank + local_rank if local_rank is not None else None
         if global_rank is not None:
-            prefix = f"rollout-replica{rank}-globalrank{global_rank}_"
+            prefix = f"{lane}-globalrank{global_rank}_"
         # Keep only the GPUs the user asked for; a tp>1 engine also traced its other ranks, but those
         # are left in the sub-directory rather than surfaced. Unknown ranks are kept, never dropped.
         if keep is not None and global_rank is not None and global_rank not in keep:
@@ -493,7 +495,7 @@ def build_vllm_profiler_args(
     with_stack = True if "stack" in contents or "module" in contents else False
     record_shapes = True if "shapes" in contents else False
     with_memory = True if "memory" in contents else False
-    save_path = rollout_trace_dir(profiler_config, rank)
+    save_path = rollout_trace_dir(profiler_config)
 
     # vLLM < 0.13.0 supports controlling profiler via environment variables
     if legacy_env:
@@ -558,7 +560,7 @@ def build_sglang_profiler_args(profiler_config: ProfilerConfig, tool_config: Bas
     )
 
     return {
-        "output_dir": rollout_trace_dir(profiler_config, rank),
+        "output_dir": rollout_trace_dir(profiler_config),
         "with_stack": "stack" in contents or "module" in contents,
         "record_shapes": "shapes" in contents,
         "start_step": start_step,
