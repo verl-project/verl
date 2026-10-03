@@ -570,9 +570,51 @@ def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
     return modules
 
 
+def _guard_fsdp2_accumulated_grad() -> None:
+    """Work around an AttributeError in torch's FSDP2 gradient accumulation.
+
+    `FSDPParam.to_accumulated_grad_if_needed` reads `self._unsharded_param`
+    without checking that it exists. That attribute is created by
+    `init_unsharded_param` (which guards its own access with `hasattr`) and
+    dropped by `free_unsharded_param`, so a parameter that never took part in the
+    forward pass does not have it, and training dies with
+
+        AttributeError: 'FSDPParam' object has no attribute '_unsharded_param'
+
+    Seen on a Qwen3.5 VL model under text-only batches, where the vision tower is
+    never gathered. Such a parameter has no unsharded gradient to upcast, which is
+    the case the method already returns early for, so returning is what it means
+    to do.
+
+    Fixed upstream in pytorch/pytorch#194058. This shim keeps verl working on the
+    torch releases that carry the bug and becomes a no-op once the fix lands: it
+    only inserts an early return for the case that would otherwise raise. It runs
+    from `apply_fsdp2` so every FSDP2 wrapper in the tree gets it, not only the
+    engine that happened to import a particular module.
+    """
+    try:
+        from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
+    except ImportError:
+        return
+
+    original = getattr(FSDPParam, "to_accumulated_grad_if_needed", None)
+    if original is None or getattr(original, "_verl_guarded", False):
+        return
+
+    @functools.wraps(original)
+    def to_accumulated_grad_if_needed(self):
+        if getattr(self, "_unsharded_param", None) is None:
+            return
+        return original(self)
+
+    to_accumulated_grad_if_needed._verl_guarded = True
+    FSDPParam.to_accumulated_grad_if_needed = to_accumulated_grad_if_needed
+
+
 def apply_fsdp2(model, fsdp_kwargs, config):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+    _guard_fsdp2_accumulated_grad()
 
     default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
     fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
