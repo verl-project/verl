@@ -22,6 +22,8 @@ from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
     ceildiv,
     get_reverse_idx,
+    get_seqlen_balanced_partitions,
+    karmarkar_karp,
     prepare_dynamic_batch,
     rearrange_micro_batches,
     restore_dynamic_batch,
@@ -337,3 +339,79 @@ def test_group_balanced_partitions_equal_size():
         for uid in uids_in_partition:
             uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
             assert all(i in partition for i in uid_indices)
+
+
+def _spread(seqlen_list, partitions):
+    """Max minus min of per-partition workload sums."""
+    sums = [sum(seqlen_list[i] for i in p) for p in partitions]
+    return max(sums) - min(sums)
+
+
+def test_get_seqlen_balanced_partitions_equal_size_invariants():
+    """The equal_size path is what all three trainers use to balance DP ranks.
+
+    get_seqlen_balanced_partitions(..., equal_size=True) is called in ray_trainer,
+    v1/trainer_base and sft_trainer_ray with k_partitions=dp_size, yet only
+    get_group_balanced_partitions had direct coverage. Pin the contract here.
+    """
+    seqlen_list = [97, 32, 55, 12, 80, 3, 44, 61, 25, 70, 18, 90]
+    k = 4
+    partitions = get_seqlen_balanced_partitions(seqlen_list, k_partitions=k, equal_size=True)
+
+    # k partitions, each with exactly len / k items
+    assert len(partitions) == k
+    assert all(len(p) == len(seqlen_list) // k for p in partitions)
+
+    # every index covered exactly once
+    flat = sorted(i for p in partitions for i in p)
+    assert flat == list(range(len(seqlen_list)))
+
+    # each partition's indices are returned sorted (documented behaviour)
+    for p in partitions:
+        assert p == sorted(p)
+
+
+def test_get_seqlen_balanced_partitions_unequal_size_covers_and_nonempty():
+    """equal_size=False must still cover all indices and leave no empty partition."""
+    seqlen_list = [10, 20, 30, 40, 50, 60, 70]
+    k = 3
+    partitions = get_seqlen_balanced_partitions(seqlen_list, k_partitions=k, equal_size=False)
+
+    assert len(partitions) == k
+    assert all(len(p) > 0 for p in partitions)
+    flat = sorted(i for p in partitions for i in p)
+    assert flat == list(range(len(seqlen_list)))
+
+
+def test_karmarkar_karp_beats_naive_contiguous_split():
+    """The whole point of KK is a smaller workload spread than a naive chunking.
+
+    A degenerate implementation that returned contiguous chunks would still pass
+    the coverage/size invariants above, so this pins the balancing property itself.
+    """
+    # Sorted-ascending lengths make a contiguous split maximally unbalanced.
+    seqlen_list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    k = 3
+
+    kk_partitions = karmarkar_karp(seqlen_list, k_partitions=k, equal_size=True)
+
+    # Naive contiguous equal-size split for comparison.
+    per = len(seqlen_list) // k
+    naive_partitions = [list(range(i * per, (i + 1) * per)) for i in range(k)]
+
+    assert _spread(seqlen_list, kk_partitions) < _spread(seqlen_list, naive_partitions)
+
+
+def test_karmarkar_karp_is_deterministic():
+    """Same input must give the same partition — DP ranks rely on this agreeing."""
+    seqlen_list = [5, 5, 5, 3, 9, 1, 7, 2, 8, 4, 6, 0]
+    first = karmarkar_karp(seqlen_list, k_partitions=4, equal_size=True)
+    second = karmarkar_karp(seqlen_list, k_partitions=4, equal_size=True)
+    assert first == second
+
+
+def test_karmarkar_karp_all_equal_lengths_is_perfectly_balanced():
+    """Equal lengths admit a zero-spread partition; KK must find it."""
+    seqlen_list = [7] * 12
+    partitions = karmarkar_karp(seqlen_list, k_partitions=4, equal_size=True)
+    assert _spread(seqlen_list, partitions) == 0
