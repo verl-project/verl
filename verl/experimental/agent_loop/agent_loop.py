@@ -989,12 +989,30 @@ class AgentLoopWorker:
         if final_output.reward_score is None and enable_async_reward:
             timing = {}
             with simple_timer("compute_score", timing):
+                # Reward managers read response lengths from the tail of attention_mask.
+                # Pad prompt/response separately so every output shares that boundary.
+                prompt_length = max(len(output.prompt_ids) for output in outputs)
+                response_length = max(len(output.response_ids) for output in outputs)
                 all_prompts, all_responses, all_input_ids, all_attention_mask, all_position_ids = [], [], [], [], []
                 for output in outputs:
-                    prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
-                    responses = torch.tensor(output.response_ids, dtype=torch.int64)
+                    prompt_output = self._pad_token_ids(
+                        output.prompt_ids,
+                        max_length=prompt_length,
+                        padding_side="left",
+                        return_attention_mask=True,
+                    )
+                    response_output = self._pad_token_ids(
+                        output.response_ids,
+                        max_length=response_length,
+                        padding_side="right",
+                        return_attention_mask=True,
+                    )
+                    prompts = prompt_output["input_ids"].squeeze(0)
+                    responses = response_output["input_ids"].squeeze(0)
                     input_ids = torch.cat([prompts, responses], dim=0)
-                    attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+                    attention_mask = torch.cat(
+                        [prompt_output["attention_mask"], response_output["attention_mask"]], dim=1
+                    ).squeeze(0)
                     multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
                     position_ids = self._compute_position_ids(
                         input_ids.unsqueeze(0),
