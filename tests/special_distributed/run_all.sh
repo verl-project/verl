@@ -25,3 +25,6 @@ torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cp
 # Regression for colocated FSDP2 full-parameter model transfers. It locks in
 # PyTorch's implicit pinned allocation for non-blocking D2H Module.to().
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py
+# Regression for verl#7092 (FSDP2 must honour HF _keep_in_fp32_modules*). Two
+# ranks are enough to exercise sharded fp32 units and the full-state-dict load.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_keep_in_fp32.py
