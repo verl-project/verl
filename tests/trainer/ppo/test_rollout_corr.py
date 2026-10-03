@@ -309,6 +309,42 @@ def test_offpolicy_metrics():
     print("   ✓ Off-policy metrics work without rollout log probs")
 
 
+def test_offpolicy_metrics_ignore_all_padding_rows():
+    """All-padding rows (e.g. from _balance_batch) must not change per-sequence metrics (#7771)."""
+    seq_length = 6
+    old_log_prob = torch.full((1, seq_length), -2.0)
+    rollout_log_prob = torch.full((1, seq_length), -1.0)
+    response_mask = torch.ones(1, seq_length)
+
+    base = compute_offpolicy_metrics(old_log_prob, rollout_log_prob, response_mask)
+
+    # 1 real row + 3 extra rows whose response_mask is all zero
+    padded_mask = torch.cat([response_mask, torch.zeros(3, seq_length)], dim=0)
+
+    padded = compute_offpolicy_metrics(
+        old_log_prob=old_log_prob.repeat(4, 1),
+        rollout_log_prob=rollout_log_prob.repeat(4, 1),
+        response_mask=padded_mask,
+    )
+
+    per_sequence_metrics = [
+        "training_ppl",
+        "training_log_ppl",
+        "rollout_ppl",
+        "rollout_log_ppl",
+        "log_ppl_diff",
+        "log_ppl_abs_diff",
+        "log_ppl_diff_max",
+        "log_ppl_diff_min",
+        "ppl_ratio",
+        "chi2_seq",
+    ]
+    for metric in per_sequence_metrics:
+        assert padded[metric] == pytest.approx(base[metric]), (
+            f"{metric} changed when all-padding rows were added: {base[metric]} -> {padded[metric]}"
+        )
+
+
 def test_mask_mode():
     """Test mask mode applies rejection via response_mask, keeps true IS weights."""
     print("\nTesting mask mode behavior...")
