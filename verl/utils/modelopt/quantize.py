@@ -15,6 +15,8 @@
 
 """ModelOpt NVFP4 quantization config and application for Megatron QAT."""
 
+import copy
+
 import modelopt.torch.quantization as mtq
 import torch.nn as nn
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
@@ -30,8 +32,8 @@ _NVFP4_W4A16_QUANTIZER_CFG = {
 }
 
 
-def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
-    cfg = {}
+def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> list[dict]:
+    cfg = []
     mapping = {
         "lm_head": "*output_layer*",
         "*mlp.gate": "*router*",
@@ -41,7 +43,7 @@ def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> dict:
         key = pattern
         if key in mapping:
             key = mapping[key]
-        cfg[key] = {"enable": False}
+        cfg.append({"quantizer_name": key, "enable": False})
     return cfg
 
 
@@ -58,11 +60,12 @@ def build_quantize_config(
 
     ignore_cfg = _ignore_patterns_to_quant_cfg(ignore_patterns)
 
-    quant_cfg = {
-        **_NVFP4_W4A16_QUANTIZER_CFG,
-        **_default_disabled_quantizer_cfg,
-        **ignore_cfg,
-    }
+    quant_cfg = mtq.normalize_quant_cfg_list(_NVFP4_W4A16_QUANTIZER_CFG)
+    disabled_cfg = copy.deepcopy(_default_disabled_quantizer_cfg)
+    if isinstance(disabled_cfg, dict):
+        disabled_cfg = mtq.normalize_quant_cfg_list(disabled_cfg)
+    quant_cfg.extend(disabled_cfg)
+    quant_cfg.extend(ignore_cfg)
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 

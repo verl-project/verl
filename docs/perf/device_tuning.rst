@@ -165,7 +165,7 @@ a PR and include a screenshot from Wandb or other verifiable evidence.
       - \
       - fsdp
       - vllm0.8.2
-      - `qwen2-14b_grpo_4_h800_fsdp_vllm <https://github.com/verl-project/verl/blob/2239fd0ff7210c80ad63e20581924d1f66167429/examples/tuning/14b/qwen2-14b_grpo_4_h800_fsdp_vllm.sh>`_
+      - `qwen2-14b_grpo_4_h800_fsdp_vllm <https://github.com/verl-project/verl/blob/2239fd0ff7210c80ad63e20581924d1f66167429/examples/tuning/14b/qwen2_14b_grpo_4_h800_fsdp_vllm.sh>`_
       - `Xiangyongan <xiangyongan@bytedance.com>`_
     * - MIN
       - Qwen2.5-14B

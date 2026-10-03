@@ -38,6 +38,8 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
+    # No trainer to sync weights from, so the server must load them from disk.
+    config.actor_rollout_ref.rollout.load_format = "auto"
 
     return config
 
@@ -46,6 +48,7 @@ def init_config() -> DictConfig:
 @pytest.mark.parametrize("tp_size", [2, 4])
 async def test_standalone_rollout(init_config, tp_size):
     """Test standalone rollout single node and multi nodes."""
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {
@@ -72,9 +75,12 @@ async def test_standalone_rollout(init_config, tp_size):
     server_addresses = llm_server_manager.get_addresses()
     assert len(server_addresses) == num_replicas
 
-    os.environ.pop("HTTPS_PROXY", None)
-    os.environ.pop("HTTP_PROXY", None)
-    os.environ.pop("NO_PROXY", None)
+    # The rollout servers listen on Ray node addresses, which NO_PROXY does not
+    # cover, so no proxy must apply here. CI sets the upper-case names and dev
+    # shells usually the lower-case ones; httpx honours either, so drop both.
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        os.environ.pop(var, None)
+        os.environ.pop(var.lower(), None)
 
     client = AsyncOpenAI(
         api_key="123-abc",
@@ -93,6 +99,7 @@ async def test_standalone_rollout(init_config, tp_size):
 @pytest.mark.skip(reason="local test only")
 def test_hybrid_rollout_with_ep(init_config):
     """Test hybrid rollout with expert parallelism, DP=2, TP=4, EP=8."""
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {
@@ -119,7 +126,7 @@ def test_hybrid_rollout_with_ep(init_config):
     agent_loop_manager = init_agent_loop_manager(init_config)
     checkpoint_manager = CheckpointEngineManager(
         config=omega_conf_to_dataclass(init_config.actor_rollout_ref.rollout.checkpoint_engine),
-        trainer=agent_loop_manager.worker_group,
+        actor_wg=agent_loop_manager.worker_group,
         replicas=agent_loop_manager.rollout_replicas,
     )
     checkpoint_manager.sleep_replicas()

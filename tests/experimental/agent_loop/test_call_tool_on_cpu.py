@@ -64,14 +64,29 @@ class FakeFailingTool(FakeTool):
         raise RuntimeError("database connection failed")
 
 
-def _make_tool_agent_loop(tools: dict[str, Any]):
+class FakeLongResponseTool(FakeTool):
+    """A fake tool that returns a long response."""
+
+    def __init__(self, name: str, text: str):
+        super().__init__(name)
+        self.text = text
+
+    async def execute(self, instance_id, parameters, **kwargs):
+        return ToolResponse(text=self.text), 1.0, {}
+
+
+def _make_tool_agent_loop(
+    tools: dict[str, Any],
+    max_tool_response_length: int = 10000,
+    tool_response_truncate_side: str = "left",
+):
     """Create a minimal ToolAgentLoop instance with only the fields _call_tool needs."""
     from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
 
     mock = MagicMock(spec=ToolAgentLoop)
     mock.tools = tools
-    mock.max_tool_response_length = 10000
-    mock.tool_response_truncate_side = "left"
+    mock.max_tool_response_length = max_tool_response_length
+    mock.tool_response_truncate_side = tool_response_truncate_side
     # Bind the real _call_tool method to our mock
     mock._call_tool = ToolAgentLoop._call_tool.__get__(mock, ToolAgentLoop)
     return mock
@@ -136,6 +151,41 @@ class TestCallToolErrorHandling(unittest.IsolatedAsyncioTestCase):
         assert reward == 0.0
         assert "failing_tool" in response.text
         assert "database connection failed" in response.text
+
+    async def test_left_truncation_keeps_response_tail(self):
+        """Left truncation should drop the left side and preserve the response tail."""
+        tool_response = (
+            "Search results for capital of France:\n"
+            "1. Lyon is a major city with a long Roman history.\n"
+            "2. Marseille is a large port city in southern France.\n"
+            "3. The final retrieved snippet says the capital is Paris.\n"
+            "Final answer: Paris"
+        )
+        tools = {"search": FakeLongResponseTool("search", tool_response)}
+        loop = _make_tool_agent_loop(tools, max_tool_response_length=19, tool_response_truncate_side="left")
+        tool_call = FakeFunctionCall(name="search", arguments="{}")
+        response, reward, _ = await loop._call_tool(tool_call, {}, self.agent_data)
+        assert reward == 1.0
+        assert response.text.startswith("(truncated)...")
+        assert response.text.endswith("Final answer: Paris")
+
+    async def test_right_truncation_keeps_response_head(self):
+        """Right truncation should drop the right side and preserve the response head."""
+        tool_response = (
+            "Search results for capital of France:\n"
+            "1. Lyon is a major city with a long Roman history.\n"
+            "2. Marseille is a large port city in southern France.\n"
+            "3. The final retrieved snippet says the capital is Paris.\n"
+            "Final answer: Paris"
+        )
+        tools = {"search": FakeLongResponseTool("search", tool_response)}
+        loop = _make_tool_agent_loop(tools, max_tool_response_length=19, tool_response_truncate_side="right")
+        tool_call = FakeFunctionCall(name="search", arguments="{}")
+        response, reward, _ = await loop._call_tool(tool_call, {}, self.agent_data)
+        assert reward == 1.0
+        assert response.text.startswith("Search results")
+        assert response.text.endswith("...(truncated)")
+        assert "Final answer: Paris" not in response.text
 
 
 if __name__ == "__main__":

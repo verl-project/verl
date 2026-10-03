@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 06/18/2025.
+Last updated: 08/24/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -158,7 +158,10 @@ Actor/Rollout/Reference Policy
         fsdp_size: -1
       checkpoint:
         # What to include in saved checkpoints
-        # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+        # 'hf_model' saves the full model in HuggingFace format. For Megatron this requires
+        # 'model' and 'hf_model' produce the same HF checkpoint by default and
+        # are deduplicated. With use_dist_checkpointing=True, 'model' stores
+        # Megatron shards and 'hf_model' requests a separate HF export.
         save_contents: ['model', 'optimizer', 'extra']
         # For more flexibility, you can specify the contents to load from the checkpoint.
         load_contents: ${actor_rollout_ref.actor.checkpoint.save_contents}
@@ -217,8 +220,11 @@ Actor/Rollout/Reference Policy
 
 **Common config for actor, rollout and reference model**
 
-- ``actor_rollout_ref.hybrid_engine``: Whether it's a hybrid engine,
-  currently only supports hybrid engine
+- ``actor_rollout_ref.hybrid_engine``: Whether actor and rollout colocate
+  on the same GPUs (hybrid engine). Set to ``False`` only with the V1
+  ``separate_async`` trainer: no colocated rollout replicas are created
+  on the training GPUs and rollout is served exclusively by the
+  standalone rollout pool. All other trainers require ``True``
 - ``actor_rollout_ref.model.path``: Huggingface model path. This can be
   either local path or HDFS path. For HDFS path, we provide utils to
   download it to DRAM and convert the HDFS path to local path.
@@ -244,8 +250,10 @@ Actor/Rollout/Reference Policy
   used.
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
-    implementation backend for fused kernels. Options: "triton" or
-    "torch". Default is "torch".
+    implementation backend for fused kernels. Options: "triton", "torch", or
+    "liger". The "torch" backend always uses verl's native output-head implementation;
+    select "liger" explicitly to use Liger's fused output-head kernel.
+    Default is "torch".
     While in megatron, we only support "triton" as the
     implementation backend, so there is no need for this option.
 
@@ -324,11 +332,25 @@ Actor/Rollout/Reference Policy
 
 - ``actor_rollout_ref.actor.checkpoint``: The configurations of checkpoint function in actor
 
-  - ``save_contents``: The contents to save in the checkpoint. By default, we save model, optimizer and extra information in the checkpoint.
-    The extra information includes Rng states currently, FSDP supported lr_scheduler, and Megatron opt_param_scheduler will coming soon.
-    We do not store hf_model in checkpoint by default, but we provide a tool in ``scripts/model_merge.py`` to convert checkpoint format to hf format.
+  - ``save_contents``: The contents to save in the checkpoint. Accepts any subset of
+    ``model``, ``optimizer``, ``extra`` and ``hf_model``. Default is
+    ``['model', 'optimizer', 'extra']``. The extra information includes RNG states (and the
+    LR scheduler for FSDP, the ``opt_param_scheduler`` for Megatron).
+    For Megatron, ``model`` uses HuggingFace format under
+    ``${ckpt_path}/model/huggingface/`` by default. With
+    ``actor.megatron.use_dist_checkpointing=True``, it instead saves Megatron
+    shards under ``${ckpt_path}/model/dist_ckpt/``. Listing ``hf_model`` also
+    writes an HF export through Megatron-Bridge.
+
+    For FSDP, ``hf_model`` saves the full HF model on rank 0 in addition to the sharded
+    ``model`` shards.
 
   - ``load_contents``: The contents to load in the checkpoint, you can specify different checkpoint loading contents. By default, it is the same with ``save_checkpoint``.
+
+  - ``save_lora_only`` (bool, default ``False``): When ``True`` and the model has LoRA adapters,
+    only LoRA/adapter weights are saved instead of the full model state dict. On load, LoRA-only
+    checkpoints are auto-detected and merged into the base model via ``strict=False``.
+    Reduces checkpoint size dramatically (e.g. ~150 MiB vs ~54 GiB for a 27B model).
 
 **Reference Model**
 
@@ -581,6 +603,7 @@ Trainer
      default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name} # local checkpoint path
      resume_mode: auto # or disable or resume_path if resume_from_path is set
      resume_from_path: null
+     checkpoint_callback_class: null
      remove_previous_ckpt_in_save: False
      del_local_ckpt_after_load: False
      ray_wait_register_center_timeout: 300
@@ -588,7 +611,7 @@ Trainer
 - ``trainer.total_epochs``: Number of epochs in training.
 - ``trainer.project_name``: For wandb, swanlab, mlflow
 - ``trainer.experiment_name``: For wandb, swanlab, mlflow
-- ``trainer.logger``: Support console and wandb, swanlab, mlflow, tensorboard, trackio
+- ``trainer.logger``: Support console, wandb, swanlab, mlflow, tensorboard, trackio, and rl_insight.
 - ``trainer.log_val_generations``: The number of logged generation during validation (default ``0``)
 - ``trainer.nnodes``: Number of nodes used in the training.
 - ``trainer.n_gpus_per_node``: Number of GPUs per node.
@@ -605,6 +628,11 @@ Trainer
   from the path specified in ``resume_from_path``.
 - ``trainer.resume_from_path``: The path to resume training from. Only
   effective when ``resume_mode`` is set to ``resume_path``.
+- ``trainer.checkpoint_callback_class``: Fully qualified class name of a
+  user-defined checkpoint callback (a ``CheckpointCallback`` subclass).
+  Instantiated on the driver; its ``on_save`` hook is called after each
+  checkpoint save. See :doc:`../advance/checkpoint` for the interface.
+  Default is null (no callback).
 - ``trainer.remove_previous_ckpt_in_save``: Whether to remove previous
   checkpoints in the save directory. Default is False.
 - ``trainer.del_local_ckpt_after_load``: Whether to delete local
@@ -726,4 +754,4 @@ Most parameters for Model are similar to Reward Model.
   default to ``all-linear``. See `peft docs <https://huggingface.co/docs/peft/v0.15.0/en/package_reference/lora#peft.LoraConfig.target_modules>`_ for detail.
 
 - ``use_liger``: Whether to enable Liger kernel, default to False. If True,
-  we apply Liger kernel to the model (depends on `liger-kernel`).
+  we apply Liger kernel to the model (depends on ``liger-kernel>=0.8.2``).

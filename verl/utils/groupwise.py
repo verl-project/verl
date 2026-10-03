@@ -204,10 +204,9 @@ def group_mean_std(
 
     count = torch.zeros(G, device=target, dtype=torch.float32).index_add_(0, gidx, ones)
     s1 = torch.zeros(G, device=target, dtype=torch.float32).index_add_(0, gidx, scores)
-    s2 = torch.zeros(G, device=target, dtype=torch.float32).index_add_(0, gidx, scores * scores)
-
     mean = s1 / count.clamp_min(1.0)
-    var_num = s2 - (s1 * s1) / count.clamp_min(1.0)
+    centered = scores - mean[gidx]
+    var_num = torch.zeros(G, device=target, dtype=torch.float32).index_add_(0, gidx, centered * centered)
     denom = (count - 1.0).clamp_min(1.0)
     var = var_num / denom
     std = torch.sqrt(torch.clamp(var, min=eps))

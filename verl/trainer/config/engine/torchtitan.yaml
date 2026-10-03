@@ -31,6 +31,9 @@ use_torch_compile: true
 # Whether to use entropy_from_logits_with_chunking
 entropy_from_logits_with_chunking: false
 
+# Chunk size for entropy from logits with chunking
+entropy_from_logits_chunk_size: 2048
+
 # Whether to use entropy checkpointing
 entropy_checkpointing: false
 
@@ -57,6 +60,14 @@ context_parallel_size: 1
 
 # Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
 attn_type: flex
+
+# torchtitan SPMD backend: "default", "full_dtensor", or "spmd_types"
+spmd_backend: spmd_types
+
+# Activation checkpointing mode: "selective", "full", or "none".
+# Use "none" with spmd_backend=spmd_types when use_torch_compile=False (eager AC
+# recompute runs off the SPMD mesh context); compiled runs are unaffected.
+activation_checkpoint: selective
 
 # Maximum sequence length for RoPE cache. If null, defaults to torchtitan's TrainingConfig.seq_len (2048).
 max_seq_len: null

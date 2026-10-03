@@ -32,10 +32,12 @@ _ngpus = torch.cuda.device_count()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False, True])
+@pytest.mark.parametrize("multi_sender", [False, True])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_nccl_checkpoint_engine(
     rebuild_group,
+    multi_sender,
     num_trainer,
     num_rollout,
     num_nodes=1,
@@ -60,7 +62,7 @@ async def test_nccl_checkpoint_engine(
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="nccl",
         update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"nccl": {"rebuild_group": rebuild_group}},
+        engine_kwargs={"nccl": {"rebuild_group": rebuild_group, "multi_sender": multi_sender}},
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
@@ -68,12 +70,12 @@ async def test_nccl_checkpoint_engine(
     # create trainer and rollout worker group
     resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
@@ -127,12 +129,12 @@ async def test_nixl_checkpoint_engine(
     # create trainer and rollout worker group
     resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
@@ -175,12 +177,12 @@ async def test_kimi_checkpoint_engine(
     resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
     resource_pool.get_placement_groups(device_name=get_device_name())
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
     rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
 
     # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, trainer=trainer, replicas=replicas)
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
@@ -191,6 +193,7 @@ async def test_kimi_checkpoint_engine(
 if __name__ == "__main__":
     test_nccl_checkpoint_engine(
         rebuild_group=False,
+        multi_sender=False,
         num_trainer=2,
         num_rollout=30,
         num_nodes=4,

@@ -5,21 +5,20 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "docker/ascend/Dockerfile.ascend_8.5.0_a3"
-      - "docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1"
+      - "docker/ascend/Dockerfile.ascend_9.1.0_a3"
+      - "docker/ascend/Dockerfile.ascend_9.1.0_a3_v0.9.1"
       - ".github/workflows/docker-build-ascend-a3.yml"
 
-  release:
-    types: [published]
   schedule:
     - cron: "0 19 * * *"
 
 env:
   QUAY_REPO: quay.io/ascend/verl
+  QUAY_TEMP_REPO: quay.io/yezib/verltest
 
 jobs:
   # ============================================================
-  # 第一阶段：分架构构建并推送 digest（main 镜像）
+  # 第一阶段：分架构构建并推送 digest 到临时仓库（main 镜像）
   # ============================================================
   build-push-digest:
     name: build-${{ matrix.tag }}
@@ -60,7 +59,7 @@ jobs:
       - name: Get base image name and tag
         id: base_image
         run: |
-          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_8.5.0_a3 | head -1 | cut -d' ' -f2)
+          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_9.1.0_a3 | head -1 | cut -d' ' -f2)
           echo "Base image full: $BASE_IMAGE_FULL" 
           BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
           echo "Base image tag: $BASE_IMAGE_TAG"
@@ -72,12 +71,7 @@ jobs:
       - name: Get image tag
         id: version
         run: |
-          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///g' | sed 's/[^a-zA-Z0-9._-]/_/g')
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ steps.base_image.outputs.new_image_name }}-${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH_NAME" = "main" ]; then
-            echo "tag=${{ steps.base_image.outputs.new_image_name }}-latest" >> "$GITHUB_OUTPUT"
-          fi
+          echo "tag=latest-vllm-a3-ubuntu" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -86,31 +80,39 @@ jobs:
           driver: docker-container
           use: true
 
-      - name: Login to Quay.io
+      # Build 阶段只推送到临时仓库，只需登录临时仓库
+      - name: Login to Quay Temp
         uses: docker/login-action@v3
         with:
           registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          username: ${{ secrets.QUAY_USERNAME_TMP }}
+          password: ${{ secrets.QUAY_PASSWORD_TMP }}
 
       - name: Clean Docker cache before build
         run: |
           docker system prune -a -f --volumes || true
 
-      - name: Build and push by digest (main image)
+      - name: Build and push by digest to temp repo (main image)
         uses: docker/build-push-action@v6
         id: build_main
         with:
           context: .
           platforms: ${{ matrix.arch }}
-          file: ./docker/ascend/Dockerfile.ascend_8.5.0_a3
+          file: ./docker/ascend/Dockerfile.ascend_9.1.0_a3
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-a3-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-a3-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+
+      # Quay.io 约 1 小时自动清理未打 tag 的 digest，构建后立即打临时 tag 防止 GC
+      - name: Tag digest to prevent GC
+        run: |
+          docker buildx imagetools create \
+            -t "${{ env.QUAY_TEMP_REPO }}:tmp-${{ matrix.tag }}" \
+            "${{ env.QUAY_TEMP_REPO }}@${{ steps.build_main.outputs.digest }}"
 
       - name: Export digest (main image)
         run: |
@@ -127,13 +129,13 @@ jobs:
           retention-days: 1
 
   # ============================================================
-  # 第一阶段（v0.7.1）：分架构构建并推送 digest
+  # 第一阶段（v0.9.1）：分架构构建并推送 digest 到临时仓库
   # ============================================================
-  build-push-digest-v071:
-    name: build-v0.7.1-${{ matrix.tag }}
+  build-push-digest-v091:
+    name: build-v0.9.1-${{ matrix.tag }}
     if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-v0.7.1-${{ matrix.tag }}
+      group: ${{ github.workflow }}-${{ github.ref }}-v0.9.1-${{ matrix.tag }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -170,43 +172,50 @@ jobs:
           driver: docker-container
           use: true
 
-      - name: Login to Quay.io
+      # Build 阶段只推送到临时仓库，只需登录临时仓库
+      - name: Login to Quay Temp
         uses: docker/login-action@v3
         with:
           registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          username: ${{ secrets.QUAY_USERNAME_TMP }}
+          password: ${{ secrets.QUAY_PASSWORD_TMP }}
 
       - name: Clean Docker cache before build
         run: |
           docker system prune -a -f --volumes || true
 
-      - name: Build and push by digest (v0.7.1 image)
+      - name: Build and push by digest to temp repo (v0.9.1 image)
         uses: docker/build-push-action@v6
-        id: build_v071
+        id: build_v091
         with:
           context: .
           platforms: ${{ matrix.arch }}
-          file: ./docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1
+          file: ./docker/ascend/Dockerfile.ascend_9.1.0_a3_v0.9.1
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-a3-v091-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-a3-v091-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
-      - name: Export digest (v0.7.1 image)
+      - name: Tag digest to prevent GC
         run: |
-          mkdir -p ${{ runner.temp }}/digests-v071
-          digest="${{ steps.build_v071.outputs.digest }}"
-          touch "${{ runner.temp }}/digests-v071/v071-${digest#sha256:}"
+          docker buildx imagetools create \
+            -t "${{ env.QUAY_TEMP_REPO }}:tmp-v091-${{ matrix.tag }}" \
+            "${{ env.QUAY_TEMP_REPO }}@${{ steps.build_v091.outputs.digest }}"
 
-      - name: Upload digest (v0.7.1 image)
+      - name: Export digest (v0.9.1 image)
+        run: |
+          mkdir -p ${{ runner.temp }}/digests-v091
+          digest="${{ steps.build_v091.outputs.digest }}"
+          touch "${{ runner.temp }}/digests-v091/v091-${digest#sha256:}"
+
+      - name: Upload digest (v0.9.1 image)
         uses: actions/upload-artifact@v4
         with:
-          name: digests-v071-${{ matrix.tag }}
-          path: ${{ runner.temp }}/digests-v071/*
+          name: digests-v091-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests-v091/*
           if-no-files-found: error
           retention-days: 1
 
@@ -225,7 +234,9 @@ jobs:
           pattern: digests-main-*
           merge-multiple: true
 
-      - name: Login to Quay.io
+      # Merge 阶段只推送到正式仓库，只需登录正式仓库
+      # 临时仓库需为 Public，否则匿名读取 digest 会 401
+      - name: Login to Quay.io (Official)
         uses: docker/login-action@v3
         with:
           registry: quay.io
@@ -237,30 +248,47 @@ jobs:
 
       - name: Merge and push multi-arch image (main)
         env:
-          IMAGE: ${{ env.QUAY_REPO }}
+          SOURCE_IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          TARGET_IMAGE: ${{ env.QUAY_REPO }}
         run: |
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-main | sed 's/^main-//'))
+          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-main | sed 's/^main-//'))
           echo "Main image digests: $DIGESTS"
           docker buildx imagetools create \
-            -t "$IMAGE:${{ needs.build-push-digest.outputs.tag }}" \
+            -t "$TARGET_IMAGE:${{ needs.build-push-digest.outputs.tag }}" \
             $DIGESTS
 
+      # Cleanup 阶段单独登录临时仓库，不影响前面的 imagetools create
+      - name: Login to Quay Temp for cleanup
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME_TMP }}
+          password: ${{ secrets.QUAY_PASSWORD_TMP }}
+
+      - name: Delete temporary tags from temp repo (main)
+        run: |
+          curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar -xz crane
+          chmod +x crane
+          echo "Deleting temporary tags from temp repo..."
+          ./crane delete ${{ env.QUAY_TEMP_REPO }}:tmp-amd64 || true
+          ./crane delete ${{ env.QUAY_TEMP_REPO }}:tmp-arm64 || true
+
   # ============================================================
-  # 第二阶段（v0.7.1）：合并多架构 manifest
+  # 第二阶段（v0.9.1）：合并多架构 manifest
   # ============================================================
-  merge-image-v071:
-    name: merge-v0.7.1
+  merge-image-v091:
+    name: merge-v0.9.1
     runs-on: ubuntu-latest
-    needs: build-push-digest-v071
+    needs: build-push-digest-v091
     steps:
-      - name: Download digests (v0.7.1 image)
+      - name: Download digests (v0.9.1 image)
         uses: actions/download-artifact@v4
         with:
-          path: ${{ runner.temp }}/digests-v071
-          pattern: digests-v071-*
+          path: ${{ runner.temp }}/digests-v091
+          pattern: digests-v091-*
           merge-multiple: true
 
-      - name: Login to Quay.io
+      - name: Login to Quay.io (Official)
         uses: docker/login-action@v3
         with:
           registry: quay.io
@@ -270,12 +298,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Merge and push multi-arch image (v0.7.1)
+      - name: Merge and push multi-arch image (v0.9.1)
         env:
-          IMAGE: ${{ env.QUAY_REPO }}
+          SOURCE_IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          TARGET_IMAGE: ${{ env.QUAY_REPO }}
         run: |
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-v071 | sed 's/^v071-//'))
-          echo "v0.7.1 image digests: $DIGESTS"
+          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-v091 | sed 's/^v091-//'))
+          echo "v0.9.1 image digests: $DIGESTS"
           docker buildx imagetools create \
-            -t "$IMAGE:verl-8.5.0-a3-ubuntu22.04-py3.11-v0.7.1" \
+            -t "$TARGET_IMAGE:v0.9.1-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12-vllm" \
             $DIGESTS
+
+      - name: Login to Quay Temp for cleanup
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME_TMP }}
+          password: ${{ secrets.QUAY_PASSWORD_TMP }}
+
+      - name: Delete temporary tags from temp repo (v0.9.1)
+        run: |
+          curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar -xz crane
+          chmod +x crane
+          echo "Deleting temporary v0.9.1 tags from temp repo..."
+          ./crane delete ${{ env.QUAY_TEMP_REPO }}:tmp-v091-amd64 || true
+          ./crane delete ${{ env.QUAY_TEMP_REPO }}:tmp-v091-arm64 || true

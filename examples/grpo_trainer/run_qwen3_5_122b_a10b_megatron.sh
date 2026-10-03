@@ -1,38 +1,79 @@
 #!/usr/bin/env bash
 # Qwen3.5-122B-A10B MoE GRPO RL with Megatron (four nodes, 8 GPUs, H20, 96G, geo3k dataset)
-# Using verlai/verl:vllm017.latest docker image
+# Using verlai/verl:uv.cu130.dev3 docker image
 # Requirements:
 #   - 32 GPUs (96GB each, e.g. 4x8 H20)
-#   - Additional packages on top of the base image:
-#       pip install --upgrade transformers
-#       pip install flash-linear-attention
-#       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM==0.16.0
+#   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
+#   - flash-linear-attention is installed by the launcher's megatron extra.
+#     The launcher uses dependencies from the current uv.lock.
+#
+# CUDA dependencies from the current uv.lock (Python 3.12):
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#
+# Requirements on Ascend (scripts/install_vllm_mcore_npu.sh baseline):
+#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
+#   - Megatron-LM==core_r0.18.0
+#   - Megatron-Bridge==v0.5.0
+#   - MindSpeed==core_r0.18.0
+#   - MegatronAdaptor==core_r0.18.0
+#   - TransformerEngineNPU==main
+#   -   pip install decorator pybind11 diffusers
+#   - MindSpeed-Ops==master
+#   - MindSpeed-Bridge: repository default branch (no pinned tag/commit)
+#   - flash-linear-attention-npu==v26.1.0
+#       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
+#   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
 #
 # Qwen3.5 architecture notes:
-#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
-#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
-#     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
-#     - actor.use_dynamic_bsz=False              (required for bshd mode)
+#   This example uses BSHD compute format:
+#     - model.use_remove_padding=False
+#     - actor.megatron.use_remove_padding=False
+#     - actor.use_dynamic_bsz=False
+#   Megatron-Core 0.18.0 and 0.19.2 also support THD for GDN.
+#   The settings above retain BSHD for this example.
 #
-#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
-#   can be set to True for better performance.
-#
-# Tested parallelism config (32 GPUs / 4 node):
-#   TP=2 PP=2 CP=1 EP=8 ETP=1 GEN_TP=8
+# Tested parallelism config:
+#   GPU (32 GPUs / 4 node): TP=2 PP=2 CP=1 EP=8 ETP=1 GEN_TP=8
+#   NPU (4 nodes):          TP=2 PP=4 CP=1 EP=16 ETP=1 GEN_TP=16
 #
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 set -xeuo pipefail
 unset http_proxy
 unset https_proxy
 # download geo3k dataset
 hf download tyzhu/geo3k --repo-type dataset --local-dir $HOME/data/geo3k
+
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+
+case "${DEVICE}" in
+    gpu)
+        export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+        ;;
+    npu)
+        export CPU_AFFINITY_CONF=${CPU_AFFINITY_CONF:-1}
+        export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+        export PYTORCH_NPU_ALLOC_CONF=${PYTORCH_NPU_ALLOC_CONF:-garbage_collection_threshold:0.8}
+        export USE_OPTIMIZED_MODEL=${USE_OPTIMIZED_MODEL:-0}
+        export HCCL_CONNECT_TIMEOUT=${HCCL_CONNECT_TIMEOUT:-5400}
+        export HCCL_BUFFSIZE=${HCCL_BUFFSIZE:-300}
+        export TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE:-1}
+        export COMBINED_ENABLE=${COMBINED_ENABLE:-1}
+        export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+        export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+        export VLLM_ASCEND_ENABLE_NZ=${VLLM_ASCEND_ENABLE_NZ:-0}
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
 
 # ---- user-adjustable ----
 test_files=${test_files:-$HOME/data/geo3k/test.parquet}
@@ -55,16 +96,39 @@ max_response_length=4096
 adv_estimator=${adv_estimator:-grpo}
 
 TP=${TP:-2}
-PP=${PP:-2}
 CP=${CP:-1}
-EP=${EP:-8}
 ETP=${ETP:-1}
-GEN_TP=${GEN_TP:-8}
+nnodes=${nnodes:-4}
+
+case "${DEVICE}" in
+    gpu)
+        PP=${PP:-2}
+        EP=${EP:-8}
+        GEN_TP=${GEN_TP:-8}
+        n_devices_per_node=${NDEVICES_PER_NODE:-8}
+        rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.66}
+        rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-1}
+        ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-1}
+        vllm_max_model_len=${vllm_max_model_len:-15768}
+        ;;
+    npu)
+        PP=${PP:-4}
+        EP=${EP:-16}
+        GEN_TP=${GEN_TP:-2}
+	    GEN_DP=${GEN_DP:-16}
+	    GEN_EP=${GEN_EP:-32}
+        n_devices_per_node=${NDEVICES_PER_NODE:-16}
+        rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.62}
+        rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-4}
+        ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-4}
+        vllm_max_model_len=${vllm_max_model_len:-5120}
+        ;;
+esac
+
 ACTOR_VPP=${ACTOR_VPP:-null}
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
-
-NODE_GPU_NUM=${NODE_GPU_NUM:-8}
-NODES_NUM=${NODES_NUM:-4}
+# Set to True when using Mindspeed-Bridge to enable ascend GDN performance optimization
+USE_MINDSPEED_BRIDGE=${USE_MINDSPEED_BRIDGE:-False}
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
@@ -80,7 +144,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -89,42 +152,37 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.dtype=bfloat16
     actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=$ACTOR_VPP
     actor_rollout_ref.actor.megatron.use_remove_padding=False
     actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_load_balancing_type=\"none\"
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True
-    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=False
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
     actor_rollout_ref.actor.use_torch_compile=True
     actor_rollout_ref.actor.checkpoint.save_contents="${save_contents}"
-
 )
-
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${rollout_backend}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.66
+    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_memory_utilization}
     actor_rollout_ref.rollout.n=6
     actor_rollout_ref.rollout.dtype=bfloat16
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.max_model_len=15768
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.max_model_len=${vllm_max_model_len}
 )
 
 REF=(
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu}
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
@@ -150,7 +208,6 @@ ALGORITHM=(
     algorithm.use_kl_in_reward=False
 )
 
-
 DATA=(
     data.train_files=$train_files
     data.val_files=$test_files
@@ -166,8 +223,8 @@ TRAINER=(
     trainer.logger=['console','wandb']
     trainer.project_name=$project_name
     trainer.experiment_name=$exp_name
-    trainer.n_gpus_per_node=$NODE_GPU_NUM
-    trainer.nnodes=$NODES_NUM
+    trainer.n_gpus_per_node=$n_devices_per_node
+    trainer.nnodes=$nnodes
     trainer.save_freq=$save_freq
     trainer.default_local_dir=${save_path}
     trainer.test_freq=10
@@ -179,9 +236,57 @@ EXTRA=(
     model_engine=megatron
 )
 
+case "${DEVICE}" in
+    gpu)
+        ACTOR+=(
+            +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_load_balancing_type=\"none\"
+            +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=False
+        )
+        ;;
+    npu)
+        ACTOR+=(
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4
+            actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
+            actor_rollout_ref.actor.checkpoint.strict=False
+            ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
+            +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.01
+            +actor_rollout_ref.actor.megatron.override_transformer_config.moe_z_loss_coeff=0.001
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rmsnorm=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True
+        )
+        if [ "${USE_MINDSPEED_BRIDGE}" = "True" ]; then
+          ACTOR+=(
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+          )
+        fi
+        ROLLOUT+=(
+            actor_rollout_ref.rollout.data_parallel_size=${GEN_DP}
+            actor_rollout_ref.rollout.expert_parallel_size=${GEN_EP}
+            actor_rollout_ref.rollout.max_num_seqs=24
+            actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=5120
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
+        )
+        ;;
+esac
+
 ########################### Launch ###########################
 export HYDRA_FULL_ERROR=1
-PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_backend}" = vllm ] || [ "${rollout_backend}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_backend}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_backend} --extra megatron")
+fi
+PYTHONUNBUFFERED=1 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
@@ -191,4 +296,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${REF[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

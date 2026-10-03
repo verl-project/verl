@@ -16,8 +16,19 @@ import logging
 import time
 
 import ray
-from cupy.cuda.nccl import NcclCommunicator, get_unique_id
 from ray.util import list_named_actors
+
+from verl.plugin.platform import get_platform
+
+
+def _get_collective_module():
+    mod = get_platform().get_collective_module()
+    if mod is None:
+        raise RuntimeError(
+            f"Platform '{get_platform().device_name}' does not provide a collective communication module. "
+            "Override get_collective_module() in your platform implementation."
+        )
+    return mod
 
 
 @ray.remote
@@ -45,6 +56,10 @@ def get_nccl_id_store_by_name(name):
 def create_nccl_communicator_in_ray(
     rank: int, world_size: int, group_name: str, max_retries: int = 100, interval_s: int = 5
 ):
+    collective = _get_collective_module()
+    NcclCommunicator = collective.NcclCommunicator
+    get_unique_id = collective.get_unique_id
+
     if rank == 0:
         nccl_id = get_unique_id()
         nccl_id_store = NCCLIDStore.options(name=group_name).remote(nccl_id)

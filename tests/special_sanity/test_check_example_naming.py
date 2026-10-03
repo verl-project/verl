@@ -46,6 +46,10 @@ def test_all_train_backends_accepted():
         assert _violations(f"run_qwen3_8b_{backend}.sh") == [], backend
 
 
+def test_multi_token_train_backend_accepted():
+    assert _violations("run_deepseek_v4_megatron_lite.sh") == []
+
+
 def test_forbidden_engine_token_rejected():
     errs = _violations("run_qwen3_8b_vllm_fsdp.sh")
     # `vllm` is both a forbidden token AND occupies the last-token slot

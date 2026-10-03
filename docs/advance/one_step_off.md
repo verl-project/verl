@@ -309,6 +309,13 @@ python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
        > - When `trainer.n_gpus_per_node + rollout.n_gpus_per_node > physical_gpus_per_node`,
        >   the required node count is `trainer.nnodes + rollout.nnodes`
 
+### Delta Weight Sync
+
+For disaggregated runs the trainer→rollout weight broadcast can ship only the changed parameters
+(a *delta*) instead of the full weights. See the dedicated design doc:
+[Delta Weight Sync](delta_weight_sync.md), covering the ``delta`` and ``delta_sharded``
+checkpoint-engine backends, their configuration, and the roadmap (Megatron, fp8).
+
 ## Functional Support
 
 | Category           | Support Situation                                                                                               |

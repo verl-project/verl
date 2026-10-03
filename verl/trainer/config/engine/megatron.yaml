@@ -1,11 +1,8 @@
 # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
 _target_: verl.workers.config.McoreEngineConfig
 
-# Whether to offload model parameters to CPU
+# Whether to offload model parameters to CPU and release gradient buffers while inactive
 param_offload: False
-
-# Whether to offload gradients to CPU
-grad_offload: False
 
 # Whether to offload optimizer state to CPU
 optimizer_offload: False
@@ -40,10 +37,11 @@ use_dist_checkpointing: False
 # distributed checkpointing path
 dist_checkpointing_path: null
 
-# Whether to use hybrid context parallelism
+# Whether to use dynamic context parallel scheduling
 dynamic_context_parallel: False
 
-# Maximum sequence length per DPxCP rank
+# Maximum packed sequence length per DPxCP rank. A positive integer is required
+# when dynamic_context_parallel=True.
 max_seqlen_per_dp_cp_rank: null
 
 # distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
@@ -55,6 +53,12 @@ dist_ckpt_optim_fully_reshardable: False
 # Use as little memory as possible during save and load by using Gloo.
 # Has effect only when `dist_ckpt_optim_fully_reshardable` is enabled
 distrib_optim_fully_reshardable_mem_efficient: False
+
+# Whether to use entropy from logits with chunking
+entropy_from_logits_with_chunking: False
+
+# Chunk size for entropy from logits with chunking
+entropy_from_logits_chunk_size: 2048
 
 # oc.select: default val for ref.megatron.seed
 seed: 42
@@ -87,14 +91,23 @@ override_transformer_config:
 
 override_mcore_model_config: {}
 
-# oc.select: default val for ref.megatron.use_mbridge
+# Enable bridge-based Megatron model construction.
 use_mbridge: True
-
-# oc.select: default val for ref.megatron.vanilla_mbridge
-vanilla_mbridge: True
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True
+
+# BSHD path only. Pad every micro-batch of a mini-batch to the mini-batch's global max sequence length instead of
+# each micro-batch's own max. Unifies padding across micro-batches to avoid repeated cuDNN compilation. Only takes
+# effect when use_remove_padding=False (BSHD); no-op on the THD path.
+pad_bshd_to_minibatch_max: True
+
+# Match the FSDP packed-padding controls. Set the bucket to 512 to reduce THD shape variability.
+pad_to_length: false
+pad_to_length_bucket: 512
+
+# Whether to use Megatron-FSDP (Zero-3 sharding)
+use_megatron_fsdp: False
 
 # whether to use forward only
 forward_only: False
@@ -109,7 +122,8 @@ router_replay:
   _target_: verl.workers.config.EngineRouterReplayConfig
 
   # Router replay mode: disabled, R2, R3
-  # - R2: Use R2 routing strategy (record mode)
+  # - R2: Record actor old-logprob routes and replay them during update.
+  #       Requires algorithm.rollout_correction.bypass_mode=false.
   # - R3: Use R3 routing strategy (record mode)
   mode: disabled
 

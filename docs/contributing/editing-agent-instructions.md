@@ -12,6 +12,10 @@
 
 Generic files are framework-agnostic. Variants directly symlink generic files or refer to them and add framework-specific content.
 
+For skills, keep canonical content under `.agent/skills/<skill-name>/SKILL.md`.
+Variant trees such as `.codex/skills/<skill-name>` and `.claude/skills/<skill-name>` should be directory symlinks to the canonical `.agent` skill directory, not directories containing only a symlinked `SKILL.md`.
+Codex documents support for symlinked skill folders and can skip file-level `SKILL.md` symlinks during discovery. Claude Code discovers the file-level symlink layout in current versions, but directory symlinks match the shared skill-package structure and keep supporting files in sync across frameworks.
+
 ## Token Budget Mindset
 
 `AGENTS.md` loads on every agent request; domain guides load on entry to a relevant area.
@@ -88,4 +92,4 @@ Before submitting changes to any agent instruction file:
 
 This guide is adapted from the [vLLM project](https://github.com/vllm-project/vllm)'s [`editing-agent-instructions.md`](https://github.com/vllm-project/vllm/blob/main/docs/contributing/editing-agent-instructions.md).
 
-Last updated: 04/01/2026
+Last updated: 05/13/2026

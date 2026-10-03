@@ -2,7 +2,15 @@
 Sandbox Fusion Tool Integration
 ===============================
 
-Last updated: 06/10/2025.
+Last updated: 05/09/2026.
+
+.. note::
+
+   The in-tree ``verl.tools.sandbox_fusion_tools.SandboxFusionTool`` reference
+   implementation discussed in this guide has been removed. The integration
+   pattern below remains accurate for users implementing their own
+   :class:`verl.tools.base_tool.BaseTool` subclass; for the previous
+   implementation see git history at commit ``f5e21df6`` and earlier.
 
 Motivations
 ===========

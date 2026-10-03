@@ -15,10 +15,11 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-from omegaconf import MISSING
+from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
@@ -31,25 +32,7 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
-    "SkipConfig",
 ]
-
-
-@dataclass
-class SkipConfig(BaseConfig):
-    """
-    Configuration for rollout skip: load/dump previously generated rollout data
-    instead of computing new rollouts (e.g. for debugging or reuse).
-    """
-
-    enable: bool = False
-    dump_dir: str = "~/.verl/rollout_dump"
-    max_dump_step: int = 1
-    action: str = "cache"  # cache | repeat | repeat_last
-
-    def get(self, key: str, default=None):
-        """Dict-like get for compatibility with code that uses skip.get('enable', False)."""
-        return getattr(self, key, default)
 
 
 @dataclass
@@ -68,6 +51,7 @@ class MultiTurnConfig(BaseConfig):
     enable: bool = False
     max_assistant_turns: Optional[int] = None
     tool_config_path: Optional[str] = None
+    function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
@@ -143,6 +127,8 @@ class CheckpointEngineConfig(BaseConfig):
     Configuration for checkpoint engine to update weights from trainer to rollout
     """
 
+    _mutable_fields = {"backend"}
+
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
@@ -165,6 +151,8 @@ class RolloutConfig(BaseConfig):
         "response_length",
         "expert_parallel_size",
         "moe_tensor_parallel_size",
+        "full_determinism",
+        "max_num_seqs",
     }
 
     name: Optional[str] = MISSING
@@ -179,6 +167,13 @@ class RolloutConfig(BaseConfig):
     n: int = 1
     repetition_penalty: float = 1.0
 
+    # Whether to enable full determinism for reproducibility.
+    full_determinism: bool = False
+
+    # Random seed for rollout. Used as the seed for vLLM sampling and
+    # enable_full_determinism() when full_determinism is True.
+    seed: int = 42
+
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
     over_sample_rate: float = 0.0
@@ -188,8 +183,9 @@ class RolloutConfig(BaseConfig):
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
+    standalone_gpu_memory_utilization: Optional[float] = None
     ignore_eos: bool = False
-    enforce_eager: bool = True
+    enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
     data_parallel_size: int = 1
@@ -209,6 +205,9 @@ class RolloutConfig(BaseConfig):
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
+    # Ray max_concurrency of the rollout server actor.
+    ray_actor_max_concurrency: int = 1024
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size: Optional[int] = None
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
@@ -221,6 +220,9 @@ class RolloutConfig(BaseConfig):
     engine_kwargs: dict = field(default_factory=dict)
 
     calculate_log_probs: bool = False
+
+    # Sampler top-k log-probs per generated token for score centering; 0 disables.
+    topk_log_probs: int = 0
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
 
@@ -244,9 +246,6 @@ class RolloutConfig(BaseConfig):
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
 
-    # Rollout skip config (load/dump rollout data)
-    skip: SkipConfig = field(default_factory=SkipConfig)
-
     profiler: Optional[ProfilerConfig] = None
 
     enable_chunked_prefill: bool = True
@@ -263,19 +262,24 @@ class RolloutConfig(BaseConfig):
 
     limit_images: Optional[int] = None
 
-    skip_tokenizer_init: bool = False
+    skip_tokenizer_init: bool = True
 
     quantization: Optional[str] = None
 
     quantization_config_file: Optional[str] = None
 
     enable_rollout_routing_replay: bool = False
+    moe_load_balance_metrics_interval: int = 0
 
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     qat: Optional[dict] = None
+
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
+
+    router_config_path: Optional[str] = None
 
     def __post_init__(self):
         """Validate the rollout config"""
@@ -323,3 +327,40 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        # Hydra passes this as dict/DictConfig; coerce to dataclass so
+        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
+        if isinstance(self.disaggregation, dict):
+            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
+        elif not isinstance(self.disaggregation, DisaggregationConfig):
+            if not isinstance(self.disaggregation, DictConfig):
+                raise TypeError(
+                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
+                    f"got {type(self.disaggregation).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "disaggregation",
+                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
+            )
+
+        if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
+            raise ValueError(
+                f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
+            )
+
+        if self.topk_log_probs:
+            if self.name != "vllm":
+                raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
+            if (
+                not self.calculate_log_probs
+                or self.top_p != 1.0
+                or self.top_k != -1
+                or self.logprobs_mode != "processed_logprobs"
+            ):
+                raise ValueError(
+                    "rollout.topk_log_probs needs calculate_log_probs=True, top_p=1.0, top_k=-1 and "
+                    "logprobs_mode='processed_logprobs' so the returned head is the sampling distribution."
+                )
+            vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
+            vllm_kwargs["max_logprobs"] = max(vllm_kwargs.get("max_logprobs", 0), self.topk_log_probs)

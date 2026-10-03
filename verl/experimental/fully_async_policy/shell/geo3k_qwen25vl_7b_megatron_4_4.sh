@@ -84,7 +84,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
-    actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.ref.megatron.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \

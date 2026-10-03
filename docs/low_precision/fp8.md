@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 03/05/2026
+Last updated: 09/29/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -10,7 +10,7 @@ verl supports two FP8 modes for accelerating RL training:
 | **FP8 End-to-End** | FP8 (Megatron) | FP8 (vLLM) |
 
 > [!TIP]
-> For ready-to-run scripts, see the [low-precision recipe directory](https://github.com/verl-project/verl-recipe/low_precision).
+> For ready-to-run scripts, see the [low-precision recipe directory](https://github.com/verl-project/verl-recipe/tree/main/low_precision).
 
 ---
 
@@ -48,6 +48,44 @@ Or via command line:
 ```bash
 actor_rollout_ref.rollout.quantization=fp8
 ```
+
+#### Skipping layers in SGLang FP8 rollout
+
+When using SGLang FP8 rollout, you can skip FP8 weight quantization for
+selected modules. Skipped modules stay in the rollout model dtype instead
+of being converted to FP8. This is useful for layers that are not
+compatible with block-wise FP8 weight quantization, or for modules that
+you prefer to keep in higher precision.
+
+Set `SGLANG_FP8_IGNORED_LAYERS` before starting training:
+
+```bash
+SGLANG_FP8_IGNORED_LAYERS=linear_attn \
+python3 -m verl.trainer.main_ppo \
+  actor_rollout_ref.rollout.name=sglang \
+  actor_rollout_ref.rollout.quantization=fp8 \
+  ...
+```
+
+Multiple entries can be separated by commas:
+
+```bash
+SGLANG_FP8_IGNORED_LAYERS=linear_attn,visual
+```
+
+You can also use the model `quantization_config`:
+
+```json
+{
+  "quantization_config": {
+    "ignored_layers": ["re:.*linear_attn.*"]
+  }
+}
+```
+
+Plain module names, full module paths, and `re:` regex patterns are
+supported. verl applies the same ignored-layer rules when launching
+SGLang and when syncing updated actor weights into the rollout engine.
 
 ### Experiments and Outcomes
 
@@ -130,7 +168,7 @@ FP8 E2E applies FP8 to the entire RL pipeline: forward/backward passes via Trans
 
 - **CUDA 12.9+** (required for block-wise FP8 scaling)
 - **Transformer Engine** with block-wise FP8 support
-- Environment variable: `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1`
+- Environment variable: `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1`, on **Hopper only**. Do not set it on Blackwell (SM100+): there Transformer Engine runs block-wise scaling through MXFP8 GEMMs, whose E8M0 scales hold only an exponent, so it requires power-of-two block scales and stops at the first FP8 quantization with `Assertion failed: pow2_scale ... requires using power of two scaling factors` when the variable is set (see [#6172](https://github.com/verl-project/verl/issues/6172)). Leaving it unset gives power-of-two scales, the Transformer Engine default.
 
 ### Key Configuration
 

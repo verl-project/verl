@@ -6,9 +6,10 @@ Reference: [ReMax: A Simple, Effective, and Efficient Reinforcement Learning Met
 
 ## Canonical Scripts
 
-| Script                               | Infer | Train | Platform |
-|--------------------------------------|-------|-------|----------|
-| `run_qwen3_8b_fsdp.sh`          | vLLM  | FSDP  | NVIDIA   |
+| Script                                    | Infer | Train     | Platform |
+|-------------------------------------------|-------|-----------|----------|
+| `run_qwen3_8b_fsdp.sh`                   | vLLM  | FSDP      | NVIDIA   |
+| `run_qwen2.5_math_7b_fsdp_sync.sh`       | vLLM  | FSDP+Sync | NVIDIA   |
 
 Override any argument via env vars at the top of the script.
 

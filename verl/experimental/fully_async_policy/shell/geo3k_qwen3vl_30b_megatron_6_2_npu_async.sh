@@ -37,7 +37,6 @@ PROJECT_NAME='ASYNC_training'
 
 ####################### with negative KL uncomment
 EXP_NAME='qwen3_vl_3b_megatron_async'
-enable_chunked_prefill=False
 train_prompt_mini_bsz=16
 staleness_threshold=0
 trigger_parameter_sync_step=4
@@ -113,7 +112,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
-    actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.ref.megatron.param_offload=True \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1 \
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True \
@@ -149,7 +147,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     trainer.test_freq="${test_freq}" \
     trainer.device=npu \
-    actor_rollout_ref.rollout.enable_chunked_prefill=${enable_chunked_prefill} \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \

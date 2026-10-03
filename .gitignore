@@ -97,8 +97,11 @@ celerybeat-schedule
 
 # virtualenv
 venv/
-.venv/
+.venv
+.venv-*
+.venvs/
 ENV/
+!**/workers/env/
 
 # Spyder project settings
 .spyderproject
@@ -117,9 +120,6 @@ ENV/
 
 # emacs
 *~
-
-# ckpt
-*.lock
 
 # data
 *.parquet

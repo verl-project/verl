@@ -176,20 +176,48 @@ def convert_checkpoint_from_transformers_to_megatron(
 
         numel += safe_copy(hf_layer.mlp.gate.weight, layer.mlp.router.weight)
 
-        for idx, hf_expert in enumerate(hf_layer.mlp.experts):
-            num_experts = len(hf_layer.mlp.experts)
-            num_local_experts = num_experts // ep_size
-            expert_idx_start = ep_rank * num_local_experts
-            expert_idx_end = (ep_rank + 1) * num_local_experts
-            if idx < expert_idx_start or idx >= expert_idx_end:
-                continue
-            local_expert_idx = idx - expert_idx_start
+        # after upgrading to transformer5.3.0, compatibility with Qwen3MoE is ensured
+        hf_experts = hf_layer.mlp.experts
+        num_experts = getattr(hf_experts, "num_experts", None) or hf_experts.gate_up_proj.shape[0]
 
-            fc1_weight = torch.cat([hf_expert.gate_proj.weight, hf_expert.up_proj.weight])
-            numel += safe_copy(fc1_weight, layer.mlp.experts.linear_fc1._parameters[f"weight{local_expert_idx}"])
-            numel += safe_copy(
-                hf_expert.down_proj.weight, layer.mlp.experts.linear_fc2._parameters[f"weight{local_expert_idx}"]
-            )
+        num_local_experts = num_experts // ep_size
+        expert_idx_start = ep_rank * num_local_experts
+        expert_idx_end = (ep_rank + 1) * num_local_experts
+
+        # adapt Transformers 5.x Qwen3MoE: gate_up-proj+down_dej as a 3D tensor
+        if hasattr(hf_experts, "gate_up_proj"):
+            for idx in range(num_experts):
+                if idx < expert_idx_start or idx >= expert_idx_end:
+                    continue
+                local_expert_idx = idx - expert_idx_start
+
+                # gate_up_proj: [num_experts, 2 * intermediate_size, hidden_size]
+                gate_up = hf_experts.gate_up_proj[idx]
+                intermediate_size = gate_up.shape[0] // 2
+                gate_w = gate_up[:intermediate_size]
+                up_w = gate_up[intermediate_size:]
+
+                fc1_weight = torch.cat([gate_w, up_w], dim=0)
+                # down_proj: [num_experts, hidden_size, intermediate_size]
+                down_w = hf_experts.down_proj[idx]
+
+                numel += safe_copy(fc1_weight, layer.mlp.experts.linear_fc1._parameters[f"weight{local_expert_idx}"])
+                numel += safe_copy(down_w, layer.mlp.experts.linear_fc2._parameters[f"weight{local_expert_idx}"])
+
+        # compatible with old versions of transformers/other MoEs (in Module List format)
+        elif hasattr(hf_experts, "__iter__"):
+            for idx, hf_expert in enumerate(hf_experts):
+                if idx < expert_idx_start or idx >= expert_idx_end:
+                    continue
+                local_expert_idx = idx - expert_idx_start
+
+                fc1_weight = torch.cat([hf_expert.gate_proj.weight, hf_expert.up_proj.weight])
+                numel += safe_copy(fc1_weight, layer.mlp.experts.linear_fc1._parameters[f"weight{local_expert_idx}"])
+                numel += safe_copy(
+                    hf_expert.down_proj.weight, layer.mlp.experts.linear_fc2._parameters[f"weight{local_expert_idx}"]
+                )
+        else:
+            raise TypeError(f"Unsupported experts type: {type(hf_experts)}")
 
         if has_share_expert:
             numel += safe_copy(hf_layer.mlp.shared_expert_gate.weight, layer.mlp.shared_experts.gate_weight)

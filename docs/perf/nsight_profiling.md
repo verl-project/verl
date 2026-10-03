@@ -1,6 +1,6 @@
 # NVIDIA Nsight Systems profiling in verl
 
-Last updated: 06/20/2025.
+Last updated: 07/29/2026.
 
 This guide explains how to use NVIDIA Nsight Systems for profiling verl training runs.
 
@@ -40,6 +40,49 @@ Verl manages mulitiple RL roles, _Actor_, _Ref_, _Rollout_, _Critic_, _Reward_, 
 By default the `*.nsys-rep` files are saved in the directory `/tmp/ray/session_latest/logs/nsight/` at each node. According to the Ray manual, this default directory is not changeable. [&#34;however, Ray preserves the `--output` option of the default config&#34;](https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html).
 
 Some users may think it is not convenient, but it is understandable that Ray may start hundreds of processes and it would be a big network file system pressure if we save the files in one central place.
+
+### Finish hook: relocate results and run a custom command
+
+Because Ray hardcodes the Nsight output directory, verl provides a *finish hook*. It has two independent parts, configurable either once under `global_profiler` (every role inherits it) or per role under `profiler` (which overrides the global value):
+
+* **`relocate_results`** (bool, default `False`). When `True`, each profiled worker moves *its own* `worker_process_<pid>.*` reports out of `/tmp/ray/session_latest/logs/nsight/` into `save_path`, **on every profiled step**. Matching is by PID (nsys's `%p` token equals the worker process PID), so co-located ranks never touch each other's files and there is no race. Destination filenames are prefixed with the role and hostname (e.g. `actor_<host>_worker_process_<pid>.nsys-rep`) to stay unique across nodes. The move is best-effort: nsys only finalizes a report after the capture session shuts down, so files that are not present yet are simply skipped and nothing is ever deleted. The same flag also flattens rollout engine traces, which the engines write into `<save_path>/agent_loop_rollout_replica_<n>/`, into `save_path` — see [PyTorch profiling](torch_profiling.md).
+* **`finish_hook_cmd`** (str, default `null`). A shell command executed on the selected ranks **once, after the last profiled step** (not once per step). Use it for post-processing, compression, or uploading traces to remote storage. Backend stop and `relocate_results` still run every profiled step, so by the last step `save_path` holds every profiled step's reports; because the command runs a single time, a command that uploads the whole directory sends each report exactly once. It runs with these environment variables:
+  * `VERL_PROFILE_SAVE_PATH` — the configured `save_path` (holds all profiled steps' reports by the time the command runs).
+  * `VERL_PROFILE_TOOL` — the profiler tool (e.g. `nsys`).
+  * `VERL_PROFILE_RANK` — the global rank.
+  * `VERL_PROFILE_PID` — the worker process PID (matches the `%p` in the report filename).
+  * `VERL_PROFILE_ROLE` — the worker role, when known.
+  * `VERL_PROFILE_RAY_NSIGHT_DIR` — Ray's fixed Nsight log dir (nsys only), handy for grabbing stragglers.
+
+Running once is what keeps each report uploaded exactly once. If the command instead ran every profiled step, a directory upload would re-send earlier steps' reports each step (`save_path` accumulates), and an uploader that versions by upload time would then store one report as several files differing only by a trailing timestamp. A single upload at the end avoids that entirely.
+
+**Choosing which ranks run the command.** `finish_hook_cmd` runs on `finish_hook_all_ranks`/`finish_hook_ranks`. When both are unset it falls back to the profiled ranks (`all_ranks`/`ranks`), so by default the command runs wherever profiling happened. `finish_hook_ranks` may also select ranks that were *not* profiled (for example to run a single aggregation step on rank 0). `relocate_results` always runs on the profiled ranks, since that is where the artifacts live. `save_path` is usually node-local, so the command runs on every selected rank/node: with multi-node profiling keep one selected rank per node (do not narrow it to rank 0 only, or the other nodes' artifacts are never picked up), but avoid selecting several ranks that share one node's directory, or each would upload that directory.
+
+**Which role's config applies.** A worker reads exactly one role block, chosen by its own role: a collocated `actor_rollout_ref` worker reads `actor_rollout_ref.actor.profiler`, and `rollout.profiler` only applies to a standalone rollout worker. Setting the hook on `global_profiler` avoids having to guess.
+
+Example: relocate every rank's reports into `save_path` every step and, once profiling is done, upload each node's directory to HDFS in one shot:
+
+```yaml
+    global_profiler:
+        tool: nsys
+        steps: [1, 2, 5]
+        save_path: "outputs/profile"
+        relocate_results: True
+        finish_hook_cmd: 'hdfs dfs -put -f "$VERL_PROFILE_SAVE_PATH"/*.nsys-rep hdfs:///my/profiles/'
+    actor_rollout_ref:
+        actor:
+            profiler:
+                enable: True
+                all_ranks: True
+```
+
+Because the command runs once (after step 5 here), globbing `save_path` uploads each report exactly
+once — there is no per-step re-upload to deduplicate. When you reference a variable on the command
+line, wrap it in single quotes so your shell does not expand it before the worker sees it. The value
+itself must not contain double quotes — Hydra's override parser rejects them — so a command that
+needs quoting (paths with spaces) belongs in a small script that the hook calls.
+
+**Observing the hook.** After the last profiled step, the selected ranks print a `[Profiler][finish_hook]` line to the worker's stdout stating whether a command is configured and whether the current rank was selected, followed by the command line itself, its merged stdout/stderr streamed live, and its exit code. These are plain prints rather than logger calls so they show up in the Ray worker logs regardless of the logging level. The command failing (non-zero exit or launch error) never interrupts training.
 
 ## Usage Example
 

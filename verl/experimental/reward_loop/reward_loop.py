@@ -19,14 +19,13 @@ import os
 import aiohttp
 import numpy as np
 import ray
-import torch
 from omegaconf import DictConfig, open_dict
 from ray.actor import ActorHandle
 from tensordict import TensorDict
 
-from verl.protocol import DataProto
+from verl.protocol import DataProto, pad_dataproto_to_divisor
 from verl.single_controller.ray.base import RayResourcePool
-from verl.trainer.ppo.reward import load_reward_manager
+from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.ray_utils import get_event_loop
@@ -144,7 +143,6 @@ class RewardLoopWorker:
         return outputs
 
     async def compute_score(self, data: DataProto) -> dict:
-        assert len(data) == 1, "RewardLoopWorker only support single data item"
         if self.config.reward.custom_reward_function.path is not None:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
@@ -152,7 +150,7 @@ class RewardLoopWorker:
             if self.config.reward.reward_model.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
-                return await self.compute_score_disrm(data)
+                return await self.compute_score_disrm(data[-1:])
             else:
                 return await self.reward_manager.run_single(data)
 
@@ -281,6 +279,26 @@ class RewardLoopManager:
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
         if self.config.reward.reward_model.enable:
+            rm_rollout = self.config.reward.reward_model.rollout
+            # The discriminative /classify (pooling) path is not covered by
+            # VLLM_BATCH_INVARIANT (vLLM batch invariance is verified on generation
+            # models, not pooling RM architectures). Serialize /classify with
+            # max_num_seqs=1 to keep it bitwise reproducible. The generative
+            # /v1/chat/completions path (custom reward fn) is user-managed and not
+            # forced here — rely on VLLM_BATCH_INVARIANT + per-request seed.
+            if (
+                rm_rollout.full_determinism
+                and self.config.reward.custom_reward_function.path is None
+                and rm_rollout.max_num_seqs != 1
+            ):
+                logger.warning(
+                    "[reward_model] full_determinism=True: forcing rollout.max_num_seqs "
+                    "from %s to 1 for the /classify pooling path (batch invariance not "
+                    "verified for pooling RM). See the determinism doc.",
+                    rm_rollout.max_num_seqs,
+                )
+                with open_dict(self.config):
+                    rm_rollout.max_num_seqs = 1
             self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
@@ -288,6 +306,7 @@ class RewardLoopManager:
             self.reward_router_address = None
 
         self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
+        self.reward_manager_cls = resolve_reward_manager_cls(config)
         self._init_reward_loop_workers()
 
     @property
@@ -325,7 +344,9 @@ class RewardLoopManager:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
 
-        chunks = data.chunk(len(self.reward_loop_workers))
+        num_workers = len(self.reward_loop_workers)
+        padded_data, pad_size = pad_dataproto_to_divisor(data, num_workers)
+        chunks = padded_data.chunk(num_workers)
         outputs = ray.get(
             [
                 worker.compute_score_batch.remote(chunk)
@@ -333,15 +354,12 @@ class RewardLoopManager:
             ]
         )
         outputs_flat = [item for sublist in outputs for item in sublist]
+        if pad_size > 0:
+            outputs_flat = outputs_flat[: len(data)]
 
         # compute rm score
         scores = [item["reward_score"] for item in outputs_flat]
-        prompt_length = data.batch["prompts"].size(1)
-        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
-        rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
-            scores, dtype=torch.float32
-        )
+        rm_scores = self.reward_manager_cls.assemble_rm_scores(data, scores)
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]

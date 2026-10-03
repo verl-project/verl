@@ -7,7 +7,7 @@ mode=${mode:-spmd}
 
 if [ "$mode" = "spmd" ]; then
   ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
-  COMMAND="torchrun --standalone --nnodes=${NNODES:-1} --nproc-per-node=${NUM_GPUS:-1} ${ENTRYPOINT}"
+  COMMAND="python -m torch.distributed.run --standalone --nnodes=${NNODES:-1} --nproc-per-node=${NUM_GPUS:-1} ${ENTRYPOINT}"
 else
   ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer_ray"}
   COMMAND="python ${ENTRYPOINT} trainer.nnodes=${NNODES:-1} trainer.n_gpus_per_node=${NUM_GPUS:-1}"
@@ -91,7 +91,8 @@ MEGATRON_ENGINE_CONFIG="\
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
     +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
-    engine.use_mbridge=True"
+    engine.use_mbridge=True \
+    "
 
 TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
@@ -152,6 +153,9 @@ else
 fi
 
 mkdir -p "${ckpts_home}"
+# These comparison runs disable resume; discard stale and partial checkpoints.
+rm -rf -- "${ckpts_home:?}/"*
+trap 'rm -rf -- "${ckpts_home:?}/"*' EXIT
 
 $COMMAND \
     data.train_files="${TRAIN_FILES}" \
@@ -178,5 +182,3 @@ $COMMAND \
     # trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     # trainer.checkpoint.save_contents=[model,optimizer,extra,hf_model] \
     # trainer.max_ckpt_to_keep=1 \
-
-rm -rf "${ckpts_home:?}/*"

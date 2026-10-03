@@ -22,6 +22,8 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.device import is_npu_available
+from verl.utils.device import manual_seed as device_manual_seed
+from verl.utils.device import manual_seed_all as device_manual_seed_all
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import rearrange_micro_batches, restore_dynamic_batch
 
@@ -35,6 +37,15 @@ def enable_full_determinism(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
+    os.environ["NCCL_DETERMINISTIC"] = "1"
+    os.environ["NCCL_ALGO"] = "Ring"
+    os.environ["NCCL_PROTO"] = "Simple"
+    # flash-attn's Triton cross-entropy kernel (used by logprobs_from_logits to
+    # compute log_probs) has a non-deterministic reduction that is NOT covered by
+    # FLASH_ATTENTION_DETERMINISTIC (only governs attention kernels' backward) nor
+    # by torch.use_deterministic_algorithms (Triton custom ops don't trigger
+    # warn_only). Force the pure-PyTorch log_softmax+gather path instead.
+    os.environ.setdefault("VERL_DISABLE_FLASH_ATTN_CE", "1")
     if is_npu_available:
         # The environment variable required to enable deterministic mode on Ascend NPUs.
         os.environ["HCCL_DETERMINISTIC"] = "true"
@@ -43,16 +54,39 @@ def enable_full_determinism(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    device_manual_seed(seed)
+    device_manual_seed_all(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
     # Enable CUDNN deterministic mode
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
-    if is_npu_available:
-        torch.npu.manual_seed(seed)
-        torch.npu.manual_seed_all(seed)
+
+
+def pad_packed_inputs(
+    input_ids_rmpad: torch.Tensor,
+    position_ids_rmpad: torch.Tensor | None,
+    pad_size: int,
+    pad_value: float = 0,
+):
+    """Right-pad a packed ``(1, total_nnz)`` batch by ``pad_size`` tokens.
+
+    Mirrors the padding :func:`verl.utils.ulysses.ulysses_pad` applies to reach a multiple of the
+    sequence-parallel size: the appended ``position_ids`` restart from 0, so the pad tokens form
+    one trailing varlen segment instead of extending the last real sequence.
+    """
+    if pad_size <= 0:
+        return input_ids_rmpad, position_ids_rmpad
+
+    input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=pad_value)
+    if position_ids_rmpad is not None:
+        pad_position_ids = torch.arange(
+            pad_size, dtype=position_ids_rmpad.dtype, device=position_ids_rmpad.device
+        ).unsqueeze(0)
+        if position_ids_rmpad.dim() == 3:  # (rope_dim, 1, total_nnz) mRoPE layout
+            pad_position_ids = pad_position_ids.unsqueeze(0).repeat(position_ids_rmpad.size(0), 1, 1)
+        position_ids_rmpad = torch.cat((position_ids_rmpad, pad_position_ids), dim=-1)
+    return input_ids_rmpad, position_ids_rmpad
 
 
 def prepare_micro_batches(
@@ -94,6 +128,31 @@ def prepare_micro_batches(
         micro_batches = tu.chunk_tensordict(data, total_data_size // (micro_batch_size_per_gpu * force_group_size))
         batch_idx_list = None
     return micro_batches, batch_idx_list
+
+
+def detach_tree(obj):
+    """Strip the autograd graph from reported tensors, keeping the data.
+
+    Every backend accumulates one per-micro-batch output entry for the whole
+    mini-batch -- ``output_lst`` in the single-program engines, Megatron's
+    ``forward_data_store`` (megatron/core/pipeline_parallel/schedules.py) -- and
+    only consumes it in :func:`postprocess_batch_func`, long after each backward
+    has run. Anything grad-attached that lands there pins that micro-batch's
+    entire autograd graph, so residency grows with the micro-batch count instead
+    of staying flat: under PEFT's ``enable_input_require_grads`` the checkpointed
+    embedding output and its gradient buffer, and under Megatron 1F1B also the
+    graph's input, which is a freshly allocated P2P receive buffer
+    (p2p_communication.py::create_tensor_recv_prev).
+
+    Gradients are unaffected: backward runs on the separately returned live loss.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.detach() if obj.requires_grad else obj
+    if isinstance(obj, dict):
+        return {k: detach_tree(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return type(obj)(detach_tree(v) for v in obj)
+    return obj
 
 
 def postprocess_batch_func(output_lst, indices, data: TensorDict):
@@ -158,3 +217,86 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
     }
 
     return output
+
+
+# ---- sharded-delta HF export (backend side) --------------------------------
+# The delta checkpoint engine consumes FINAL HF-coordinate deltas; everything
+# backend-specific -- the weight->HF naming, the to-HF conversion, the diff and
+# its snapshot -- happens here, on the backend side of the contract. The engine
+# keeps only collectives, bucketing and the wire. This module holds only the
+# DTensor-generic pieces both backends share; EP/converter machinery lives in
+# the veomni backend's own utils.
+
+
+def _prodshape(shape) -> int:
+    n = 1
+    for x in shape:
+        n *= int(x)
+    return n
+
+
+def _hf_entry_identity(name, spec, place, lidx, lval):
+    """Identity profile: the param IS its own single slot (weight name == HF name)
+    -- translate the shard-local delta to within-param coordinates. int32
+    positions: the wire is int32 anyway and the engine asserts the range."""
+    from .spec import translate_flat_indices
+
+    gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
+    counts = torch.zeros(1, dtype=torch.int64)
+    counts[0] = int(gidx.numel())
+    return [(name, tuple(spec.full_shape))], str(lval.dtype).replace("torch.", ""), counts, gidx, lval
+
+
+def hf_delta_export(gen, snaps: dict, entry_fn):
+    """STEADY export: wrap a raw ``(name, local_shard, spec)`` exporter into final
+    HF-coordinate delta entries ``(slots, dtype_str, counts, hf_idx, hf_val,
+    gather_group)`` -- diff against the pinned snapshot, refresh it, then hand the
+    shard-local delta to ``entry_fn(name, spec, place, lidx, lval)``, the engine's
+    per-param entry builder (FSDP: identity only; veomni adds the EP converter).
+    The delta engine consumes these entries verbatim (batch -> gather -> wire); no
+    spec, no placement and no conversion cross the boundary. Requires a prior seed
+    pass."""
+    from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
+
+    from .spec import derive_dtensor_placement
+
+    for name, local, spec in gen:
+        local = local.detach().contiguous().view(-1)
+        snap = snaps.get(name)
+        assert snap is not None and snap.numel() == local.numel(), (
+            f"{name}: no seed snapshot for this shard; run the seed export first"
+        )
+        if spec.place is not None:
+            # explicit exporter override: the backend declared the whole triple
+            # (hybrid geometries are not derivable from DTensor facts alone).
+            place, contributes, pg = spec.place, spec.contributes, spec.gather_group
+        else:
+            place, contributes, pg = derive_dtensor_placement(spec)
+        if contributes:
+            base = snap.to(local.device, non_blocking=True)
+            lidx, lval = shard_delta_indices(local, base, 0)
+        else:
+            # replicated param owned by another rank; empty delta keeps lockstep.
+            lidx = torch.empty(0, dtype=torch.int64, device=local.device)
+            lval = torch.empty(0, dtype=local.dtype, device=local.device)
+        snap.copy_(local, non_blocking=True)
+        yield (*entry_fn(name, spec, place, lidx, lval), pg)
+
+
+def prime_delta_snapshots(gen, snaps: dict, pin: bool) -> None:
+    """Snapshot each rank's current shards to CPU as the steady diff base. Run
+    right after the seed's full-weight sync: weights do not move during the
+    sync, so the snapshots equal exactly what the rollout side received.
+
+    ``pin`` selects pinned vs pageable host memory and is the ENGINE's call
+    (``BaseEngine.delta_pin_snapshots``): pinning a whole shard set
+    (cudaHostAlloc) competes with everything else that pins on the node and its
+    failure surfaces as a CUDA out-of-memory; pageable costs a slower H2D on
+    the diff read-back but cannot OOM the device."""
+    for name, local, _spec in gen:
+        local = local.detach().contiguous().view(-1)
+        snap = snaps.get(name)
+        if snap is None or snap.numel() != local.numel():
+            snap = torch.empty_like(local, device="cpu", pin_memory=pin)
+            snaps[name] = snap
+        snap.copy_(local, non_blocking=True)

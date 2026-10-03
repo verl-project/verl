@@ -63,6 +63,10 @@ cliprange_value: 0.5
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
 loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
 
+# Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.
+# If null, uses response_length. Set to a constant to ensure consistent normalization.
+loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
+
 # checkpoint configs
 checkpoint:
 
@@ -78,9 +82,6 @@ checkpoint:
 
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
-
-  # Mbridge config extension.
-  mbridge_config: {}
 
 # profile the critic model in `update_critic`
 profiler:
@@ -103,6 +104,25 @@ profiler:
 
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
+
+  # When profiling finishes, move backend artifacts written to a framework-fixed location into
+  # save_path. Currently only affects nsys: Ray hardcodes its Nsight output dir
+  # (/tmp/ray/session_latest/logs/nsight). Runs on the profiled ranks.
+  # Default same as relocate_results in global config.
+  relocate_results: ${oc.select:global_profiler.relocate_results,false}
+
+  # Shell command executed on the selected ranks when profiling finishes (after relocate_results).
+  # Env vars available: VERL_PROFILE_SAVE_PATH, VERL_PROFILE_TOOL, VERL_PROFILE_RANK,
+  # VERL_PROFILE_PID, VERL_PROFILE_ROLE, VERL_PROFILE_RAY_NSIGHT_DIR (nsys only). null disables it.
+  # Default same as finish_hook_cmd in global config.
+  finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+
+  # Run finish_hook_cmd on all ranks. Default same as global config.
+  finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+
+  # Ranks that run finish_hook_cmd. [] or [0,1,...]. Falls back to the profiled ranks when unset.
+  # save_path is usually node-local, so pick one rank per node. Default same as global config.
+  finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
 
   # specific tool config which only related to the role
   tool_config:
@@ -143,10 +163,35 @@ profiler:
 
       # Contents to profile, can be empty
       # options: cuda, cpu, memory, shapes, stack
+      # CPU activity is collected either way, since the per-stage markers (critic_update,
+      # compute_values, ...) are CPU-side events and a device-only trace cannot locate them.
       contents: []
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: false
+
+      # Optional torch.profiler.schedule over the critic update loop's mini-batches (see
+      # actor.profiler for the full semantics). Enabled only when active > 0; profiler.step()
+      # (advanced once per critic update mini-batch) walks it.
+      schedule:
+
+        # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+        _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+        # Mini-batches to skip before the first cycle (discrete only)
+        skip_first: 0
+
+        # Idle mini-batches (no collection) at the start of each cycle (discrete only)
+        wait: 0
+
+        # Warmup mini-batches (tracing on, data discarded) each cycle (discrete only)
+        warmup: 0
+
+        # Mini-batches to record each cycle; <= 0 disables scheduling (record the whole update loop)
+        active: 0
+
+        # Number of cycles to repeat; 0 repeats until profiling stops (discrete only)
+        repeat: 0
 
     # torch memory profiler config
     torch_memory:
@@ -159,6 +204,9 @@ profiler:
 
       # Stack trace depth for memory allocations
       stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+      # Number of profiled RL steps to retain before dumping a memory snapshot.
+      memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
 
     # msprobe precision debugger config
     precision_debugger:
@@ -179,4 +227,3 @@ profiler:
 
       # Whether to fail on unknown stage or missing msprobe
       strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-      

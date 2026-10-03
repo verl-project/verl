@@ -4,7 +4,11 @@ set -x
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
+
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
@@ -57,4 +61,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
-    trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/qwen3-8b-ppo/ppo_qwen3-8b_fsdp_npu-$(date +%Y%m%d_%H%M).log
+    trainer.total_training_steps=15 2>&1 | tee $LOG_DIR/$SCRIPT_NAME.log

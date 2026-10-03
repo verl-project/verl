@@ -180,8 +180,8 @@ After task execution, log in to Grafana to view and customize monitoring dashboa
 **Available Dashboards:**
 
 - [vLLM Grafana Dashboard style 1](https://github.com/ArronHZG/verl-community/blob/main/docs/grafana/vllm_grafana.json)
-- [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/performance_statistics.json)
-- [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/dashboards/grafana/query_statistics.json)
+- [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/observability/dashboards/grafana/performance_statistics.json)
+- [vLLM Grafana Dashboard style 2](https://github.com/vllm-project/vllm/blob/main/examples/observability/dashboards/grafana/query_statistics.json)
 - [SGLang Grafana Dashboard](https://github.com/sgl-project/sglang/blob/main/examples/monitoring/grafana/dashboards/json/sglang-dashboard.json)
 
 ## Additional Resources

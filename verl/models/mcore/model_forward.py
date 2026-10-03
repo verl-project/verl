@@ -19,163 +19,15 @@ import torch
 from torch.nested._internal.nested_tensor import NestedTensor
 
 from verl.utils.megatron_utils import unwrap_model
-from verl.workers.config import MtpConfig
 
 from .util import (
     build_vlm_attn_mask_bshd,
-    build_vlm_attn_mask_thd,
-    postprocess_bshd,
     postprocess_bshd_engine,
-    postprocess_packed_seqs,
     postprocess_thd_engine,
-    preprocess_bshd,
     preprocess_bshd_engine,
-    preprocess_packed_seqs,
     preprocess_thd_engine,
+    preprocess_vlm_thd_engine,
 )
-
-
-def model_forward_gen(vision_model: bool = False):
-    def model_forward(
-        model,
-        input_ids,
-        attention_mask,
-        position_ids,
-        multi_modal_inputs: dict,
-        logits_processor=None,
-        logits_processor_args: dict = None,
-        value_model=False,
-        data_format: str = "thd",
-        mtp_config: MtpConfig = None,
-    ):
-        """Forward pass for models with sequence packing."""
-        assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
-        pre_process = (
-            unwrap_model(model).pre_process if not vision_model else False
-        )  # vision model does not need pre_process, because we pack the input_ids to thd in the forward function
-        post_process = unwrap_model(model).post_process
-        sp = unwrap_model(model).config.sequence_parallel
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
-
-        model_kwargs = {}
-        if "pixel_values" in multi_modal_inputs:
-            model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
-        if "image_grid_thw" in multi_modal_inputs:
-            model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
-        if "pixel_values_videos" in multi_modal_inputs:
-            model_kwargs["pixel_values_videos"] = multi_modal_inputs["pixel_values_videos"].to(input_ids.device)
-        if "video_grid_thw" in multi_modal_inputs:
-            model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
-
-        batch_size, seq_len = attention_mask.shape[:2]
-        mtp_enable_train = mtp_config and mtp_config.enable_train
-
-        if data_format == "thd":
-            input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(
-                input_ids,
-                attention_mask,
-                pre_process=pre_process or (post_process and mtp_enable_train),
-                use_fp8_padding=use_fp8_padding,
-            )
-            input_ids_rmpad = input_ids_rmpad.contiguous()
-
-            # when pp > 1 and processor is not None, we need to pass the labels and loss_mask to the model
-            if mtp_enable_train and post_process:
-                args = {
-                    k: preprocess_packed_seqs(v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
-                    for k, v in logits_processor_args.items()
-                }
-                model_kwargs["labels"] = args["label"].contiguous()
-                model_kwargs["loss_mask"] = args["label_mask"].contiguous()
-
-            input_args = dict(
-                input_ids=input_ids_rmpad,
-                attention_mask=None,
-                position_ids=position_ids if not vision_model else None,  # vision models will calculate position_ids
-                packed_seq_params=packed_seq_params,
-                **model_kwargs,
-            )
-
-            if vision_model:
-                # workaround for supporting sequence packing with context parallelism
-                # cp split with sequence packing will make model lose vision token information, so we need to keep
-                # the original input_ids and pack them after vision embedding is calculated,
-                # cooporate with mbridge
-                input_args["input_ids"] = input_ids
-                input_args["attention_mask"] = attention_mask
-
-            output_orig = model(**input_args)
-
-            if post_process and logits_processor is not None:
-                args = {
-                    k: preprocess_packed_seqs(v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
-                    for k, v in logits_processor_args.items()
-                }
-                output_dict = logits_processor(output_orig, **args)
-                output = {
-                    k: postprocess_packed_seqs(
-                        v, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-                    )
-                    for k, v in output_dict.items()
-                }
-            else:
-                output = postprocess_packed_seqs(
-                    output_orig, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-                )
-        elif data_format == "bshd":
-            """
-            data_format: "thd" or "bshd", default is "thd",
-            why we need this?
-                for some new models, GPT-OSS, the thd format is not supported, so we need to use the bshd format.
-            When using the bshd format, we have to add paddings to the input_ids to meet the longest sequence length, 
-            so it is recommended to disable dynamic batch size and set batch size to 1
-            """
-            assert fp8 is None, "fp8 is not supported for bshd format yet"
-
-            batch_size, sequence_length = attention_mask.shape[:2]
-            position_ids_for_preprocess = (
-                torch.arange(sequence_length, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-                if vision_model
-                else position_ids
-            )
-            pre_process_for_bshd = True if vision_model else pre_process
-            new_input_ids, new_attention_mask, new_position_ids = preprocess_bshd(
-                input_ids,
-                attention_mask,
-                position_ids_for_preprocess,
-                sequence_parallel=sp,
-                pre_process=pre_process_for_bshd,
-            )
-            output_orig = model(
-                input_ids=new_input_ids,
-                position_ids=None if vision_model else new_position_ids,
-                attention_mask=new_attention_mask,
-                **model_kwargs,
-            )
-            if post_process and logits_processor is not None:
-                args = {
-                    k: preprocess_bshd(
-                        v, attention_mask, position_ids_for_preprocess, sequence_parallel=sp, pre_process=True
-                    )[0]
-                    for k, v in logits_processor_args.items()
-                }
-                output_dict = logits_processor(output_orig, **args)
-                output = {
-                    k: postprocess_bshd(
-                        v, new_attention_mask, attention_mask, sequence_length, post_process=post_process
-                    )
-                    for k, v in output_dict.items()
-                }
-            else:
-                output = postprocess_bshd(
-                    output_orig, new_attention_mask, attention_mask, sequence_length, post_process=post_process
-                )
-        if value_model and post_process:
-            output = output[..., 0]
-        return output
-
-    return model_forward
 
 
 def _convert_to_nested_tensor(v, input_ids_lengths):
@@ -210,6 +62,57 @@ def _convert_to_nested_tensor(v, input_ids_lengths):
     return v
 
 
+def _build_mtp_loss_mask_nested(response_mask, input_ids_lengths, response_attention_mask):
+    """Build a nested loss_mask aligned to ``input_ids = [prompt; response]`` for MTP.
+
+    ``response_mask`` is response-only data. This expands it to full packed
+    input length as prompt zeros followed by valid response positions.
+    """
+    if isinstance(response_mask, NestedTensor):
+        response_offsets = response_mask.offsets().tolist()
+        response_lengths = [response_offsets[i + 1] - response_offsets[i] for i in range(len(response_offsets) - 1)]
+        batch_size = len(response_lengths)
+        response_values = response_mask.values()
+    else:
+        assert response_attention_mask is not None, "response_attention_mask is required to align padded MTP loss_mask"
+        assert not isinstance(response_attention_mask, NestedTensor), (
+            "response_attention_mask must be a padded (bs, max_response_len) tensor, got NestedTensor"
+        )
+        assert response_attention_mask.shape == response_mask.shape, (
+            f"response_attention_mask shape {response_attention_mask.shape} "
+            f"!= response_mask shape {response_mask.shape}"
+        )
+        batch_size = response_mask.shape[0]
+        response_lengths = response_attention_mask.to(torch.int32).sum(dim=-1).tolist()
+
+    assert len(input_ids_lengths) == batch_size, (
+        f"len(input_ids_lengths)={len(input_ids_lengths)} != batch_size={batch_size}"
+    )
+
+    pieces = []
+    for i in range(batch_size):
+        actual_total = int(input_ids_lengths[i])
+        actual_response = int(response_lengths[i])
+        actual_prompt = actual_total - actual_response
+        assert actual_prompt >= 0, (
+            f"sample {i}: actual_response={actual_response} > actual_total={actual_total}; "
+            "loss_mask cannot be longer than input_ids"
+        )
+        prompt_pad = torch.zeros(actual_prompt, dtype=response_mask.dtype, device=response_mask.device)
+        # Keep the whole valid response span; response_mask may contain internal zeros for tool outputs.
+        if isinstance(response_mask, NestedTensor):
+            response_piece = response_values[response_offsets[i] : response_offsets[i + 1]]
+        else:
+            response_piece = response_mask[i, :actual_response]
+        full = torch.cat([prompt_pad, response_piece], dim=0)
+        assert full.shape[0] == actual_total, (
+            f"sample {i}: built loss_mask length {full.shape[0]} != input_ids length {actual_total}"
+        )
+        pieces.append(full)
+
+    return torch.nested.nested_tensor(pieces, layout=torch.jagged)
+
+
 def gptmodel_forward_model_engine(
     model,
     input_ids,
@@ -222,6 +125,12 @@ def gptmodel_forward_model_engine(
     data_format: str = "thd",
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
+    forced_max_seqlen: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
+    cp_layout: str = "zigzag",
+    router_padding_mask: torch.Tensor | None = None,
+    mtp_loss_normalization_factor: float | None = None,
+    position_ids: torch.Tensor | None = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -244,12 +153,25 @@ def gptmodel_forward_model_engine(
 
     batch_size = input_ids.shape[0]
     if data_format == "thd":
-        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
-            input_ids,
-            pre_process=pre_process or (post_process and mtp_enable_train),
+        attention_mask = None
+        thd_kwargs = dict(
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
+            pad_to_length_bucket=pad_to_length_bucket,
+            cp_layout=cp_layout,
         )
+        # Rank-local THD rows + positions for every model and PP stage: rope LLMs only read positions
+        # in MTP; MRoPE positions, when present, are read on every stage.
+        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
+            input_ids, pre_process=True, **thd_kwargs
+        )
+        if vision_model:
+            input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
+                model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
+            )
+
+        if mtp_loss_normalization_factor is not None:
+            packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         args = {}
@@ -257,10 +179,14 @@ def gptmodel_forward_model_engine(
             # Use input_ids sequence length to ensure label and loss_mask alignment
             input_ids_offsets = input_ids.offsets()
             input_ids_lengths = input_ids_offsets.diff().tolist()
+            response_attention_mask = logits_processor_args.get("response_attention_mask", None)
 
             for k in ["label", "loss_mask"]:
                 v = logits_processor_args[k]
-                v = _convert_to_nested_tensor(v, input_ids_lengths)
+                if k == "loss_mask":
+                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
+                else:
+                    v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
                 args[k] = preprocess_thd_engine(
                     v,
@@ -268,6 +194,8 @@ def gptmodel_forward_model_engine(
                     need_roll=True,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
                 )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
@@ -275,16 +203,16 @@ def gptmodel_forward_model_engine(
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
+        if logits_processor_args and "response_attention_mask" in logits_processor_args:
+            logits_processor_args.pop("response_attention_mask")
 
-        # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
-        attention_mask = None
-        if vision_model:
-            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
+        if router_padding_mask is not None:
+            model_kwargs["padding_mask"] = router_padding_mask
 
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
-            position_ids=position_ids_rmpad if not vision_model else None,  # vision models will calculate position_ids
+            position_ids=position_ids_rmpad,
             packed_seq_params=packed_seq_params,
             **model_kwargs,
         )
@@ -297,13 +225,21 @@ def gptmodel_forward_model_engine(
                     need_roll=(k == "label"),
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
                 )[0]
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
             output = {
                 k: postprocess_thd_engine(
-                    v, packed_seq_params, input_ids, batch_size, post_process=post_process, local_cp_size=local_cp_size
+                    v,
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )
                 for k, v in output_dict.items()
             }
@@ -315,6 +251,7 @@ def gptmodel_forward_model_engine(
                 batch_size,
                 post_process=post_process,
                 local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
     else:
         """
@@ -327,7 +264,10 @@ def gptmodel_forward_model_engine(
         assert local_cp_size is None, "dynamic_CP is not supported for bshd format"
 
         input_ids_bshd, attention_mask_bshd, position_ids_bshd = preprocess_bshd_engine(
-            input_ids, pre_process=pre_process or (post_process and mtp_enable_train), use_fp8_padding=use_fp8_padding
+            input_ids,
+            pre_process=pre_process or (post_process and mtp_enable_train),
+            use_fp8_padding=use_fp8_padding,
+            forced_max_seqlen=forced_max_seqlen,
         )
 
         if mtp_enable_train and post_process:
@@ -335,23 +275,35 @@ def gptmodel_forward_model_engine(
             # Use input_ids sequence length to ensure label and loss_mask alignment
             input_ids_offsets = input_ids.offsets()
             input_ids_lengths = input_ids_offsets.diff().tolist()
+            response_attention_mask = logits_processor_args.get("response_attention_mask", None)
 
             for k in ["label", "loss_mask"]:
                 v = logits_processor_args[k]
-                v = _convert_to_nested_tensor(v, input_ids_lengths)
+                if k == "loss_mask":
+                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
+                else:
+                    v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
-                args[k] = preprocess_bshd_engine(v, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding)[
-                    0
-                ]
+                args[k] = preprocess_bshd_engine(
+                    v,
+                    pre_process=True,
+                    need_roll=True,
+                    use_fp8_padding=use_fp8_padding,
+                    forced_max_seqlen=forced_max_seqlen,
+                )[0]
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
+        if logits_processor_args and "response_attention_mask" in logits_processor_args:
+            logits_processor_args.pop("response_attention_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         if vision_model:
-            input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(input_ids, batch_size, pad_token_id)
+            input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
+                input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen
+            )
         else:
             attention_mask = attention_mask_bshd
 
@@ -364,7 +316,11 @@ def gptmodel_forward_model_engine(
         if post_process and logits_processor is not None:
             args = {
                 k: preprocess_bshd_engine(
-                    v, pre_process=True, need_roll=(k == "label"), use_fp8_padding=use_fp8_padding
+                    v,
+                    pre_process=True,
+                    need_roll=(k == "label"),
+                    use_fp8_padding=use_fp8_padding,
+                    forced_max_seqlen=forced_max_seqlen,
                 )[0]
                 for k, v in logits_processor_args.items()
             }

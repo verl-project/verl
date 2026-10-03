@@ -115,7 +115,6 @@ The rewards can be categorized as follows:
          return outputs
 
       async def compute_score(self, data: DataProto) -> dict:
-         assert len(data) == 1, "RewardLoopWorker only support single data item"
          if self.config.reward.custom_reward_function.path is not None:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
@@ -123,7 +122,7 @@ The rewards can be categorized as follows:
             if self.config.reward.reward_model.enable:
                # we assume the rm is disrm
                # genrm must set custom_reward_function
-               return await self.compute_score_disrm(data)
+               return await self.compute_score_disrm(data[-1:])  # only pass the last output to discriminative reward model
             else:
                return await self.reward_manager.run_single(data)
 
@@ -146,11 +145,17 @@ Users can also customize their own ``RewardManager``, inheriting from ``RewardMa
    @register("user_costomized")
    class UserCostomizedRewardManager(RewardManagerBase):
       async def run_single(self, data: DataProto) -> dict:
-         assert len(data) == 1, "Only support single data item"
+         data_item = data[-1]
          # your own reward manager
          ...
 
 After defining it, users can specify their custom reward manager by setting ``reward.reward_manager.name=user_costomized``.
+
+When trajectories consist of multiple output sequences (currently supported only by the ``main_ppo_sync`` trainer) reward managers may consider all outputs when computing their scores.
+In that case, the ``data`` argument passed to ``run_single`` will contain all outputs in the trajectory.
+However, the default reward managers (e.g. ``naive``, ``dapo``, etc.) will only consider the last sequence by default, as they are typically designed for single-output tasks.
+The same is true in the ``UserCostomizedRewardManager`` example above, as indicated by the line ``data_item = data[-1]``.
+
 
 Rule-Based Reward
 ~~~~~~~~~~~~~~~~~

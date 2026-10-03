@@ -16,6 +16,7 @@ import asyncio
 import os.path
 import time
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import DictConfig
@@ -134,8 +135,11 @@ def create_test_data_proto(tokenizer, response_text: str, ground_truth: str, dat
         }
     )
 
-    # Wrap non-tensor values in lists to match batch dimension
-    data.non_tensor_batch = {"data_source": [data_source], "reward_model": [{"ground_truth": ground_truth}]}
+    # Wrap non-tensor values in numpy arrays to match batch dimension
+    data.non_tensor_batch = {
+        "data_source": np.array([data_source], dtype=object),
+        "reward_model": np.array([{"ground_truth": ground_truth}], dtype=object),
+    }
 
     return data
 
@@ -489,7 +493,7 @@ class TestRateLimitedRewardManager:
         )
 
         data = create_test_data_proto(tokenizer, "answer", "answer")
-        data.non_tensor_batch["extra_info"] = [{"custom_field": "test_value"}]
+        data.non_tensor_batch["extra_info"] = np.array([{"custom_field": "test_value"}], dtype=object)
 
         await manager.run_single(data)
 

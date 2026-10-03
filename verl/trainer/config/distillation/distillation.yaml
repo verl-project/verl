@@ -104,7 +104,7 @@ teacher_models:
       enable_chunked_prefill: true
       enable_prefix_caching: true
       disable_log_stats: true
-      skip_tokenizer_init: false
+      skip_tokenizer_init: true
       prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
       response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
       temperature: ${oc.select:actor_rollout_ref.rollout.temperature}

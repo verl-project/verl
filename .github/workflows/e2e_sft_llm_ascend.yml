@@ -71,15 +71,16 @@ permissions:
 jobs:
   e2e_sft_llm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -96,17 +97,16 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install veomni==0.1.9a1 --ignore-requires-python --no-deps
-          pip install transformers==4.57.3
+          pip install "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@10a26aca258f91a7af3e698cc0db8c6c51705989" --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip install pandas==2.3.3
-          pip uninstall -y mbridge
-          pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10
+          # Match the Transformers version used to generate the pinned VeOmni models.
+          pip install "transformers==5.16.1" --index-url https://pypi.tuna.tsinghua.edu.cn/simple/
       - name: Check final pip list
         run: |
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare gsm8k dataset
         run: |
           python3 examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k

@@ -25,10 +25,11 @@ from ray.experimental.state.api import get_actor
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
+from verl.plugin.platform import get_platform
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
-from verl.utils.device import get_device_name, is_torch_npu_available
+from verl.utils.device import get_device_name
 from verl.utils.py_functional import temp_env_var
 
 __all__ = ["Worker"]
@@ -119,6 +120,10 @@ class RayResourcePool(ResourcePool):
         detached=False,
         accelerator_type: Optional[str] = None,
     ) -> None:
+        # TPU claims a chip exclusively per process, so colocating more than one
+        # WorkerGroup builds a placement group that can never be satisfied.
+        if not get_platform().supports_colocated_worker_groups():
+            max_colocate_count = 1
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
         # print(f"in RayProcessDispatchConfiguration: name_prefix = {name_prefix}")
@@ -135,10 +140,12 @@ class RayResourcePool(ResourcePool):
             name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
         )
         # print(f"pg_name_prefix = {pg_name_prefix}")
-        if device_name == "npu":
-            device_name = "NPU"
-        elif device_name == "cuda":
-            device_name = "GPU"
+        current_platform = get_platform()
+        if device_name != current_platform.device_name:
+            logger.warning(
+                f"Requested device {device_name} does not match current platform device {current_platform.device_name}"
+            )
+        device_name = current_platform.ray_resource_name()
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
@@ -186,7 +193,13 @@ class ResourcePoolManager:
 
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
+    max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Mirror the cap in RayResourcePool so the bundle CPU count matches what it creates.
+        if not get_platform().supports_colocated_worker_groups():
+            self.max_colocate_count = 1
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -202,7 +215,10 @@ class ResourcePoolManager:
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes,
+                use_gpu=True,
+                max_colocate_count=self.max_colocate_count,
+                name_prefix=resource_pool_name,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -218,20 +234,19 @@ class ResourcePoolManager:
 
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
+        # accelerator resource key differs per platform ("GPU", "NPU", ...)
+        resource_name = get_platform().ray_resource_name()
         node_available_resources = ray._private.state.available_resources_per_node()
-        node_available_gpus = {
-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
-            for node, node_info in node_available_resources.items()
-        }
 
-        # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
+        # check total required devices can be satisfied
+        total_available = sum(node_info.get(resource_name, 0) for node_info in node_available_resources.values())
+        total_required = sum(
             [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
         )
-        if total_available_gpus < total_required_gpus:
+        if total_available < total_required:
             raise ValueError(
-                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
+                f"Total available {resource_name} {total_available} is less than "
+                f"total desired {resource_name} {total_required}"
             )
 
 
@@ -294,7 +309,7 @@ def split_resource_pool(
         start_bundle_idx_list = np.cumsum([0] + split_size_list[:-1])
 
     # ensure resource_pool.pgs has been initialized
-    device = "npu" if is_torch_npu_available(check_device=False) else "cuda"
+    device = get_device_name()
     placement_groups = resource_pool.get_placement_groups(device_name=device)
     split_resource_pools = [
         SubRayResourcePool(
@@ -394,10 +409,9 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         }
         options.update(self._options)
 
-        if use_gpu and device_name == "cuda":
-            options["num_gpus"] = num_gpus
-        if use_gpu and device_name == "npu":
-            options["resources"] = {"NPU": num_gpus}
+        if use_gpu:
+            resource_opts = get_platform().ray_resource_options(num_gpus)
+            options.update(resource_opts)
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
@@ -632,6 +646,22 @@ class RayWorkerGroup(WorkerGroup):
             "MASTER_ADDR": self._master_addr,
             "MASTER_PORT": self._master_port,
         }
+        # TPU workers need slice and mesh environment derived from the placement groups, which
+        # Ray does not supply. Kept as an explicit TPU branch rather than a PlatformBase hook,
+        # since no other platform needs it.
+        platform = get_platform()
+        if platform.device_name == "tpu":
+            env_vars.update(
+                platform.get_worker_env_vars(
+                    resource_pool=resource_pool,
+                    rank=rank,
+                    world_size=world_size,
+                    local_rank=local_rank,
+                    local_world_size=local_world_size,
+                    name_prefix=self.name_prefix,
+                    device_name=self.device_name,
+                )
+            )
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
             conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())
@@ -650,17 +680,13 @@ class RayWorkerGroup(WorkerGroup):
         name = f"{self.name_prefix}{cia_name}_{pg_idx}:{local_rank}"  # e.g. Worker_2:5
 
         if self.profile_steps and self.device_name == "cuda":
-            ray_cls_with_init.update_options(
-                {
-                    "runtime_env": {
-                        "env_vars": env_vars,
-                        "nsight": self.worker_nsight_options,
-                    },
-                    "name": name,
-                }
-            )
+            runtime_env = {
+                "env_vars": env_vars,
+                "nsight": self.worker_nsight_options,
+            }
         else:
-            ray_cls_with_init.update_options({"runtime_env": {"env_vars": env_vars}, "name": name})
+            runtime_env = {"env_vars": env_vars}
+        ray_cls_with_init.update_options({"runtime_env": runtime_env, "name": name})
 
         if detached:
             ray_cls_with_init.update_options({"lifetime": "detached"})

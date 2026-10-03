@@ -1,7 +1,7 @@
 Multinode Training
 ==================
 
-Last updated: 06/10/2025.
+Last updated: 07/29/2026.
 
 .. _wuxibin89: https://github.com/wuxibin89
 
@@ -73,8 +73,11 @@ Option 2: Launch via SkyPilot on Kubernetes or clouds
    Ready-to-use SkyPilot example configurations are available in the `examples/tutorial/skypilot/ <https://github.com/verl-project/verl/tree/main/examples/tutorial/skypilot>`_ directory:
    
    - ``verl-ppo.yaml`` - PPO training with GSM8K dataset
-   - ``verl-grpo.yaml`` - GRPO training with MATH dataset  
-   - ``verl-multiturn-tools.yaml`` - Multi-turn tool usage training
+   - ``verl-grpo.yaml`` - GRPO training with MATH dataset
+
+   Agent Loop and tool-use training is covered by the `Agent Loop tutorial
+   <https://github.com/verl-project/verl/blob/main/examples/tutorial/agent_loop_get_started/agent_loop_tutorial.ipynb>`_.
+   It does not currently include a preconfigured SkyPilot task.
    
    See the `SkyPilot examples README <https://github.com/verl-project/verl/tree/main/examples/tutorial/skypilot>`_ for detailed usage instructions.
 
@@ -289,6 +292,22 @@ manager available on your cluster or use other container runtimes (e.g. through 
 2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
 
 3. Modify `examples/tutorial/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/tutorial/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
+
+   On a cluster with multiple network interfaces, hostname resolution may select a management network instead of the
+   high-speed interconnect. Set ``RAY_NETWORK_INTERFACE`` to make the example resolve the IPv4 address of that interface
+   on every node and explicitly bind both the Ray head and workers to it:
+
+   .. code:: bash
+
+       RAY_NETWORK_INTERFACE=ib0 sbatch examples/tutorial/slurm/ray_on_slurm.slurm
+
+   The interface name must exist on every allocated node. This setting controls Ray's network interface only. Distributed
+   communication backends may need their own interface settings, for example:
+
+   .. code:: bash
+
+       export GLOO_SOCKET_IFNAME=ib0
+       export NCCL_SOCKET_IFNAME=ib0
 
 4. Submit the job script to the Slurm cluster with `sbatch`.
 
@@ -560,7 +579,7 @@ slurm_script.sh
     ### Project
     CONTAINER_NAME="multinode_verl_training"
     IMG="verl.rocm"
-    DOCKERFILE="docker/Dockerfile.rocm"
+    DOCKERFILE="docker/rocm/Dockerfile.rocm"
     # echo $PWD
     verl_workdir="${HOME}/projects/verl_upstream"
     export TRANSFORMERS_CACHE="${HOME}/.cache/huggingface"
@@ -818,4 +837,3 @@ Just sbatch your slurm_script.sh
 .. code-block:: bash
 
     sbatch slurm_script.sh
-

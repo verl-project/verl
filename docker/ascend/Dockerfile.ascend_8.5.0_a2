@@ -19,14 +19,16 @@ RUN ARCH=$(uname -m) && \
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
     fi && \
     # Clone libs
-    git clone --depth 1 --branch v0.13.0 https://github.com/vllm-project/vllm.git && \
-    git clone -b releases/v0.13.0 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git && \
+    git clone -b releases/v0.18.0 https://github.com/vllm-project/vllm-ascend.git && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
     cd MindSpeed && git checkout 2.3.0_core_r0.12.1 && cd .. && \
     git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
 
 # Install repositories with low update frequency
-RUN ARCH=$(uname -m) && \
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
         export LD_LIBRARY_PATH=/usr/local/Ascend/cann-8.5.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
@@ -40,16 +42,19 @@ RUN ARCH=$(uname -m) && \
     # Install vllm
     cd vllm && pip install -r requirements/build.txt && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+    fi && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
-    export COMPILE_CUSTOM_KERNELS=1 && pip install -v -e . && cd .. && \
+    export COMPILE_CUSTOM_KERNELS=1 && pip install --no-build-isolation --no-deps -v -e . && cd .. && \
     # Install MindSpeed & Megatron
     pip install -e MindSpeed && \
     pip install -e Megatron-LM && \
     # Remove existing triton installed by some third-party packages
     pip uninstall -y triton && \
     # Install mbridge
-    pip install mbridge torch_npu==2.8.0 && \
+    pip install mbridge && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge

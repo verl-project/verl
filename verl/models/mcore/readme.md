@@ -1,14 +1,14 @@
-updated 20251222
+updated 20260706
 
 # The ways verl integrates megatron-core
 There has been 3 ways that verl integrates megatron-core as it training backend:
 1. the codes inside this directory, which defines the conversion for new models one by one. (deprecated now)
-2. through [mbridge](https://github.com/ISEEKYAN/mbridge) (will be deprecated at about v0.8)
-3. through [megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) (the official way for further development)
+2. through [mbridge](https://github.com/ISEEKYAN/mbridge) (deprecated)
+3. through [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) (the default and official way for further development)
 
 There is a configure option of `megatron.use_mbridge` to choose way#1 (false) or way#2 (true), and after the megatron-bridge is integrated we have a new option `megatron.vanilla_mbridge` to choose way#2 (true) or way#3 (false)
 
-Now since we deprecated the way#1, the option `use_mbridge` will be asserted to be true and will be removed after v0.7. The default `vanilla_mbridge` is true for now and will be false one the megatron-bridge backend turns default.
+Now since we deprecated the way#1, the option `use_mbridge` will be asserted to be true and will be removed after v0.9. Megatron-Bridge is selected by default with `vanilla_mbridge=false`. Setting `vanilla_mbridge=true` selects the deprecated mbridge backend for compatibility.
 
 With the bridge way(#2 or #3), we can directly load and save the megatron model weight through HuggingFace format, and we can use any megatron version >= 0.13 to adopt new megatron optimization feature as handy as possible by directly add overrided megatron configs such as `+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform`.
 
@@ -36,7 +36,7 @@ Also, we can easily upgrade the mcore version to the latest version. In most cas
 1. make sure the model is supported by vLLM
 2. Support the model in [mbridge](https://github.com/iseekyan/mbridge), see its currently supported models for example.
     - we will migrate to [megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) in the future.
-3. Register the model forward function in verl, see the example in `verl/verl/models/mcore/registry.py`.
+3. Register the model forward function in verl, see the example in `verl/models/mcore/registry.py`.
 
 
 
@@ -88,7 +88,7 @@ main steps:
     - b. support exporting the mcore checkpoint to huggingface format, for downstream inference.
 
 ### Modelling the huggingface model with mcore `GPTModel`
-The first step is to convert huggingface config to mcore `TransformerConfig` and init the mcore `GPTModel` with the converted config. See code in `verl/models/mcore/config_converter.py` and `verl/verl/models/mcore/models/model_initializer.py`. The corresponding model forward code is in `verl/verl/models/mcore/models/model_forward.py`.
+The first step is to convert huggingface config to mcore `TransformerConfig` and init the mcore `GPTModel` with the converted config. See code in `verl/models/mcore/config_converter.py` and `verl/models/mcore/model_initializer.py`. The corresponding model forward code is in `verl/models/mcore/model_forward.py`.
 
 There are two ways of loading the huggingface model weights to the `GPTModel`
 1. Runtime loading

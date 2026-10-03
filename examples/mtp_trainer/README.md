@@ -7,6 +7,7 @@ MTP uses an auxiliary token-prediction head (speculative / draft head) during tr
 | Script                                                                    | Infer  | Train    | Mode                              | Platform |
 |---------------------------------------------------------------------------|--------|----------|-----------------------------------|----------|
 | `run_mimo_7b_mtp_megatron.sh`                                             | SGLang | Megatron | Sync hybrid-engine                | NVIDIA   |
+| `run_mimo_7b_mtp_rl_vllm_sgl_megatron.sh`                                 | SGLang / vLLM | Megatron | Sync hybrid-engine, slime-aligned RL/EAGLE setup | NVIDIA |
 | `run_mimo_7b_mtp_fully_async_megatron_multinode.sh`                       | SGLang | Megatron | Fully-async split-placement (DAPO)| NVIDIA   |
 
 IMPORTANT: after downloading MiMo-7B-RL, set `max_position_embeddings: 32768` in its `config.json`.

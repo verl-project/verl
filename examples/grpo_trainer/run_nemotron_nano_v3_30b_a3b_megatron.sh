@@ -6,7 +6,7 @@ set -xeuo pipefail
 # pip install nvidia-modelopt
 # MAX_JOBS=32 pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation --no-cache-dir
 # MAX_JOBS=32 pip install git+https://github.com/state-spaces/mamba.git --no-build-isolation --no-cache-dir
-# pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge 
+# pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge
 # pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_dev_r0.16.0
 # unset ROCR_VISIBLE_DEVICES
 # unset PYTORCH_CUDA_ALLOC_CONF
@@ -140,7 +140,6 @@ ACTOR=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
     actor_rollout_ref.actor.megatron.param_offload=${offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${offload}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp}
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp}
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=$EP
@@ -148,7 +147,6 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
 )
 
 ROLLOUT=(
@@ -210,7 +208,16 @@ EXTRA=(
 
 ################################################### start script ###################################################
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_name}" = vllm ] || [ "${rollout_name}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_name}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_name} --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -222,4 +229,5 @@ python3 -m verl.trainer.main_ppo \
     "${TRAINER[@]}" \
     "${FORWARD_ONLY_SETS[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

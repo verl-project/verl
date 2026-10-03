@@ -20,7 +20,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
-from verl.trainer.main_ppo import create_rl_sampler
+from verl.trainer.ppo.utils import create_rl_sampler
 from verl.utils import hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -58,6 +58,8 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
     config.actor_rollout_ref.rollout.nnodes = 1
+    # No trainer to sync weights from, so the server must load them from disk.
+    config.actor_rollout_ref.rollout.load_format = "auto"
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 

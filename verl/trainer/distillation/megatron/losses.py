@@ -94,6 +94,8 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             partition_vocab_size, rank, world_size
         )
 
+        target_topk_indices_global = target_topk_indices.clone()
+
         # Which target top-k indices fall into this partition's vocab range?
         topk_indices_in_vocab_mask = (target_topk_indices >= vocab_start_index) & (
             target_topk_indices < vocab_end_index
@@ -107,13 +109,13 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_indices[~topk_indices_in_vocab_mask] = 0
 
         # Target probs/logps (teacher distribution restricted to top-k), masked to this shard.
-        # Note: `target_topk_mass` is computed *before* masking-out-of-shard entries, so it represents
-        # the mass of the provided top-k distribution (global), independent of TP sharding.
+        # Compute the logging metric before clamping and masking so it represents the original
+        # mass of the provided top-k distribution (global), independent of TP sharding.
+        target_topk_mass = torch.sum(torch.exp(target_topk_logps.float()), dim=-1)
         if log_prob_min_clamp is not None:
             target_topk_logps = target_topk_logps.clamp_min(log_prob_min_clamp)
         target_topk_logps = target_topk_logps.float()
         target_topk_probs = torch.exp(target_topk_logps)
-        target_topk_mass = torch.sum(target_topk_probs, dim=-1)
         target_topk_probs[~topk_indices_in_vocab_mask] = 0
         target_topk_logps[~topk_indices_in_vocab_mask] = 0
 
@@ -125,6 +127,16 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)
         ]  # (b*s, topk)
         vp_source_topk_logps = vp_source_topk_logps_2d.view(target_topk_indices.shape)  # (b, s, topk)
+
+        # For logging: mass of student probs that lands on the teacher's top-k indices.
+        # Compute it before clamping; entries outside this TP shard contribute zero.
+        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
+        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
+        torch.distributed.all_reduce(
+            per_token_topk_mass,
+            op=torch.distributed.ReduceOp.SUM,
+            group=get_tensor_model_parallel_group(),
+        )
 
         # `active_mask` tracks entries that should receive gradient.
         # If clamping is enabled, entries with log p_i <= clamp have zero gradient w.r.t. logits.
@@ -162,17 +174,47 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
 
         ctx.save_for_backward(vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass)
 
-        # For logging: mass of student probs that lands on the teacher's top-k indices.
-        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
-        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
+        # Compute the student's global top-k ids from per-rank vocab-shard candidates.
+        local_topk = min(topk, partition_vocab_size)
+        local_student_topk_logps, local_student_topk_ids = torch.topk(vp_source_logps, k=local_topk, dim=-1)
+        local_student_topk_ids = local_student_topk_ids + vocab_start_index
+        gathered_student_topk_logps = [torch.empty_like(local_student_topk_logps) for _ in range(world_size)]
+        gathered_student_topk_ids = [torch.empty_like(local_student_topk_ids) for _ in range(world_size)]
+        torch.distributed.all_gather(
+            gathered_student_topk_logps, local_student_topk_logps, group=get_tensor_model_parallel_group()
+        )
+        torch.distributed.all_gather(
+            gathered_student_topk_ids, local_student_topk_ids, group=get_tensor_model_parallel_group()
+        )
+        student_topk_logps = torch.cat(gathered_student_topk_logps, dim=-1)
+        student_topk_ids = torch.cat(gathered_student_topk_ids, dim=-1)
+        _, student_topk_positions = torch.topk(student_topk_logps, k=topk, dim=-1)
+        student_topk_ids = torch.gather(student_topk_ids, dim=-1, index=student_topk_positions)
+
+        per_target_token_kl = target_topk_probs * (target_topk_logps - vp_source_topk_logps)
         torch.distributed.all_reduce(
-            per_token_topk_mass,
+            per_target_token_kl,
             op=torch.distributed.ReduceOp.SUM,
             group=get_tensor_model_parallel_group(),
         )
-        ctx.mark_non_differentiable(per_token_topk_mass, target_topk_mass)
 
-        return per_token_kl_loss, per_token_topk_mass.detach(), target_topk_mass.detach()
+        # Diagnostics for tracking teacher/student top-k overlap in OPD, following
+        # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016).
+        overlap_mask = (target_topk_indices_global.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
+        overlap_count = overlap_mask.sum(dim=-1)
+        overlap_token_advantage_sum = (-per_target_token_kl * overlap_mask).sum(dim=-1)
+        overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
+        overlap_token_advantage = torch.where(
+            overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
+        )
+
+        per_token_topk_mass = per_token_topk_mass.detach()
+        target_topk_mass = target_topk_mass.detach()
+        overlap_count = overlap_count.detach()
+        overlap_token_advantage = overlap_token_advantage.detach()
+        ctx.mark_non_differentiable(per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage)
+
+        return per_token_kl_loss, per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage
 
     @staticmethod
     def backward(
@@ -180,6 +222,8 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         grad_loss: torch.Tensor,
         grad_source_mass: torch.Tensor,
         grad_target_mass: torch.Tensor,
+        grad_overlap_count: torch.Tensor,
+        grad_overlap_token_advantage: torch.Tensor,
     ):
         """
         Backprop for the per-token loss:
@@ -251,15 +295,19 @@ def compute_forward_kl_topk(
 
     # 2. compute token-wise KL divergence across tp groups
     distillation_loss_config: DistillationLossConfig = config.distillation_loss
-    distillation_losses, student_mass, teacher_mass = _VocabParallelKLDivergence.apply(
-        student_logits,
-        teacher_topk_log_probs_cp_split,
-        teacher_topk_ids_cp_split,
-        distillation_loss_config.log_prob_min_clamp,
+    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage = (
+        _VocabParallelKLDivergence.apply(
+            student_logits,
+            teacher_topk_log_probs_cp_split,
+            teacher_topk_ids_cp_split,
+            distillation_loss_config.log_prob_min_clamp,
+        )
     )
 
     return {
         "distillation_losses": distillation_losses,
         "student_mass": student_mass,
         "teacher_mass": teacher_mass,
+        "overlap_count": overlap_count,
+        "overlap_token_advantage": overlap_token_advantage,
     }

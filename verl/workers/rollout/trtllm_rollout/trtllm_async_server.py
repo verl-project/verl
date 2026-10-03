@@ -23,15 +23,62 @@ from ray.actor import ActorHandle
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
 
+from verl.plugin.platform import get_platform
 from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.profiler import (
+    DistProfiler,
+    build_rollout_dist_profiler,
+    relocate_rollout_traces,
+    rollout_profiler_global_ranks,
+)
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _resolve_chat_stop_tokens(model_config) -> tuple[int, list[int]]:
+    """Return (end_id, stop_token_ids) for TorchSampler.
+
+    Both TRTLLM's samplers stops only on end_id.  For chat-format prompts the model
+    naturally ends each assistant turn with a chat-end token (e.g. <|im_end|>
+    for Qwen, <|eot_id|> for Llama-3) that is *different* from the base-model
+    eos_token_id.  If end_id is set to the base eos the sampler ignores the
+    chat-end token and the model loops into a second turn, inflating response
+    lengths until max_tokens is hit.
+
+    For models without a distinct chat-end token the return values are
+    identical to the current default (end_id = hf_config.eos_token_id).
+    """
+    eos_token_id = model_config.hf_config.eos_token_id
+    all_stop_ids: list[int] = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+
+    if model_config.generation_config is not None:
+        gen_eos = model_config.generation_config.eos_token_id
+        if gen_eos is not None:
+            for t in gen_eos if isinstance(gen_eos, list) else [gen_eos]:
+                if t not in all_stop_ids:
+                    all_stop_ids.append(t)
+
+    chat_end_id = None
+    if model_config.tokenizer is not None:
+        _chat_stop_strings = ["<|im_end|>", "<|eot_id|>", "<|end_of_turn|>"]
+        _added_vocab = model_config.tokenizer.get_added_vocab()
+        for stop_str in _chat_stop_strings:
+            if stop_str in _added_vocab:
+                tid = _added_vocab[stop_str]
+                if tid not in all_stop_ids:
+                    all_stop_ids.append(tid)
+                if chat_end_id is None:
+                    chat_end_id = tid
+
+    primary_end_id = chat_end_id if chat_end_id is not None else eos_token_id
+    logger.warning(f"TRT-LLM stop token IDs: {all_stop_ids}, end_id: {primary_end_id}")
+    return primary_end_id, all_stop_ids
 
 
 @ray.remote
@@ -85,10 +132,13 @@ class TRTLLMHttpServer:
         self.bundle_indices = bundle_indices
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        # Set when generation is allowed; cleared during weight sync to block new requests.
+        self._generation_allowed = asyncio.Event()
+        self._generation_allowed.set()
+        # Set by abort_all_requests(reject_request=True) when no resume is coming soon.
+        self._rejecting = False
 
-        if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
-            logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
-            self.config.load_format = "auto"
+        self.profiler_controller = self._init_profiler_controller()
 
         self.is_vlm_model = (
             self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
@@ -100,13 +150,29 @@ class TRTLLMHttpServer:
 
         logger.info(f"TRTLLMHttpServer, replica_rank: {self.replica_rank}")
 
-        self.sampling_args = {
-            "detokenize": False,
-            "end_id": -1,
-            "pad_id": self.model_config.hf_config.pad_token_id,
-            "stop_token_ids": [self.model_config.hf_config.eos_token_id],
-            "include_stop_str_in_output": True,
-        }
+        _end_id, _stop_ids = _resolve_chat_stop_tokens(self.model_config)
+
+        logger.info(f"TRT-LLM resolved end_id={_end_id}, stop_ids={_stop_ids}")
+
+        self._use_torch_sampler = bool(int(os.environ.get("TLLM_USE_TORCHSAMPLER", "0")))
+
+        if self._use_torch_sampler:
+            self.sampling_args = {
+                "detokenize": True,
+                "end_id": _end_id,
+                "stop_token_ids": _stop_ids,
+                "pad_id": self.model_config.hf_config.pad_token_id,
+                "include_stop_str_in_output": True,
+            }
+        else:
+            self.sampling_args = {
+                "detokenize": False,
+                "end_id": -1,
+                "pad_id": self.model_config.hf_config.pad_token_id,
+                "stop_token_ids": _stop_ids,
+                "include_stop_str_in_output": True,
+            }
+        logger.info(f"use_torch_sampler={self._use_torch_sampler}, sampling_args={self.sampling_args}")
 
     def get_server_address(self):
         """Get http server address and port."""
@@ -131,11 +197,12 @@ class TRTLLMHttpServer:
         # otherwise **engine_kwargs unpacking in llm_kwargs would overwrite the entire
         # KvCacheConfig object, losing free_gpu_memory_fraction and enable_block_reuse.
         kv_cache_overrides = engine_kwargs.pop("kv_cache_config", {})
-        kv_cache_config = KvCacheConfig(
-            enable_block_reuse=self.config.enable_prefix_caching,
-            free_gpu_memory_fraction=self.config.gpu_memory_utilization,
+        kv_cache_kwargs = {
+            "enable_block_reuse": self.config.enable_prefix_caching,
+            "free_gpu_memory_fraction": self.config.gpu_memory_utilization,
             **kv_cache_overrides,
-        )
+        }
+        kv_cache_config = KvCacheConfig(**kv_cache_kwargs)
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
@@ -183,7 +250,7 @@ class TRTLLMHttpServer:
             if self.config.enable_sleep_mode and SleepConfig is not None
             else None,
             "allreduce_strategy": "NCCL",
-            "sampler_type": "TRTLLMSampler",
+            "sampler_type": "TorchSampler" if self._use_torch_sampler else "TRTLLMSampler",
             **engine_kwargs,
         }
 
@@ -193,9 +260,13 @@ class TRTLLMHttpServer:
         if self.is_vlm_model:
             llm_kwargs.update(self_defined_extension)
         else:
+            # TODO: once TRT-LLM WorkerExtension includes wait_for_engine_idle,
+            # replace with "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension" directly.
             llm_kwargs.update(
                 {
-                    "ray_worker_extension_cls": "tensorrt_llm.llmapi.rlhf_utils.WorkerExtension",
+                    "ray_worker_extension_cls": (
+                        "verl.workers.rollout.trtllm_rollout.trtllm_worker_extension.RlhfWorkerExtension"
+                    ),
                 }
             )
 
@@ -251,24 +322,41 @@ class TRTLLMHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 
-        max_tokens = min(self.config.response_length, self.config.max_model_len - len(prompt_ids))
+        max_tokens = min(
+            self.config.response_length,
+            self.config.prompt_length + self.config.response_length - len(prompt_ids),
+        )
+        max_tokens = max(0, min(max_tokens, self.config.max_model_len - len(prompt_ids)))
         sampling_params["max_tokens"] = max_tokens
-        sampling_params["logprobs"] = 1 if sampling_params.pop("logprobs", False) else None
+        # TorchSampler: logprobs=0 means sampled-token logprob; TRTLLMSampler: logprobs=1
+        _want_logprobs = sampling_params.pop("logprobs", False)
+        if self._use_torch_sampler:
+            sampling_params["logprobs"] = 0 if _want_logprobs else None
+        else:
+            sampling_params["logprobs"] = 1 if _want_logprobs else None
         if sampling_params["top_k"] == -1:
             sampling_params["top_k"] = 0
         sampling_params.update(self.sampling_args)
 
         trt_llm_sampling_params = SamplingParams(**sampling_params)
+        if audio_data is not None:
+            raise NotImplementedError("TRT-LLM rollout does not support audio inputs yet.")
+
+        rejected = await self._park_until_allowed(request_id)
+        if rejected is not None:
+            return rejected
         if self.is_vlm_model and (image_data or video_data):
             deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
             org_prompt = self.llm.tokenizer.decode(deduped_ids)
             input_dict = {
                 "prompt": org_prompt,
                 "multi_modal_data": {},
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": dict(mm_processor_kwargs or {}),
             }
             if image_data:
                 input_dict["multi_modal_data"]["image"] = image_data
@@ -287,19 +375,80 @@ class TRTLLMHttpServer:
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
         if outputs.outputs[0].logprobs is not None:
-            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position
+            # When logprobs=1, TRT-LLM returns only the sampled token's logprob at each position.
+            # Extract log_probs before checking finish_reason so cancelled (partial) requests also
+            # return log_probs for their already-generated tokens.
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
+        if outputs.outputs[0].finish_reason == "cancelled":
+            return TokenOutput(
+                token_ids=token_ids,
+                log_probs=log_probs,
+                stop_reason="aborted",
+                extra_fields={"global_steps": self.global_steps},
+            )
         return TokenOutput(token_ids=token_ids, log_probs=log_probs, extra_fields={"global_steps": self.global_steps})
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
-    async def abort_all_requests(self):
-        raise NotImplementedError
+    async def abort_all_requests(self, reject_request: bool = False):
+        """Abort all in-flight requests and block new ones. Call resume_generation() to unblock.
+
+        Args:
+            reject_request: Fail requests that arrive while generation is blocked instead of
+                holding them. Pass True when this server is leaving the load balancer with no
+                resume coming soon, so the client re-routes them to an active replica.
+        """
+        self._generation_allowed.clear()
+        self._rejecting = reject_request
+        await self.llm.pause_generation()
+        # TODO: remove once TRT-LLM is upgraded to a version where pause_generation()
+        # drains internally (https://github.com/NVIDIA/TensorRT-LLM/pull/13784).
+        await self.llm.collective_rpc("wait_for_engine_idle")
+        if self.config.enable_prefix_caching:
+            await self.llm.collective_rpc("reset_prefix_cache")
 
     async def resume_generation(self):
-        raise NotImplementedError
+        """Unblock new generation requests after abort_all_requests()."""
+        await self.llm.resume_generation()
+        self._rejecting = False
+        self._generation_allowed.set()
+
+    async def _park_until_allowed(self, request_id: str) -> Optional[TokenOutput]:
+        """Wait out a blocked gate, or fail the request when the gate rejects late arrivals.
+
+        Returns None once generation is allowed, or an aborted TokenOutput telling the client
+        to re-route. Rejection is checked before waiting, so the request never reaches the engine.
+        """
+        while not self._generation_allowed.is_set():
+            if self._rejecting:
+                logger.debug("rejecting request %s: server left rotation while generation is blocked", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            await self._generation_allowed.wait()
+        return None
+
+    async def clear_kv_cache(self):
+        """Invalidate prefix cache entries after weight update."""
+        await self.llm.collective_rpc("reset_prefix_cache")
+
+    async def release_kv_cache(self):
+        """Release only kv_cache GPU memory, keeping model weights intact.
+
+        This is used during weight sync to free GPU memory for new weights.
+        """
+        if not self.config.free_cache_engine:
+            return
+        await self.llm.release(tags=["kv_cache"])
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
+        await self.llm.resume(tags=["kv_cache"])
 
     async def wake_up(self):
         from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
@@ -330,6 +479,54 @@ class TRTLLMHttpServer:
         return await self.llm.collective_rpc(
             "report_device_id",
             unique_reply_rank=0,
+        )
+
+    async def start_profile(self, **kwargs):
+        if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
+            await self.llm.collective_rpc("start_profile")
+
+    async def stop_profile(self):
+        if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
+            await self.llm.collective_rpc("stop_profile")
+            # Relocate the engine's traces into save_path (when relocate_results is set) so the
+            # training worker's single end-of-run upload of the whole save_path picks them up. The
+            # rollout engine does not run the finish command itself: it shares save_path with the
+            # colocated training worker, so uploading here too would send the same directory twice.
+            relocate_rollout_traces(
+                self.profiler_controller.config,
+                self.replica_rank,
+                self.replica_world_size,
+                self.profiler_keep_global_ranks,
+            )
+
+    def _init_profiler_controller(self) -> DistProfiler:
+        profiler_config = self.config.profiler
+        tool_config = None
+        if profiler_config is not None:
+            if profiler_config.tool in ["torch", "npu"]:
+                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
+            elif profiler_config.tool == "nsys":
+                # nsys config lives in global_tool_config, not tool_config
+                from verl.utils.profiler.config import NsightToolConfig
+
+                raw = (profiler_config.global_tool_config or {}).get("nsys")
+                tool_config = omega_conf_to_dataclass(raw) if raw is not None else NsightToolConfig()
+            elif profiler_config.tool is not None:
+                logger.warning(f"trtllm rollout: unsupported profiler tool '{profiler_config.tool}', disabling")
+                profiler_config = None
+        # `ranks` in the rollout profiler config are global GPU ranks (as in the training roles);
+        # map them to the replica that owns them so e.g. ranks=[0, 8] with tp=8 profiles the replicas
+        # holding global ranks 0 and 8 (replicas 0 and 1), not replica indices 0 and 8.
+        self.replica_world_size = (
+            self.config.tensor_model_parallel_size
+            * self.config.data_parallel_size
+            * self.config.pipeline_model_parallel_size
+        )
+        # A tp>1 engine profiles its whole replica, but the user asked for specific global GPU ranks;
+        # keep only those when relocating so ranks=[0, 8] yields exactly GPU 0 and 8, not their tp-mates.
+        self.profiler_keep_global_ranks = rollout_profiler_global_ranks(profiler_config)
+        return build_rollout_dist_profiler(
+            self.replica_rank, self.replica_world_size, config=profiler_config, tool_config=tool_config
         )
 
 
@@ -369,7 +566,13 @@ class TRTLLMReplica(RolloutReplica):
         # For RayResourcePool, the replica is assigned to entire resource pool.
         # We need to find start pg index and local bundle index based on replica rank.
         else:
-            local_bundle_index = self.world_size * self.replica_rank
+            # In standalone mode, init_standalone() creates a per-replica RayResourcePool
+            # that contains only world_size bundles for this replica. Start at bundle 0.
+            # In colocated/hybrid mode, the shared pool spans all replicas, so offset by rank.
+            if self.rollout_mode == RolloutMode.STANDALONE:
+                local_bundle_index = 0
+            else:
+                local_bundle_index = self.world_size * self.replica_rank
 
         while (
             start_pg_index < len(self.resource_pool.pgs)
@@ -431,14 +634,25 @@ class TRTLLMReplica(RolloutReplica):
             if not self.is_reward_model
             else f"trtllm_server_reward_{self.replica_rank}{self.name_suffix}"
         )
+        _server_env_vars = {var: "1" for var in get_platform().ray_noset_envvars()}
+        _server_env_vars.update(get_platform().rollout_env_vars())
+        # Propagate profiling env vars to the Ray actor so that RayExecutor
+        # (instantiated inside TRTLLMHttpServer) picks them up for inner workers.
+        for _prof_var in (
+            "TLLM_ENABLE_NSYS",
+            "TLLM_NSYS_OUTPUT_DIR",
+            "TLLM_USE_TORCHSAMPLER",
+        ):
+            if _val := os.environ.get(_prof_var):
+                _server_env_vars[_prof_var] = _val
         server = TRTLLMHttpServer.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id,
                 soft=False,
             ),
-            runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
+            runtime_env={"env_vars": _server_env_vars},
             name=name,
-            max_concurrency=self.max_concurrency,
+            max_concurrency=self.config.ray_actor_max_concurrency,
         ).remote(
             config=self.config,
             model_config=self.model_config,

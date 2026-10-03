@@ -19,7 +19,6 @@ LR scheduling, gradient clipping, and checkpointing to Automodel's
 infrastructure while using verl's training loop, data pipeline, and loss function.
 """
 
-import gc
 import logging
 import os
 from contextlib import nullcontext
@@ -49,7 +48,7 @@ from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import AutomodelEngineConfig, AutomodelOptimizerConfig, HFModelConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from ..utils import detach_tree, enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     build_automodel_model,
     build_distributed_config_from_engine_config,
@@ -345,7 +344,6 @@ class AutomodelEngine(BaseEngine):
                 load_automodel_model_to_gpu(self.module)
             if optimizer and self.optimizer is not None:
                 load_automodel_optimizer(self.optimizer, get_device_id())
-            gc.collect()
         elif device == "cpu":
             if model:
                 offload_automodel_model_to_cpu(self.module)
@@ -465,7 +463,8 @@ class AutomodelTrainModeCtx(BaseEngineCtx):
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, AutomodelEngine)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 
@@ -623,7 +622,13 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+                        if self.engine_config.entropy_from_logits_with_chunking:
+                            entropy_rmpad = self.compute_entropy_from_logits(
+                                logits_rmpad,
+                                chunk_size=self.engine_config.entropy_from_logits_chunk_size,
+                            )
+                        else:
+                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                     else:
                         entropy_rmpad = torch.utils.checkpoint.checkpoint(
                             self.compute_entropy_from_logits, logits_rmpad
@@ -704,8 +709,9 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
+            # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
             output = {
-                "model_output": model_output,
+                "model_output": detach_tree(model_output),
                 "loss": loss.detach().item(),
                 "metrics": metrics,
             }

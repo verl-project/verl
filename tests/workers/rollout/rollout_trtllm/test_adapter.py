@@ -158,6 +158,8 @@ class TestTRTLLMServerAdapter:
             config.actor_rollout_ref.rollout.name = "trtllm"
             config.actor_rollout_ref.rollout.mode = "async"
             config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
+            # No trainer to sync weights from, so the server must load them from disk.
+            config.actor_rollout_ref.rollout.load_format = "auto"
 
             rollout_config = config.actor_rollout_ref.rollout
             model_config = config.actor_rollout_ref.model

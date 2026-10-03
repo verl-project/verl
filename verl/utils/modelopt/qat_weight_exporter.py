@@ -92,6 +92,8 @@ class QATWeightExporter:
         quantized, or the original tensor unchanged otherwise.
         """
         for hf_name, weight in per_tensor_param:
+            if "_quantizer." in hf_name:
+                continue
             meta = self._resolve_quant_metadata(hf_name)
             if meta is None:
                 yield (hf_name, weight)
@@ -149,27 +151,12 @@ class QATWeightExporter:
                     self._metadata[global_name] = meta
 
     def _local_to_global_param_name(self, name: str, vpp_idx: int) -> str:
-        if self._pp_size > 1 and "layers." in name and self._config is not None:
-            from megatron.bridge.models.conversion.model_bridge import (
-                _megatron_local_name_to_global,
-            )
+        if self._config is None:
+            return name
 
-            name = _megatron_local_name_to_global(self._actor_module, self._config, name, vpp_idx)
+        from megatron.bridge.models.conversion.model_bridge import _megatron_local_name_to_global
 
-        # SequentialMLP ``local_experts.{idx}`` needs manual global conversion;
-        # TEGroupedMLP is already handled by ``_megatron_local_name_to_global``.
-        if self._ep_size > 1 and self._num_local_experts > 0:
-            m = re.search(r"local_experts\.(\d+)\.", name)
-            if m:
-                local_idx = int(m.group(1))
-                global_idx = self._ep_rank * self._num_local_experts + local_idx
-                name = name.replace(
-                    f"local_experts.{local_idx}.",
-                    f"local_experts.{global_idx}.",
-                    1,
-                )
-
-        return name
+        return _megatron_local_name_to_global(self._actor_module, self._config, name, vpp_idx)
 
     def _sync_metadata(self, group) -> None:
         world_size = torch.distributed.get_world_size(group=group)

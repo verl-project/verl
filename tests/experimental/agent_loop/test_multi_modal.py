@@ -28,6 +28,12 @@ from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
 
+VIDEO_PATH = os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4")
+
+# The sglang server adapter refuses video prompts (it cannot forward verl's decoded
+# frames to the engine), so video samples only run on backends that accept them.
+ROLLOUT_SUPPORTS_VIDEO = os.getenv("ROLLOUT_NAME", "vllm") != "sglang"
+
 
 def parse_multi_modal_type(messages: list[dict]) -> str:
     message = messages[-1]
@@ -58,7 +64,7 @@ def init_config() -> DictConfig:
             ],
         )
 
-    model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
+    model_path = os.path.expanduser("~/models/Qwen/Qwen3.5-2B")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
@@ -66,6 +72,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.prompt_length = 10240
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.seed = 0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
 
@@ -123,7 +130,6 @@ class ImageGeneratorTool(BaseTool):
             return ToolResponse(text=str(e)), 0, {}
 
 
-@pytest.mark.flaky(reruns=3)
 def test_multimodal_tool_agent(init_config):
     """Test agent loop with multimodal tool that returns images using Qwen VL model."""
     ray.shutdown()
@@ -164,31 +170,17 @@ def test_multimodal_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
+    # The video sample in this test naturally produces ~60k tokens under transformers 5.x
+    # (much more aggressive multimodal placeholder expansion than 4.x). The agent loop
+    # enforces ``len(prompt_ids) <= rollout.prompt_length`` and refuses to silently
+    # truncate multimodal prompts, so size the budget to fit the natural prompt length.
+    init_config.actor_rollout_ref.rollout.prompt_length = 65536
     agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
     raw_prompts = [
         [
             {"role": "user", "content": "How are you?"},
-        ],
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video",
-                        "video": os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4"),
-                        "min_pixels": 4 * 32 * 32,
-                        "max_pixels": 256 * 32 * 32,
-                        "total_pixels": 4096 * 32 * 32,
-                    },
-                    {
-                        "type": "text",
-                        "text": "Describe this video. Then you must call the "
-                        "image generator tool to generate a green image for me.",
-                    },
-                ],
-            },
         ],
         [
             {"role": "user", "content": "Please generate a red image for me."},
@@ -207,6 +199,29 @@ def test_multimodal_tool_agent(init_config):
             {"role": "user", "content": "Generate a green landscape image and describe what you see in it."},
         ],
     ]
+
+    if ROLLOUT_SUPPORTS_VIDEO:
+        raw_prompts.append(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video",
+                            "video": VIDEO_PATH,
+                            "min_pixels": 4 * 32 * 32,
+                            "max_pixels": 256 * 32 * 32,
+                            "total_pixels": 4096 * 32 * 32,
+                        },
+                        {
+                            "type": "text",
+                            "text": "Describe this video. Then you must call the "
+                            "image generator tool to generate a green image for me.",
+                        },
+                    ],
+                },
+            ]
+        )
 
     batch = DataProto(
         non_tensor_batch={
@@ -230,14 +245,14 @@ def test_multimodal_tool_agent(init_config):
             assert "pixel_values_videos" in multi_modal_inputs[i], f"Sample {i} should have pixel_values_videos"
             assert "video_grid_thw" in multi_modal_inputs[i], f"Sample {i} should have video_grid_thw"
 
-        if i // n == 0:
-            # First prompt: "How are you?" - should have 2 turns [user, assistant]
-            assert num_turns[i] == 2, f"Expected 2 turns but got {num_turns[i]} for sample {i}"
-        elif i // n == 1:
+        if multi_modal_type == "video":
             # TODO: prompt with video not generate tool call as expected
             assert num_turns[i] == 2 or num_turns[i] == 4, (
                 f"Expected 2 or 4 turns but got {num_turns[i]} for sample {i}"
             )
+        elif i // n == 0:
+            # First prompt: "How are you?" - should have 2 turns [user, assistant]
+            assert num_turns[i] == 2, f"Expected 2 turns but got {num_turns[i]} for sample {i}"
         else:
             # Tool-calling prompts should have 4 turns [user, assistant, tool, assistant]
             assert num_turns[i] == 4, f"Expected 4 turns but got {num_turns[i]} for sample {i}"
@@ -314,6 +329,10 @@ def test_multimodal_single_turn_agent(init_config):
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
+    # Same as ``test_multimodal_tool_agent``: the video sample exceeds the default 10k
+    # ``prompt_length`` under transformers 5.x, and the agent loop refuses to truncate
+    # multimodal prompts in place, so request a larger budget for this test.
+    init_config.actor_rollout_ref.rollout.prompt_length = 65536
     agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
@@ -350,23 +369,27 @@ def test_multimodal_single_turn_agent(init_config):
                 ],
             },
         ],
-        # video
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video",
-                        "video": os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4"),
-                        "min_pixels": 4 * 32 * 32,
-                        "max_pixels": 256 * 32 * 32,
-                        "total_pixels": 4096 * 32 * 32,
-                    },
-                    {"type": "text", "text": "Describe this video."},
-                ],
-            },
-        ],
     ]
+
+    # video
+    if ROLLOUT_SUPPORTS_VIDEO:
+        raw_prompts.append(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video",
+                            "video": VIDEO_PATH,
+                            "min_pixels": 4 * 32 * 32,
+                            "max_pixels": 256 * 32 * 32,
+                            "total_pixels": 4096 * 32 * 32,
+                        },
+                        {"type": "text", "text": "Describe this video."},
+                    ],
+                },
+            ]
+        )
 
     batch = DataProto(
         non_tensor_batch={

@@ -18,7 +18,6 @@ Utilities to create common models from huggingface
 import json
 import os
 import re
-import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -33,8 +32,6 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     GenerationConfig,
-    MistralForSequenceClassification,
-    PretrainedConfig,
     PreTrainedModel,
 )
 
@@ -50,11 +47,12 @@ except ImportError:
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from verl.models.registry import ModelRegistry
 from verl.utils.import_utils import is_trl_available
 from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
+
+_VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask", "mm_token_type_ids"}
 
 
 class LambdaLayer(nn.Module):
@@ -379,138 +377,6 @@ def normalize_pp_vpp_params(params, num_hidden_layers, layer_name="layers"):
                 yield normalized_name, param
 
 
-def get_parallel_model_from_config(
-    config, megatron_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False
-):
-    from megatron.core import ModelParallelConfig
-
-    assert isinstance(megatron_config, ModelParallelConfig)
-    model_class = _get_parallel_model_architecture_from_config(config, value)
-
-    model = model_class(
-        config,
-        megatron_config,
-        pre_process=pre_process,
-        post_process=post_process,
-        share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-    )
-    return model
-
-
-def _get_parallel_model_architecture_from_config(config: PretrainedConfig, value=False) -> type[nn.Module]:
-    architectures = getattr(config, "architectures", [])
-    for arch in architectures:
-        model_cls = ModelRegistry.load_model_cls(arch, value)
-        print("after load model cls")
-        if model_cls is not None:
-            return model_cls
-    raise ValueError(
-        f"Model architectures {architectures} are not supported for now. Supported architectures: "
-        f"{ModelRegistry.get_supported_archs()}"
-    )
-
-
-def _load_hf_model(config, model_config, is_value_model):
-    """Helper function containing the loading hf model logic"""
-    from accelerate import init_empty_weights
-    from megatron.core import parallel_state as mpu
-
-    from verl.models.mcore.saver import _megatron_calc_global_rank
-
-    assert hasattr(model_config, "architectures"), "architectures cannot be empty when load weight!"
-    architectures = getattr(model_config, "architectures", [])
-
-    # get auto class
-    auto_cls = get_hf_auto_model_class(model_config)
-
-    if config.model.path.startswith("hdfs:"):
-        from verl.utils.fs import copy_to_local
-
-        print(f"start download from {config.model.path}")
-        local_model_path = copy_to_local(src=config.model.path, use_shm=config.model.get("use_shm", False))
-        print("finish download")
-    else:
-        local_model_path = config.model.path
-        print(f"load from local dir {local_model_path}")
-
-    src_rank = _megatron_calc_global_rank(tp_rank=0, dp_rank=0, pp_rank=0, cp_rank=mpu.get_context_parallel_rank())
-    cpu_init_weights = lambda: torch.device("cpu")
-    init_context = init_empty_weights if torch.distributed.get_rank() != src_rank else cpu_init_weights
-    with init_context(), warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        # TODO: to find a better way to load mistral7b-rm lm_head
-        if "mistral7b-rm" in config.model.path:
-            model = MistralForSequenceClassification.from_pretrained(
-                local_model_path,
-                torch_dtype="auto",
-                # device_map="auto",  # disable auto device_map, the HF weight is only loaded to CPU in src_rank
-                # low_cpu_mem_usage=True
-            )  # use score head instead of lm_head
-            state_dict = model.state_dict()
-            state_dict["lm_head.weight"] = state_dict["score.weight"]
-            state_dict["model.embed_tokens.weight"] = state_dict["model.embed_tokens.weight"][
-                :32000
-            ]  # workaround, 32001 -> 32000
-            is_value_model = True
-        else:
-            model = auto_cls.from_pretrained(
-                local_model_path,
-                torch_dtype="auto",
-                # device_map="auto", # disable auto device_map, the HF weight is only loaded to CPU in src_rank
-                # low_cpu_mem_usage=True
-            )
-            state_dict = model.state_dict()
-
-    return architectures, model, state_dict, is_value_model
-
-
-def get_hf_model_path(config):
-    if config.model.path.startswith("hdfs:"):
-        from verl.utils.fs import copy_to_local
-
-        local_model_path = copy_to_local(src=config.model.path, use_shm=config.model.get("use_shm", False))
-    else:
-        local_model_path = config.model.path
-    return local_model_path
-
-
-def load_megatron_model_weights(config, model_config, parallel_model, params_dtype, is_value_model=False):
-    """Load weights for verl customized model."""
-    architectures, model, state_dict, is_value_model = _load_hf_model(config, model_config, is_value_model)
-
-    from verl.models.weight_loader_registry import get_weight_loader
-
-    print(f"before weight loader: architectures = {architectures}...")
-    for arch in architectures:
-        print(f"call weight loader arch = {arch}, model config = {model.config}")
-        weight_loader = get_weight_loader(arch)
-        weight_loader(
-            state_dict=state_dict,
-            wrapped_models=parallel_model,
-            config=model.config,
-            params_dtype=params_dtype,
-            is_value_model=is_value_model,
-            tie_word_embeddings=model_config.tie_word_embeddings,
-        )
-    return model.config
-
-
-def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_dtype, is_value_model=False):
-    """Load weights for mcore GPT model."""
-    _, model, state_dict, is_value_model = _load_hf_model(config, model_config, is_value_model)
-
-    from verl.models.mcore.loader import load_state_dict_to_megatron_gptmodel
-
-    load_state_dict_to_megatron_gptmodel(
-        state_dict=state_dict,
-        wrapped_models=parallel_model,
-        config=model.config,
-        params_dtype=params_dtype,
-        is_value_model=is_value_model,
-    )
-    del state_dict, model
-
-
 # pad input_ids_rmpad, cu_seqlens and max_seqlen_in_batch to be divisible by tp
 def pad_packed_inputs(unpad_tokens: torch.Tensor, cu_seqlens, max_seqlen_in_batch, size):
     """pad the tokens such that the total length is a multiple of size.
@@ -564,49 +430,15 @@ def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=Fal
     return
 
 
-def get_parallel_gptmodel_from_config(
-    tfconfig, hf_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False
-):
-    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
-    from megatron.core.models.gpt.gpt_model import GPTModel
-
-    from verl.models.mcore.config_converter import get_hf_rope_theta
-
-    use_te = True
-    assert tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
-    transformer_layer_spec = get_gpt_decoder_block_spec(tfconfig, use_transformer_engine=use_te)
-    rope_scaling_args = {}
-    if hf_config.rope_scaling is not None:
-        assert hf_config.rope_scaling["type"] == "linear", "only linear scaling is supported for now"
-        rope_scaling_args["seq_len_interpolation_factor"] = hf_config.rope_scaling["factor"]
-    parallel_model = GPTModel(
-        config=tfconfig,
-        transformer_layer_spec=transformer_layer_spec,
-        vocab_size=hf_config.vocab_size,
-        max_sequence_length=hf_config.max_position_embeddings,
-        pre_process=pre_process,
-        post_process=post_process,
-        share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-        position_embedding_type="rope",
-        rotary_base=get_hf_rope_theta(hf_config),
-        **rope_scaling_args,
-    )
-    # # for layer in parallel_model.decoder.layers:
-    # layer.self_attention.core_attention.flash_attention.softmax_scale = None
-    if post_process and value:
-        from verl.models.mcore.bridge import LinearForLastLayer
-
-        parallel_model.output_layer = LinearForLastLayer(
-            input_size=tfconfig.hidden_size, output_size=1, sequence_parallel=tfconfig.sequence_parallel
-        )
-    return parallel_model
-
-
 def patch_valuehead_model(model) -> None:
     from types import MethodType
 
     from transformers import PreTrainedModel
-    from trl import AutoModelForCausalLMWithValueHead
+
+    try:
+        from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
+    except ImportError:
+        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
 
     def tie_weights(self: "AutoModelForCausalLMWithValueHead") -> None:
         if isinstance(self.pretrained_model, PreTrainedModel):
@@ -652,7 +484,10 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
     assert is_trl_available()
 
-    from trl import AutoModelForCausalLMWithValueHead
+    try:
+        from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
+    except ImportError:
+        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
 
     if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq
@@ -710,6 +545,43 @@ def get_hf_auto_model_class(hf_config):
     return actor_module_class
 
 
+def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
+    if not values:
+        raise ValueError(f"Cannot merge empty multi-modal input list for key {key!r}.")
+
+    def _format_tensor_shapes(values: list[torch.Tensor]) -> str:
+        return ", ".join(str(tuple(value.shape)) for value in values)
+
+    rank = values[0].dim()
+    if rank < 2:
+        raise RuntimeError(
+            f"Cannot pad multi-modal input {key!r} with rank {rank}; shapes: {_format_tensor_shapes(values)}"
+        )
+
+    middle_shape = values[0].shape[1:-1]
+    for value in values:
+        if value.dim() != rank or value.shape[1:-1] != middle_shape:
+            raise RuntimeError(
+                f"Cannot pad multi-modal input {key!r}; expected matching rank and non-batch/non-time "
+                f"dimensions, got shapes: {_format_tensor_shapes(values)}"
+            )
+
+    max_len = max(value.shape[-1] for value in values)
+    if all(value.shape[-1] == max_len for value in values):
+        return torch.cat(values, dim=0)
+
+    padded_values = []
+    for value in values:
+        if value.shape[-1] == max_len:
+            padded_values.append(value)
+            continue
+        padded_value = value.new_zeros((*value.shape[:-1], max_len))
+        padded_value[..., : value.shape[-1]] = value
+        padded_values.append(padded_value)
+
+    return torch.cat(padded_values, dim=0)
+
+
 def extract_multi_modal_inputs(
     batch_data: list[dict[str, torch.Tensor]],
     indices: Optional[list[int]] = None,
@@ -749,8 +621,16 @@ def extract_multi_modal_inputs(
     for key, values in multi_modal_inputs_collected.items():
         if has_image_bound:  # minicpm-o logic
             multi_modal_inputs[key] = values
+        elif key in _VARLEN_MULTI_MODAL_KEYS:
+            # some multi-modal keys with variable length are put in non-tensor batch,
+            # so we need to pad them manually.
+            multi_modal_inputs[key] = _pad_last_dim_and_cat(values, key)
         else:
-            multi_modal_inputs[key] = torch.cat(values, dim=0)
+            try:
+                multi_modal_inputs[key] = torch.cat(values, dim=0)
+            except RuntimeError as e:
+                shapes = ", ".join(str(tuple(value.shape)) for value in values)
+                raise RuntimeError(f"Failed to concatenate multi-modal input {key!r}; shapes: {shapes}") from e
 
     return multi_modal_inputs
 

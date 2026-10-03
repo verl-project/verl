@@ -72,8 +72,6 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
 
     routed_experts = data.get("routed_experts", None)
     if routed_experts is not None and not routed_experts.is_nested:
-        if routed_experts.max() <= 255:
-            routed_experts = routed_experts.to(torch.uint8)
         routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
         routed_experts_nested = torch.nested.nested_tensor_from_jagged(
             routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
@@ -141,6 +139,17 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     output = torch.stack(response_list, dim=0)
     return output
+
+
+def build_attention_mask_from_nested(input_ids: torch.Tensor, max_seq_len: int | None = None) -> torch.Tensor:
+    """Build a padded full-sequence attention mask from nested input ids."""
+    assert input_ids.is_nested, "input_ids must be a nested tensor"
+    device = input_ids.values().device
+    seq_lens = input_ids.offsets().diff().to(device=device)
+    if max_seq_len is None:
+        max_seq_len = int(seq_lens.max().item())
+    positions = torch.arange(max_seq_len, device=device).unsqueeze(0)
+    return (positions < seq_lens.unsqueeze(1)).to(torch.int32)
 
 
 def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:

@@ -80,7 +80,7 @@ trigger_parameter_sync_step=$((train_bsz / ( train_prompt_mini_bsz * require_bat
 partial_rollout=True
 enforce_eager=False
 nccl_timeout=72000
-enable_sleep_mode=False
+enable_sleep_mode=True
 
 # Performance Related Parameter
 sp_size=4

@@ -41,13 +41,13 @@ on:
   pull_request:
     branches:
       - main
+      - v0.*
     paths:
       - ".github/workflows/e2e_ascend.yml"
       - "examples/data_preprocess/**"
       - "examples/grpo_trainer/**"
       - "examples/ppo_trainer/**"
       - "examples/sft/**"
-      - "verl/experimental/one_step_off_policy/**"
       - "tests/special_npu/**"
       - "tests/special_sanity/check_device_api_usage.py"
       - "verl/**"
@@ -62,28 +62,40 @@ concurrency:
 
 permissions:
   contents: read
-
+ 
 jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
+      - name: Install uv
+        run: pip install uv
       - name: Check initial pip list from image
         run: |
-          pip list
+          uv pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -91,10 +103,11 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .
+          uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
-          pip list
+          uv pip list
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -106,86 +119,35 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen2_5_05b_grpo.sh
+          bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
+          python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="./profiler_data-dis" --device="npu" \
+            --stage actor_update actor_compute_log_prob '*_rollout_*'
+          rm -rf ./profiler_data-dis
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True bash tests/special_npu/run_qwen2_5_05b_grpo_mindspeed.sh
-          rm -rf $HOME/dist_ckpt/qwen2_5_05b_grpo_mindspeed
+          USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
+          rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
           USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
-  engine_mindspeed_llm_rl_job:
-    if: github.repository_owner == 'verl-project'
-    name: E2E Ascend testing for RL training scenarios of LLM models using MindSpeed_LLM engine
-    runs-on: linux-aarch64-a3-8
-    timeout-minutes: 120
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.3.rc1-a3-ubuntu22.04-py3.11-latest
-      options: >-
-        --shm-size 16g
-    env:
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
-      - name: Check initial pip list from image
-        run: |
-          pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
-      - name: Install the current repository
-        run: |
-          pip install --no-deps --no-build-isolation -e .
-      - name: Check final pip list
-        run: |
-          pip list
-      - name: Configure related dependencies
-        run: |
-          git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone https://gitcode.com/ascend/MindSpeed.git /MindSpeed
-          git clone https://gitcode.com/ascend/MindSpeed-LLM.git /MindSpeed-LLM
-      - name: Preprocess gsm8k dataset
-        run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend)
-        run: |
-          ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          bash tests/special_npu/run_qwen3_8b_grpo_mindspeedllm.sh
-      - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
-        run: |
-          ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeedllm bash tests/special_npu/run_qwen3_30b_grpo_mindspeedllm.sh
-
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 80g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -202,6 +164,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
           pip list
@@ -211,5 +174,12 @@ jobs:
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen2_5_vl_3b_npu.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts
+      - name: Running geo3k e2e training tests with GRPO on ASCEND NPU (FSDP-Turbo backend)
+        run: |
+          rm -rf /FSDPTurbo
+          git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
+          export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
+          ray stop --force
+          bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh

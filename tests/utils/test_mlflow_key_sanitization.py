@@ -59,6 +59,20 @@ class TestMlflowLoggingAdapter(unittest.TestCase):
             self.assertTrue(any("val-core///acc/best_at_5" in msg for msg in warning_msgs))
             self.assertTrue(any("metric////with/many////slashes" in msg for msg in warning_msgs))
 
+    def test_finish_ends_active_run(self):
+        """Test that finish() calls mlflow.end_run() when a run is active."""
+        adapter = _MlflowLoggingAdapter()
+        with patch("mlflow.active_run", return_value=object()), patch("mlflow.end_run") as mock_end_run:
+            adapter.finish()
+        mock_end_run.assert_called_once()
+
+    def test_finish_skips_when_no_active_run(self):
+        """Test that finish() does not call mlflow.end_run() when no run is active."""
+        adapter = _MlflowLoggingAdapter()
+        with patch("mlflow.active_run", return_value=None), patch("mlflow.end_run") as mock_end_run:
+            adapter.finish()
+        mock_end_run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

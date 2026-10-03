@@ -28,6 +28,11 @@ router_replay:
 
 ## Quick Start Guide
 
+The config path differs by engine: `actor.megatron.router_replay.mode` for the
+Megatron engine, `actor.veomni.router_replay.mode` for the VeOmni engine.
+Examples below use `<engine>` as a placeholder — substitute `megatron` or
+`veomni`.
+
 ### Enabling R2 Mode
 
 #### Configuration File Method
@@ -35,15 +40,16 @@ Add the following to your training configuration:
 
 ```yaml
 actor:
-  router_replay:
-    mode: "R2"
+  <engine>:
+    router_replay:
+      mode: "R2"
 ```
 
 #### Command Line Method
 Enable R2 mode via command-line parameters:
 
 ```bash
-actor_rollout_ref.actor.router_replay.mode="R2"
+actor_rollout_ref.actor.<engine>.router_replay.mode="R2"
 ```
 
 ### Enabling R3 Mode
@@ -52,20 +58,31 @@ actor_rollout_ref.actor.router_replay.mode="R2"
 Configure both actor and rollout settings:
 
 ```yaml
-# Actor configuration
-router_replay:
-  mode: "R3"
+actor:
+  <engine>:
+    router_replay:
+      mode: "R3"
 
-# Rollout configuration  
-enable_rollout_routing_replay: True
+rollout:
+  enable_rollout_routing_replay: True
 ```
 
 #### Command Line Method
 Enable R3 mode via command-line parameters:
 
 ```bash
-actor_rollout_ref.actor.router_replay.mode="R3"
+actor_rollout_ref.actor.<engine>.router_replay.mode="R3"
 actor_rollout_ref.rollout.enable_rollout_routing_replay=True
 ```
 
 R3 mode requires the rollout backend to support returning router selection results. Currently, this functionality is being tested based on the vllm implementation at https://github.com/vllm-project/vllm/pull/28284 as well as bug fix at https://github.com/vllm-project/vllm/pull/33013 and SGLang implementation at https://github.com/sgl-project/sglang/commit/bed301a5acaa9577c9aa706468bdf242f6a43051.
+
+#### Requirements (vLLM backend)
+
+For **hybrid-attention MoE** models (e.g. Qwen3.5, whose Gated Delta Net linear +
+periodic full-attention layout yields more than one KV-cache group), the routed-experts
+capture path only produces a correctly-sized buffer starting from **vLLM `>= 0.22.0`**
+(`pip install -U "vllm>=0.22.0"`). On older vLLM, verl now fails fast at startup with
+an actionable error when `enable_rollout_routing_replay=True`, instead of crashing
+later inside vLLM.
+

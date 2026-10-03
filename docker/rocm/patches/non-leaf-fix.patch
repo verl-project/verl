@@ -1,0 +1,27 @@
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index 0b6fb468c..1fc541dda 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -465,7 +465,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+ 
+                 # fp32 params.
+                 elif model_param.type() == 'torch.cuda.FloatTensor':
+-                    shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
++                    # Detach so the shard is a leaf tensor: it is handed to the inner optimizer,
++                    # and torch.optim rejects non-leaf params. Detaching shares storage, so
++                    # in-place updates of the shard still land in the model param.
++                    shard_model_param = model_param.detach().view(-1)[
++                        param_range.start : param_range.end
++                    ]
+                     model_fp32_params_this_group.append(model_param)
+                     shard_fp32_params_this_group.append(shard_model_param)
+                     tensor_parallel.copy_tensor_model_parallel_attributes(
+@@ -2554,7 +2559,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+             self.model_float16_groups,
+             self.model_fp32_groups,
+             self.shard_float16_groups,  # grad empty/unused here?
+-            self.shard_fp32_groups,  # throws grad-access warning
++            self.shard_fp32_groups,
+         ]
+         if not self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
+             total_groups.append(self.shard_fp32_from_float16_groups)

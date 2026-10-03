@@ -22,6 +22,14 @@ top_k: -1
 # Top-p sampling parameter. Default 1.0.
 top_p: 1
 
+# Whether to enable full determinism for reproducibility in rollout.
+# See https://pytorch.org/docs/stable/notes/randomness.html for details.
+full_determinism: false
+
+# Random seed for rollout. Used as the seed for vLLM sampling and
+# enable_full_determinism() when full_determinism is True.
+seed: 42
+
 # typically the same as data max prompt length
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
@@ -36,6 +44,9 @@ dtype: bfloat16
 
 # Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
+
+# Fraction of GPU memory used by standalone rollout replicas; defaults to the shared rollout budget.
+standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
 
 # Whether to ignore EOS and continue generating after EOS is hit.
 ignore_eos: False
@@ -73,7 +84,12 @@ max_num_batched_tokens: 8192
 max_model_len: null
 
 # max length of sequences
-max_num_seqs: 1024
+max_num_seqs: 256
+
+# Ray max_concurrency of the rollout server actor. Raise it above the peak number of
+# in-flight generate requests per replica, otherwise control calls (wake_up, weight sync)
+# can be starved.
+ray_actor_max_concurrency: 1024
 
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
 enable_chunked_prefill: True
@@ -161,6 +177,10 @@ val_kwargs:
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
 
+# Null uses the built-in router; set a plugin YAML path to use an external router.
+# Relative paths resolve against the working directory, then the verl package root.
+router_config_path: null
+
 # Multi-turn tool config.
 multi_turn:
 
@@ -173,8 +193,19 @@ multi_turn:
   # null for no limit (default max_length // 3)
   max_assistant_turns: null
 
-  # null for no tool
+  # YAML config for stateful tools that subclass ``BaseTool``.
+  # Use this when a tool needs per-trajectory state, async ``create``/``release``
+  # lifecycle hooks, or custom rewards.
+  # null disables this code path.
   tool_config_path: null
+
+  # Path to a Python file with ``@function_tool``-decorated functions, loaded
+  # once per ``AgentLoopWorker``. Use this for stateless tools where the
+  # OpenAI-compatible JSON schema can be inferred from the function signature
+  # and Google-style docstring. Coexists with ``tool_config_path``; name
+  # collisions across the two raise an error.
+  # null disables this code path.
+  function_tool_path: null
 
   # null for no limit (default max_length // 3)
   max_user_turns: null
@@ -211,7 +242,11 @@ multi_turn:
 
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
-calculate_log_probs: False
+calculate_log_probs: True
+
+# Sampler top-k log-probs per generated token, needed by algorithm.rollout_correction.score_centering.
+# 0 disables; the paper uses 128 (32 also matches). vLLM only for now, single-turn agent loop only.
+topk_log_probs: 0
 
 # [Experimental] agent loop based rollout configs
 agent:
@@ -292,7 +327,7 @@ trace:
   # Experiment name for run identification in tracking tools
   experiment_name: ${oc.select:trainer.experiment_name,null}
 
-  # trace backend, support mlflow, weave
+  # trace backend, support mlflow, weave, trackio
   backend: null
 
   # whether translate token id to text in output
@@ -304,29 +339,6 @@ trace:
   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
   max_samples_per_step_per_worker: null
 
-# rollout skip config (load/dump rollout data)
-skip:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.workers.config.SkipConfig
-
-  # When enabled (True), the trainer will attempt to load previously generated rollout data from the specified directory instead of computing new rollouts.
-  # If no cached data is found or loading fails, new rollouts will be generated and automatically saved.
-  # This feature is useful for debugging or when you want to reuse computation results across multiple runs.
-  enable: False
-
-  # Default ~/.verl/rollout_dump (expanduser+resolve at runtime). Ray/multi-node: prefer absolute dump_dir (relative paths follow each process cwd).
-  # Avoid /tmp/ray/session* (ephemeral).
-  dump_dir: "~/.verl/rollout_dump"
-
-  # Number of training steps (from start) for which dump/load is active. Steps with train_step <= max_dump_step are "dump steps" (try load first, then generate and dump if missing).
-  max_dump_step: 1
-
-  # Action when beyond dump steps (gen_step > max_dump_step):
-  # - "cache": If dumped data exists for current step, use it; otherwise generate and dump.
-  # - "repeat": Reuse dumped data in a round-robin over the first max_dump_step steps.
-  # - "repeat_last": Reuse the last dumped step's data.
-  action: "cache"
 
 # Whether to skip tokenizer initialization for rollout engine
 # When enabled (True), the rollout assume token in token out for generation
@@ -335,6 +347,10 @@ skip_tokenizer_init: True
 # Whether to enable rollout routing replay for MoE models
 # When enabled (True), the rollout will record the routing decisions.
 enable_rollout_routing_replay: False
+
+# Interval for logging rollout MoE load-balance metrics from routing replay data.
+# Set to 0 to disable.
+moe_load_balance_metrics_interval: 0
 
 
 # profile the rollout model in `generate_sequence`
@@ -359,6 +375,22 @@ profiler:
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
 
+  # Pull each replica's traces up into save_path (engines otherwise write per-replica sub-dirs) so
+  # post-processing that does not walk sub-directories sees them. Default same as the actor's.
+  relocate_results: ${oc.select:actor_rollout_ref.actor.profiler.relocate_results,false}
+
+  # Shell command executed on the selected ranks when profiling finishes (after relocate_results).
+  # See actor.profiler.finish_hook_cmd for the available env vars. null disables it.
+  # Default same as the actor's.
+  finish_hook_cmd: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_cmd,null}
+
+  # Run finish_hook_cmd on all ranks. Default same as the actor's.
+  finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
+
+  # Ranks that run finish_hook_cmd. [] or [0,1,...]. Falls back to the profiled ranks when unset.
+  # save_path is usually node-local, so pick one rank per node. Default same as the actor's.
+  finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
+
   # specific tool config
   tool_config:
 
@@ -381,6 +413,14 @@ profiler:
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
 
+      # Start collecting profiler data from this response-token index.
+      # null means collect from the first response token (full collection start).
+      profile_token_start: null
+
+      # Stop collecting profiler data at this response-token index (exclusive).
+      # null means collect until the end (full collection).
+      profile_token_end: null
+
     # torch profiler config
     torch:
 
@@ -393,6 +433,15 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+
+      # Start collecting profiler data from this response-token index.
+      # null means collect from the first response token (full collection start).
+      profile_token_start: null
+
+      # Stop collecting profiler data at this response-token index (exclusive).
+      # null means collect until the end (full collection).
+      profile_token_end: null
+
 
     # msprobe precision debugger config
     precision_debugger:
@@ -443,3 +492,27 @@ mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 
 # QAT configuration (inherited from actor's engine config)
 qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
+
+# Prefill-Decode disaggregation (SGLang only; keep rollout.name=sglang and toggle enabled=True).
+disaggregation:
+
+  # Master switch for PD disaggregation.
+  enabled: False
+
+  # Number of prefill replicas (each uses tensor_model_parallel_size GPUs).
+  prefill_replicas: 1
+
+  # Number of decode replicas.
+  decode_replicas: 1
+
+  # Decode TP override; null = same as tensor_model_parallel_size.
+  decode_tensor_model_parallel_size: null
+
+  # KV cache transport: nixl | mooncake | ascend | mori | fake.
+  transfer_backend: nixl
+
+  # Bootstrap server port on prefill side; null = auto-assign.
+  bootstrap_port: null
+
+  # InfiniBand device (required for mooncake over RDMA).
+  ib_device: null
