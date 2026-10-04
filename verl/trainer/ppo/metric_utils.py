@@ -16,8 +16,9 @@ Metrics related to the PPO trainer.
 """
 
 import logging
+import math
 from collections import defaultdict
-from functools import partial
+from functools import lru_cache
 from typing import Any, Callable
 
 import numpy as np
@@ -861,8 +862,9 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     """
     Calculate a value based on majority voting.
 
-    This function identifies the most common value for a specified vote key
-    in the data, then returns the corresponding value for that majority vote.
+    Return the expected score when choosing uniformly among the most common
+    votes, then uniformly among the rows having the chosen vote. No ordering
+    of votes or rows is used to break ties.
 
     Args:
         data: List of dictionaries, where each dictionary contains both vote_key and val_key.
@@ -870,7 +872,7 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
         val_key: The key in each dictionary whose value will be returned for the majority vote.
 
     Returns:
-        The value associated with the most common vote.
+        The expected value under uniform tie breaking and row selection.
 
     Example:
         >>> data = [
@@ -879,18 +881,124 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
         ...     {"pred": "A", "val": 0.7}
         ... ]
         >>> calc_maj_val(data, vote_key="pred", val_key="val")
-        0.9  # Returns the first "val" for the majority vote "A"
+        0.8
     """
     vote2vals = defaultdict(list)
     for d in data:
         vote2vals[d[vote_key]].append(d[val_key])
 
-    vote2cnt = {k: len(v) for k, v in vote2vals.items()}
-    maj_vote = max(vote2cnt, key=vote2cnt.get)
+    max_count = max(map(len, vote2vals.values()))
+    return float(np.mean([np.mean(vals) for vals in vote2vals.values() if len(vals) == max_count]))
 
-    maj_val = vote2vals[maj_vote][0]
 
-    return maj_val
+@lru_cache(maxsize=128)
+def _majority_win_probabilities(counts: tuple[int, ...], k: int) -> tuple[float, ...]:
+    """Exact plurality probabilities for a uniform k-subset of grouped rows.
+
+    For candidate i with m selected rows, other groups can select at most m
+    rows. A DP tracks their total selected rows s and number of ties t. Each
+    state contributes 1/(t+1) to i's winning probability. Its coefficient is
+    the product of binomial coefficients, divided by C(N,k): the multivariate
+    hypergeometric law, including all possible tied winners.
+
+    We compute coefficients using independent Binomial(count, k/N) PMFs and
+    condition on a total of k. This common scaling keeps floating point
+    intermediates bounded without enumerating subsets or count vectors.
+    Equal-sized groups have equal probabilities and share a single DP.
+    """
+    total = sum(counts)
+    if k == 1:
+        return tuple(count / total for count in counts)
+    if k == total:
+        largest = max(counts)
+        ties = counts.count(largest)
+        return tuple(1.0 / ties if count == largest else 0.0 for count in counts)
+    if len(set(counts)) == 1:
+        return (1.0 / len(counts),) * len(counts)
+
+    p = k / total
+
+    def binomial_pmf(n: int, x: int) -> float:
+        return math.exp(
+            math.lgamma(n + 1)
+            - math.lgamma(x + 1)
+            - math.lgamma(n - x + 1)
+            + x * math.log(p)
+            + (n - x) * math.log1p(-p)
+        )
+
+    pmfs = {count: [binomial_pmf(count, x) for x in range(min(count, k) + 1)] for count in set(counts)}
+    normalizer = binomial_pmf(total, k)
+    if len(counts) == 2:
+        # With two answers the winner is determined solely by the first count.
+        first, second = counts
+        probability = math.fsum(
+            pmfs[first][m] * pmfs[second][k - m] * (0.5 if 2 * m == k else 1.0) / normalizer
+            for m in range(max(k - second, (k + 1) // 2), min(first, k) + 1)
+        )
+        probability = min(1.0, max(0.0, probability))
+        return probability, 1.0 - probability
+    count2prob = {}
+    for count in set(counts):
+        others = list(counts)
+        others.remove(count)
+        probability = 0.0
+        # If every other group is capped at m, all k rows must still fit.
+        for m in range(max(1, math.ceil(k / len(counts))), min(count, k) + 1):
+            remaining = k - m
+            if sum(min(other, m) for other in others) < remaining:
+                continue
+            if m > min(max(others), remaining):
+                # Every feasible selection of the remaining rows loses to m.
+                probability += pmfs[count][m] * binomial_pmf(total - count, remaining) / normalizer
+                continue
+            max_ties = min(len(others), remaining // m)
+            dp = np.zeros((remaining + 1, max_ties + 1), dtype=np.float64)
+            dp[0, 0] = 1.0
+            processed = 0
+            for other in others:
+                next_dp = np.zeros_like(dp)
+                for x in range(min(other, m, remaining) + 1):
+                    stop = min(processed, remaining - x) + 1
+                    if x == m:
+                        next_dp[x : x + stop, 1:] += dp[:stop, :-1] * pmfs[other][x]
+                    else:
+                        next_dp[x : x + stop] += dp[:stop] * pmfs[other][x]
+                dp = next_dp
+                processed = min(remaining, processed + min(other, m))
+            tie_weights = 1.0 / np.arange(1, max_ties + 2)
+            probability += pmfs[count][m] * float(dp[remaining] @ tie_weights) / normalizer
+        count2prob[count] = probability
+    probabilities = np.array([count2prob[count] for count in counts])
+    # Remove accumulated floating point normalization error.
+    probabilities /= probabilities.sum()
+    return tuple(float(probability) for probability in probabilities)
+
+
+def majority_vote_metric(
+    data: list[dict[str, Any]], subset_size: int, vote_key: str, val_key: str
+) -> tuple[float, float]:
+    """Analytic mean/std of maj@k under sampling without replacement.
+
+    Draw a uniform k-subset, choose uniformly among answers with the highest
+    count, then choose a row uniformly from that answer's sampled rows. The
+    returned std is the standard deviation of this random score, including
+    tie breaking and row selection, rather than an estimation error. By
+    exchangeability, conditional score moments for an answer equal its full
+    group's empirical moments, even when only part of that group is sampled.
+    """
+    if not 1 <= subset_size <= len(data):
+        raise ValueError("subset_size must be between 1 and the number of rows")
+    vote2vals = defaultdict(list)
+    for row in data:
+        vote2vals[row[vote_key]].append(row[val_key])
+    groups = sorted(vote2vals.values(), key=len)
+    counts = tuple(map(len, groups))
+    probabilities = _majority_win_probabilities(counts, subset_size)
+    group_means = [float(np.mean(vals)) for vals in groups]
+    mean = float(np.dot(probabilities, group_means))
+    variance = float(np.dot(probabilities, [np.mean((np.asarray(vals) - mean) ** 2) for vals in groups]))
+    return mean, math.sqrt(max(variance, 0.0))
 
 
 def process_validation_metrics(
@@ -934,8 +1042,9 @@ def process_validation_metrics(
         - "best@N/std": Standard deviation of the best values in bootstrap samples
         - "worst@N/mean": Mean of the worst values in bootstrap samples
         - "worst@N/std": Standard deviation of the worst values in bootstrap samples
-        - "maj@N/mean": Mean of majority voting results in bootstrap samples (if "pred" exists)
-        - "maj@N/std": Standard deviation of majority voting results (if "pred" exists)
+        - "maj@N/mean": Exact expected majority score for uniform N-subsets without replacement
+          (if "pred" exists); tied answers and rows within an answer are selected uniformly
+        - "maj@N/std": Exact standard deviation of that random majority score
 
     Example:
         >>> data_sources = ["source1", "source1", "source2"]
@@ -1023,6 +1132,11 @@ def process_validation_metrics(
                     if n_resps not in ns_cache:
                         ns_cache[n_resps] = gen_ns(n_resps)
                     ns = ns_cache[n_resps]
+                    vote_data = (
+                        [{"val": val, "pred": pred} for val, pred in zip(var_vals, pred_vals, strict=True)]
+                        if has_pred
+                        else None
+                    )
 
                     # compute best/worst metrics
                     for n in ns:
@@ -1041,17 +1155,8 @@ def process_validation_metrics(
 
                         # compute maj metrics
                         if has_pred:
-                            # create vote_data
-                            vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, pred_vals, strict=True)
-                            ]
-                            # compute maj metrics
-                            [(maj_n_mean, maj_n_std)] = bootstrap_metric(
-                                data=vote_data,
-                                subset_size=n,
-                                reduce_fns=[partial(calc_maj_val, vote_key="pred", val_key="val")],
-                                n_bootstrap=n_bootstrap,
-                                seed=seed,
+                            maj_n_mean, maj_n_std = majority_vote_metric(
+                                data=vote_data, subset_size=n, vote_key="pred", val_key="val"
                             )
                             metric[f"maj@{n}/mean"] = maj_n_mean
                             metric[f"maj@{n}/std"] = maj_n_std

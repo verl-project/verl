@@ -16,6 +16,7 @@ Tests for the metric utilities in verl.trainer.ppo.metric_utils.
 """
 
 import unittest
+from itertools import combinations, product
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -27,6 +28,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    majority_vote_metric,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -505,8 +507,8 @@ class TestCalcMajVal(unittest.TestCase):
 
         result = calc_maj_val(data, vote_key="pred", val_key="val")
 
-        # "A" is the majority vote, so we should get the first "val" for "A"
-        self.assertEqual(result, 0.9)
+        # Select uniformly among A's rows.
+        self.assertAlmostEqual(result, 0.8)
 
     def test_calc_maj_val_tie(self):
         """Test calc_maj_val with tied votes."""
@@ -517,12 +519,82 @@ class TestCalcMajVal(unittest.TestCase):
             {"pred": "A", "val": 0.6},
         ]
 
-        # In case of a tie, the first key in sorted order wins
-        # This depends on Python's dict implementation, but for this test
-        # we just verify that one of the valid values is returned
         result = calc_maj_val(data, vote_key="pred", val_key="val")
+        self.assertAlmostEqual(result, 0.75)
+        self.assertAlmostEqual(calc_maj_val(data[::-1], "pred", "val"), result)
 
-        self.assertTrue(result in [0.9, 0.8])
+
+class TestMajorityVoteMetric(unittest.TestCase):
+    @staticmethod
+    def exhaustive_moments(data, k):
+        first, second = [], []
+        for subset in combinations(data, k):
+            groups = {}
+            for row in subset:
+                groups.setdefault(row["pred"], []).append(row["val"])
+            largest = max(map(len, groups.values()))
+            winners = [vals for vals in groups.values() if len(vals) == largest]
+            first.append(np.mean([np.mean(vals) for vals in winners]))
+            second.append(np.mean([np.mean(np.square(vals)) for vals in winners]))
+        mean = np.mean(first)
+        return mean, np.sqrt(max(0, np.mean(second) - mean**2))
+
+    def test_matches_exhaustive_subsets(self):
+        # Two/three/four-group populations, every k.
+        # Distinct scores within groups also exercise random row selection.
+        populations = [
+            *product(range(1, 4), repeat=2),
+            *product(range(1, 4), repeat=3),
+            *product(range(1, 3), repeat=4),
+        ]
+        for counts in populations:
+            data = [
+                {"pred": group, "val": (group - 1) * 0.7 + row * 0.2}
+                for group, count in enumerate(counts)
+                for row in range(count)
+            ]
+            for k in range(1, len(data) + 1):
+                with self.subTest(counts=counts, k=k):
+                    actual = majority_vote_metric(data, k, "pred", "val")
+                    np.testing.assert_allclose(actual, self.exhaustive_moments(data, k), atol=1e-12)
+
+    def test_without_replacement_and_full_population_ties(self):
+        data = [{"pred": "A", "val": 1.0}] * 2 + [{"pred": "B", "val": 0.0}] * 2
+        # All six 2-subsets: AA, BB and four AB, with fair tie breaking.
+        np.testing.assert_allclose(majority_vote_metric(data, 2, "pred", "val"), (0.5, 0.5))
+        np.testing.assert_allclose(majority_vote_metric(data, 4, "pred", "val"), (0.5, 0.5))
+        data.append({"pred": "A", "val": 1.0})
+        # At k=N the unique plurality always wins; replacement would allow B.
+        self.assertEqual(majority_vote_metric(data, 5, "pred", "val"), (1.0, 0.0))
+
+    def test_permutation_and_single_group(self):
+        data = [{"pred": "A", "val": 0.0}, {"pred": "A", "val": 1.0}, {"pred": "B", "val": 0.3}]
+        for k in range(1, 4):
+            np.testing.assert_allclose(
+                majority_vote_metric(data, k, "pred", "val"),
+                majority_vote_metric(data[::-1], k, "pred", "val"),
+                atol=1e-14,
+            )
+        for k in (1, 2):
+            self.assertEqual(majority_vote_metric(data[:2], k, "pred", "val"), (0.5, 0.5))
+
+    def test_invalid_subset_sizes(self):
+        for data, k in (([], 1), ([{"pred": "A", "val": 1}], 0), ([{"pred": "A", "val": 1}], 2)):
+            with self.assertRaises(ValueError):
+                majority_vote_metric(data, k, "pred", "val")
+
+    def test_large_binary_population(self):
+        # Independently evaluate the hypergeometric tail with integer counts.
+        from math import comb
+
+        data = [{"pred": "A", "val": 1.0}] * 600 + [{"pred": "B", "val": 0.0}] * 424
+        k = 512
+        expected = sum(
+            comb(600, m) * comb(424, k - m) * (0.5 if 2 * m == k else 1.0) for m in range(k // 2, min(600, k) + 1)
+        ) / comb(1024, k)
+        mean, std = majority_vote_metric(data, k, "pred", "val")
+        self.assertAlmostEqual(mean, expected, places=12)
+        self.assertAlmostEqual(std, np.sqrt(expected * (1 - expected)), places=6)
 
 
 class TestProcessValidationMetrics(unittest.TestCase):
@@ -565,8 +637,16 @@ class TestProcessValidationMetrics(unittest.TestCase):
         # Check that majority voting metrics are present
         self.assertIn("maj@2/mean", result["source1"]["score"])
 
-        # For bootstrap with n=2, the majority vote could be either A or B
-        # depending on the random sampling, so we don't check the exact value
+        metrics = result["source1"]["score"]
+        self.assertAlmostEqual(metrics["maj@2/mean"], 0.8)
+        self.assertAlmostEqual(metrics["maj@3/mean"], 0.75)
+        self.assertAlmostEqual(metrics["maj@3/std"], 0.05)
+        reversed_result = process_validation_metrics(
+            data_sources, sample_inputs, {key: values[::-1] for key, values in infos_dict.items()}, seed=123
+        )
+        for name, value in metrics.items():
+            if name.startswith("maj@"):
+                self.assertAlmostEqual(value, reversed_result["source1"]["score"][name])
 
     def test_process_validation_metrics_counts_missing_sessions_as_incorrect(self):
         data_sources = ["source1", "source1"]

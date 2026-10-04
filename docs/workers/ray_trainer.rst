@@ -1,7 +1,7 @@
 PPO Ray Trainer
 ===============
 
-Last updated: 02/12/2025.
+Last updated: 10/04/2026.
 
 We implement the RayPPOTrainer, which is a trainer runs on the driver
 process on a single CPU/GPU node (default is CPU).
@@ -239,3 +239,31 @@ To extend to other RLHF algorithms, such as DPO, GRPO, please refer to
        if self.val_reward_fn is not None:
            val_metrics = self._validate()
            pprint(f'Final validation metrics: {val_metrics}')
+
+Validation majority-vote metrics
+-------------------------------
+
+When reward extra information contains a ``pred`` answer for each response,
+validation reports ``maj@k/mean`` and ``maj@k/std`` for numeric scores.
+These metrics use uniformly selected subsets of ``k`` distinct responses
+without replacement. The answer with the highest count wins; when multiple
+answers share that count, each tied answer has equal probability of winning.
+The score is selected uniformly from the sampled responses having the winning
+answer. Neither answer order nor response order determines the winner or score.
+
+``maj@k/mean`` is the expected score, and ``maj@k/std`` is the standard
+deviation of that random score, including subset selection, tied answers,
+and score selection within an answer. It is not the standard error of an
+estimator. Both moments are computed analytically using the multivariate
+hypergeometric distribution; there is no Monte Carlo sampling noise.
+Per-prompt means and standard deviations retain the existing averaging across
+prompts.
+
+For three responses with answers ``[A, A, B]`` and scores ``[1, 1, 0]``,
+``maj@2/mean`` is ``2/3`` and ``maj@3/mean`` is ``1``. At ``k`` equal to the
+number of responses, the full set is used, although ties and differing scores
+within the winning answer can still yield a nonzero standard deviation.
+Earlier versions used sampling with replacement and selected the first
+occurring tied answer and score. Metric names are preserved, but historical
+values use a different probability definition and should not be compared
+directly with these values.
