@@ -332,7 +332,13 @@ def _load_vllm():
 
 
 def _load_sglang():
-    os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
+    from verl.plugin.platform import get_platform
+
+    # Only force sglang's CPU engine when this process really has no accelerator;
+    # the CPU-only sgl_kernel symbols it then imports do not exist in every build.
+    force_cpu_engine = not get_platform().is_available()
+    if force_cpu_engine:
+        os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
 
     try:
         import vllm  # noqa: F401
@@ -371,7 +377,8 @@ def _load_sglang():
 
     from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangReplica
 
-    del os.environ["SGLANG_USE_CPU_ENGINE"]
+    if force_cpu_engine:
+        del os.environ["SGLANG_USE_CPU_ENGINE"]
     return SGLangReplica
 
 

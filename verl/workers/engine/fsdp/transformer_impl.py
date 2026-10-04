@@ -772,6 +772,10 @@ class FSDPEngine(BaseEngine):
                         meta_info.pop("model_output", None)
 
             output_lst.append(meta_info)
+            # Expandable segments are off on XPU (they break XCCL), so free each
+            # micro-batch's variable-size blocks before the next one fragments the cache.
+            if device_name == "xpu":
+                torch.xpu.empty_cache()
 
         # postprocess and return
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
