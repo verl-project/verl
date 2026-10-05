@@ -986,7 +986,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         """Save model weights through megatron-bridge."""
         if self.peft_cls is not None:
             hf_adapter_ckpt_path = os.path.join(hf_ckpt_path, "adapter")
-            self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls)
+            adapter_export_kwargs = {}
+            if getattr(self.peft_cls, "experts_shared_outer_loras", False):
+                adapter_export_kwargs["allow_serving_layout"] = True
+            self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls, **adapter_export_kwargs)
             log_with_rank(
                 f"Saved HF PEFT adapter checkpoint to {hf_adapter_ckpt_path}",
                 rank=self.rank,
