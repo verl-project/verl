@@ -6,11 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from verl.utils.megatron.router_replay_patch import (
-    RouterReplay,
-    RouterReplayAction,
-    apply_router_replay_patch,
-)
+from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import iter_model_routers
 
 deepseek_v41_moe = pytest.importorskip("megatron.core.models.deepseek_v41.moe")
@@ -69,7 +65,10 @@ def test_modality_router_records_and_replays_experts_without_changing_scores(iso
     assert torch.allclose(recorded_probs.sum(-1), replay_probs.sum(-1))
 
 
-def test_modality_router_replay_keeps_padding_dispatch_rows_out_of_balance_counts(isolated_router_registry):
+@pytest.mark.parametrize("bias_update_rate", [0.0, 1.0])
+def test_modality_router_replay_keeps_padding_dispatch_rows_out_of_balance_counts(
+    isolated_router_registry, bias_update_rate
+):
     del isolated_router_registry
     apply_router_replay_patch()
     router = ModalityRouter.__new__(ModalityRouter)
@@ -78,6 +77,7 @@ def test_modality_router_replay_keeps_padding_dispatch_rows_out_of_balance_count
         moe_router_topk=1,
         moe_router_topk_scaling_factor=1.0,
         moe_router_enable_expert_bias=True,
+        moe_router_bias_update_rate=bias_update_rate,
     )
     router.num_experts = 2
     router.text_balance = _Balance([1.0, 0.0])
@@ -94,8 +94,9 @@ def test_modality_router_replay_keeps_padding_dispatch_rows_out_of_balance_count
 
     torch.testing.assert_close(route.sum(-1), torch.ones(3, dtype=torch.long))
     torch.testing.assert_close(probs[2], torch.zeros(2))
-    assert router.text_balance.local_tokens_per_expert.sum() == 1
-    assert router.image_balance.local_tokens_per_expert.sum() == 1
+    expected = 0 if bias_update_rate == 0.0 else 1
+    assert router.text_balance.local_tokens_per_expert.sum() == expected
+    assert router.image_balance.local_tokens_per_expert.sum() == expected
 
 
 def test_model_walk_finds_deepseek_v41_modality_router(isolated_router_registry):

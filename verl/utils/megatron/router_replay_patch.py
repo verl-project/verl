@@ -126,14 +126,27 @@ class RouterReplay:
 
         indices = indices.to(scores.device)
         if replay_mask is not None:
-            _, native_indices = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
-            if indices.shape != native_indices.shape or replay_mask.numel() != scores.shape[0]:
+            if indices.shape != (scores.shape[0], topk) or replay_mask.numel() != scores.shape[0]:
                 raise RuntimeError(
                     "Router replay tensors are not aligned: "
                     f"scores={tuple(scores.shape)}, targets={tuple(indices.shape)}, "
-                    f"native={tuple(native_indices.shape)}, mask={tuple(replay_mask.shape)}"
+                    f"native={(scores.shape[0], topk)}, mask={tuple(replay_mask.shape)}"
                 )
-            indices = torch.where(replay_mask.to(scores.device).bool().unsqueeze(-1), indices, native_indices)
+            replay_mask = replay_mask.to(scores.device).bool().reshape(-1)
+            if num_groups is None and group_topk is None:
+                # R3 masks normally cover most rows. Compute native top-k only for
+                # uncovered rows. torch.topk handles an empty row selection, so this
+                # also avoids a device synchronization for an all-True mask.
+                native_rows = ~replay_mask
+                _, native_indices = default_compute_topk(
+                    scores[native_rows], topk, num_groups=num_groups, group_topk=group_topk
+                )
+                mixed_indices = indices.clone()
+                mixed_indices[native_rows] = native_indices
+                indices = mixed_indices
+            else:
+                _, native_indices = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+                indices = torch.where(replay_mask.unsqueeze(-1), indices, native_indices)
         return scores.gather(1, indices), indices
 
     def clear_indices(self):
@@ -399,14 +412,20 @@ def apply_router_replay_patch():
             if self.config.moe_router_topk > 1:
                 weights = weights / (weights.sum(-1, keepdim=True) + 1e-20)
             weights = weights * self.config.moe_router_topk_scaling_factor
-            probs = torch.zeros_like(scores).scatter(-1, indices, weights)
-            route = torch.zeros_like(scores, dtype=torch.bool).scatter(-1, indices, True)
-            counted_route = route
             if padding_mask is not None:
                 valid = ~padding_mask.reshape(-1, 1)
-                probs = probs * valid
-                counted_route = route & valid
-            if self.training and torch.is_grad_enabled() and self.config.moe_router_enable_expert_bias:
+                weights = weights * valid
+            probs = torch.zeros_like(scores).scatter(-1, indices, weights)
+            route = torch.zeros_like(scores, dtype=torch.bool).scatter(-1, indices, True)
+            if (
+                self.training
+                and torch.is_grad_enabled()
+                and self.config.moe_router_enable_expert_bias
+                and getattr(self.config, "moe_router_bias_update_rate", 1.0) != 0.0
+            ):
+                counted_route = route
+                if padding_mask is not None:
+                    counted_route = route & valid
                 with torch.no_grad():
                     self.text_balance.local_tokens_per_expert.add_((counted_route & ~image[:, None]).sum(0))
                     self.image_balance.local_tokens_per_expert.add_((counted_route & image[:, None]).sum(0))

@@ -518,3 +518,39 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_replay_topk_computes_native_routes_only_for_unmasked_rows():
+    router = RouterReplay()
+    router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+    target_indices = torch.tensor([[0, 1], [2, 3], [4, 5], [1, 6], [0, 7]])
+    replay_mask = torch.tensor([True, False, True, True, False])
+    router.set_target_indices(target_indices, replay_mask=replay_mask)
+    scores = torch.tensor(
+        [
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            [0.8, 0.1, 0.2, 0.7, 0.3, 0.4, 0.5, 0.6],
+            [0.8, 0.7, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            [0.2, 0.3, 0.9, 0.1, 0.4, 0.5, 0.6, 0.7],
+            [0.9, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8],
+        ]
+    )
+    native_rows_seen = []
+
+    def compute_topk(values, topk, num_groups=None, group_topk=None):
+        del num_groups, group_topk
+        native_rows_seen.append(values.shape[0])
+        return torch.topk(values, k=topk, dim=1)
+
+    _, indices = router.get_replay_topk(scores, 2, default_compute_topk=compute_topk)
+    expected = target_indices.clone()
+    expected[~replay_mask] = torch.topk(scores[~replay_mask], k=2, dim=1).indices
+    assert native_rows_seen == [2]
+    torch.testing.assert_close(indices, expected)
+
+    router.clear_indices()
+    router.set_target_indices(target_indices, replay_mask=torch.ones(5, dtype=torch.bool))
+    native_rows_seen.clear()
+    _, indices = router.get_replay_topk(scores, 2, default_compute_topk=compute_topk)
+    assert native_rows_seen == [0]
+    torch.testing.assert_close(indices, target_indices)
