@@ -400,6 +400,37 @@ The probe verifies the kernel's *layout*, not that the sync delivered the right 
 checks with `VERL_MXFP8_REFIT_CHECK=0`; the linear tolerance (default 0.25) is
 `VERL_MXFP8_REFIT_CHECK_TOL`.
 
+### Quantized-layer audit
+
+"Matched" train/rollout quantization presumes both sides quantize the same layers, but training decides
+implicitly (TE linear modules inside `fp8_autocast`) and rollout decides by name (`ignored_layers` and
+the sync-time name rule). At the first weight sync after a training step, verl reads which decoder
+layers actually ran FP8 GEMMs (TE's FP8 weight workspaces) and compares them, per synced parameter
+name, with the rollout side. The audit wraps the training engine's weight export
+(`get_per_tensor_param`), which every sync route shares (the colocated worker, the checkpoint engine
+and the server-replica path), and produces its verdict when the weight stream ends.
+
+- **vLLM.** The engine is asked directly: a `collective_rpc` into the worker resolves each HF name onto
+  its live parameter and reports whether it is held in fp8. On B200 this exposed the router exclusion
+  that also excluded `gate_up_proj` (56 of 311 parameters on Qwen3-1.7B) while the configured rule
+  reported 28 of 28 layers in agreement.
+- **SGLang.** There is no return channel, so the trainer compares with the sync-time include/exclude
+  rule in `verl/utils/fp8_utils.py`, and the refit loader checks the sync against the engine: before a
+  sync is written, every incoming linear weight's dtype is compared with the dtype of the engine
+  parameter that will receive it (HF names are mapped onto SGLang's fused modules: `q_proj` →
+  `qkv_proj`, `gate_proj` → `gate_up_proj`, per-expert names → the fused `w13` / `w2` tensors). A bf16
+  tensor headed for an fp8 parameter, or fp8 data headed for a bf16 one, is refused by name instead of
+  being cast silently by `load_weights`, e.g. Mixtral's `experts.N.w1/w2/w3`, which the sync rule does
+  not match while the engine built them as fp8 (disabled with `VERL_MXFP8_REFIT_CHECK=0`).
+
+The audit logs each disagreement (e.g. `first_last_layers_bf16` without the matching rollout regex, a
+router the name patterns miss, `lm_head` left in the quantized set). Fused expert tensors as
+`transformers >= 5` saves them (`mlp.experts.gate_up_proj`, no `.weight` suffix) are judged too. The
+signal survives `param_offload=True` (verl marks each module before it drops the TE workspace cache on
+offload); when there is no signal at all (`disable_parameter_transpose_cache=True` makes TE skip the
+cache), the audit warns once that it cannot run instead of staying silent. `VERL_QUANT_LAYER_AUDIT=raise`
+turns the report into an error, `=0` disables it.
+
 ---
 
 ## Citation
