@@ -130,7 +130,8 @@ class ServerAdapter(BaseRollout):
         replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
-        if self.config.get("quantization", None) == "fp8":
+        quantization = self.config.get("quantization", None)
+        if quantization == "fp8":
             import sglang
             from packaging import version
 
@@ -141,6 +142,15 @@ class ServerAdapter(BaseRollout):
             )
             fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+        elif quantization == "mxfp8":
+            from verl.utils.sglang.sglang_mxfp8_utils import (
+                build_sglang_mxfp8_quant_config,
+                check_sglang_mxfp8_support,
+            )
+
+            check_sglang_mxfp8_support()
+            mxfp8_quant_kwargs = build_sglang_mxfp8_quant_config(self.model_config.hf_config)
+            self.model_config.hf_config.quantization_config = mxfp8_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
@@ -328,6 +338,16 @@ class ServerAdapter(BaseRollout):
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
         if wire_format == "delta_flush":
+            quantization = self.config.get("quantization", None)
+            if quantization is not None:
+                # Delta payloads are applied in place as raw bf16 tensors and would
+                # bypass the weight-sync quantization below, feeding unquantized data
+                # to a server whose parameters expect fp8-serialized weights.
+                raise ValueError(
+                    f"rollout.quantization={quantization!r} is not supported with the delta "
+                    "checkpoint engine (wire_format='delta_flush'); use the bucketed weight "
+                    "sync or disable rollout quantization."
+                )
             await self._update_weights_delta(weights, global_steps=global_steps)
             return
 
@@ -357,7 +377,8 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
+            quantization = self.config.get("quantization", None)
+            if quantization == "fp8":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
                 logger.info("Convert bf16 weights to fp8 format before loading")
@@ -366,8 +387,26 @@ class ServerAdapter(BaseRollout):
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
+            elif quantization == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import SGLangMXFP8QuantizerHelper
+
+                logger.info("Convert bf16 weights to mxfp8 format before loading")
+                mxfp8_quantizer_helper = SGLangMXFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+                weights = mxfp8_quantizer_helper.quant_weights_by_name(
+                    weights,
+                    dtype=self.model_config.hf_config.dtype,
+                )
             else:
                 weights = weights
+
+            # MXFP8: route the update through verl's refit loader so SGLang re-derives the
+            # FlashInfer scale layouts (weight_scale_inv_swizzled) after the canonical
+            # scales are overwritten; a no-op on the default Triton backend.
+            load_format = None
+            if quantization == "mxfp8":
+                from verl.workers.rollout.sglang_rollout.mxfp8_refit_loader import LOADER_FQN as MXFP8_LOADER_FQN
+
+                load_format = MXFP8_LOADER_FQN
 
             fusion_groups = (
                 DEEPSEEK_V4_FUSION_GROUPS
@@ -382,6 +421,7 @@ class ServerAdapter(BaseRollout):
                     params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
                     device_mesh_key="infer_tp",
                     device_mesh=self.device_mesh,
+                    load_format=load_format,
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
