@@ -107,6 +107,14 @@ class _StubVllm:
             scale = layer.weight_scale
             layer.weight_scale = torch.nn.Parameter(scale.data.reshape(-1).clone() + 1, requires_grad=False)
 
+        def _apply(self, layer, x, bias=None):
+            # The kernel reads the swizzled copy; "+1" is the fake swizzle, so undo it for the math.
+            from verl.utils.mxfp8_refit_check import mxfp8_dequantize
+
+            n, k = layer.weight.shape
+            scale = layer.weight_scale.data.reshape(n, k // 32) - 1
+            return (x.float() @ mxfp8_dequantize(layer.weight.data, scale).t()).to(torch.bfloat16)
+
         def replace_parameter(layer, name, new):
             setattr(layer, name, torch.nn.Parameter(new, requires_grad=False))
 
@@ -117,7 +125,7 @@ class _StubVllm:
         modelopt.replace_parameter = replace_parameter  # ModelOpt binds its own copy at import, like vLLM
         modelopt.ModelOptMxFp8Config = ModelOptMxFp8Config
         modelopt.ModelOptMxFp8LinearMethod = type(
-            "ModelOptMxFp8LinearMethod", (), {"process_weights_after_loading": _swizzle_process}
+            "ModelOptMxFp8LinearMethod", (), {"process_weights_after_loading": _swizzle_process, "apply": _apply}
         )
 
         def _moe_process(self, layer):
@@ -238,8 +246,9 @@ def test_modelopt_mxfp8_methods_are_patched_and_survive_a_refit():
                 p.stop()
 
 
-def test_full_refit_cycle_re_derives_the_kernel_layout(monkeypatch):
+def test_full_refit_cycle_runs_the_self_check(monkeypatch):
     module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK", raising=False)
     # The MXFP4 MoE hooks import vLLM's fused-MoE oracle, which the stub cannot provide; they are
     # exercised by their own tests and are unrelated to the fp8 stage/reprocess cycle under test.
     monkeypatch.setattr(module, "stage_mxfp4_moe_params_for_loading", lambda model: [])
@@ -257,17 +266,29 @@ def test_full_refit_cycle_re_derives_the_kernel_layout(monkeypatch):
             layer.weight_scale = torch.nn.Parameter(torch.full((4, 2), 127, dtype=torch.uint8), requires_grad=False)
             layer.quant_method = stub.modelopt.ModelOptMxFp8LinearMethod()
             layer.quant_method.process_weights_after_loading(layer)  # initial load
-            live_ptr = layer.weight_scale.data_ptr()
             model = torch.nn.Module()
             model.proj = layer
 
-            # stage -> write the new canonical scale -> reprocess: the kernel layout follows the new scale,
-            # in the storage the CUDA graph captured.
+            # Healthy refit: stage -> write new canonical scale -> reprocess -> self-check passes.
             state = module.prepare_quanted_weights_for_loading(model)
             layer.weight_scale.data.copy_(torch.full((4, 2), 129, dtype=torch.uint8))
             module.process_quanted_weights_after_loading(model, state)
             assert torch.equal(layer.weight_scale.data, torch.full((8,), 130, dtype=torch.uint8))
-            assert layer.weight_scale.data_ptr() == live_ptr
+
+            # Broken refit: the kernel keeps an old layout -> the self-check must raise.
+            state = module.prepare_quanted_weights_for_loading(model)
+            layer.weight_scale.data.copy_(torch.full((4, 2), 125, dtype=torch.uint8))
+
+            def _stale_process(self, lyr):  # post-processing that derives the kernel layout from OLD scales
+                lyr.weight_scale = torch.nn.Parameter(torch.full((8,), 130, dtype=torch.uint8), requires_grad=False)
+
+            monkeypatch.setattr(type(layer.quant_method), "process_weights_after_loading", _stale_process)
+            try:
+                module.process_quanted_weights_after_loading(model, state)
+            except RuntimeError as e:
+                assert "refit self-check failed" in str(e)
+            else:
+                raise AssertionError("expected the self-check to fail")
         finally:
             for p in patchers:
                 p.stop()
@@ -277,7 +298,7 @@ E, INTER, HID = 2, 32, 64
 
 
 class _FakeRoutedExperts(torch.nn.Module):
-    """vLLM 0.24 RoutedExperts stand-in: fused expert weights and their scales."""
+    """vLLM 0.24 RoutedExperts stand-in: fused expert weights + the modular forward the runner calls."""
 
     def __init__(self, quant_method, tp=1, ep=1, dp=1, activation="silu"):
         super().__init__()
@@ -301,6 +322,24 @@ class _FakeRoutedExperts(torch.nn.Module):
         self.top_k = 2
         self.activation = activation
 
+    def forward_modular(self, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
+        from verl.utils.mxfp8_refit_check import mxfp8_moe_expert_reference
+
+        s13, s2 = self._kernel_scales
+        out = torch.zeros(x.shape[0], HID)
+        for j in range(topk_ids.shape[1]):
+            for r in range(x.shape[0]):
+                e = int(topk_ids[r, j])
+                w = topk_weights[r, j]
+                if w != 0:
+                    out[r] += (
+                        w
+                        * mxfp8_moe_expert_reference(
+                            x[r : r + 1], self.w13_weight.data[e], s13[e], self.w2_weight.data[e], s2[e]
+                        )[0]
+                    )
+        return out.to(torch.bfloat16)
+
 
 def _moe_model(module, stub, **kw):
     layer = _FakeRoutedExperts(stub.modelopt.ModelOptMxFp8FusedMoE(), **kw)
@@ -310,8 +349,9 @@ def _moe_model(module, stub, **kw):
     return model, layer
 
 
-def test_moe_refit_cycle_clears_the_process_once_flag(monkeypatch):
+def test_moe_refit_cycle_clears_the_process_once_flag_and_passes_the_expert_probe(monkeypatch):
     module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK", raising=False)
     monkeypatch.setattr(module, "stage_mxfp4_moe_params_for_loading", lambda model: [])
     monkeypatch.setattr(module, "process_mxfp4_moe_weights_after_loading", lambda modules: None)
     with _StubVllm() as stub:
@@ -327,11 +367,61 @@ def test_moe_refit_cycle_clears_the_process_once_flag(monkeypatch):
             layer.w2_weight_scale.data.fill_(129)
             module.process_quanted_weights_after_loading(model, state)
             # Without clearing the flag vLLM's hook would have returned early and the kernel copy would still
-            # hold the 127s; with it the copy follows the new scales.
+            # hold the 127s (and the probe would have failed); with it the copy follows the new scales.
             assert torch.equal(layer._kernel_scales[0], torch.full((E, 2 * INTER, HID // 32), 129, dtype=torch.uint8))
         finally:
             for p in patchers:
                 p.stop()
+
+
+def test_moe_expert_probe_catches_a_kernel_copy_that_was_not_re_derived(monkeypatch):
+    module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK", raising=False)
+    monkeypatch.setattr(module, "stage_mxfp4_moe_params_for_loading", lambda model: [])
+    monkeypatch.setattr(module, "process_mxfp4_moe_weights_after_loading", lambda modules: None)
+    with _StubVllm() as stub:
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            model, layer = _moe_model(module, stub)
+            state = module.prepare_quanted_weights_for_loading(model)
+            layer.w13_weight_scale.data.fill_(129)
+            layer.w2_weight_scale.data.fill_(129)
+
+            def _stale(self, lyr):  # re-derives the layout but from the OLD kernel copy: scales stay 127
+                for n in ("w13_weight_scale", "w2_weight_scale"):
+                    p = getattr(lyr, n)
+                    setattr(lyr, n, torch.nn.Parameter(p.data.reshape(p.shape[0], -1).clone() + 1, requires_grad=False))
+
+            monkeypatch.setattr(type(layer.quant_method), "process_weights_after_loading", _stale)
+            try:
+                module.process_quanted_weights_after_loading(model, state)
+            except RuntimeError as e:
+                assert "vllm MoE layer 'experts', expert 0" in str(e)
+            else:
+                raise AssertionError("expected the MoE expert probe to fail on a stale kernel copy")
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+def test_moe_expert_probe_is_skipped_where_it_cannot_reproduce_the_layer(monkeypatch):
+    module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK", raising=False)
+    with _StubVllm() as stub:
+        for kw in ({"ep": 2}, {"dp": 2}, {"activation": "swigluoai"}):
+            layer = _FakeRoutedExperts(stub.modelopt.ModelOptMxFp8FusedMoE(), **kw)
+            model = torch.nn.Module()
+            model.experts = layer
+            assert module.snapshot_mxfp8_moe_for_check(model) is None, kw
+        layer = _FakeRoutedExperts(stub.modelopt.ModelOptMxFp8FusedMoE())
+        model = torch.nn.Module()
+        model.experts = layer
+        snap = module.snapshot_mxfp8_moe_for_check(model)
+        assert snap is not None and snap[0] == "experts" and snap[2] == 0 and tuple(snap[3].shape) == (2 * INTER, HID)
+        monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK", "0")
+        assert module.snapshot_mxfp8_moe_for_check(model) is None
 
 
 def _trtllm_like_process(self, layer):
