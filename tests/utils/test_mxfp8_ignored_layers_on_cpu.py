@@ -25,3 +25,32 @@ from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
 
 def test_keep_high_precision_layers_covers_lm_head():
     assert "lm_head" in MXFP8_KEEP_HIGH_PRECISION_LAYERS
+
+
+def test_sglang_mxfp8_config_excludes_lm_head():
+    from verl.utils.sglang.sglang_mxfp8_utils import build_sglang_mxfp8_quant_config
+
+    cfg = build_sglang_mxfp8_quant_config()
+    assert cfg["quant_method"] == "mxfp8"
+    assert cfg["weight_block_size"] == [1, 32]
+    ignored = cfg.get("ignored_layers") or []
+    for name in MXFP8_KEEP_HIGH_PRECISION_LAYERS:
+        assert name in ignored, f"{name} must be in ignored_layers, got {ignored}"
+
+
+def test_sglang_mxfp8_config_preserves_caller_ignored_layers():
+    """The high-precision layers are additive, not a replacement."""
+    from verl.utils.sglang.sglang_mxfp8_utils import build_sglang_mxfp8_quant_config
+
+    cfg = build_sglang_mxfp8_quant_config(ignored_layers=["model.layers.0.mlp.gate"])
+    ignored = cfg.get("ignored_layers") or []
+    assert "model.layers.0.mlp.gate" in ignored
+    assert "lm_head" in ignored
+
+
+def test_no_duplicates_when_caller_already_excludes_lm_head():
+    from verl.utils.sglang.sglang_mxfp8_utils import build_sglang_mxfp8_quant_config
+
+    cfg = build_sglang_mxfp8_quant_config(ignored_layers=["lm_head"])
+    ignored = cfg.get("ignored_layers") or []
+    assert ignored.count("lm_head") == 1, ignored

@@ -56,6 +56,13 @@ def _install_fake_te(monkeypatch, recorded):
     monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.constants", te_constants)
 
 
+def test_sglang_module_reexports_shared_core():
+    from verl.utils.sglang import sglang_mxfp8_utils
+
+    assert sglang_mxfp8_utils.mxfp8_quantize is mxfp8_quantize
+    assert sglang_mxfp8_utils.MXFP8_GROUP_SIZE == MXFP8_GROUP_SIZE
+
+
 def test_mxfp8_quantize_3d_expert_weight(monkeypatch):
     # vLLM fused-MoE expert weights are 3D [num_experts, n, k]; the shared core
     # must flatten leading dims, quantize, and restore the scale shape.
