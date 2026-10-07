@@ -1770,6 +1770,11 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # Quantized rollout guard: raise on nan log-probs / runaway kl / all-truncated
+                # responses instead of logging them (no-op unless rollout.quantization is set).
+                from verl.utils.quant_sentinel import check_quantized_rollout_metrics
+
+                check_quantized_rollout_metrics(self, metrics, self.global_steps)
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
