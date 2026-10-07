@@ -372,6 +372,34 @@ canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel lay
 storage the CUDA graph captured. This path is covered by CPU tests and has not been validated on
 hardware.
 
+### Post-sync self-check
+
+Both engines rewrite the synced weights and scales into kernel-specific layouts after loading
+(swizzled scales, shuffled or interleaved experts). If that re-derivation is skipped, the kernel pairs
+fresh weights with stale scales: every shape and dtype still matches and the sync reports success,
+but the engine serves garbage. After every weight sync verl therefore runs the smallest MXFP8 linear
+layer's own quantized GEMM on a small random input and compares it with a bf16 GEMM on the
+dequantized canonical weight and scale; a stale or mis-laid-out scale shows up as an O(1) relative
+error and raises. Healthy layers read about 0.03 (the error of the kernel's activation quantization).
+
+- **MoE experts.** One local expert of the smallest MXFP8 MoE layer is probed the same way: every probe
+  row is routed to it and the layer's forward is compared with the gated-MLP reference on the
+  dequantized `w13` / `w2` (tolerance `VERL_MXFP8_REFIT_CHECK_MOE_TOL`, default the linear one; healthy
+  experts read about 0.05). On vLLM the probe calls the `ModelOptMxFp8FusedMoE` weight holder's
+  `forward_modular` / `forward_monolithic` directly and is skipped under expert or data parallelism and
+  for non-SiLU gates; on SGLang it is skipped under expert parallelism and under TP without
+  `reduce_results`. The log states every skip. On 1×B200 (vLLM 0.24, TRT-LLM MXFP8 MoE) the expert probe
+  read 1.739 at the first sync when the kernel layout was not re-derived, against 0.052 after the fix
+  (verl-project/verl#7986).
+- **Unwritten expert scales (SGLang).** Before re-deriving the kernel layout, the loader checks that
+  the sync wrote every staged expert scale (the staging buffer is pre-filled with the UE8M0 NaN code
+  `0xFF`): experts whose HF names miss the sync-side quantization rule would otherwise arrive as a
+  scale-less bf16 cast into the fp8 buffer, and are reported by name instead.
+
+The probe verifies the kernel's *layout*, not that the sync delivered the right weights. Disable both
+checks with `VERL_MXFP8_REFIT_CHECK=0`; the linear tolerance (default 0.25) is
+`VERL_MXFP8_REFIT_CHECK_TOL`.
+
 ---
 
 ## Citation

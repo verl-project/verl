@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 import torch
 
+from verl.utils.mxfp8_refit_check import mxfp8_dequantize
 from verl.workers.rollout.sglang_rollout import mxfp8_refit_loader as refit
 
 
@@ -75,6 +76,11 @@ class _QuantMethod:
     def process_weights_after_loading(self, layer):
         self.calls += 1
         layer.weight_scale_inv_swizzled = layer.weight_scale_inv.clone() + 1
+
+    def apply(self, layer, x, bias=None):
+        # A FlashInfer-style kernel reads only the derived copy; "+1" is the fake swizzle.
+        scale = layer.weight_scale_inv_swizzled - 1
+        return (x.float() @ mxfp8_dequantize(layer.weight.data, scale).t()).to(torch.bfloat16)
 
 
 class _Linear(torch.nn.Module):
@@ -139,6 +145,16 @@ class _MoE(torch.nn.Module):
             torch.full((experts, hidden, inter // 32), 127, dtype=torch.uint8), requires_grad=False
         )
         self.quant_method = _MoEQuantMethod()
+
+    def forward(self, x, topk_output):
+        """sglang FusedMoE.forward stand-in: gated MLP of the routed expert on the scales the kernel reads."""
+        assert isinstance(topk_output, _StandardTopKOutput) and topk_output.topk_ids.shape[1] == 1
+        e = int(topk_output.topk_ids[0, 0])
+        s13, s2 = self._kernel_scales
+        from verl.utils.mxfp8_refit_check import mxfp8_moe_expert_reference
+
+        out = mxfp8_moe_expert_reference(x, self.w13_weight.data[e], s13[e], self.w2_weight.data[e], s2[e])
+        return (out * topk_output.topk_weights).to(torch.bfloat16)
 
 
 class _Model(torch.nn.Module):
@@ -247,6 +263,39 @@ def test_moe_scales_kept_canonical_by_the_runner_are_not_staged():
     assert refit.reprocess_mxfp8_moe_layers(m, []) == 1
 
 
+def test_moe_scales_the_sync_never_wrote_are_reported_instead_of_swizzled():
+    # The Mixtral case: expert names (block_sparse_moe.experts.N.w1/w2/w3) miss the sync-side rule, so the
+    # sync ships bf16 weights and no scales; the model's load_weights casts them into the fp8 buffer
+    # silently. The staged scale buffers still hold 0xFF afterwards and the loader must say so by name.
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE()
+    m.moe.quant_method.process_weights_after_loading(m.moe)
+    live = m.moe.w13_weight_scale_inv.data.clone()
+    try:
+        refit.load_and_reprocess(m, [("moe.w13_weight", torch.zeros(2, 128, 64, dtype=torch.bfloat16))])
+    except RuntimeError as e:
+        assert "moe.w13_weight_scale_inv: the weight sync did not write 512 of 512" in str(e)
+        assert "block_sparse_moe.experts" in str(e)
+    else:
+        raise AssertionError("expected the loader to report expert scales the sync never wrote")
+    assert m.moe.quant_method.calls == 1  # nothing was re-processed on top of sentinel scales
+    assert torch.equal(m.moe.w13_weight_scale_inv.data, live) or m.moe.w13_weight_scale_inv.data.dtype == torch.uint8
+
+    # a sync that writes every scale is untouched by the check (covered end-to-end by the staging test)
+    m2 = _Model(resolved_backend="flashinfer_cutlass")
+    m2.moe = _MoE()
+    m2.moe.quant_method.process_weights_after_loading(m2.moe)
+    refit.load_and_reprocess(
+        m2,
+        [
+            ("moe.w13_weight_scale_inv", torch.full((2, 128, 2), 7, dtype=torch.uint8)),
+            ("moe.w2_weight_scale_inv", torch.full((2, 64, 2), 5, dtype=torch.uint8)),
+        ],
+    )
+    assert m2.moe.quant_method.calls == 2
+
+
 def _canonical_moe_model():
     """A model whose MoE runner keeps scales canonical (no staging) but derives a kernel copy at load."""
 
@@ -261,6 +310,50 @@ def _canonical_moe_model():
     m.moe.quant_method = _CanonicalRunner()
     m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load
     return m
+
+
+def test_moe_self_check_passes_after_a_full_refit_cycle_on_the_swizzling_runner():
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE(random=True)
+    m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load: scales swizzled, kernel copy = 127s
+    new_w13 = torch.full((2, 128, 2), 129, dtype=torch.uint8)  # a sync ships 4x scales
+    new_w2 = torch.full((2, 64, 2), 129, dtype=torch.uint8)
+    # stage -> load -> snapshot (canonical) -> reprocess (kernel copy re-derived from the NEW scales) -> probe
+    refit.load_and_reprocess(m, [("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+    assert torch.equal(m.moe._kernel_scales[0], new_w13)
+
+
+def test_moe_self_check_catches_expert_scales_the_kernel_never_re_derived():
+    m = _canonical_moe_model()
+    new_w13 = torch.full((2, 128, 2), 129, dtype=torch.uint8)
+    new_w2 = torch.full((2, 64, 2), 129, dtype=torch.uint8)
+    # the sync writes new canonical scales in place, but nothing re-derives the kernel copy: stale by 4x
+    m.load_weights([("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+    snap = refit.snapshot_mxfp8_moe_for_check(m)
+    assert snap is not None and snap[0] == "moe" and snap[2] == 0
+    try:
+        refit.self_check_mxfp8_moe(snap)
+    except RuntimeError as e:
+        assert "MoE layer 'moe', expert 0" in str(e) and "w13_/w2_weight_scale" in str(e)
+    else:
+        raise AssertionError("expected the MoE self-check to fail on stale expert scales")
+    refit.reprocess_mxfp8_moe_layers(m, [])  # the loader's re-processing is exactly what fixes it
+    refit.self_check_mxfp8_moe(snap)
+
+
+def test_moe_self_check_is_skipped_under_expert_parallelism_and_when_disabled(monkeypatch):
+    m = _canonical_moe_model()
+    m.moe.moe_ep_size = 2
+    assert refit.snapshot_mxfp8_moe_for_check(m) is None  # cannot route to a global expert without EP dispatch
+    m.moe.moe_ep_size = 1
+    m.moe.moe_tp_size = 2  # TP without reduce_results: the layer output is a partial sum, no reference possible
+    assert refit.snapshot_mxfp8_moe_for_check(m) is None
+    m.moe.moe_tp_size = 1
+    monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK", "0")
+    assert refit.snapshot_mxfp8_moe_for_check(m) is None
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK")
+    assert refit.snapshot_mxfp8_moe_for_check(m) is not None
 
 
 def test_reprocess_reports_a_staged_scale_that_was_not_folded_back():
@@ -281,6 +374,22 @@ def test_reprocess_reports_a_staged_scale_that_was_not_folded_back():
         assert "not folded back into its live storage" in str(e)
     else:
         raise AssertionError("expected the post-condition to fire for the orphaned staged scale")
+
+
+def test_self_check_catches_a_stale_swizzled_copy():
+    _install_stub("flashinfer_cutlass")
+    m = _Model()
+    refit.self_check_mxfp8_linear(m)  # healthy: derived copy matches canonical scale
+    m.a.weight_scale_inv.data.fill_(130)  # a sync wrote new scales ...
+    m.b.weight_scale_inv.data.fill_(130)
+    try:  # ... but nothing rebuilt the copy the kernel reads
+        refit.self_check_mxfp8_linear(m)
+    except RuntimeError as e:
+        assert "refit self-check failed" in str(e)
+    else:
+        raise AssertionError("expected the self-check to fail on stale swizzled scales")
+    refit.reprocess_mxfp8_layers(m)  # the loader's re-processing is exactly what fixes it
+    refit.self_check_mxfp8_linear(m)
 
 
 def test_loader_fqn_matches_function():
