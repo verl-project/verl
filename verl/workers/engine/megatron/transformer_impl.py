@@ -204,6 +204,12 @@ class MegatronEngine(BaseEngine):
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
         if self._qat_enabled:
+            if self.engine_config.override_transformer_config.get("fp8"):
+                raise ValueError(
+                    "QAT and Transformer Engine FP8 training are mutually exclusive: QAT fake-quantizes weights "
+                    "inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs themselves to "
+                    "FP8. Disable one of them."
+                )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
 
         # Router replay configuration for MoE models
