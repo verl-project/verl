@@ -254,6 +254,50 @@ Notes:
   weights, for weight synchronization to an MXFP8 rollout engine; `lm_head` and the token embedding
   stay in high precision there (`MXFP8_KEEP_HIGH_PRECISION_LAYERS`).
 
+### MXFP8 Rollout and Train-Inference Consistency
+
+With `quantization: mxfp8`, the rollout engine is launched in MXFP8 mode against the bf16
+checkpoint (a `quantization_config` override, no offline conversion), and every weight sync
+quantizes the bf16 actor weights to MXFP8 on the fly:
+
+```yaml
+actor_rollout_ref.rollout:
+  name: vllm
+  quantization: mxfp8
+```
+
+The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`**
+(`verl.utils.mxfp8_quant`), the same quantizer the trainer's FP8 GEMMs apply to weights, so the
+rollout engine serves exactly the weight grid the training forward pass saw. An independent
+quantization kernel can round E8M0 scales differently at block boundaries and reintroduce
+train-inference mismatch. Two things still differ by construction: the engine quantizes activations
+with its own kernels, and its GEMMs accumulate in a different order. Pairing with token-level TIS is
+recommended, as with the blockwise FP8 E2E recipe.
+
+For vLLM, the config maps to `ModelOptMxFp8Config` (weight `fp8_e4m3fn` + `uint8` UE8M0
+`weight_scale`, block `[1, 32]`). `lm_head`, the token embedding and the MoE routers stay in bf16
+through `ignored_layers`, and verl opts its generated config into exact module-path matching of those
+exclusions ([mxfp8_exclusion_patch.md](mxfp8_exclusion_patch.md)); vLLM 0.24's substring fallback would
+otherwise also exclude `mlp.gate_up_proj` through the router entry `mlp.gate`. Refits reuse the same
+pristine-layout record → stage → load → reprocess → fold cycle as the blockwise FP8 path, which keeps
+the storage that CUDA graphs captured. vLLM's Marlin/emulation fallbacks allow serving MXFP8 weights on
+pre-Blackwell GPUs (SM80+); the served weight grid is still produced by TE's quantizer.
+
+The staging cycle decides per layer whether a refit must go through stage → load → reprocess by
+comparing the live parameters with the checkpoint layout recorded at load. A kernel that hands back a
+*rewritten copy with the checkpoint's shape and dtype* is invisible to that comparison. FlashInfer
+TRT-LLM's MXFP8 MoE preparation (`ModelOptMxFp8FusedMoE` on Blackwell: W13→W31 swap, gate/up row
+interleave, tile shuffle of weights and scales) is such a kernel, so verl's patched `replace_parameter`
+records the rewrite (the same-shape record was merged upstream as verl-project/verl#7986) and the layer
+is staged on every refit. vLLM 0.24's ModelOpt MXFP8 MoE method also processes its weights only once per
+layer and returns early afterwards; verl's patched hook clears that flag on every refit, so the kernel
+layout is re-derived from the synced scales. Measured on 1×B200 (vLLM 0.24, a tiny Qwen3-MoE, TP1), an
+expert's output read relative error 1.739 against a dequantized reference after the first sync without
+the record, and 0.052 with it.
+
+On Qwen3-30B-A3B (4×B200, vLLM 0.24) the MXFP8 rollout generated 24% faster than bf16; on the dense
+Qwen3-8B the measured difference was within run-to-run variation.
+
 ---
 
 ## Citation

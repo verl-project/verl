@@ -86,10 +86,25 @@ def is_quantized_model(vllm_config):
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
+        elif is_vllm_modelopt_mxfp8_quant(vllm_config.quant_config):
+            return True
         elif is_vllm_ascend_mx_quant(vllm_config.quant_config):
             return True
 
     return False
+
+
+def is_vllm_modelopt_mxfp8_quant(quant_config):
+    """Whether quant_config is vLLM's ModelOpt MXFP8 config (``modelopt_mxfp8``).
+
+    The stock-vLLM MXFP8 path; vllm-ascend's MX configs are matched by ``is_vllm_ascend_mx_quant``.
+    """
+    try:
+        from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+    except ImportError:
+        # Older vLLM without MXFP8 support
+        return False
+    return isinstance(quant_config, ModelOptMxFp8Config)
 
 
 # vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
@@ -364,8 +379,11 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
     is_ascend_mx = is_vllm_ascend_mx_quant(quant_config)
+    is_modelopt_mxfp8 = is_vllm_modelopt_mxfp8_quant(quant_config)
     if is_ascend_mx:
         import torch_npu
+    if is_modelopt_mxfp8:
+        from verl.utils.mxfp8_quant import mxfp8_quantize
     for k, v in weights:
         quant_type = _classify_quant_weight(k, model, is_ascend_mx)
         if quant_type is None:
@@ -374,7 +392,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
         # Cast the weight into quantized format and its scale factor
         if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to {quant_type} blockwise: {k}")
+            logger.debug(f"Quantizing to {'mxfp8' if is_modelopt_mxfp8 else quant_type + ' blockwise'}: {k}")
         if quant_type in ("mx_fp8", "mx_fp4"):
             dst_type = torch_npu.float4_e2m1fn_x2 if quant_type == "mx_fp4" else torch_npu.float8_e4m3fn
             param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
@@ -383,22 +401,28 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
                 dst_type=dst_type,
             )
             param_scale = param_scale.flatten(-2, -1)
+            param_scale = param_scale.squeeze(-1)
             if quant_type == "mx_fp4":
                 # W4A8 params are uint8 holding packed FP4 pairs; the mx quant
                 # op returns those bytes as float4_e2m1fn_x2, so reinterpret
                 # them as uint8 to match the parameter dtype.
                 param_lp = param_lp.view(torch.uint8)
+        elif is_modelopt_mxfp8:
+            # TE MXFP8Quantizer: the same quantizer the trainer's FP8 GEMMs use
+            # under fp8_recipe="mxfp8", so rollout serves the training weight
+            # grid. Scale is already compact 2D [n, k // 32] uint8 UE8M0.
+            param_lp, param_scale = mxfp8_quantize(v.to(dtype))
         else:
             param_lp, param_scale = scaled_fp8_blockwise(
                 v.to(dtype),
                 weight_block_size=quant_config.weight_block_size,
             )
-        param_scale = param_scale.squeeze(-1)
+            param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
         yield (k, param_lp)
 
-        if is_ascend_mx:
+        if is_ascend_mx or is_modelopt_mxfp8:
             yield (k + "_scale", param_scale)
         else:
             yield (k + "_scale_inv", param_scale)

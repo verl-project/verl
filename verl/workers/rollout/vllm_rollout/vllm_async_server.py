@@ -1379,25 +1379,52 @@ class vLLMHttpServer:
             logger.info(f"QAT quantization config injected (quant_method={quant_method})")
             hf_overrides["quantization_config"] = quantization_config_dict
         elif quantization is not None:
-            # Handle other quantization methods (fp8, torchao)
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao", "ascend"]
+            # Handle other quantization methods (fp8, mxfp8, torchao)
+            _SUPPORTED_QUANTIZATION = ["fp8", "mxfp8", "torchao", "ascend"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
-            if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
+            if quantization in ("fp8", "mxfp8"):
+                # Ignore MoE router layers for FP8/MXFP8 quantization
                 all_mlp_gate_layers = []
                 for layer in range(self.model_config.hf_config.num_hidden_layers):
                     all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
 
-                FP8_BLOCK_QUANT_KWARGS = {
-                    "activation_scheme": "dynamic",
-                    "fmt": "e4m3",
-                    "quant_method": "fp8",
-                    "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
-                }
-                hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
+                if quantization == "fp8":
+                    quant_kwargs = {
+                        "activation_scheme": "dynamic",
+                        "fmt": "e4m3",
+                        "quant_method": "fp8",
+                        "weight_block_size": [128, 128],
+                        "ignored_layers": all_mlp_gate_layers,
+                    }
+                else:
+                    try:
+                        from vllm.model_executor.layers.quantization.modelopt import (  # noqa: F401
+                            ModelOptMxFp8Config,
+                        )
+                    except ImportError as err:
+                        raise ImportError(
+                            "The installed vLLM does not support MXFP8 (ModelOptMxFp8Config not found); "
+                            "upgrade vLLM to use rollout.quantization=mxfp8."
+                        ) from err
+                    # MiniMax-style config: vLLM normalizes quant_method "mxfp8" to
+                    # the ModelOpt MXFP8 config (weight fp8_e4m3fn + uint8 UE8M0
+                    # weight_scale, block size [1, 32]). Weight sync quantizes with
+                    # TE's MXFP8Quantizer so rollout serves the training weight grid.
+                    from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
+                    from verl.utils.vllm.mxfp8_exclusion_patch import VERL_EXACT_MXFP8_EXCLUSIONS
+
+                    quant_kwargs = {
+                        "quant_method": "mxfp8",
+                        "ignored_layers": all_mlp_gate_layers + list(MXFP8_KEEP_HIGH_PRECISION_LAYERS),
+                        # Opt this verl-generated config into strict (exact/glob) exclusion matching so
+                        # vLLM's legacy substring fallback does not exclude mlp.gate_up_proj via the
+                        # router's "mlp.gate". Only marked configs are affected (see mxfp8_exclusion_patch).
+                        VERL_EXACT_MXFP8_EXCLUSIONS: True,
+                    }
+
+                hf_overrides["quantization_config"] = dict(quant_kwargs)
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
                 apply_vllm_quant_patches()
                 # for subprocesses patching

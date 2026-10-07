@@ -25,3 +25,18 @@ from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
 
 def test_keep_high_precision_layers_covers_lm_head():
     assert "lm_head" in MXFP8_KEEP_HIGH_PRECISION_LAYERS
+
+
+def test_vllm_mxfp8_quant_kwargs_excludes_lm_head():
+    """Mirror the dict the vLLM launch path builds (see vllm_async_server.py).
+
+    Kept as an explicit construction rather than importing the server module,
+    which pulls in vLLM at import time and is not available on CPU CI.
+    """
+    all_mlp_gate_layers = [f"model.layers.{i}.mlp.gate" for i in range(4)]
+    quant_kwargs = {
+        "quant_method": "mxfp8",
+        "ignored_layers": all_mlp_gate_layers + list(MXFP8_KEEP_HIGH_PRECISION_LAYERS),
+    }
+    assert "lm_head" in quant_kwargs["ignored_layers"]
+    assert "model.layers.0.mlp.gate" in quant_kwargs["ignored_layers"]
