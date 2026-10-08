@@ -161,6 +161,8 @@ megatron = [
     "nvidia-mathdx",
     "apex",
     "transformer-engine[pytorch,core-cu13]==2.18.0",
+    # TE builds in the selected environment and imports wheel.bdist_wheel.
+    "wheel",
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
@@ -299,6 +301,8 @@ verl = [
 # One universal uv.lock: `uv lock` resolves every extra; conflicting extras
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
+# Follow TE's documented installation against the selected runtime dependencies.
+no-build-isolation-package = ["transformer-engine-torch"]
 # Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
 # aarch64 (GH200 / GB200 superchips).
 #
@@ -500,11 +504,10 @@ name = "verl-wheelhouse"
 url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/"
 explicit = true
 
-# TE's extension uses the selected Torch ABI and imports wheel.bdist_wheel.
+# Keep TE's extension build cache scoped to the selected Torch ABI.
 [tool.uv.extra-build-dependencies]
 transformer-engine-torch = [
     { requirement = "torch", match-runtime = true },
-    "wheel",
 ]
 
 [[tool.uv.index]]
