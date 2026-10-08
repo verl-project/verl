@@ -29,6 +29,7 @@ from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl.checkpoint_engine import CheckpointEngineRegistry
+from verl.plugin.platform import get_platform
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
@@ -486,10 +487,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             omega_profiler_config = config.ref.get("profiler", {})
 
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
-            tool_config = omega_conf_to_dataclass(
-                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-            )
+        _profiler_tool = omega_profiler_config.get("tool", None)
+        if _profiler_tool in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"] or (
+            _profiler_tool is not None and get_platform().dist_profiler_cls(_profiler_tool)
+        ):
+            tool_config = omega_conf_to_dataclass(omega_profiler_config.get("tool_config", {}).get(_profiler_tool))
         else:
             tool_config = None
 

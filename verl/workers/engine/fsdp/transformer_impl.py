@@ -175,6 +175,11 @@ class FSDPEngine(BaseEngine):
         if self._qat_enabled:
             logger.info(f"QAT enabled: mode={self._qat_config.mode}, group_size={self._qat_config.group_size}")
 
+        self._fp8_config = getattr(self.engine_config, "fp8_training", None)
+        self._fp8_enabled = self._fp8_config is not None and getattr(self._fp8_config, "enable", False)
+        if self._fp8_enabled:
+            logger.info(f"Real FP8 training enabled: mode={self._fp8_config.mode}, block_size={self._fp8_config.block_size}")
+
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
         else:
@@ -554,6 +559,21 @@ class FSDPEngine(BaseEngine):
 
         return module
 
+    def _apply_fp8(self, module):
+        from verl.utils.fp8_training.core import apply_fp8_training
+
+        return apply_fp8_training(
+            module,
+            {
+                "enable": self._fp8_config.enable,
+                "mode": self._fp8_config.mode,
+                "block_size": list(self._fp8_config.block_size),
+                "ignore_patterns": list(self._fp8_config.ignore_patterns),
+                "include_patterns": list(self._fp8_config.include_patterns),
+                "min_features": self._fp8_config.min_features,
+            },
+        )
+
     def _restore_w4a4_input_scales(self, model, model_path):
         """Restore input_global_scale and input_amax from checkpoint for W4A4 mode."""
         import glob
@@ -601,6 +621,10 @@ class FSDPEngine(BaseEngine):
         # Apply QAT before FSDP wrapping (training only)
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
+
+        if self._fp8_enabled and not self.engine_config.forward_only:
+            module = self._apply_fp8(module)
+            log_gpu_memory_usage("After FP8 conversion", logger=logger)
 
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()

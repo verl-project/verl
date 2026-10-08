@@ -36,6 +36,7 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
+    "FP8TrainingEngineConfig",
 ]
 
 
@@ -142,6 +143,29 @@ class QATEngineConfig(BaseConfig):
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
     activation_observer: str = "static_minmax"
     quantization_config_path: Optional[str] = None
+
+
+@dataclass
+class FP8TrainingEngineConfig(BaseConfig):
+    """Configuration for real (non-fake) FP8 weight-storage training within the FSDP engine.
+
+    Not QAT (see QATEngineConfig) -- this performs actual float8_e4m3fn compute
+    in the forward matmul rather than simulating low-bit precision in full
+    precision. FSDP2-only (see FSDPEngine for the strategy assertion).
+    """
+
+    enable: bool = False
+    mode: str = "rowwise"
+    block_size: list = field(default_factory=lambda: [128, 128])
+    ignore_patterns: list = field(
+        default_factory=lambda: ["embed_tokens", "lm_head", "layernorm", "norm", "ln_", "embeddings", "mlp.gate"]
+    )
+    include_patterns: list = field(
+        default_factory=lambda: [
+            "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "fc1", "fc2",
+        ]
+    )
+    min_features: int = 256
 
 
 @dataclass
@@ -290,11 +314,18 @@ class FSDPEngineConfig(EngineConfig):
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    fp8_training: FP8TrainingEngineConfig = field(default_factory=FP8TrainingEngineConfig)
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
+        assert not self.fp8_training.enable or self.strategy == "fsdp2", (
+            "fp8_training requires strategy=fsdp2"
+        )
+        assert not (self.qat.enable and self.fp8_training.enable), (
+            "qat and fp8_training are mutually exclusive"
+        )
 
 
 @dataclass

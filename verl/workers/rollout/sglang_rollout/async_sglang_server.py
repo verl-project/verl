@@ -194,10 +194,12 @@ class SGLangHttpServer:
         profiler_config = self.config.profiler
         tool_config = None
         if profiler_config is not None:
-            if profiler_config.tool in ["torch", "npu"]:
+            if profiler_config.tool in ["torch", "npu"] or (
+                profiler_config.tool is not None and get_platform().dist_profiler_cls(profiler_config.tool)
+            ):
                 tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
             else:
-                logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
+                logger.warning(f"agent loop only support torch, npu, or a plugin profiler, got {profiler_config.tool}")
                 profiler_config = None
         # `ranks` in the rollout profiler config are global GPU ranks (as in the training roles);
         # map them to the replica that owns them so e.g. ranks=[0, 8] with tp=8 profiles the replicas

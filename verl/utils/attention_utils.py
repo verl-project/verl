@@ -60,12 +60,25 @@ def _fallback_rearrange(*args, **kwargs):
 def _get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
     """Dynamically import attention functions based on available hardware."""
 
+    import importlib
+
+    from verl.plugin.platform import get_platform
     from verl.utils.device import is_torch_npu_available
 
     global _index_first_axis, _pad_input, _rearrange, _unpad_input
 
+    plugin_module = get_platform().attention_utils_module()
+
     if is_torch_npu_available(check_device=False):
         from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
+    elif plugin_module is not None:
+        mod = importlib.import_module(plugin_module)
+        index_first_axis, pad_input, rearrange, unpad_input = (
+            mod.index_first_axis,
+            mod.pad_input,
+            mod.rearrange,
+            mod.unpad_input,
+        )
     else:
         try:
             from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input

@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from types import ModuleType
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 class PlatformBase(abc.ABC):
@@ -166,6 +166,17 @@ class PlatformBase(abc.ABC):
         """Return the environment-variable name that controls visible devices."""
         ...
 
+    def attention_utils_module(self) -> Optional[str]:
+        """Return a dotted module path providing a flash-attn-equivalent for this platform.
+
+        The module must expose ``index_first_axis``, ``pad_input``,
+        ``rearrange`` and ``unpad_input`` (see ``verl/utils/npu_flash_attn_utils.py``
+        for the expected signatures). Return ``None`` (default) to fall back to
+        the ``flash_attn`` pip package, or to the pure-PyTorch implementation in
+        ``verl/utils/attention_utils.py`` when that isn't installed either.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Profiling helpers
     # ------------------------------------------------------------------
@@ -188,6 +199,27 @@ class PlatformBase(abc.ABC):
     def profiler_stop(self) -> None:
         """Stop the device profiler (no-op on unsupported platforms)."""
         ...
+
+    def profiler_markers(self) -> Optional[tuple[Callable, Callable, Callable, Callable]]:
+        """Return a ``(mark_start_range, mark_end_range, mark_annotate, marked_timer)`` tuple.
+
+        Lets a platform supply its own tracing-marker implementation (see
+        ``verl/utils/profiler/nvtx_profile.py`` / ``mstx_profile.py`` for the
+        expected signatures), selected by ``verl/utils/profiler/__init__.py``
+        when no ``nvtx`` package and no built-in device-specific module apply.
+        Return ``None`` (default) to use the generic pure-Python fallback.
+        """
+        return None
+
+    def dist_profiler_cls(self, tool: str) -> Optional[type]:
+        """Return a ``DistProfiler`` subclass for a plugin-supplied ``profiler.tool`` name.
+
+        Called by ``DistProfiler.__init__`` (``verl/utils/profiler/profile.py``)
+        after checking verl's built-in tool names (``nsys``, ``npu``, ``torch``,
+        ``torch_memory``, ``precision_debugger``). Return ``None`` (default) if
+        this platform doesn't provide an implementation for ``tool``.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # vllm integration
@@ -217,6 +249,33 @@ class PlatformBase(abc.ABC):
     def ray_noset_envvars(self) -> list[str]:
         """Return ``RAY_EXPERIMENTAL_NOSET_*`` env var names for this platform."""
         ...
+
+    def ray_device_index(self, accelerator_ids: list[str]) -> int:
+        """Map the accelerator ids Ray assigned to this actor to a device index to pin.
+
+        Ray reports *physical* device ids. Whether a physical id is also the index
+        to pass to ``set_device()`` depends on what the process can see:
+
+        * Ray masked :meth:`visible_devices_envvar` for this actor (its default),
+          or the user masked it themselves -- the visible devices are relabeled
+          from 0, so the index is the position of the physical id in that mask.
+        * Nothing is masked, e.g. ``RAY_EXPERIMENTAL_NOSET_*`` is set -- every
+          device on the node is visible and the physical id *is* the index.
+
+        Platforms whose runtime does not honor its own visibility mask must
+        override this and return the physical id, since masking there does not
+        relabel anything.
+        """
+        physical_id = str(accelerator_ids[0])
+        visible = os.environ.get(self.visible_devices_envvar())
+        if visible:
+            visible_ids = [dev.strip() for dev in visible.split(",") if dev.strip()]
+            if physical_id in visible_ids:
+                return visible_ids.index(physical_id)
+            # A mask we cannot index into (e.g. CUDA's UUID form). A masked actor
+            # only sees what Ray gave it, relabeled from 0.
+            return 0
+        return int(physical_id)
 
     def ray_resource_options(self, num_gpus: float) -> dict[str, Any]:
         """Return Ray actor resource options for allocating accelerators.

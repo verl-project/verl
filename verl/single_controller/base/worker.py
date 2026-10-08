@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import ray
 
 from verl.utils.device import (
+    get_ray_device_index,
     get_resource_name,
     get_torch_device,
     get_visible_devices_keyword,
@@ -229,10 +230,6 @@ class Worker(WorkerHelper):
         return self.fused_worker_dict.get(worker_name, None)
 
     def _setup_env_cuda_visible_devices(self):
-        from verl.utils.ray_utils import ray_noset_visible_devices
-
-        is_ray_noset_visible_devices = ray_noset_visible_devices()
-
         # Prevent use of clashing `{CUDA/HIP/ROCR}_VISIBLE_DEVICES``
         rocr_val = os.environ.get("ROCR_VISIBLE_DEVICES", None)
         hip_val = os.environ.get("HIP_VISIBLE_DEVICES", None)
@@ -270,15 +267,23 @@ class Worker(WorkerHelper):
             os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
             rocr_val = None
 
-        if is_ray_noset_visible_devices:
-            # NOTE: Ray will automatically set the *_VISIBLE_DEVICES
-            # environment variable for each actor, unless
-            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
-            # so we need to set local rank when the flag is set.
-            device_name = get_resource_name()
-            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
-            os.environ["LOCAL_RANK"] = local_rank
-            get_torch_device().set_device(int(local_rank))
+        # Pin this rank's accelerator from Ray's own assignment.
+        #
+        # Ray sets the *_VISIBLE_DEVICES variable for each actor unless
+        # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set. Pinning only in the
+        # latter case leaves the default device (index 0) correct just when the
+        # runtime honors that mask; where it does not, every rank in the job
+        # silently runs on the same physical device -- a collision that shows up
+        # as out-of-memory or as collectives falling back to paths meant for
+        # ranks sharing a device, not as a device error. The platform resolves
+        # Ray's physical id against what this process can actually see, which is
+        # correct in both modes, so pinning no longer depends on that flag.
+        device_name = get_resource_name()
+        accelerator_ids = ray.get_runtime_context().get_accelerator_ids().get(device_name)
+        if accelerator_ids:
+            local_rank = get_ray_device_index(accelerator_ids)
+            os.environ["LOCAL_RANK"] = str(local_rank)
+            get_torch_device().set_device(local_rank)
 
     def _configure_with_store(self, store: dict):
         """

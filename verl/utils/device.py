@@ -93,6 +93,19 @@ def get_visible_devices_keyword() -> str:
     return get_platform().visible_devices_envvar()
 
 
+def get_ray_device_index(accelerator_ids: list[str]) -> int:
+    """Map accelerator ids Ray assigned to this actor to the device index to pin.
+
+    Args:
+        accelerator_ids: Physical device ids from
+            ``ray.get_runtime_context().get_accelerator_ids()``.
+
+    Returns:
+        int: The index to pass to ``set_device()`` for this actor.
+    """
+    return get_platform().ray_device_index(accelerator_ids)
+
+
 def get_device_name() -> str:
     """Get the device type string based on available accelerators.
 

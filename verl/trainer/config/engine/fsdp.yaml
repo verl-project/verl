@@ -109,6 +109,48 @@ qat:
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
 
+# Real FP8 weight-storage training (not fake-quant QAT). FSDP2 only.
+fp8_training:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.FP8TrainingEngineConfig
+
+  # Whether to enable real FP8 training
+  enable: false
+
+  # "rowwise" (torch._scaled_mm) or "blockwise" (dequant+matmul fallback)
+  mode: "rowwise"
+
+  # Block size for blockwise quantization
+  block_size: [128, 128]
+
+  # Patterns to exclude from quantization
+  ignore_patterns:
+
+    - "embed_tokens"
+    - "lm_head"
+    - "layernorm"
+    - "norm"
+    - "ln_"
+    - "embeddings"
+    - "mlp.gate"
+
+  # Patterns eligible for quantization
+  include_patterns:
+
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+    - "fc1"
+    - "fc2"
+
+  # Skip Linear layers smaller than this on either dimension
+  min_features: 256
+
 turbo_config:
   distributed:
     fully_shard_parallel_size: 16
