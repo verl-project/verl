@@ -452,9 +452,17 @@ def build_fp8_method_patchers(vllm_version):
         # ModelOpt's legacy substring exclusion can mistake a router's "gate"
         # for the dense "gate_up_proj". Only explicitly marked, verl-generated
         # MXFP8 configs use strict matching; checkpoint configs keep the original.
-        from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config  # noqa: F401
+        except ImportError:
+            pass  # Older vLLM without ModelOpt MXFP8: no exclusion matcher to patch.
+        else:
+            # Imported only here: the ``verl.utils.vllm`` package init pulls in vLLM,
+            # and CPU tests load this module standalone against a stubbed vLLM.
+            from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
 
-        patchers.extend(build_mxfp8_exclusion_patchers())
+            patchers.extend(build_mxfp8_exclusion_patchers())
+
         return patchers
 
     return [
