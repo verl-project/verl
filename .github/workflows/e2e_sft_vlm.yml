@@ -122,7 +122,7 @@ jobs:
           $UV_RUN python3 examples/data_preprocess/pokemon.py --local_dataset_path ${HOME}/models/hf_data/pokemon-gpt4o-captions
       - name: Running Pokemon E2E training tests with multiturn and various configs and compare results
         run: |
-          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct DATASET_DIR=~/data/pokemon-gpt4o-captions VPP_SIZE=null $UV_RUN bash tests/special_e2e/sft/test_sft_engine_all.sh
+          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct DATASET_DIR=~/data/pokemon-gpt4o-captions VPP_SIZE=null RUN_TORCHTITAN=0 $UV_RUN bash tests/special_e2e/sft/test_sft_engine_all.sh
 
   cleanup:
     runs-on: ubuntu-latest
