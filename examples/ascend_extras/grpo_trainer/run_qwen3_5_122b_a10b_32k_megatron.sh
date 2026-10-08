@@ -54,7 +54,7 @@ DATA=(
 MODEL=(
     actor_rollout_ref.model.path=${HF_MODEL_PATH}
     actor_rollout_ref.model.trust_remote_code=True
-    actor_rollout_ref.model.use_remove_padding=False
+    actor_rollout_ref.model.use_remove_padding=True
 )
 
 ALGORITHM=(
@@ -63,7 +63,7 @@ ALGORITHM=(
 )
 
 ACTOR=(
-    actor_rollout_ref.actor.use_dynamic_bsz=False
+    actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
@@ -78,8 +78,7 @@ ACTOR=(
     actor_rollout_ref.actor.checkpoint.save_contents="['model']"
 
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
-    actor_rollout_ref.actor.megatron.use_remove_padding=False
+    actor_rollout_ref.actor.megatron.use_remove_padding=True
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.actor.megatron.context_parallel_size=${CP}
@@ -105,11 +104,16 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+    +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=False
+    
+    +actor_rollout_ref.actor.megatron.override_ddp_config.grad_reduce_in_fp32=False
+    +actor_rollout_ref.actor.megatron.override_ddp_config.overlap_grad_reduce=True
 )
 
 REF=(
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.ref.megatron.context_parallel_size=${CP}
@@ -126,7 +130,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.n=5
     actor_rollout_ref.rollout.dtype=bfloat16
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.ignore_eos=False
     actor_rollout_ref.rollout.enforce_eager=False

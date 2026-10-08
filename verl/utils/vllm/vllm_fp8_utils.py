@@ -94,6 +94,8 @@ def _copy_param_subclass_attrs(dst_param, src_param):
 
 _FP8_PRISTINE_ATTR = "_verl_fp8_pristine"
 _FP8_LIVE_ATTR = "_verl_fp8_live_params"
+# Names of the params a kernel handed back as a rewritten copy with the checkpoint's shape and dtype.
+_FP8_REPACKED_ATTR = "_verl_fp8_repacked"
 
 # ``Fp8LinearMethod`` owns the first group, ``Fp8MoEMethod`` the second. The MoE
 # scale is named ``w13_weight_scale_inv`` under block quant and
@@ -155,6 +157,23 @@ def replace_parameter_preserve_subclass(
         new_data = new_data.data
 
     old_param = getattr(layer, param_name, None)
+    # Some kernel preps return tensors with the checkpoint's shape and dtype -- FlashInfer CUTLASS swaps
+    # the gate/up halves of w13 (weights and block scales), FlashInfer TRT-LLM's MXFP8 path interleaves
+    # and tile-shuffles them -- so the comparison in _layer_needs_fp8_staging cannot tell the live buffer
+    # left checkpoint layout. This call is the one place the rewrite is visible: a same-shaped,
+    # same-typed tensor that is not the old storage.
+    if (
+        param_name in _FP8_REFIT_PARAM_NAMES
+        and isinstance(old_param, torch.nn.Parameter)
+        and tuple(old_param.shape) == tuple(new_data.shape)
+        and old_param.dtype == new_data.dtype
+        and old_param.data_ptr() != new_data.data_ptr()
+    ):
+        repacked = getattr(layer, _FP8_REPACKED_ATTR, None)
+        if repacked is None:
+            repacked = set()
+            setattr(layer, _FP8_REPACKED_ATTR, repacked)
+        repacked.add(param_name)
     param = torch.nn.Parameter(new_data, requires_grad=False)
     _copy_param_subclass_attrs(param, old_param)
     setattr(layer, param_name, param)
@@ -196,18 +215,20 @@ def _record_pristine_fp8_layout(layer, params):
 
 
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
+    repacked = getattr(layer, _FP8_REPACKED_ATTR, None) or ()
     for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
         if not isinstance(param, torch.nn.Parameter):
             continue
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
-        # ROCm's AITER MoE backend permutes the expert weights into its MFMA
-        # layout while leaving shape and dtype untouched, so the comparison
-        # above cannot see it. ``is_shuffled``, which that backend sets on the
-        # repacked parameter, is the only signal that the live buffer is no
-        # longer in checkpoint layout.
-        if getattr(param, "is_shuffled", False):
+        # Some backends permute the expert weights while leaving shape and
+        # dtype untouched, so the comparison above cannot see it. ROCm's AITER
+        # MoE sets ``is_shuffled`` on the repacked parameter; the FlashInfer
+        # preps set nothing, so the patched ``replace_parameter`` records the
+        # rewrite itself (``_FP8_REPACKED_ATTR``). Either is the only signal
+        # that the live buffer is no longer in checkpoint layout.
+        if getattr(param, "is_shuffled", False) or name in repacked:
             return True
     return False
 

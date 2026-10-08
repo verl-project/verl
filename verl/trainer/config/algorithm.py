@@ -138,6 +138,12 @@ class RolloutCorrectionConfig(BaseConfig):
               L = -E[min(r*A, clip(r)*A)] where r = π_current / π_rollout
             Default: "ppo_clip"
 
+        score_centering (bool): Subtract the expected score under the sampler from every token's
+            score, see the score centering reference below. Needs the sampler's top-k log-probs
+            from the rollout (``actor_rollout_ref.rollout.topk_log_probs``). Only with
+            ``bypass_mode=True``, ``loss_type="reinforce"`` and ``rollout_is`` None or "token".
+            Default: False
+
     Example:
         # Create with defaults
         config = RolloutCorrectionConfig()
@@ -160,6 +166,10 @@ class RolloutCorrectionConfig(BaseConfig):
         config = RolloutCorrectionConfig.bypass_pg_geo_rs()             # REINFORCE + Geo-RS
         config = RolloutCorrectionConfig.bypass_pg_geo_rs_seq_tis()     # REINFORCE + Geo-RS + Seq-TIS
         config = RolloutCorrectionConfig.bypass_pg_geo_rs_token_tis()   # REINFORCE + Geo-RS + Token-TIS
+        # Score centering presets (needs rollout.topk_log_probs > 0):
+        config = RolloutCorrectionConfig.bypass_pg_sc()                 # REINFORCE + score centering
+        config = RolloutCorrectionConfig.bypass_pg_token_tis_sc()       # REINFORCE + Token-TIS + score centering
+        config = RolloutCorrectionConfig.bypass_pg_token_icepop_sc()    # REINFORCE + Token-IcePop + score centering
 
         # Decoupled Geometric ratio presets (length-normalized IS ratio)
         config = RolloutCorrectionConfig.decoupled_geo_rs_seq_tis()           # Decoupled Geo-RS + Seq-TIS
@@ -174,6 +184,10 @@ class RolloutCorrectionConfig(BaseConfig):
         Liu, Li, Fu, Wang, Liu, Shen (2025)
         "When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch"
         https://richardli.xyz/rl-collapse
+
+        Marek, Ryabinin (2026)
+        "Score Centering Stabilizes Off-policy Reinforcement Learning"
+        https://arxiv.org/abs/2609.20807
     """
 
     rollout_is: Optional[str] = "sequence"
@@ -183,6 +197,17 @@ class RolloutCorrectionConfig(BaseConfig):
     rollout_rs_threshold: Optional[str | float] = None
     bypass_mode: bool = False
     loss_type: str = "ppo_clip"
+    score_centering: bool = False
+
+    def __post_init__(self):
+        if not self.score_centering:
+            return
+        if not self.bypass_mode or self.loss_type != "reinforce":
+            raise ValueError("score_centering requires bypass_mode=True and loss_type='reinforce'.")
+        if self.rollout_is not in (None, "token"):
+            raise ValueError("score_centering requires rollout_is=None or rollout_is='token'.")
+        if self.rollout_is_batch_normalize:
+            raise ValueError("score_centering requires rollout_is_batch_normalize=False.")
 
     @classmethod
     def decoupled_token_is(cls, threshold: float = 2.0) -> "RolloutCorrectionConfig":
@@ -394,6 +419,58 @@ class RolloutCorrectionConfig(BaseConfig):
             rollout_rs=None,
             bypass_mode=True,
             loss_type="reinforce",
+        )
+
+    @classmethod
+    def bypass_pg_sc(cls) -> "RolloutCorrectionConfig":
+        """Bypass mode with REINFORCE loss and score centering, no IS weights.
+
+        Returns:
+            RolloutCorrectionConfig configured for bypass mode with REINFORCE + score centering
+        """
+        return cls(rollout_is=None, rollout_rs=None, bypass_mode=True, loss_type="reinforce", score_centering=True)
+
+    @classmethod
+    def bypass_pg_token_tis_sc(cls, threshold: float = 2.0) -> "RolloutCorrectionConfig":
+        """Bypass mode with REINFORCE loss, token-level TIS and score centering.
+
+        Args:
+            threshold (float): Upper threshold for IS weights. Default: 2.0
+
+        Returns:
+            RolloutCorrectionConfig configured for bypass mode with REINFORCE + token-level TIS + score centering
+        """
+        return cls(
+            rollout_is="token",
+            rollout_is_threshold=threshold,
+            rollout_rs=None,
+            bypass_mode=True,
+            loss_type="reinforce",
+            score_centering=True,
+        )
+
+    @classmethod
+    def bypass_pg_token_icepop_sc(
+        cls,
+        threshold: float = 5.0,
+        threshold_lower: float = 0.5,
+    ) -> "RolloutCorrectionConfig":
+        """Bypass mode with REINFORCE loss, token-level IcePop and score centering.
+
+        Args:
+            threshold (float): Upper IcePop bound. Default: 5.0
+            threshold_lower (float): Lower IcePop bound. Default: 0.5
+
+        Returns:
+            RolloutCorrectionConfig configured for bypass mode with REINFORCE + token-level IcePop + score centering
+        """
+        return cls(
+            rollout_is="token",
+            rollout_is_threshold=f"{threshold_lower}_{threshold}",
+            rollout_rs=None,
+            bypass_mode=True,
+            loss_type="reinforce",
+            score_centering=True,
         )
 
     @classmethod

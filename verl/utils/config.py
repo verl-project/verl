@@ -85,6 +85,38 @@ def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -
         )
 
 
+def _validate_score_centering_config(config: DictConfig) -> None:
+    algorithm_rc = config.algorithm.get("rollout_correction") or {}
+    actor_rc = config.actor_rollout_ref.actor.policy_loss.get("rollout_correction") or {}
+    if not (algorithm_rc.get("score_centering", False) or actor_rc.get("score_centering", False)):
+        return
+    if not (algorithm_rc.get("score_centering", False) and actor_rc.get("score_centering", False)):
+        raise ValueError(
+            "score centering must be enabled on both algorithm.rollout_correction and "
+            "actor_rollout_ref.actor.policy_loss.rollout_correction."
+        )
+    from verl.trainer.config.algorithm import RolloutCorrectionConfig
+
+    # the actor-side mirror is a plain mapping, so run the dataclass checks on it here
+    RolloutCorrectionConfig(**actor_rc)
+    for key in ("bypass_mode", "loss_type", "rollout_is", "rollout_is_threshold"):
+        if actor_rc.get(key) != algorithm_rc.get(key):
+            raise ValueError(
+                f"score centering requires actor_rollout_ref.actor.policy_loss.rollout_correction.{key} to match "
+                f"algorithm.rollout_correction.{key}."
+            )
+    if not config.trainer.get("use_v1", True):
+        raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
+    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2"):
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp or fsdp2.")
+    if config.actor_rollout_ref.rollout.get("name") != "vllm":
+        raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
+    if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
+        raise ValueError("score centering requires actor_rollout_ref.rollout.topk_log_probs > 0.")
+    if (config.get("distillation") or {}).get("enabled", False):
+        raise ValueError("score centering cannot be combined with distillation.")
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -164,6 +196,7 @@ def validate_config(
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
     _validate_router_replay_config(actor_config, config.algorithm.get("rollout_correction", None))
+    _validate_score_centering_config(config)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:

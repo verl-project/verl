@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/16/2026.
+Last updated: 09/21/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -214,6 +214,15 @@ trainer.v1.separate_async.num_warmup_batches=1
 ```
 
 `num_warmup_batches` also accepts fractional values (see [colocate async](#colocate-async)).
+
+Hybrid replicas use `actor_rollout_ref.rollout.gpu_memory_utilization`. To give dedicated standalone rollout GPUs a different memory budget, set the existing `standalone_gpu_memory_utilization` override:
+
+```bash
+actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+actor_rollout_ref.rollout.standalone_gpu_memory_utilization=0.85
+```
+
+Choose both fractions for the memory available on their respective GPU pools. By default, `standalone_gpu_memory_utilization` follows `gpu_memory_utilization`. Setting it to `null` also falls back to `gpu_memory_utilization`. The override also applies when `actor_rollout_ref.hybrid_engine=False`, and does not change the trainer's or hybrid replicas' configuration.
 
 `separate_async` requires a non-`naive` checkpoint-engine backend such as `nccl`, `nixl`, or `mooncake` for standalone rollout weight synchronization.
 

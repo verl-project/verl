@@ -11,7 +11,6 @@ N_GPUS_TRAINING=${N_GPUS_TRAINING:-$((NUM_GPUS / 2))}
 N_GPUS_ROLLOUT=${N_GPUS_ROLLOUT:-$((NUM_GPUS - N_GPUS_TRAINING))}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-fsdp2}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}
-VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
 ########################### launch ###########################
 # uv (set VERL_USE_UV=0 for system python, as the ascend image does): on GPU this
@@ -141,7 +140,6 @@ elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
         model_engine=megatron \
         "${common_params[@]}" \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-        actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
         actor_rollout_ref.actor.megatron.param_offload=False \
         actor_rollout_ref.actor.megatron.optimizer_offload=False \
         actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP} \

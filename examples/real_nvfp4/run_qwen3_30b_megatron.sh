@@ -154,7 +154,6 @@ ACTOR=(
   actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
   actor_rollout_ref.actor.megatron.sequence_parallel=False
   actor_rollout_ref.actor.megatron.use_mbridge=True
-  actor_rollout_ref.actor.megatron.vanilla_mbridge=False
   actor_rollout_ref.actor.megatron.use_megatron_fsdp=False
   actor_rollout_ref.actor.megatron.router_replay.mode=R3
   actor_rollout_ref.actor.megatron.qat.enable=False

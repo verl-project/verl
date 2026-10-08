@@ -314,6 +314,15 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     )
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
+            # sampler top-k heads for score centering, one row per newly generated token
+            for key in ("response_topk_ids", "response_topk_log_probs"):
+                if key in output.extra_fields:
+                    previous = final_output.extra_fields.get(key)
+                    final_output.extra_fields[key] = (
+                        output.extra_fields[key]
+                        if previous is None
+                        else np.concatenate([previous, output.extra_fields[key]])
+                    )
             final_output.stop_reason = output.stop_reason
 
             # carry the initial prefill's prefix-cache hit count forward

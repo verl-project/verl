@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hash-guarded backport of Megatron-LM #6964 to released Core 0.19.
+"""Hash-guarded backport of Megatron-LM #6964 to released Core 0.19.2.
 
 Upstream: 53abe744b5e8d043a06e54cfaef44cbe23b1e2ca.
 FA2 also ships flash_attn.cute; that namespace alone does not establish FA4

@@ -138,7 +138,7 @@ repatch
 
 | verl 参数 | 功能说明 |
 |:---|:---|
-| `actor_rollout_ref.actor.megatron.use_mbridge` | **MBridge 权重转换** — 启用 mbridge 进行权重格式转换 |
+| `actor_rollout_ref.actor.megatron.use_mbridge` | **Megatron-Bridge 权重转换** — 当前需要保持 `True` |
 | `actor_rollout_ref.actor.megatron.use_dist_checkpointing` | **分布式 checkpoint** — 使用分布式格式保存/加载权重，默认 `False` |
 | `actor_rollout_ref.actor.megatron.dist_checkpointing_path` | **分布式权重路径** — 分布式 checkpoint 加载路径，默认 `null` |
 
@@ -205,15 +205,11 @@ repatch
 
 ## 5. 限制与注意事项
 
-1. **mbridge 与 VPP 互斥**
-   - `actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) **暂不支持同时开启**
-   - 由于 verl 默认开启 mbridge，使用 VPP 时需手动将 `use_mbridge` 置为 `False`
-
-2. **FSDP1 vs FSDP2 差异**
+1. **FSDP1 vs FSDP2 差异**
    - `forward_prefetch` 和 `use_orig_params` 仅适用于 FSDP1
    - FSDP2 为默认推荐版本，API 支持度参照 [昇腾 PyTorch 版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/PyTorchNativeapi/docs/zh/native_apis/pytorch_2-7-1/torch-distributed-fsdp.md)
 
-3. **重计算参数依赖关系**
+2. **重计算参数依赖关系**
    - `recompute_method` 需 `recompute_granularity='full'` 才生效
    - `recompute_num_layers` 需 `recompute_granularity='full'` 才生效
    - 当 `recompute_method='uniform'` 时，`recompute_num_layers` 表示每个重计算单元的 Transformer 层数，需能被当前进程模型层数整除

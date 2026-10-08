@@ -205,7 +205,7 @@ class TestInitFlagResolution:
         with pytest.raises(ValueError, match="'hf_model'"):
             _make_manager(save_contents=["hf_model"], bridge=None)
 
-    def test_hf_model_with_dist_ckpt_when_mbridge(self):
+    def test_hf_model_with_dist_ckpt_when_bridge(self):
         mgr = _make_manager(
             save_contents=["model", "hf_model", "optimizer", "extra"],
             use_dist_checkpointing=True,
@@ -293,8 +293,8 @@ class TestSaveCheckpointDispatch:
         return os.path.join(self.test_dir, f"global_step_{step}")
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_mbridge_split_optimizer_extra(self, mock_save_dc):
-        """With mbridge, optimizer and extra go to SEPARATE dist_ckpt directories; model via bridge."""
+    def test_bridge_split_optimizer_extra(self, mock_save_dc):
+        """With bridge, optimizer and extra go to SEPARATE dist_ckpt directories; model via bridge."""
         mgr = _make_manager(save_contents=["model", "optimizer", "extra"])
         with patch.object(mgr, "_save_transformer_config"):
             mgr.save_checkpoint(self._save_path(), global_step=1)
@@ -305,16 +305,16 @@ class TestSaveCheckpointDispatch:
         assert "rng_state" in calls["extra"]
         # model must NOT be in any dist_ckpt tree (it lives under model/huggingface/)
         assert all("model" not in sd for sd in calls.values())
-        mgr.bridge.save_weights.assert_called_once()
+        mgr.bridge.save_hf_weights.assert_called_once()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_mbridge_model_only_no_dist_ckpt(self, mock_save_dc):
-        """With mbridge and save_contents=['model'], dist_checkpointing is not called."""
+    def test_bridge_model_only_no_dist_ckpt(self, mock_save_dc):
+        """With bridge and save_contents=['model'], dist_checkpointing is not called."""
         mgr = _make_manager(save_contents=["model"])
         mgr.save_checkpoint(self._save_path(), global_step=1)
 
         mock_save_dc.assert_not_called()
-        mgr.bridge.save_weights.assert_called_once()
+        mgr.bridge.save_hf_weights.assert_called_once()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_optimizer_only_writes_only_optimizer_subdir(self, mock_save_dc):
@@ -326,7 +326,7 @@ class TestSaveCheckpointDispatch:
         assert set(calls) == {"optimizer"}
         assert "optimizer" in calls["optimizer"]
         assert "model" not in calls["optimizer"]
-        mgr.bridge.save_weights.assert_not_called()
+        mgr.bridge.save_hf_weights.assert_not_called()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_extra_only(self, mock_save_dc):
@@ -358,17 +358,17 @@ class TestSaveCheckpointDispatch:
         assert "rng_state" in calls["extra"]
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_hf_model_with_mbridge_deduplicates(self, mock_save_dc):
-        """save_contents=['model', 'hf_model'] with mbridge saves model once via bridge."""
+    def test_hf_model_with_bridge_deduplicates(self, mock_save_dc):
+        """save_contents=['model', 'hf_model'] with bridge saves model once via bridge."""
         mgr = _make_manager(save_contents=["model", "hf_model"])
         mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mgr.bridge.save_weights.assert_called_once()
+        mgr.bridge.save_hf_weights.assert_called_once()
         mock_save_dc.assert_not_called()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_hf_model_and_dist_ckpt_saves_both(self, mock_save_dc):
-        """With mbridge + dist_checkpointing, ``model`` and ``hf_model`` write shards and HF tree."""
+        """With bridge + dist_checkpointing, ``model`` and ``hf_model`` write shards and HF tree."""
         mgr = _make_manager(
             save_contents=["model", "hf_model", "optimizer", "extra"],
             use_dist_checkpointing=True,
@@ -376,14 +376,14 @@ class TestSaveCheckpointDispatch:
         with patch.object(mgr, "_save_transformer_config"):
             mgr.save_checkpoint(self._save_path(), global_step=1)
 
-        mgr.bridge.save_weights.assert_called_once()
+        mgr.bridge.save_hf_weights.assert_called_once()
         mock_save_dc.assert_called()
         calls = _collect_save_calls(mock_save_dc)
         assert "model" in calls and "optimizer" in calls and "extra" in calls
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
     def test_peft_adapters_under_model_subdir(self, mock_save_dc):
-        """PEFT adapter shards live under model/dist_ckpt/ even with mbridge; optimizer stays separate."""
+        """PEFT adapter shards live under model/dist_ckpt/ even with bridge; optimizer stays separate."""
         mgr = _make_manager(save_contents=["model", "optimizer"], peft_cls=MagicMock())
 
         with patch.object(mgr, "_maybe_filter_peft_state_dict", side_effect=lambda sd: sd):
@@ -401,7 +401,7 @@ class TestSaveCheckpointDispatch:
         mgr.save_checkpoint(self._save_path(), global_step=1)
 
         mock_save_dc.assert_not_called()
-        mgr.bridge.save_weights.assert_not_called()
+        mgr.bridge.save_hf_weights.assert_not_called()
 
 
 # ===========================================================================
@@ -570,7 +570,7 @@ class TestSaveCheckpointSideEffects:
         return os.path.join(self.test_dir, f"global_step_{step}")
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_hf_config_saved_with_mbridge(self, mock_save_dc):
+    def test_hf_config_saved_with_bridge(self, mock_save_dc):
         mgr = _make_manager(save_contents=["model"])
         mgr.save_checkpoint(self._save_path(), global_step=1)
 
@@ -619,8 +619,8 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
         mgr.model[0].sharded_state_dict.assert_not_called()
 
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
-    def test_model_only_mbridge_does_not_build_model_sd(self, mock_save_dc):
-        """mbridge model save uses bridge.save_weights, not model.sharded_state_dict."""
+    def test_model_only_bridge_does_not_build_model_sd(self, mock_save_dc):
+        """bridge model save uses bridge.save_hf_weights, not model.sharded_state_dict."""
         mgr = _make_manager(save_contents=["model"])
         mgr.save_checkpoint(os.path.join(self.test_dir, "step_1"), global_step=1)
         mgr.model[0].sharded_state_dict.assert_not_called()

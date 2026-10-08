@@ -501,7 +501,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.actor.megatron.distrib_optim_fully_reshardable_mem_efficient` | `false` | 分布式优化器重分片是否内存高效 |
 | `actor_rollout_ref.actor.megatron.seed` | `42` | 随机种子 |
 | `actor_rollout_ref.actor.megatron.use_mbridge` | `true` | 是否启用 Bridge 权重转换 |
-| `actor_rollout_ref.actor.megatron.vanilla_mbridge` | `false` | 是否使用已弃用的老版 mBridge；默认使用 Megatron-Bridge |
 | `actor_rollout_ref.actor.megatron.use_remove_padding` | `true` | 是否移除 padding |
 | `actor_rollout_ref.actor.megatron.forward_only` | `false` | 是否仅前向计算 |
 | `actor_rollout_ref.actor.megatron.dtype` | `bfloat16` | 模型数据类型 |
@@ -608,7 +607,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `checkpoint.save_contents` | `[model, optimizer, extra]` | Checkpoint 保存内容 |
 | `checkpoint.load_contents` | 引用自 `checkpoint.save_contents` | Checkpoint 加载内容 |
 | `checkpoint.async_save` | `false` | 是否异步保存 Checkpoint |
-| `checkpoint.mbridge_config` | `{}` | mBridge 配置 |
 
 #### 1.4.5 QAT 配置
 

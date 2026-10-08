@@ -74,7 +74,6 @@ actor_rollout_ref:
         attention_backend: flash
       override_mcore_model_config: {}
       use_mbridge: true
-      vanilla_mbridge: false
       use_remove_padding: true
       pad_bshd_to_minibatch_max: true
       pad_to_length: false
@@ -146,7 +145,7 @@ actor_rollout_ref:
     shuffle: false
     data_loader_seed: 42
     checkpoint:
-      _target_: verl.workers.config.McoreCheckpointConfig
+      _target_: verl.trainer.config.CheckpointConfig
       save_contents:
       - model
       - optimizer
@@ -154,7 +153,6 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       strict: true
-      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -288,7 +286,6 @@ actor_rollout_ref:
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
       override_mcore_model_config: {}
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
-      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,False}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
       pad_bshd_to_minibatch_max: true
       pad_to_length: ${oc.select:actor_rollout_ref.actor.megatron.pad_to_length,False}
@@ -340,6 +337,7 @@ actor_rollout_ref:
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
     ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
@@ -351,6 +349,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 256
+    ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -393,6 +392,7 @@ actor_rollout_ref:
       format: hermes
       num_repeat_rollouts: null
     calculate_log_probs: true
+    topk_log_probs: 0
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -639,7 +639,6 @@ critic:
       attention_backend: flash
     override_mcore_model_config: {}
     use_mbridge: true
-    vanilla_mbridge: false
     use_remove_padding: true
     pad_bshd_to_minibatch_max: true
     pad_to_length: false
@@ -690,14 +689,13 @@ critic:
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
   loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
-    _target_: verl.workers.config.McoreCheckpointConfig
+    _target_: verl.trainer.config.CheckpointConfig
     save_contents:
     - model
     - optimizer
     - extra
     load_contents: ${.save_contents}
     async_save: false
-    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
@@ -925,6 +923,7 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
+    score_centering: false
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0

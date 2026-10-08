@@ -45,6 +45,9 @@ dtype: bfloat16
 # Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
 
+# Fraction of GPU memory used by standalone rollout replicas; defaults to the shared rollout budget.
+standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
+
 # Whether to ignore EOS and continue generating after EOS is hit.
 ignore_eos: False
 
@@ -82,6 +85,11 @@ max_model_len: null
 
 # max length of sequences
 max_num_seqs: 256
+
+# Ray max_concurrency of the rollout server actor. Raise it above the peak number of
+# in-flight generate requests per replica, otherwise control calls (wake_up, weight sync)
+# can be starved.
+ray_actor_max_concurrency: 1024
 
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
 enable_chunked_prefill: True
@@ -235,6 +243,10 @@ multi_turn:
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: True
+
+# Sampler top-k log-probs per generated token, needed by algorithm.rollout_correction.score_centering.
+# 0 disables; the paper uses 128 (32 also matches). vLLM only for now, single-turn agent loop only.
+topk_log_probs: 0
 
 # [Experimental] agent loop based rollout configs
 agent:

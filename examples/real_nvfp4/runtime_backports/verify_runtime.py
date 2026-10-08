@@ -32,7 +32,8 @@ def main():
         "transformer-engine-cu13": "2.18.0",
         "transformer-engine-torch": "2.18.0",
         "vllm": "0.29.0",
-        "megatron-core": "0.19.0",
+        "megatron-core": "0.19.2",
+        "megatron-bridge": "0.6.2",
     }
     actual_versions = {name: version(name) for name in expected_versions}
     if actual_versions != expected_versions:

@@ -25,7 +25,6 @@ from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
 from verl.utils.device import is_npu_available
-from verl.utils.model import CausalLMOutputForPPO
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -223,104 +222,6 @@ def postprocess_packed_seqs(
         output_new[i, attention_mask[i]] = tmp[:s_len]
 
     return output_new
-
-
-def preprocess_bshd(
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    position_ids: torch.Tensor,
-    sequence_parallel: bool = False,
-    pre_process: bool = True,
-):
-    """
-    Remove left padding from input_ids, attention_mask and position_ids
-    return new_input_ids, new_attention_mask, new_position_ids
-    """
-    assert attention_mask.ndim == 2
-    assert position_ids.ndim == 2
-    cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
-    batch_size = input_ids.shape[0]
-    shape = list(input_ids.shape)  # batch_size, seq_len,...
-    seq_lens = attention_mask.sum(dim=1)
-    seq_len = seq_lens.max().item()
-    if sequence_parallel:
-        sp_world_size = mpu.get_tensor_model_parallel_world_size()
-        pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
-        seq_len = seq_len + pad_size
-    shape[1] = seq_len
-    if pre_process:
-        new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
-    new_attention_mask = torch.zeros(
-        dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len)
-    )
-    new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
-    for i in range(batch_size):
-        if pre_process:
-            new_input_ids[i, : seq_lens[i]] = input_ids[i, attention_mask[i]]
-        new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
-        new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
-    if pre_process:
-        return new_input_ids, new_attention_mask, new_position_ids
-    else:
-        return input_ids, new_attention_mask, new_position_ids
-
-
-def postprocess_bshd(
-    result,
-    attention_mask: torch.Tensor,
-    original_attention_mask: torch.Tensor,
-    origin_seqlen: int,
-    post_process: bool = True,
-):
-    """
-    Recover left padding from result
-    return result
-    """
-    if not post_process:
-        return result
-    shape = list(result.shape)
-    batch_size = shape[0]
-    shape[1] = origin_seqlen
-    new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
-    for i in range(batch_size):
-        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
-    return new_result
-
-
-def postprocess_packed_seqs_for_dict_output(
-    labels_mask: torch.Tensor,
-    output: CausalLMOutputForPPO,
-    packed_seq_params: PackedSeqParams,
-    attention_mask: torch.Tensor,
-    batch_size: int,
-    seq_len: int,
-    post_process: bool = True,
-) -> dict[str, torch.Tensor]:
-    """_summary_
-    For fused kernels, the output is a dictionary with keys like 'log_probs', 'entropy', etc.
-    This function post-processes each tensor in the output dictionary.
-    Args:
-        output (CausalLMOutputForPPO): _description_
-        packed_seq_params (PackedSeqParams): _description_
-        attention_mask (torch.Tensor): _description_
-        batch_size (int): _description_
-        seq_len (int): _description_
-        post_process (bool, optional): _description_. Defaults to True.
-    Returns:
-        CausalLMOutputForPPO: _description_
-    """
-    ret = {}
-    output.entropy = output.entropy.view(1, -1)
-    output.log_probs = output.log_probs.view(1, -1)
-    output.log_probs = output.log_probs.masked_fill(~labels_mask, 0.0)
-    ret["entropy"] = postprocess_packed_seqs(
-        output.entropy, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-    )
-    ret["log_probs"] = postprocess_packed_seqs(
-        output.log_probs, packed_seq_params, attention_mask, batch_size, seq_len, post_process=post_process
-    )
-    return ret
 
 
 def preprocess_for_mindspeed(input_ids, cu_seqlens_padded, seqlens_in_batch_padded, batch_size):
@@ -862,25 +763,95 @@ def postprocess_bshd_engine(
     return output_new_tensor
 
 
-def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
-    seqlens_in_batch = input_ids.offsets().diff()
+def build_vlm_attn_mask_thd(
+    input_ids: torch.Tensor,
+    pad_token_id: int = None,
+    packed_seq_params: PackedSeqParams | None = None,
+):
+    """Build dense VLM inputs for a THD forward.
+
+    The Megatron-Bridge VLM wrapper repacks these dense inputs after inserting
+    vision embeddings. When THD bucket padding is enabled, use the padded
+    sequence lengths from the outer metadata so Bridge reconstructs the same
+    physical layout that the language model receives.
+    """
+    if packed_seq_params is None or packed_seq_params.cu_seqlens_q_padded is None:
+        padded_lengths = input_ids.offsets().diff()
+    else:
+        padded_lengths = packed_seq_params.cu_seqlens_q_padded.diff()
 
     # Align to TP/CP so ``combined_embeddings`` is divisible by tp_size before
     # the SP scatter. Mirrors ``build_vlm_attn_mask_bshd``.
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
-    max_seqlen = int(seqlens_in_batch.max().item())
+    max_seqlen = int(padded_lengths.max().item())
     if align_size > 1:
         max_seqlen += (align_size - max_seqlen % align_size) % align_size
 
     batch_size = input_ids.shape[0]
     input_ids_with_pad = input_ids.to_padded_tensor(pad_token_id, output_size=(batch_size, max_seqlen))
     attention_mask = torch.zeros_like(input_ids_with_pad, dtype=torch.bool)
-    for i, seqlen in enumerate(seqlens_in_batch):
+    for i, seqlen in enumerate(padded_lengths):
         attention_mask[i, :seqlen] = True
 
     return input_ids_with_pad, attention_mask
+
+
+def is_mrope_position_ids(position_ids: torch.Tensor | None) -> bool:
+    """Whether ``position_ids`` is verl's nested ``(bsz, 4, j)`` (text, t, h, w) MRoPE layout."""
+    return (
+        isinstance(position_ids, torch.Tensor)
+        and position_ids.is_nested
+        and position_ids.dim() == 3
+        and position_ids.size(1) == 4
+    )
+
+
+def accepts_packed_thd_vlm_inputs(model) -> bool:
+    """Whether the Megatron-Bridge VLM takes rank-local (CP-sharded) THD inputs.
+
+    Only Qwen3-VL-family models (including Qwen3.5-VL) in Megatron-Bridge >= 0.6 do; other VLMs
+    still need dense BSHD inputs that the model packs itself.
+    """
+    from verl.utils.megatron_utils import unwrap_model
+
+    try:
+        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
+    except ImportError:
+        return False
+    return hasattr(qwen3_vl_model, "_is_packed_input_pre_sharded") and isinstance(
+        unwrap_model(model), qwen3_vl_model.Qwen3VLModel
+    )
+
+
+def preprocess_vlm_thd_engine(
+    model,
+    input_ids: torch.Tensor,
+    input_ids_rmpad: torch.Tensor,
+    packed_seq_params: PackedSeqParams,
+    position_ids: torch.Tensor | None,
+    pad_token_id: int,
+    **thd_kwargs,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Build ``(input_ids, attention_mask, position_ids)`` for a VLM THD forward.
+
+    ``input_ids_rmpad`` / ``packed_seq_params`` come from ``preprocess_thd_engine(input_ids,
+    pre_process=True, **thd_kwargs)``. VLMs that take rank-local THD inputs get them as-is plus
+    verl's ``(bsz, 4, j)`` text/t/h/w positions repacked to Bridge's ``(3, 1, T)`` t/h/w in the same
+    row layout; other VLMs get dense BSHD inputs that the model repacks itself.
+    """
+    if accepts_packed_thd_vlm_inputs(model) and is_mrope_position_ids(position_ids):
+        mrope_nested = torch.nested.nested_tensor_from_jagged(
+            position_ids.values()[1:].transpose(0, 1).contiguous(), offsets=input_ids.offsets()
+        )
+        mrope_rmpad = preprocess_thd_engine(mrope_nested, pre_process=True, **thd_kwargs)[0]
+        return input_ids_rmpad, None, mrope_rmpad.permute(2, 0, 1).contiguous()
+
+    input_ids_bshd, attention_mask = build_vlm_attn_mask_thd(
+        input_ids, pad_token_id, packed_seq_params=packed_seq_params
+    )
+    return input_ids_bshd, attention_mask, None
 
 
 def build_vlm_attn_mask_bshd(

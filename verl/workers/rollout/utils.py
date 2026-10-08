@@ -138,6 +138,28 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
+def extract_response_topk_logprobs(logprobs, k: int) -> tuple[list[float], np.ndarray, np.ndarray]:
+    """Sampled-token log-probs and the sampler top-k head per generated token.
+
+    ``logprobs`` is a vLLM ``FlatLogprobs`` (``SamplingParams(flat_logprobs=True)``), which stores
+    ``[sampled, top-1, ..., top-k]`` for every position in flat lists. Reshaping them avoids
+    rebuilding one Logprob dict per position on the server event loop, and numpy arrays avoid
+    shipping millions of Python scalars through Ray.
+
+    Returns:
+        Tuple containing:
+            sampled_log_probs: Sampled-token log-probs, length T.
+            ids: Top-k token ids ordered by rank, shape (T, k), dtype int32.
+            log_probs: Top-k log-probs matching ``ids``, shape (T, k), dtype float32.
+    """
+    num_tokens, width = len(logprobs), k + 1
+    if len(logprobs.token_ids) != num_tokens * width:
+        raise ValueError(f"expected {width} logprob entries per generated token, got {len(logprobs.token_ids)} total")
+    ids = np.asarray(logprobs.token_ids, dtype=np.int32).reshape(num_tokens, width)
+    log_probs = np.asarray(logprobs.logprobs, dtype=np.float32).reshape(num_tokens, width)
+    return log_probs[:, 0].tolist(), ids[:, 1:].copy(), log_probs[:, 1:].copy()
+
+
 def _get_rollout_targets(config_file: str, server_addresses: list[str]) -> list[str]:
     """Merge new rollout server addresses into the existing Prometheus rollout targets."""
     try:

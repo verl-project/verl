@@ -250,7 +250,7 @@ class MindSpeedFeature:
 | verl参数 | 简介|
 | --- | --- |
 | `actor_rollout_ref.actor.megatron.optimizer_offload` |是否卸载模型优化器到CPU，默认值为False|
-| `actor_rollout_ref.actor.megatron.use_mbridge` |是否启用 mbridge：为 True（默认）时 engine 会构造 `bridge` 并交给 checkpoint manager，从而可读写 `model/huggingface/`；`save_contents` / `load_contents` 含 `hf_model` 时 manager 要求 `bridge` 非空（通常即此项为 True）。可与 `use_dist_checkpointing` 同时开启，在同一 checkpoint 中同时写入 HF 树与 `model/dist_ckpt/` 分片。为 False 时一般无 `hf_model`；仅 `model` 槽位走 `dist_checkpointing` 时需配合 `use_dist_checkpointing=True`|
+| `actor_rollout_ref.actor.megatron.use_mbridge` |引擎使用 Megatron-Bridge 构造模型并转换 HuggingFace 权重，昇腾适配由 MindSpeed 和 MindSpeed-Bridge 提供。可与 `use_dist_checkpointing` 同时开启。|
 | `actor_rollout_ref.actor.megatron.param_offload` |是否卸载模型权重到CPU，默认值为False|
 | `actor_rollout_ref.actor.megatron.tensor_model_parallel_size` | 张量并行大小；默认值为1。|
 | `actor_rollout_ref.actor.megatron.pipeline_model_parallel_size`  |流水并行大小，默认值为1|
@@ -273,8 +273,6 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu` |是否使用融合swiglu，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` |第一个pipeline stage 的层数，默认值为none|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage` |最后一个pipeline stage 的层数，默认值为none|
-
-注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge，使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。
 
 ### 3. VeOmni
 

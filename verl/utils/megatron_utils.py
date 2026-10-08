@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from megatron.core import ModelParallelConfig, mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
@@ -37,11 +36,8 @@ from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelpe
 from megatron.core.utils import get_attr_wrapped_model
 from transformers import PretrainedConfig
 
-import verl.utils.megatron.tensor_parallel as tp_utils
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
-from verl.utils.model import normalize_model_name
-from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
 logger = logging.getLogger(__file__)
@@ -339,7 +335,6 @@ class McoreModuleWrapperConfig:
     """Configuration for Mcore module wrapper."""
 
     is_value_model: bool = False
-    share_embeddings_and_output_weights: bool = False
     wrap_with_ddp: bool = True
     use_distributed_optimizer: bool = True
     use_layer_wise_distributed_optimizer: bool = False
@@ -348,7 +343,6 @@ class McoreModuleWrapperConfig:
 
 def make_megatron_module(
     wrap_config: McoreModuleWrapperConfig,
-    tf_config: TransformerConfig,
     hf_config: PretrainedConfig,
     bridge: Any = None,
     provider: Any = None,
@@ -369,190 +363,131 @@ def make_megatron_module(
     if override_model_config is None:
         override_model_config = {}
 
-    if bridge is not None:
-        if provider is None:
-            from verl.models.mcore.mbridge import freeze_moe_router, make_value_model
+    if bridge is None or provider is None:
+        raise ValueError("Megatron-Bridge and its model provider are required")
 
-            value_model_hook = make_value_model
-        else:
-            from verl.models.mcore.bridge import freeze_moe_router, make_value_model
+    from verl.models.mcore.bridge import freeze_moe_router, make_value_model
 
-            hidden_size = get_hf_config_attr(hf_config, "hidden_size")
-            value_model_hook = make_value_model(hidden_size, provider.sequence_parallel)
+    hidden_size = get_hf_config_attr(hf_config, "hidden_size")
+    value_model_hook = make_value_model(hidden_size, provider.sequence_parallel)
+    post_model_creation_callbacks = []
+    if wrap_config.is_value_model:
+        post_model_creation_callbacks.append(value_model_hook)
+    if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
+        post_model_creation_callbacks.append(freeze_moe_router)
 
-        post_model_creation_callbacks = []
-        if wrap_config.is_value_model:
-            post_model_creation_callbacks.append(value_model_hook)
-        if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
-            post_model_creation_callbacks.append(freeze_moe_router)
-        if provider is not None:
-            # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
-            # BEFORE wrapping the model in DDP. This is required because:
-            # 1. PEFT freezes base model parameters (requires_grad=False)
-            # 2. DDP must be aware of which parameters are trainable when building gradient buckets
-            # 3. The distributed optimizer must only track trainable (adapter) parameters
-            # See Megatron-Bridge docs: training/peft.md
+    # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
+    # BEFORE wrapping the model in DDP. This is required because:
+    # 1. PEFT freezes base model parameters (requires_grad=False)
+    # 2. DDP must be aware of which parameters are trainable when building gradient buckets
+    # 3. The distributed optimizer must only track trainable (adapter) parameters
+    # See Megatron-Bridge docs: training/peft.md
 
-            # Register PEFT transformation as pre-wrap hook if peft_cls is specified
-            # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
-            if peft_cls is not None:
-                from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+    # Register PEFT transformation as pre-wrap hook if peft_cls is specified
+    # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
+    if peft_cls is not None:
+        from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
 
-                from verl.utils.megatron_peft_utils import print_adapter_info
+        from verl.utils.megatron_peft_utils import print_adapter_info
 
-                provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
+        provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
 
-                adapter_path = peft_config.get("adapter_path", None)
-                if adapter_path:
+        adapter_path = peft_config.get("adapter_path", None)
+        if adapter_path:
 
-                    def adapter_checkpoint_hook(model):
-                        print(f"Loading adapter weights from: {adapter_path}")
-                        load_peft_adapter_checkpoint(
-                            model,
-                            adapter_path,
-                            peft=peft_cls,
-                            strict=False,
-                        )
-                        return model
-
-                    provider.register_pre_wrap_hook(adapter_checkpoint_hook)
-
-                def peft_info_hook(model):
-                    if torch.distributed.get_rank() == 0:
-                        print_adapter_info(model)
-                    return model
-
-                provider.register_pre_wrap_hook(peft_info_hook)
-
-            # Register post-creation callbacks (make_value_model, freeze_moe_router) as pre-wrap hooks
-            for callback in post_model_creation_callbacks:
-                provider.register_pre_wrap_hook(callback)
-
-            layer_wise_ddp = wrap_config.wrap_with_ddp and wrap_config.use_layer_wise_distributed_optimizer
-            if layer_wise_ddp:
-                if wrap_config.use_megatron_fsdp:
-                    raise ValueError(
-                        "Muon layer-wise distributed optimizer is incompatible with Megatron FSDP. "
-                        "Set use_megatron_fsdp=False or disable use_layer_wise_distributed_optimizer."
-                    )
-                _assert_muon_layer_wise_ddp_supported()
-
-            # Create DDP config if needed
-
-            # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
-            # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
-            try:
-                from megatron.bridge.training.utils.config_utils import create_ddp_config
-
-                ddp_config = create_ddp_config(
-                    wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
-                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-                    use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-                    overrides=override_ddp_config,
-                )
-            except ImportError:
-                ddp_config = None
-                if wrap_config.wrap_with_ddp and not layer_wise_ddp:
-                    from megatron.bridge.training.config import DistributedDataParallelConfig
-
-                    ddp_config_dict = {
-                        "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
-                    }
-                    if wrap_config.use_megatron_fsdp:
-                        ddp_config_dict["use_distributed_optimizer"] = True
-                        ddp_config_dict.setdefault("check_for_nan_in_grad", True)
-                        ddp_config_dict.setdefault("use_megatron_fsdp", True)
-                        ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
-                        ddp_config_dict.setdefault("overlap_grad_reduce", True)
-                    if override_ddp_config is not None:
-                        ddp_config_dict.update(override_ddp_config)
-                    ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
-                    ddp_config.finalize()
-
-            # Now call provide_distributed_model with all hooks registered
-            # Hooks will be applied automatically before DDP wrapping
-            model = provider.provide_distributed_model(
-                wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
-                ddp_config=ddp_config,
-                fp16=provider.fp16,
-                bf16=provider.bf16,
-                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-            )
-
-            if layer_wise_ddp:
-                if not isinstance(model, list):
-                    model = [model]
-                bridge_tf_config = get_model_config(model[0])
-                model = wrap_model_chunks_with_layerwise_aware_ddp(
+            def adapter_checkpoint_hook(model):
+                print(f"Loading adapter weights from: {adapter_path}")
+                load_peft_adapter_checkpoint(
                     model,
-                    bridge_tf_config,
-                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-                    use_layer_wise_distributed_optimizer=True,
-                    override_ddp_config=override_ddp_config,
+                    adapter_path,
+                    peft=peft_cls,
+                    strict=False,
                 )
+                return model
 
-            # Extract TransformerConfig from the created model
-            tf_config = get_model_config(model[0] if isinstance(model, list) else model)
-        else:
-            # Build ddp_config dict with use_distributed_optimizer, same as provider path
-            ddp_config = None
-            if wrap_config.wrap_with_ddp:
-                ddp_config_dict = {
-                    "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
-                }
-                if override_ddp_config is not None:
-                    ddp_config_dict.update(override_ddp_config)
-                ddp_config = ddp_config_dict
+            provider.register_pre_wrap_hook(adapter_checkpoint_hook)
 
-            model = bridge.get_model(
-                post_model_creation_callbacks=post_model_creation_callbacks,
-                wrap_with_ddp=wrap_config.wrap_with_ddp and not wrap_config.use_layer_wise_distributed_optimizer,
-                fp16=tf_config.fp16,
-                bf16=tf_config.bf16,
-                ddp_config=ddp_config,
+        def peft_info_hook(model):
+            if torch.distributed.get_rank() == 0:
+                print_adapter_info(model)
+            return model
+
+        provider.register_pre_wrap_hook(peft_info_hook)
+
+    # Register post-creation callbacks (make_value_model, freeze_moe_router) as pre-wrap hooks
+    for callback in post_model_creation_callbacks:
+        provider.register_pre_wrap_hook(callback)
+
+    layer_wise_ddp = wrap_config.wrap_with_ddp and wrap_config.use_layer_wise_distributed_optimizer
+    if layer_wise_ddp:
+        if wrap_config.use_megatron_fsdp:
+            raise ValueError(
+                "Muon layer-wise distributed optimizer is incompatible with Megatron FSDP. "
+                "Set use_megatron_fsdp=False or disable use_layer_wise_distributed_optimizer."
             )
-            if wrap_config.wrap_with_ddp and wrap_config.use_layer_wise_distributed_optimizer:
-                if not isinstance(model, list):
-                    model = [model]
-                mbridge_tf_config = get_model_config(model[0])
-                model = wrap_model_chunks_with_layerwise_aware_ddp(
-                    model,
-                    mbridge_tf_config,
-                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-                    use_layer_wise_distributed_optimizer=True,
-                    override_ddp_config=override_ddp_config,
-                )
+        _assert_muon_layer_wise_ddp_supported()
 
-        if isinstance(tf_config, MLATransformerConfig):
-            # Keep the same behavior as hf_to_mcore_config_dpskv3
-            from verl.models.mcore.patch import apply_patch
+    # Create DDP config if needed
 
-            apply_patch()
-    else:
+    # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
+    # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
+    try:
+        from megatron.bridge.training.utils.config_utils import create_ddp_config
 
-        def megatron_model_provider(pre_process, post_process, vp_stage=None):
-            from verl.models.mcore import init_mcore_model
-
-            parallel_model = init_mcore_model(
-                tf_config,
-                hf_config,
-                pre_process,
-                post_process,
-                share_embeddings_and_output_weights=wrap_config.share_embeddings_and_output_weights,
-                value=wrap_config.is_value_model,
-                freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False),
-                vp_stage=vp_stage,
-            )
-            parallel_model.to(get_device_name())
-            return parallel_model
-
-        model = get_model(
-            megatron_model_provider,
-            wrap_with_ddp=wrap_config.wrap_with_ddp,
+        ddp_config = create_ddp_config(
+            wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
             use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-            use_layer_wise_distributed_optimizer=wrap_config.use_layer_wise_distributed_optimizer,
+            use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+            overrides=override_ddp_config,
+        )
+    except ImportError:
+        ddp_config = None
+        if wrap_config.wrap_with_ddp and not layer_wise_ddp:
+            from megatron.bridge.training.config import DistributedDataParallelConfig
+
+            ddp_config_dict = {
+                "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
+            }
+            if wrap_config.use_megatron_fsdp:
+                ddp_config_dict["use_distributed_optimizer"] = True
+                ddp_config_dict.setdefault("check_for_nan_in_grad", True)
+                ddp_config_dict.setdefault("use_megatron_fsdp", True)
+                ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
+                ddp_config_dict.setdefault("overlap_grad_reduce", True)
+            if override_ddp_config is not None:
+                ddp_config_dict.update(override_ddp_config)
+            ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
+            ddp_config.finalize()
+
+    # Now call provide_distributed_model with all hooks registered
+    # Hooks will be applied automatically before DDP wrapping
+    model = provider.provide_distributed_model(
+        wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
+        ddp_config=ddp_config,
+        fp16=provider.fp16,
+        bf16=provider.bf16,
+        use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+    )
+
+    if layer_wise_ddp:
+        if not isinstance(model, list):
+            model = [model]
+        bridge_tf_config = get_model_config(model[0])
+        model = wrap_model_chunks_with_layerwise_aware_ddp(
+            model,
+            bridge_tf_config,
+            use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+            use_layer_wise_distributed_optimizer=True,
             override_ddp_config=override_ddp_config,
         )
+
+    # Extract TransformerConfig from the created model
+    tf_config = get_model_config(model[0] if isinstance(model, list) else model)
+    if isinstance(tf_config, MLATransformerConfig):
+        # Keep the same behavior as hf_to_mcore_config_dpskv3
+        from verl.models.mcore.patch import apply_patch
+
+        apply_patch()
     return model, tf_config
 
 
@@ -578,62 +513,6 @@ def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
     if not return_list:
         return unwrapped_model[0]
     return unwrapped_model
-
-
-def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerConfig:
-    """[Deprecated] convert config
-
-    Args:
-        hf_config (PretrainedConfig): _description_
-        megatron_config (_type_): _description_
-
-    Returns:
-        TransformerConfig: _description_
-    """
-
-    warnings.warn("[deprecated] use config converter for more model support", stacklevel=2)
-    print(f"megatron config {megatron_config}")
-    dt = PrecisionType.to_dtype(megatron_config.params_dtype)
-    print(f"pipeline_dtype=megatron_config {dt}")
-    qkv_bias = True if "Qwen2ForCausalLM" in hf_config.architectures else getattr(hf_config, "attention_bias", False)
-    overlap_p2p_comm = (
-        mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-        and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
-    )
-    batch_p2p_comm = False
-    transformer_config = TransformerConfig(
-        num_layers=hf_config.num_hidden_layers,
-        hidden_size=hf_config.hidden_size,
-        num_attention_heads=hf_config.num_attention_heads,
-        num_query_groups=hf_config.num_key_value_heads,
-        ffn_hidden_size=hf_config.intermediate_size,
-        #    max_position_embeddings=hf_config.max_position_embeddings,
-        activation_func=F.silu,
-        normalization="RMSNorm",
-        #    rotary_percent=False, # default,
-        gated_linear_unit=True,  # for llama
-        use_cpu_initialization=True,
-        apply_residual_connection_post_layernorm=False,  # check what's this mean
-        add_bias_linear=False,
-        tensor_model_parallel_size=mpu.get_tensor_model_parallel_world_size(),
-        pipeline_model_parallel_size=mpu.get_pipeline_model_parallel_world_size(),
-        virtual_pipeline_model_parallel_size=mpu.get_virtual_pipeline_model_parallel_world_size(),
-        context_parallel_size=mpu.get_context_parallel_world_size(),
-        overlap_p2p_comm=overlap_p2p_comm,
-        batch_p2p_comm=batch_p2p_comm,
-        pipeline_dtype=dt,
-        params_dtype=dt,
-        sequence_parallel=mpu.get_tensor_model_parallel_world_size() > 1,
-        variable_seq_lengths=True,
-        masked_softmax_fusion=True,
-        moe_token_dispatcher_type="alltoall",
-        attention_dropout=hf_config.attention_dropout,
-        hidden_dropout=getattr(hf_config, "hidden_dropout", 0.0),
-        add_qkv_bias=qkv_bias,
-        bf16=dt is torch.bfloat16,
-    )
-
-    return transformer_config
 
 
 def mcore_model_parallel_config(
@@ -1014,8 +893,8 @@ def load_megatron_optimizer(optimizers):
 #     ├── ckpt_contents.json           # manifest (authoritative mapping)
 #     ├── transformer_config.json      # rank-0, when 'extra' is saved
 #     ├── model/
-#     │   ├── huggingface/             # mbridge-saved HF weights + config + tokenizer
-#     │   └── dist_ckpt/               # Megatron sharded model shards (mbridge off or PEFT)
+#     │   ├── huggingface/             # Megatron-Bridge HF weights + config + tokenizer
+#     │   └── dist_ckpt/               # Megatron sharded model or PEFT adapter shards
 #     ├── optimizer/
 #     │   └── dist_ckpt/               # optimizer state + lr_scheduler
 #     └── extra/
@@ -1058,7 +937,7 @@ def get_extra_checkpoint_path(checkpoint_path):
 
 
 def get_model_dist_checkpoint_path(checkpoint_path):
-    """``model/dist_ckpt/`` — used when mbridge is disabled or for PEFT adapter shards."""
+    """``model/dist_ckpt/`` — Megatron model or PEFT adapter shards."""
     p = os.path.join(get_model_checkpoint_path(checkpoint_path), _DIST_CKPT_SUBDIR)
     local_mkdir_safe(p)
     return p
@@ -1145,436 +1024,6 @@ def get_dist_checkpoint_path(checkpoint_path):  # pragma: no cover - back-compat
         "get_optimizer_dist_checkpoint_path, get_extra_dist_checkpoint_path. "
         "To migrate an old checkpoint, run scripts/migrate_megatron_checkpoint_layout.py."
     )
-
-
-def convert_megatron_model_to_transformers_model(
-    name,
-    param,
-    config: PretrainedConfig,
-    tp_size: int,
-    num_query_groups: int,
-    convert_qkv_gate_up_by_trunk_concat=False,
-):
-    """Convert megatron model to transformers model."""
-    new_params = {}
-
-    def convert_qkv_shard(full_tensor, q_name, k_name, v_name):
-        nonlocal config
-        nonlocal tp_size
-        nonlocal num_query_groups
-
-        q_shard_list = []
-        k_shard_list = []
-        v_shard_list = []
-        hidden_size_per_head = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-
-        if config.num_key_value_heads >= tp_size:
-            q_size_tp = hidden_size_per_head * config.num_attention_heads // tp_size
-            kv_size_tp = hidden_size_per_head * config.num_key_value_heads // tp_size
-            total_size = q_size_tp + 2 * kv_size_tp
-            for i in range(tp_size):
-                num_query_groups_per_partition = num_query_groups // tp_size
-                qkv_part = full_tensor[i * total_size : (i + 1) * total_size]
-                q_size_chunk = q_size_tp // num_query_groups_per_partition
-                kv_size_chunk = kv_size_tp // num_query_groups_per_partition
-                for qkv_part_chunk in qkv_part.chunk(num_query_groups_per_partition):
-                    q_part = qkv_part_chunk[:q_size_chunk]
-                    k_part = qkv_part_chunk[q_size_chunk : q_size_chunk + kv_size_chunk]
-                    v_part = qkv_part_chunk[q_size_chunk + kv_size_chunk :]
-                    q_shard_list.append(q_part)
-                    k_shard_list.append(k_part)
-                    v_shard_list.append(v_part)
-        else:
-            q_size_tp = hidden_size_per_head * config.num_attention_heads // tp_size
-            kv_size_tp = hidden_size_per_head
-            total_size = q_size_tp + 2 * kv_size_tp
-            for i in range(tp_size):
-                num_query_groups_per_partition = num_query_groups // tp_size
-                qkv_part = full_tensor[i * total_size : (i + 1) * total_size]
-                q_size_chunk = q_size_tp // num_query_groups_per_partition
-                kv_size_chunk = kv_size_tp // num_query_groups_per_partition
-                for qkv_part_chunk in qkv_part.chunk(num_query_groups_per_partition):
-                    q_part = qkv_part_chunk[:q_size_chunk]
-                    k_part = qkv_part_chunk[q_size_chunk : q_size_chunk + kv_size_chunk]
-                    v_part = qkv_part_chunk[q_size_chunk + kv_size_chunk :]
-                    q_shard_list.append(q_part)
-                    if i * config.num_key_value_heads % tp_size == 0:
-                        k_shard_list.append(k_part)
-                        v_shard_list.append(v_part)
-
-        new_params[q_name] = torch.cat(q_shard_list, dim=0)
-        new_params[k_name] = torch.cat(k_shard_list, dim=0)
-        new_params[v_name] = torch.cat(v_shard_list, dim=0)
-
-    def convert_gate_up_shard(full_tensor, gate_name, up_name):
-        nonlocal config
-        nonlocal tp_size
-
-        intermediate_size_tp = config.intermediate_size // tp_size
-        gate_weight_list = []
-        up_weight_list = []
-        for i in range(tp_size):
-            gate_up_weight_tp = full_tensor[intermediate_size_tp * 2 * i : intermediate_size_tp * 2 * (i + 1)]
-            gate_weight_tp = gate_up_weight_tp[:intermediate_size_tp]
-            up_weight_tp = gate_up_weight_tp[intermediate_size_tp:]
-            gate_weight_list.append(gate_weight_tp)
-            up_weight_list.append(up_weight_tp)
-
-        new_params[gate_name] = torch.cat(gate_weight_list, dim=0)
-        new_params[up_name] = torch.cat(up_weight_list, dim=0)
-
-    if name == "embedding.word_embeddings.weight":
-        new_params["model.embed_tokens.weight"] = param
-    elif "self_attention" in name:
-        splitted_name = name.split(".")
-        layer_number = splitted_name[2]
-        component = splitted_name[4]
-        param_type = splitted_name[5]
-        if component == "linear_proj":
-            new_params[f"model.layers.{layer_number}.self_attn.o_proj.weight"] = param
-        elif component == "linear_qkv" and not isinstance(param, list):
-            if param_type == "layer_norm_weight":
-                new_params[f"model.layers.{layer_number}.input_layernorm.weight"] = param
-            else:
-                if convert_qkv_gate_up_by_trunk_concat:
-                    convert_qkv_shard(
-                        param,
-                        f"model.layers.{layer_number}.self_attn.q_proj.{param_type}",
-                        f"model.layers.{layer_number}.self_attn.k_proj.{param_type}",
-                        f"model.layers.{layer_number}.self_attn.v_proj.{param_type}",
-                    )
-                else:
-                    new_params[f"model.layers.{layer_number}.self_attn.qkv_proj.{param_type}"] = param
-        elif component == "q_layernorm" or component == "k_layernorm":
-            hf_component = component.replace("layer", "")
-            new_params[f"model.layers.{layer_number}.self_attn.{hf_component}.weight"] = param
-        else:
-            assert isinstance(param, list) and len(param) == 3
-            assert param_type == "weight" or param_type == "bias"
-            new_params[f"model.layers.{layer_number}.self_attn.q_proj.{param_type}"] = param[0]
-            new_params[f"model.layers.{layer_number}.self_attn.k_proj.{param_type}"] = param[1]
-            new_params[f"model.layers.{layer_number}.self_attn.v_proj.{param_type}"] = param[2]
-    elif "mlp" in name:
-        splitted_name = name.split(".")
-        layer_number = splitted_name[2]
-        component = splitted_name[4]
-        param_type = splitted_name[5]
-        if component == "linear_fc1" and not isinstance(param, list):
-            if param_type == "layer_norm_weight":
-                new_params[f"model.layers.{layer_number}.post_attention_layernorm.weight"] = param
-            elif param_type == "weight":
-                if convert_qkv_gate_up_by_trunk_concat:
-                    convert_gate_up_shard(
-                        param,
-                        f"model.layers.{layer_number}.mlp.gate_proj.weight",
-                        f"model.layers.{layer_number}.mlp.up_proj.weight",
-                    )
-                else:
-                    new_params[f"model.layers.{layer_number}.mlp.gate_up_proj.weight"] = param
-        elif component == "linear_fc1" and isinstance(param, list):
-            assert len(param) == 2
-            assert param_type == "weight" or param_type == "bias"
-            new_params[f"model.layers.{layer_number}.mlp.gate_proj.weight"] = param[0]
-            new_params[f"model.layers.{layer_number}.mlp.up_proj.weight"] = param[1]
-        elif component == "linear_fc2":
-            new_params[f"model.layers.{layer_number}.mlp.down_proj.weight"] = param
-    elif name == "decoder.final_layernorm.weight":
-        new_params["model.norm.weight"] = param
-    elif name == "output_layer.weight":
-        new_params["lm_head.weight"] = param
-    else:
-        raise ValueError(f"Unknown param name: {name}")
-    return new_params.keys(), new_params.values()
-
-
-def broadcast_from_megatron_pp(tensor: torch.Tensor):
-    # tensor is not None only in one of the pp ranks
-    if tensor is not None:
-        shape = tensor.shape
-        dtype = tensor.dtype
-        tensor_parallel = getattr(tensor, "tensor_model_parallel", None)
-        partition_dim = getattr(tensor, "partition_dim", None)
-        tensor_spec = (shape, dtype, tensor_parallel, partition_dim)
-    else:
-        tensor_spec = None
-    tensor_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
-    torch.distributed.all_gather_object(
-        object_list=tensor_spec_output, obj=tensor_spec, group=mpu.get_pipeline_model_parallel_group()
-    )
-    # find the src rank
-    target_tensor_spec = None
-    src_rank = None
-    for rank, tensor_spec in enumerate(tensor_spec_output):
-        if tensor_spec is not None:
-            if target_tensor_spec is None:
-                target_tensor_spec = tensor_spec
-            else:
-                raise ValueError("A tensor exists on two pp ranks")
-            src_rank = rank
-    assert target_tensor_spec is not None
-    if tensor is None:
-        tensor = torch.empty(size=target_tensor_spec[0], dtype=target_tensor_spec[1], device=get_device_id())
-        if target_tensor_spec[2] is not None:
-            tensor.tensor_model_parallel = target_tensor_spec[2]
-        if target_tensor_spec[3] is not None:
-            tensor.partition_dim = target_tensor_spec[3]
-
-    global_rank = torch.distributed.get_global_rank(group=mpu.get_pipeline_model_parallel_group(), group_rank=src_rank)
-    torch.distributed.broadcast(tensor=tensor, src=global_rank, group=mpu.get_pipeline_model_parallel_group())
-    return tensor
-
-
-def broadcast_str_from_megatron_pp(obj: Any):
-    obj_output = [None] * mpu.get_pipeline_model_parallel_world_size()
-    torch.distributed.all_gather_object(object_list=obj_output, obj=obj, group=mpu.get_pipeline_model_parallel_group())
-
-    src_rank = None
-    target_obj = None
-    for rank, item in enumerate(obj_output):
-        if item is not None:
-            if target_obj is not None:
-                raise ValueError("An object exists on two pp ranks")
-            target_obj = item
-            src_rank = rank
-
-    assert target_obj is not None, "No valid object found to broadcast."
-
-    global_rank = torch.distributed.get_global_rank(group=mpu.get_pipeline_model_parallel_group(), group_rank=src_rank)
-
-    obj_output = [None] * torch.distributed.get_world_size(group=mpu.get_pipeline_model_parallel_group())
-    obj_output[0] = target_obj
-    torch.distributed.broadcast_object_list(
-        object_list=obj_output, src=global_rank, group=mpu.get_pipeline_model_parallel_group()
-    )
-
-    return obj_output[0]
-
-
-def default_tp_concat_fn(
-    layer_name_mapping,
-    name,
-    train_params,
-    infer_params,
-    model_config,
-    hf_config=None,
-    convert_qkv_gate_up_by_simple_split=False,
-):
-    """
-    name: name of the parameter
-    train_params: training parameters
-    infer_params (Iterable[torch.Tensor]): a iterator towards list of parameters all-gathered from micro_dp_group
-    model_config: huggingface model_config
-    TODO(zhangchi.usc1992): currently, the implementation is adhoc. We can move this function to the model
-    definition so that it is model-agnostic. If the model doesn't implement this function,
-    we can throw an error to force user disable TP HybridEngine.
-    """
-    from megatron.core import mpu
-
-    train_tp_size = mpu.get_tensor_model_parallel_world_size()
-    if layer_name_mapping.get("qkv_layer_name") in name and "layer_norm" not in name:
-        # if the tensor is qkv, for each param on tp, split into q, k, v
-        # concat q, k, v separately.
-        q_lst = []
-        k_lst = []
-        v_lst = []
-        num_attention_heads = model_config.num_attention_heads
-        num_key_value_heads = model_config.num_key_value_heads
-        if "vision_model" in name:
-            num_attention_heads = hf_config.vision_config.num_heads
-            num_key_value_heads = hf_config.vision_config.num_heads
-        assert num_attention_heads % num_key_value_heads == 0
-        num_q_per_kv = num_attention_heads // num_key_value_heads
-        assert infer_params[0].shape[0] % (num_q_per_kv + 2) == 0, (
-            f"param '{name}' shape '{infer_params[0].shape}' dim0 is not divisible by {num_q_per_kv + 2}"
-        )
-        kv_size_per_tp = infer_params[0].shape[0] // (num_q_per_kv + 2)
-        split_size = [kv_size_per_tp * num_q_per_kv, kv_size_per_tp, kv_size_per_tp]
-        for infer_param in infer_params:
-            num_query_groups_per_partition = num_key_value_heads // train_tp_size
-            for chunk in infer_param.chunk(num_query_groups_per_partition):
-                split_size = [
-                    kv_size_per_tp * num_q_per_kv // num_query_groups_per_partition,
-                    kv_size_per_tp // num_query_groups_per_partition,
-                    kv_size_per_tp // num_query_groups_per_partition,
-                ]
-                q, k, v = chunk.split(split_size)
-                q_lst.append(q)
-                k_lst.append(k)
-                v_lst.append(v)
-        q = torch.cat(q_lst, dim=0)
-        k = torch.cat(k_lst, dim=0)
-        v = torch.cat(v_lst, dim=0)
-        infer_params = torch.cat((q, k, v), dim=0) if not convert_qkv_gate_up_by_simple_split else [q, k, v]
-
-    elif (
-        layer_name_mapping.get("gate_proj_layer_name") in name
-        and "layer_norm" not in name
-        and "vision_model.projection" not in name
-    ):
-        # if the tensor is gate and proj
-        gate_lst = []
-        up_lst = []
-        for infer_param in infer_params:
-            gate, up = infer_param.chunk(2)
-            gate_lst.append(gate)
-            up_lst.append(up)
-        gate = torch.cat(gate_lst, dim=0)
-        up = torch.cat(up_lst, dim=0)
-        infer_params = torch.cat((gate, up), dim=0) if not convert_qkv_gate_up_by_simple_split else [gate, up]
-
-    elif "mlp.experts.linear_fc2.weight" in name:  # moe
-        infer_params = torch.cat(infer_params, dim=1)
-
-    else:
-        # concat tensor
-        infer_params = torch.cat(infer_params, dim=tp_utils.get_tensor_parallel_partition_dim(train_params))
-
-    return infer_params
-
-
-def per_tensor_generator(
-    actor_module,
-    model_config,
-    weight_converter,
-    transformer_config,
-    layer_name_mapping,
-    convert_qkv_gate_up_by_simple_split=True,
-):
-    from megatron.core import parallel_state as mpu
-
-    pp_rank = mpu.get_pipeline_model_parallel_rank()
-    ep_size = mpu.get_expert_model_parallel_world_size()
-    etp_size = mpu.get_expert_tensor_parallel_world_size()
-    ep_group = mpu.get_expert_model_parallel_group()
-    etp_group = mpu.get_expert_tensor_parallel_group()
-    vpp_size = len(actor_module)
-    all_gather_group = mpu.get_tensor_model_parallel_group()
-    all_gather_group_size = torch.distributed.get_world_size(group=all_gather_group)
-
-    def tensor_generator():
-        for scan_vpp_idx in range(vpp_size):
-            existing_keys = set()
-            model = unwrap_model(actor_module[scan_vpp_idx])
-            for name, param in model.named_parameters():
-                existing_keys.add(name)
-                yield name, param
-            # note
-            # there is a bug in megatron GPTModel
-            # decoder.layers[n].mlp.router.expert_bias" in GPTModel is not registered in named_parameter, but in
-            # state_dict(). for now we patch it by adding those keys to extra_keys.
-            extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
-            for name in extra_keys:
-                yield name, model.state_dict()[name].to(get_device_id())
-
-    # we need first make all rank get full model information
-    meta_info = []
-    for scan_vpp_idx in range(vpp_size):
-        existing_keys = set()
-        model = unwrap_model(actor_module[scan_vpp_idx])
-        for idx, (name, _) in enumerate(model.named_parameters()):
-            existing_keys.add(name)
-            meta_info.append((pp_rank, scan_vpp_idx, idx, name))
-        extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
-        for name in extra_keys:
-            meta_info.append((pp_rank, scan_vpp_idx, idx, name))
-
-    obj_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
-    torch.distributed.all_gather_object(
-        object_list=obj_spec_output, obj=meta_info, group=mpu.get_pipeline_model_parallel_group()
-    )
-    layer_list_meta = [item for sublist in obj_spec_output for item in sublist]
-
-    gen_func = tensor_generator()
-
-    # lazy load tensor for full model
-    for cur_pp_rank, scan_vpp_idx, idx, name in layer_list_meta:
-        if model_config.tie_word_embeddings and ("output_layers" in name):
-            import warnings
-
-            warnings.warn(
-                "Current model sharing word and embedding weights, skip output layer conversion", stacklevel=2
-            )
-            continue
-
-        if cur_pp_rank == pp_rank:
-            try:
-                cur_name, cur_tensor = next(gen_func)
-            except StopIteration:
-                cur_name, cur_tensor = None, None
-            cur_name = normalize_model_name(name, cur_pp_rank, scan_vpp_idx, transformer_config)
-        else:
-            cur_tensor, cur_name = None, None
-
-        # pp broadcast model tensor and name
-        cur_name = broadcast_str_from_megatron_pp(cur_name)
-        broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
-
-        # (xya): this is a hack to fix the name of the parameters
-        while cur_name.startswith("module."):
-            cur_name = cur_name[len("module.") :]
-
-        # EP
-        if ".mlp.experts.linear_fc" in cur_name and ep_size > 1:
-            num_experts = weight_converter.mcore_config.num_moe_experts
-            num_experts_per_rank = num_experts // ep_size
-            infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(ep_size)]
-            torch.distributed.all_gather(infer_params, broad_pp_tensor, group=ep_group)
-
-            name_prefix, local_expert_id = cur_name.split(".weight")
-            local_expert_id = int(local_expert_id)
-            global_expert_ids = [num_experts_per_rank * ep_rank + local_expert_id for ep_rank in range(ep_size)]
-            global_expert_names = [f"{name_prefix}.weight{expert_id}" for expert_id in global_expert_ids]
-
-            for name, param in zip(global_expert_names, infer_params, strict=True):
-                if etp_size > 1:
-                    # gather etp
-                    etp_params = [torch.empty_like(param) for _ in range(etp_size)]
-                    torch.distributed.all_gather(etp_params, param, group=etp_group)
-                    params = etp_params
-                else:
-                    params = [param]
-
-                merge_params = default_tp_concat_fn(
-                    layer_name_mapping,
-                    name,
-                    broad_pp_tensor,
-                    params,
-                    model_config,
-                    weight_converter.hf_config,
-                    convert_qkv_gate_up_by_simple_split,
-                )
-                if not isinstance(merge_params, list):
-                    merge_params = [merge_params]
-                converted_names, converted_params = weight_converter.convert_param(name, merge_params)
-
-                yield from zip(converted_names, [param.detach() for param in converted_params], strict=True)
-            continue
-
-        # tp all gather
-        if tp_utils.is_tensor_parallel_param(broad_pp_tensor):
-            # allocate a new tensor with proper size
-            if all_gather_group_size <= 1:
-                infer_params = [broad_pp_tensor]
-            else:
-                infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
-                torch.distributed.all_gather(infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group())
-            infer_params = default_tp_concat_fn(
-                layer_name_mapping,
-                cur_name,
-                broad_pp_tensor,
-                infer_params,
-                model_config,
-                weight_converter.hf_config,
-                convert_qkv_gate_up_by_simple_split,
-            )
-        else:
-            infer_params = broad_pp_tensor
-
-        if not isinstance(infer_params, list):
-            infer_params = [infer_params]
-        converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
-
-        yield from zip(converted_names, [param.detach() for param in converted_params], strict=True)
 
 
 def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerConfig):

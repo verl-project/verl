@@ -1,6 +1,6 @@
 # Supported tags
 
-> Last updated: 08/19/2026.
+> Last updated: 09/28/2026.
 
 A full list of tags that are supported with Verl on ascend.
 
@@ -22,6 +22,9 @@ A full list of tags that are supported with Verl on ascend.
 
 | Device | CANN Base Image | Inference Backend | verl release version | Image Tag | Dockerfile |
 |--------|-----------------|-------------------|----------------------|-----------|------------|
+| 910b | 9.1.0 | vLLM | v0.9.1 | `v0.9.1-cann9.1.0-torch_npu2.10.0.post4-910b-ubuntu22.04-py3.12-vllm` | [Dockerfile.ascend_9.1.0_a2_v0.9.1](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2_v0.9.1) |
+| A3 | 9.1.0 | vLLM | v0.9.1 | `v0.9.1-cann9.1.0-torch_npu2.10.0.post4-a3-ubuntu22.04-py3.12-vllm` | [Dockerfile.ascend_9.1.0_a3_v0.9.1](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3_v0.9.1) |
+| A5 | 9.1.0 | vLLM | v0.9.1 | `v0.9.1-cann9.1.0-torch_npu2.10.0.post4-950-ubuntu22.04-py3.12-vllm` | [Dockerfile.ascend_9.1.0_a5_v0.9.1](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5_v0.9.1) |
 | 910b | 9.0.0 | vLLM | v0.8.0 | `v0.8.0-cann9.0.0-torch_npu2.9.0.post2-910b-ubuntu22.04-py3.11-vllm` | [Dockerfile.ascend_9.0.0_a2_v0.8.0](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0) |
 | A3 | 9.0.0 | vLLM | v0.8.0 | `v0.8.0-cann9.0.0-torch_npu2.9.0.post2-a3-ubuntu22.04-py3.11-vllm` | [Dockerfile.ascend_9.0.0_a3_v0.8.0](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0) |
 | 910b | 8.5.0 | vLLM | v0.7.1 | `verl-8.5.0-910b-ubuntu22.04-py3.11-v0.7.1` | [Dockerfile.ascend_8.5.0_a2_v0.7.1](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1) |

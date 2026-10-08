@@ -22,7 +22,7 @@ match the training recipe, including the BF16 layer selection.
 ## Installation
 
 The runtime uses PyTorch 2.13.0/CUDA 13, Transformer Engine 2.18.0,
-Megatron-Core 0.19.0, vLLM 0.29.0, Transformers 5.10.4 and FlashInfer 0.6.18.
+Megatron-Core 0.19.2, Megatron-Bridge 0.6.2, vLLM 0.29.0, Transformers 5.12.1 and FlashInfer 0.6.18.
 The project lock selects CUTLASS DSL 4.6.2 and QuACK 0.6.4, matching vLLM's
 released dependencies.
 Keep the FlashInfer Python, cubin and CUDA JIT-cache packages aligned.
@@ -31,7 +31,7 @@ Build through the official Docker entry:
 
 ```bash
 docker build -f docker/Dockerfile.uv.cu130 \
-  --build-arg NVFP4_RUNTIME=1 --build-arg MAX_JOBS=16 -t verl:nvfp4 .
+  --build-arg NVFP4_RUNTIME=1 -t verl:nvfp4 .
 ```
 
 Alternatively, in a new environment:
@@ -59,10 +59,11 @@ For a non-Docker launch, use the environment's NCCL library:
 export LD_LIBRARY_PATH="$PWD/.venv/lib/python3.12/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}"
 ```
 
-Apex and FlashAttention build from source when matching wheels are unavailable.
-Use a persistent uv cache to reuse native builds. SGLang retains its separate
-Torch 2.11 selection; the full multi-backend Docker matrix is not covered by the
-vLLM/Megatron validation.
+Apex, FlashAttention and Megatron-Bridge use the official cu130/Torch 2.13
+wheelhouse. Transformer Engine 2.18.0 uses its official PyPI distribution;
+its PyTorch extension selects a matching release wheel when available and
+otherwise builds against the selected Torch runtime. Use a persistent uv
+cache to reuse the extension build.
 
 ## Run
 
