@@ -184,6 +184,92 @@ def compute_spec_decode_metrics(
     }
 
 
+def _snapshot_spec_decode_counters(trainer) -> dict[str, float] | None:
+    mtp_config = getattr(trainer.config.actor_rollout_ref.model, "mtp", None)
+    if mtp_config is None or not mtp_config.enable or not mtp_config.enable_rollout:
+        return None
+
+    managers = [trainer.llm_server_manager]
+    standalone_manager = getattr(trainer, "standalone_server_manager", None)
+    if standalone_manager is not None and standalone_manager is not trainer.llm_server_manager:
+        managers.append(standalone_manager)
+
+    aggregate = {
+        "num_draft_tokens": 0.0,
+        "num_accepted_tokens": 0.0,
+        "num_verify_steps": 0.0,
+    }
+    for manager in managers:
+        counters = manager.snapshot_spec_decode_counters()
+        if counters is None:
+            return None
+        for key, value in counters.items():
+            aggregate[key] += value
+    return aggregate
+
+
+def begin_spec_decode_counter_window(trainer) -> None:
+    """Record the speculative decoding counters at the start of a metrics window."""
+
+    trainer._spec_decode_counter_start = _snapshot_spec_decode_counters(trainer)
+    trainer._spec_decode_counter_end = None
+
+
+def end_spec_decode_counter_window(trainer) -> None:
+    """Record the speculative decoding counters at the end of a metrics window."""
+
+    trainer._spec_decode_counter_end = _snapshot_spec_decode_counters(trainer)
+
+
+def compute_spec_decode_metrics_with_fallback(
+    trainer,
+    spec_drafts,
+    spec_accepts,
+    spec_verifies,
+    non_padding_mask=None,
+) -> dict[str, float]:
+    """Compute speculative decoding metrics, falling back to counter deltas.
+
+    Per-request statistics are preferred when available. Otherwise, metrics are
+    derived from the speculative decoding counter snapshots for the current
+    window.
+
+    Args:
+        trainer: Trainer containing the counter snapshots.
+        spec_drafts: Number of draft tokens for each request.
+        spec_accepts: Number of accepted draft tokens for each request.
+        spec_verifies: Number of verification steps for each request.
+        non_padding_mask: Optional mask selecting non-padding requests.
+
+    Returns:
+        The speculative decoding metrics, or an empty dictionary when neither
+        source contains valid statistics.
+    """
+    metrics = compute_spec_decode_metrics(
+        spec_drafts,
+        spec_accepts,
+        spec_verifies,
+        non_padding_mask,
+    )
+    if metrics:
+        return metrics
+
+    start = getattr(trainer, "_spec_decode_counter_start", None)
+    end = getattr(trainer, "_spec_decode_counter_end", None)
+    if start is None or end is None:
+        return {}
+
+    draft_tokens = end["num_draft_tokens"] - start["num_draft_tokens"]
+    accepted_tokens = end["num_accepted_tokens"] - start["num_accepted_tokens"]
+    verify_steps = end["num_verify_steps"] - start["num_verify_steps"]
+    if draft_tokens <= 0 or verify_steps <= 0 or accepted_tokens < 0:
+        return {}
+    return {
+        "rollout/spec_accept_rate": float(accepted_tokens / draft_tokens),
+        "rollout/spec_accept_length": float(1.0 + accepted_tokens / verify_steps),
+    }
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
