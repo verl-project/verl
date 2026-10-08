@@ -41,6 +41,10 @@ version = "0.19.2"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
 [[manifest.dependency-metadata]]
+name = "torchtitan"
+version = "0.3.0"
+
+[[manifest.dependency-metadata]]
 name = "transferqueue"
 
 [[manifest.dependency-metadata]]
@@ -4485,6 +4489,15 @@ wheels = [
 ]
 
 [[package]]
+name = "spmd-types"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/71/8854aaad93b29395ed7152bde16d679e25cf55d5cb8a743a986db3c9e134/spmd_types-0.2.3.tar.gz", hash = "sha256:40dec13051545d66fd3e42c4d67be387877ea472a9ca0906cfa608d4cb61ef24", size = 109656, upload-time = "2026-08-06T01:00:36.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/a1/c6cad5b3f20d0b8ff016358e0edb60506749b6fd7ce64d9cea24df5446e8/spmd_types-0.2.3-py3-none-any.whl", hash = "sha256:0bbeb783a7e9678a125cded42e07ef17c73982e4b4de2294d435f9df8c17331c", size = 122723, upload-time = "2026-08-06T01:00:34.432Z" },
+]
+
+[[package]]
 name = "sse-starlette"
 version = "3.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -4799,6 +4812,22 @@ wheels = [
 ]
 
 [[package]]
+name = "torch-checkpointing"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "extra == 'extra-4-verl-cpu' or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "torch", version = "2.13.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/85/f7/c16752b0fe0c4f79dc5d23f8eecb0d0ab4a7c2a348d2dd27edc17ee89bd6/torch_checkpointing-0.1.0.tar.gz", hash = "sha256:304725d78f7c110c521cfdb92357df371a423a0168d38f367cede63c122aea73", size = 181770, upload-time = "2026-08-13T01:36:48.14Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/e1/184f1abad2fa8f3090376772a99af4ee552bf939cde979332d203cb7c77e/torch_checkpointing-0.1.0-py3-none-any.whl", hash = "sha256:1a0944c88adcdbe88f4a68870d0d88b5a1c9e421cc5b604c84eda7c17d719164", size = 121315, upload-time = "2026-08-13T01:36:46.585Z" },
+]
+
+[[package]]
 name = "torch-memory-saver"
 version = "0.0.9.post1"
 source = { registry = "https://pypi.org/simple" }
@@ -4887,6 +4916,15 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/95/d4/af694ef718aedbe95a72760ab9ff7a6a7a44ace2d7f70c27bfeb67c5c503/torchdata-0.11.0-py3-none-any.whl", hash = "sha256:52b940fbbe0e00fb21cabddf528449d1bec5bfb0d0823b7487b15f951658ee33", size = 61968, upload-time = "2025-02-20T22:26:30.666Z" },
+]
+
+[[package]]
+name = "torchtitan"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/62/b7/c12d162b0f0f1c96052c70e456aad19038b46c4ddcb585bbd64e0bdf310d/torchtitan-0.3.0.tar.gz", hash = "sha256:6351b2dc6cdd8bdad15cd2ce5d9520e391a75b584770d2ebd925cc3321cd1b47", size = 1051942, upload-time = "2026-09-03T03:54:49.997Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/0f/42a9599a63200352f21cbd3ef21ae8696028e431e6ab82e0b737dc834097/torchtitan-0.3.0-py3-none-any.whl", hash = "sha256:5563ccf9a295b24e00a36087149e9c2d0686cecbd3972c31e67227029293af42", size = 1273061, upload-time = "2026-09-03T03:54:48.132Z" },
 ]
 
 [[package]]
@@ -5029,6 +5067,18 @@ wheels = [
 ]
 
 [[package]]
+name = "typeguard"
+version = "4.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b4/de/4420db493fa8fc0856d5e5c1b159c63a323d2de2317babe36b01568928e8/typeguard-4.6.0.tar.gz", hash = "sha256:e7414f09111317de3e335de92cd397c5c0ca00b1cc1676de12e1d444a79b3f21", size = 82330, upload-time = "2026-07-26T08:40:23.207Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/eb/461d5f167b6f5c7d97696f397c82f82e3480e003fce3f0a1cd1dd26e2eb2/typeguard-4.6.0-py3-none-any.whl", hash = "sha256:79878165bb86f2cf5d41d159a0ff1792a796cf496882d2fe1b1c6c7049b9cdd7", size = 36884, upload-time = "2026-07-26T08:40:21.868Z" },
+]
+
+[[package]]
 name = "typer"
 version = "0.25.1"
 source = { registry = "https://pypi.org/simple" }
@@ -5062,6 +5112,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/55/e3/70399cb7dd41c10ac53367ae42139cf4b1ca5f36bb3dc6c9d33acdb43655/typing_inspection-0.4.2.tar.gz", hash = "sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464", size = 75949, upload-time = "2025-10-01T02:14:41.687Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7", size = 14611, upload-time = "2025-10-01T02:14:40.154Z" },
+]
+
+[[package]]
+name = "tyro"
+version = "1.0.16"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docstring-parser" },
+    { name = "typeguard" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3c/83/4008dff806dc894fc0422017316982d3f14709046bcb0dfa720cb64501aa/tyro-1.0.16.tar.gz", hash = "sha256:edf23c9c3eecba5a2b5af152df8f34a723b689a001ff5b7311f93eff1893a636", size = 603382, upload-time = "2026-08-23T01:19:26.643Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/d9/ea12ca0392c9eaeff7421efcc665f350dbc2ef30a113ee13c7afea21cf37/tyro-1.0.16-py3-none-any.whl", hash = "sha256:2f9087196113699647190459a12b6b4f2784dd0703c50ab1f7bf0f85a3a794ea", size = 216925, upload-time = "2026-08-23T01:19:25.168Z" },
 ]
 
 [[package]]
@@ -5355,6 +5419,13 @@ test = [
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
 ]
+torchtitan = [
+    { name = "einops" },
+    { name = "spmd-types" },
+    { name = "torch-checkpointing" },
+    { name = "torchtitan" },
+    { name = "tyro" },
+]
 veomni-sft = [
     { name = "veomni" },
 ]
@@ -5446,6 +5517,7 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'verl-core'" },
     { name = "dill" },
     { name = "dill", marker = "extra == 'verl-core'" },
+    { name = "einops", marker = "extra == 'torchtitan'" },
     { name = "einops", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
     { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch213'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
@@ -5502,6 +5574,7 @@ requires-dist = [
     { name = "sglang", marker = "extra == 'sglang'", specifier = "==0.5.20" },
     { name = "sglang-kernel", marker = "extra == 'sglang'" },
     { name = "sglang-router", marker = "extra == 'ci'", specifier = "==0.2.2" },
+    { name = "spmd-types", marker = "extra == 'torchtitan'", specifier = "==0.2.3" },
     { name = "tensorboard" },
     { name = "tensorboard", marker = "extra == 'verl-core'" },
     { name = "tensordict", specifier = ">=0.8.0,!=0.9.0,<=0.10.0" },
@@ -5511,6 +5584,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'megatron'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "megatron" } },
     { name = "torch", marker = "extra == 'sglang'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "sglang" } },
     { name = "torch", marker = "extra == 'vllm'", specifier = "==2.13.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "vllm" } },
+    { name = "torch-checkpointing", marker = "extra == 'torchtitan'", specifier = ">=0.1.0" },
     { name = "torchaudio", marker = "extra == 'cpu'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "verl", extra = "cpu" } },
     { name = "torchaudio", marker = "extra == 'fsdp'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "fsdp" } },
     { name = "torchaudio", marker = "extra == 'megatron'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "megatron" } },
@@ -5519,6 +5593,7 @@ requires-dist = [
     { name = "torchcodec", marker = "extra == 'verl-core'" },
     { name = "torchdata" },
     { name = "torchdata", marker = "extra == 'verl-core'" },
+    { name = "torchtitan", marker = "extra == 'torchtitan'", specifier = "==0.3.0" },
     { name = "torchvision", marker = "extra == 'cpu'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "verl", extra = "cpu" } },
     { name = "torchvision", marker = "extra == 'fsdp'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "fsdp" } },
     { name = "torchvision", marker = "extra == 'megatron'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "megatron" } },
@@ -5534,6 +5609,7 @@ requires-dist = [
     { name = "triton", marker = "extra == 'cpu'" },
     { name = "trl", marker = "extra == 'fsdp'", specifier = "==0.27.0" },
     { name = "trl", marker = "extra == 'megatron'", specifier = "==0.27.0" },
+    { name = "tyro", marker = "extra == 'torchtitan'" },
     { name = "uvicorn", marker = "extra == 'verl-core'" },
     { name = "veomni", marker = "extra == 'veomni-sft'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=10a26aca258f91a7af3e698cc0db8c6c51705989" },
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'fsdp'" },
@@ -5549,7 +5625,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "wandb", marker = "extra == 'verl-core'" },
 ]
-provides-extras = ["test", "math", "verl-core", "flash-attn-cu130torch213", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "cpu"]
+provides-extras = ["test", "math", "verl-core", "flash-attn-cu130torch213", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "torchtitan", "cpu"]
 
 [[package]]
 name = "virtualenv"

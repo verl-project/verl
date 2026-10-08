@@ -495,13 +495,21 @@ class TorchtitanEngineConfig(EngineConfig):
         context_parallel_size (int): Context parallel size, default 1
         attn_type (str): Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen"),
             default "flex"
-        spmd_backend (str): torchtitan SPMD backend, one of "default", "full_dtensor", "spmd_types",
-            default "spmd_types"
+        spmd_backend (str): torchtitan SPMD backend, one of "partial_dtensor", "full_dtensor", "spmd_types",
+            default "partial_dtensor". "spmd_types" requires torch>=2.14 (FSDP2 rejects its plain-tensor
+            parameters on older torch).
         activation_checkpoint (str): Activation checkpointing mode, one of "selective", "full", "none".
             Default "selective" (torchtitan's default). Use "none" under spmd_backend="spmd_types" with
             eager: selective/full AC recompute runs on the autograd backward
             thread where the thread-local SPMD mesh is inactive, so spmd.assert_type raises
             "no current mesh". Compiled runs recompute in-graph and are unaffected.
+        pad_to_length (bool): Round every packed micro-batch up to a multiple of
+            ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
+            values and torch.compile / kernel autotuning stop re-specializing every step. Only
+            applies with ``use_remove_padding=True``. Under context parallelism the padded length
+            is additionally aligned to ``2 * context_parallel_size``. default False
+        pad_to_length_bucket (int): Padding granularity in tokens on the packed sequence. Only
+            read when ``pad_to_length=True``. default 1024
         strategy (str): Strategy to use for distributed training, default "torchtitan"
         seed (int): Random seed for reproducibility.
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
@@ -529,19 +537,22 @@ class TorchtitanEngineConfig(EngineConfig):
     pipeline_parallel_size: int = 1
     context_parallel_size: int = 1
     attn_type: str = "flex"
-    spmd_backend: str = "spmd_types"
+    spmd_backend: str = "partial_dtensor"
     activation_checkpoint: str = "selective"
     max_seq_len: Optional[int] = None
+    pad_to_length: bool = False
+    pad_to_length_bucket: int = 1024
     strategy: str = "torchtitan"
     seed: int = 42
     full_determinism: bool = False
 
     def __post_init__(self):
         super().__post_init__()
+        assert self.pad_to_length_bucket > 0, f"pad_to_length_bucket must be positive, got {self.pad_to_length_bucket}"
         assert self.attn_type in ["flex", "flex_flash", "varlen"], (
             f"attn_type {self.attn_type} not supported (sdpa is not a valid language-model backend)"
         )
-        assert self.spmd_backend in ["default", "full_dtensor", "spmd_types"], (
+        assert self.spmd_backend in ["partial_dtensor", "full_dtensor", "spmd_types"], (
             f"spmd_backend {self.spmd_backend} not supported"
         )
         assert self.activation_checkpoint in ["selective", "full", "none"], (

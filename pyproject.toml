@@ -199,6 +199,19 @@ ci = [
 # VeOmni CI overlays transformers==5.16.1 for this pinned revision.
 veomni-sft = ["veomni==0.1.12"]
 
+# TorchTitan engine add-on, layered on a cu130 backend (fsdp / megatron) like
+# veomni-sft. torchtitan is installed deps-free (empty requires-dist in
+# [[tool.uv.dependency-metadata]] below): its real metadata caps datasets<4.8.0,
+# which would downgrade the shared datasets dependency. The runtime deps it
+# actually imports are listed here instead.
+torchtitan = [
+    "torchtitan==0.3.0",
+    "spmd_types==0.2.3",
+    "torch_checkpointing>=0.1.0",
+    "tyro",
+    "einops",
+]
+
 # CI / unit tests / dev sanity. No GPU runtime.
 cpu = [
     "verl[verl-core]",
@@ -418,6 +431,14 @@ requires-dist = []
 [[tool.uv.dependency-metadata]]
 name = "veomni"
 version = "0.1.12"
+requires-dist = []
+
+# torchtitan 0.3.0 (torchtitan extra) is installed deps-free too: its metadata
+# pins datasets<4.8.0, which would downgrade the shared datasets dependency.
+# The torchtitan extra lists the runtime deps it imports.
+[[tool.uv.dependency-metadata]]
+name = "torchtitan"
+version = "0.3.0"
 requires-dist = []
 
 # TransferQueue is installed deps-free as well: it asks for an unbounded

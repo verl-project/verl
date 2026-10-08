@@ -67,7 +67,7 @@ jobs:
       # cache. Pick one inference engine + one training backend, e.g. `vllm
       # megatron`, `sglang fsdp`, or `cpu` for CPU-only, plus any conflict-free
       # add-ons the job needs: `math` (math-verify), `ci` (hf_transfer,
-      # sglang-router), `veomni-sft`. `manage_envs.py list` shows them all.
+      # sglang-router), `veomni-sft`, `torchtitan`. `manage_envs.py list` shows them all.
       #
       # Keep these extras identical in every step of the job — and matching what
       # the e2e script picks for the same backend combo — or uv re-syncs torch
@@ -123,6 +123,7 @@ works when run by hand, and drive the Ray workers through it via
 | --- | --- |
 | `run_ppo_trainer_megatron.sh` | `$ENGINE` + `megatron` + `math` |
 | `run_ppo_trainer_veomni.sh` | `vllm` + `fsdp` + `veomni-sft` + `math`, with Transformers 5.16.1 |
+| `run_ppo_trainer_torchtitan.sh` | `vllm` + `fsdp` + `torchtitan` + `math` |
 | `ppo_trainer/run_function_reward.sh` | `$ENGINE` + `fsdp`\|`megatron` (from `STRATEGY`) |
 | `run_one_step_off_policy.sh` | `vllm` + `fsdp`\|`megatron` (from `ACTOR_STRATEGY`) |
 | `run_fully_async_policy_opd.sh` | `vllm` + `megatron` |
@@ -151,7 +152,7 @@ mention alone. Two consequences worth knowing:
 
 Prefer the lock over `uv pip install`: add the package to an extra in
 `pyproject.toml`, run `python manage_envs.py lock`, and name that extra in the
-job's `UV_RUN`. Add-on extras (`math`, `ci`, `veomni-sft`) are conflict-free, so
+job's `UV_RUN`. Add-on extras (`math`, `ci`, `veomni-sft`, `torchtitan`) are conflict-free, so
 they compose with any backend combo and are pre-warmed into the image's uv cache
 by `manage_envs.py prefetch`.
 

@@ -42,9 +42,11 @@ actor_rollout_ref:
       pipeline_parallel_size: 1
       context_parallel_size: 1
       attn_type: flex
-      spmd_backend: spmd_types
+      spmd_backend: partial_dtensor
       activation_checkpoint: selective
       max_seq_len: null
+      pad_to_length: false
+      pad_to_length_bucket: 1024
       strategy: torchtitan
       seed: 42
       full_determinism: false
@@ -188,9 +190,11 @@ actor_rollout_ref:
       pipeline_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.pipeline_parallel_size,1}
       context_parallel_size: ${oc.select:actor_rollout_ref.actor.torchtitan.context_parallel_size,1}
       attn_type: ${oc.select:actor_rollout_ref.actor.torchtitan.attn_type,flex}
-      spmd_backend: spmd_types
+      spmd_backend: partial_dtensor
       activation_checkpoint: selective
       max_seq_len: null
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.torchtitan.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.torchtitan.pad_to_length_bucket,1024}
       strategy: torchtitan
       seed: ${oc.select:actor_rollout_ref.actor.torchtitan.seed,42}
       full_determinism: false
@@ -531,9 +535,11 @@ critic:
     pipeline_parallel_size: 1
     context_parallel_size: 1
     attn_type: flex
-    spmd_backend: spmd_types
+    spmd_backend: partial_dtensor
     activation_checkpoint: selective
     max_seq_len: null
+    pad_to_length: false
+    pad_to_length_bucket: 1024
     strategy: torchtitan
     seed: 42
     full_determinism: false

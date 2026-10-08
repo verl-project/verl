@@ -113,7 +113,7 @@ This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
 the cu13.0 / torch-2.13 backends (vllm, sglang, fsdp, megatron) and the
 GPU-free ``cpu`` slice. They never mix in one ``.venv`` (see the conflict
 sets). On top of whichever one you pick sit the conflict-free *add-ons*
-(``math``, ``ci``, ``veomni-sft``) — extras that carry no torch of their own,
+(``math``, ``ci``, ``veomni-sft``, ``torchtitan``) — extras that carry no torch of their own,
 so CI composes them freely, e.g.::
 
     python manage_envs.py sync sglang megatron ci
@@ -124,6 +124,8 @@ pyproject.toml until they support torch-2.13 / cu130): the cu12.9 /
 torch-2.9.1 world (nemoautomodel) and trtllm (a CUDA-13 RC sdist).
 VeOmni composes ``fsdp`` with the ``veomni-sft`` add-on on the cu130 stack;
 its current generated models need ``uv run --with transformers==5.16.1``.
+TorchTitan likewise composes a cu130 training backend with the ``torchtitan``
+add-on.
 
 CPU architecture
 ----------------
@@ -174,12 +176,13 @@ CU129_BACKENDS: list[str] = []
 # `cpu` is the GPU-free CI / unit-test / dev-sanity slice.
 DEV_BACKENDS: list[str] = ["cpu"]
 # Conflict-free add-ons layered ON TOP of a backend combo, never synced alone:
-# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers) and
+# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers),
 # `veomni-sft` (the deps-free VeOmni package the PPO/SFT tests import; it carries
-# no torch, so it rides on whichever cu130 backend the job synced). They ride
+# no torch, so it rides on whichever cu130 backend the job synced) and
+# `torchtitan` (the deps-free TorchTitan engine package, same idea). They ride
 # along with every `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
 # offline just like a plain backend sync does.
-ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft"]
+ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft", "torchtitan"]
 ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
 
 # Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
@@ -838,7 +841,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     extras_help = (
         "extra name(s); shortcuts: all, inference (vllm sglang), "
-        "training (fsdp megatron), dev (cpu), addons (math ci veomni-sft). "
+        "training (fsdp megatron), dev (cpu), addons (math ci veomni-sft torchtitan). "
         "Linux + Python 3.12, x86_64 or aarch64 (same extras on both). "
         "Add-ons are conflict-free and layer "
         "on top of a backend combo. Mutually exclusive sets (at most one each per sync): "
