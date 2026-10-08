@@ -454,12 +454,11 @@ RUN NSIGHT_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo arm64; else echo a
     && nsys --version
 
 # Optional NVFP4 runtime: materialize the standard locked extras and apply the
-# existing hash-guarded backports once, at image build time. The default image
+# vLLM NVFP4 compatibility patch once, at image build time. The default image
 # retains its backend-selection flow; this opt-in image carries the audited
 # vLLM+Megatron environment and must be rebuilt after changing these extras.
 ARG NVFP4_RUNTIME=0
 RUN if [ "${NVFP4_RUNTIME}" = "1" ]; then \
         uv sync --frozen --extra megatron --extra vllm && \
-        PYTHON_BIN=/workspace/verl/.venv/bin/python \
-            bash examples/real_nvfp4/runtime_backports/apply_backports.sh; \
+        /workspace/verl/.venv/bin/python examples/real_nvfp4/runtime_backports/apply_vllm_nvfp4.py; \
     fi

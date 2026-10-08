@@ -38,20 +38,15 @@ Alternatively, in a new environment:
 
 ```bash
 uv sync --frozen --extra megatron --extra vllm
-PYTHON_BIN="$PWD/.venv/bin/python" bash examples/real_nvfp4/runtime_backports/apply_backports.sh
+.venv/bin/python examples/real_nvfp4/runtime_backports/apply_vllm_nvfp4.py
 ```
 
-Two dependency patches are required by the pinned releases:
+The vLLM 0.29 compatibility patch derives scales from freshly loaded weights
+and restores reciprocal-scale storage after refit and level-2 sleep. Packing
+and kernel reuse are already included in this release.
 
-- Megatron [#6964](https://github.com/NVIDIA/Megatron-LM/pull/6964): check that
-  FlashAttention 4 is installed before importing its optional module.
-- vLLM refit scale lifecycle: derive scales from freshly loaded weights and
-  restore reciprocal-scale storage after refit and level-2 sleep. The packing
-  and kernel-reuse fixes are already included in vLLM 0.29.
-
-The scripts check source hashes and reject unknown dependency implementations.
-Apply them while building the environment, before starting workers. The runtime
-verifier checks dependency versions, native extension imports and refit support.
+The patch checks the vLLM version and source hash. Apply it while building the
+environment, before starting workers.
 
 For a non-Docker launch, use the environment's NCCL library:
 
