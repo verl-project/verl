@@ -133,7 +133,7 @@ def test_engine_loader_rejects_eval_drift_before_loading_megatron_recipe(monkeyp
     monkeypatch.setattr(OmegaConf, "load", lambda _path: OmegaConf.create(raw))
     engine = SimpleNamespace(
         _real_nvfp4_config=SimpleNamespace(te_precision_config_file=str(RECIPE_PATH)),
-        _real_nvfp4_bf16_layers=(False, 0, 0),
+        _real_nvfp4_bf16_layers=(True, 2, 4),
         model_config=SimpleNamespace(hf_config=_model_config()),
     )
     with pytest.raises(ValueError, match="evaluation_recipe must match training_recipe"):
