@@ -3,7 +3,7 @@ set -x
 
 # ---- user-adjustable ----
 # # 0. download HF checkpoint
-hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/glm52_top16_dapo_17k_tuned_weights}
+hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/lxb007981/GLM-5.2-top16-DAPO-17k-Tuned}
 
 echo "[info] hf_weights=${hf_weights}"
 
@@ -123,7 +123,6 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.attention_softmax_in_fp32=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.pad_bshd_to_minibatch_max=False
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.checkpoint.strict=False
@@ -207,9 +206,10 @@ TRAINER=(
 )
 
 EXTRA=(
-    --config-name='ppo_megatron_trainer'
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'"
     actor_rollout_ref.nccl_timeout=7200
+    +transfer_queue.backend.SimpleStorage.required_node_resource=CPU
+    --config-name='ppo_megatron_trainer' # need to be the last one, as it will split the positional overrides list
 )
 
 ########################### launch ###########################
