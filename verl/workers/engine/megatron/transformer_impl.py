@@ -302,14 +302,7 @@ class MegatronEngine(BaseEngine):
             from verl.utils.real_nvfp4 import validate_real_nvfp4_model_contract
 
             validate_real_nvfp4_model_contract(self.model_config.hf_config)
-            # NeMo-RL's R3 arm leaves the first N and last M decoder layers in
-            # BF16 and quantizes only the routed experts in between, so the
-            # scope is a knob rather than a fixed "every MLP" contract. The
-            # carve-out is expressed twice on purpose: MCore's
-            # first_last_layers_bf16 skips the FP4 autocast for those layers,
-            # and the per-module quant recipe gives them the BF16 config, so a
-            # disagreement between the two is caught instead of silently
-            # quantizing a layer the operator asked to keep in BF16.
+            # Match the per-module recipe and the FP4 autocast layer carve-out.
             self._real_nvfp4_bf16_layers = self._resolve_real_nvfp4_bf16_layers(override_transformer_config)
             carve_enabled, carve_start, carve_end = self._real_nvfp4_bf16_layers
             required_overrides = {
@@ -516,13 +509,6 @@ class MegatronEngine(BaseEngine):
         from megatron.core.quantization.utils import load_quantization_recipe
 
         recipe = load_quantization_recipe(path)
-        scope = "all_mlp" if not bf16_layer_indices else f"routed_expert_mlp_first{carve_start}_last{carve_end}"
-        logger.warning(
-            "VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=%s attention=bf16 bf16_layers=%s path=%s",
-            scope,
-            ",".join(str(index) for index in bf16_layer_indices) or "none",
-            path,
-        )
         return recipe
 
     def _validate_real_nvfp4_environment(self) -> None:
@@ -687,29 +673,6 @@ class MegatronEngine(BaseEngine):
                 "real_nvfp4 did not apply the per-module recipe to the expected layers "
                 f"(actual, expected): {mismatched_counts}"
             )
-
-        import transformer_engine
-
-        scope = "all_mlp" if not carve_enabled else f"routed_expert_mlp_first{carve_start}_last{carve_end}"
-        logger.warning(
-            "VERL_REAL_NVFP4_ATTESTATION PASS fp4=%s recipe=%s scope=%s attention=bf16 "
-            "backward=%s fp4_param=%s te_version=%s te_modules=%d "
-            "attn_qkv_bf16=%d attn_proj_bf16=%d mlp_fc1_nvfp4=%d mlp_fc2_nvfp4=%d "
-            "mlp_fc1_bf16=%d mlp_fc2_bf16=%d",
-            fp4,
-            recipe_type,
-            scope,
-            self._real_nvfp4_config.backward_override,
-            getattr(self.tf_config, "fp4_param", None),
-            getattr(transformer_engine, "__version__", "unknown"),
-            te_module_count,
-            precision_counts["attn_qkv_bf16"],
-            precision_counts["attn_proj_bf16"],
-            precision_counts["mlp_fc1_nvfp4"],
-            precision_counts["mlp_fc2_nvfp4"],
-            precision_counts["mlp_fc1_bf16"],
-            precision_counts["mlp_fc2_bf16"],
-        )
 
     def _resolve_override_ddp_config(self):
         """Keep the DDP grad-bucket dtype consistent with the optimizer's grad buffer.
@@ -1331,10 +1294,10 @@ class MegatronEngine(BaseEngine):
         elif self._real_nvfp4_enabled:
             from verl.utils.real_nvfp4 import (
                 attest_real_nvfp4_bf16_transport,
-                real_nvfp4_expected_counts,
+                real_nvfp4_expected_expert_weights,
             )
 
-            expected_expert_weights, _ = real_nvfp4_expected_counts(self.model_config.hf_config)
+            expected_expert_weights = real_nvfp4_expected_expert_weights(self.model_config.hf_config)
             per_tensor_param = attest_real_nvfp4_bf16_transport(
                 per_tensor_param,
                 expected_expert_weights=expected_expert_weights,

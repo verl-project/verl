@@ -164,7 +164,6 @@ real_nvfp4:
   # Uses the quantized forward operands, dequantized for backward. Requires a
   # Transformer Engine build containing NVTE_BACKWARD_OVERRIDE support.
   backward_override: "dequantized"
-  group_size: 16
   # Keep BF16 master parameters for Adam; W4A4 refers to executed GEMMs.
   fp4_param: false
   # Required MCore per-module recipe: attention BF16, MLP NVFP4.

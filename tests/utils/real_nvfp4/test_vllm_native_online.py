@@ -14,7 +14,7 @@ import torch
 
 from verl.utils.real_nvfp4.bf16_transport import attest_real_nvfp4_bf16_transport
 from verl.utils.real_nvfp4.config import (
-    real_nvfp4_expected_counts,
+    real_nvfp4_expected_expert_weights,
     real_nvfp4_moe_layer_indices,
     real_nvfp4_rollout_layer_partition,
     real_nvfp4_vllm_ignore_layers,
@@ -23,8 +23,6 @@ from verl.utils.real_nvfp4.config import (
 from verl.utils.real_nvfp4.vllm_runtime import (
     attest_r3_rollout_routes,
     attest_vllm_native_nvfp4_runtime,
-    require_vllm_native_reload_contract,
-    vllm_native_nvfp4_fingerprint,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
@@ -100,20 +98,12 @@ class _FakeUnquantizedMoE(torch.nn.Module):
         self.quant_method = UnquantizedFusedMoEMethod()
 
 
-def test_native_vllm_runtime_attestation_and_fingerprint():
+def test_native_vllm_runtime_attestation():
     model = torch.nn.Sequential(_FakeNativeMoE())
     assert attest_vllm_native_nvfp4_runtime(model, expected_moe_layers=1) == {
         "dense_layers": 0,
         "moe_layers": 1,
     }
-    first = vllm_native_nvfp4_fingerprint(model)
-    model[0].w13_weight[0, 0] += 1
-    assert vllm_native_nvfp4_fingerprint(model) != first
-
-    scale_fingerprint = vllm_native_nvfp4_fingerprint(model)
-    model[0].w2_weight_scale_2[0] = 1.00001
-    assert vllm_native_nvfp4_fingerprint(model) != scale_fingerprint
-
     bad = torch.nn.Sequential(_FakeNativeMoE(per_token_activation=False))
     with pytest.raises(RuntimeError, match="per-token activation"):
         attest_vllm_native_nvfp4_runtime(bad, expected_moe_layers=1)
@@ -173,28 +163,6 @@ def test_native_vllm_rejects_discarded_activation_scale_after_sleep(field):
     getattr(model[0].quant_method.moe_kernel.fused_experts.quant_config, field).zero_()
     with pytest.raises(RuntimeError, match="current activation scale after sleep/refit"):
         attest_vllm_native_nvfp4_runtime(model, expected_moe_layers=1)
-
-
-def test_native_vllm_fingerprint_covers_derived_scale():
-    model = torch.nn.Sequential(_FakeNativeMoE())
-    before = vllm_native_nvfp4_fingerprint(model)
-    model[0].g1_scale_c[0] = 1.00001
-    assert before != vllm_native_nvfp4_fingerprint(model)
-
-
-def test_native_vllm_reload_contract_accepts_compatible_signatures():
-    for reload_weights in (
-        lambda weights_iterator=None, weights_path=None, is_checkpoint_format=True: None,
-        lambda weights_iterator=None, is_checkpoint_format=False, *, optional_new_argument=None: None,
-    ):
-        require_vllm_native_reload_contract(SimpleNamespace(reload_weights=reload_weights))
-
-    for reload_weights in (
-        lambda weights_path=None: None,
-        lambda required_new_argument, weights_iterator=None, is_checkpoint_format=True: None,
-    ):
-        with pytest.raises(RuntimeError, match="must accept"):
-            require_vllm_native_reload_contract(SimpleNamespace(reload_weights=reload_weights))
 
 
 def test_online_nvfp4_ignore_is_a_model_config_argument(monkeypatch):
@@ -272,7 +240,7 @@ def test_model_contract_accepts_all_moe_but_refuses_mixed_precision_scope():
     )
     validate_real_nvfp4_model_contract(all_moe)
     assert real_nvfp4_moe_layer_indices(all_moe) == list(range(48))
-    assert real_nvfp4_expected_counts(all_moe) == (48 * 128 * 3, 48 * 128 * 2)
+    assert real_nvfp4_expected_expert_weights(all_moe) == 48 * 128 * 3
     assert real_nvfp4_rollout_layer_partition(
         all_moe,
         num_layers_at_start_in_bf16=2,
@@ -304,7 +272,7 @@ def test_model_contract_accepts_all_moe_but_refuses_mixed_precision_scope():
         validate_real_nvfp4_model_contract(interleaved)
     assert real_nvfp4_moe_layer_indices(interleaved) == [i for i in range(48) if (i + 1) % 2 == 0]
     with pytest.raises(ValueError, match="mixed dense/MoE"):
-        real_nvfp4_expected_counts(interleaved)
+        real_nvfp4_expected_expert_weights(interleaved)
 
     # Explicitly dense prefixes are likewise unsupported by the current recipe.
     dense_prefix = SimpleNamespace(

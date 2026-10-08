@@ -1,4 +1,4 @@
-# Routed-expert W4A4 training contract with NeMo-RL's layer carve-out: the
+# Routed-expert W4A4 training contract with BF16 boundary layers: the
 # first 2 and last 4 decoder layers stay BF16, and only the routed-expert MLP
 # fc1/fc2 of the remaining 42 layers use the TE NVFP4 recipe. Attention is BF16
 # everywhere and parameters stay BF16.

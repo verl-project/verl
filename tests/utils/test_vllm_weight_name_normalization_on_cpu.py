@@ -999,7 +999,6 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
         "attest_vllm_native_nvfp4_runtime",
         lambda model, **expected_partition: attestations.append((model, expected_partition)),
     )
-    monkeypatch.setattr(real_nvfp4, "vllm_native_nvfp4_fingerprint", lambda model: 2)
     monkeypatch.setattr(
         _vllm_rollout_utils,
         "get_torch_device",
@@ -1019,8 +1018,6 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     worker._is_qat_model = False
     worker._is_modelopt_qat = False
     worker._is_real_nvfp4 = True
-    worker._real_nvfp4_last_fingerprint = 1
-    worker._real_nvfp4_refit_index = 0
     worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1, num_experts=1)
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-native-nvfp4-reload.sock"
 
@@ -1040,5 +1037,3 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
             },
         )
     ]
-    assert worker._real_nvfp4_last_fingerprint == 2
-    assert worker._real_nvfp4_refit_index == 1

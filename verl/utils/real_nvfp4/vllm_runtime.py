@@ -14,14 +14,10 @@
 
 """Validate native NVFP4 configuration, weight layout and live-refit state."""
 
-import inspect
-import logging
 import re
 from collections.abc import Collection
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"
 REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
@@ -56,20 +52,6 @@ def require_vllm_native_nvfp4_per_token(vllm_config) -> None:
         raise RuntimeError(
             f"real_nvfp4 worker quantization drifted: expected {NVFP4_PER_TOKEN_METHOD!r}, got {quantization!r}"
         )
-
-
-def require_vllm_native_reload_contract(model_runner) -> None:
-    """Check that the runner accepts the native reload call used by verl."""
-
-    reload_weights = getattr(model_runner, "reload_weights", None)
-    if reload_weights is None:
-        raise RuntimeError("vLLM model runner has no native reload_weights API")
-    try:
-        inspect.signature(reload_weights).bind(weights_iterator=iter(()), is_checkpoint_format=True)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            "vLLM reload_weights must accept weights_iterator and is_checkpoint_format keyword arguments"
-        ) from exc
 
 
 @torch.no_grad()
@@ -188,54 +170,4 @@ def attest_vllm_native_nvfp4_runtime(
         raise RuntimeError(
             f"native NVFP4 rollout MoE-layer count mismatch: expected {expected_moe_layers}, got {moe_count}"
         )
-    logger.warning(
-        "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=%d expected=%d bf16_moe_layers=%s "
-        "method=vllm_native_nvfp4_per_token backend=FLASHINFER_TRTLLM "
-        "scope=routed_expert_mlp attention=bf16 activation=per_token scale_references=current derived_scale=current",
-        moe_count,
-        expected_moe_layers,
-        sorted(expected_bf16_layer_indices),
-    )
     return {"dense_layers": 0, "moe_layers": moe_count}
-
-
-@torch.no_grad()
-def vllm_native_nvfp4_fingerprint(model: torch.nn.Module) -> int:
-    """Return a cheap fingerprint sampled from every packed expert layer."""
-
-    fingerprint: torch.Tensor | None = None
-    layer_index = 0
-    for module in model.modules():
-        quant_method = getattr(module, "quant_method", None)
-        if type(quant_method).__name__ != "Nvfp4OnlineMoEMethod":
-            continue
-        layer_index += 1
-        fingerprint_tensors = (
-            "w13_weight",
-            "w2_weight",
-            "w13_weight_scale",
-            "w2_weight_scale",
-            "w13_weight_scale_2",
-            "w2_weight_scale_2",
-            "g1_scale_c",
-        )
-        for tensor_index, name in enumerate(fingerprint_tensors, start=1):
-            flat = getattr(module, name).view(torch.uint8).flatten()
-            # Packed weights and FP8 block scales are sampled; the small FP32
-            # global-scale tensors are read in full. This makes refit-change
-            # detection sensitive to scale changes even when a 1e-6 optimizer
-            # step does not cross many 4-bit bins.
-            sample_size = flat.numel() if name.endswith("_scale_2") or name == "g1_scale_c" else 2048
-            stride = max(flat.numel() // sample_size, 1)
-            sample = flat[::stride][:sample_size].to(torch.int64)
-            coefficients = torch.arange(
-                1,
-                sample.numel() + 1,
-                device=sample.device,
-                dtype=torch.int64,
-            )
-            value = (sample * coefficients).sum() * (2 * layer_index + tensor_index)
-            fingerprint = value if fingerprint is None else fingerprint + value
-    if layer_index == 0 or fingerprint is None:
-        raise RuntimeError("native NVFP4 fingerprint found no quantized MoE layers")
-    return int(fingerprint.item())

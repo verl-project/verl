@@ -210,7 +210,7 @@ class vLLMColocateWorkerExtension:
             from verl.utils.modelopt import apply_modelopt_nvfp4_patches
 
             apply_modelopt_nvfp4_patches()
-            logger.info("Applied legacy ModelOpt QAT W4A16 patches in vLLM worker subprocess")
+            logger.info("Applied ModelOpt NVFP4 patches in vLLM worker subprocess")
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -233,9 +233,6 @@ class vLLMColocateWorkerExtension:
 
     def _get_drafter_model(self):
         """Return the drafter's model object, or None if unavailable."""
-        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
-        if get_draft_model is not None:
-            return get_draft_model()
         drafter = getattr(self.model_runner, "drafter", None)
         return drafter.model if drafter is not None and hasattr(drafter, "model") else None
 
@@ -277,8 +274,6 @@ class vLLMColocateWorkerExtension:
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
                     real_nvfp4_rollout_layer_partition,
-                    require_vllm_native_reload_contract,
-                    vllm_native_nvfp4_fingerprint,
                 )
 
                 quantized_moe_layers, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
@@ -291,9 +286,6 @@ class vLLMColocateWorkerExtension:
                     expected_quantized_layer_indices=quantized_moe_layers,
                     expected_bf16_layer_indices=bf16_moe_layers,
                 )
-                require_vllm_native_reload_contract(self.model_runner)
-                self._real_nvfp4_last_fingerprint = vllm_native_nvfp4_fingerprint(model)
-                self._real_nvfp4_refit_index = 0
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -326,16 +318,15 @@ class vLLMColocateWorkerExtension:
             raw_weights_iterator = receiver.iter_weights(own_tensors=True, defer_last_ack=True)
             from verl.utils.real_nvfp4 import (
                 attest_real_nvfp4_bf16_transport,
-                real_nvfp4_expected_counts,
+                real_nvfp4_expected_expert_weights,
             )
 
-            expected_expert_weights, _ = real_nvfp4_expected_counts(
+            expected_expert_weights = real_nvfp4_expected_expert_weights(
                 self.model_runner.vllm_config.model_config.hf_config
             )
             weights_iterator = attest_real_nvfp4_bf16_transport(
                 raw_weights_iterator,
                 expected_expert_weights=expected_expert_weights,
-                location="vllm_receive",
                 hf_config=self.model_runner.vllm_config.model_config.hf_config,
             )
             try:
@@ -349,7 +340,6 @@ class vLLMColocateWorkerExtension:
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
                     real_nvfp4_rollout_layer_partition,
-                    vllm_native_nvfp4_fingerprint,
                 )
 
                 quantized_moe_layers, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
@@ -362,17 +352,6 @@ class vLLMColocateWorkerExtension:
                     expected_quantized_layer_indices=quantized_moe_layers,
                     expected_bf16_layer_indices=bf16_moe_layers,
                 )
-                fingerprint = vllm_native_nvfp4_fingerprint(self._get_main_model())
-                previous = self._real_nvfp4_last_fingerprint
-                changed = fingerprint != previous
-                print(
-                    "VERL_REAL_NVFP4_NATIVE_REFIT PASS "
-                    f"refit={self._real_nvfp4_refit_index} changed={int(changed)} "
-                    f"packed_fingerprint={fingerprint}",
-                    flush=True,
-                )
-                self._real_nvfp4_last_fingerprint = fingerprint
-                self._real_nvfp4_refit_index += 1
                 get_torch_device().synchronize()
                 receiver.complete_deferred_last_ack()
             finally:
@@ -382,42 +361,6 @@ class vLLMColocateWorkerExtension:
                     close()
                 receiver.close_weight_iterator(raw_weights_iterator)
 
-            logger.warning(
-                "VERL_REAL_NVFP4_SYNC PASS transport=bf16 "
-                "quantization=vllm_native_online "
-                "reload=native completion_ack=post_finalize"
-            )
-            return
-
-        # Let the BF16 comparison recipe use the same native reload API as
-        # real NVFP4. The default path below retains verl's bucketed loading
-        # and unquantized-MoE staging/folding for other recipes.
-        if os.environ.get("VERL_VLLM_NATIVE_RELOAD") == "1":
-            if peft_config is not None:
-                raise NotImplementedError("native reload weight sync does not support LoRA")
-            if self._use_mtp_drafter_weight_sync():
-                raise NotImplementedError("native reload weight sync does not support MTP drafter weight sync")
-            receiver = BucketedWeightReceiver(
-                zmq_handle=self._get_zmq_handle(),
-                device=self.device,
-                use_shm=use_shm,
-            )
-            weights_iterator = receiver.iter_weights(own_tensors=True, defer_last_ack=True)
-            try:
-                self.model_runner.reload_weights(
-                    weights_iterator=weights_iterator,
-                    is_checkpoint_format=True,
-                )
-                if not receiver.iterator_exhausted:
-                    raise RuntimeError("vLLM reload_weights returned before consuming the full weight stream")
-                get_torch_device().synchronize()
-                receiver.complete_deferred_last_ack()
-            finally:
-                close = getattr(weights_iterator, "close", None)
-                if close is not None:
-                    close()
-                receiver.close_weight_iterator(weights_iterator)
-            logger.warning("VERL_VLLM_NATIVE_RELOAD PASS reload=native")
             return
 
         if self._is_qat_model:
@@ -431,7 +374,7 @@ class vLLMColocateWorkerExtension:
             from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
 
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
-            logger.info("ModelOpt legacy QAT W4A16: prepare_modelopt_for_weight_reload completed")
+            logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
         elif peft_config and base_sync_done:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
@@ -494,7 +437,7 @@ class vLLMColocateWorkerExtension:
             from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
 
             modelopt_process_weights_after_loading(self.model_runner.model)
-            logger.info("ModelOpt legacy QAT W4A16: process_weights_after_loading completed")
+            logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
         elif is_quantized_model(self.model_runner.vllm_config):

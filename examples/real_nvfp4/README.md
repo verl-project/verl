@@ -11,12 +11,12 @@ used by CUDA graphs across policy updates.
 The default module recipe keeps attention and the first two and last four
 MLP layers in BF16. The remaining routed-expert MLPs use NVFP4 with per-token
 activation scaling, dequantized backward, and adaptive 4-over-6 disabled.
-Router, norms, embeddings, shared experts and the LM head remain BF16.
+Router, norms, embeddings and the LM head remain BF16.
 
 The current integration supports the all-MoE `Qwen3MoeForCausalLM` layout,
 training PP=1 without virtual pipeline parallelism, and rollout TP/PP/EP=1/1/1.
 It uses BF16 KV cache, `FULL_DECODE_ONLY` CUDA graphs and no speculative decoding.
-Mixed dense/MoE layouts are not supported. An evaluation module recipe must
+Mixed dense/MoE layouts and shared experts are not supported. An evaluation module recipe must
 match the training recipe, including the BF16 layer selection.
 
 ## Installation
@@ -108,5 +108,4 @@ python -m pytest -q tests/utils/test_bucketed_weight_transfer.py
 ```
 
 Coverage includes recipe compatibility, BF16 transport, GPU packing, repeated
-refit and sleep/wake scale restoration. Training curves and end-to-end
-performance results are reported in the PR.
+refit and sleep/wake scale restoration.

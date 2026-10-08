@@ -102,7 +102,6 @@ actor_rollout_ref:
         fp4_format: e2m1
         fp4_recipe: nvfp4
         backward_override: dequantized
-        group_size: 16
         fp4_param: false
         te_precision_config_file: null
         num_layers_at_start_in_bf16: 0
@@ -314,7 +313,6 @@ actor_rollout_ref:
         fp4_format: e2m1
         fp4_recipe: nvfp4
         backward_override: dequantized
-        group_size: 16
         fp4_param: false
         te_precision_config_file: null
         num_layers_at_start_in_bf16: 0
@@ -667,7 +665,6 @@ critic:
       fp4_format: e2m1
       fp4_recipe: nvfp4
       backward_override: dequantized
-      group_size: 16
       fp4_param: false
       te_precision_config_file: null
       num_layers_at_start_in_bf16: 0

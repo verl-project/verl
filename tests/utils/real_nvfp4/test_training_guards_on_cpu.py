@@ -25,7 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from verl.utils.real_nvfp4.config import (
-    real_nvfp4_expected_counts,
+    real_nvfp4_expected_expert_weights,
     validate_real_nvfp4_model_contract,
     validate_real_nvfp4_parallelism,
     validate_real_nvfp4_precision_configs,
@@ -33,10 +33,7 @@ from verl.utils.real_nvfp4.config import (
 
 ROOT = Path(__file__).resolve().parents[3]
 ENGINE_PATH = ROOT / "verl/workers/engine/megatron/transformer_impl.py"
-RECIPE_PATHS = [
-    ROOT / "examples/real_nvfp4/config/attn_bf16_mlp_nvfp4.yaml",
-    ROOT / "examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first2_last4.yaml",
-]
+RECIPE_PATH = ROOT / "examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first2_last4.yaml"
 
 
 def _engine_method(name):
@@ -57,7 +54,7 @@ def _model_config(**kwargs):
 def test_current_all_moe_model_still_has_the_same_export_counts():
     model = _model_config()
     validate_real_nvfp4_model_contract(model)
-    assert real_nvfp4_expected_counts(model) == (48 * 128 * 3, 48 * 128 * 2)
+    assert real_nvfp4_expected_expert_weights(model) == 48 * 128 * 3
 
 
 @pytest.mark.parametrize("overrides", [{"decoder_sparse_step": 2}, {"mlp_only_layers": [0, 1]}])
@@ -104,10 +101,9 @@ def test_engine_rejects_pipeline_splitting_with_and_without_carveout(pp, vpp, ca
         _engine_method("_resolve_real_nvfp4_bf16_layers")(engine, overrides)
 
 
-@pytest.mark.parametrize("recipe_path", RECIPE_PATHS)
 @pytest.mark.parametrize("explicit_eval", [False, True])
-def test_formal_recipe_and_identical_explicit_eval_are_accepted(recipe_path, explicit_eval):
-    configs = OmegaConf.to_container(OmegaConf.load(recipe_path), resolve=True)["configs"]
+def test_formal_recipe_and_identical_explicit_eval_are_accepted(explicit_eval):
+    configs = OmegaConf.to_container(OmegaConf.load(RECIPE_PATH), resolve=True)["configs"]
     if explicit_eval:
         for payload in configs.values():
             payload["evaluation_recipe"] = copy.deepcopy(payload["training_recipe"])
@@ -125,18 +121,18 @@ def test_formal_recipe_and_identical_explicit_eval_are_accepted(recipe_path, exp
     ],
 )
 def test_effective_eval_precision_cannot_differ(config_name, evaluation_recipe):
-    configs = OmegaConf.to_container(OmegaConf.load(RECIPE_PATHS[0]), resolve=True)["configs"]
+    configs = OmegaConf.to_container(OmegaConf.load(RECIPE_PATH), resolve=True)["configs"]
     configs[config_name]["evaluation_recipe"] = evaluation_recipe
     with pytest.raises(ValueError, match="evaluation_recipe must match training_recipe"):
         validate_real_nvfp4_precision_configs(configs)
 
 
 def test_engine_loader_rejects_eval_drift_before_loading_megatron_recipe(monkeypatch):
-    raw = OmegaConf.to_container(OmegaConf.load(RECIPE_PATHS[0]), resolve=True)
+    raw = OmegaConf.to_container(OmegaConf.load(RECIPE_PATH), resolve=True)
     raw["configs"]["nvfp4"]["evaluation_recipe"] = {}
     monkeypatch.setattr(OmegaConf, "load", lambda _path: OmegaConf.create(raw))
     engine = SimpleNamespace(
-        _real_nvfp4_config=SimpleNamespace(te_precision_config_file=str(RECIPE_PATHS[0])),
+        _real_nvfp4_config=SimpleNamespace(te_precision_config_file=str(RECIPE_PATH)),
         _real_nvfp4_bf16_layers=(False, 0, 0),
         model_config=SimpleNamespace(hf_config=_model_config()),
     )

@@ -9,35 +9,14 @@ case "$PRECISION_MODE" in
   bf16|real_nvfp4) ;;
   *) echo "PRECISION_MODE must be bf16 or real_nvfp4" >&2; exit 2 ;;
 esac
-readonly RUN_PROFILE=${RUN_PROFILE:-formal}
-case "$RUN_PROFILE" in
-  formal)
-    readonly EXPECTED_NNODES=8
-    readonly TRAIN_PROMPT_BSZ=32
-    readonly N_RESP_PER_PROMPT=16
-    readonly PPO_MINI_BATCH_SIZE=32
-    readonly MAX_RESPONSE_LENGTH=20480
-    readonly MAX_TOKEN_LEN=21504
-    readonly MAX_NUM_BATCHED_TOKENS=32768
-    readonly MAX_NUM_SEQS=256
-    readonly AGENT_NUM_WORKERS=8
-    ;;
-  smoke)
-    readonly EXPECTED_NNODES=1
-    # The expanded rollout batch must contain at least one item per EP/DP
-    # partition.  EP=4 with 2 responses therefore needs 2 prompts.
-    readonly TRAIN_PROMPT_BSZ=2
-    readonly N_RESP_PER_PROMPT=2
-    readonly PPO_MINI_BATCH_SIZE=2
-    readonly MAX_RESPONSE_LENGTH=1024
-    readonly MAX_TOKEN_LEN=2048
-    readonly MAX_NUM_BATCHED_TOKENS=2048
-    # The reduced smoke profile is not the formal capacity-validation contract.
-    readonly MAX_NUM_SEQS=128
-    readonly AGENT_NUM_WORKERS=2
-    ;;
-  *) echo "RUN_PROFILE must be formal or smoke" >&2; exit 2 ;;
-esac
+readonly TRAIN_PROMPT_BSZ=32
+readonly N_RESP_PER_PROMPT=16
+readonly PPO_MINI_BATCH_SIZE=32
+readonly MAX_RESPONSE_LENGTH=20480
+readonly MAX_TOKEN_LEN=21504
+readonly MAX_NUM_BATCHED_TOKENS=32768
+readonly MAX_NUM_SEQS=256
+readonly AGENT_NUM_WORKERS=8
 
 readonly WORKING_DIR=${WORKING_DIR:-$PWD}
 readonly RAY_ADDRESS=${RAY_ADDRESS:-http://127.0.0.1:8265}
@@ -54,29 +33,13 @@ readonly CKPTS_DIR=${CKPTS_DIR:-$RAY_DATA_HOME/checkpoints/$PROJECT_NAME/$EXP_NA
 readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
 # Token-level truncated importance sampling caps each importance weight at 2.
 # Keep the same first/last BF16 layer carve-outs in training and rollout.
-readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-True}
-readonly BF16_LAYERS_AT_START=${BF16_LAYERS_AT_START:-2}
-readonly BF16_LAYERS_AT_END=${BF16_LAYERS_AT_END:-4}
-readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
-# Keep FlashInfer autotuning disabled for this example.
-readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-False}
-case "$ROLLOUT_IS" in token|sequence|null) ;; *) echo "ROLLOUT_IS must be token|sequence|null" >&2; exit 2 ;; esac
 readonly RESUME_MODE=${RESUME_MODE:-disable}
 readonly RESUME_FROM_PATH=${RESUME_FROM_PATH:-}
-# The carve-out lives in the per-module MCore recipe as well as in Megatron's
-# first_last_layers_bf16 flag: the flag skips the FP4 autocast for those layers
-# and the recipe gives their MLP the BF16 config, and verl refuses to build if
-# the two disagree.
-if [[ "$FIRST_LAST_BF16" = True ]]; then
-  readonly DEFAULT_TE_PRECISION_CONFIG=$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first${BF16_LAYERS_AT_START}_last${BF16_LAYERS_AT_END}.yaml
-else
-  readonly DEFAULT_TE_PRECISION_CONFIG=$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4.yaml
-fi
-readonly TE_PRECISION_CONFIG=${TE_PRECISION_CONFIG:-$DEFAULT_TE_PRECISION_CONFIG}
+readonly TE_PRECISION_CONFIG=$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first2_last4.yaml
 
 [[ -f "$MODEL_PATH/config.json" ]]
 [[ -f "$TRAIN_FILE" && -f "$TEST_FILE" && -f "$RUNTIME_ENV" ]]
-[[ "$NNODES" = "$EXPECTED_NNODES" && "$N_GPUS_PER_NODE" = 4 ]]
+[[ "$NNODES" = 8 && "$N_GPUS_PER_NODE" = 4 ]]
 [[ "$RESUME_MODE" = disable || "$RESUME_MODE" = auto || "$RESUME_MODE" = resume_path ]]
 if [[ "$RESUME_MODE" = resume_path ]]; then
   [[ -d "$RESUME_FROM_PATH" && "$RESUME_FROM_PATH" = *global_step_* ]]
@@ -114,7 +77,7 @@ ALGORITHM=(
   algorithm.adv_estimator=grpo
   algorithm.use_kl_in_reward=False
   algorithm.kl_ctrl.kl_coef=0.0
-  algorithm.rollout_correction.rollout_is="$ROLLOUT_IS"
+  algorithm.rollout_correction.rollout_is=token
   algorithm.rollout_correction.rollout_is_threshold=2.0
   algorithm.rollout_correction.rollout_is_batch_normalize=False
   algorithm.rollout_correction.rollout_rs=null
@@ -160,9 +123,9 @@ ACTOR=(
   +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True
   +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
   +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
-  +actor_rollout_ref.actor.megatron.override_transformer_config.first_last_layers_bf16="$FIRST_LAST_BF16"
-  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_start_in_bf16="$BF16_LAYERS_AT_START"
-  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_end_in_bf16="$BF16_LAYERS_AT_END"
+  +actor_rollout_ref.actor.megatron.override_transformer_config.first_last_layers_bf16=True
+  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_start_in_bf16=2
+  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_end_in_bf16=4
   +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
   +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
   +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -196,7 +159,7 @@ ROLLOUT=(
   actor_rollout_ref.rollout.enable_rollout_routing_replay=True
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=512
   +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune="$FLASHINFER_AUTOTUNE"
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune=False
 )
 
 FORWARD_ONLY=(
@@ -239,11 +202,10 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
     actor_rollout_ref.actor.megatron.real_nvfp4.fp4_format=e2m1
     actor_rollout_ref.actor.megatron.real_nvfp4.fp4_recipe=nvfp4
     actor_rollout_ref.actor.megatron.real_nvfp4.backward_override=dequantized
-    actor_rollout_ref.actor.megatron.real_nvfp4.group_size=16
     actor_rollout_ref.actor.megatron.real_nvfp4.fp4_param=False
     actor_rollout_ref.actor.megatron.real_nvfp4.te_precision_config_file="$TE_PRECISION_CONFIG"
-    actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_start_in_bf16="$BF16_LAYERS_AT_START"
-    actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_end_in_bf16="$BF16_LAYERS_AT_END"
+    actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_start_in_bf16=2
+    actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_end_in_bf16=4
   )
 fi
 

@@ -33,25 +33,6 @@ def test_native_quantization_configuration():
         )
 
 
-def test_bf16_native_reload_refuses_mtp_before_ipc(monkeypatch):
-    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer, utils
-
-    monkeypatch.setenv("VERL_VLLM_NATIVE_RELOAD", "1")
-    monkeypatch.setattr(torch.version, "hip", None)
-
-    def forbidden_receiver(*args, **kwargs):
-        pytest.fail("MTP must be rejected before opening an IPC receiver")
-
-    monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", forbidden_receiver)
-    worker = SimpleNamespace(
-        device=torch.device("cpu"),
-        _is_real_nvfp4=False,
-        _use_mtp_drafter_weight_sync=lambda: True,
-    )
-    with pytest.raises(NotImplementedError, match="MTP drafter"):
-        utils.vLLMColocateWorkerExtension.update_weights_from_ipc(worker)
-
-
 def _weights():
     return [
         (f"model.layers.{layer}.mlp.experts.{expert}.{projection}.weight", torch.ones(2, 16))

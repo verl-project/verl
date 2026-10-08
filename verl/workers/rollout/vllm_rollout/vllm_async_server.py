@@ -354,22 +354,6 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
-        if real_nvfp4_config.get("enable", False):
-            logger.warning(
-                "VERL_REAL_NVFP4_ENGINE_CONTRACT PASS "
-                "cudagraph=%s enforce_eager=%d max_num_seqs=%d "
-                "max_num_batched_tokens=%d tp=%d pp=%d ep=%d "
-                "moe_backend=%s",
-                json.loads(compilation_config)["cudagraph_mode"],
-                int(bool(self.config.enforce_eager)),
-                int(self.config.max_num_seqs),
-                int(self.config.max_num_batched_tokens),
-                int(self.config.tensor_model_parallel_size),
-                int(self.config.pipeline_model_parallel_size),
-                int(self.config.expert_parallel_size),
-                args["moe_backend"],
-            )
-
         # update profiler args, only on the replica that will actually be profiled: configuring
         # the engine profiler everywhere makes every replica log that profiling is enabled while
         # only the selected one is ever started.
@@ -1362,7 +1346,7 @@ class vLLMHttpServer:
         quantization = self.config.quantization
         hf_overrides = {}
 
-        # Real W4A4: vLLM 0.26's native online MoE quantization consumes the
+        # Real W4A4: Native online MoE quantization consumes the
         # BF16 refit stream, quantizes each complete expert layer to NVFP4, and
         # executes dynamic/per-token activation quantization. This must be
         # handled before the legacy ModelOpt QAT/Marlin path.
@@ -1420,7 +1404,6 @@ class vLLMHttpServer:
             from verl.utils.real_nvfp4 import (
                 NVFP4_PER_TOKEN_METHOD,
                 REAL_NVFP4_MOE_BACKEND,
-                real_nvfp4_rollout_layer_partition,
                 real_nvfp4_vllm_ignore_layers,
                 validate_real_nvfp4_model_contract,
             )
@@ -1428,11 +1411,6 @@ class vLLMHttpServer:
             validate_real_nvfp4_model_contract(self.model_config.hf_config)
             bf16_layers_at_start = int(real_nvfp4_config.get("num_layers_at_start_in_bf16", 0))
             bf16_layers_at_end = int(real_nvfp4_config.get("num_layers_at_end_in_bf16", 0))
-            quantized_moe_layers, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
-                self.model_config.hf_config,
-                num_layers_at_start_in_bf16=bf16_layers_at_start,
-                num_layers_at_end_in_bf16=bf16_layers_at_end,
-            )
             ignored_layers = real_nvfp4_vllm_ignore_layers(
                 self.model_config.hf_config,
                 num_layers_at_start_in_bf16=bf16_layers_at_start,
@@ -1442,7 +1420,7 @@ class vLLMHttpServer:
             os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_START"] = str(bf16_layers_at_start)
             os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_END"] = str(bf16_layers_at_end)
             quantization = NVFP4_PER_TOKEN_METHOD
-            # vLLM 0.26 merges this with the nvfp4_per_token shorthand. Its
+            # vLLM merges this with the nvfp4_per_token shorthand. Its
             # online quantizer's field is singular `ignore`, and these are the
             # exact RoutedExperts prefixes constructed by Qwen3Moe.
             # This is a ModelConfig/AsyncEngineArgs field, not an HF config
@@ -1451,16 +1429,6 @@ class vLLMHttpServer:
             # before the online shorthand can be resolved.
             engine_kwargs["quantization_config"] = {"ignore": ignored_layers}
             engine_kwargs["moe_backend"] = REAL_NVFP4_MOE_BACKEND
-            logger.warning(
-                "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION configured "
-                "method=vllm_native_nvfp4_per_token "
-                "backend=FLASHINFER_TRTLLM scope=routed_expert_mlp "
-                "attention=bf16 activation=per_token quantized_moe_layers=%s "
-                "bf16_moe_layers=%s ignore=%s",
-                quantized_moe_layers,
-                bf16_moe_layers,
-                ignored_layers,
-            )
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}

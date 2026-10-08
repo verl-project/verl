@@ -14,14 +14,11 @@
 
 """Fail-closed attestation for the BF16 actor-to-rollout refit stream."""
 
-import logging
 import re
 from collections.abc import Iterator
 from typing import Any
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 _EXPERT_WEIGHT_RE = re.compile(r"^.*\.experts\.\d+\.(?:gate_proj|up_proj|down_proj)\.weight$")
 _EXPERT_KEY_RE = re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
@@ -32,7 +29,6 @@ def attest_real_nvfp4_bf16_transport(
     weights: Iterator[tuple[str, torch.Tensor]],
     *,
     expected_expert_weights: int,
-    location: str = "actor_export",
     hf_config: Any = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Pass plain actor weights through while proving refit is not pre-packed.
@@ -81,9 +77,3 @@ def attest_real_nvfp4_bf16_transport(
             "real NVFP4 BF16 refit expert-weight count mismatch: "
             f"expected {expected_expert_weights}, got {expert_weights}"
         )
-    logger.warning(
-        "VERL_REAL_NVFP4_EXPORT PASS location=%s transport=bf16 quantization=vllm_worker expert_weights=%d expected=%d",
-        location,
-        expert_weights,
-        expected_expert_weights,
-    )

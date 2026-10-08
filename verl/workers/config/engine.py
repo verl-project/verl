@@ -160,7 +160,6 @@ class RealNVFP4EngineConfig(BaseConfig):
     fp4_format: str = "e2m1"
     fp4_recipe: str = "nvfp4"
     backward_override: str = "dequantized"
-    group_size: int = 16
     fp4_param: bool = False
     te_precision_config_file: Optional[str] = None
     num_layers_at_start_in_bf16: int = 0
@@ -176,8 +175,6 @@ class RealNVFP4EngineConfig(BaseConfig):
                 "real_nvfp4.backward_override must be 'dequantized' or 'high_precision', "
                 f"got {self.backward_override!r}"
             )
-        if self.group_size != 16:
-            raise ValueError("NVFP4 requires real_nvfp4.group_size=16")
         if self.fp4_param:
             raise ValueError("real_nvfp4 requires fp4_param=False so Adam and refit retain BF16 master weights")
         if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:

@@ -81,7 +81,7 @@ def real_nvfp4_vllm_ignore_layers(
     num_layers_at_start_in_bf16: int = 0,
     num_layers_at_end_in_bf16: int = 0,
 ) -> list[str]:
-    """Exact vLLM 0.26 module names excluded from online NVFP4."""
+    """Exact vLLM module names excluded from online NVFP4."""
 
     _, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
         hf_config,
@@ -158,31 +158,19 @@ def validate_real_nvfp4_precision_configs(configs: Any) -> None:
             raise ValueError(f"real_nvfp4 {name} evaluation_recipe must match training_recipe")
 
 
-def real_nvfp4_expected_counts(hf_config: Any) -> tuple[int, int]:
-    """Return exact ``(expert_weights, quantized_groups)`` for the refit."""
+def real_nvfp4_expected_expert_weights(hf_config: Any) -> int:
+    """Return the number of routed-expert projection weights in the refit."""
 
     validate_real_nvfp4_model_contract(hf_config)
 
     num_experts = int(_hf_get(hf_config, "num_experts") or _hf_get(hf_config, "n_routed_experts") or 0)
     moe_layers = len(real_nvfp4_moe_layer_indices(hf_config))
-    if moe_layers <= 0 or num_experts <= 0:
-        raise ValueError("real_nvfp4 model config requires positive MoE layer and expert counts")
-    # Three projections per expert on the wire (gate/up/down); two quantized
-    # groups per expert once gate/up are fused into w13.
-    expert_weights = moe_layers * num_experts * 3
-    quantized_groups = moe_layers * num_experts * 2
-    return expert_weights, quantized_groups
+    # Three projections per expert on the wire: gate, up and down.
+    return moe_layers * num_experts * 3
 
 
 def validate_real_nvfp4_te_recipe(recipe: Any, *, backward_override: str) -> None:
-    """Fail closed unless TE implements the exact audited training semantics.
-
-    TE 2.18 release packages, also used by NeMo RL PR #3566, contain both the
-    GroupedLinear packed-wgrad lifetime fix (TE PR #3049) and the fix that
-    preserves quantized/dequantized forward operands for a dequantized backward
-    (TE PR #3141). Check all three distribution versions to reject mixed
-    Python/core/extension installations, and still validate the recipe payload.
-    """
+    """Validate matched TE packages and the effective NVFP4 recipe."""
 
     for package in ("transformer-engine", "transformer-engine-cu13", "transformer-engine-torch"):
         actual_version = version(package)
@@ -198,7 +186,7 @@ def validate_real_nvfp4_te_recipe(recipe: Any, *, backward_override: str) -> Non
         "disable_rht": True,
         "disable_stochastic_rounding": True,
         "disable_2d_quantization": True,
-        # vLLM 0.26's native nvfp4_per_token rollout uses standard NVFP4, not
+        # Native nvfp4_per_token rollout uses standard NVFP4, not
         # TE's adaptive 4-over-6 representation. Keep training aligned.
         "nvfp4_4over6": "none",
         "nvfp4_4over6_e4m3_use_256": "all",
@@ -212,25 +200,13 @@ def validate_real_nvfp4_te_recipe(recipe: Any, *, backward_override: str) -> Non
     if mismatches:
         raise RuntimeError(f"real_nvfp4 Transformer Engine recipe drifted: {mismatches}")
 
-    qparam_contract = {
-        "fp4_quant_fwd_inp": {
-            "random_hadamard_transform": False,
-            "stochastic_rounding": False,
-            "fp4_2d_quantization": False,
-        },
-        "fp4_quant_fwd_weight": {
-            "random_hadamard_transform": False,
-            "stochastic_rounding": False,
-            "fp4_2d_quantization": False,
-        },
-        "fp4_quant_bwd_grad": {
-            "random_hadamard_transform": False,
-            "stochastic_rounding": False,
-            "fp4_2d_quantization": False,
-        },
+    group_expected = {
+        "random_hadamard_transform": False,
+        "stochastic_rounding": False,
+        "fp4_2d_quantization": False,
     }
     qparam_mismatches = {}
-    for group_name, group_expected in qparam_contract.items():
+    for group_name in ("fp4_quant_fwd_inp", "fp4_quant_fwd_weight", "fp4_quant_bwd_grad"):
         group = getattr(recipe, group_name, None)
         for field_name, wanted in group_expected.items():
             actual = getattr(group, field_name, None)
