@@ -105,6 +105,30 @@ from sympy.parsing.sympy_parser import parse_expr
 # verl related
 from verl.utils.py_functional import timeout_limit
 
+import ast
+
+_ARITHMETIC_NODES = frozenset(
+    [ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Load]
+    + list(ast.operator.__subclasses__())
+    + list(ast.unaryop.__subclasses__())
+)
+
+
+def _safe_arith_eval(expression: str):
+    r"""Evaluate a purely numeric arithmetic expression.
+
+    The input string is model-authored text after \pi substitution, so it
+    must never reach a general-purpose eval. Only numeric constants,
+    arithmetic operators, and unary signs are permitted; names, calls,
+    attributes, subscripts, and comprehensions raise before evaluation.
+    """
+    tree = ast.parse(expression, mode="eval")
+    for node in ast.walk(tree):
+        if type(node) not in _ARITHMETIC_NODES:
+            raise ValueError(f"disallowed node in arithmetic expression: {type(node).__name__}")
+    code = compile(tree, "<prime_math>", "eval")
+    return eval(code, {"__builtins__": {}}, {})
+
 
 def is_digit(s):
     try:
@@ -164,9 +188,11 @@ def handle_pi(string, pi):
             # Find the next occurrence of "\pi"
             idx = string.find("\\pi", idx + 1)
 
-        # Evaluate the expression using eval() function
+        # Evaluate the arithmetic expression with a whitelisted AST
+        # (CVE-2026-6878): the string is model-authored and must never
+        # reach a general-purpose eval.
         with contextlib.suppress(Exception):
-            string = eval(string)
+            string = _safe_arith_eval(string)
 
     return string
 
@@ -296,9 +322,12 @@ def math_equal(
         except Exception:
             pass
     elif r"\begin{pmatrix}" in reference and prediction.startswith("[") and prediction.endswith("]"):
-        if isinstance(eval(prediction), list):
+        try:
+            pred_matrix = ast.literal_eval(prediction)
+        except (ValueError, SyntaxError):
+            pred_matrix = None
+        if isinstance(pred_matrix, list):
             try:
-                pred_matrix = eval(prediction)
                 # ref_matrix_items = reference.split()[1:-1:2]
                 ref_matrix_items = (
                     reference.removeprefix(r"\\begin{pmatrix}")
