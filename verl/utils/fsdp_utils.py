@@ -660,7 +660,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     """
     lora_params = OrderedDict()
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
-    adapter_name = next(iter(peft_model, "peft_config", None) and peft_model.peft_config or {"default": None})
+    adapter_name = next(iter(peft_model.peft_config)) if hasattr(peft_model, "peft_config") else "default"
     adapter_seg = f".{adapter_name}."
 
     for name, submodule in fsdp_module.named_modules():
