@@ -18,6 +18,7 @@ Utility classes for manage and request LLM servers:
 """
 
 import asyncio
+import inspect
 import logging
 import os
 from typing import Any, Optional
@@ -25,7 +26,8 @@ from uuid import uuid4
 
 import numpy as np
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, MissingMandatoryValue
+from omegaconf.errors import ConfigAttributeError, ConfigKeyError
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
@@ -360,6 +362,23 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         return final_output
 
 
+def _actor_strategy(config: DictConfig) -> str | None:
+    """Training backend that owns the rollout weight sync, when the config has one.
+
+    Reward and generation servers have no ``actor.strategy``. Leaving it unset
+    keeps merged-LoRA sleep at level 2; only an explicit FSDP strategy opts into
+    level 1.
+    """
+    try:
+        actor = config.actor_rollout_ref.actor
+        strategy = actor.strategy
+    except (AttributeError, MissingMandatoryValue, ConfigAttributeError, ConfigKeyError):
+        return None
+    if isinstance(strategy, str) and strategy and strategy != "???":
+        return strategy
+    return None
+
+
 class LLMServerManager:
     """LLMServerManager is responsible for:
     - Launch server replicas
@@ -468,13 +487,18 @@ class LLMServerManager:
         )
         num_replicas = world_size // rollout_world_size
 
+        replica_kwargs = {
+            "config": self.rollout_config,
+            "model_config": self.model_config,
+            "gpus_per_node": self.rollout_config.n_gpus_per_node,
+        }
+        # vLLM uses the strategy to choose sleep level for merged LoRA. Other
+        # rollout servers do not take this argument.
+        if "actor_strategy" in inspect.signature(self.rollout_replica_class.__init__).parameters:
+            replica_kwargs["actor_strategy"] = _actor_strategy(self.config)
+
         self.rollout_replicas = [
-            self.rollout_replica_class(
-                replica_rank=start_rank + replica_rank,
-                config=self.rollout_config,
-                model_config=self.model_config,
-                gpus_per_node=self.rollout_config.n_gpus_per_node,
-            )
+            self.rollout_replica_class(replica_rank=start_rank + replica_rank, **replica_kwargs)
             for replica_rank in range(num_replicas)
         ]
 

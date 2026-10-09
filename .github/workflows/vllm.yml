@@ -134,7 +134,11 @@ jobs:
             tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \
             tests/workers/rollout/rollout_vllm/test_submitter_gate_on_cpu.py \
             tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_accumulates_lora_across_buckets \
-            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket
+            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket \
+            tests/workers/rollout/rollout_vllm/test_mtp_hybrid_sleep_acceptance_on_cpu.py::test_hybrid_full_param_sleep_discards_weights \
+            tests/workers/rollout/rollout_vllm/test_mtp_hybrid_sleep_acceptance_on_cpu.py::test_hybrid_fsdp_merged_lora_sleep_keeps_weights \
+            tests/workers/rollout/rollout_vllm/test_mtp_hybrid_sleep_acceptance_on_cpu.py::test_hybrid_megatron_merged_lora_sleep_discards_weights \
+            tests/workers/rollout/rollout_vllm/test_mtp_hybrid_sleep_acceptance_on_cpu.py::test_hybrid_lora_adapter_sleep_keeps_weights
       - name: Prepare gsm8k dataset
         run: |
           $UV_RUN ray stop --force
