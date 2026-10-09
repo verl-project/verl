@@ -78,7 +78,7 @@ env:
 jobs:
   e2e_ppo_trainer_fsdp_vllm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -122,7 +122,7 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
           ray stop --force
-          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging DDP+FSDP checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4"
@@ -130,7 +130,7 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP2)
         run: |
           ray stop --force
-          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging FSDP2 checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8"
@@ -138,15 +138,15 @@ jobs:
       - name: Running GSM8K E2E without rmpad using function rm
         run: |
           ray stop --force
-          RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (GRPO)
         run: |
           ray stop --force
-          CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
         run: |
           ray stop --force
-          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
             +actor_rollout_ref.model.lora.fully_sharded_loras=True
       - name: Test GRPO LoRA checkpoints merging function
         run: |
@@ -157,7 +157,7 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
         run: |
           ray stop --force
-          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
             +actor_rollout_ref.model.lora.fully_sharded_loras=True
 
   e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
@@ -208,7 +208,7 @@ jobs:
       - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
-          TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
@@ -216,7 +216,7 @@ jobs:
       - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
-          TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
@@ -224,7 +224,7 @@ jobs:
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
-          TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+          TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
