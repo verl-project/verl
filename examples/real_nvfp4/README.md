@@ -83,10 +83,12 @@ PRECISION_MODE=real_nvfp4 EXP_NAME=my-run NNODES=8 \
 ```
 
 Use `PRECISION_MODE=bf16` for a control with the same example settings. The
-launcher uses verl's standard PPO entry point and built-in reward manager.
-The default configuration is 8 nodes × 4 GPUs, EP=4, GRPO/PPO clipping,
-R3 routing replay and token-level TIS, training on 32 prompts × 16 responses
-per update. Adam uses learning rate 1e-6 and betas (0.9, 0.999).
+launcher uses verl's standard PPO entry point with the built-in DAPO reward
+manager and the default rule-based scorer for each `data_source`. The default
+configuration is 8 nodes × 4 GPUs, EP=4, DAPO (GRPO advantages, clip-higher,
+token-level loss, dynamic sampling on accuracy and a 512-token overlong
+penalty), R3 routing replay and token-level TIS, training on 32 prompts × 16
+responses per update. Adam uses learning rate 1e-6 and betas (0.9, 0.999).
 
 Rollout memory utilization defaults to 0.8, with 256 sequences and 32768 batched
 tokens. Set `TOTAL_TRAINING_STEPS`, `RESUME_MODE` and checkpoint paths for the

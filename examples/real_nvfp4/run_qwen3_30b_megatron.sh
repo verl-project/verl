@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# GRPO training on Qwen3-30B-A3B with native W4A4 routed-expert MLPs,
-# per-token rollout activation scaling, and BF16 boundary-layer carve-outs.
+# DAPO training on Qwen3-30B-A3B with native W4A4 routed-expert MLPs,
+# per-token rollout activation scaling, and BF16 boundary-layer carve-outs:
+# GRPO advantages, clip-higher, token-level loss, dynamic sampling and the
+# overlong reward penalty.
 
 readonly PRECISION_MODE=${PRECISION_MODE:-real_nvfp4}
 case "$PRECISION_MODE" in
@@ -14,6 +16,7 @@ readonly N_RESP_PER_PROMPT=16
 readonly PPO_MINI_BATCH_SIZE=32
 readonly MAX_RESPONSE_LENGTH=20480
 readonly MAX_TOKEN_LEN=21504
+readonly OVERLONG_BUFFER_LEN=512
 readonly MAX_NUM_BATCHED_TOKENS=32768
 readonly MAX_NUM_SEQS=256
 readonly AGENT_NUM_WORKERS=8
@@ -67,6 +70,8 @@ ALGORITHM=(
   algorithm.rollout_correction.rollout_is_threshold=2.0
   algorithm.rollout_correction.rollout_is_batch_normalize=False
   algorithm.rollout_correction.rollout_rs=null
+  algorithm.filter_groups.enable=True
+  algorithm.filter_groups.metric=acc
 )
 
 MODEL=(
@@ -151,7 +156,14 @@ FORWARD_ONLY=(
   actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$MAX_TOKEN_LEN"
 )
 
-REWARD=(reward.reward_manager.name=naive)
+REWARD=(
+  reward.reward_manager.name=dapo
+  +reward.reward_kwargs.overlong_buffer_cfg.enable=True
+  +reward.reward_kwargs.overlong_buffer_cfg.len="$OVERLONG_BUFFER_LEN"
+  +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0
+  +reward.reward_kwargs.overlong_buffer_cfg.log=False
+  +reward.reward_kwargs.max_resp_len="$MAX_RESPONSE_LENGTH"
+)
 
 TRAINER=(
   trainer.logger='["console","wandb"]'
