@@ -11,7 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+_LORA_DEBUG_RANK = int(os.environ.get("RANK", "0"))
 
+def _lora_debug(*args):
+    # 只在 rank 0 打，避免 8 卡刷屏；flush 保证崩溃前能落盘
+    if _LORA_DEBUG_RANK == 0:
+        print("[LORA-SYNC-DEBUG]", *args, flush=True)
+
+_yielded = 0
 import functools
 import itertools
 import json
