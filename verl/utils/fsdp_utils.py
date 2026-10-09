@@ -663,8 +663,23 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     Sharded entries collected first get overwritten when the child unit is
     summoned later, so every LoRA tensor is gathered exactly once.
     """
+    # ===================== [DEBUG] begin =====================
+    _dbg = os.environ.get("RANK", "0") == "0" and os.environ.get("LORA_SYNC_DEBUG", "1") == "1"
+
+    def _p(*args):
+        if _dbg:
+            print("[LORA-SYNC-DEBUG][layered]", *args, flush=True)
+
+    _visited_fsdp_units = 0
+    _skipped_no_lora = 0
+    _first_unit_dumped = False
+    # ===================== [DEBUG] end =======================
+
     lora_params = OrderedDict()
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+
+    _p("peft_model type:", type(peft_model).__name__,
+       "| root fsdp_version:", fsdp_version(fsdp_module))  # [DEBUG]
 
     for name, submodule in fsdp_module.named_modules():
         if name == "":
@@ -686,11 +701,20 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         # their params are not gathered here and again when their own unit is visited.
         nested_fsdp_names = {n for n, m in submodule.named_modules() if n != "" and fsdp_version(m) > 0}
 
+        # ===================== [DEBUG] begin =====================
+        _visited_fsdp_units += 1
+        if not _first_unit_dumped:
+            _first_unit_dumped = True
+            _p(f"first FSDP unit '{name}' (fsdp{fsdp_version(submodule)}) param names:",
+               [n for n, _ in itertools.islice(submodule.named_parameters(), 10)])
+        # ===================== [DEBUG] end =======================
+
         if not any(
             "lora_" in n
             for n, _ in submodule.named_parameters()
             if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
         ):
+            _skipped_no_lora += 1  # [DEBUG]
             continue
 
         if is_fsdp1:
@@ -704,8 +728,14 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                 if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
             }
             sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=sub_state_dict)
+            # ===================== [DEBUG] begin =====================
             if not sub_lora_params:
+                _p(f"unit '{name}': get_peft_model_state_dict -> EMPTY; "
+                   f"raw keys sample: {list(sub_state_dict.keys())[:8]}")
                 continue
+            _p(f"unit '{name}': +{len(sub_lora_params)} lora tensors, "
+               f"e.g. {list(sub_lora_params.keys())[:3]}")
+            # ===================== [DEBUG] end =======================
             sub_lora_params = {
                 f"{clean_prefix}.{key}": (
                     param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
@@ -717,6 +747,8 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                 submodule._is_root = False
         get_torch_device().empty_cache()
 
+    _p(f"done: visited_fsdp_units={_visited_fsdp_units}, skipped_no_lora={_skipped_no_lora}, "
+       f"collected={len(lora_params)}, sample={list(lora_params.keys())[:3]}")  # [DEBUG]
     return lora_params
 
 
@@ -726,6 +758,14 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
     """
     from peft.utils.save_and_load import get_peft_model_state_dict
+
+    # ===================== [DEBUG] begin =====================
+    _dbg = os.environ.get("RANK", "0") == "0" and os.environ.get("LORA_SYNC_DEBUG", "1") == "1"
+
+    def _p(*args):
+        if _dbg:
+            print("[LORA-SYNC-DEBUG][collect]", *args, flush=True)
+    # ===================== [DEBUG] end =======================
 
     lora_params = OrderedDict()
     peft_model = getattr(module, "_fsdp_wrapped_module", module)
@@ -749,6 +789,13 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                 )
                 with summon_ctx:
                     lora_params = get_peft_model_state_dict(peft_model)
+                    # ===================== [DEBUG] begin =====================
+                    _p(f"fallback raw get_peft_model_state_dict: n={len(lora_params)}, "
+                       f"peft_model={type(peft_model).__name__}, sample={list(lora_params.keys())[:5]}")
+                    if not lora_params:
+                        _p("fallback EMPTY! peft_model.named_parameters sample:",
+                           [n for n, _ in itertools.islice(peft_model.named_parameters(), 10)])
+                    # ===================== [DEBUG] end =======================
                     lora_params = {
                         name: param.full_tensor().detach().cpu()
                         if hasattr(param, "full_tensor")
@@ -794,6 +841,12 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                 name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
                 lora_params[name] = param.detach().cpu()
             model = model.to(orig_dev)
+
+    # ===================== [DEBUG] begin =====================
+    _p(f"return: n={len(lora_params)}, base_sync_done={base_sync_done}, "
+       f"layered={layered_summon}, fsdp_version={fsdp_version(module)}, "
+       f"sample={list(lora_params.keys())[:3]}")
+    # ===================== [DEBUG] end =======================
     return lora_params
 
 
