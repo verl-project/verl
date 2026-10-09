@@ -304,10 +304,10 @@ ENV UV_HTTP_TIMEOUT=500 \
     UV_CACHE_DIR=/root/.cache/uv
 
 # megatron-core's package_info.py appends `git rev-parse --short HEAD` to
-# __version__ unless NO_VCS_VERSION=1, producing 0.19.2+<hash>. uv then sees a
-# mismatch with the locked 0.19.2 and reinstalls it on every `uv run` — racing
+# __version__ unless NO_VCS_VERSION=1, producing 0.18.0+<hash>. uv then sees a
+# mismatch with the locked 0.18.0 and reinstalls it on every `uv run` — racing
 # across 100+ Ray workers. Set it here so the prefetch-baked wheel AND every
-# runtime `uv run` build the clean 0.19.2.
+# runtime `uv run` build the clean 0.18.0.
 ENV NO_VCS_VERSION=1
 
 # Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'.
