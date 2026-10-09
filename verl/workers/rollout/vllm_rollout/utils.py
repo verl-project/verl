@@ -261,10 +261,8 @@ class vLLMColocateWorkerExtension:
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV and other illegal tokens
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
-            # patch weight loader to support MoE model. Native NVFP4 reload
-            # calls vLLM's own per-expert loaders, which this patch replaces.
-            if not self._is_real_nvfp4:
-                patch_vllm_moe_model_weight_loader(model)
+            # patch weight loader to support MoE model
+            patch_vllm_moe_model_weight_loader(model)
         if self._is_real_nvfp4:
             self._attest_real_nvfp4_runtime()
 
