@@ -40,7 +40,7 @@ TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 
 ########################### derived defaults ###########################
-n_devices_per_node=${NDEVICES_PER_NODE:-8}
+n_devices_per_node=${NDEVICES_PER_NODE:-16}
 
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
