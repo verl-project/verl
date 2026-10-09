@@ -12,7 +12,7 @@ TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 
 GEN_TP=${GEN_TP:-2}
 SP_SIZE=${SP_SIZE:-2}
-FSDP_SIZE=${FSDP_SIZE:-4}
+FSDP_SIZE=${FSDP_SIZE:-8}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.4}
 ROLLOUT_N=${ROLLOUT_N:-2}
 
@@ -33,7 +33,7 @@ export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-n_devices_per_node=8
+n_devices_per_node=16
 
 ########################### shared turbo config values ###########################
 ACTOR_TURBO="actor_rollout_ref.actor.fsdp_config.turbo_config"
