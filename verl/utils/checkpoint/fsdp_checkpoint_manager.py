@@ -12,27 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
 import logging
 import os
 import warnings
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import Callable, Generator, Optional
 
 import torch
 import torch.distributed
-from accelerate import init_empty_weights
 from omegaconf import DictConfig
+from safetensors.torch import save_file
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
+from torch.distributed.fsdp._common_utils import clean_tensor_name
 from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
-from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
+from verl.utils.fsdp_utils import fsdp_version, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
-from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
+from verl.utils.model import convert_weight_keys
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -72,6 +74,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             - 'load': Components to load; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
             - 'save': Components to save; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
         trust_remote_code: Whether to trust_remote_code when loading the model configuration
+        per_tensor_param_fn: Callable with the engine ``get_per_tensor_param`` contract yielding the full
+            HF-format weights streamed into the 'hf_model' export; required when 'hf_model' is saved. It is called
+            collectively on every rank.
+        hf_export_dtype: Optional dtype the forward computes parameters in (the mixed-precision param_dtype).
+            fp32 parameters are exported in this dtype; buffers and parameters of modules excluded from mixed
+            precision keep their dtype, as the forward uses them unconverted.
     """
 
     def __init__(
@@ -82,6 +90,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: DictConfig = None,
         trust_remote_code: bool = False,
+        per_tensor_param_fn: Optional[
+            Callable[[], tuple[Generator[tuple[str, torch.Tensor], None, None], Optional[dict]]]
+        ] = None,
+        hf_export_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if processing_class is None and "tokenizer" in kwargs:
@@ -98,6 +110,85 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             checkpoint_config=checkpoint_config,
         )
         self.trust_remote_code = trust_remote_code
+        if self.should_save_hf_model and per_tensor_param_fn is None:
+            raise ValueError("Saving 'hf_model' requires `per_tensor_param_fn` to stream the full HF weights.")
+        self.per_tensor_param_fn = per_tensor_param_fn
+        self.hf_export_dtype = hf_export_dtype
+
+    def _to_export_names(self, unwrap_model: torch.nn.Module, names) -> set[str]:
+        """Map module FQNs to the HF names ``per_tensor_param_fn`` yields."""
+        return set(convert_weight_keys(dict.fromkeys(clean_tensor_name(name) for name in names), unwrap_model))
+
+    def _get_dtype_preserved_names(self, unwrap_model: torch.nn.Module) -> set[str]:
+        """Tensors the forward uses in their stored dtype: buffers and params of mixed-precision-ignored modules."""
+        names = [name for name, _ in unwrap_model.named_buffers()]
+        get_ignored_modules = getattr(unwrap_model, "get_ignore_modules_in_mixed_precision", None)
+        ignored_classes = get_ignored_modules() if get_ignored_modules is not None else None
+        if ignored_classes:
+            for module_name, module in unwrap_model.named_modules():
+                if isinstance(module, ignored_classes):
+                    names.extend(f"{module_name}.{name}" for name, _ in module.named_parameters())
+        return self._to_export_names(unwrap_model, names)
+
+    def _get_tied_alias_names(self, unwrap_model: torch.nn.Module) -> set[str]:
+        """Names of tied aliases (e.g. ``lm_head.weight``), which HF re-ties on load and must not be saved."""
+        return self._to_export_names(unwrap_model, unwrap_model.get_expanded_tied_weights_keys(all_submodels=True))
+
+    def _save_hf_weights_from_per_tensor_param(self, hf_local_path: str, max_shard_bytes: int = 5 * 1024**3):
+        """Stream HF-format weights from ``per_tensor_param_fn`` into safetensors shards on rank 0.
+
+        Host memory peaks at about one shard instead of the whole model, so models larger than host
+        memory can be exported. fp32 parameters are narrowed to ``hf_export_dtype``.
+        """
+        per_tensor_param, _ = self.per_tensor_param_fn()
+        unwrap_model = getattr(self.model, "_fsdp_wrapped_module", self.model)
+        tied_aliases = self._get_tied_alias_names(unwrap_model) if self.rank == 0 else set()
+        preserved_names = self._get_dtype_preserved_names(unwrap_model) if self.rank == 0 else set()
+
+        shard, shard_bytes, total_size = {}, 0, 0
+        tmp_shards: list[tuple[str, list[str]]] = []
+
+        def flush_shard():
+            nonlocal shard, shard_bytes
+            tmp_path = os.path.join(hf_local_path, f"model-{len(tmp_shards) + 1:05d}.safetensors.tmp")
+            save_file(shard, tmp_path, metadata={"format": "pt"})
+            tmp_shards.append((tmp_path, list(shard)))
+            shard, shard_bytes = {}, 0
+
+        # Every rank must drain the generator since it issues collectives; only rank 0 writes.
+        for name, tensor in per_tensor_param:
+            if self.rank != 0 or name in tied_aliases:
+                continue
+            if self.hf_export_dtype is not None and tensor.dtype == torch.float32 and name not in preserved_names:
+                tensor = tensor.to(self.hf_export_dtype)
+            nbytes = tensor.numel() * tensor.element_size()
+            if shard and shard_bytes + nbytes > max_shard_bytes:
+                flush_shard()
+            # Yielded tensors may be views of a buffer the generator overwrites later (EP broadcast),
+            # so copy them out before advancing.
+            shard[name] = tensor.detach().contiguous().to("cpu", copy=True)
+            shard_bytes += nbytes
+            total_size += nbytes
+
+        if self.rank != 0:
+            return
+        if shard:
+            flush_shard()
+
+        weight_map = {}
+        for i, (tmp_path, names) in enumerate(tmp_shards, start=1):
+            file_name = f"model-{i:05d}-of-{len(tmp_shards):05d}.safetensors"
+            os.replace(tmp_path, os.path.join(hf_local_path, file_name))
+            weight_map.update(dict.fromkeys(names, file_name))
+        with open(os.path.join(hf_local_path, "model.safetensors.index.json"), "w") as f:
+            json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f, indent=2)
+        log_with_rank(
+            f"Saved hf_model ({len(weight_map)} tensors in {len(tmp_shards)} shards) "
+            f"to {os.path.abspath(hf_local_path)}",
+            rank=self.rank,
+            logger=logger,
+            log_only_rank_0=True,
+        )
 
     def _get_lora_train_meta(self, unwrap_model):
         peft_config = getattr(unwrap_model, "peft_config", None)
@@ -387,6 +478,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if hasattr(model_config, "auto_map") and None in model_config.auto_map:
                 model_config.auto_map = {k: v for k, v in model_config.auto_map.items() if k is not None}
 
+            if self.should_save_hf_model and self.hf_export_dtype is not None:
+                # Record the exported weight dtype instead of the training dtype the model was built with.
+                model_config = copy.deepcopy(model_config)
+                for cfg in (model_config, *(getattr(model_config, k, None) for k in model_config.sub_configs)):
+                    if cfg is not None:
+                        cfg.dtype = self.hf_export_dtype
+
             model_config.save_pretrained(hf_config_tokenizer_path)
             if self.processing_class is not None:
                 self.processing_class.save_pretrained(hf_config_tokenizer_path)
@@ -420,55 +518,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         torch.distributed.barrier()
 
         if self.should_save_hf_model:
-            # Only rank 0 will save hf model and,
-            # offload to cpu to save LLMs which may be too large to fit in one GPU
-            state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=True, rank0_only=True)
-
-            if self.rank == 0:
-                hf_local_path = os.path.join(local_path, "huggingface")
-                os.makedirs(hf_local_path, exist_ok=True)
-
-                if "ForTokenClassification" in model_config.architectures[0]:
-                    from transformers import AutoModelForTokenClassification
-
-                    auto_model_cls = AutoModelForTokenClassification
-                elif "ForCausalLM" in model_config.architectures[0]:
-                    from transformers import AutoModelForCausalLM
-
-                    auto_model_cls = AutoModelForCausalLM
-                elif "ForConditionalGeneration" in model_config.architectures[0]:
-                    auto_model_cls = get_auto_model_for_vision2seq()
-                else:
-                    raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
-
-                with init_empty_weights():
-                    save_model = auto_model_cls.from_config(
-                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.trust_remote_code
-                    )
-
-                save_model.to_empty(device="cpu")
-
-                if save_model.can_generate():
-                    if generation_config is not None:
-                        save_model.generation_config = generation_config
-                    else:
-                        print(
-                            f"Warning: {self.__class__.__name__}.save_checkpoint: Generation config file not found "
-                            f"in, using a generation config created from the model config when saving hf_model."
-                        )
-
-                drop_tied_target_keys(state_dict, save_model, model_config)
-
-                save_model.save_pretrained(hf_local_path, state_dict=state_dict)
-                log_with_rank(
-                    f"Saved hf_model to {os.path.abspath(hf_local_path)}",
-                    rank=self.rank,
-                    logger=logger,
-                    log_only_rank_0=True,
-                )
-                del state_dict
-                del save_model
-
+            self._save_hf_weights_from_per_tensor_param(os.path.join(local_path, "huggingface"))
             # wait for rank0 to dump hf_model to local
             torch.distributed.barrier()
 

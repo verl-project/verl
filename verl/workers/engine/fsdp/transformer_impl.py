@@ -221,7 +221,11 @@ class FSDPEngine(BaseEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
+            per_tensor_param_fn=self.get_per_tensor_param,
+            hf_export_dtype=self._autocast_dtype,
         )
+        if (self._is_lora or self._qat_enabled) and self.checkpoint_manager.should_save_hf_model:
+            raise NotImplementedError("Saving 'hf_model' in checkpoints is not supported with LoRA or QAT enabled.")
 
         self.to(
             device="cpu",

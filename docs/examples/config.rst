@@ -343,7 +343,9 @@ Actor/Rollout/Reference Policy
     writes an HF export through Megatron-Bridge.
 
     For FSDP, ``hf_model`` saves the full HF model on rank 0 in addition to the sharded
-    ``model`` shards.
+    ``model`` shards. Weights are streamed into safetensors shards one tensor at a time, and
+    fp32 parameters are stored in the mixed-precision ``param_dtype``. Saving ``hf_model`` is not
+    supported with LoRA or QAT.
 
   - ``load_contents``: The contents to load in the checkpoint, you can specify different checkpoint loading contents. By default, it is the same with ``save_checkpoint``.
 
