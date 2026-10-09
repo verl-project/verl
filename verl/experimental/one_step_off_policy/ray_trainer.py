@@ -387,7 +387,29 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         timing_raw = self.timing_raw
 
         with marked_timer("gen", timing_raw, color="red"):
-            _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
+            batch_data = await batch_data_future
+            if batch_data is None:
+                train_batch_size = OmegaConf.select(self.config, "data.train_batch_size", default="N/A")
+                train_max_samples = OmegaConf.select(self.config, "data.train_max_samples", default="N/A")
+                total_epochs = OmegaConf.select(self.config, "trainer.total_epochs", default="N/A")
+                total_training_steps = OmegaConf.select(
+                    self.config, "trainer.total_training_steps", default="N/A"
+            if batch_data is None:
+                train_batch_size = OmegaConf.select(self.config, "data.train_batch_size", default="N/A")
+                train_max_samples = OmegaConf.select(self.config, "data.train_max_samples", default="N/A")
+                total_epochs = OmegaConf.select(self.config, "trainer.total_epochs", default="N/A")
+                total_training_steps = OmegaConf.select(self.config, "trainer.total_training_steps", default="N/A")
+                raise RuntimeError(
+                    "Training dataloader was exhausted before one-step-off-policy reached "
+                    f"step {self.global_steps}/{self.total_training_steps}. "
+                    f"Current data.train_batch_size={train_batch_size}, "
+                    f"data.train_max_samples={train_max_samples}, "
+                    f"trainer.total_epochs={total_epochs}, "
+                    f"trainer.total_training_steps={total_training_steps}. "
+                    "Increase data.train_max_samples or trainer.total_epochs, or reduce "
+                    "trainer.total_training_steps."
+                )
+            _metrics, _timing_raw, epoch, batch, future_reward = batch_data
             batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             timing_raw.update(batch.meta_info["timing"])
             timing_raw.update(_timing_raw)
