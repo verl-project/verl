@@ -107,6 +107,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
+    if loss_mode == "bypass_mode":
+        policy_loss_kwargs["dp_group"] = dp_group
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,

@@ -2427,6 +2427,7 @@ def compute_policy_loss_bypass_mode(
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
     sc_correction: Optional[torch.Tensor] = None,
+    dp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Bypass mode policy loss supporting both REINFORCE and PPO-clip.
 
@@ -2462,6 +2463,7 @@ def compute_policy_loss_bypass_mode(
         config: Actor config containing rollout_correction settings in policy_loss.
         rollout_is_weights: Pre-computed IS weights (ignored, computed internally).
         sc_correction: Score-centering term from the logits processor; only with loss_type="reinforce".
+        dp_group: Data-parallel group, to count the tokens that rejection keeps across ranks.
 
     Config options (in config.policy_loss.rollout_correction):
         loss_type: "ppo_clip" (default) or "reinforce"
@@ -2552,6 +2554,16 @@ def compute_policy_loss_bypass_mode(
 
     else:
         raise ValueError(f"Invalid loss_type: {loss_type}. Must be 'reinforce' or 'ppo_clip'.")
+
+    # pg_loss divides by the global batch's token count, which the engine takes before rejection. Rescale it
+    # to divide by the kept tokens, estimated as that count times the share of tokens this micro-batch keeps
+    # across data-parallel ranks (exact when every micro-batch keeps the same share).
+    if rollout_rs is not None and loss_agg_mode == "token-mean" and config.global_batch_info.get("batch_num_tokens"):
+        num_tokens = torch.stack([response_mask.sum(), effective_mask.sum()]).float()
+        if dp_group is not None:
+            torch.distributed.all_reduce(num_tokens, group=dp_group)
+        if num_tokens[1] > 0:
+            pg_loss = pg_loss * num_tokens[0] / num_tokens[1]
 
     # Merge rollout correction metrics
     pg_metrics.update(rollout_metrics)
