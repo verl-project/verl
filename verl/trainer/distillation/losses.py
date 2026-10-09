@@ -52,19 +52,23 @@ class DistillationLossSettings(BaseConfig):
         names (str | list[str]): Name(s) to register the distillation loss function under.
         use_topk (bool): Whether the loss function uses top-k log probabilities.
         use_estimator (bool): Whether the loss function uses single-sample KL estimators.
+        use_full_vocab (bool): Whether the loss function uses full-vocabulary teacher logits
+            rebuilt on the fly from exported teacher hidden states and the teacher lm_head.
     """
 
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
     use_estimator: bool = False
+    use_full_vocab: bool = False
 
     _mutable_fields = {"names"}
 
     def __post_init__(self):
         self.names = [self.names] if isinstance(self.names, str) else self.names
-        if sum([self.use_topk, self.use_estimator]) != 1:
+        if sum([self.use_topk, self.use_estimator, self.use_full_vocab]) != 1:
             raise ValueError(
-                f"Expected only one of use_estimator, use_topk, but got {self.use_estimator=}, {self.use_topk=}."
+                f"Expected exactly one of use_topk, use_estimator, use_full_vocab to be True, "
+                f"but got {self.use_topk=}, {self.use_estimator=}, {self.use_full_vocab=}."
             )
 
 
@@ -153,6 +157,55 @@ def compute_topk_loss(
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
+    )
+
+    expected_shape = student_logits.shape[:2]
+    for k, v in outputs.items():
+        assert v.shape == expected_shape, f"Expected shape {expected_shape}, but got {v.shape} for {k=}."
+
+    return outputs
+
+
+def compute_full_vocab_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    data: TensorDict,
+    student_logits: torch.Tensor,
+    data_format: str,
+    teacher_lm_head_shards: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Compute the full-vocabulary forward KL loss in logit processor.
+
+    The student rebuilds full-vocab teacher logits on the fly from the teacher's
+    exported hidden states (carried by ``data`` as artifact metadata) and the
+    frozen teacher lm_head shards.
+
+    Args:
+        teacher_lm_head_shards: teacher_key -> [V/tp, H] teacher lm_head shard for this TP rank.
+
+    Returns:
+    - distillation_losses: (bsz, seqlen/cp_size)
+    """
+    match config.strategy:
+        case "megatron":
+            from verl.trainer.distillation.megatron.full_vocab_kl import (
+                compute_forward_kl_full_vocab,
+                compute_reverse_kl_full_vocab,
+            )
+
+            if distillation_config.distillation_loss.loss_mode == "reverse_kl_full_vocab":
+                distillation_loss_fn = compute_reverse_kl_full_vocab
+            else:
+                distillation_loss_fn = compute_forward_kl_full_vocab
+        case _:
+            raise NotImplementedError(f"Unsupported strategy for full-vocab distillation loss: {config.strategy=}")
+
+    outputs = distillation_loss_fn(
+        student_logits=student_logits,
+        data=data,
+        config=distillation_config,
+        data_format=data_format,
+        teacher_lm_head_shards=teacher_lm_head_shards,
     )
 
     expected_shape = student_logits.shape[:2]
@@ -291,6 +344,41 @@ def distillation_loss(
     return distillation_loss, distillation_metrics
 
 
+def _finalize_forward_kl_losses(model_output: dict, data: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shared finalization for forward-KL distillation losses computed in the logits processor.
+
+    Restores padding on the per-token losses, extracts the boolean response mask, and
+    clamps the losses at zero (divergences can be slightly negative due to top-k
+    truncation or numerical error).
+
+    Returns:
+    - distillation_losses: (bsz, resp_len) padded per-token losses, clamped at zero.
+    - response_mask_bool: (bsz, resp_len) boolean response mask.
+    """
+    if "distillation_losses" not in model_output:
+        available = sorted(model_output.keys()) if hasattr(model_output, "keys") else type(model_output).__name__
+        raise KeyError(
+            "model_output has no 'distillation_losses': the inline distillation loss was not computed "
+            "in the logits processor on the engine worker, but the registered loss "
+            f"expects it. Available model_output keys: {available}. "
+            "Check that (1) the trainer entrypoint forwards `distillation_use_topk`/"
+            "`distillation_use_full_vocab` to the actor worker (main_ppo_sync.py and "
+            "ppo/ray_trainer.py `_update_actor` both do), (2) the training strategy supports "
+            "this loss (full-vocab KL requires the megatron engine), and (3) "
+            "use_fused_kernels=False, since fused kernels bypass the logits processor."
+        )
+    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    assert distillation_losses.shape == response_mask_bool.shape
+
+    distillation_losses = distillation_losses.clamp_min(0.0)
+
+    return distillation_losses, response_mask_bool
+
+
 @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     config: ActorConfig,
@@ -305,7 +393,7 @@ def compute_forward_kl_topk(
     - distillation_metrics: Dictionary of metrics.
     """
     # topk loss has been computed in logits processor
-    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
+    distillation_losses, response_mask_bool = _finalize_forward_kl_losses(model_output, data)
     student_mass = no_padding_2_padding(model_output["student_mass"], data)
     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
     overlap_count = model_output.get("overlap_count")
@@ -313,11 +401,7 @@ def compute_forward_kl_topk(
     if overlap_count is not None and overlap_token_advantage is not None:
         overlap_count = no_padding_2_padding(overlap_count, data)
         overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
-    if data["response_mask"].is_nested:
-        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
-    else:
-        response_mask_bool = data["response_mask"].bool()
-    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
+    assert student_mass.shape == teacher_mass.shape == response_mask_bool.shape
 
     overlap_metrics = {}
     if overlap_count is not None and overlap_token_advantage is not None:
@@ -350,8 +434,72 @@ def compute_forward_kl_topk(
         **overlap_metrics,
     }
 
-    # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
-    distillation_losses = distillation_losses.clamp_min(0.0)
+    return distillation_losses, distillation_metrics
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["forward_kl_full_vocab"], use_full_vocab=True)
+)  # type: ignore[arg-type]
+def compute_forward_kl_full_vocab(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Finalize the full-vocabulary forward KL distillation loss computed in the logits processor."""
+    return _finalize_full_vocab_kl_losses(config, distillation_config, model_output, data)
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["reverse_kl_full_vocab"], use_full_vocab=True)
+)  # type: ignore[arg-type]
+def compute_reverse_kl_full_vocab(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Finalize the full-vocabulary reverse KL distillation loss computed in the logits processor."""
+    return _finalize_full_vocab_kl_losses(config, distillation_config, model_output, data)
+
+
+def _finalize_full_vocab_kl_losses(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Shared finalizer for the full-vocabulary KL modes (forward and reverse).
+
+    Returns:
+    - distillation_losses: (bsz, resp_len)
+    - distillation_metrics: Dictionary of metrics.
+    """
+    # full-vocab KL loss has been computed in logits processor
+    distillation_losses, response_mask_bool = _finalize_forward_kl_losses(model_output, data)
+
+    # Diagnostics from the per-token teacher hidden-state norms computed alongside the
+    # KL loss. no_padding_2_padding left-shifts by one (rows that predict each response
+    # token), so the structural norm-0 last row of each sample (no teacher target) is
+    # sliced away and coverage is exactly 1 in healthy runs; a lower value indicates
+    # teacher hidden-state gaps on scored positions (export misalignment).
+    distillation_metrics: dict[str, Any] = {}
+    hidden_norm = model_output.get("teacher_hidden_norm")
+    if hidden_norm is not None:
+        hidden_norm = no_padding_2_padding(hidden_norm, data)
+        assert hidden_norm.shape == response_mask_bool.shape
+        masked_norm = hidden_norm[response_mask_bool]
+        covered = masked_norm > 0
+        if covered.any():
+            valid_norm = masked_norm[covered]
+            distillation_metrics["distillation/teacher_hidden_norm"] = valid_norm.mean().item()
+            distillation_metrics["distillation/teacher_hidden_norm_min"] = Metric(
+                AggregationType.MIN, valid_norm.min()
+            )
+            distillation_metrics["distillation/teacher_hidden_norm_max"] = Metric(
+                AggregationType.MAX, valid_norm.max()
+            )
+            distillation_metrics["distillation/teacher_hidden_coverage"] = covered.float().mean().item()
 
     return distillation_losses, distillation_metrics
 

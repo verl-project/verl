@@ -16,12 +16,15 @@ import asyncio
 import logging
 import os
 
-from omegaconf import DictConfig
+import ray
+from omegaconf import DictConfig, OmegaConf
 
-from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
+from verl.experimental.teacher_loop.teacher_controller import TeacherLLMServerClient, TeacherSleepController
+from verl.single_controller.ray.base import RayResourcePool, SubRayResourcePool, split_resource_pool
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import get_device_name
 from verl.utils.ray_utils import auto_await
-from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig, HFModelConfig
+from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import get_rollout_replica_class
 
@@ -42,6 +45,7 @@ class TeacherModelManager:
         distillation_config: DistillationConfig,
         teacher_model_config: DistillationTeacherModelConfig,
         resource_pool: RayResourcePool,
+        full_vocab_export_config: dict | None = None,
     ):
         """
         Initialize the teacher model manager.
@@ -50,12 +54,16 @@ class TeacherModelManager:
             distillation_config (DistillationConfig): Distillation configuration.
             teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
             resource_pool (RayResourcePool): Dedicated teacher resource pool.
+            full_vocab_export_config (dict | None): Full-vocab KL hidden-state export
+                config ``{"enabled": bool, "prefix": str}`` derived from the
+                distillation loss config by ``MultiTeacherModelManager``.
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
         self.distillation_config = distillation_config
         self.teacher_model_config = teacher_model_config
         self.resource_pool = resource_pool
+        self.full_vocab_export_config = full_vocab_export_config
         self._initialize_llm_servers()
         self._initialize_load_balancer_handle()
 
@@ -75,8 +83,28 @@ class TeacherModelManager:
         gpus_per_node = self.distillation_config.n_gpus_per_node
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
         rollout_config = teacher_model_config.inference
-        model_config = HFModelConfig(path=teacher_model_config.model_path)
+        # model_config = HFModelConfig(path=teacher_model_config.model_path)
+        # Keep the model path unresolved until the rollout server actor is
+        # placed. Each server backend converts this DictConfig to HFModelConfig
+        # in its own process, so HDFS models are copied into that node's local
+        # cache instead of the controller's local /tmp.
+        model_config = OmegaConf.create(
+            {
+                "_target_": "verl.workers.config.HFModelConfig",
+                "path": teacher_model_config.model_path,
+            }
+        )
         name_suffix = (teacher_model_config.key or "").replace("/", "_")
+        replica_extra_kwargs = {}
+        if self.full_vocab_export_config and self.full_vocab_export_config.get("enabled"):
+            # Full-vocab hidden export is only implemented for the vLLM teacher
+            # backend; other replica classes do not accept this kwarg.
+            if teacher_model_config.inference.name != "vllm":
+                raise ValueError(
+                    f"Full-vocab KL distillation requires the teacher inference backend to be 'vllm', "
+                    f"but teacher {teacher_model_config.key!r} uses {teacher_model_config.inference.name!r}."
+                )
+            replica_extra_kwargs["full_vocab_export_config"] = self.full_vocab_export_config
         self.rollout_replicas = [
             rollout_replica_class(
                 replica_rank=replica_rank,
@@ -85,6 +113,7 @@ class TeacherModelManager:
                 gpus_per_node=gpus_per_node,
                 is_teacher_model=True,
                 name_suffix=name_suffix,
+                **replica_extra_kwargs,
             )
             for replica_rank in range(num_replicas)
         ]
@@ -105,7 +134,8 @@ class TeacherModelManager:
 
         `per_replica_world_size` (W below) is the GPU count of a *single* inference
         replica — the product of the replica's inference-time parallelism
-        (tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size).
+        (tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size
+        * prefill_context_parallel_size).
         It is not the teacher's total GPU footprint (`num_replicas * W`).
 
         `split_resource_pool` walks bundles linearly and is oblivious to node
@@ -169,15 +199,35 @@ class MultiTeacherModelManager:
         self.config = config
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
 
+        # Full-vocab KL distillation: the teacher servers export pre-lm_head
+        # hidden states to TransferQueue. The prefix isolates this run's TQ
+        # partitions from other runs sharing the same TQ cluster.
+        from verl.trainer.distillation.full_vocab_tq import resolve_partition_prefix
+
+        distillation_loss = self.distillation_config.distillation_loss
+        use_full_vocab = distillation_loss.loss_settings.use_full_vocab
+        self.full_vocab_export_config = {
+            "enabled": bool(use_full_vocab),
+            "prefix": resolve_partition_prefix(distillation_loss.full_vocab_experiment_name)
+            if use_full_vocab
+            else "",
+        }
+
         self.resource_pool = resource_pool
         self.teacher_model_managers: dict[str, TeacherModelManager] = {}
         self.server_addresses: dict[str, list[str]] = {}
         self.server_handles: dict[str, list] = {}
         self.load_balancer_handle: dict[str, object] = {}
+        # TeacherSleepController actor; only set when share_gpu_group is enabled.
+        self._controller = None
 
         self._initialize_teacher_model_managers()
 
     def _initialize_teacher_model_managers(self):
+        if self.distillation_config.share_gpu_group:
+            self._initialize_shared_gpu_group()
+            return
+
         teacher_models = self.distillation_config.teacher_models
         split_sizes = [teacher.world_size for teacher in teacher_models.values()]
         split_pools = split_resource_pool(self.resource_pool, split_size=split_sizes)
@@ -187,18 +237,78 @@ class MultiTeacherModelManager:
                 distillation_config=self.distillation_config,
                 teacher_model_config=teacher_model_config,
                 resource_pool=teacher_pool,
+                full_vocab_export_config=self.full_vocab_export_config,
             )
-            self.teacher_model_managers[key] = manager
-            self.server_addresses[key] = manager.server_addresses
-            self.server_handles[key] = manager.server_handles
-            self.load_balancer_handle[key] = manager.load_balancer_handle
+            self._register_teacher_model_manager(key, manager)
+
+    def _initialize_shared_gpu_group(self):
+        """Place ALL teachers' replicas on the same GPU bundles and wake/sleep on demand.
+
+        Every teacher gets a SubRayResourcePool view over the parent's full placement
+        groups with the same start_bundle_index, so replicas within a teacher are
+        disjoint while across teachers they overlap. Each teacher is put to sleep right
+        after its engines boot — before the next teacher is constructed — so engine
+        boot/profiling does not OOM even when sum(gpu_memory_utilization) > 1, and to
+        establish the all-asleep initial state the TeacherSleepController assumes.
+        """
+        teacher_models = self.distillation_config.teacher_models
+        start_bundle_index = getattr(self.resource_pool, "start_bundle_index", 0)
+        placement_groups = self.resource_pool.get_placement_groups(device_name=get_device_name())
+
+        for idx, (key, teacher_model_config) in enumerate(teacher_models.items()):
+            teacher_pool = SubRayResourcePool(
+                placement_groups=placement_groups,
+                start_bundle_index=start_bundle_index,
+                subgroup_world_size=teacher_model_config.world_size,
+                process_on_nodes=self.resource_pool.store,
+                use_gpu=self.resource_pool.use_gpu,
+                name_prefix=f"{self.resource_pool.name_prefix}_shared_{idx}",
+                max_colocate_count=self.resource_pool.max_colocate_count,
+            )
+            manager = TeacherModelManager(
+                distillation_config=self.distillation_config,
+                teacher_model_config=teacher_model_config,
+                resource_pool=teacher_pool,
+                full_vocab_export_config=self.full_vocab_export_config,
+            )
+            self._register_teacher_model_manager(key, manager)
+            _run_all([replica.sleep() for replica in manager.rollout_replicas])
+
+        server_handles = {
+            key: [server for replica in manager.rollout_replicas for server in replica.servers]
+            for key, manager in self.teacher_model_managers.items()
+        }
+        max_awake = self.distillation_config.max_awake_teachers or len(teacher_models)
+        self._controller = TeacherSleepController.remote(
+            server_handles=server_handles,
+            max_awake=max_awake,
+        )
+
+    def _register_teacher_model_manager(self, key: str, manager: TeacherModelManager):
+        self.teacher_model_managers[key] = manager
+        self.server_addresses[key] = manager.server_addresses
+        self.server_handles[key] = manager.server_handles
+        self.load_balancer_handle[key] = manager.load_balancer_handle
 
     def get_client(self) -> dict[str, LLMServerClient]:
         """Get the LLMServerClient for each teacher model."""
         teacher_clients = {}
         for key, manager in self.teacher_model_managers.items():
-            teacher_clients[key] = LLMServerClient(
-                config=self.config,
-                load_balancer_handle=manager.load_balancer_handle,
-            )
+            if self._controller is not None:
+                teacher_clients[key] = TeacherLLMServerClient(
+                    config=self.config,
+                    load_balancer_handle=manager.load_balancer_handle,
+                    teacher_key=key,
+                    controller_handle=self._controller,
+                )
+            else:
+                teacher_clients[key] = LLMServerClient(
+                    config=self.config,
+                    load_balancer_handle=manager.load_balancer_handle,
+                )
         return teacher_clients
+
+    def sleep_all(self):
+        """Sleep every awake teacher. No-op when share_gpu_group is disabled."""
+        if self._controller is not None:
+            ray.get(self._controller.sleep_all.remote())

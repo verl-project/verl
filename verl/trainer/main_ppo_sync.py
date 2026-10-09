@@ -1499,9 +1499,24 @@ class PPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_use_full_vocab = (
+            self.distillation_config.distillation_loss.loss_settings.use_full_vocab
+            if is_distillation_enabled(self.config.get("distillation"))
+            else False
+        )
+        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        if is_distillation_enabled(self.config.get("distillation")):
+            distillation_loss_cfg = self.distillation_config.distillation_loss
+            distillation_only = (
+                distillation_use_topk
+                and not distillation_loss_cfg.use_task_rewards
+                and not distillation_loss_cfg.use_policy_gradient
+            )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
+            "distillation_use_full_vocab": distillation_use_full_vocab,
+            "distillation_only": distillation_only,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
@@ -1518,6 +1533,41 @@ class PPOTrainer:
         metrics.update(actor_metrics)
 
         return batch
+
+    def _clear_full_vocab_tq_step(self, step: int) -> None:
+        """Clear one step's full-vocab teacher hidden-state partitions from TransferQueue.
+
+        Full-vocab distillation (``loss_mode='forward_kl_full_vocab'``) transports teacher
+        hidden states through TQ partitions named
+        ``full_vocab_hidden_{prefix}_{teacher}_step_{N}``, written by the teacher servers
+        with the same ``global_steps`` that is attached to the batch at generation time
+        (see ``_add_batch_to_generate`` / agent_loop_tq). Once the actor update for this
+        step has completed, the student Megatron workers no longer read these partitions,
+        so the driver clears them to prevent TQ storage from growing without bound.
+
+        Called once per global step after all ``_step_once`` triggers, so samples consumed
+        by later parameter-sync triggers of the same step are not cleared prematurely.
+        """
+        distillation_config = self.distillation_config
+        if distillation_config is None or not distillation_config.distillation_loss.loss_settings.use_full_vocab:
+            return
+
+        # transfer_queue is mandatory in full-vocab mode (the teacher hidden states only
+        # exist in TQ), so an import failure here is a configuration error and must abort
+        # training rather than silently leak partitions.
+        from verl.trainer.distillation.full_vocab_tq import clear_step, resolve_partition_prefix
+
+        prefix = resolve_partition_prefix(distillation_config.distillation_loss.full_vocab_experiment_name)
+        for teacher_key in distillation_config.teacher_models:
+            try:
+                # clear_step itself is best-effort (failures only log a warning); this
+                # extra guard keeps an unexpected error from aborting the training loop.
+                clear_step(prefix=prefix, teacher_name=teacher_key, step=step)
+            except Exception as exc:
+                logger.warning(
+                    f"[FVKL-TQ] failed to clear full-vocab hidden partition for teacher {teacher_key!r} "
+                    f"at step {step}: {exc}"
+                )
 
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
@@ -1750,6 +1800,10 @@ class PPOTrainer:
             with marked_timer("update_actor", timing_raw, color="red"):
                 batch = self._update_actor(batch, metrics=metrics)
 
+        # clear this step's full-vocab teacher hidden-state partitions from TransferQueue
+        # (no-op unless distillation loss_mode is forward_kl_full_vocab)
+        self._clear_full_vocab_tq_step(step=self.global_steps)
+
         return batch
 
 
@@ -1803,6 +1857,7 @@ class TaskRunner:
             self.mapping[Role.RewardModel] = "global_pool"
 
         distillation_config = config.get("distillation")
+        max_colocate_count = 3
         if is_distillation_enabled(distillation_config):
             if distillation_config.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
@@ -1813,7 +1868,17 @@ class TaskRunner:
             resource_pool_spec["teacher_pool"] = teacher_pool
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
-        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+            if distillation_config.get("share_gpu_group", False):
+                # All teachers' worker actors share the same placement-group bundles.
+                # Each bundle reserves max_colocate_count CPUs and actors request 1 CPU
+                # each (plus 1/max_colocate_count GPU), so the per-bundle actor count
+                # (= number of teachers) must not exceed max_colocate_count.
+                num_teachers = len(omega_conf_to_dataclass(distillation_config).teacher_models)
+                max_colocate_count = max(3, num_teachers)
+
+        self.resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec, mapping=self.mapping, max_colocate_count=max_colocate_count
+        )
 
     def run(self, config):
         pprint(OmegaConf.to_container(config, resolve=True))

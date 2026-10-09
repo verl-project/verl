@@ -17,6 +17,21 @@ from typing import Any, Optional
 from omegaconf import MISSING
 from transformers import AutoConfig
 
+# Models loaded with ``trust_remote_code=True`` produce config/tokenizer classes under the
+# dynamic ``transformers_modules`` package. That package only appears in ``sys.modules``
+# after transformers' dynamic-module loader initializes it, so a fresh Ray worker process
+# (e.g. CheckpointEngineWorker) fails to unpickle an ``HFModelConfig`` carrying such
+# dynamic-class instances with ``ModuleNotFoundError: No module named 'transformers_modules'``.
+# Instances of HFModelConfig are pickled by Ray with the class reference first, so importing
+# this module is guaranteed to happen before the pickled ``hf_config`` attribute is
+# deserialized — registering the dynamic-module namespace here fixes the unpickle ordering.
+try:
+    from transformers.dynamic_module_utils import init_hf_modules
+
+    init_hf_modules()
+except Exception:  # pragma: no cover - transformers without dynamic_module_utils
+    pass
+
 from verl.base_config import BaseConfig
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.fs import copy_to_local
@@ -178,13 +193,13 @@ class HFModelConfig(BaseConfig):
 
         self.local_hf_config_path = copy_to_local(self.hf_config_path, use_shm=self.use_shm)
         self.generation_config = get_generation_config(
-            self.local_hf_config_path, trust_remote_code=self.trust_remote_code
+            self.local_hf_config_path, trust_remote_code=True
         )
 
         # construct hf_config
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
         self.hf_config = AutoConfig.from_pretrained(
-            self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
+            self.local_hf_config_path, trust_remote_code=True, attn_implementation=attn_implementation
         )
 
         override_config_kwargs = {}

@@ -20,7 +20,7 @@ from typing import Optional
 from verl.base_config import BaseConfig
 from verl.utils.config import omega_conf_to_dataclass
 
-from .rollout import RolloutConfig
+from .rollout import RolloutConfig, get_engine_pcp_size
 
 __all__ = ["DistillationLossConfig", "DistillationTeacherModelConfig", "DistillationConfig"]
 
@@ -69,6 +69,36 @@ class DistillationLossConfig(BaseConfig):
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
 
+    # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
+    # at long context). Only consumed by ``loss_mode='forward_kl_topk'``.
+    # Default ``False`` to preserve short-context performance (chunked path
+    # has ~6x time overhead at N=14K, V=152K). Set ``True`` when hitting OOM
+    # at long context (>=64K tokens, V=152K) where the baseline path OOMs.
+    use_chunked_topk: bool = False
+    # Tokens per chunk along (B*T) when ``use_chunked_topk=True``. Larger
+    # chunks reduce kernel-launch overhead but increase per-chunk memory;
+    # smaller chunks reduce per-chunk memory but increase kernel-launch
+    # overhead (saved-tensor total stays constant either way).
+    chunked_topk_chunk_size: int = 4096
+
+    # Full-vocabulary KL (loss_mode='forward_kl_full_vocab' / 'reverse_kl_full_vocab'):
+    # the teacher exports pre-lm_head hidden states and the student rebuilds
+    # full-vocab teacher logits on the fly with the frozen teacher lm_head.
+    # Tokens per chunk along (B*T) when computing the full-vocab KL, bounding
+    # the [chunk, V] log-softmax buffer.
+    full_vocab_chunk_tokens: int = 4096
+    # Checkpoint to load the teacher lm_head from. None -> load from the
+    # teacher's model_path.
+    full_vocab_lm_head_checkpoint: Optional[str] = None
+    # Name of the lm_head weight in the checkpoint. "auto" reads embed_tokens
+    # when the teacher ties word embeddings, otherwise lm_head.
+    full_vocab_lm_head_layer: str = "auto"
+    # TransferQueue partition prefix isolating this run's hidden-state
+    # partitions from other runs sharing the same TQ cluster. None -> fall back
+    # to the VERL_FULL_VOCAB_EXPERIMENT_NAME env var, then "default_exp".
+    full_vocab_experiment_name: Optional[str] = None
+
+
     use_policy_gradient: bool = True
     policy_loss_mode: str = "vanilla"
     clip_ratio: float = 0.2
@@ -111,6 +141,12 @@ class DistillationLossConfig(BaseConfig):
                 " wrt model weights does not depend on teacher log probabilities."
             )
 
+        if self.loss_settings.use_full_vocab and self.full_vocab_chunk_tokens <= 0:
+            raise ValueError(
+                f"full_vocab_chunk_tokens must be > 0 when the distillation loss uses full-vocab "
+                f"KL, but got {self.full_vocab_chunk_tokens}."
+            )
+
 
 @dataclass
 class DistillationTeacherModelConfig(BaseConfig):
@@ -125,8 +161,8 @@ class DistillationTeacherModelConfig(BaseConfig):
     num_replicas (int):
         Number of inference replicas of this teacher to launch. Each replica occupies
         `per_replica_world_size` GPUs (= inference.data_parallel_size *
-        inference.tensor_model_parallel_size * inference.pipeline_model_parallel_size),
-        so the teacher's total GPU footprint is
+        inference.tensor_model_parallel_size * inference.pipeline_model_parallel_size *
+        inference.prefill_context_parallel_size), so the teacher's total GPU footprint is
         `num_replicas * per_replica_world_size`.
     """
 
@@ -143,6 +179,8 @@ class DistillationTeacherModelConfig(BaseConfig):
             self.inference.tensor_model_parallel_size
             * self.inference.data_parallel_size
             * self.inference.pipeline_model_parallel_size
+            # PCP (prefill context parallel) ranks are extra engine worker processes.
+            * self.inference.prefill_context_parallel_size
         )
 
     @property
@@ -157,7 +195,9 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+    def validate_and_prepare_for_distillation(
+        self, use_topk: bool, topk: Optional[int], use_full_vocab: bool = False
+    ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
@@ -171,7 +211,41 @@ class DistillationTeacherModelConfig(BaseConfig):
             )
         self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
         self.inference.response_length = 1
-        self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
+        if use_full_vocab:
+            # Full-vocab mode uses prompt_logprobs=0 and exports hidden states instead of
+            # top-k logprobs, so the max_logprobs >= topk check does not apply.
+            self._validate_full_vocab_inference()
+        else:
+            self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
+
+    def _validate_full_vocab_inference(self) -> None:
+        # Full-vocab KL exports per-request hidden states; exactly one request per engine
+        # forward keeps the exported hidden states aligned with the request.
+        if self.inference.max_num_seqs != 1:
+            raise ValueError(
+                "Full-vocab distillation requires the teacher inference engine to process one request "
+                f"at a time, but got max_num_seqs={self.inference.max_num_seqs}. Please set "
+                "distillation.teacher_models.<name>.inference.max_num_seqs=1."
+            )
+        if self.inference.enable_chunked_prefill:
+            raise ValueError(
+                "Full-vocab distillation requires chunked prefill to be disabled so that each teacher "
+                "forward contains exactly one complete request, but got enable_chunked_prefill=True. "
+                "Please set distillation.teacher_models.<name>.inference.enable_chunked_prefill=false."
+            )
+        if self.inference.max_num_batched_tokens < self.inference.max_model_len:
+            # On vLLM v1, enable_chunked_prefill=False does NOT stop the scheduler from
+            # splitting a prompt longer than max_num_batched_tokens into multiple prefill
+            # steps. The hidden-state capture keeps only the last forward, so a chunked
+            # prefill silently exports just the tail chunk of the sample.
+            raise ValueError(
+                "Full-vocab distillation requires the teacher prefill to run in a single "
+                f"forward, but max_num_batched_tokens={self.inference.max_num_batched_tokens} < "
+                f"max_model_len={self.inference.max_model_len}: longer samples would be chunked "
+                "and only the tail chunk's hidden states would be captured. Please set "
+                "distillation.teacher_models.<name>.inference.max_num_batched_tokens >= "
+                "max_model_len."
+            )
 
     def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
         if not use_topk:
@@ -223,6 +297,19 @@ class DistillationConfig(BaseConfig):
         the data proto, e.g., data_source.
     distillation_loss (DistillationLossConfig):
     Configuration for distillation loss settings.
+    share_gpu_group (bool):
+        Whether all teachers' replicas are placed on the SAME GPU bundles (multi-teacher
+        shared GPU group) instead of disjoint sub-pools. Requires every teacher's
+        `world_size` (= num_replicas * per_replica_world_size) to be equal and to match the
+        distillation resource pool size (`n_gpus_per_node * nnodes`), and every teacher's
+        `inference.free_cache_engine` and `inference.enable_sleep_mode` to be True. Teacher
+        engines start asleep (weights offloaded to CPU, KV cache freed) and are woken on
+        demand by the TeacherSleepController.
+    max_awake_teachers (int, optional):
+        Maximum number of simultaneously-awake teachers when `share_gpu_group` is True.
+        None means unlimited (all teachers may stay awake). When the limit is hit, the
+        least-recently-used unpinned teacher is put to sleep (vLLM sleep level 1) to make
+        room for the requested teacher.
 
     NOTE: The `teacher_model` entry is in the `teacher_models` dict by default.
     Since it is popped when other teacher entries are added, using `teacher_model` as
@@ -253,17 +340,24 @@ class DistillationConfig(BaseConfig):
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
+    share_gpu_group: bool = False
+    max_awake_teachers: Optional[int] = None
 
     def __post_init__(self):
         if not self.enabled:
             return
 
         self.teacher_models = self._resolve_teacher_models()
+        if self.share_gpu_group:
+            self._validate_shared_gpu_group()
+            return
+
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
+                use_full_vocab=self.distillation_loss.loss_settings.use_full_vocab,
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes
@@ -272,6 +366,51 @@ class DistillationConfig(BaseConfig):
                 f"Sum of teacher (num_replicas * per_replica_world_size) ({teacher_world_size_sum}) must match "
                 f"the distillation resource pool size "
                 f"({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size})."
+            )
+
+    def _validate_shared_gpu_group(self):
+        """Validate multi-teacher shared GPU group placement.
+
+        All teachers' replicas are placed on the same GPU bundles, so every teacher's
+        `world_size` must equal the distillation resource pool size, and every teacher
+        engine must support sleep/wake (`free_cache_engine` + `enable_sleep_mode`).
+        """
+        if self.max_awake_teachers is not None and self.max_awake_teachers < 1:
+            raise ValueError(
+                f"distillation.max_awake_teachers must be >= 1 when set, "
+                f"but got {self.max_awake_teachers}."
+            )
+
+        total_pool_size = self.n_gpus_per_node * self.nnodes
+        world_sizes = {}
+        for key, teacher_model in self.teacher_models.items():
+            teacher_model.validate_and_prepare_for_distillation(
+                use_topk=self.distillation_loss.loss_settings.use_topk,
+                topk=self.distillation_loss.topk,
+            )
+            world_sizes[key] = teacher_model.world_size
+            inference = teacher_model.inference
+            if not inference.free_cache_engine or not inference.enable_sleep_mode:
+                raise ValueError(
+                    f"share_gpu_group=True requires inference.free_cache_engine=True and "
+                    f"inference.enable_sleep_mode=True for every teacher (on-demand teacher "
+                    f"sleep/wake depends on both), but teacher {key!r} has "
+                    f"free_cache_engine={inference.free_cache_engine}, "
+                    f"enable_sleep_mode={inference.enable_sleep_mode}."
+                )
+
+        if len(set(world_sizes.values())) != 1:
+            raise ValueError(
+                f"share_gpu_group=True requires every teacher's world_size "
+                f"(num_replicas * per_replica_world_size) to be equal, but got {world_sizes}."
+            )
+        teacher_world_size = next(iter(world_sizes.values()))
+        if teacher_world_size != total_pool_size:
+            raise ValueError(
+                f"share_gpu_group=True requires each teacher's world_size ({teacher_world_size}) "
+                f"to equal the distillation resource pool size "
+                f"({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size}), since all "
+                f"teachers are placed on the same GPU bundles."
             )
 
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
@@ -284,6 +423,9 @@ class DistillationConfig(BaseConfig):
                 inference.tensor_model_parallel_size
                 * inference.data_parallel_size
                 * inference.pipeline_model_parallel_size
+                # PCP (prefill context parallel) ranks are extra engine worker
+                # processes; keep in sync with per_replica_world_size.
+                * get_engine_pcp_size((inference.engine_kwargs or {}).get("vllm", {}) or {})
             )
             pool_size = self.n_gpus_per_node * self.nnodes
             if pool_size % per_replica != 0:

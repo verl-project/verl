@@ -577,6 +577,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
             if self.distillation_enabled:
+                if (
+                    distillation_config.distillation_loss.loss_settings.use_full_vocab
+                    and actor_config.strategy != "megatron"
+                ):
+                    raise ValueError(
+                        f"distillation loss_mode={distillation_config.distillation_loss.loss_mode!r} "
+                        "(full-vocabulary KL) is only implemented for the megatron engine, but "
+                        f"actor strategy is {actor_config.strategy!r}."
+                    )
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )

@@ -11,7 +11,9 @@
 import logging
 import os
 import platform
+import re
 import subprocess
+from functools import lru_cache
 
 import torch
 from packaging import version
@@ -360,3 +362,38 @@ def is_support_ipc() -> bool:
 
     # For other devices (CPU), return False
     return False
+
+def get_platform():
+    """Return a platform descriptor with ``device_name`` in {'npu','cuda','cpu'}."""
+    from types import SimpleNamespace
+    try:
+        if is_torch_npu_available(check_device=False):
+            return SimpleNamespace(device_name="npu")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if torch.cuda.is_available():
+            return SimpleNamespace(device_name="cuda")
+    except Exception:  # noqa: BLE001
+        pass
+    return SimpleNamespace(device_name="cpu")
+
+
+@lru_cache(maxsize=1)
+def get_superpod_id():
+    """Return this node's Super Pod ID (int) via npu-smi spod-info. None on non-NPU/failure."""
+    if get_platform().device_name != "npu":
+        return None
+    try:
+        result = subprocess.run(
+            ["npu-smi", "info", "-t", "spod-info", "-i", "0", "-c", "0"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    for line in result.stdout.split("\n"):
+        if "Super Pod ID" in line:
+            m = re.search(r"Super Pod ID\s*:\s*(\d+)", line)
+            if m:
+                return int(m.group(1))
+    return None

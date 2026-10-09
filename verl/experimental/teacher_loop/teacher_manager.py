@@ -33,7 +33,20 @@ def _get_teacher_sampling_params(
 ) -> dict[str, Any]:
     """Get sampling parameters for teacher model when computing log probabilities for distillation."""
     if teacher_model_config.inference.temperature != 1.0:
-        raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
+        logger.warning(
+            "Teacher inference temperature is set to %.1f, but temperature has no effect "
+            "on prompt_logprobs (forward pass only). Using temperature=1.0.",
+            teacher_model_config.inference.temperature,
+        )
+    if distillation_loss_config.loss_settings.use_full_vocab:
+        # Full-vocab KL: the teacher exports pre-lm_head hidden states instead of
+        # logprobs. prompt_logprobs=0 is enough to make vLLM compute logits for
+        # every prompt position, which triggers the compute_logits capture.
+        return {
+            "max_tokens": 1,
+            "temperature": 1.0,
+            "prompt_logprobs": 0,
+        }
 
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
     return {
@@ -82,6 +95,13 @@ class AsyncTeacherLLMServerManager:
                 f"do not match teacher routing keys {sorted(expected)}."
             )
         self.teacher_client: dict[str, LLMServerClient] = teacher_client
+        # Fallback step source for full-vocab export when the caller cannot
+        # provide the trainer's global_steps (see compute_teacher_full_vocab_single).
+        self._full_vocab_step_counter = 0
+
+    def _next_full_vocab_step(self) -> int:
+        self._full_vocab_step_counter += 1
+        return self._full_vocab_step_counter
 
     def _resolve_teacher_key(self, routing_key: Optional[str]) -> str:
         if len(self.teacher_model_configs) == 1:
@@ -126,3 +146,64 @@ class AsyncTeacherLLMServerManager:
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
         return teacher_ids, teacher_logprobs
+
+    async def compute_teacher_full_vocab_single(
+        self,
+        sequence_ids: list[int],
+        *,
+        step: Optional[int] = None,
+        uid: Optional[str] = None,
+        routing_key: Optional[str] = None,
+        multi_modal_data: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    ) -> dict:
+        """Export the teacher's pre-lm_head hidden states for one unpadded sequence.
+
+        Runs a prefill-only teacher forward (max_tokens=1, prompt_logprobs=0); the
+        teacher server captures the hidden states, writes them to TransferQueue and
+        returns only the artifact metadata dict, which this method returns.
+
+        ``step``/``uid`` key the TQ entry (``{teacher}/step={step}/sample={uid}`` in
+        partition ``..._step_{step}``). When ``step`` is None (callers without access
+        to the trainer's global_steps, e.g. the v0 agent-loop path) a monotonic
+        per-manager counter is used instead: every call then lands in its own
+        partition, which keeps keys unique but fragments per-step cleanup. When
+        ``uid`` is None a random uuid is used.
+
+        Fail-loud: raises if the teacher output carries no artifact.
+        """
+        multi_modal_data = multi_modal_data or {}
+        teacher_key = self._resolve_teacher_key(routing_key)
+        teacher_model_config = self.teacher_model_configs[teacher_key]
+        client = self.teacher_client[teacher_key]
+        if step is None:
+            step = self._next_full_vocab_step()
+        if uid is None:
+            uid = uuid4().hex
+        else:
+            # Guarantee per-export key uniqueness inside the per-step partition even
+            # when the caller's uid repeats (rollout.n>1 repeats of one prompt, a
+            # duplicated uid column in the dataset, retries). A second put to the same
+            # key silently overwrites the first entry, after which the first sample's
+            # artifact points at a tensor with a different shape (reshape error at
+            # consumption). The caller uid stays as a readable prefix.
+            uid = f"{uid}_{uuid4().hex[:8]}"
+        teacher_output = await client.generate(
+            request_id=uuid4().hex,
+            prompt_ids=sequence_ids,
+            sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
+            image_data=multi_modal_data.get("images"),
+            video_data=multi_modal_data.get("videos"),
+            audio_data=multi_modal_data.get("audios"),
+            mm_processor_kwargs=mm_processor_kwargs,
+            full_vocab={"teacher_name": teacher_key, "step": step, "uid": uid},
+        )
+        artifact = teacher_output.extra_fields.get("teacher_full_vocab_artifact")
+        if artifact is None:
+            raise RuntimeError(
+                f"Teacher {teacher_key!r} returned no 'teacher_full_vocab_artifact' in extra_fields "
+                f"(step={step}, uid={uid!r}, seq_len={len(sequence_ids)}). The teacher server must be "
+                "started with full_vocab_export_config enabled; a missing artifact would silently "
+                "disable full-vocab distillation for this sample."
+            )
+        return artifact

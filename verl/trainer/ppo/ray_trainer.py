@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import logging
 import os
 import uuid
 from collections import defaultdict
@@ -71,6 +72,8 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+_logger = logging.getLogger(__name__)
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -781,6 +784,22 @@ class RayPPOTrainer:
         """
         self.resource_pool_manager.create_resource_pool()
 
+        # ===== RACK-AWARE (PG-pinned): student=first(rack0), teacher=last(rack1); 设在 MAIN pool, split 之前 =====
+        import os as _os
+        if _os.environ.get('VERL_TEACHER_DEDICATED_RACK', '0') == '1':
+            from verl.single_controller.ray.rack_aware import assign_rack_aware_nodes
+            import logging as _rlg
+            _n_gpus = self.config.trainer.n_gpus_per_node
+            _ar = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+            _a_pool = self.resource_pool_manager.get_resource_pool(_ar)
+            _a_pool.pinned_node_ids = assign_rack_aware_nodes(_n_gpus, _a_pool.world_size // _n_gpus, take="first")
+            _t_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            _t_pool.pinned_node_ids = assign_rack_aware_nodes(_n_gpus, _t_pool.world_size // _n_gpus, take="last")
+            _rlg.getLogger(__name__).warning(
+                "[RACK-AWARE] student pool pinned %d nodes (first->rack0), teacher pool pinned %d nodes (last->rack1)"
+                % (len(_a_pool.pinned_node_ids), len(_t_pool.pinned_node_ids)))
+        # ===== end RACK-AWARE =====
+
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # create actor and rollout
@@ -1307,6 +1326,11 @@ class RayPPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_use_full_vocab = (
+            self.distillation_config.distillation_loss.loss_settings.use_full_vocab
+            if is_distillation_enabled(self.config.get("distillation"))
+            else False
+        )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1316,6 +1340,7 @@ class RayPPOTrainer:
             batch_td,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
+            distillation_use_full_vocab=distillation_use_full_vocab,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
@@ -1331,6 +1356,38 @@ class RayPPOTrainer:
         actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
         return actor_output
+
+    def _clear_full_vocab_tq_step(self, step: int) -> None:
+        """Clear one step's full-vocab teacher hidden-state partitions from TransferQueue.
+
+        Full-vocab distillation (``loss_mode='forward_kl_full_vocab'``) transports teacher
+        hidden states through TQ partitions named
+        ``full_vocab_hidden_{prefix}_{teacher}_step_{N}``, written by the teacher servers
+        with the same ``global_steps`` that is attached to the batch at generation time.
+        Once the actor update for this step has completed, the student Megatron workers no
+        longer read these partitions, so the driver clears them to prevent TQ storage from
+        growing without bound (which can OOM the host running the TQ storage units).
+        """
+        distillation_config = self.distillation_config
+        if distillation_config is None or not distillation_config.distillation_loss.loss_settings.use_full_vocab:
+            return
+
+        # transfer_queue is mandatory in full-vocab mode (the teacher hidden states only
+        # exist in TQ), so an import failure here is a configuration error and must abort
+        # training rather than silently leak partitions.
+        from verl.trainer.distillation.full_vocab_tq import clear_step, resolve_partition_prefix
+
+        prefix = resolve_partition_prefix(distillation_config.distillation_loss.full_vocab_experiment_name)
+        for teacher_key in distillation_config.teacher_models:
+            try:
+                # clear_step itself is best-effort (failures only log a warning); this
+                # extra guard keeps an unexpected error from aborting the training loop.
+                clear_step(prefix=prefix, teacher_name=teacher_key, step=step)
+            except Exception as exc:
+                _logger.warning(
+                    f"[FVKL-TQ] failed to clear full-vocab hidden partition for teacher {teacher_key!r} "
+                    f"at step {step}: {exc}"
+                )
 
     def _update_critic(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
@@ -1676,6 +1733,10 @@ class RayPPOTrainer:
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+
+                    # Full-vocab teacher hidden states for this step have been consumed
+                    # (or skipped during critic warmup); release the TQ partition.
+                    self._clear_full_vocab_tq_step(step=self.global_steps)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
