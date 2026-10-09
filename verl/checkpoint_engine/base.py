@@ -350,13 +350,64 @@ class CheckpointEngineWorker(Worker):
         # sglang and trt-llm need device_mesh for internal communication
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
+    def _infer_lora_peft_config(self):
+        """Rebuild the minimal peft_config a LoRA adapter push needs.
+
+        The trainer engine returns the authoritative config, but it lives in a
+        different process. Both sides are built from the same model_config, and
+        vLLM's PEFTHelper.from_dict only requires r / lora_alpha / target_modules.
+        """
+        from verl.utils.py_functional import convert_to_regular_types
+
+        rank = getattr(self.model_config, "lora_rank", 0) or 0
+        if rank <= 0:
+            return None
+        cfg = {
+            "task_type": "CAUSAL_LM",
+            "peft_type": "LORA",
+            "r": rank,
+            "lora_alpha": getattr(self.model_config, "lora_alpha", 2 * rank),
+            "target_modules": convert_to_regular_types(self.model_config.target_modules),
+            "bias": "none",
+        }
+        exclude = convert_to_regular_types(getattr(self.model_config, "exclude_modules", None))
+        if exclude:
+            cfg["exclude_modules"] = exclude
+        return cfg
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
+        wire_format = getattr(self.checkpoint_engine, "wire_format", "named_tensors")
+        # Adapter pushes are self-describing: they contain only `lora_` tensors,
+        # while base / full / merged pushes contain none. Peek at the first name so
+        # no extra signalling is needed on the wire. Delta engines own their own
+        # layout, so only the named-tensors format is inspected.
+        first = None
+        kwargs = {}
+        if wire_format == "named_tensors":
+            try:
+                first = await weights.__anext__()
+            except StopAsyncIteration:
+                first = None
+            if first is not None and "lora_" in first[0]:
+                peft_config = self._infer_lora_peft_config()
+                if peft_config is not None:
+                    kwargs = {"peft_config": peft_config, "base_sync_done": True}
+        if first is not None:
+            inner = weights
+
+            async def _chained():
+                yield first
+                async for item in inner:
+                    yield item
+
+            weights = _chained()
         await self.server_adapter.update_weights(
             weights,
             global_steps=global_steps,
-            wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
+            wire_format=wire_format,
+            **kwargs,
         )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
