@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-NUM_GPUS=${NUM_GPUS:-8}
+NUM_GPUS=${NUM_GPUS:-16}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -81,7 +81,7 @@ else
     CHECKPOINT_CONTENTS="['model','optimizer','extra']"
 fi
 
-train_traj_micro_bsz_per_gpu=2 # b
+train_traj_micro_bsz_per_gpu=4 # b
 n_resp_per_prompt=4 # g
 
 train_traj_micro_bsz=$((train_traj_micro_bsz_per_gpu * 1)) # b * n
