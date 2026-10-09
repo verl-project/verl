@@ -100,6 +100,24 @@ jobs:
           pip install "transformers==5.16.1"
           pip uninstall -y megatron-bridge
           pip install --no-deps --no-build-isolation "megatron-bridge @ git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.6.2"
+          python3 - <<'EOF'
+          path = "/MindSpeed-Bridge/mindspeed_bridge/features/data/vlm_datasets/shuffle_control.py"
+          src = open(path).read()
+          old = """        from megatron.bridge.data.vlm_datasets.preloaded_provider import (
+                      PreloadedVLMConversationProvider,
+                  )
+          """
+          new = """        try:
+                      from megatron.bridge.data.vlm_datasets.preloaded_provider import (
+                          PreloadedVLMConversationProvider,
+                      )
+                  except ModuleNotFoundError:
+                      return
+          """
+          assert old in src, "patch anchor not found, upstream file may have changed"
+          open(path, "w").write(src.replace(old, new))
+          print("patched:", path)
+          EOF
       - name: Check final pip list
         run: |
           pip list
