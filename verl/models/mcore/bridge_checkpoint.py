@@ -76,27 +76,34 @@ def initialize_conversion():
         dist.init_process_group(get_nccl_backend())
 
 
-def build_conversion_model(bridge, pp_size, ep_size=1, use_cpu_initialization=False, is_value_model=False):
+def build_conversion_model(
+    bridge, pp_size, ep_size=1, use_cpu_initialization=False, is_value_model=False, *, tp_size=1, etp_size=1
+):
     """Use the same Bridge provider and value-head hook as the training engine.
 
-    Conversion uses TP=1 and no virtual pipeline. Distributed checkpoints can be
-    resharded to the training engine's TP/PP/EP configuration when loaded.
+    Conversion defaults to TP=1 and ETP=1 with no virtual pipeline. Distributed
+    checkpoints can be resharded to the training engine's parallelism when loaded.
     """
     from verl.models.mcore.bridge import make_value_model
 
     provider = bridge.to_megatron_provider(load_weights=False)
     world_size = dist.get_world_size()
-    if pp_size < 1 or ep_size < 1 or world_size % (pp_size * ep_size):
-        raise ValueError(f"WORLD_SIZE={world_size} must be divisible by pp_size * ep_size ({pp_size} * {ep_size})")
+    if min(tp_size, pp_size, ep_size, etp_size) < 1:
+        raise ValueError("tp_size, pp_size, ep_size and etp_size must be positive")
+    if world_size % (tp_size * pp_size) or world_size % (etp_size * ep_size * pp_size):
+        raise ValueError(
+            f"WORLD_SIZE={world_size} must be divisible by TP * PP ({tp_size * pp_size}) "
+            f"and ETP * EP * PP ({etp_size * ep_size * pp_size})"
+        )
     shards = get_dynamic_pipeline_shards(provider.num_layers, pp_size)
     overrides = dict(
-        tensor_model_parallel_size=1,
+        tensor_model_parallel_size=tp_size,
         pipeline_model_parallel_size=pp_size,
         virtual_pipeline_model_parallel_size=None,
         context_parallel_size=1,
         expert_model_parallel_size=ep_size,
-        expert_tensor_parallel_size=1,
-        sequence_parallel=False,
+        expert_tensor_parallel_size=etp_size,
+        sequence_parallel=tp_size > 1,
         params_dtype=torch.bfloat16,
         pipeline_dtype=torch.bfloat16,
         bf16=True,
