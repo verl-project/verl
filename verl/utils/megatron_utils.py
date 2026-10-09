@@ -1318,6 +1318,26 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         # Force the provider override so MTP remains disabled after that reload.
         engine_config.override_transformer_config["mtp_num_layers"] = None
         engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+
+        # Reference models may inherit an actor layout containing MTP layers.
+        # Reference scoring only needs next-token log probabilities, not auxiliary
+        # MTP predictions; So we remove MTP layers from the inherited layout.
+        pipeline_layout = engine_config.override_transformer_config.get("pipeline_model_parallel_layout")
+        if pipeline_layout is not None:
+            from megatron.core.transformer.enums import LayerType
+            from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+
+            if not isinstance(pipeline_layout, PipelineParallelLayerLayout):
+                pipeline_layout = PipelineParallelLayerLayout(
+                    pipeline_layout, engine_config.pipeline_model_parallel_size
+                )
+            # Convert [PP][VPP] back to stage order, retaining empty stages and
+            # building new lists so an inherited layout is not modified in place.
+            engine_config.override_transformer_config["pipeline_model_parallel_layout"] = [
+                [layer.name for layer in pipeline_layout.layout[pp_rank][vp_rank] if layer != LayerType.mtp]
+                for vp_rank in range(pipeline_layout.virtual_pipeline_model_parallel_size)
+                for pp_rank in range(pipeline_layout.pipeline_model_parallel_size)
+            ]
         return
 
     elif enable_mtp and not has_mtp:
