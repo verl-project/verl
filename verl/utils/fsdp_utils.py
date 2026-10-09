@@ -18,6 +18,8 @@ import json
 import logging
 import math
 import os
+import socket
+import tempfile
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
@@ -52,6 +54,106 @@ elif version.parse(torch.__version__) >= version.parse("2.4"):
     fully_shard_module = torch.distributed._composable.fsdp
 else:
     fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy, fully_shard_module = None, None, None, None, None
+
+
+_NO_PLACEMENT_REGISTRATIONS = "_verl_no_placement_param_registrations"
+
+
+def get_no_placement_param_registrations(model: nn.Module):
+    """Resolve Transformers parameters that must stay on their current device."""
+    patterns = getattr(model, "_no_placement_params", None) or ()
+    named_params = dict(model.named_parameters(remove_duplicate=False)) if patterns else {}
+    matched_params = set()
+    for pattern in patterns:
+        matches = {param for name, param in named_params.items() if name == pattern or name.endswith(f".{pattern}")}
+        if not matches:
+            raise ValueError(f"Could not resolve _no_placement_params entry: {pattern}")
+        matched_params.update(matches)
+    trainable = [name for name, param in named_params.items() if param in matched_params and param.requires_grad]
+    if trainable:
+        raise ValueError(f"FSDP2 cannot train CPU-resident _no_placement_params: {trainable}")
+
+    return tuple(
+        (module, name, param, f"{prefix}.{name}" if prefix else name)
+        for prefix, module in model.named_modules()
+        for name, param in module._parameters.items()
+        if param in matched_params
+    )
+
+
+def set_no_placement_param_registrations(model: nn.Module, registrations) -> None:
+    setattr(model, _NO_PLACEMENT_REGISTRATIONS, tuple(registrations))
+
+
+def _share_no_placement_param(param, directory):
+    """Map one frozen CPU copy per host; each invocation uses a fresh file."""
+    hosts = [None] * dist.get_world_size()
+    dist.all_gather_object(hosts, socket.gethostname())
+    leader = hosts.index(socket.gethostname())
+    path = None
+    if dist.get_rank() == leader:
+        os.makedirs(directory, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix="verl-frozen-", dir=directory)
+        os.close(fd)
+        mapped = torch.from_file(path, shared=True, size=param.numel(), dtype=param.dtype)
+        mapped.copy_(param.detach().reshape(-1))
+        del mapped
+    paths = [None] * dist.get_world_size()
+    dist.all_gather_object(paths, path)
+    path = paths[leader]
+    mapped = torch.from_file(path, shared=False, size=param.numel(), dtype=param.dtype).view(param.shape)
+    # Unlink only after every local reader has mapped it. The mappings stay alive.
+    dist.barrier()
+    if dist.get_rank() == leader:
+        os.unlink(path)
+    return nn.Parameter(mapped, requires_grad=False)
+
+
+def materialize_no_placement_params(registrations):
+    """Broadcast frozen CPU parameters using VERL's CPU/Gloo process group."""
+    by_param = {}
+    for registration in registrations:
+        by_param.setdefault(id(registration[2]), []).append(registration)
+
+    result = []
+    distributed = dist.is_initialized() and dist.get_world_size() > 1
+    for grouped_registrations in by_param.values():
+        param = grouped_registrations[0][2]
+        name = grouped_registrations[0][3]
+        if distributed and dist.get_rank() != 0:
+            param = nn.Parameter(torch.empty_like(param, device="cpu"), requires_grad=False)
+        elif param.is_meta or param.device.type != "cpu":
+            raise RuntimeError(f"Expected CPU data for _no_placement_params: {name}")
+
+        if distributed:
+            flat = param.detach().view(-1)
+            chunk_size = max(1, (256 * 1024**2) // flat.element_size())
+            for offset in range(0, flat.numel(), chunk_size):
+                dist.broadcast(flat[offset : offset + chunk_size], src=0)
+            directory = os.getenv("VERL_NO_PLACEMENT_MMAP_DIR")
+            if directory:
+                param = _share_no_placement_param(param, directory)
+
+        for module, local_name, _, full_name in grouped_registrations:
+            module._parameters[local_name] = param
+            result.append((module, local_name, param, full_name))
+    return tuple(result)
+
+
+@contextmanager
+def temporarily_detach_no_placement_params(model: nn.Module, registrations=None):
+    """Keep CPU-resident parameters out of recursive ``Module.to`` calls."""
+    if registrations is None:
+        registrations = vars(model).get(_NO_PLACEMENT_REGISTRATIONS, ())
+    for module, name, param, full_name in registrations:
+        if module._parameters.get(name) is not param:
+            raise RuntimeError(f"Unexpected parameter registration for {full_name}")
+        module._parameters[name] = None
+    try:
+        yield
+    finally:
+        for module, name, param, _ in registrations:
+            module._parameters[name] = param
 
 
 def init_fn(x: torch.nn.Module):
@@ -206,7 +308,8 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
     # host must synchronize first, and a caller that reloads them on another
     # stream must establish an explicit stream dependency. empty_cache() below
     # is not a synchronization point.
-    model.to("cpu", non_blocking=True)
+    with temporarily_detach_no_placement_params(model):
+        model.to("cpu", non_blocking=True)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -234,7 +337,8 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
-    model.to(device, non_blocking=True)
+    with temporarily_detach_no_placement_params(model):
+        model.to(device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -485,7 +589,27 @@ def get_fsdp_full_state_dict(model: torch.nn.Module, offload_to_cpu: bool = True
         raise NotImplementedError(f"Unknown FSDP version {fsdp_version}")
 
 
-def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_mesh=None, cpu_offload=None):
+def to_empty_preserving_shared_params(model: nn.Module, device):
+    """Keep parameter aliases when materializing or discarding storage."""
+    aliases = {}
+    for module in model.modules():
+        for name, param in module._parameters.items():
+            if param is not None:
+                aliases.setdefault(id(param), []).append((module, name))
+    model.to_empty(device=device)
+    for registrations in aliases.values():
+        owner, name = registrations[0]
+        for module, alias in registrations[1:]:
+            module._parameters[alias] = owner._parameters[name]
+
+
+def fsdp2_load_full_state_dict(
+    model: torch.nn.Module,
+    full_state: dict,
+    device_mesh=None,
+    cpu_offload=None,
+    buffers: dict[str, torch.Tensor] | None = None,
+):
     """
     Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
     parameters from rank 0 to all other ranks. This function modifies the model in-place.
@@ -502,11 +626,18 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         # use torch 2.7.0 copy from verl/third_party/torch/distributed/checkpoint
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
-    # To broadcast, it needs to be instantiated in the GPU.
-    if dist.get_rank() == 0:
-        model = model.to(device=get_device_id(), non_blocking=True)
-    else:
-        model = model.to_empty(device=get_device_id())
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        missing = set(model.state_dict()) - set(full_state)
+        if missing:
+            preview = sorted(missing)[:10]
+            raise ValueError(f"Full state dict is missing model entries: {preview}")
+
+    if buffers is None:
+        buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers() if not buffer.is_meta}
+    model.to_empty(device=get_device_id())
+    for name, buffer in model.named_buffers():
+        if name in buffers:
+            buffer.copy_(buffers[name].to(buffer.device))
 
     cpu_offload = cpu_offload is not None
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
@@ -559,14 +690,17 @@ def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
     _wrap_by_name = set() if _tie else {"embed_tokens", "lm_head"}
 
     modules = []
+    module_names = []
     for name, module in model.named_modules():
         leaf_name = name.rsplit(".", 1)[-1] if "." in name else name
-        if (
+        is_wrap_target = (
             module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap
             or (isinstance(module, nn.Embedding) and not _tie)
             or (leaf_name in _wrap_by_name and hasattr(module, "weight"))
-        ):
+        )
+        if is_wrap_target and not any(name.startswith(f"{parent_name}.") for parent_name in module_names):
             modules.append(module)
+            module_names.append(name)
     return modules
 
 
@@ -587,6 +721,9 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
+    ignored_params = fsdp_kwargs.get("ignored_params") or set()
+    if ignored_params:
+        modules = [module for module in modules if any(param not in ignored_params for param in module.parameters())]
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
