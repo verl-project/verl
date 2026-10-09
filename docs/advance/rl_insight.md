@@ -108,7 +108,22 @@ python3 -m verl.trainer.main_ppo \
 
 When rollout replicas or TransferQueue metrics endpoints start, verl registers them with RL-Insight. The generation path is also wrapped with RL-Insight state traces for vLLM and SGLang rollout workers.
 
-## Step 4: Add Hardware Metrics (Optional)
+## Step 4: Export Engine Request Traces
+
+Step 3 registers rollout Prometheus metrics. This step exports each inference-engine request span. The same switch applies to vLLM, SGLang, and other rollout engines:
+
+```bash
+python3 -m verl.trainer.main_ppo \
+    trainer.logger='["console","rl_insight"]' \
+    actor_rollout_ref.rollout.trace.enable_otel=True \
+    ...
+```
+
+Each replica reads `otlp_port` from the RL-Insight server status (`GET /services`) and sends traces to `http://<server-host>:<otlp_port>/v1/traces`. It also sets `OTEL_RESOURCE_ATTRIBUTES` (`project`, `experiment_name`, `replica`) and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`, because the default exporter is gRPC. RL-Insight must be enabled; otherwise this export stays off.
+
+`project` and `experiment_name` come from `actor_rollout_ref.rollout.trace`, which defaults to `trainer.project_name` and `trainer.experiment_name`. These spans do not include the prompt or response text. In Grafana, open `verl_trainer_v1_with_vllm_engine` and the **vLLM request traces** row, then filter with Project, Experiment Name, and Rollout Replica.
+
+## Step 5: Add Hardware Metrics (Optional)
 
 To monitor CPU, memory, network, or Ascend NPU metrics, follow the [RL-Insight Hardware Monitoring guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/hardware/index.md). The guide explains how to install or reuse the exporters and register their monitoring endpoints with RL-Insight.
 
@@ -151,6 +166,7 @@ The dashboards should include training metrics, rollout metrics, TransferQueue m
 - If trainer metrics do not appear, check that `trainer.logger` contains `rl_insight` and `RL_INSIGHT_SERVER_URL` points to the machine that runs `rl-insight server start`.
 - If rollout metrics do not appear, check that `actor_rollout_ref.rollout.disable_log_stats=False` is set.
 - If TransferQueue metrics do not appear, check that `transfer_queue.metrics.enabled=True` is set.
+- If engine request traces do not appear, check Step 4: `actor_rollout_ref.rollout.trace.enable_otel=True`, `rl_insight` in `trainer.logger`, and `otlp_port` in the RL-Insight server status. vLLM spans are on the **vLLM request traces** row of `verl_trainer_v1_with_vllm_engine`.
 - If `server install` fails to download packages, use the offline `--local-archive` path above.
 
 For more RL-Insight server installation details, see the [RL-Insight server installation guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/server_installation.md) and [quick start](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/quick_start.md).

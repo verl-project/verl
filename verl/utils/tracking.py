@@ -250,6 +250,22 @@ class RLInsightLogger:
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
+    def otlp_traces_endpoint(cls) -> str | None:
+        """Return the Tempo OTLP/HTTP traces URL from the RL-Insight server status.
+
+        ``GET /services`` returns ``status`` and ``otlp_port``. Returns ``None`` when
+        RL-Insight is disabled or the status has no OTLP port.
+        """
+        if not cls.enabled():
+            return None
+        from rl_insight.server.http_api import get_server_services, server_url
+        from rl_insight.server.network import service_url_from_server_url
+
+        services = get_server_services()
+        endpoint = service_url_from_server_url(server_url(), services.get("otlp_port"), "/v1/traces")
+        return endpoint or None
+
+    @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
         """Warn once when an optional RL-Insight feature is unavailable."""
         if feature in cls._warned_unsupported_features:
