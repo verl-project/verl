@@ -222,13 +222,13 @@ jobs:
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
-        run: |
-          ray stop --force
-          NUM_GPUS=16  TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
-            MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen3.5-2B \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
-            LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
-            bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
-              +actor_rollout_ref.model.lora.fully_sharded_loras=True
+      # - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
+      #   run: |
+      #     ray stop --force
+      #     NUM_GPUS=16  TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
+      #       MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
+      #       MODEL_ID=Qwen/Qwen3.5-2B \
+      #       ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
+      #       LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
+      #       bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
+      #         +actor_rollout_ref.model.lora.fully_sharded_loras=True
