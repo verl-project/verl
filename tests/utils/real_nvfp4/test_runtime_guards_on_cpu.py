@@ -12,25 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Configuration and BF16 transport checks for native NVFP4 refit."""
-
-from types import SimpleNamespace
+"""BF16 transport checks for native NVFP4 refit."""
 
 import pytest
 import torch
 
-from verl.utils.real_nvfp4 import vllm_runtime
 from verl.utils.real_nvfp4.bf16_transport import attest_real_nvfp4_bf16_transport
-
-
-def test_native_quantization_configuration():
-    vllm_runtime.require_vllm_native_nvfp4_per_token(
-        SimpleNamespace(model_config=SimpleNamespace(quantization="nvfp4_per_token"))
-    )
-    with pytest.raises(RuntimeError, match="quantization drifted"):
-        vllm_runtime.require_vllm_native_nvfp4_per_token(
-            SimpleNamespace(model_config=SimpleNamespace(quantization="fp8"))
-        )
 
 
 def _weights():
@@ -43,13 +30,7 @@ def _weights():
 
 
 def _attest(weights):
-    return list(
-        attest_real_nvfp4_bf16_transport(
-            iter(weights),
-            expected_expert_weights=12,
-            hf_config={"num_hidden_layers": 2, "num_experts": 2},
-        )
-    )
+    return list(attest_real_nvfp4_bf16_transport(iter(weights), {"num_hidden_layers": 2, "num_experts": 2}))
 
 
 def test_expert_coverage_accepts_complete_reordered_stream():
@@ -85,7 +66,14 @@ def test_expert_coverage_rejects_wrong_layer_expert_or_prefix(name):
         _attest(weights)
 
 
-def test_count_only_transport_still_rejects_duplicates():
-    weight = _weights()[0]
-    with pytest.raises(RuntimeError, match="duplicate expert weight"):
-        list(attest_real_nvfp4_bf16_transport(iter([weight, weight]), expected_expert_weights=2))
+def test_transport_rejects_prepacked_tensors():
+    weights = _weights() + [("model.layers.0.mlp.experts.0.gate_proj.weight_scale", torch.ones(1))]
+    with pytest.raises(RuntimeError, match="packed tensor"):
+        _attest(weights)
+
+
+def test_transport_rejects_non_floating_expert_weights():
+    weights = _weights()
+    weights[0] = weights[0][0], torch.ones(2, 8, dtype=torch.uint8)
+    with pytest.raises(RuntimeError, match="must be floating point"):
+        _attest(weights)

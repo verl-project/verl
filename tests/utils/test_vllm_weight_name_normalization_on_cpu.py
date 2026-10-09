@@ -961,23 +961,9 @@ def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
 class _FakeNativeReloadReceiver:
     def __init__(self, weights):
         self.weights = weights
-        self.own_tensors = None
-        self.defer_last_ack = None
-        self.iterator_exhausted = False
-        self.completed_ack = False
 
-    def iter_weights(self, own_tensors=False, defer_last_ack=False):
-        self.own_tensors = own_tensors
-        self.defer_last_ack = defer_last_ack
+    def iter_weights(self):
         yield from self.weights
-        self.iterator_exhausted = True
-
-    def complete_deferred_last_ack(self):
-        self.completed_ack = True
-
-    @staticmethod
-    def close_weight_iterator(iterator):
-        iterator.close()
 
 
 def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
@@ -997,43 +983,46 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     monkeypatch.setattr(
         real_nvfp4,
         "attest_vllm_native_nvfp4_runtime",
-        lambda model, **expected_partition: attestations.append((model, expected_partition)),
-    )
-    monkeypatch.setattr(
-        _vllm_rollout_utils,
-        "get_torch_device",
-        lambda: types.SimpleNamespace(synchronize=lambda: None),
+        lambda model, **partition: attestations.append((model, partition)),
     )
 
     model = _FakeModel({"q.weight": torch.empty(0)})
     reload_calls = []
 
     def _reload_weights(*, weights_iterator, is_checkpoint_format):
-        reload_calls.append((list(weights_iterator), is_checkpoint_format))
+        reload_calls.append(([name for name, _ in weights_iterator], is_checkpoint_format))
 
     worker = _make_worker(model)
     worker.model_runner.reload_weights = _reload_weights
+    worker.model_runner.get_model = lambda: model
     worker.device = torch.device("cpu")
-    worker.local_rank = 0
     worker._is_qat_model = False
-    worker._is_modelopt_qat = False
     worker._is_real_nvfp4 = True
     worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1, num_experts=1)
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-native-nvfp4-reload.sock"
 
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
-    assert receiver.own_tensors is True
-    assert receiver.defer_last_ack is True
-    assert receiver.completed_ack is True
-    assert reload_calls[0][1] is True
-    assert [name for name, _ in reload_calls[0][0]] == names
-    assert attestations == [
-        (
-            model,
-            {
-                "expected_quantized_layer_indices": [0],
-                "expected_bf16_layer_indices": [],
-            },
-        )
+    assert reload_calls == [(names, True)]
+    assert attestations == [(model, {"quantized_layer_indices": [0], "bf16_layer_indices": []})]
+
+
+def test_real_nvfp4_update_rejects_partial_consumption(monkeypatch):
+    pytest.importorskip("vllm")
+
+    names = [
+        f"model.layers.0.mlp.experts.0.{projection}.weight" for projection in ("gate_proj", "up_proj", "down_proj")
     ]
+    receiver = _FakeNativeReloadReceiver([(name, torch.ones(1, dtype=torch.bfloat16)) for name in names])
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: receiver)
+
+    worker = _make_worker(_FakeModel({"q.weight": torch.empty(0)}))
+    worker.model_runner.reload_weights = lambda *, weights_iterator, is_checkpoint_format: next(weights_iterator)
+    worker.device = torch.device("cpu")
+    worker._is_qat_model = False
+    worker._is_real_nvfp4 = True
+    worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1, num_experts=1)
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-native-nvfp4-reload.sock"
+
+    with pytest.raises(RuntimeError, match="before consuming the full weight stream"):
+        worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)

@@ -16,32 +16,26 @@
 
 from .bf16_transport import attest_real_nvfp4_bf16_transport
 from .config import (
-    REAL_NVFP4_TE_VERSION,
-    real_nvfp4_expected_expert_weights,
     real_nvfp4_moe_layer_indices,
-    real_nvfp4_rollout_layer_partition,
+    real_nvfp4_moe_layer_partition,
+    real_nvfp4_quant_recipe_config,
     real_nvfp4_vllm_ignore_layers,
     validate_real_nvfp4_model_contract,
+    validate_real_nvfp4_parallelism,
     validate_real_nvfp4_te_recipe,
 )
-from .vllm_runtime import (
-    NVFP4_PER_TOKEN_METHOD,
-    REAL_NVFP4_MOE_BACKEND,
-    attest_vllm_native_nvfp4_runtime,
-    require_vllm_native_nvfp4_per_token,
-)
+from .vllm_runtime import NVFP4_PER_TOKEN_METHOD, REAL_NVFP4_MOE_BACKEND, attest_vllm_native_nvfp4_runtime
 
 __all__ = [
     "NVFP4_PER_TOKEN_METHOD",
     "REAL_NVFP4_MOE_BACKEND",
-    "REAL_NVFP4_TE_VERSION",
     "attest_real_nvfp4_bf16_transport",
     "attest_vllm_native_nvfp4_runtime",
-    "real_nvfp4_expected_expert_weights",
     "real_nvfp4_moe_layer_indices",
-    "real_nvfp4_rollout_layer_partition",
+    "real_nvfp4_quant_recipe_config",
+    "real_nvfp4_moe_layer_partition",
     "real_nvfp4_vllm_ignore_layers",
-    "require_vllm_native_nvfp4_per_token",
     "validate_real_nvfp4_model_contract",
+    "validate_real_nvfp4_parallelism",
     "validate_real_nvfp4_te_recipe",
 ]

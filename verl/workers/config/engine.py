@@ -150,40 +150,27 @@ class RealNVFP4EngineConfig(BaseConfig):
     """Real W4A4 execution through Megatron-Core and Transformer Engine.
 
     Unlike :class:`QATEngineConfig`, this mode does not replace linear layers
-    with ModelOpt fake-quant modules.  Megatron-Core enables Transformer
-    Engine's per-module NVFP4 recipe for routed-expert MLP training. Refit
-    keeps BF16 master weights on the wire and quantizes them in the vLLM
-    worker; attention remains BF16 on both sides.
+    with ModelOpt fake-quant modules. Routed-expert MLP GEMMs run Transformer
+    Engine's NVFP4 recipe while parameters stay BF16; refit transports BF16
+    and the vLLM worker quantizes it. Attention remains BF16 on both sides.
     """
 
     enable: bool = False
-    fp4_format: str = "e2m1"
-    fp4_recipe: str = "nvfp4"
     backward_override: str = "dequantized"
-    fp4_param: bool = False
-    te_precision_config_file: Optional[str] = None
     num_layers_at_start_in_bf16: int = 0
     num_layers_at_end_in_bf16: int = 0
 
     def __post_init__(self) -> None:
-        if self.fp4_format != "e2m1":
-            raise ValueError("real_nvfp4 currently requires fp4_format='e2m1'")
-        if self.fp4_recipe != "nvfp4":
-            raise ValueError("real_nvfp4 currently requires fp4_recipe='nvfp4'")
         if self.backward_override not in {"dequantized", "high_precision"}:
             raise ValueError(
                 "real_nvfp4.backward_override must be 'dequantized' or 'high_precision', "
                 f"got {self.backward_override!r}"
             )
-        if self.fp4_param:
-            raise ValueError("real_nvfp4 requires fp4_param=False so Adam and refit retain BF16 master weights")
         if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:
             raise ValueError(
                 "real_nvfp4 BF16 layer carve-out must be non-negative, got "
                 f"{self.num_layers_at_start_in_bf16}/{self.num_layers_at_end_in_bf16}"
             )
-        if self.enable and not self.te_precision_config_file:
-            raise ValueError("real_nvfp4.te_precision_config_file is required for audited per-module precision")
 
 
 @dataclass

@@ -8,16 +8,17 @@ used by CUDA graphs across policy updates.
 
 ## Precision and supported configuration
 
-The default module recipe keeps attention and the first two and last four
-MLP layers in BF16. The remaining routed-expert MLPs use NVFP4 with per-token
-activation scaling, dequantized backward, and adaptive 4-over-6 disabled.
-Router, norms, embeddings and the LM head remain BF16.
+Setting `actor_rollout_ref.actor.megatron.real_nvfp4.enable=True` runs the
+routed-expert MLPs in NVFP4 with per-token activation scaling, dequantized
+backward, and adaptive 4-over-6 disabled. Attention, router, norms,
+embeddings and the LM head remain BF16. `num_layers_at_start_in_bf16` and
+`num_layers_at_end_in_bf16` keep whole decoder layers in BF16 for both training
+and rollout; this example keeps the first two and last four.
 
 The current integration supports the all-MoE `Qwen3MoeForCausalLM` layout,
 training PP=1 without virtual pipeline parallelism, and rollout TP/PP/EP=1/1/1.
 It uses BF16 KV cache, `FULL_DECODE_ONLY` CUDA graphs and no speculative decoding.
-Mixed dense/MoE layouts and shared experts are not supported. An evaluation module recipe must
-match the training recipe, including the BF16 layer selection.
+Mixed dense/MoE layouts and shared experts are not supported.
 
 ## Installation
 
@@ -90,8 +91,11 @@ per update. Adam uses learning rate 1e-6 and betas (0.9, 0.999).
 Rollout memory utilization defaults to 0.8, with 256 sequences and 32768 batched
 tokens. Set `TOTAL_TRAINING_STEPS`, `RESUME_MODE` and checkpoint paths for the
 run. Checkpoints include optimizer, scheduler and dataloader progress.
-Logging uses verl's standard console and W&B integration; provide worker
-environment settings through `RUNTIME_ENV` when needed.
+Logging uses verl's standard console and W&B integration.
+
+Transformer Engine reads its NVFP4 settings from `NVTE_*` environment variables
+in each worker; `runtime_env.yaml` sets them and the trainer rejects a recipe
+that differs. Keep these variables when passing another file via `RUNTIME_ENV`.
 
 R3 uses vLLM's native routing capture inside the fused MoE path. Runtime checks validate
 BF16 weight coverage, NVFP4 layer selection and scale values after native reload.

@@ -309,10 +309,12 @@ class vLLMHttpServer:
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
+        if (getattr(self.config, "real_nvfp4", None) or {}).get("enable", False):
+            # Native NVFP4 rollout is validated with full CUDA graphs for decode only.
+            compilation_config.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
+            if compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
+                raise ValueError("real_nvfp4 rollout requires compilation_config.cudagraph_mode=FULL_DECODE_ONLY")
         compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
-        real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
-        if real_nvfp4_config.get("enable", False) and compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
-            raise ValueError("the formal real_nvfp4 recipe requires compilation_config.cudagraph_mode=FULL_DECODE_ONLY")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
         dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
@@ -741,13 +743,6 @@ class vLLMHttpServer:
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
             routed_experts = final_res.outputs[0].routed_experts
-            real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
-            if real_nvfp4_config.get("enable", False):
-                from verl.utils.real_nvfp4.vllm_runtime import (
-                    attest_r3_rollout_routes,
-                )
-
-                routed_experts = attest_r3_rollout_routes(routed_experts)
 
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason
@@ -1346,10 +1341,8 @@ class vLLMHttpServer:
         quantization = self.config.quantization
         hf_overrides = {}
 
-        # Real W4A4: Native online MoE quantization consumes the
-        # BF16 refit stream, quantizes each complete expert layer to NVFP4, and
-        # executes dynamic/per-token activation quantization. This must be
-        # handled before the legacy ModelOpt QAT/Marlin path.
+        # Real W4A4: vLLM's native online method quantizes the BF16 refit of each
+        # routed-expert layer to NVFP4 and quantizes activations per token.
         real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
         if real_nvfp4_config.get("enable", False):
             reserved_engine_kwargs = {
@@ -1375,9 +1368,6 @@ class vLLMHttpServer:
                 raise ValueError("real_nvfp4 rollout requires kv_cache_dtype=auto")
             if engine_kwargs.get("speculative_config"):
                 raise ValueError("real_nvfp4 rollout does not support speculative decoding")
-            qat_config_dict = getattr(self.config, "qat", {}) or {}
-            if qat_config_dict.get("enable", False):
-                raise ValueError("real_nvfp4 and legacy QAT rollout cannot both be enabled")
             if self.config.dtype != "bfloat16":
                 raise ValueError("real_nvfp4 rollout requires dtype=bfloat16")
             if self.config.load_format != "dummy":
@@ -1390,8 +1380,6 @@ class vLLMHttpServer:
                 raise ValueError("real_nvfp4 rollout currently requires vLLM pipeline_model_parallel_size=1")
             if self.config.enforce_eager:
                 raise ValueError("real_nvfp4 rollout requires CUDA Graphs (enforce_eager=False)")
-            if not self.config.enable_rollout_routing_replay:
-                raise ValueError("the formal real_nvfp4 recipe requires rollout R3 capture")
             if self.config.mtp is not None and self.config.mtp.enable:
                 raise ValueError("real_nvfp4 rollout does not support speculative decoding/MTP")
             if self.config.quantization is not None:
@@ -1416,25 +1404,18 @@ class vLLMHttpServer:
                 num_layers_at_start_in_bf16=bf16_layers_at_start,
                 num_layers_at_end_in_bf16=bf16_layers_at_end,
             )
-            os.environ["VERL_VLLM_REAL_NVFP4_ENABLED"] = "1"
             os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_START"] = str(bf16_layers_at_start)
             os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_END"] = str(bf16_layers_at_end)
             quantization = NVFP4_PER_TOKEN_METHOD
-            # vLLM merges this with the nvfp4_per_token shorthand. Its
-            # online quantizer's field is singular `ignore`, and these are the
-            # exact RoutedExperts prefixes constructed by Qwen3Moe.
-            # This is a ModelConfig/AsyncEngineArgs field, not an HF config
-            # field. Injecting it through hf_overrides makes ModelConfig parse
-            # an incomplete checkpoint quantization config (no quant_method)
-            # before the online shorthand can be resolved.
+            # An engine argument merged with the online method, not an HF config
+            # override: through hf_overrides vLLM would parse it as an incomplete
+            # checkpoint quantization config.
             engine_kwargs["quantization_config"] = {"ignore": ignored_layers}
             engine_kwargs["moe_backend"] = REAL_NVFP4_MOE_BACKEND
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
-        if real_nvfp4_config.get("enable", False):
-            pass
-        elif qat_config_dict.get("enable", False):
+        if qat_config_dict.get("enable", False):
             from verl.utils.qat import QATConfig, load_quantization_config
 
             qat_config = QATConfig(**qat_config_dict)

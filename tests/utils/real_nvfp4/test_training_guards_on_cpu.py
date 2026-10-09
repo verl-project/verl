@@ -8,39 +8,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Configuration rejection tests, not TE/vLLM numerical-equivalence tests.
+"""Training-side configuration tests, not TE numerical-equivalence tests.
 
-The two engine methods are extracted without importing Megatron providers. This
-tests their actual guard wiring without constructing a model or initializing
-distributed workers; real execution remains covered by scheduled GPU jobs.
+The engine method is extracted without importing Megatron providers, so its
+guard wiring runs without building a model; real execution is covered by GPU
+jobs.
 """
 
 import ast
-import copy
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from omegaconf import OmegaConf
 
 from verl.utils.real_nvfp4.config import (
-    real_nvfp4_expected_expert_weights,
+    real_nvfp4_quant_recipe_config,
     validate_real_nvfp4_model_contract,
     validate_real_nvfp4_parallelism,
-    validate_real_nvfp4_precision_configs,
+    validate_real_nvfp4_te_recipe,
 )
 
-ROOT = Path(__file__).resolve().parents[3]
-ENGINE_PATH = ROOT / "verl/workers/engine/megatron/transformer_impl.py"
-RECIPE_PATH = ROOT / "examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first2_last4.yaml"
+ENGINE_PATH = Path(__file__).resolve().parents[3] / "verl/workers/engine/megatron/transformer_impl.py"
 
 
 def _engine_method(name):
     tree = ast.parse(ENGINE_PATH.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "MegatronEngine")
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
-    namespace = {"os": os, "OmegaConf": OmegaConf}
+    namespace = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(ENGINE_PATH), "exec"), namespace)
     return namespace[name]
 
@@ -51,90 +46,153 @@ def _model_config(**kwargs):
     return SimpleNamespace(**values)
 
 
-def test_current_all_moe_model_still_has_the_same_export_counts():
-    model = _model_config()
-    validate_real_nvfp4_model_contract(model)
-    assert real_nvfp4_expected_expert_weights(model) == 48 * 128 * 3
+def _engine(start=2, end=4, pp=1, vpp=None):
+    return SimpleNamespace(
+        engine_config=SimpleNamespace(pipeline_model_parallel_size=pp, virtual_pipeline_model_parallel_size=vpp),
+        _real_nvfp4_config=SimpleNamespace(num_layers_at_start_in_bf16=start, num_layers_at_end_in_bf16=end),
+        model_config=SimpleNamespace(hf_config=_model_config()),
+    )
+
+
+def test_all_moe_model_is_supported():
+    validate_real_nvfp4_model_contract(_model_config())
 
 
 @pytest.mark.parametrize("overrides", [{"decoder_sparse_step": 2}, {"mlp_only_layers": [0, 1]}])
-def test_mixed_dense_moe_fails_before_unattested_dense_quantization(overrides):
+def test_mixed_dense_moe_is_rejected(overrides):
     with pytest.raises(ValueError, match="mixed dense/MoE"):
         validate_real_nvfp4_model_contract(_model_config(**overrides))
 
 
-@pytest.mark.parametrize("virtual_pipeline_size", [None, 1])
-def test_unsplit_pipeline_is_supported(virtual_pipeline_size):
-    validate_real_nvfp4_parallelism(pipeline_size=1, virtual_pipeline_size=virtual_pipeline_size)
+def test_shared_experts_are_rejected():
+    with pytest.raises(ValueError, match="shared experts"):
+        validate_real_nvfp4_model_contract(_model_config(shared_expert_intermediate_size=512))
 
 
-def test_current_engine_carveout_is_unchanged():
-    engine = SimpleNamespace(
-        engine_config=SimpleNamespace(pipeline_model_parallel_size=1, virtual_pipeline_model_parallel_size=None),
-        _real_nvfp4_config=SimpleNamespace(num_layers_at_start_in_bf16=2, num_layers_at_end_in_bf16=4),
-        model_config=SimpleNamespace(hf_config=_model_config()),
-    )
-    overrides = {
+@pytest.mark.parametrize("pp,vpp", [(2, None), (1, 2), (2, 2)])
+def test_pipeline_splitting_is_rejected(pp, vpp):
+    with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
+        validate_real_nvfp4_parallelism(pipeline_size=pp, virtual_pipeline_size=vpp)
+
+
+def test_recipe_lists_carved_out_layers_before_general_patterns():
+    matchers = real_nvfp4_quant_recipe_config(48, 2, 4)["matchers"]
+    assert list(matchers) == [
+        "layer_0_bf16",
+        "layer_1_bf16",
+        "layer_44_bf16",
+        "layer_45_bf16",
+        "layer_46_bf16",
+        "layer_47_bf16",
+        "attn_qkv_bf16",
+        "attn_proj_bf16",
+        "mlp_fc1_nvfp4",
+        "mlp_fc2_nvfp4",
+    ]
+    assert matchers["layer_44_bf16"]["pattern"] == "*.layers.44.*"
+    assert matchers["mlp_fc1_nvfp4"] == {"config": "nvfp4", "type": "glob", "pattern": "*.linear_fc1", "enabled": True}
+
+
+@pytest.mark.parametrize("start,end", [(-1, 0), (0, -1), (24, 24)])
+def test_recipe_rejects_invalid_carveout(start, end):
+    with pytest.raises(ValueError, match="carve-out"):
+        real_nvfp4_quant_recipe_config(48, start, end)
+
+
+@pytest.mark.parametrize(
+    "module_path,expected",
+    [
+        ("decoder.layers.0.mlp.experts.linear_fc1", "bf16"),
+        ("decoder.layers.2.mlp.experts.linear_fc1", "nvfp4"),
+        ("decoder.layers.43.mlp.experts.linear_fc2", "nvfp4"),
+        ("decoder.layers.44.mlp.experts.linear_fc2", "bf16"),
+        ("decoder.layers.10.self_attention.linear_qkv", "bf16"),
+        ("decoder.layers.10.self_attention.linear_proj", "bf16"),
+    ],
+)
+def test_engine_sets_megatron_recipe_and_fp4_overrides(module_path, expected):
+    pytest.importorskip("megatron.core.quantization.quant_config")
+    from megatron.core.quantization.utils import get_quant_config_or_none
+
+    overrides = {"num_layers_at_start_in_bf16": 2}  # restating a value is allowed
+    _engine_method("_apply_real_nvfp4_overrides")(_engine(), overrides)
+
+    assert {key: value for key, value in overrides.items() if key != "quant_recipe"} == {
+        "fp4": "e2m1",
+        "fp4_recipe": "nvfp4",
+        "fp4_param": False,
         "first_last_layers_bf16": True,
         "num_layers_at_start_in_bf16": 2,
         "num_layers_at_end_in_bf16": 4,
     }
-    assert _engine_method("_resolve_real_nvfp4_bf16_layers")(engine, overrides) == (True, 2, 4)
+    assert get_quant_config_or_none(module_path, overrides["quant_recipe"]).config_key == expected
 
 
-@pytest.mark.parametrize("pp,vpp", [(2, None), (1, 2), (2, 2)])
-@pytest.mark.parametrize("carve_start,carve_end", [(0, 0), (2, 4)])
-def test_engine_rejects_pipeline_splitting_with_and_without_carveout(pp, vpp, carve_start, carve_end):
-    engine = SimpleNamespace(
-        engine_config=SimpleNamespace(pipeline_model_parallel_size=pp, virtual_pipeline_model_parallel_size=vpp),
-        _real_nvfp4_config=SimpleNamespace(
-            num_layers_at_start_in_bf16=carve_start, num_layers_at_end_in_bf16=carve_end
-        ),
-        model_config=SimpleNamespace(hf_config=_model_config()),
-    )
-    overrides = {
-        "first_last_layers_bf16": carve_start + carve_end > 0,
-        "num_layers_at_start_in_bf16": carve_start,
-        "num_layers_at_end_in_bf16": carve_end,
-    }
-    with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
-        _engine_method("_resolve_real_nvfp4_bf16_layers")(engine, overrides)
-
-
-@pytest.mark.parametrize("explicit_eval", [False, True])
-def test_formal_recipe_and_identical_explicit_eval_are_accepted(explicit_eval):
-    configs = OmegaConf.to_container(OmegaConf.load(RECIPE_PATH), resolve=True)["configs"]
-    if explicit_eval:
-        for payload in configs.values():
-            payload["evaluation_recipe"] = copy.deepcopy(payload["training_recipe"])
-    validate_real_nvfp4_precision_configs(configs)
+def test_engine_without_carveout_disables_first_last_layers_bf16():
+    pytest.importorskip("megatron.core.quantization.quant_config")
+    overrides = {}
+    _engine_method("_apply_real_nvfp4_overrides")(_engine(start=0, end=0), overrides)
+    assert overrides["first_last_layers_bf16"] is False
 
 
 @pytest.mark.parametrize(
-    "config_name,evaluation_recipe",
+    "overrides,match",
     [
-        ("nvfp4", {}),
-        ("nvfp4", None),
-        ("nvfp4", {"fp8_quantization_recipe": "tensorwise"}),
-        ("bf16", {"fp4_quantization_recipe": "nvfp4"}),
-        ("bf16", None),
+        ({"num_layers_at_end_in_bf16": 2}, "num_layers_at_end_in_bf16=4"),
+        ({"first_last_layers_bf16": False}, "first_last_layers_bf16=True"),
+        ({"fp4_param": True}, "fp4_param=False"),
+        ({"fp8": "e4m3"}, "FP8"),
+        ({"quant_recipe": object()}, "owns"),
     ],
 )
-def test_effective_eval_precision_cannot_differ(config_name, evaluation_recipe):
-    configs = OmegaConf.to_container(OmegaConf.load(RECIPE_PATH), resolve=True)["configs"]
-    configs[config_name]["evaluation_recipe"] = evaluation_recipe
-    with pytest.raises(ValueError, match="evaluation_recipe must match training_recipe"):
-        validate_real_nvfp4_precision_configs(configs)
+def test_engine_rejects_conflicting_overrides(overrides, match):
+    pytest.importorskip("megatron.core.quantization.quant_config")
+    with pytest.raises(ValueError, match=match):
+        _engine_method("_apply_real_nvfp4_overrides")(_engine(), overrides)
 
 
-def test_engine_loader_rejects_eval_drift_before_loading_megatron_recipe(monkeypatch):
-    raw = OmegaConf.to_container(OmegaConf.load(RECIPE_PATH), resolve=True)
-    raw["configs"]["nvfp4"]["evaluation_recipe"] = {}
-    monkeypatch.setattr(OmegaConf, "load", lambda _path: OmegaConf.create(raw))
-    engine = SimpleNamespace(
-        _real_nvfp4_config=SimpleNamespace(te_precision_config_file=str(RECIPE_PATH)),
-        _real_nvfp4_bf16_layers=(True, 2, 4),
-        model_config=SimpleNamespace(hf_config=_model_config()),
-    )
-    with pytest.raises(ValueError, match="evaluation_recipe must match training_recipe"):
-        _engine_method("_load_real_nvfp4_precision_recipe")(engine)
+def test_engine_rejects_pipeline_splitting():
+    pytest.importorskip("megatron.core.quantization.quant_config")
+    with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
+        _engine_method("_apply_real_nvfp4_overrides")(_engine(pp=2), {})
+
+
+def _te_recipe(**overrides):
+    qparams = SimpleNamespace(random_hadamard_transform=False, stochastic_rounding=False, fp4_2d_quantization=False)
+    values = {
+        "backward_override": "dequantized",
+        "row_scaled_activation": True,
+        "disable_rht": True,
+        "disable_stochastic_rounding": True,
+        "disable_2d_quantization": True,
+        "nvfp4_4over6": "none",
+        "nvfp4_4over6_e4m3_use_256": "all",
+        "nvfp4_4over6_err_mode": "MAE",
+        "fp4_quant_fwd_inp": qparams,
+        "fp4_quant_fwd_weight": qparams,
+        "fp4_quant_bwd_grad": qparams,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_te_recipe_contract_accepts_expected_semantics():
+    validate_real_nvfp4_te_recipe(_te_recipe(), backward_override="dequantized")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"nvfp4_4over6": "all"},
+        {"backward_override": "high_precision"},
+        {"row_scaled_activation": False},
+        {
+            "fp4_quant_fwd_inp": SimpleNamespace(
+                random_hadamard_transform=True, stochastic_rounding=False, fp4_2d_quantization=False
+            )
+        },
+    ],
+)
+def test_te_recipe_contract_rejects_drift(overrides):
+    with pytest.raises(RuntimeError, match="recipe drifted"):
+        validate_real_nvfp4_te_recipe(_te_recipe(**overrides), backward_override="dequantized")

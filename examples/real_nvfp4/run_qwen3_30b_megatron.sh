@@ -31,15 +31,11 @@ readonly TRAIN_FILE=${TRAIN_FILE:?set TRAIN_FILE to your preprocessed training p
 readonly TEST_FILE=${TEST_FILE:?set TEST_FILE to your preprocessed validation parquet}
 readonly CKPTS_DIR=${CKPTS_DIR:-$RAY_DATA_HOME/checkpoints/$PROJECT_NAME/$EXP_NAME}
 readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
-# Token-level truncated importance sampling caps each importance weight at 2.
-# Keep the same first/last BF16 layer carve-outs in training and rollout.
 readonly RESUME_MODE=${RESUME_MODE:-disable}
 readonly RESUME_FROM_PATH=${RESUME_FROM_PATH:-}
-readonly TE_PRECISION_CONFIG=$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first2_last4.yaml
 
 [[ -f "$MODEL_PATH/config.json" ]]
 [[ -f "$TRAIN_FILE" && -f "$TEST_FILE" && -f "$RUNTIME_ENV" ]]
-[[ "$NNODES" = 8 && "$N_GPUS_PER_NODE" = 4 ]]
 [[ "$RESUME_MODE" = disable || "$RESUME_MODE" = auto || "$RESUME_MODE" = resume_path ]]
 if [[ "$RESUME_MODE" = resume_path ]]; then
   [[ -d "$RESUME_FROM_PATH" && "$RESUME_FROM_PATH" = *global_step_* ]]
@@ -47,18 +43,8 @@ else
   [[ -z "$RESUME_FROM_PATH" ]]
 fi
 
-export VLLM_USE_V1=1
-export VERL_LOGGING_LEVEL=INFO
-export NVTE_BACKWARD_OVERRIDE=dequantized
-export NVTE_NVFP4_ROW_SCALED_ACTIVATION=1
-export NVTE_NVFP4_DISABLE_RHT=1
-export NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING=1
-export NVTE_NVFP4_DISABLE_2D_QUANTIZATION=1
-export NVTE_NVFP4_4OVER6=none
-export NVTE_NVFP4_4OVER6_E4M3_USE_256=all
-export NVTE_NVFP4_4OVER6_ERR_MODE=MAE
-export FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1
-export TRTLLM_DISABLE_FP4_QUANT_FAST_MATH=1
+# Transformer Engine and FlashInfer read their NVFP4 settings from the worker
+# environment, which RUNTIME_ENV provides.
 
 DATA=(
   data.train_files="$TRAIN_FILE"
@@ -117,15 +103,10 @@ ACTOR=(
   actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
   actor_rollout_ref.actor.megatron.sequence_parallel=False
   actor_rollout_ref.actor.megatron.use_mbridge=True
-  actor_rollout_ref.actor.megatron.use_megatron_fsdp=False
   actor_rollout_ref.actor.megatron.router_replay.mode=R3
-  actor_rollout_ref.actor.megatron.qat.enable=False
   +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True
   +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
   +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
-  +actor_rollout_ref.actor.megatron.override_transformer_config.first_last_layers_bf16=True
-  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_start_in_bf16=2
-  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_end_in_bf16=4
   +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
   +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
   +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -158,7 +139,6 @@ ROLLOUT=(
   actor_rollout_ref.rollout.val_kwargs.n=1
   actor_rollout_ref.rollout.enable_rollout_routing_replay=True
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=512
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY
   +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune=False
 )
 
@@ -188,22 +168,17 @@ TRAINER=(
   trainer.default_local_dir="$CKPTS_DIR"
   trainer.resume_mode="$RESUME_MODE"
   trainer.log_val_generations=2
-  trainer.use_v1=False
 )
 if [[ "$RESUME_MODE" = resume_path ]]; then
   TRAINER+=(trainer.resume_from_path="$RESUME_FROM_PATH")
 fi
 
+# Routed-expert MLPs run NVFP4 except in the first 2 and last 4 decoder layers,
+# which stay BF16 in both training and rollout.
 PRECISION=(actor_rollout_ref.actor.megatron.real_nvfp4.enable=False)
 if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
-  [[ -f "$TE_PRECISION_CONFIG" ]]
   PRECISION=(
     actor_rollout_ref.actor.megatron.real_nvfp4.enable=True
-    actor_rollout_ref.actor.megatron.real_nvfp4.fp4_format=e2m1
-    actor_rollout_ref.actor.megatron.real_nvfp4.fp4_recipe=nvfp4
-    actor_rollout_ref.actor.megatron.real_nvfp4.backward_override=dequantized
-    actor_rollout_ref.actor.megatron.real_nvfp4.fp4_param=False
-    actor_rollout_ref.actor.megatron.real_nvfp4.te_precision_config_file="$TE_PRECISION_CONFIG"
     actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_start_in_bf16=2
     actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_end_in_bf16=4
   )
