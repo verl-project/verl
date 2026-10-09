@@ -52,6 +52,99 @@ def test_deepseek_v41_bshd_uses_padding_mask_instead_of_attention_mask(monkeypat
     assert torch.equal(captured["padding_mask"], ~valid_tokens)
 
 
+def test_deepseek_v41_thd_keeps_logical_and_physical_lengths_separate(monkeypatch):
+    input_ids = torch.nested.nested_tensor([torch.tensor([1, 2, 3]), torch.tensor([4, 5])], layout=torch.jagged)
+    physical = torch.tensor([0, 4, 8], dtype=torch.int32)
+    packed = SimpleNamespace(
+        cu_seqlens_q=physical,
+        cu_seqlens_kv=physical,
+        cu_seqlens_q_padded=physical,
+        cu_seqlens_kv_padded=physical,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        model_forward,
+        "preprocess_thd_engine",
+        lambda *_args, **_kwargs: (torch.zeros(1, 8, dtype=torch.long), packed, None),
+    )
+    monkeypatch.setattr(model_forward, "postprocess_thd_engine", lambda output, *_args, **_kwargs: output)
+
+    class Model:
+        pre_process = True
+        post_process = True
+        config = SimpleNamespace(fp8=None, dsv4_version="v4.1")
+
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            return torch.zeros(8, 1, 8)
+
+    model_forward.gptmodel_forward_model_engine(Model(), input_ids, {}, data_format="thd")
+    actual = captured["packed_seq_params"]
+    torch.testing.assert_close(actual.cu_seqlens_q, torch.tensor([0, 3, 5], dtype=torch.int32))
+    assert actual.cu_seqlens_kv is actual.cu_seqlens_q
+    torch.testing.assert_close(actual.cu_seqlens_q_padded, physical)
+
+
+def test_deepseek_v41_thd_forwards_images_and_reserves_cp_halo(monkeypatch):
+    input_ids = torch.nested.nested_tensor(
+        [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6, 7, 8])],
+        layout=torch.jagged,
+    )
+    physical = torch.tensor([0, 8, 16], dtype=torch.int32)
+    packed = SimpleNamespace(
+        cu_seqlens_q=physical,
+        cu_seqlens_kv=physical,
+        cu_seqlens_q_padded=physical,
+        cu_seqlens_kv_padded=physical,
+    )
+    captured = {}
+    padding_rows = []
+
+    def preprocess(*_args, **kwargs):
+        padding_rows.append(kwargs["min_local_rows"])
+        return torch.zeros(1, 8, dtype=torch.long), packed, None
+
+    monkeypatch.setattr(model_forward, "preprocess_thd_engine", preprocess)
+    monkeypatch.setattr(model_forward, "postprocess_thd_engine", lambda output, *_args, **_kwargs: output)
+
+    class Model:
+        pre_process = True
+        post_process = True
+        config = SimpleNamespace(
+            fp8=None,
+            dsv4_version="v4.1",
+            context_parallel_size=2,
+            csa_window_size=4,
+        )
+
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            return torch.zeros(8, 1, 8)
+
+    types = torch.full((2, 8), -1, dtype=torch.long)
+    types[1, :4] = torch.tensor([0, 1, 2, 3])
+    patches = torch.randn(9, 3, 2, 2)
+    multi_modal_inputs = {
+        "pixel_values": patches,
+        "image_grid_hws": torch.tensor([[3, 3]]),
+        "vision_token_types": types,
+    }
+    model_forward.gptmodel_forward_model_engine(
+        Model(),
+        input_ids,
+        multi_modal_inputs,
+        data_format="thd",
+        cp_layout="contiguous",
+        logits_processor=lambda output, **_kwargs: {"loss": output},
+        logits_processor_args={"label": input_ids},
+    )
+    assert padding_rows == [4, 4]
+    assert len(captured["images"]) == 2
+    assert captured["images"][0] == []
+    assert captured["images"][1][0].start == 0
+    torch.testing.assert_close(captured["images"][1][0].patches, patches)
+
+
 def test_deepseek_v41_bshd_converts_processor_tensors_to_native_images(monkeypatch):
     image_token_id = 129264
     dense_ids = torch.tensor(

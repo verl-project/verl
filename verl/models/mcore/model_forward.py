@@ -161,6 +161,11 @@ def gptmodel_forward_model_engine(
         thd_kwargs = dict(
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
+            min_local_rows=(
+                model_config.csa_window_size
+                if deepseek_v41_multimodal and (local_cp_size or getattr(model_config, "context_parallel_size", 1)) > 1
+                else None
+            ),
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
         )
@@ -169,6 +174,18 @@ def gptmodel_forward_model_engine(
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids, pre_process=True, **thd_kwargs
         )
+        if deepseek_v41_multimodal:
+            # CSA2 uses logical lengths to exclude each sequence's physical padding
+            # from compression, routing, and sparse-attention indexing.
+            logical_cu_seqlens = input_ids.offsets().to(
+                device=packed_seq_params.cu_seqlens_q_padded.device,
+                dtype=packed_seq_params.cu_seqlens_q_padded.dtype,
+            )
+            packed_seq_params.cu_seqlens_q = logical_cu_seqlens
+            packed_seq_params.cu_seqlens_kv = logical_cu_seqlens
+            images = build_deepseek_v41_image_inputs(multi_modal_inputs, input_ids_rmpad, batch_size=batch_size)
+            if images is not None:
+                model_kwargs["images"] = images
         if vision_model:
             input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
                 model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
@@ -198,6 +215,7 @@ def gptmodel_forward_model_engine(
                     need_roll=True,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    min_local_rows=thd_kwargs["min_local_rows"],
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )[0]
@@ -229,6 +247,7 @@ def gptmodel_forward_model_engine(
                     need_roll=(k == "label"),
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    min_local_rows=thd_kwargs["min_local_rows"],
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )[0]

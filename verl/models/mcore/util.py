@@ -32,7 +32,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 ContextParallelLayout = Literal["zigzag", "contiguous"]
 
 
-def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.Tensor):
+def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.Tensor, batch_size: int | None = None):
     if not multi_modal_inputs:
         return None
 
@@ -41,7 +41,7 @@ def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.T
     grids = multi_modal_inputs["image_grid_hws"].tolist()
     type_rows = multi_modal_inputs["vision_token_types"].tolist()
     pixel_values = multi_modal_inputs["pixel_values"]
-    images = [[] for _ in range(input_ids.shape[0])]
+    images = [[] for _ in range(input_ids.shape[0] if batch_size is None else batch_size)]
     grid_index = 0
     patch_start = 0
 
