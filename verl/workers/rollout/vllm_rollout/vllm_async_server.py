@@ -1406,12 +1406,12 @@ class vLLMHttpServer:
             )
             os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_START"] = str(bf16_layers_at_start)
             os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_END"] = str(bf16_layers_at_end)
-            quantization = NVFP4_PER_TOKEN_METHOD
             # An engine argument merged with the online method, not an HF config
             # override: through hf_overrides vLLM would parse it as an incomplete
             # checkpoint quantization config.
             engine_kwargs["quantization_config"] = {"ignore": ignored_layers}
             engine_kwargs["moe_backend"] = REAL_NVFP4_MOE_BACKEND
+            return NVFP4_PER_TOKEN_METHOD, hf_overrides
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
