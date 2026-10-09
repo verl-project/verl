@@ -98,6 +98,48 @@ jobs:
           pip install pandas==2.3.3
           # Match the Transformers version used to generate the pinned VeOmni models.
           pip install "transformers==5.16.1"
+          python3 - <<'EOF'
+          path = "/MindSpeed-Bridge/mindspeed_bridge/features/megatron_bridge/common/qwen3_asr_auto_config.py"
+          src = open(path).read()
+          # AutoConfig wrapper: staticmethod -> classmethod
+          old = '''    @wraps(original)
+              def register(model_type, config, exist_ok=False):
+                  if model_type == _QWEN3_ASR_MODEL_TYPE and _has_native_qwen3_asr(config):
+                      return None
+                  return original(model_type, config, exist_ok=exist_ok)
+
+              return staticmethod(register)'''
+          new = '''    @wraps(original)
+              def register(cls, model_type, config, exist_ok=False):
+                  if model_type == _QWEN3_ASR_MODEL_TYPE and _has_native_qwen3_asr(config):
+                      return None
+                  return original(model_type, config, exist_ok=exist_ok)
+
+              return classmethod(register)'''
+          assert old in src
+          src = src.replace(old, new)
+          # AutoProcessor wrapper 同理
+          old2 = '''    @wraps(original)
+              def register(config_class, processor_class, exist_ok=False):
+                  if _has_native_qwen3_asr(config_class):
+                      return None
+                  return original(config_class, processor_class, exist_ok=exist_ok)
+
+              return staticmethod(register)'''
+          new2 = '''    @wraps(original)
+              def register(cls, config_class, processor_class, exist_ok=False):
+                  if _has_native_qwen3_asr(config_class):
+                      return None
+                  return original(config_class, processor_class, exist_ok=exist_ok)
+
+              return classmethod(register)'''
+          if old2 not in src:
+              print("old is not in src, may has been solved")
+          else:
+              src = src.replace(old2, new2)
+              open(path, "w").write(src)
+              print("patched:", path)
+          EOF
       - name: Check final pip list
         run: |
           pip list
