@@ -958,7 +958,7 @@ def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
     assert events == ["add_lora"]
 
 
-class _FakeBucketReceiver:
+class _FakeNVFP4BucketReceiver:
     """Delivers each bucket through the regular per-bucket callback, like BucketedWeightReceiver."""
 
     def __init__(self, buckets, events):
@@ -989,7 +989,7 @@ def _real_nvfp4_worker(monkeypatch, events, load_weights):
     ]
     buckets = [[(name, torch.ones(1, dtype=torch.bfloat16))] for name in names]
     monkeypatch.setattr(
-        _vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeBucketReceiver(buckets, events)
+        _vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeNVFP4BucketReceiver(buckets, events)
     )
 
     model = _FakeModel({"q.weight": torch.empty(0)})
