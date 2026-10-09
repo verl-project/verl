@@ -98,6 +98,8 @@ jobs:
           pip install pandas==2.3.3
           # Match the Transformers version used to generate the pinned VeOmni models.
           pip install "transformers==5.16.1"
+          pip uninstall -y megatron-bridge
+          pip install --no-deps --no-build-isolation "megatron-bridge @ git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.6.2"
       - name: Check final pip list
         run: |
           pip list

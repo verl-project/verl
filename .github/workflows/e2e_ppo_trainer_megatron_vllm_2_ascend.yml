@@ -162,7 +162,8 @@ jobs:
 
   e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-800i-8
+    needs: e2e_ppo_trainer_fsdp_vllm_ascend
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu

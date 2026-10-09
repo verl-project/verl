@@ -96,6 +96,7 @@ jobs:
         run: |
           pip3 install --no-deps -e .[test]
           pip3 install pytest-asyncio
+          pip install "av<19"
       - name: Check final pip list
         run: |
           pip list
