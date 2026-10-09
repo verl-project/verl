@@ -232,8 +232,14 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             raw_inputs = inputs
             raw_outputs = in_outs["outputs"][index]
             if which_type == CODE_TYPE.call_based:
-                inputs = [json.loads(line) for line in inputs.split("\n")]
-                in_outs["outputs"][index] = json.loads(in_outs["outputs"][index])
+                if isinstance(inputs, str):
+                    # one JSON value per line, one line per argument (LiveCodeBench layout)
+                    inputs = [json.loads(line) for line in inputs.split("\n")]
+                    in_outs["outputs"][index] = json.loads(in_outs["outputs"][index])
+                else:
+                    # the arguments as a list, the output as is (APPS / TACO layout)
+                    raw_inputs = "\n".join(json.dumps(arg) for arg in inputs)
+                    raw_outputs = json.dumps(raw_outputs)
 
                 truncate_line_size = 300 // (raw_inputs.count("\n") + 1)
                 raw_inputs = "\n".join(
