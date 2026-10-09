@@ -99,46 +99,31 @@ jobs:
           # Match the Transformers version used to generate the pinned VeOmni models.
           pip install "transformers==5.16.1"
           python3 - <<'EOF'
-          path = "/MindSpeed-Bridge/mindspeed_bridge/features/megatron_bridge/common/qwen3_asr_auto_config.py"
+          path = "/Megatron-Bridge/src/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py"
           src = open(path).read()
-          # AutoConfig wrapper: staticmethod -> classmethod
-          old = '''    @wraps(original)
-              def register(model_type, config, exist_ok=False):
-                  if model_type == _QWEN3_ASR_MODEL_TYPE and _has_native_qwen3_asr(config):
-                      return None
-                  return original(model_type, config, exist_ok=exist_ok)
+          old = '''AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
+          AutoModel.register(Qwen3ASRConfig, Qwen3ASRForConditionalGeneration)
+          AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)'''
+          new = '''from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-              return staticmethod(register)'''
-          new = '''    @wraps(original)
-              def register(cls, model_type, config, exist_ok=False):
-                  if model_type == _QWEN3_ASR_MODEL_TYPE and _has_native_qwen3_asr(config):
-                      return None
-                  return original(model_type, config, exist_ok=exist_ok)
 
-              return classmethod(register)'''
-          assert old in src
-          src = src.replace(old, new)
-          # AutoProcessor wrapper 同理
-          old2 = '''    @wraps(original)
-              def register(config_class, processor_class, exist_ok=False):
-                  if _has_native_qwen3_asr(config_class):
-                      return None
-                  return original(config_class, processor_class, exist_ok=exist_ok)
+          def _register_auto_classes(config_mapping=CONFIG_MAPPING) -> bool:
+              """Register vendored classes only when Transformers has no native Qwen3-ASR."""
+              if Qwen3ASRConfig.model_type in config_mapping:
+                  return False
 
-              return staticmethod(register)'''
-          new2 = '''    @wraps(original)
-              def register(cls, config_class, processor_class, exist_ok=False):
-                  if _has_native_qwen3_asr(config_class):
-                      return None
-                  return original(config_class, processor_class, exist_ok=exist_ok)
+              AutoConfig.register(Qwen3ASRConfig.model_type, Qwen3ASRConfig)
+              AutoModel.register(Qwen3ASRConfig, Qwen3ASRForConditionalGeneration)
+              AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
+              return True
 
-              return classmethod(register)'''
-          if old2 not in src:
-              print("old is not in src, may has been solved")
-          else:
-              src = src.replace(old2, new2)
-              open(path, "w").write(src)
+
+          _register_auto_classes()'''
+          if old in src:
+              open(path, "w").write(src.replace(old, new))
               print("patched:", path)
+          else:
+              print("may has been fixed")
           EOF
       - name: Check final pip list
         run: |
