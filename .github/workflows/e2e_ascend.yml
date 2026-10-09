@@ -140,6 +140,7 @@ jobs:
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
+    needs: llm_rl_job
     name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 160
