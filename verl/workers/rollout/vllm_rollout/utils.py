@@ -284,6 +284,45 @@ class vLLMColocateWorkerExtension:
             bf16_layer_indices=bf16_layers,
         )
 
+    def _update_real_nvfp4_weights(self, use_shm: bool):
+        """Refit through vLLM's layerwise reload, which re-quantizes each complete expert layer.
+
+        This is ``model_runner.reload_weights`` split into per-bucket loads, as the delta
+        weight-sync consumer does; the processed tensors are copied back into the storage
+        captured by CUDA graphs.
+        """
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload, initialize_layerwise_reload
+
+        from verl.utils.real_nvfp4 import RealNVFP4BF16TransportCheck
+
+        model = self.model_runner.get_model()
+        model_config = self.model_runner.vllm_config.model_config
+        transport = RealNVFP4BF16TransportCheck(model_config.hf_config)
+        error = None
+
+        def load_bucket(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            nonlocal error
+            if error is not None:
+                return
+            try:
+                transport.check_bucket(weights)
+                # Layerwise reload holds a layer's tensors until the layer is complete,
+                # while the receiver reuses its IPC buffer for the next bucket.
+                model.load_weights([(name, tensor.clone()) for name, tensor in weights])
+            except BaseException as exc:
+                # Keep acknowledging the remaining buckets so the sender is not left
+                # blocked, then raise once the round has finished.
+                error = exc
+
+        initialize_layerwise_reload(model)
+        receiver = BucketedWeightReceiver(zmq_handle=self._get_zmq_handle(), device=self.device, use_shm=use_shm)
+        receiver.receive_weights(on_bucket_received=load_bucket)
+        if error is not None:
+            raise error
+        transport.finish()
+        finalize_layerwise_reload(model, model_config)
+        self._attest_real_nvfp4_runtime()
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         if self.device is None:
@@ -307,19 +346,7 @@ class vLLMColocateWorkerExtension:
                 raise NotImplementedError("real W4A4 native reload does not support LoRA weight sync")
             if self._use_mtp_drafter_weight_sync():
                 raise NotImplementedError("real W4A4 native reload does not support MTP drafter weight sync")
-            from verl.utils.real_nvfp4 import attest_real_nvfp4_bf16_transport
-
-            # vLLM's native reload consumes one iterator for the whole model and
-            # re-quantizes each complete expert layer into the storage captured
-            # by CUDA graphs.
-            receiver = BucketedWeightReceiver(zmq_handle=self._get_zmq_handle(), device=self.device, use_shm=use_shm)
-            weights = attest_real_nvfp4_bf16_transport(
-                receiver.iter_weights(), self.model_runner.vllm_config.model_config.hf_config
-            )
-            self.model_runner.reload_weights(weights_iterator=weights, is_checkpoint_format=True)
-            if next(weights, None) is not None:
-                raise RuntimeError("vLLM reload_weights returned before consuming the full weight stream")
-            self._attest_real_nvfp4_runtime()
+            self._update_real_nvfp4_weights(use_shm)
             return
 
         if self._is_qat_model:

@@ -19,7 +19,6 @@ Not recommended depending on vllm for this file.
 
 import logging
 import os
-from collections.abc import Iterator
 from multiprocessing import shared_memory
 from typing import Callable, TypedDict
 
@@ -308,41 +307,6 @@ class BucketedWeightReceiver:
                     break
         finally:
             self._cleanup()
-
-    def iter_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """
-        Yield one weight-sync round as a flat iterator of owned tensors.
-
-        For consumers that take a single iterator for the whole model, such as
-        vLLM's native ``reload_weights``. They may hold a tensor until the rest
-        of its layer arrives, while the sender reuses its bucket after every
-        ACK, so each tensor is copied out before its bucket is acknowledged.
-        """
-        try:
-            self._init_socket()
-            self._init_buffer()
-            while True:
-                metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
-                for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
-                    if handle is not None:
-                        tensor = rebuild_ipc(handle, self.device.index)
-                    else:
-                        size = dtype.itemsize * shape.numel()
-                        tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    weights.append((name, tensor.to(self.device, copy=True)))
-                get_torch_device().synchronize()
-                del tensor
-                if metadata["is_last"]:
-                    # Acknowledged by _cleanup once the buffer is released.
-                    self._ack_pending = True
-                    break
-                self.socket.send(b"")
-                yield from weights
-        finally:
-            self._cleanup()
-        yield from weights
 
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""

@@ -17,7 +17,7 @@
 import pytest
 import torch
 
-from verl.utils.real_nvfp4.bf16_transport import attest_real_nvfp4_bf16_transport
+from verl.utils.real_nvfp4.bf16_transport import RealNVFP4BF16TransportCheck
 
 
 def _weights():
@@ -30,13 +30,17 @@ def _weights():
 
 
 def _attest(weights):
-    return list(attest_real_nvfp4_bf16_transport(iter(weights), {"num_hidden_layers": 2, "num_experts": 2}))
+    check = RealNVFP4BF16TransportCheck({"num_hidden_layers": 2, "num_experts": 2})
+    # Split the round into two buckets, as the receiver delivers it.
+    check.check_bucket(weights[: len(weights) // 2])
+    check.check_bucket(weights[len(weights) // 2 :])
+    check.finish()
 
 
 def test_expert_coverage_accepts_complete_reordered_stream():
     weights = list(reversed(_weights()))
     weights.insert(0, ("model.embed_tokens.weight", torch.ones(2, 16)))
-    assert len(_attest(weights)) == 13
+    _attest(weights)
 
 
 def test_expert_coverage_rejects_duplicate_replacing_missing_projection():

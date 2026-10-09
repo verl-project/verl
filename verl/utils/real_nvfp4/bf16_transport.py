@@ -15,7 +15,6 @@
 """Fail-closed attestation for the BF16 actor-to-rollout refit stream."""
 
 import re
-from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -26,40 +25,39 @@ _EXPERT_WEIGHT_RE = re.compile(r"^.*\.experts\.\d+\.(?:gate_proj|up_proj|down_pr
 _PACKED_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale")
 
 
-def attest_real_nvfp4_bf16_transport(
-    weights: Iterator[tuple[str, torch.Tensor]],
-    hf_config: Any,
-) -> Iterator[tuple[str, torch.Tensor]]:
-    """Pass plain actor weights through while proving refit is not pre-packed.
+class RealNVFP4BF16TransportCheck:
+    """Check one refit round: every routed-expert projection arrives exactly once, unpacked.
 
-    Every routed-expert projection must arrive exactly once and in floating
-    point. Quantized weight and scale tensors are produced only inside the
-    vLLM worker.
+    Quantized weight and scale tensors are produced only inside the vLLM worker.
+    Call :meth:`check_bucket` for each received bucket and :meth:`finish` at the end.
     """
 
-    validate_real_nvfp4_model_contract(hf_config)
-    num_experts = int(_hf_get(hf_config, "num_experts") or _hf_get(hf_config, "n_routed_experts"))
-    expected_names = {
-        f"model.layers.{layer}.mlp.experts.{expert}.{projection}.weight"
-        for layer in real_nvfp4_moe_layer_indices(hf_config)
-        for expert in range(num_experts)
-        for projection in ("gate_proj", "up_proj", "down_proj")
-    }
+    def __init__(self, hf_config: Any):
+        validate_real_nvfp4_model_contract(hf_config)
+        num_experts = int(_hf_get(hf_config, "num_experts") or _hf_get(hf_config, "n_routed_experts"))
+        self.expected_names = {
+            f"model.layers.{layer}.mlp.experts.{expert}.{projection}.weight"
+            for layer in real_nvfp4_moe_layer_indices(hf_config)
+            for expert in range(num_experts)
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        }
+        self.seen_names = set()
 
-    seen_expert_names = set()
-    for name, tensor in weights:
-        if name.endswith(_PACKED_SUFFIXES):
-            raise RuntimeError(f"real NVFP4 BF16 refit unexpectedly contained packed tensor {name}")
-        if _EXPERT_WEIGHT_RE.match(name):
-            if name not in expected_names:
+    def check_bucket(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        for name, tensor in weights:
+            if name.endswith(_PACKED_SUFFIXES):
+                raise RuntimeError(f"real NVFP4 BF16 refit unexpectedly contained packed tensor {name}")
+            if not _EXPERT_WEIGHT_RE.match(name):
+                continue
+            if name not in self.expected_names:
                 raise RuntimeError(f"real NVFP4 refit contains unexpected expert weight {name}")
-            if name in seen_expert_names:
+            if name in self.seen_names:
                 raise RuntimeError(f"real NVFP4 refit contains duplicate expert weight {name}")
             if tensor.dtype not in {torch.bfloat16, torch.float16, torch.float32}:
                 raise RuntimeError(f"real NVFP4 expert refit tensor must be floating point, got {name}: {tensor.dtype}")
-            seen_expert_names.add(name)
-        yield name, tensor
+            self.seen_names.add(name)
 
-    if seen_expert_names != expected_names:
-        missing = sorted(expected_names - seen_expert_names)
-        raise RuntimeError(f"real NVFP4 refit is missing {len(missing)} expert weights: {missing[:8]}")
+    def finish(self) -> None:
+        missing = sorted(self.expected_names - self.seen_names)
+        if missing:
+            raise RuntimeError(f"real NVFP4 refit is missing {len(missing)} expert weights: {missing[:8]}")

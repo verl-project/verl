@@ -135,7 +135,7 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
     asyncio.run(sender.async_send_weights(iter(weights)))
 
 
-def _receiver_fn(zmq_handle, use_shm, result_queue, use_iter=False):
+def _receiver_fn(zmq_handle, use_shm, result_queue):
     """Receiver process: receive weights, send back (name, dtype, shape, checksum)."""
     from verl.utils.device import get_device_name
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
@@ -147,12 +147,9 @@ def _receiver_fn(zmq_handle, use_shm, result_queue, use_iter=False):
         use_shm=use_shm,
     )
     received = []
-    if use_iter:
-        received = list(receiver.iter_weights())
-    else:
-        receiver.receive_weights(
-            on_bucket_received=lambda w, is_last: received.extend([(name, t.clone()) for name, t in w])
-        )
+    receiver.receive_weights(
+        on_bucket_received=lambda w, is_last: received.extend([(name, t.clone()) for name, t in w])
+    )
     # Only send lightweight metadata + checksum back through the queue
     summaries = [(name, t.dtype, tuple(t.shape), t.float().sum().item()) for name, t in received]
     result_queue.put(summaries)
@@ -161,7 +158,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue, use_iter=False):
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, use_iter=False):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
     """Spawn sender + receiver processes, then validate received tensors."""
     zmq_handle = _unique_zmq_handle()
     seed = 42
@@ -174,7 +171,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, use_iter=False
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
-        args=(zmq_handle, use_shm, result_queue, use_iter),
+        args=(zmq_handle, use_shm, result_queue),
     )
 
     # Start sender first (it binds), then receiver (it connects)
@@ -295,71 +292,3 @@ class TestBucketedWeightTransferIPC:
         specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
 
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
-
-    @pytest.mark.parametrize(
-        "specs",
-        [
-            [],
-            [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)],
-            [("embedding", (1024, 1024), torch.float32), ("bias", (128,), torch.bfloat16)],
-        ],
-        ids=["empty", "multiple_buckets", "large_weight"],
-    )
-    def test_iter_weights(self, specs):
-        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, use_iter=True)
-
-
-# ---------------------------------------------------------------------------
-# iter_weights ordering (CPU, scripted socket)
-# ---------------------------------------------------------------------------
-class _ScriptedReceiverSocket:
-    """REP socket stand-in: the sender rewrites the bucket after each non-final ACK."""
-
-    def __init__(self, receiver, buckets):
-        self.receiver = receiver
-        self.buckets = buckets
-        self.sent = 0
-        self.events = []
-
-    def recv_pyobj(self):
-        name, tensor, is_last = self.buckets[self.sent]
-        self.receiver.buffer[: tensor.nbytes].copy_(tensor.view(torch.uint8))
-        meta = {"shape": tensor.shape, "dtype": tensor.dtype, "offset": 0, "handle": None}
-        return {"bucket_meta": {name: meta}, "is_last": is_last}
-
-    def send(self, payload):
-        assert payload == b""
-        self.events.append(("ack", self.receiver.buffer is None))
-        self.sent += 1
-        if self.sent < len(self.buckets):
-            self.receiver.buffer.fill_(0)  # sender reuses its bucket
-
-    def close(self):
-        self.events.append(("close", None))
-
-
-def test_iter_weights_owns_tensors_and_acks_final_bucket_after_release(monkeypatch):
-    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
-
-    receiver = bucketed_weight_transfer.BucketedWeightReceiver("unused", torch.device("cpu"))
-    buckets = [("first", torch.tensor([1.0, 2.0]), False), ("second", torch.tensor([3.0, 4.0]), True)]
-    socket = _ScriptedReceiverSocket(receiver, buckets)
-    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
-    monkeypatch.setattr(
-        receiver, "_init_buffer", lambda: setattr(receiver, "buffer", torch.zeros(8, dtype=torch.uint8))
-    )
-    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeIpcDevice())
-    monkeypatch.setattr(bucketed_weight_transfer, "is_support_ipc", lambda: False)
-
-    received = list(receiver.iter_weights())
-
-    assert [name for name, _ in received] == ["first", "second"]
-    torch.testing.assert_close(received[0][1], torch.tensor([1.0, 2.0]))
-    torch.testing.assert_close(received[1][1], torch.tensor([3.0, 4.0]))
-    # The final ACK follows the buffer release; then the socket closes.
-    assert socket.events == [("ack", False), ("ack", True), ("close", None)]
-
-
-class _FakeIpcDevice(_FakeTorchDevice):
-    def empty_cache(self):
-        pass

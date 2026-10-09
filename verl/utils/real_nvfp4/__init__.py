@@ -14,7 +14,7 @@
 
 """Real NVFP4 training/rollout integration helpers."""
 
-from .bf16_transport import attest_real_nvfp4_bf16_transport
+from .bf16_transport import RealNVFP4BF16TransportCheck
 from .config import (
     real_nvfp4_moe_layer_indices,
     real_nvfp4_moe_layer_partition,
@@ -29,7 +29,7 @@ from .vllm_runtime import NVFP4_PER_TOKEN_METHOD, REAL_NVFP4_MOE_BACKEND, attest
 __all__ = [
     "NVFP4_PER_TOKEN_METHOD",
     "REAL_NVFP4_MOE_BACKEND",
-    "attest_real_nvfp4_bf16_transport",
+    "RealNVFP4BF16TransportCheck",
     "attest_vllm_native_nvfp4_runtime",
     "real_nvfp4_moe_layer_indices",
     "real_nvfp4_quant_recipe_config",
