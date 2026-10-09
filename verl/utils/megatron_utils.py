@@ -351,8 +351,6 @@ def make_megatron_module(
     peft_cls: Any = None,
     peft_config: Any = None,
 ):
-    from verl.models.mcore.config_converter import get_hf_rope_theta
-
     try:
         hf_config.rope_theta = get_hf_rope_theta(hf_config)
     except AttributeError:
@@ -484,7 +482,7 @@ def make_megatron_module(
     # Extract TransformerConfig from the created model
     tf_config = get_model_config(model[0] if isinstance(model, list) else model)
     if isinstance(tf_config, MLATransformerConfig):
-        # Keep the same behavior as hf_to_mcore_config_dpskv3
+        # Apply MLA compatibility patches after model creation.
         from verl.models.mcore.patch import apply_patch
 
         apply_patch()
@@ -519,11 +517,8 @@ def mcore_model_parallel_config(
     sequence_parallel: bool,
     params_dtype: torch.dtype,
 ) -> ModelParallelConfig:
-    # WARNING: Code should not reach this point. This function is deprecated and will be removed.
-    # Please use hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.
     warnings.warn(
-        "Code should not reach this point. This function is deprecated and will be removed. Please use "
-        "hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.",
+        "mcore_model_parallel_config is deprecated. Use Megatron-Bridge model providers for model configuration.",
         DeprecationWarning,
         stacklevel=2,
     )

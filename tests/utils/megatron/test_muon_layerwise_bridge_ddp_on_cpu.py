@@ -108,7 +108,7 @@ def megatron_bridge_stubs(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
-        "verl.models.mcore.config_converter.get_hf_rope_theta",
+        "verl.utils.megatron_utils.get_hf_rope_theta",
         lambda hf_config: hf_config.rope_theta,
     )
     bridge_helpers = types.ModuleType("verl.models.mcore.bridge")
