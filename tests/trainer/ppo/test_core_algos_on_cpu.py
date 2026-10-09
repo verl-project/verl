@@ -18,10 +18,12 @@ import unittest
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_gdpo_outcome_advantage,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
     compute_rloo_outcome_advantage,
@@ -258,6 +260,100 @@ def test_rloo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert ret1.shape == ret2.shape == (batch_size, seq_len)
     assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+def _gdpo_batch(num_samples: int = 4, response_length: int = 3):
+    """Build the tensors GDPO reads: a prompt block plus a response block."""
+    prompt_length = 2
+    prompts = torch.zeros(num_samples, prompt_length, dtype=torch.long)
+    attention_mask = torch.ones(num_samples, prompt_length + response_length, dtype=torch.long)
+    response_mask = torch.ones(num_samples, response_length, dtype=torch.float32)
+    token_level_rewards = torch.zeros(num_samples, response_length, dtype=torch.float32)
+    token_level_rewards[:, -1] = torch.tensor([1.0, 0.0, 1.0, 0.0])[:num_samples]
+    batch = {"prompts": prompts, "attention_mask": attention_mask}
+    return token_level_rewards, response_mask, batch
+
+
+@pytest.mark.parametrize("num_weights", [1, 3])
+def test_gdpo_rejects_reward_weight_count_mismatch(num_weights: int):
+    """`gdpo_reward_weights` is matched to `gdpo_reward_keys` by position.
+
+    Too few weights used to surface as a bare `IndexError` from the aggregation loop,
+    and too many were silently ignored, so a mis-specified config could train with
+    weights the user never intended.
+    """
+    token_level_rewards, response_mask, batch = _gdpo_batch()
+    keys = ["format_reward", "accuracy_reward"]
+    non_tensor_batch = {
+        "format_reward": np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        "accuracy_reward": np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32),
+    }
+    config = OmegaConf.create({"gdpo_reward_keys": keys, "gdpo_reward_weights": [1.0] * num_weights})
+    index = np.array(["p0", "p0", "p1", "p1"], dtype=object)
+
+    with pytest.raises(AssertionError, match="gdpo_reward_weights"):
+        compute_gdpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            config=config,
+            non_tensor_batch=non_tensor_batch,
+            batch=batch,
+        )
+
+
+def test_gdpo_accepts_matching_reward_weights():
+    """The happy path must stay unaffected by the new check."""
+    token_level_rewards, response_mask, batch = _gdpo_batch()
+    non_tensor_batch = {
+        "format_reward": np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        "accuracy_reward": np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32),
+    }
+    config = OmegaConf.create(
+        {
+            "gdpo_reward_keys": ["format_reward", "accuracy_reward"],
+            "gdpo_reward_weights": [1.0, 2.0],
+        }
+    )
+    index = np.array(["p0", "p0", "p1", "p1"], dtype=object)
+
+    advantages, returns = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        config=config,
+        non_tensor_batch=non_tensor_batch,
+        batch=batch,
+    )
+
+    assert advantages.shape == token_level_rewards.shape
+    assert torch.equal(advantages, returns)
+    assert torch.isfinite(advantages).all()
+
+
+def test_gdpo_weights_change_the_aggregation():
+    """Guard that weights are actually applied, not just validated."""
+    token_level_rewards, response_mask, batch = _gdpo_batch()
+    non_tensor_batch = {
+        "format_reward": np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        "accuracy_reward": np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32),
+    }
+    index = np.array(["p0", "p0", "p1", "p1"], dtype=object)
+    keys = ["format_reward", "accuracy_reward"]
+
+    def run(weights):
+        config = OmegaConf.create({"gdpo_reward_keys": keys, "gdpo_reward_weights": weights})
+        adv, _ = compute_gdpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            config=config,
+            non_tensor_batch=non_tensor_batch,
+            batch=batch,
+        )
+        return adv
+
+    assert not torch.allclose(run([1.0, 1.0]), run([1.0, 5.0]))
 
 
 def test_grpo_vectorized_matches_original_for_low_variance_rewards():
