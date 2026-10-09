@@ -67,6 +67,7 @@ class _FakeEngine:
 
 def _make_server(node_rank: int = 0):
     server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(collect_partial_rollout_metrics=False)
     server.node_rank = node_rank
     server.global_steps = 7
     server.engine = _FakeEngine()
@@ -270,5 +271,61 @@ def test_snapshot_rejects_headless_node_without_touching_engine():
         del server.engine
         with pytest.raises(RuntimeError, match="requires the node-rank-0 AsyncLLM"):
             await server.snapshot()
+
+    asyncio.run(main())
+
+
+def test_observed_admission_abort_has_no_backend_completion():
+    async def main():
+        server = _make_server()
+        server.config.collect_partial_rollout_metrics = True
+        await server.abort_all_requests(reject_request=True)
+        output = await server._park_until_admitted("late")
+        observed = output.extra_fields["backend_termination"]
+        assert observed["available"] is False
+        assert observed["finish_reason"] is None
+        assert observed["unavailable_reason"] == "admission_aborted_before_engine"
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("enabled,empty", [(False, False), (True, False), (True, True)])
+def test_generate_records_backend_observation_without_changing_output(monkeypatch, enabled, empty):
+    from verl.workers.config import RolloutConfig
+
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(
+            name="vllm",
+            max_model_len=32,
+            collect_partial_rollout_metrics=enabled,
+            prompt_length=16,
+            response_length=8,
+        )
+        server.model_config = SimpleNamespace(processor=None, lora_rank=0, lora={})
+        monkeypatch.setattr(
+            vllm_async_server.ray, "get_runtime_context", lambda: SimpleNamespace(get_actor_name=lambda: "test")
+        )
+        completion = SimpleNamespace(token_ids=[1, 2], finish_reason="stop", stop_reason=2)
+        response = SimpleNamespace(
+            outputs=[] if empty else [completion], metrics=SimpleNamespace(scheduled_ts=5, first_token_ts=7)
+        )
+
+        async def generate(**kwargs):
+            yield response
+
+        server.engine.generate = generate
+        output = await server.generate(prompt_ids=[10], sampling_params={}, request_id="test")
+        assert output.token_ids == ([] if empty else [1, 2])
+        assert output.stop_reason == ("aborted" if empty else "completed")
+        if not enabled:
+            assert "engine_prefill" not in output.extra_fields
+            assert "backend_termination" not in output.extra_fields
+        else:
+            assert output.extra_fields["engine_prefill"] == {"available": True, "seconds": 2}
+            observed = output.extra_fields["backend_termination"]
+            assert observed["available"] is not empty
+            assert observed["finish_reason"] == (None if empty else "stop")
+            assert observed["segment_max_tokens"] == 8
 
     asyncio.run(main())

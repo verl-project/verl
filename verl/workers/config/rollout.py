@@ -233,6 +233,9 @@ class RolloutConfig(BaseConfig):
     # Server configuration for sglang server mode
     server: ServerConfig = field(default_factory=ServerConfig)
 
+    # Record backend termination and partial-attempt observations without changing retry control.
+    collect_partial_rollout_metrics: bool = False
+
     # Use Prometheus to collect and monitor rollout statistics
     prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
 

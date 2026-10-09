@@ -705,6 +705,14 @@ class vLLMHttpServer:
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
+        if getattr(self.config, "collect_partial_rollout_metrics", False):
+            from verl.workers.rollout.partial_metrics import engine_prefill_timing
+            from verl.workers.rollout.termination import backend_termination
+
+            extra_fields["engine_prefill"] = engine_prefill_timing(getattr(final_res, "metrics", None))
+            extra_fields["backend_termination"] = backend_termination(
+                max_tokens=sampling_params.max_tokens, unavailable_reason="empty_engine_output"
+            )
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -739,6 +747,11 @@ class vLLMHttpServer:
         if self.config.enable_rollout_routing_replay:
             routed_experts = final_res.outputs[0].routed_experts
 
+        # Preserve the raw engine reason separately from the client's cumulative budget.
+        if getattr(self.config, "collect_partial_rollout_metrics", False):
+            extra_fields["backend_termination"] = backend_termination(
+                final_res.outputs[0], max_tokens=sampling_params.max_tokens
+            )
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason
         if finish_reason == "abort":
@@ -1144,6 +1157,14 @@ class vLLMHttpServer:
         await self.resume_engine_generation()
         await self.open_submission_gate()
 
+    def _admission_termination_metrics(self):
+        """Record admission rejection only when observation is enabled."""
+        if not getattr(self.config, "collect_partial_rollout_metrics", False):
+            return {}
+        from verl.workers.rollout.termination import backend_termination
+
+        return {"backend_termination": backend_termination(unavailable_reason="admission_aborted_before_engine")}
+
     async def _park_until_admitted(self, request_id: str) -> Optional[TokenOutput]:
         """Wait out a closed gate, or fail the request when the gate rejects late arrivals.
 
@@ -1159,7 +1180,10 @@ class vLLMHttpServer:
                     log_probs=None,
                     routed_experts=None,
                     stop_reason="aborted",
-                    extra_fields={"global_steps": self.global_steps},
+                    extra_fields={
+                        "global_steps": self.global_steps,
+                        **self._admission_termination_metrics(),
+                    },
                 )
             logger.debug("parking request %s until weight sync completes", request_id)
             await self._resume_event.wait()

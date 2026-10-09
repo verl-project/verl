@@ -285,8 +285,18 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # must carry it forward explicitly or the consumer sees 0. Take the first
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
+        rollout_config = getattr(getattr(self.config, "actor_rollout_ref", None), "rollout", None)
+        collect_metrics = bool(getattr(rollout_config, "collect_partial_rollout_metrics", False))
+        partial_attempts = None
 
         while True:
+            if partial_attempts is None:
+                # Keep history inside TokenOutput so a partial checkpoint can
+                # serialize it together with the retained prefix.
+                partial_attempts = final_output.extra_fields.get("partial_attempts", [])
+                collect_metrics = collect_metrics or bool(partial_attempts)
+                if collect_metrics:
+                    final_output.extra_fields["partial_attempts"] = partial_attempts
             # 1. generate tokens
             output = await super().generate(
                 request_id=request_id,
@@ -300,6 +310,18 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             )
 
             # 2. merge output into final_output
+            if collect_metrics:
+                partial_attempts.append(
+                    {
+                        "version": output.extra_fields.get("global_steps"),
+                        "retained_tokens": len(final_output.token_ids),
+                        "new_tokens": len(output.token_ids),
+                        "aborted": output.stop_reason in ("aborted", "abort"),
+                        "backend_termination": output.extra_fields.get("backend_termination"),
+                        "client_stop_reason": output.stop_reason,
+                        "prefill": output.extra_fields.get("engine_prefill", {"available": False, "seconds": None}),
+                    }
+                )
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
@@ -357,6 +379,34 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
         final_output.extra_fields["num_cached_tokens"] = num_cached_tokens
+        # A restored complete session can skip the loop entirely. Missing
+        # attempt history remains unobserved rather than an empty observation.
+        partial_attempts = partial_attempts or final_output.extra_fields.get("partial_attempts", [])
+        if partial_attempts:
+            from verl.workers.rollout.partial_metrics import summarize_partial_attempts
+
+            final_output.extra_fields["partial_rollout"] = summarize_partial_attempts(partial_attempts)
+            final_output.extra_fields["termination"] = {
+                "attempts": [
+                    {
+                        key: attempt[key]
+                        for key in (
+                            "version",
+                            "retained_tokens",
+                            "new_tokens",
+                            "backend_termination",
+                            "client_stop_reason",
+                        )
+                    }
+                    for attempt in partial_attempts
+                ],
+                "final_backend": partial_attempts[-1]["backend_termination"],
+                "client_stop_reason": final_output.stop_reason,
+                "response_budget": original_max_tokens,
+                "response_budget_reached": (
+                    original_max_tokens is not None and len(final_output.token_ids) >= original_max_tokens
+                ),
+            }
         return final_output
 
 

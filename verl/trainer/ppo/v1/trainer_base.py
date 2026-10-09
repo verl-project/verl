@@ -1901,6 +1901,12 @@ class PPOTrainer(ABC):
         min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
         max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
 
+        if self.config.actor_rollout_ref.rollout.get("collect_partial_rollout_metrics", False):
+            from verl.utils.metric.partial_rollout import partial_rollout_metrics, read_partial_rollout_fields
+
+            observations = read_partial_rollout_fields(batch.keys, batch.partition_id, tq.kv_batch_get)
+            metrics.update(partial_rollout_metrics(observations, non_padding_mask))
+
         # Only fetch speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None
         mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)

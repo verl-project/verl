@@ -7,6 +7,9 @@ name: ???
 # sync: LLM, async: AsyncLLM
 mode: async
 
+# Record partial-attempt counts, backend termination and available prefill intervals.
+collect_partial_rollout_metrics: false
+
 # Number of nodes for standalone rollout server, must be > 0 in one-step-off/fully async training.
 nnodes: 0
 
