@@ -17,8 +17,9 @@ Compatibility utilities for different versions of transformers library.
 """
 
 import importlib.metadata
+import inspect
 from functools import lru_cache
-from typing import Optional
+from typing import Any, Optional
 
 from packaging import version
 
@@ -72,6 +73,14 @@ def get_auto_model_for_vision2seq():
         return AutoModelForVision2Seq
 
     return AutoModelForImageTextToText
+
+
+def get_hf_save_kwargs(model: Any, state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Build version-compatible kwargs for saving an externally supplied HF state dict."""
+    kwargs: dict[str, Any] = {"state_dict": state_dict}
+    if "save_original_format" in inspect.signature(model.save_pretrained).parameters:
+        kwargs["save_original_format"] = False
+    return kwargs
 
 
 def unpack_visual_output(visual_output):
