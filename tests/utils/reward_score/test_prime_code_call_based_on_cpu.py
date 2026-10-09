@@ -38,3 +38,10 @@ call_based_test_cases = {
 def test_call_based_full_reward(test_cases):
     assert default_compute_score("apps", correct_completion, json.dumps(test_cases)) == 1.0
     assert default_compute_score("apps", wrong_completion, json.dumps(test_cases)) == 0.0
+
+
+def test_call_based_continuous_fraction():
+    # with continuous=True a partially correct solution gets the fraction of passed tests
+    test_cases = {"fn_name": "add", "inputs": [[1, 2], [3, 4], [5, 999]], "outputs": [3, 7, 999]}
+    assert default_compute_score("apps", correct_completion, json.dumps(test_cases)) == pytest.approx(2 / 3)
+    assert default_compute_score("apps", wrong_completion, json.dumps(test_cases)) == 0.0

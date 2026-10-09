@@ -42,7 +42,13 @@ def compute_score(completion, test_cases, continuous=False):
         inputs = test_cases["inputs"]
         outputs = test_cases["outputs"]
         for i in range(len(inputs)):
-            test_cases_list.append({"inputs": [inputs[i]], "outputs": [outputs[i]]})
+            test_case = {"inputs": [inputs[i]], "outputs": [outputs[i]]}
+            if "fn_name" in test_cases:
+                # keep the call-based type in per-sample runs: run_test dispatches on
+                # fn_name, and dropping it makes call-based samples be graded as
+                # standard-input samples (which can only ever fail)
+                test_case["fn_name"] = test_cases["fn_name"]
+            test_cases_list.append(test_case)
 
         if continuous:
             # per sample test: if continuous score is needed, test first 10 samples regardless of failures
