@@ -1,0 +1,70 @@
+name: Sync Ascend Quay description
+
+on:
+  # Temporary: register the workflow before manually dispatching it via gh.
+  push:
+    branches: ["test-quay-description"]
+    paths:
+      - "docker/ascend/quay-description.md"
+      - ".github/workflows/sync-ascend-quay-description.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-ascend-quay-description
+  cancel-in-progress: false
+
+jobs:
+  register-workflow:
+    if: github.repository == 'verl-project/verl' && github.ref == 'refs/heads/test-quay-description' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Show manual test command
+        run: |
+          echo 'Workflow registered. To update the live Quay description, run:'
+          echo 'gh workflow run sync-ascend-quay-description.yml --repo verl-project/verl --ref test-quay-description'
+
+  sync-description:
+    if: github.repository == 'verl-project/verl' && github.ref == 'refs/heads/test-quay-description' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout current test branch
+        uses: actions/checkout@v4
+        with:
+          # Rerunning an old workflow must not restore an outdated description.
+          ref: test-quay-description
+          persist-credentials: false
+
+      - name: Update Quay repository description
+        shell: bash
+        env:
+          QUAY_API_TOKEN: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$QUAY_API_TOKEN" ]]; then
+            echo "::error::The QUAY_PASSWORD secret used for image uploads is missing."
+            exit 1
+          fi
+
+          description_file="docker/ascend/quay-description.md"
+          if [[ ! -s "$description_file" ]]; then
+            echo "::error::The Quay description file is missing or empty."
+            exit 1
+          fi
+
+          payload_file="$RUNNER_TEMP/quay-description.json"
+          jq -n --rawfile description "$description_file" \
+            '{description: $description}' > "$payload_file"
+
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 60 \
+            --retry 3 --retry-delay 5 \
+            --request PUT \
+            --header "Authorization: Bearer $QUAY_API_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data-binary "@$payload_file" \
+            "https://quay.io/api/v1/repository/ascend/verl"
