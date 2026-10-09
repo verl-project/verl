@@ -17,7 +17,7 @@
 import pytest
 import torch
 
-from verl.utils.real_nvfp4.bf16_transport import RealNVFP4BF16TransportCheck
+from verl.utils.real_nvfp4.vllm_runtime import RealNVFP4BF16TransportCheck
 
 
 def _weights():
