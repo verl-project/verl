@@ -272,3 +272,67 @@ def test_snapshot_rejects_headless_node_without_touching_engine():
             await server.snapshot()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("initial_version", [7, None])
+@pytest.mark.parametrize("parked", [False, True])
+def test_generate_keeps_admitted_version_when_final_output_follows_refit(monkeypatch, initial_version, parked):
+    from verl.utils.metric.behavior_age import behavior_age_metrics
+    from verl.workers.config import RolloutConfig
+
+    async def main():
+        server = _make_server()
+        server.global_steps = initial_version
+        server.config = RolloutConfig(name="vllm", max_model_len=32, prompt_length=16, response_length=8)
+        server.model_config = SimpleNamespace(processor=None, lora_rank=0, lora={})
+        monkeypatch.setattr(
+            vllm_async_server.ray, "get_runtime_context", lambda: SimpleNamespace(get_actor_name=lambda: "test")
+        )
+        first_output_delivered = asyncio.Event()
+        deliver_final_output = asyncio.Event()
+        engine_versions = []
+
+        async def generate(**kwargs):
+            engine_versions.append(server.global_steps)
+            yield SimpleNamespace(outputs=[], finished=False)
+            first_output_delivered.set()
+            await deliver_final_output.wait()
+            completion = SimpleNamespace(token_ids=[1, 2], finish_reason="abort", stop_reason=None)
+            yield SimpleNamespace(outputs=[completion], finished=True)
+
+        server.engine.generate = generate
+        if parked:
+            await server.abort_all_requests()
+        pending = asyncio.create_task(server.generate(prompt_ids=[10], sampling_params={}, request_id="request"))
+        try:
+            if parked:
+                # Admission under new weights must capture the post-resume version.
+                await asyncio.sleep(0)
+                assert server._admitting == 0 and not pending.done()
+                await server.set_global_steps(8)
+                await server.resume_generation()
+            await asyncio.wait_for(first_output_delivered.wait(), timeout=5)
+            admitted_version = 8 if parked else initial_version
+            assert engine_versions == [admitted_version]
+            # EngineCore has drained, but its final frontend output is still pending.
+            await server.abort_all_requests()
+            await server.set_global_steps(9)
+            deliver_final_output.set()
+            output = await asyncio.wait_for(pending, timeout=5)
+            assert output.extra_fields["global_steps"] == admitted_version
+            assert output.token_ids == [1, 2]
+            assert output.stop_reason == "aborted"
+            fields = {"behavior_version_segments": [[output.extra_fields["global_steps"], 2]]}
+            metrics = behavior_age_metrics([fields], [2], [True], current_version=9)
+            if admitted_version is None:
+                assert metrics["training/off_policy/behavior_version/token_coverage"] == 0
+                assert "training/off_policy/token_staleness/mean" not in metrics
+            else:
+                assert metrics["training/off_policy/behavior_version/token_coverage"] == 1
+                assert metrics["training/off_policy/token_staleness/mean"] == 9 - admitted_version
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+    asyncio.run(main())

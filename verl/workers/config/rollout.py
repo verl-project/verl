@@ -178,6 +178,9 @@ class RolloutConfig(BaseConfig):
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
     over_sample_rate: float = 0.0
 
+    # Record per-attempt token provenance for v1 trainer age/coverage metrics.
+    collect_behavior_version_metrics: bool = False
+
     prompt_length: int = 512
     response_length: int = 512
 

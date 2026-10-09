@@ -1897,6 +1897,15 @@ class PPOTrainer(ABC):
         num_turns = np.array(data.pop("num_turns").tolist())
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
+        if self.config.actor_rollout_ref.rollout.get("collect_behavior_version_metrics", False):
+            from verl.utils.metric.behavior_age import behavior_age_metrics, read_behavior_version_fields
+
+            version_fields = read_behavior_version_fields(batch.keys, batch.partition_id, tq.kv_batch_get)
+            metrics.update(
+                behavior_age_metrics(
+                    version_fields, response_length.tolist(), non_padding_mask, current_version=global_steps - 1
+                )
+            )
         global_token_num = (prompt_length + response_length).tolist()
         min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
         max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]

@@ -678,6 +678,9 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
+        # Pause drains EngineCore before every frontend output task necessarily runs.
+        # Keep the admitted weight version even if a refit precedes final delivery.
+        generation_version = self.global_steps
         with RLInsightLogger.trace_state(
             "vllm_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
@@ -704,7 +707,7 @@ class vLLMHttpServer:
                     self._admitting -= 1
             assert final_res is not None
 
-        extra_fields = {"global_steps": self.global_steps}
+        extra_fields = {"global_steps": generation_version}
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".

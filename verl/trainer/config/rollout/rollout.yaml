@@ -516,3 +516,6 @@ disaggregation:
 
   # InfiniBand device (required for mooncake over RDMA).
   ib_device: null
+
+# Record token provenance and report v1 trainer behavior-version age/coverage.
+collect_behavior_version_metrics: false
