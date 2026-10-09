@@ -14,19 +14,19 @@
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import ray
 import torch
 from omegaconf import DictConfig
-from ray.actor import ActorHandle
-from ray.util import placement_group_table
-from ray.util.placement_group import PlacementGroup
+from ray.util.placement_group import PlacementGroup, placement_group
 
 from verl.plugin.platform import get_platform
-from verl.single_controller.ray import SubRayResourcePool
+from verl.runtime import ClassWithInitArgs, Worker
+from verl.single_controller.ray.resource_pool import RayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.net_utils import get_local_ip_address, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -34,6 +34,55 @@ from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_d
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+_TRTLLM_RAY_NODE_PIN = 1e-4
+
+
+@dataclass(frozen=True)
+class TRTLLMExecutorPlacement:
+    """TRT-LLM-private native placement; never exposed by ResourcePool."""
+
+    placement_groups: tuple[PlacementGroup, ...]
+    bundle_indices: tuple[tuple[int, ...], ...]
+
+    def close(self) -> None:
+        for group in self.placement_groups:
+            ray.util.remove_placement_group(group)
+
+
+def _create_trtllm_executor_placement(pool: RayResourcePool) -> TRTLLMExecutorPlacement:
+    """Create the native PG contract required by TRT-LLM's inner Ray executor."""
+    node_addresses = {
+        str(node["NodeID"]): str(node["NodeManagerAddress"]) for node in ray.nodes() if node.get("Alive", True)
+    }
+    resource_name = get_platform().ray_resource_name()
+    groups: list[PlacementGroup] = []
+    try:
+        for node_index in range(pool.nnodes):
+            node_id = pool.node_ids[node_index * pool.processes_per_node]
+            try:
+                node_address = node_addresses[node_id]
+            except KeyError as exc:
+                raise RuntimeError(f"TRT-LLM executor host {node_id!r} is not a live Ray node") from exc
+            bundle = {
+                "CPU": _TRTLLM_RAY_NODE_PIN,
+                resource_name: 1,
+                f"node:{node_address}": _TRTLLM_RAY_NODE_PIN,
+            }
+            group = placement_group(
+                bundles=[bundle.copy() for _ in range(pool.processes_per_node)],
+                strategy="STRICT_PACK",
+            )
+            groups.append(group)
+        ray.get([group.ready() for group in groups])
+    except BaseException:
+        for group in groups:
+            ray.util.remove_placement_group(group)
+        raise
+    return TRTLLMExecutorPlacement(
+        placement_groups=tuple(groups),
+        bundle_indices=tuple(tuple(range(pool.processes_per_node)) for _ in groups),
+    )
 
 
 def _resolve_chat_stop_tokens(model_config) -> tuple[int, list[int]]:
@@ -76,8 +125,7 @@ def _resolve_chat_stop_tokens(model_config) -> tuple[int, list[int]]:
     return primary_end_id, all_stop_ids
 
 
-@ray.remote
-class TRTLLMHttpServer:
+class TRTLLMHttpServer(Worker):
     """TensorRT LLM HTTP server in single node.
 
     Args:
@@ -85,11 +133,8 @@ class TRTLLMHttpServer:
         model_config (HFModelConfig): model config.
         is_reward_model (bool): whether this is a reward model.
         rollout_mode (RolloutMode): rollout mode.
-        workers (list[ActorHandle]): list of rollout workers.
         replica_rank (int): replica rank, a replica may contain multiple nodes.
-        max_colocate_count (int): max colocate count.
-        pgs (list[PlacementGroup]): placement groups.
-        bundle_indices (list[list[int]]): bundle indices.
+        placement: Ray placement groups and bundle indices used by TRT-LLM's Ray executor.
     """
 
     def __init__(
@@ -98,12 +143,13 @@ class TRTLLMHttpServer:
         model_config: HFModelConfig,
         is_reward_model: bool,
         rollout_mode: RolloutMode,
-        workers: list[ActorHandle],
         replica_rank: int,
-        max_colocate_count: int,
-        pgs: list[PlacementGroup] = None,
-        bundle_indices: list[list[int]] = None,
+        placement: TRTLLMExecutorPlacement,
+        env_vars: dict[str, str] | None = None,
     ):
+        if "WORLD_SIZE" in os.environ:
+            super().__init__()
+        os.environ.update(env_vars or {})
         os.environ["TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL"] = "1"
         assert torch.cuda.is_available(), "TRTLLM http server should run on GPU node"
 
@@ -120,11 +166,8 @@ class TRTLLMHttpServer:
                     f"max_position_embeddings ({max_position_embeddings})"
                 )
         self.rollout_mode = rollout_mode
-        self.workers = workers
         self.replica_rank = replica_rank
-        self.max_colocate_count = max_colocate_count
-        self.pgs = pgs
-        self.bundle_indices = bundle_indices
+        self.placement = placement
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
         # Set when generation is allowed; cleared during weight sync to block new requests.
@@ -148,7 +191,7 @@ class TRTLLMHttpServer:
         ) or hasattr(self.model_config, "vision_config")
 
         # used for http server
-        self._server_address = ray.util.get_node_ip_address().strip("[]")
+        self._server_address = get_local_ip_address()
         self._server_port = None
 
         logger.info(f"TRTLLMHttpServer, replica_rank: {self.replica_rank}")
@@ -177,7 +220,7 @@ class TRTLLMHttpServer:
             }
         logger.info(f"use_torch_sampler={self._use_torch_sampler}, sampling_args={self.sampling_args}")
 
-    def get_server_address(self):
+    async def get_server_address(self):
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
@@ -207,7 +250,7 @@ class TRTLLMHttpServer:
         }
         kv_cache_config = KvCacheConfig(**kv_cache_kwargs)
 
-        per_worker_gpu_share = 1.0 / self.max_colocate_count
+        per_worker_gpu_share = _TRTLLM_RAY_NODE_PIN
 
         quantization = self.config.quantization
         if quantization is not None:
@@ -241,8 +284,8 @@ class TRTLLMHttpServer:
             "moe_tensor_parallel_size": self.config.moe_tensor_parallel_size,
             "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
-            "placement_groups": self.pgs,
-            "placement_bundle_indices": self.bundle_indices,
+            "placement_groups": list(self.placement.placement_groups),
+            "placement_bundle_indices": [list(indices) for indices in self.placement.bundle_indices],
             "per_worker_gpu_share": per_worker_gpu_share,
             "sleep_config": SleepConfig(
                 restore_modes={
@@ -393,6 +436,10 @@ class TRTLLMHttpServer:
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
+    async def supports_partial_loading(self) -> bool:
+        results = await self.llm.collective_rpc("supports_partial_loading")
+        return all(results) if isinstance(results, list) else bool(results)
+
     async def abort_all_requests(self):
         """Abort all in-flight requests and block new ones. Call resume_generation() to unblock."""
         self._generation_allowed.clear()
@@ -498,94 +545,34 @@ class TRTLLMReplica(RolloutReplica):
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
-        self.node_ip = ray.util.get_node_ip_address().strip("[]")
+        self.node_ip = get_local_ip_address()
+        self._executor_placement: TRTLLMExecutorPlacement | None = None
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            placement, self._executor_placement = self._executor_placement, None
+            if placement is not None:
+                placement.close()
 
     def rollout_worker_use_gpu(self) -> bool:
         return False
 
-    def get_pgs_and_bundle_indices(self) -> tuple[list[PlacementGroup], list[list[int]]]:
-        """Get placement groups and bundle indices for the replica."""
-
-        start_pg_index = 0
-        local_bundle_index = 0
-
-        # For SubRayResourcePool, the replica is assigned sub pool specific for this replica.
-        if isinstance(self.resource_pool, SubRayResourcePool):
-            assert self.resource_pool.subgroup_world_size == self.world_size, (
-                "Subgroup world size must be equal to world size"
-            )
-            local_bundle_index = self.resource_pool.start_bundle_index
-        # For RayResourcePool, the replica is assigned to entire resource pool.
-        # We need to find start pg index and local bundle index based on replica rank.
-        else:
-            # In standalone mode, init_standalone() creates a per-replica RayResourcePool
-            # that contains only world_size bundles for this replica. Start at bundle 0.
-            # In colocated/hybrid mode, the shared pool spans all replicas, so offset by rank.
-            if self.rollout_mode == RolloutMode.STANDALONE:
-                local_bundle_index = 0
-            else:
-                local_bundle_index = self.world_size * self.replica_rank
-
-        while (
-            start_pg_index < len(self.resource_pool.pgs)
-            and local_bundle_index >= self.resource_pool.pgs[start_pg_index].bundle_count
-        ):
-            local_bundle_index -= self.resource_pool.pgs[start_pg_index].bundle_count
-            start_pg_index += 1
-        assert (
-            start_pg_index < len(self.resource_pool.pgs)
-            and local_bundle_index < self.resource_pool.pgs[start_pg_index].bundle_count
-        ), "Start pg index or local bundle index out of range"
-
-        # Global Bundle View for Replica x 2 & TP=4:
-        # ┌───────────────────┬───────────────────┐
-        # │ Placement Group 0 │ Placement Group 1 │
-        # ├────┬────┬────┬────┼────┬────┬────┬────┤
-        # │ 0  │ 1  │ 2  │ 3  │ 0  │ 1  │ 2  │ 3  │
-        # └────┴────┴────┴────┴────┴────┴────┴────┘
-        #   └───────────────┘   └───────────────┘
-        #       Replica 0           Replica 1
-        #       (4 GPUs)            (4 GPUs)
-
-        left_bundle_count = self.world_size
-
-        pgs = []
-        bundle_indices = []
-
-        for pg in self.resource_pool.pgs[start_pg_index:]:
-            if left_bundle_count == 0:
-                break
-
-            left_bundle_count_in_pg = min(left_bundle_count, pg.bundle_count - local_bundle_index)
-            pg_bundle_indices = [local_bundle_index + idx for idx in range(left_bundle_count_in_pg)]
-            pgs.append(pg)
-            bundle_indices.append(pg_bundle_indices)
-            left_bundle_count -= left_bundle_count_in_pg
-            local_bundle_index = 0
-
-        assert left_bundle_count == 0, "all bundle indices should be assigned"
-
-        return pgs, bundle_indices
+    def _create_executor_placement(self) -> TRTLLMExecutorPlacement:
+        """Create TRT-LLM's engine-private native Ray placement."""
+        if not isinstance(self.resource_pool, RayResourcePool):
+            raise NotImplementedError("TRT-LLM's Ray executor requires the Ray Runtime backend")
+        if self._executor_placement is None:
+            self._executor_placement = _create_trtllm_executor_placement(self.resource_pool)
+        return self._executor_placement
 
     async def launch_servers(self):
-        assert self.resource_pool.pgs is not None, "placement groups are not initialized"
-
-        pgs, bundle_indices = self.get_pgs_and_bundle_indices()
-
-        # Check server process should be launched on the same node as first bundle of first pg.
-        first_pg_data = placement_group_table(pgs[0])
-        node_id = first_pg_data["bundles_to_node_id"][bundle_indices[0][0]]
+        if self.resource_pool is None:
+            raise RuntimeError("rollout worker placement is not initialized")
+        executor_placement = self._create_executor_placement()
         print(f"TRTLLMReplica: {self.replica_rank}")
-        print(f"pg node_id: {node_id}")
-        print(f"pgs: {pgs}")
-        print(f"bundle_indices: {bundle_indices}")
 
-        # TRTLLMReplica is a 1:1 map from replica to TRTLLMHttpServer.
-        name = (
-            f"trtllm_server_{self.replica_rank}{self.name_suffix}"
-            if not self.is_reward_model
-            else f"trtllm_server_reward_{self.replica_rank}{self.name_suffix}"
-        )
         _server_env_vars = {var: "1" for var in get_platform().ray_noset_envvars()}
         _server_env_vars.update(get_platform().rollout_env_vars())
         # Propagate profiling env vars to the Ray actor so that RayExecutor
@@ -597,33 +584,29 @@ class TRTLLMReplica(RolloutReplica):
         ):
             if _val := os.environ.get(_prof_var):
                 _server_env_vars[_prof_var] = _val
-        server = TRTLLMHttpServer.options(
-            scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                node_id=node_id,
-                soft=False,
+        group = await self._create_server_worker_group(
+            ClassWithInitArgs(
+                TRTLLMHttpServer,
+                config=self.config,
+                model_config=self.model_config,
+                is_reward_model=self.is_reward_model,
+                rollout_mode=self.rollout_mode,
+                replica_rank=self.replica_rank,
+                placement=executor_placement,
+                env_vars=_server_env_vars,
             ),
-            runtime_env={"env_vars": _server_env_vars},
-            name=name,
-            max_concurrency=self.max_concurrency,
-        ).remote(
-            config=self.config,
-            model_config=self.model_config,
-            is_reward_model=self.is_reward_model,
-            rollout_mode=self.rollout_mode,
-            workers=self.workers,
-            replica_rank=self.replica_rank,
-            max_colocate_count=self.resource_pool.max_colocate_count,
-            pgs=pgs,
-            bundle_indices=bundle_indices,
+            source_pool=self.resource_pool.slice(0),
         )
+        server = group.remote()
         self.servers.append(server)
 
         # launch http server in each node
-        await asyncio.gather(*[server.launch_server.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("launch_server") for server in self.servers])
 
         # get http server address from first server
-        server_address, server_port = await self.servers[0].get_server_address.remote()
+        server_address, server_port = await self.servers[0].submit("get_server_address")
         self._server_handle = self.servers[0]
+        await self._set_server_endpoints([self._server_handle] * self.world_size)
         self._server_address = (
             f"[{server_address}]:{server_port}"
             if is_valid_ipv6_address(server_address)

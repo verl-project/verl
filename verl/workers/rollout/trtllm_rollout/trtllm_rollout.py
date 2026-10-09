@@ -26,7 +26,6 @@ from typing import Any, AsyncGenerator, Optional
 
 import aiohttp
 import pynvml
-import ray
 import torch
 import torch.distributed as dist
 
@@ -38,8 +37,9 @@ except (ImportError, RuntimeError):
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.multiprocessing.reductions import reduce_tensor
 
+from verl.runtime import RemoteWorkerGroup
 from verl.utils.device import get_torch_device
-from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.net_utils import get_local_ip_address, is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.utils import ensure_async_iterator
@@ -307,6 +307,13 @@ class ServerAdapter(BaseRollout):
         self.replica_rank = None
         self.is_dp_rank = None
         self._supports_partial_loading = None
+        self.server_actor: RemoteWorkerGroup | None = None
+
+        visible_gpu_ids = [item for item in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if item]
+        if not visible_gpu_ids:
+            raise RuntimeError("CUDA_VISIBLE_DEVICES is required by the TRT-LLM ServerAdapter")
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        assigned_gpu_id = visible_gpu_ids[0] if len(visible_gpu_ids) == 1 else visible_gpu_ids[local_rank]
 
         # hybrid mode
         if self.device_mesh is not None:
@@ -324,22 +331,21 @@ class ServerAdapter(BaseRollout):
             logger.info(f"is_dp_leader: {self.is_leader_rank}")
             logger.info(f"exclude_dp_rank = {self.hybrid_device_mesh['exclude_dp'].get_local_rank()}")
             logger.info(f"exclude_dp_size = {self.hybrid_device_mesh['exclude_dp'].size()}")
-            self.gpu_id = ray.get_gpu_ids()[0]
+            self.gpu_id = assigned_gpu_id
             self.replica_rank = self.hybrid_device_mesh["dp"].get_local_rank()
-            assert len(ray.get_gpu_ids()) == 1, "ServerAdapter should run on a single GPU node"
         else:
             rank = int(os.environ["RANK"])
             self.replica_rank = replica_rank
             self.is_leader_rank = rank == 0
             # Required for CUDA IPC handle creation during weight sync for Async RL.
             # Reward/ref models skip weight sync so this can be None.
-            self.gpu_id = ray.get_gpu_ids()[0]
+            self.gpu_id = assigned_gpu_id
 
         # Below is required for all modes.
         assert self.replica_rank >= 0, "replica_rank is not set"
         assert self.is_leader_rank is not None, "is_leader_rank is not set"
 
-        self.node_ip = ray.util.get_node_ip_address().strip("[]")
+        self.node_ip = get_local_ip_address()
 
     async def get_supports_partial_loading(self) -> bool:
         """Query and cache whether the model supports partial weight loading."""
@@ -348,7 +354,7 @@ class ServerAdapter(BaseRollout):
 
         await self._init_server_adapter()
         try:
-            self._supports_partial_loading = await self.server_actor.supports_partial_loading.remote()
+            self._supports_partial_loading = await self.server_actor.submit("supports_partial_loading")
         except Exception as e:
             logger.warning(f"Failed to query partial loading support: {e}, defaulting to False")
             self._supports_partial_loading = False
@@ -361,7 +367,7 @@ class ServerAdapter(BaseRollout):
             return
 
         # Standalone mode: lazily build the CPU device mesh from the gloo process group
-        # (initialized by initialize_global_process_group_ray before ServerAdapter construction).
+        # (initialized by initialize_worker_process_group before ServerAdapter construction).
         # Reward/ref models that never call resume(), release(), or update_weights() will never build the mesh.
         if self.hybrid_device_mesh is None and self.device_mesh is None:
             assert dist.is_initialized(), "gloo process group must be initialized before building device mesh"
@@ -375,9 +381,9 @@ class ServerAdapter(BaseRollout):
             self.hybrid_device_mesh[self.hybrid_device_mesh.mesh_dim_names[1:]]._flatten(mesh_dim_name="exclude_dp")
             self.is_leader_rank = self.hybrid_device_mesh["exclude_dp"].get_local_rank() == 0
 
-        # Lazy init http server adapter because http server is launched after hybrid engine.
-        self.server_actor = ray.get_actor(f"trtllm_server_{self.replica_rank}")
-        server_address, server_port = await self.server_actor.get_server_address.remote()
+        if self.server_actor is None:
+            raise RuntimeError("rollout server endpoint has not been injected")
+        server_address, server_port = await self.server_actor.submit("get_server_address")
         assert server_address == self.node_ip, f"server address: {server_address} != node_ip: {self.node_ip}"
 
         logger.debug(f"replica_rank={self.replica_rank}, server address: {server_address}, port: {server_port}")
@@ -390,6 +396,10 @@ class ServerAdapter(BaseRollout):
             retry_delay=self.config.server.retry_delay,
             max_connections=self.config.server.max_connections,
         )
+
+    def set_server_endpoint(self, endpoint: RemoteWorkerGroup) -> None:
+        super().set_server_endpoint(endpoint)
+        self.server_actor = endpoint
 
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
@@ -525,7 +535,7 @@ class ServerAdapter(BaseRollout):
             # Finalize update weights
             await self._adapter.update_weights(None)
             if global_steps is not None:
-                await self.server_actor.set_global_steps.remote(global_steps)
+                await self.server_actor.submit("set_global_steps", args=(global_steps,))
         group = self.hybrid_device_mesh["exclude_dp"].get_group() if self.hybrid_device_mesh is not None else None
         await asyncio.to_thread(dist.barrier, group=group)
 

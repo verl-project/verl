@@ -18,7 +18,6 @@ import os
 import time
 from typing import Any, AsyncGenerator, Generator
 
-import ray
 import torch
 from mooncake.engine import TransferEngine
 
@@ -29,7 +28,7 @@ except ImportError:
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
 from verl.utils.device import get_torch_device
-from verl.utils.net_utils import get_free_port
+from verl.utils.net_utils import get_free_port, get_local_ip_address
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -67,7 +66,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         get_torch_device().set_device(local_rank)
 
         self.engine = TransferEngine()
-        hostname = ray.util.get_node_ip_address().strip("[]")
+        hostname = get_local_ip_address()
         ret = self.engine.initialize(
             hostname,
             "P2PHANDSHAKE",

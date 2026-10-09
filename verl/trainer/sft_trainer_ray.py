@@ -24,7 +24,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 import logging
 
 import hydra
-import ray
 import torch
 import torch.distributed
 from omegaconf import OmegaConf
@@ -32,6 +31,7 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.runtime import ClassWithInitArgs, Runtime, current_runtime, select_backend
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -50,8 +50,10 @@ class SFTTrainer:
     def __init__(
         self,
         config,
+        runtime: Runtime | None = None,
     ):
         self.config = config
+        self.runtime = current_runtime() if runtime is None else runtime
 
         self._build_config()
         self._build_dataset()
@@ -81,7 +83,7 @@ class SFTTrainer:
             default_hdfs_dir=default_hdfs_dir,
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
-            mode=OrchestrationMode.RAY,
+            mode=OrchestrationMode.WORKER_GROUP,
         )
 
     def _build_config(self):
@@ -120,27 +122,18 @@ class SFTTrainer:
             profiler_config=self.profiler_config,
         )
 
-        wg_kwargs = {}
-        if self.start_profile_step != -1:
-            wg_kwargs["profile_steps"] = list(range(self.start_profile_step, self.end_profile_step + 1))
-            # Only require nsight worker options when tool is nsys
-            if OmegaConf.select(self.config.profiler, "tool") == "nsys":
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                )
-
         # create resource pool and worker group
-        from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
         nnodes = self.config.trainer.nnodes
-        self.resource_pool = RayResourcePool(process_on_nodes=[n_gpus_per_node] * nnodes)
-        ray_cls_with_init = RayClassWithInitArgs(ray.remote(TrainingWorker), config=config)
-        self.training_client = RayWorkerGroup(
-            resource_pool=self.resource_pool,
-            ray_cls_with_init=ray_cls_with_init,
-            device_name=self.config.trainer.device,
-            **wg_kwargs,
+        self.resource_pool = self.runtime.create_resource_pool(
+            nnodes=nnodes,
+            processes_per_node=n_gpus_per_node,
+            device_type="gpu",
+            on="cluster",
+        )
+        self.training_client = self.runtime.create_worker_group(
+            ClassWithInitArgs(TrainingWorker, config=config),
+            on=self.resource_pool,
         )
         self.training_client.set_loss_fn(loss_fn=self.loss_fn)
         self.training_client.reset()
@@ -332,7 +325,9 @@ class SFTTrainer:
 
                 # train for on batch
                 output = self.training_client.train_batch(data)
-                output = output.get()
+                # Runtime worker groups return a backend-neutral RemoteCall. Resolve it
+                # through result() instead of a backend-specific future API such as get().
+                output = output.result()
 
                 if global_step == self.end_profile_step:
                     self.training_client.stop_profile()
@@ -344,7 +339,10 @@ class SFTTrainer:
                 metrics["train/grad_norm"] = metrics.pop("grad_norm")
                 metrics["train/lr"] = metrics.pop("lr")
                 metrics["train/mfu"] = metrics.pop("mfu")
-                metrics["train/global_tokens"] = torch.sum(torch.tensor(batch_seqlens, device=self.device_name)).item()
+                # The controller owns metrics and may be CPU-only (for example,
+                # a Monarch job controller). Token counts are already ordinary
+                # integers, so aggregating them must not require an gpu.
+                metrics["train/global_tokens"] = sum(batch_seqlens)
                 total_tokens += metrics["train/global_tokens"]
                 metrics["train/total_tokens(B)"] = total_tokens / 1e9
                 tracking.log(data=metrics, step=global_step)
@@ -360,7 +358,7 @@ class SFTTrainer:
                     for val_data in self.val_dataloader:
                         val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
                         output = self.training_client.infer_batch(val_data)
-                        output = output.get()
+                        output = output.result()
                         metrics = tu.get(output, "metrics")
                         val_losses.append(metrics["loss"])
 
@@ -380,9 +378,36 @@ class SFTTrainer:
 
 
 def run_sft(config):
-    ray.init()
-    trainer = SFTTrainer(config=config)
-    trainer.fit()
+    runtime = Runtime.from_config(_sft_runtime_config(config))
+    try:
+        trainer = SFTTrainer(config=config, runtime=runtime)
+        trainer.fit()
+    finally:
+        runtime.close()
+
+
+def _sft_runtime_config(config) -> dict[str, object]:
+    runtime_raw = config.get("runtime")
+    if runtime_raw is None:
+        result: dict[str, object] = {"backend": "ray", "env_vars": {}}
+    else:
+        materialized = OmegaConf.to_container(runtime_raw, resolve=True) or {}
+        result = dict(materialized)
+        result.setdefault("backend", "ray")
+        result.setdefault("env_vars", {})
+
+    if select_backend(result) == "ray":
+        ray_section = dict(result.get("ray") or {})
+        ray_section.setdefault("ray_init", {})
+        start, end = config.trainer.profile_interval
+        if start != -1:
+            ray_section["profile_steps"] = list(range(start, end + 1))
+            if OmegaConf.select(config.profiler, "tool") == "nsys":
+                ray_section["worker_nsight_options"] = OmegaConf.to_container(
+                    OmegaConf.select(config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                )
+        result["ray"] = ray_section
+    return result
 
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)

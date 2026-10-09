@@ -17,11 +17,10 @@ import multiprocessing
 import os
 import time
 
-import ray
 import requests
 from sglang_router.launch_server import RouterArgs, launch_router
 
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import get_free_port, get_local_ip_address, is_valid_ipv6_address
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -33,7 +32,7 @@ def launch_router_process(
     max_wait_time: int = 300,
     timeout: int = 30,
 ) -> str:
-    router_ip = ray.util.get_node_ip_address().strip("[]")
+    router_ip = get_local_ip_address().strip("[]")
     router_port, _ = get_free_port(router_ip)
     router_address = (
         f"[{router_ip}]:{router_port}" if is_valid_ipv6_address(router_ip) else f"{router_ip}:{router_port}"

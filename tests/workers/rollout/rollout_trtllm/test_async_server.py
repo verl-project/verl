@@ -17,6 +17,7 @@ import subprocess
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
 import ray
 import torch
 from ray.util import placement_group_table
@@ -59,12 +60,13 @@ class TestTRTLLMReplica:
             replica.resource_pool = resource_pool
             replica.world_size = 4  # TP=4
 
-            pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
-
-            assert len(pgs) == 1
-            assert pgs[0] == mock_pg
-            assert len(bundle_indices) == 1
-            assert bundle_indices[0] == [4, 5, 6, 7]
+            assert replica.resource_pool.pgs == [mock_pg]
+            assert replica.resource_pool.start_bundle_index == 4
+            assert replica.resource_pool.subgroup_world_size == 4
+            assert replica.resource_pool.world_size == 4
+            assert replica.resource_pool.store == [8]
+            with pytest.raises(RuntimeError, match="no placement"):
+                replica.resource_pool._scheduling_strategy(0)
 
     def test_placement_group_with_ray_resource_pool(self):
         """
@@ -99,12 +101,9 @@ class TestTRTLLMReplica:
             replica.resource_pool = resource_pool
             replica.world_size = 2  # TP=2
 
-            pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
-
-            assert len(pgs) == 1
-            assert pgs[0] == mock_pg
-            assert len(bundle_indices) == 1
-            assert bundle_indices[0] == [2, 3]
+            assert replica.resource_pool.pgs == [mock_pg]
+            assert replica.resource_pool.world_size == 8
+            assert replica.world_size == 2
 
     def test_placement_group_multi_node_ray_resource_pool(self):
         """
@@ -141,14 +140,9 @@ class TestTRTLLMReplica:
             replica.resource_pool = resource_pool
             replica.world_size = 16
 
-            pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
-
-            assert len(pgs) == 2
-            assert pgs[0] == mock_pg0
-            assert pgs[1] == mock_pg1
-            assert len(bundle_indices) == 2
-            assert bundle_indices[0] == list(range(8))
-            assert bundle_indices[1] == list(range(8))
+            assert replica.resource_pool.pgs == [mock_pg0, mock_pg1]
+            assert replica.resource_pool.world_size == 16
+            assert replica.world_size == 16
 
     def test_placement_group_multi_node_multi_replica(self):
         """
@@ -185,12 +179,9 @@ class TestTRTLLMReplica:
                 replica.resource_pool = resource_pool
                 replica.world_size = 8
 
-                pgs, bundle_indices = replica.get_pgs_and_bundle_indices()
-
-                assert len(pgs) == 1
-                assert pgs[0] == (mock_pg0 if replica_rank == 0 else mock_pg1)
-                assert len(bundle_indices) == 1
-                assert bundle_indices[0] == list(range(8))
+                assert replica.resource_pool.pgs == [mock_pg0, mock_pg1]
+                assert replica.resource_pool.world_size == 16
+                assert replica.world_size == 8
 
 
 class TestTRTLLMHttpServer:

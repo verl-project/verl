@@ -16,20 +16,19 @@ asymmetric TP supported. MVP: prefill_replicas=1, whole replica on one node."""
 
 import asyncio
 import logging
-import os
 from dataclasses import replace as _dc_replace
 from typing import Optional
 
-import ray
 from omegaconf import DictConfig
-from ray.actor import ActorHandle
 
-from verl.utils.device import is_torch_npu_available
+from verl.plugin.platform import get_platform
+from verl.runtime import ClassWithInitArgs, RemoteCall, RemoteWorkerGroup, ResourcePool
+from verl.utils.device import get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.sglang_rollout.async_sglang_server import (
+    SGLangHttpServer,
     SGLangReplica,
-    visible_devices_keyword,
 )
 
 logger = logging.getLogger(__file__)
@@ -86,26 +85,22 @@ class SGLangPDReplica(SGLangReplica):
         assert self.world_size % self.gpus_per_replica_node == 0
         self.nnodes = self.world_size // self.gpus_per_replica_node
 
-        self._prefill_servers: list[ActorHandle] = []
-        self._decode_servers: list[ActorHandle] = []
+        self._prefill_servers: list[RemoteWorkerGroup] = []
+        self._decode_servers: list[RemoteWorkerGroup] = []
         self._prefill_server_address: Optional[str] = None
         self._decode_server_addresses: list[str] = []
         self._bootstrap_port: Optional[int] = None
 
     async def launch_servers(self):
-        assert len(self.workers) == self.world_size
+        if self._worker_group is None or self.resource_pool is None:
+            raise RuntimeError("rollout worker placement is not initialized")
+        if self._worker_group.world_size != self.world_size:
+            raise RuntimeError(f"worker count {self._worker_group.world_size} != PD world size {self.world_size}")
         assert not is_torch_npu_available(check_device=False), "PD on NPU not validated"
 
-        worker_infos = await asyncio.gather(
-            *[
-                worker.__ray_call__.remote(
-                    lambda self: (
-                        ray.get_runtime_context().get_node_id(),
-                        os.environ[visible_devices_keyword],
-                    )
-                )
-                for worker in self.workers
-            ]
+        worker_devices, worker_ips = await asyncio.gather(
+            RemoteCall.gather(self._worker_group.execute_all_async("get_assigned_device_id")),
+            RemoteCall.gather(self._worker_group.execute_all_async("get_node_ip_address")),
         )
 
         # Hold the bootstrap socket open until prefill binds it; closing earlier
@@ -113,31 +108,26 @@ class SGLangPDReplica(SGLangReplica):
         bootstrap_port = self.config.disaggregation.bootstrap_port
         self._bootstrap_sock = None
         if bootstrap_port is None:
-            prefill_host_ip = ray.util.get_node_ip_address().strip("[]")
+            prefill_host_ip = worker_ips[0]
             bootstrap_port, self._bootstrap_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
         self._bootstrap_port = bootstrap_port
 
         prefill_end = self._prefill_tp
-        prefill_workers = self.workers[0:prefill_end]
-        prefill_node_id = worker_infos[0][0]
-        prefill_devs = self._collect_cuda_devices(worker_infos[0:prefill_end])
-
+        prefill_pool = self.resource_pool.slice(slice(0, prefill_end))
         if self._bootstrap_sock is not None:
             self._bootstrap_sock.close()
             self._bootstrap_sock = None
 
         [prefill_server] = await self._launch_one(
             role="prefill",
-            workers=prefill_workers,
-            node_id=prefill_node_id,
-            cuda_visible_devices=prefill_devs,
+            source_pool=prefill_pool,
             bootstrap_port=self._bootstrap_port,
             tp=self._prefill_tp,
-            actor_name=f"sglang_server_{self.replica_rank}_0",
+            worker_devices=worker_devices[: self._prefill_tp],
         )
         self._prefill_servers = [prefill_server]
 
-        prefill_address, prefill_port = await prefill_server.get_server_address.remote()
+        prefill_address, prefill_port = await prefill_server.submit("get_server_address")
 
         def _fmt(addr, port):
             return f"[{addr}]:{port}" if is_valid_ipv6_address(addr) else f"{addr}:{port}"
@@ -149,29 +139,28 @@ class SGLangPDReplica(SGLangReplica):
         for i in range(self._n_decode):
             start = self._prefill_tp + i * self._decode_tp
             end = start + self._decode_tp
-            workers_i = self.workers[start:end]
-            node_id_i = worker_infos[start][0]
-            devs_i = self._collect_cuda_devices(worker_infos[start:end])
-
+            source_pool_i = self.resource_pool.slice(slice(start, end))
             [decode_server] = await self._launch_one(
                 role="decode",
-                workers=workers_i,
-                node_id=node_id_i,
-                cuda_visible_devices=devs_i,
+                source_pool=source_pool_i,
                 bootstrap_port=self._bootstrap_port,
                 tp=self._decode_tp,
-                actor_name=f"sglang_server_decode_{self.replica_rank}_{i}",
+                worker_devices=worker_devices[start:end],
             )
             self._decode_servers.append(decode_server)
 
-            d_addr, d_port = await decode_server.get_server_address.remote()
+            d_addr, d_port = await decode_server.submit("get_server_address")
             self._decode_server_addresses.append(_fmt(d_addr, d_port))
 
         self._server_address = self._prefill_server_address
         self._server_handle = prefill_server
         self.servers = list(self._prefill_servers) + list(self._decode_servers)
+        await self._set_server_endpoints(
+            [prefill_server] * self._prefill_tp
+            + [server for server in self._decode_servers for _ in range(self._decode_tp)]
+        )
 
-        await prefill_server.set_pd_peer.remote(list(self._decode_servers), prefill_address)
+        await prefill_server.submit("set_pd_peer", args=(list(self._decode_servers), prefill_address))
 
         logger.info(
             f"SGLangPDReplica rank={self.replica_rank} launched: "
@@ -180,50 +169,35 @@ class SGLangPDReplica(SGLangReplica):
             f"bootstrap_port={self._bootstrap_port}"
         )
 
-    @staticmethod
-    def _collect_cuda_devices(worker_infos) -> str:
-        devs = set()
-        for _, dev_str in worker_infos:
-            for d in dev_str.split(","):
-                if d.strip():
-                    devs.add(int(d))
-        return ",".join(str(d) for d in sorted(devs))
-
     async def _launch_one(
         self,
         role: str,
-        workers: list[ActorHandle],
-        node_id: str,
-        cuda_visible_devices: str,
+        source_pool: ResourcePool,
         bootstrap_port: int,
         tp: int,
-        actor_name: str,
-    ) -> list[ActorHandle]:
-        base_gpu_id = 0
-        if os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None):
-            base_gpu_id = (0 + self.replica_rank * self.world_size) % self.gpus_per_node
-
+        worker_devices: list[str],
+    ) -> list[RemoteWorkerGroup]:
         pool_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
+        server_env = {
+            **get_platform().rollout_env_vars(),
+            get_visible_devices_keyword(): self._merge_cuda_visible_devices(worker_devices, expected_count=tp),
+        }
 
-        server = self.server_class.options(
-            scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False
+        group = await self._create_server_worker_group(
+            ClassWithInitArgs(
+                SGLangHttpServer,
+                config=pool_config,
+                model_config=self.model_config,
+                rollout_mode=self.rollout_mode,
+                replica_rank=self.replica_rank,
+                node_rank=0,
+                nnodes=1,
+                env_vars=server_env,
+                disaggregation_role=role,
+                disaggregation_bootstrap_port=bootstrap_port,
             ),
-            runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
-            name=actor_name,
-            max_concurrency=self.max_concurrency,
-        ).remote(
-            config=pool_config,
-            model_config=self.model_config,
-            rollout_mode=self.rollout_mode,
-            workers=workers,
-            replica_rank=self.replica_rank,
-            node_rank=0,
-            nnodes=1,
-            cuda_visible_devices=cuda_visible_devices,
-            base_gpu_id=base_gpu_id,
-            disaggregation_role=role,
-            disaggregation_bootstrap_port=bootstrap_port,
+            source_pool=source_pool,
         )
-        await server.launch_server.remote(master_address=None, master_port=None)
+        server = group.remote()
+        await server.submit("launch_server", kwargs={"master_address": None, "master_port": None})
         return [server]

@@ -261,7 +261,7 @@ def test_dataproto_surface_and_tensordict_round_trip(storage):
     assert "score" not in restored.non_tensor_batch
 
 
-def test_padding_and_dispatch_support_neodataproto(storage):
+def test_padding_and_dispatch_support_neodataproto(storage, ray_only_runtime):
     data = _make_data(storage, auto_padding=True)
 
     padded, pad_size = pad_dataproto_to_divisor(data, 3)
@@ -498,3 +498,23 @@ def test_runtime_tensor_assignment_isolates_caller_cache_and_local_storage(stora
     data.batch["token_level_scores"].add_(200)
     data.clear_cache()
     torch.testing.assert_close(data.batch["token_level_scores"], expected)
+
+
+def test_standalone_batch_roundtrip_before_configuring_storage():
+    set_default_storage_engine(None)
+    source = DataProto.from_dict(tensors={"values": torch.arange(6).reshape(3, 2)})
+    restored = pickle.loads(pickle.dumps(source.select_idxs([2, 0])))
+    assert restored.batch["values"].tolist() == [[4, 5], [0, 1]]
+    source.release()
+    assert restored.batch["values"].tolist() == [[4, 5], [0, 1]]
+
+    configured = CountingStorageEngine()
+    set_default_storage_engine(configured)
+    try:
+        later = DataProto.from_dict(tensors={"values": torch.arange(4).reshape(2, 2)})
+        later.clear_cache()
+        assert later.batch["values"].tolist() == [[0, 1], [2, 3]]
+        assert configured.get_count == 1
+        later.release()
+    finally:
+        set_default_storage_engine(None)

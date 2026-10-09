@@ -1,6 +1,6 @@
 # NeoProto integration
 
-Last updated: 08/19/2026.
+Last updated: 09/10/2026.
 
 NeoProto is the default and only data path for the V0 `RayPPOTrainer`. Batch
 payloads stay in a storage engine while the driver manipulates schemas,
@@ -63,3 +63,15 @@ scripts.
   performance benchmarking.
 - Direct users of `verl.protocol.DataProto` are on the explicit legacy path and
   should migrate to `from verl import DataProto`.
+
+## Monarch Runtime
+
+Monarch uses one global TorchStore. Run the `ppo_monarch_neoproto` recipe with
+`trainer.nnodes` and `trainer.n_gpus_per_node` set to the available resources.
+The Runtime installs the same ObjectStore client in the controller and every
+WorkerGroup, including dedicated reference, reward, teacher, or standalone
+rollout groups.
+
+Outside a Runtime, standalone construction stores values in inline references
+and does not start a Ray cluster. The trainer explicitly configures the storage
+engine from `runtime.backend`; later writes use that engine.

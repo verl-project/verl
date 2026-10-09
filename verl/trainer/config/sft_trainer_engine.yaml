@@ -13,6 +13,12 @@ defaults:
   - profiler@profiler: profiler
   - _self_
 
+# Runtime backend for the SFT WorkerGroup.
+runtime:
+  backend: ray
+  ray:
+    ray_init: {}
+
 data:
   train_batch_size: 256 # global batch size
   micro_batch_size_per_gpu: 4  # this is also val batch size

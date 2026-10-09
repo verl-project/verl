@@ -17,7 +17,7 @@ from enum import Enum
 
 from omegaconf import DictConfig
 
-from verl.single_controller.base import Worker
+from verl.runtime import Worker
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 
@@ -74,9 +74,16 @@ class Role(Enum):
 
 def need_reference_policy(
     config: DictConfig,
+    actor_config: DictConfig | None = None,
 ) -> bool:
-    """Given the config, do we need ref policy."""
-    return config.algorithm.get("use_kl_in_reward", False) or config.actor_rollout_ref.actor.use_kl_loss
+    """Given the config, do we need ref policy.
+
+    ``actor_config`` is the actor section selected by topology ``config_key``;
+    callers outside that path retain the legacy config lookup.
+    """
+    if actor_config is None:
+        actor_config = config.actor_rollout_ref.actor
+    return config.algorithm.get("use_kl_in_reward", False) or actor_config.use_kl_loss
 
 
 def need_teacher_policy(
@@ -88,15 +95,26 @@ def need_teacher_policy(
 
 def need_reward_model(
     config: DictConfig,
+    reward_model_config: DictConfig | None = None,
 ) -> bool:
-    """Given the config, do we need reward model."""
-    return config.reward.reward_model.enable
+    """Given the config, do we need reward model.
+
+    ``reward_model_config`` is selected by topology ``config_key`` when present.
+    """
+    if reward_model_config is None:
+        reward_model_config = config.reward.reward_model
+    return reward_model_config.enable
 
 
-def need_critic(config: DictConfig) -> bool:
-    """Given a config, do we need critic."""
-    if config.critic.enable is not None:
-        return bool(config.critic.enable)
+def need_critic(config: DictConfig, critic_config: DictConfig | None = None) -> bool:
+    """Given a config, do we need critic.
+
+    ``critic_config`` is selected by topology ``config_key`` when present.
+    """
+    if critic_config is None:
+        critic_config = config.critic
+    if critic_config.enable is not None:
+        return bool(critic_config.enable)
     elif config.algorithm.adv_estimator == AdvantageEstimator.GAE:
         return True
     else:

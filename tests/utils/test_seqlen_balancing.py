@@ -120,7 +120,7 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
     inv = get_reverse_idx(idx)
     inv = torch.tensor(inv, device=flat.device)
     reconstructed = flat[inv]
-    torch.testing.assert_close(reconstructed, batch)
+    torch.testing.assert_close(reconstructed, proto.to_tensordict())
 
     dist.destroy_process_group()
 

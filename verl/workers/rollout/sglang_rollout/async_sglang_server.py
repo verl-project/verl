@@ -18,45 +18,110 @@ import json
 import logging
 import os
 import secrets
+import sys
+import types
 from pathlib import Path
 from typing import Any, Optional
 
-import ray
-import sglang
-import sglang.srt.entrypoints.engine
 import torch
 from packaging import version
-from ray.actor import ActorHandle
-from sglang.srt.entrypoints.http_server import (
-    ServerArgs,
-    _GlobalState,
-    app,
-    set_global_state,
-)
-from sglang.srt.managers.io_struct import (
-    ContinueGenerationReqInput,
-    GenerateReqInput,
-    PauseGenerationReqInput,
-    ReleaseMemoryOccupationReqInput,
-    ResumeMemoryOccupationReqInput,
-)
-from sglang.srt.managers.tokenizer_manager import ServerStatus
 
 from verl.plugin.platform import get_platform
+from verl.runtime import ClassWithInitArgs, RemoteCall, Worker
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import get_free_port, get_local_ip_address, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn, stop_uvicorn
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 visible_devices_keyword = get_visible_devices_keyword()
+
+
+def _load_sglang_runtime() -> None:
+    """Load SGLang only after the remote worker has installed its GPU environment."""
+    global ContinueGenerationReqInput
+    global GenerateReqInput
+    global PauseGenerationReqInput
+    global ReleaseMemoryOccupationReqInput
+    global ResumeMemoryOccupationReqInput
+    global ServerArgs
+    global ServerStatus
+    global _GlobalState
+    global _set_envs_and_config
+    global app
+    global set_global_state
+    global sglang
+
+    if "sglang" in globals():
+        return
+
+    try:
+        import vllm  # noqa: F401
+    except ModuleNotFoundError as exc:
+        # The shim supports an environment where the optional top-level vLLM
+        # package is absent. Never treat an error raised from inside an installed
+        # vLLM as absence: binary and dependency failures must retain their
+        # original traceback instead of being hidden behind SGLang imports.
+        if exc.name != "vllm":
+            raise
+        mock_vllm = types.ModuleType("vllm")
+
+        mock_custom_ops = types.ModuleType("vllm._custom_ops")
+
+        def unavailable_scaled_fp8_quant(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("scaled_fp8_quant requires the optional vLLM package")
+
+        mock_custom_ops.scaled_fp8_quant = unavailable_scaled_fp8_quant
+        mock_vllm._custom_ops = mock_custom_ops
+
+        mock_model_executor = types.ModuleType("vllm.model_executor")
+        mock_layers = types.ModuleType("vllm.model_executor.layers")
+        mock_activation = types.ModuleType("vllm.model_executor.layers.activation")
+
+        class GeluAndMul:  # noqa: N801
+            pass
+
+        class SiluAndMul:  # noqa: N801
+            pass
+
+        mock_activation.GeluAndMul = GeluAndMul
+        mock_activation.SiluAndMul = SiluAndMul
+        mock_layers.activation = mock_activation
+        mock_model_executor.layers = mock_layers
+        mock_vllm.model_executor = mock_model_executor
+
+        sys.modules["vllm"] = mock_vllm
+        sys.modules["vllm._custom_ops"] = mock_custom_ops
+        sys.modules["vllm.model_executor"] = mock_model_executor
+        sys.modules["vllm.model_executor.layers"] = mock_layers
+        sys.modules["vllm.model_executor.layers.activation"] = mock_activation
+
+    import sglang as sglang_module
+    import sglang.srt.entrypoints.engine  # noqa: F401
+    from sglang.srt.entrypoints import http_server as sglang_http_server
+    from sglang.srt.managers import io_struct as sglang_io_struct
+    from sglang.srt.managers import tokenizer_manager as sglang_tokenizer_manager
+
+    from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config as set_envs_and_config
+
+    sglang = sglang_module
+    ServerArgs = sglang_http_server.ServerArgs
+    _GlobalState = sglang_http_server._GlobalState
+    app = sglang_http_server.app
+    set_global_state = sglang_http_server.set_global_state
+    ContinueGenerationReqInput = sglang_io_struct.ContinueGenerationReqInput
+    GenerateReqInput = sglang_io_struct.GenerateReqInput
+    PauseGenerationReqInput = sglang_io_struct.PauseGenerationReqInput
+    ReleaseMemoryOccupationReqInput = sglang_io_struct.ReleaseMemoryOccupationReqInput
+    ResumeMemoryOccupationReqInput = sglang_io_struct.ResumeMemoryOccupationReqInput
+    ServerStatus = sglang_tokenizer_manager.ServerStatus
+    _set_envs_and_config = set_envs_and_config
 
 
 def _extract_prompt_logprobs_sglang(
@@ -109,7 +174,7 @@ def _extract_prompt_logprobs_sglang(
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
 
 
-class SGLangHttpServer:
+class SGLangHttpServer(Worker):
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
     python -m sglang.launch_server --node-rank 0 --nnode 1 ...
@@ -121,7 +186,6 @@ class SGLangHttpServer:
         replica_rank (int): replica rank, a replica may contain multiple nodes.
         node_rank (int): node rank.
         nnodes (int): number of nodes.
-        cuda_visible_devices (str): cuda visible devices.
     """
 
     def __init__(
@@ -129,21 +193,22 @@ class SGLangHttpServer:
         config: RolloutConfig,
         model_config: HFModelConfig,
         rollout_mode: RolloutMode,
-        workers: list[ActorHandle],
         replica_rank: int,
         node_rank: int,
         nnodes: int,
-        cuda_visible_devices: str,
-        base_gpu_id: int,
+        env_vars: dict[str, str] | None = None,
         disaggregation_role: str = "null",
         disaggregation_bootstrap_port: Optional[int] = None,
     ):
+        if "WORLD_SIZE" in os.environ:
+            super().__init__()
+        os.environ.update(env_vars or {})
+        _load_sglang_runtime()
+        cuda_visible_devices = os.environ.get(visible_devices_keyword, "")
         print(
             f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
             f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
         )
-        os.environ[visible_devices_keyword] = cuda_visible_devices
-
         assert disaggregation_role in ("null", "prefill", "decode"), (
             f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
         )
@@ -162,17 +227,14 @@ class SGLangHttpServer:
                     f"max_position_embeddings ({max_position_embeddings})"
                 )
         self.rollout_mode = rollout_mode
-        self.workers = workers
-
         self.replica_rank = replica_rank
         self.node_rank = node_rank
         self.nnodes = nnodes
-        self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
 
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
-        self._pd_decode_peers: list[ActorHandle] = []
+        self._pd_decode_peers: list = []
         self._pd_bootstrap_host: Optional[str] = None
 
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
@@ -180,7 +242,7 @@ class SGLangHttpServer:
             self.config.load_format = "auto"
 
         # used for http server
-        self._server_address = ray.util.get_node_ip_address().strip("[]")
+        self._server_address = get_local_ip_address()
         self._server_port = None
 
         # used for controlling sglang server profiler
@@ -194,12 +256,15 @@ class SGLangHttpServer:
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
-        # For multi-node, we need dist_init_addr so nodes can coordinate NCCL init.
-        # For single-node, let SGLang handle port selection internally via nccl_port,
-        # which also avoids port conflicts.
+        # Reserve the NCCL rendezvous port before concurrent server actors launch.
+        # SGLang's single-node fallback selects a random offset from its default
+        # HTTP port, so actors on the same host can select the same port before
+        # either scheduler subprocess binds it.
         self._master_address = None
         self._master_port = None
         self._master_sock = None
+        self._nccl_port = None
+        self._nccl_sock = None
         if self.nnodes > 1 and self.node_rank == 0:
             self._master_address = self._server_address
             self._master_port, self._master_sock = get_free_port(self._server_address, with_alive_sock=True)
@@ -207,15 +272,49 @@ class SGLangHttpServer:
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"
             )
+        elif self.nnodes == 1:
+            self._nccl_port, self._nccl_sock = get_free_port(self._server_address, with_alive_sock=True)
 
-    def get_master_address(self):
+    def _configure_rendezvous_args(self, args: dict[str, Any]) -> None:
+        if self.nnodes > 1:
+            dist_init_addr = (
+                f"[{self._master_address}]:{self._master_port}"
+                if is_valid_ipv6_address(self._master_address)
+                else f"{self._master_address}:{self._master_port}"
+            )
+            args["dist_init_addr"] = dist_init_addr
+        else:
+            assert self._nccl_port is not None
+            args["nccl_port"] = self._nccl_port
+
+    def _release_rendezvous_reservation(self) -> None:
+        reservation_attr = "_master_sock" if self.nnodes > 1 else "_nccl_sock"
+        reservation = getattr(self, reservation_attr)
+        if reservation is not None:
+            reservation.close()
+            setattr(self, reservation_attr, None)
+
+    async def get_master_address(self):
         """Get master address and port for init NCCL process group."""
         return self._master_address, self._master_port
 
-    def get_server_address(self):
+    async def get_server_address(self):
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    async def close(self) -> None:
+        """Stop request admission before shutting down the Runtime-owned sidecar."""
+        server_task = getattr(self, "_server_task", None)
+        self._server_task = None
+        try:
+            await stop_uvicorn(server_task)
+        finally:
+            for socket_name in ("_master_sock", "_nccl_sock"):
+                sock = getattr(self, socket_name, None)
+                if sock is not None:
+                    setattr(self, socket_name, None)
+                    sock.close()
 
     async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
         assert isinstance(decode_peers, list) and decode_peers
@@ -287,7 +386,7 @@ class SGLangHttpServer:
             "mem_fraction_static": self.config.gpu_memory_utilization,
             "disable_cuda_graph": self.config.enforce_eager,
             "enable_memory_saver": True,
-            "base_gpu_id": self.base_gpu_id,
+            "base_gpu_id": 0,
             "gpu_id_step": 1,
             "tp_size": infer_tp,
             "dp_size": self.config.data_parallel_size,
@@ -318,15 +417,7 @@ class SGLangHttpServer:
                     "lora_target_modules": self.model_config.target_modules,
                 }
             )
-        # Only set dist_init_addr for multi-node; for single-node, let SGLang
-        # handle port selection internally via nccl_port to avoid conflicts.
-        if self.nnodes > 1:
-            dist_init_addr = (
-                f"[{self._master_address}]:{self._master_port}"
-                if is_valid_ipv6_address(self._master_address)
-                else f"{self._master_address}:{self._master_port}"
-            )
-            args["dist_init_addr"] = dist_init_addr
+        self._configure_rendezvous_args(args)
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
@@ -382,7 +473,11 @@ class SGLangHttpServer:
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
-        server_args = ServerArgs(**args)
+        try:
+            server_args = ServerArgs(**args)
+        finally:
+            self._release_rendezvous_reservation()
+
         # For SGLang main branch or version >= 0.5.10
         # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
         if version.parse(sglang.__version__) >= version.parse("0.5.10"):
@@ -451,10 +546,8 @@ class SGLangHttpServer:
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
-            # In standalone mode, resume kv_cache if free_cache_engine is enabled
-            obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
-            await self.tokenizer_manager.resume_memory_occupation(obj, None)
-            await self.tokenizer_manager.flush_cache()
+            # Standalone checkpoint sync owns its kv-cache release/resume cycle.
+            return
 
     @property
     def lora_as_adapter(self) -> bool:
@@ -466,6 +559,11 @@ class SGLangHttpServer:
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # Standalone rollout does not share devices with the trainer. Its
+        # checkpoint sync releases only kv_cache immediately around the update.
+        if self.rollout_mode == RolloutMode.STANDALONE:
+            return
+
         # When using LoRA as adapter (merge=False), only release kv_cache —
         # keep base weights in GPU so we only need to sync adapter deltas.
         # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
@@ -474,16 +572,8 @@ class SGLangHttpServer:
         else:
             tags = ["kv_cache", "weights"]
 
-        if self.rollout_mode == RolloutMode.HYBRID:
-            obj = ReleaseMemoryOccupationReqInput(tags=tags)
-            await self.tokenizer_manager.release_memory_occupation(obj, None)
-        elif self.rollout_mode == RolloutMode.COLOCATED:
-            obj = ReleaseMemoryOccupationReqInput(tags=tags)
-            await self.tokenizer_manager.release_memory_occupation(obj, None)
-        elif self.rollout_mode == RolloutMode.STANDALONE:
-            # In standalone mode, resume kv_cache if free_cache_engine is enabled
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
-            await self.tokenizer_manager.release_memory_occupation(obj, None)
+        obj = ReleaseMemoryOccupationReqInput(tags=tags)
+        await self.tokenizer_manager.release_memory_occupation(obj, None)
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
@@ -532,15 +622,16 @@ class SGLangHttpServer:
                 bootstrap_port=self._disaggregation_bootstrap_port,
                 bootstrap_room=room,
             )
-            decode_coro = decode_peer.generate.remote(
-                prompt_ids,
-                dict(sampling_params),
-                f"{request_id}_D",
-                image_data=image_data,
-                video_data=video_data,
-                bootstrap_host=self._pd_bootstrap_host,
-                bootstrap_port=self._disaggregation_bootstrap_port,
-                bootstrap_room=room,
+            decode_coro = decode_peer.submit(
+                "generate",
+                args=(prompt_ids, dict(sampling_params), f"{request_id}_D"),
+                kwargs={
+                    "image_data": image_data,
+                    "video_data": video_data,
+                    "bootstrap_host": self._pd_bootstrap_host,
+                    "bootstrap_port": self._disaggregation_bootstrap_port,
+                    "bootstrap_room": room,
+                },
             )
             _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
             return decode_output
@@ -731,100 +822,56 @@ class SGLangReplica(RolloutReplica):
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
-        self.server_class = ray.remote(SGLangHttpServer)
 
     async def launch_servers(self):
         """Launch http server in each node."""
-        assert len(self.workers) == self.world_size, (
-            f"worker number {len(self.workers)} not equal to world size {self.world_size}"
-        )
-
-        # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
-        worker_infos = await asyncio.gather(
-            *[
-                worker.__ray_call__.remote(
-                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ[visible_devices_keyword])
-                )
-                for worker in self.workers
-            ]
-        )
-        worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
-        worker_node_ids = [worker_info[0] for worker_info in worker_infos]
-        base_gpu_id = 0
-        infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
-        replica_world_size = infer_tp * self.config.pipeline_model_parallel_size
-        if os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None):
-            logger.warning(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword} is set True!")
-            base_gpu_id = (0 + self.replica_rank * replica_world_size) % self.gpus_per_node
-        # create server actor in each node with node affinity and cuda visible devices
+        if self._worker_group is None or self.resource_pool is None:
+            raise RuntimeError("rollout worker placement is not initialized")
+        worker_devices = await RemoteCall.gather(self._worker_group.execute_all_async("get_assigned_device_id"))
+        # Create one Runtime-owned server WorkerGroup on every source host.
         for node_rank in range(self.nnodes):
-            workers = self.workers[
-                node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
-            ]
-            node_cuda_visible_devices_set = worker_cuda_visible_devices[
-                node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
-            ]
-            node_cuda_visible_devices = ",".join(
-                map(
-                    str,
-                    sorted(
-                        set(
-                            int(device)
-                            for worker_devices_set in node_cuda_visible_devices_set
-                            for device in worker_devices_set.split(",")
-                            if device.strip()
-                        )
-                    ),
-                )
-            )
-
-            node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
-            if self.is_reward_model:
-                name = f"sglang_server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            elif self.is_teacher_model:
-                name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            else:
-                name = f"sglang_server_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            server = self.server_class.options(
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=node_id,
-                    soft=False,
+            start = node_rank * self.gpus_per_replica_node
+            stop = (node_rank + 1) * self.gpus_per_replica_node
+            source_pool = self.resource_pool.slice(slice(start, stop))
+            server_env = {
+                **get_platform().rollout_env_vars(),
+                visible_devices_keyword: self._merge_cuda_visible_devices(
+                    worker_devices[start:stop], expected_count=self.gpus_per_replica_node
                 ),
-                runtime_env={
-                    "env_vars": {
-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
-                        **get_platform().rollout_env_vars(),
-                    }
-                },
-                name=name,
-                max_concurrency=self.max_concurrency,
-            ).remote(
-                config=self.config,
-                model_config=self.model_config,
-                rollout_mode=self.rollout_mode,
-                workers=workers,
-                replica_rank=self.replica_rank,
-                node_rank=node_rank,
-                nnodes=self.nnodes,
-                cuda_visible_devices=node_cuda_visible_devices,
-                base_gpu_id=base_gpu_id,
+            }
+            group = await self._create_server_worker_group(
+                ClassWithInitArgs(
+                    SGLangHttpServer,
+                    config=self.config,
+                    model_config=self.model_config,
+                    rollout_mode=self.rollout_mode,
+                    replica_rank=self.replica_rank,
+                    node_rank=node_rank,
+                    nnodes=self.nnodes,
+                    env_vars=server_env,
+                ),
+                source_pool=source_pool,
             )
-            self.servers.append(server)
+            self.servers.append(group.remote())
 
         # launch http server in each node
         master_address, master_port = None, None
         if self.nnodes > 1:
-            master_address, master_port = await self.servers[0].get_master_address.remote()
+            master_address, master_port = await self.servers[0].submit("get_master_address")
         await asyncio.gather(
             *[
-                server.launch_server.remote(master_address=master_address, master_port=master_port)
+                server.submit(
+                    "launch_server",
+                    kwargs={"master_address": master_address, "master_port": master_port},
+                )
                 for server in self.servers
             ]
         )
 
         # get http server address from first server
-        server_address, server_port = await self.servers[0].get_server_address.remote()
+        server_address, server_port = await self.servers[0].submit("get_server_address")
         self._server_handle = self.servers[0]
+        await self._set_server_endpoints([server for server in self.servers for _ in range(self.gpus_per_replica_node)])
         self._server_address = (
             f"[{server_address}]:{server_port}"
             if is_valid_ipv6_address(server_address)
@@ -837,8 +884,8 @@ class SGLangReplica(RolloutReplica):
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
-        await self.servers[0].abort_all_requests.remote()
+        await self.servers[0].submit("abort_all_requests")
 
     async def resume_generation(self):
         """Resume generation on the primary server after abort_all_requests."""
-        await self.servers[0].resume_generation.remote()
+        await self.servers[0].submit("resume_generation")

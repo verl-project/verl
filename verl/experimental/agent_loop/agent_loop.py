@@ -33,11 +33,9 @@ import os
 import random
 from abc import ABC, abstractmethod
 from typing import Any, Optional
-from uuid import uuid4
 
 import hydra
 import numpy as np
-import ray
 import torch
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
@@ -47,6 +45,13 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from verl import DataProto
 from verl.experimental.agent_loop.utils import resolve_config_path
+from verl.runtime import (
+    ClassWithInitArgs,
+    RemoteWorkerGroup,
+    ResourcePool,
+    Worker,
+    current_runtime,
+)
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
 from verl.utils.config import omega_conf_to_dataclass
@@ -198,7 +203,9 @@ class AgentLoopBase(ABC):
     environments.
 
     Args:
-        trainer_config (DictConfig): whole config for main entrypoint.
+        trainer_config (DictConfigWrap): whole config for main entrypoint.
+        rollout_config (DictConfigWrap): rollout config selected by topology ``config_key``.
+        model_config (DictConfigWrap): model config selected by topology ``config_key``.
         server_manager (LLMServerClient): OpenAI compatible LLM server manager.
         tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
         processor (AutoProcessor): Processor for process messages.
@@ -214,10 +221,15 @@ class AgentLoopBase(ABC):
         processor: AutoProcessor,
         dataset_cls: type[RLHFDataset],
         data_config: DictConfigWrap,
+        rollout_config: DictConfigWrap | None = None,
+        model_config: DictConfigWrap | None = None,
         **kwargs,
     ):
         self.config = trainer_config.config
-        self.rollout_config = self.config.actor_rollout_ref.rollout
+        self.rollout_config = (
+            rollout_config.config if rollout_config is not None else self.config.actor_rollout_ref.rollout
+        )
+        self.model_config = model_config.config if model_config is not None else self.config.actor_rollout_ref.model
         self.server_manager = server_manager
         self.tokenizer = tokenizer
         self.processor = processor
@@ -229,12 +241,11 @@ class AgentLoopBase(ABC):
         self.enable_continuous_token = False
         continuous_token_config = self.data_config.continuous_token
         if continuous_token_config.enable and self.processor is None:
-            model_config = self.config.actor_rollout_ref.model
             self.continuous_token_builder = create_continuous_token_builder(
                 self.tokenizer,
                 model_family=continuous_token_config.model_family,
-                model_path=model_config.path,
-                tokenizer_name_or_path=model_config.tokenizer_path,
+                model_path=self.model_config.path,
+                tokenizer_name_or_path=self.model_config.tokenizer_path,
                 chat_template_kwargs=self.apply_chat_template_kwargs,
             )
             self.enable_continuous_token = True
@@ -491,7 +502,9 @@ class AgentLoopWorker:
         config (DictConfig): whole config for main entrypoint.
         llm_client (LLMServerClient): Client for the LLM server.
         teacher_client (dict[str, LLMServerClient]): Client for multiple teacher servers.
-        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        reward_loop_worker_group (RemoteWorkerGroup): Runtime-native workers for streaming reward computation.
+        rollout_config (DictConfig): selected rollout config; defaults to the legacy config path.
+        model_config (DictConfig): selected model config; defaults to the legacy config path.
     """
 
     def __init__(
@@ -499,13 +512,18 @@ class AgentLoopWorker:
         config: DictConfig,
         llm_client: LLMServerClient,
         teacher_client: dict[str, LLMServerClient] = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        reward_loop_worker_group: RemoteWorkerGroup | None = None,
+        *,
+        rollout_config: DictConfig | None = None,
+        model_config: DictConfig | None = None,
     ):
         self.config = config
         self.llm_client = llm_client
         self.teacher_client = teacher_client
-        self.reward_loop_worker_handles = reward_loop_worker_handles
-        rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
+        self.reward_loop_worker_group = reward_loop_worker_group
+
+        rollout_config = rollout_config if rollout_config is not None else config.actor_rollout_ref.rollout
+        model_config = model_config if model_config is not None else config.actor_rollout_ref.model
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
 
@@ -684,6 +702,8 @@ class AgentLoopWorker:
             agent_loop = hydra.utils.instantiate(
                 config=agent_loop_config,
                 trainer_config=DictConfigWrap(config=self.config),
+                rollout_config=DictConfigWrap(config=self.rollout_config),
+                model_config=DictConfigWrap(config=self.model_config),
                 server_manager=self.llm_client,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
@@ -942,7 +962,8 @@ class AgentLoopWorker:
 
     async def _compute_score(self, outputs: list[AgentLoopOutput], kwargs: dict) -> None:
         """Compute reward score for all outputs in a trajectory; assigns result to outputs[-1]."""
-        enable_async_reward = self.reward_loop_worker_handles is not None
+        reward_loop_worker_group = self.reward_loop_worker_group
+        enable_async_reward = reward_loop_worker_group is not None
 
         final_output = outputs[-1]
         if final_output.reward_score is None and enable_async_reward:
@@ -998,8 +1019,8 @@ class AgentLoopWorker:
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
                 )
-                selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-                result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+                rank = random.randrange(reward_loop_worker_group.world_size)
+                result = await reward_loop_worker_group.rank(rank).compute_score(data)
                 final_output.reward_score = result["reward_score"]
                 final_output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
             final_output.metrics.compute_score = timing["compute_score"]
@@ -1076,7 +1097,7 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
-        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
+        if self.reward_loop_worker_group is None and input_non_tensor_batch:
             non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
@@ -1145,6 +1166,14 @@ async def get_trajectory_info(step, index, validate):
     return trajectory_info
 
 
+class RuntimeAgentLoopWorker(AgentLoopWorker, Worker):
+    """AgentLoopWorker hosted by a backend-neutral Runtime WorkerGroup."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        Worker.__init__(self)
+        AgentLoopWorker.__init__(self, *args, **kwargs)
+
+
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers.
 
@@ -1152,7 +1181,9 @@ class AgentLoopManager:
         config (DictConfig): whole config for main entrypoint.
         llm_client (LLMServerClient): Client for the LLM server.
         teacher_client (dict[str, LLMServerClient]): Client for multiple teacher servers.
-        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        reward_loop_worker_group (RemoteWorkerGroup): Runtime-native workers for streaming reward computation.
+        rollout_config (DictConfig): selected rollout config; defaults to the legacy config path.
+        model_config (DictConfig): selected model config; defaults to the legacy config path.
     """
 
     def __init__(
@@ -1160,17 +1191,20 @@ class AgentLoopManager:
         config: DictConfig,
         llm_client: LLMServerClient,
         teacher_client: dict[str, LLMServerClient] = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        reward_loop_worker_group: RemoteWorkerGroup | None = None,
+        *,
+        worker_resource_pool: ResourcePool,
+        rollout_config: DictConfig | None = None,
+        model_config: DictConfig | None = None,
     ):
         self.config = config
-        self.rollout_config = config.actor_rollout_ref.rollout
-        self.model_config = config.actor_rollout_ref.model
+        self.rollout_config = rollout_config if rollout_config is not None else config.actor_rollout_ref.rollout
+        self.model_config = model_config if model_config is not None else config.actor_rollout_ref.model
         self.llm_client = llm_client
         self.teacher_client = teacher_client
-        self.reward_loop_worker_handles = reward_loop_worker_handles
-
-        if not hasattr(self, "agent_loop_workers_class"):
-            self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
+        self.reward_loop_worker_group = reward_loop_worker_group
+        self.worker_resource_pool = worker_resource_pool
+        self.agent_loop_worker_group = None
 
     @classmethod
     @auto_await
@@ -1181,26 +1215,34 @@ class AgentLoopManager:
         return instance
 
     async def _init_agent_loop_workers(self):
-        self.agent_loop_workers = []
         num_workers = self.rollout_config.agent.num_workers
-
-        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
-        for i in range(num_workers):
-            # Round-robin scheduling over the all nodes
-            node_id = node_ids[i % len(node_ids)]
-            self.agent_loop_workers.append(
-                self.agent_loop_workers_class.options(
-                    name=f"agent_loop_worker_{i}" + f"_{uuid4().hex[:8]}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id, soft=True
-                    ),
-                ).remote(
-                    self.config,
-                    self.llm_client,
-                    self.teacher_client,
-                    self.reward_loop_worker_handles,
-                )
+        nnodes = self.worker_resource_pool.nnodes
+        if num_workers % nnodes:
+            raise ValueError(
+                f"rollout.agent.num_workers={num_workers} must be divisible by worker ResourcePool nnodes={nnodes}"
             )
+        runtime = current_runtime()
+        cpu_pool = runtime.create_resource_pool(
+            nnodes=nnodes,
+            processes_per_node=num_workers // nnodes,
+            device_type="cpu",
+            on=self.worker_resource_pool,
+        )
+        worker_group = await runtime.create_worker_group_async(
+            ClassWithInitArgs(
+                RuntimeAgentLoopWorker,
+                config=self.config,
+                rollout_config=self.rollout_config,
+                model_config=self.model_config,
+                llm_client=self.llm_client,
+                teacher_client=self.teacher_client,
+                reward_loop_worker_group=self.reward_loop_worker_group,
+            ),
+            on=cpu_pool,
+        )
+        self.agent_loop_worker_group = worker_group
+        remote_group = worker_group.remote()
+        self.agent_loop_workers = [remote_group.rank(rank) for rank in range(remote_group.world_size)]
 
     @auto_await
     @SkipManager.annotate(role="rollout")
@@ -1220,12 +1262,10 @@ class AgentLoopManager:
             prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
-        outputs = await asyncio.gather(
-            *[
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
-            ]
-        )
+        calls = [
+            worker.generate_sequences(chunk) for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+        ]
+        outputs = await asyncio.gather(*calls)
         output = outputs[0].concat(outputs)
 
         # calculate performance metrics

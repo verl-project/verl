@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import inspect
+import warnings
 from functools import partial, wraps
 from types import FunctionType
 
-from verl.protocol import DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
 
 # here we add a magic number of avoid user-defined function already have this attribute
@@ -92,7 +92,7 @@ def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
 
 
 def _split_args_kwargs_data_proto_with_auto_padding(chunks, *args, **kwargs):
-    from verl.protocol import BatchData, DataProtoFuture
+    from verl.protocol import BatchData, DataProtoFuture, _padding_size_key
 
     data_proto_len = None
     padding_size = None
@@ -152,9 +152,9 @@ def _concat_data_proto_or_future(output: list):
 
 
 def dispatch_dp_compute(worker_group, *args, **kwargs):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
+    assert isinstance(worker_group, RemoteWorkerGroup)
     for arg in args:
         assert isinstance(arg, tuple | list) and len(arg) == worker_group.world_size
     for k, v in kwargs.items():
@@ -163,17 +163,17 @@ def dispatch_dp_compute(worker_group, *args, **kwargs):
 
 
 def collect_dp_compute(worker_group, output):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
+    assert isinstance(worker_group, RemoteWorkerGroup)
     assert len(output) == worker_group.world_size
     return output
 
 
 def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
+    assert isinstance(worker_group, RemoteWorkerGroup)
     # Note: enable auto padding for dp compute DatapProto
     splitted_args, splitted_kwargs = _split_args_kwargs_data_proto_with_auto_padding(
         worker_group.world_size,
@@ -184,9 +184,9 @@ def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
 
 
 def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
+    assert isinstance(worker_group, RemoteWorkerGroup)
     assert isinstance(args[0], FunctionType)  # NOTE: The first one args is a function!
 
     splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(worker_group.world_size, *args[1:], **kwargs)
@@ -206,18 +206,9 @@ def collect_dp_compute_data_proto(worker_group, output):
 
 
 def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
-    import os
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    from verl.single_controller.base.worker_group import WorkerGroup
-    from verl.utils.ray_utils import parallel_put
-
-    assert isinstance(worker_group, WorkerGroup)
-
-    max_workers = max(1, min(len(args[0]), os.cpu_count()))
-
-    args = [parallel_put(arg, max_workers=max_workers) for arg in args]
-    kwargs = {k: parallel_put(v, max_workers=max_workers) for k, v in kwargs.items()}
-
+    assert isinstance(worker_group, RemoteWorkerGroup)
     all_args = []
     for arg in args:
         assert isinstance(arg, tuple | list) and len(arg) == dp_size
@@ -240,9 +231,9 @@ def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args
 
 
 def collect_nd_compute(collect_mask: list[bool], worker_group, output):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
+    assert isinstance(worker_group, RemoteWorkerGroup)
     assert len(output) == worker_group.world_size
 
     output_in_dp = []
@@ -270,10 +261,9 @@ def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output)
 
 
 def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
-
+    assert isinstance(worker_group, RemoteWorkerGroup)
     # query dispatch info of the worker group
     if mesh_name not in worker_group._dispatch_info:
         worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
@@ -286,10 +276,9 @@ def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
 
 def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
-    from verl.single_controller.base.worker_group import WorkerGroup
+    from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
 
-    assert isinstance(worker_group, WorkerGroup)
-
+    assert isinstance(worker_group, RemoteWorkerGroup)
     # the dispatch info is stored in the worker group
     assert mesh_name in worker_group._dispatch_info
 
@@ -304,6 +293,15 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
 
 def make_nd_compute_dataproto_dispatch_fn(mesh_name):
+    """Build a ``register(dispatch_mode=...)`` mapping that splits DataProto by a device mesh.
+
+    Args:
+        mesh_name: Mesh registered by the worker; its data-parallel ranks receive
+            chunks and its collect ranks contribute outputs.
+
+    Returns:
+        A dict with ``dispatch_fn`` and ``collect_fn`` bound to ``mesh_name``.
+    """
     return {
         "dispatch_fn": partial(dispatch_lazy_compute_data_proto, mesh_name),
         "collect_fn": partial(collect_lazy_compute_data_proto, mesh_name),
@@ -387,6 +385,8 @@ def _check_execute_mode(execute_mode):
 
 
 def _materialize_futures(*args, **kwargs):
+    from verl.protocol import DataProtoFuture
+
     new_args = []
     for arg in args:
         if isinstance(arg, DataProtoFuture):
@@ -399,6 +399,20 @@ def _materialize_futures(*args, **kwargs):
 
     new_args = tuple(new_args)
     return new_args, kwargs
+
+
+def _warn_timeout_parameter_collision(func):
+    """Warn when a registered method declares a business parameter named timeout."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return
+    if "timeout" in signature.parameters:
+        warnings.warn(
+            f"{func.__qualname__} declares a parameter named 'timeout'; "
+            "bound WorkerGroup methods reserve 'timeout' as an RPC control keyword",
+            stacklevel=3,
+        )
 
 
 def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=True, materialize_futures=True):
@@ -428,6 +442,8 @@ def register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocki
     _check_execute_mode(execute_mode=execute_mode)
 
     def decorator(func):
+        _warn_timeout_parameter_collision(func)
+
         @wraps(func)
         def inner(*args, **kwargs):
             if materialize_futures:

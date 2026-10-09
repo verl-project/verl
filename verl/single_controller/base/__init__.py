@@ -12,7 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .worker import Worker
-from .worker_group import ClassWithInitArgs, ResourcePool, WorkerGroup
+"""Backend-neutral foundational Runtime types and helpers."""
 
-__all__ = ["Worker", "WorkerGroup", "ClassWithInitArgs", "ResourcePool"]
+from __future__ import annotations
+
+from verl.single_controller.base.actor import ClassWithInitArgs, WorkerContainer
+from verl.single_controller.base.decorator import Dispatch, Execute, make_nd_compute_dataproto_dispatch_fn, register
+from verl.single_controller.base.errors import (
+    PlacementUnavailableError,
+    RPCError,
+    RPCRemoteError,
+    RPCTimeoutError,
+    RPCTransportError,
+    RPCUnavailableError,
+)
+from verl.single_controller.base.remote_call import RemoteCall
+from verl.single_controller.base.remote_worker_group import RemoteWorkerGroup
+from verl.single_controller.base.resource_pool import ResourcePool
+from verl.single_controller.base.worker import DistGlobalInfo, DistRankInfo, Worker, WorkerHelper
+from verl.single_controller.base.worker_group import WorkerGroup
+
+__all__ = [
+    "ClassWithInitArgs",
+    "Dispatch",
+    "DistGlobalInfo",
+    "DistRankInfo",
+    "Execute",
+    "PlacementUnavailableError",
+    "RPCError",
+    "RPCRemoteError",
+    "RPCTimeoutError",
+    "RPCTransportError",
+    "RPCUnavailableError",
+    "RemoteCall",
+    "RemoteWorkerGroup",
+    "ResourcePool",
+    "Worker",
+    "WorkerContainer",
+    "WorkerGroup",
+    "WorkerHelper",
+    "make_nd_compute_dataproto_dispatch_fn",
+    "register",
+]

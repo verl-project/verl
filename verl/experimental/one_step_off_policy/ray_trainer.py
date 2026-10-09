@@ -32,12 +32,9 @@ from tqdm import tqdm
 
 from verl import DataProto
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.ray_trainer import (
-    ResourcePoolManager,
-    compute_response_mask,
-)
+from verl.trainer.ppo.ray_trainer import compute_response_mask
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
@@ -172,9 +169,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
         enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
-        # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
-        # to stream reward computation with actor rollout
-        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        reward_loop_worker_group = self.reward_loop_manager.remote_worker_group if enable_agent_reward_loop else None
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
@@ -191,7 +186,8 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(),
-            reward_loop_worker_handles=reward_loop_worker_handles,
+            reward_loop_worker_group=reward_loop_worker_group,
+            worker_resource_pool=self.actor_rollout_wg.resource_pool,
         )
 
     def _create_continuous_iterator(self):

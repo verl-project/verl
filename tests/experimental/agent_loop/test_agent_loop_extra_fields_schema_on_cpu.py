@@ -229,7 +229,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         "_DummyWorker",
         (),
         {
-            "reward_loop_worker_handles": None,
+            "reward_loop_worker_group": None,
             "distillation_enabled": False,
         },
     )()
@@ -277,7 +277,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
             self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
             self.processor = None
             self.mm_processor_kwargs = {}
-            self.reward_loop_worker_handles = None
+            self.reward_loop_worker_group = None
 
     routed_experts = np.arange(8, dtype=np.int64).reshape(4, 2, 1)
     routed_experts.setflags(write=False)

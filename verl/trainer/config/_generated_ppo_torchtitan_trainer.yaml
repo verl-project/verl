@@ -822,6 +822,10 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+topology:
+  clusters: []
+  device_pools: []
+  models: []
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -916,3 +920,11 @@ ray_kwargs:
   ray_init:
     num_cpus: null
   timeline_json_file: null
+  placement_ready_timeout_s: 300.0
+runtime:
+  backend: ray
+  ray: {}
+  monarch:
+    job_mode: current
+    worker_ready_timeout_s: 300
+    shutdown_timeout_s: 300

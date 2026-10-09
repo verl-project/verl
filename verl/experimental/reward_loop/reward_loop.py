@@ -18,14 +18,19 @@ import os
 
 import aiohttp
 import numpy as np
-import ray
 from omegaconf import DictConfig, open_dict
-from ray.actor import ActorHandle
 from tensordict import TensorDict
 
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
-from verl.single_controller.ray.base import RayResourcePool
+from verl.runtime import (
+    ClassWithInitArgs,
+    RemoteCall,
+    RemoteWorkerGroup,
+    ResourcePool,
+    Worker,
+    current_runtime,
+)
 from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
@@ -107,26 +112,41 @@ class RewardLoopWorker:
         -> rm is genrm: raise error (user-costomized reward func must be provided)
     """
 
-    def __init__(self, config: DictConfig, reward_router_address: str = None):
+    def __init__(
+        self,
+        config: DictConfig,
+        reward_router_address: str = None,
+        *,
+        input_model_config: DictConfig | None = None,
+        reward_model_config: DictConfig | None = None,
+    ):
         """
         Args:
             config: DictConfig, the config for reward loop worker.
             reward_router_address: str, the address of reward router.
+            input_model_config: model config selected for tokenizing policy samples.
+            reward_model_config: reward-model config selected by topology ``config_key``.
         """
         self.config = config
+        self.input_model_config = (
+            input_model_config if input_model_config is not None else config.actor_rollout_ref.model
+        )
+        self.reward_model_config = (
+            reward_model_config if reward_model_config is not None else config.reward.reward_model
+        )
         self.reward_router_address = reward_router_address
         self._init_reward_fn()
         self.loop = get_event_loop()
 
     def _init_reward_fn(self):
-        input_tokenizer_path = self.config.actor_rollout_ref.model.tokenizer_path
+        input_tokenizer_path = self.input_model_config.tokenizer_path
         if input_tokenizer_path is None:
-            input_tokenizer_path = self.config.actor_rollout_ref.model.path
+            input_tokenizer_path = self.input_model_config.path
         input_tokenizer_local_path = copy_to_local(input_tokenizer_path)
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
         self.reward_model_tokenizer = None
-        if self.config.reward.reward_model.enable:
-            reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
+        if self.reward_model_config.enable:
+            reward_model_tokenizer_local_path = copy_to_local(self.reward_model_config.model_path)
             self.reward_model_tokenizer = hf_tokenizer(reward_model_tokenizer_local_path, trust_remote_code=True)
 
         self.reward_manager = load_reward_manager(
@@ -148,7 +168,7 @@ class RewardLoopWorker:
             # directly use user-customized reward function
             return await self.reward_manager.run_single(data)
         else:
-            if self.config.reward.reward_model.enable:
+            if self.reward_model_config.enable:
                 # we assume the rm is disrm
                 # genrm must set custom_reward_function
                 return await self.compute_score_disrm(data[-1:])
@@ -231,8 +251,8 @@ class RewardLoopWorker:
 
     async def compute_score_disrm(self, data: DataProto) -> dict:
         disrm_prompt = await self._preprocess_reward_inputs(data)
-        engine_name = self.config.reward.reward_model.rollout.name
-        model_name = self.config.reward.reward_model.model_path
+        engine_name = self.reward_model_config.rollout.name
+        model_name = self.reward_model_config.model_path
         if engine_name == "vllm":
             payloads = {
                 "model": model_name,
@@ -271,69 +291,126 @@ class RewardLoopWorker:
         return {"reward_score": rm_score}
 
 
+class RuntimeRewardLoopWorker(RewardLoopWorker, Worker):
+    """RewardLoopWorker hosted by a backend-neutral Runtime WorkerGroup."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        Worker.__init__(self)
+        RewardLoopWorker.__init__(self, *args, **kwargs)
+
+    def close(self) -> None:
+        close = getattr(self.reward_manager, "close", None)
+        if callable(close):
+            close()
+
+
 class RewardLoopManager:
     """
     RewardLoopManager run in single controller.
     This class will create reward loop workers and manage them.
     """
 
-    def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
+    def __init__(
+        self,
+        config: DictConfig,
+        rm_resource_pool: ResourcePool | None = None,
+        *,
+        worker_resource_pool: ResourcePool,
+        input_model_config: DictConfig | None = None,
+        reward_model_config: DictConfig | None = None,
+    ):
+        """Create reward workers using explicitly selected model configs.
+
+        Args:
+            config: Whole trainer config for algorithm and reward-function settings.
+            rm_resource_pool: GPU pool for a colocated or dedicated reward model.
+            worker_resource_pool: Host pool used to place Runtime reward-loop workers.
+            input_model_config: Policy model config used to tokenize reward inputs.
+            reward_model_config: Reward-model config selected by topology ``config_key``.
+        """
         self.config = config
-        if self.config.reward.reward_model.enable:
-            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
+        self.input_model_config = (
+            input_model_config if input_model_config is not None else config.actor_rollout_ref.model
+        )
+        self.reward_model_config = (
+            reward_model_config if reward_model_config is not None else config.reward.reward_model
+        )
+        if self.reward_model_config.enable:
+            rm_rollout = self.reward_model_config.rollout
+            # The discriminative /classify (pooling) path is not covered by
+            # VLLM_BATCH_INVARIANT (vLLM batch invariance is verified on generation
+            # models, not pooling RM architectures). Serialize /classify with
+            # max_num_seqs=1 to keep it bitwise reproducible. The generative
+            # /v1/chat/completions path (custom reward fn) is user-managed and not
+            # forced here — rely on VLLM_BATCH_INVARIANT + per-request seed.
+            if (
+                rm_rollout.full_determinism
+                and self.config.reward.custom_reward_function.path is None
+                and rm_rollout.max_num_seqs != 1
+            ):
+                logger.warning(
+                    "[reward_model] full_determinism=True: forcing rollout.max_num_seqs "
+                    "from %s to 1 for the /classify pooling path (batch invariance not "
+                    "verified for pooling RM). See the determinism doc.",
+                    rm_rollout.max_num_seqs,
+                )
+                with open_dict(self.config):
+                    rm_rollout.max_num_seqs = 1
+            self.reward_model_manager = RewardModelManager(self.reward_model_config, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
             self.reward_model_manager = None
             self.reward_router_address = None
 
-        self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self.reward_manager_cls = resolve_reward_manager_cls(config)
-        self._init_reward_loop_workers()
+        self.worker_group = None
+        self._init_runtime_reward_loop_workers(worker_resource_pool)
 
     @property
-    def reward_loop_worker_handles(self) -> list[ActorHandle]:
-        """Return worker handles for agent loop worker to compute reward score.
-
-        Only return worker handles when reward computation can be parallelized with rollout:
-        (1) rule-based reward without reward model
-        (2) reward model with extra resource pool
-        """
-        if not self.config.reward.reward_model.enable or self.config.reward.reward_model.enable_resource_pool:
-            return self.reward_loop_workers
+    def remote_worker_group(self) -> RemoteWorkerGroup | None:
+        """Return the serializable Runtime group used by streaming reward calls."""
+        if self.worker_group is not None and (
+            not self.reward_model_config.enable or self.reward_model_config.enable_resource_pool
+        ):
+            return self.worker_group.remote()
         return None
 
-    def _init_reward_loop_workers(self):
-        self.reward_loop_workers = []
+    def _init_runtime_reward_loop_workers(self, worker_resource_pool: ResourcePool) -> None:
         num_workers = self.config.reward.num_workers
-        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
-
-        for i in range(num_workers):
-            # Round-robin scheduling over the all nodes
-            node_id = node_ids[i % len(node_ids)]
-
-            self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=True,
-                    ),
-                ).remote(self.config, self.reward_router_address)
+        nnodes = worker_resource_pool.nnodes
+        if num_workers % nnodes:
+            raise ValueError(
+                f"reward.num_workers={num_workers} must be divisible by worker ResourcePool nnodes={nnodes}"
             )
+        runtime = current_runtime()
+        cpu_pool = runtime.create_resource_pool(
+            nnodes=nnodes,
+            processes_per_node=num_workers // nnodes,
+            device_type="cpu",
+            on=worker_resource_pool,
+        )
+        self.worker_group = runtime.create_worker_group(
+            ClassWithInitArgs(
+                RuntimeRewardLoopWorker,
+                config=self.config,
+                reward_router_address=self.reward_router_address,
+                input_model_config=self.input_model_config,
+                reward_model_config=self.reward_model_config,
+            ),
+            on=cpu_pool,
+        )
 
     def compute_rm_score(self, data: DataProto) -> DataProto:
         if self.reward_model_manager is not None:
             self.reward_model_manager.wake_up()
 
-        num_workers = len(self.reward_loop_workers)
+        num_workers = self.worker_group.world_size
         padded_data, pad_size = pad_dataproto_to_divisor(data, num_workers)
         chunks = padded_data.chunk(num_workers)
-        outputs = ray.get(
-            [
-                worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(self.reward_loop_workers, chunks, strict=True)
-            ]
-        )
+        remote_group = self.worker_group.remote()
+        outputs = RemoteCall.gather(
+            [remote_group.rank(rank).compute_score_batch(chunk) for rank, chunk in enumerate(chunks)]
+        ).result()
         outputs_flat = [item for sublist in outputs for item in sublist]
         if pad_size > 0:
             outputs_flat = outputs_flat[: len(data)]

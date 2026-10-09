@@ -19,11 +19,10 @@ import socket
 from datetime import timedelta
 from typing import Any
 
-import ray
 import torch.distributed
 from torch.distributed import TCPStore
 
-from verl.utils.device import get_device_name, get_nccl_backend, get_resource_name, get_torch_device, is_npu_available
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_npu_available
 from verl.utils.net_utils import is_ipv6
 
 
@@ -42,12 +41,7 @@ def set_numa_affinity():
 
         pynvml.nvmlInit()
         initialized = True
-        device_name = get_resource_name()
-        # Avoid ray.init in SFT trainer.
-        if ray.is_initialized():
-            local_rank = int(ray.get_runtime_context().get_accelerator_ids()[device_name][0])
-        else:
-            local_rank = int(os.environ["LOCAL_RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
         handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
         pynvml.nvmlDeviceSetCpuAffinity(handle)
     except ImportError:
@@ -79,9 +73,8 @@ def destroy_global_process_group():
         torch.distributed.destroy_process_group()
 
 
-def initialize_global_process_group_ray(timeout_second=None, backend=None):
-    # in current ray environment, LOCAL_RANK is always zero.
-
+def initialize_worker_process_group(timeout_second=None, backend=None):
+    """Initialize the default process group from Worker environment variables."""
     import torch.distributed
 
     timeout = timedelta(seconds=timeout_second) if timeout_second is not None else None
@@ -96,6 +89,11 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
             timeout=timeout,
             init_method=os.environ.get("DIST_INIT_METHOD", None),
         )
+
+
+def initialize_global_process_group_ray(timeout_second=None, backend=None):
+    """Compatibility entrypoint; initialize from backend-neutral Worker environment variables."""
+    return initialize_worker_process_group(timeout_second=timeout_second, backend=backend)
 
 
 def create_tcp_store(

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Ray controller interface, including the historical ``ray.base`` names."""
+
 from .base import (
     RayClassWithInitArgs,
     RayResourcePool,

@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
+import dataclasses
+import functools
+import gc
 import json
 import logging
 import os
@@ -20,7 +23,7 @@ import signal
 import threading
 from collections.abc import Mapping
 from types import MethodType
-from typing import Any, Literal, Optional, get_args
+from typing import Any, Literal, get_args
 
 import torch
 from vllm.outputs import RequestOutput
@@ -239,6 +242,43 @@ class vLLMColocateWorkerExtension:
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
+    def release_cumem_pools(self) -> None:
+        """Release sleep-mode pools before Python starts finalizing extensions.
+
+        vLLM 0.19.x keeps both ``torch.cuda.MemPool`` and its pluggable
+        allocator wrapper in ``CuMemAllocator.allocator_and_pools``.  MemPool
+        only owns a raw pointer to the allocator.  If interpreter shutdown
+        happens to finalize the allocator first, the later MemPool destructor
+        calls through a freed virtual table and aborts in
+        ``MemPool::~MemPool -> emptyCache -> release_block`` (PyTorch #145168).
+
+        This is the two-phase release order used by newer upstream vLLM: drop
+        and collect MemPools while allocator wrappers are still strongly held,
+        then release the wrappers.  Keep it here as a compatibility hook until
+        the minimum supported vLLM exposes ``CuMemAllocator.release_pools()``.
+        """
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        allocator = CuMemAllocator.instance
+        if allocator is None:
+            return
+        upstream_release = getattr(allocator, "release_pools", None)
+        if upstream_release is not None:
+            upstream_release()
+            return
+        pools = getattr(allocator, "allocator_and_pools", None)
+        if not pools:
+            return
+
+        pool_entries = list(pools.values())
+        pools.clear()
+        mem_pools = [entry[0] for entry in pool_entries]
+        allocators = [entry[1] for entry in pool_entries]
+        pool_entries.clear()
+        mem_pools.clear()
+        gc.collect()
+        allocators.clear()
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
@@ -358,7 +398,7 @@ class vLLMColocateWorkerExtension:
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
 
-        Uses Ray job id + replica_rank + rollout-local rank to match the sender
+        Uses Runtime id + replica_rank + rollout-local rank to match the sender
         side and avoid cross-job collisions on shared hosts.
         In PD mode, each engine actor's local ranks start at 0; the optional
         VERL_ZMQ_BASE_TRAINER_RANK offset maps them back to trainer ranks.
@@ -390,6 +430,20 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+@functools.lru_cache(maxsize=1)
+def _optional_bool_vllm_args() -> set[str]:
+    """Return the names of vLLM `AsyncEngineArgs` fields typed exactly `bool | None`.
+
+    For such fields an omitted flag leaves the None default, which vLLM can
+    resolve to True at engine-config time (e.g. `enable_prefix_caching`), so
+    an explicit False must be serialized as `--no-<flag>` instead of being
+    dropped.
+    """
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    return {f.name for f in dataclasses.fields(AsyncEngineArgs) if set(get_args(f.type)) == {bool, type(None)}}
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -397,7 +451,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for Optional[bool] engine args (whose None
+      default resolves to True), otherwise skipped
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -416,6 +471,9 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k.replace("-", "_") in _optional_bool_vllm_args():
+                # Absent flag resolves to True at engine-config time.
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value
@@ -449,7 +507,7 @@ def build_mtp_speculative_config(
     }
 
 
-def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):
+def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: int | None, result_dict: dict[str, list]):
     """Extract prompt log probabilities from generation output."""
     if num_prompt_logprobs is None:
         return

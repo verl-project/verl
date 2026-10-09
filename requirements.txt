@@ -1,8 +1,10 @@
 # requirements.txt records the full set of dependencies for development
 accelerate
+cachetools
 codetiming
 datasets
 dill
+exceptiongroup; python_version < '3.11'
 hydra-core
 liger-kernel
 numpy>=2.0.0

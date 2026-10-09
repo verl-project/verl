@@ -42,6 +42,9 @@ defaults:
   # distillation config
   - distillation@distillation: distillation
 
+  # Declarative model placement.
+  - topology@topology: topology
+
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_
@@ -404,3 +407,27 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+  # Maximum seconds to wait for topology placement groups to become ready
+  placement_ready_timeout_s: 300.0
+
+# Runtime resource and RPC backend.
+runtime:
+
+  # Supported values: ray, monarch.
+  backend: ray
+
+  # Ray settings are populated from ray_kwargs for backward compatibility.
+  ray: {}
+
+  # Monarch can load the current applied job or create a local ProcessJob.
+  monarch:
+
+    # Supported values: current, process.
+    job_mode: current
+
+    # Maximum seconds to wait for Monarch host, process, actor, and Worker readiness.
+    worker_ready_timeout_s: 300
+
+    # Maximum seconds to wait for runtime shutdown.
+    shutdown_timeout_s: 300

@@ -21,17 +21,16 @@ import os
 import socket
 
 import hydra
-import ray
 
 from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayTrainer
 from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
+from verl.runtime import Worker
 from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
 
 
-@ray.remote(num_cpus=10, max_concurrency=100)  # please make sure main_task is not scheduled on head
-class OneStepTaskRunner:
+class OneStepTaskRunner(Worker):
     def run(self, config):
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint

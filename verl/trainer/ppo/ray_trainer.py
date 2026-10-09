@@ -24,7 +24,7 @@ import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pprint import pprint
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,10 +34,9 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.neoproto.storage import DefaultStorageEngine, set_default_storage_engine
+from verl.experimental.neoproto.storage import configure_storage_engine
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.runtime import ClassWithInitArgs, ResourcePool, current_runtime, select_backend
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
@@ -49,7 +48,11 @@ from verl.trainer.ppo.metric_utils import (
     compute_variance_proxy_metrics,
     process_validation_metrics,
 )
+from verl.trainer.ppo.model_config import PPOModelConfigs, PPORoleConfigs
 from verl.trainer.ppo.reward import extract_reward
+from verl.trainer.ppo.runtime_resource_pool import (
+    ResourcePoolManagerProtocol,
+)
 from verl.trainer.ppo.utils import (
     Role,
     WorkerType,
@@ -70,7 +73,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.skip.skip_manager import SkipManager
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import DistillationConfig, EngineConfig
+from verl.workers.config import EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 
 
@@ -190,7 +193,7 @@ def compute_advantage(
     lam: float = 1.0,
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
-    config: Optional[AlgoConfig] = None,
+    config: AlgoConfig | None = None,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -292,20 +295,18 @@ class RayPPOTrainer:
     Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
     """
 
-    # TODO: support each role have individual ray_worker_group_cls,
-    # i.e., support different backend of different role
     def __init__(
         self,
         config,
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
-        resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
+        resource_pool_manager: ResourcePoolManagerProtocol,
+        model_configs: PPOModelConfigs | None = None,
         processor=None,
-        train_dataset: Optional[Dataset] = None,
-        val_dataset: Optional[Dataset] = None,
+        train_dataset: Dataset | None = None,
+        val_dataset: Dataset | None = None,
         collate_fn=None,
-        train_sampler: Optional[Sampler] = None,
+        train_sampler: Sampler | None = None,
         device_name=None,
     ):
         """
@@ -316,8 +317,8 @@ class RayPPOTrainer:
             config: Configuration object containing training parameters.
             tokenizer: Tokenizer used for encoding and decoding text.
             role_worker_mapping (dict[Role, WorkerType]): Mapping from roles to worker classes.
-            resource_pool_manager (ResourcePoolManager): Manager for Ray resource pools.
-            ray_worker_group_cls (RayWorkerGroup, optional): Class for Ray worker groups. Defaults to RayWorkerGroup.
+            resource_pool_manager (ResourcePoolManagerProtocol): Manager for Runtime resource pools.
+            model_configs: Model configs selected by topology ``config_key`` values. ``None`` keeps the legacy paths.
             processor: Optional data processor, used for multimodal data
             train_dataset (Optional[Dataset], optional): Training dataset. Defaults to None.
             val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
@@ -332,11 +333,21 @@ class RayPPOTrainer:
         self.config = config
         # NeoProto is the single trainer data path. ``DataProto`` is its
         # backward-compatible public API, not a runtime-selectable alternative.
-        set_default_storage_engine(DefaultStorageEngine())
+        configure_storage_engine(select_backend(config.runtime))
         if os.environ.get("NEO_BRIDGE_FULL_MATERIALIZE", "0") != "0":
             raise RuntimeError("The NeoProto-only trainer forbids NEO_BRIDGE_FULL_MATERIALIZE")
+        self.model_configs = model_configs
+        roles = PPORoleConfigs.resolve(config, model_configs)
+        self.actor_rollout_worker_config = roles.actor_rollout_worker_config()
+        self.actor_model_config = roles.actor.model
+        self.actor_config = roles.actor.actor
+        self.rollout_model_config = roles.rollout.model
+        self.rollout_config = roles.rollout.rollout
+        self.ref_config = roles.ref.ref
+        self.critic_config = roles.critic
+        self.reward_model_config = roles.reward_model
 
-        self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
+        self.hybrid_engine = roles.actor.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
@@ -346,13 +357,12 @@ class RayPPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = need_reference_policy(self.config)
+        self.use_reference_policy = need_reference_policy(self.config, self.actor_config)
         self.use_teacher_policy = need_teacher_policy(self.config)
 
-        self.use_rm = need_reward_model(self.config)
+        self.use_rm = need_reward_model(self.config, self.reward_model_config)
 
-        self.use_critic = need_critic(self.config)
-        self.ray_worker_group_cls = ray_worker_group_cls
+        self.use_critic = need_critic(self.config, self.critic_config)
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
             project_name=self.config.trainer.project_name,
@@ -360,24 +370,24 @@ class RayPPOTrainer:
         )
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        lora_rank = self.actor_model_config.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+            lora_rank = self.actor_model_config.get("lora_rank", 0)
+        self.ref_in_actor = lora_rank > 0 or self.actor_model_config.get("lora_adapter_path") is not None
 
         # define in-reward KL control
         # kl loss control currently not suppoorted
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
-        self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+        self.use_prefix_grouper = self.actor_config.get("use_prefix_grouper", False)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
         self._init_dump_executor()
 
-    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
+    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Sampler | None):
         """
         Creates the train and validation dataloaders.
         """
@@ -450,9 +460,9 @@ class RayPPOTrainer:
             OmegaConf.set_struct(self.config, True)
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                    self.actor_config.optim.total_training_steps = total_training_steps
                 if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
+                    self.critic_config.optim.total_training_steps = total_training_steps
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
@@ -620,9 +630,7 @@ class RayPPOTrainer:
                 )
 
             # repeat test batch
-            test_batch = test_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
-            )
+            test_batch = test_batch.repeat(repeat_times=self.rollout_config.val_kwargs.n, interleave=True)
 
             ground_truths = [
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
@@ -634,14 +642,14 @@ class RayPPOTrainer:
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
                 "recompute_log_prob": False,
-                "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
+                "do_sample": self.rollout_config.val_kwargs.do_sample,
                 "validate": True,
                 "global_steps": self.global_steps,
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
+            size_divisor = self.rollout_config.agent.num_workers
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
@@ -776,23 +784,26 @@ class RayPPOTrainer:
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
     def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
+        """Initialize distributed training workers through the common Runtime.
 
         Creates:
-        1. Ray resource pools from configuration
+        1. Runtime resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
         self.resource_pool_manager.create_resource_pool()
+        runtime = current_runtime()
 
-        self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+        self.resource_pool_to_cls: dict[ResourcePool, dict[str, ClassWithInitArgs]] = {
+            pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()
+        }
 
         # create actor and rollout
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
         if self.hybrid_engine:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
-            actor_rollout_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[actor_role],
-                config=self.config.actor_rollout_ref,
+            actor_rollout_cls = ClassWithInitArgs(
+                self.role_worker_mapping[actor_role],
+                config=self.actor_rollout_worker_config,
                 distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
             )
@@ -806,7 +817,8 @@ class RayPPOTrainer:
 
             from verl.workers.config import CriticConfig
 
-            critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
+            critic_config = self.critic_config
+            critic_cfg: CriticConfig = omega_conf_to_dataclass(critic_config)
 
             # convert critic_cfg into TrainingWorkerConfig for the unified model engine worker
             from verl.workers.engine_workers import TrainingWorkerConfig
@@ -825,53 +837,26 @@ class RayPPOTrainer:
                 extra_context=getattr(self, "_critic_extra_context", {}),
             )
 
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
+            critic_cls = ClassWithInitArgs(self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
         # create reference policy if needed
         if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-            ref_policy_cls = RayClassWithInitArgs(
+            ref_policy_cls = ClassWithInitArgs(
                 self.role_worker_mapping[Role.RefPolicy],
-                config=self.config.actor_rollout_ref,
+                config=self.actor_rollout_worker_config,
                 role=str(Role.RefPolicy),
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
-        # initialize WorkerGroup
-        # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
-        # you should not use `create_colocated_worker_cls`.
-        # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/verl-project/verl/blob/master/examples/tutorial/ray/tutorial.ipynb
-        # for more information.
+        # One WorkerGroup owns each pool; role entries become non-owning fused views.
         all_wg = {}
-        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
-        if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
-            wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        if OmegaConf.select(self.config.global_profiler, "steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            # Only require nsight worker options when tool is nsys
-            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-                assert (
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                    is not None
-                ), "worker_nsight_options must be set when using nsys with profile_steps"
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                )
-        wg_kwargs["device_name"] = self.device_name
-
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(
-                resource_pool=resource_pool,
-                ray_cls_with_init=worker_dict_cls,
-                **wg_kwargs,
-            )
-            spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
-            all_wg.update(spawn_wg)
+            role_groups = current_runtime().create_worker_group(class_dict, on=resource_pool)
+            all_wg.update(role_groups)
 
         if self.use_critic:
             self.critic_wg = all_wg[str(Role.Critic)]
@@ -900,6 +885,14 @@ class RayPPOTrainer:
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
+        rollout_worker_group = self.actor_rollout_wg
+        rollout_resource_pool = actor_rollout_resource_pool
+        if self.model_configs is not None:
+            rollout_model = self.model_configs.one("rollout").model
+            rollout_resource_pool = runtime.model_resource_pool(rollout_model.name)
+            if rollout_resource_pool is not actor_rollout_resource_pool:
+                rollout_worker_group = None
+
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
@@ -910,6 +903,9 @@ class RayPPOTrainer:
         self.reward_loop_manager = RewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
+            worker_resource_pool=rollout_resource_pool,
+            input_model_config=self.actor_model_config,
+            reward_model_config=self.reward_model_config,
         )
 
         # create async rollout manager and request scheduler
@@ -920,18 +916,36 @@ class RayPPOTrainer:
         if self.use_teacher_policy:
             from verl.experimental.teacher_loop import MultiTeacherModelManager
 
-            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            if self.model_configs is not None:
+                teacher_bindings = self.model_configs.all("teacher")
+                if not teacher_bindings:
+                    raise ValueError("topology.models must declare at least one 'teacher' model")
+                if len(teacher_bindings) == 1 and teacher_bindings[0].model.config_key == "distillation":
+                    teacher_resource_pool = runtime.model_resource_pool(teacher_bindings[0].model.name)
+                else:
+                    teacher_resource_pool = {}
+                    for binding in teacher_bindings:
+                        teacher_key = binding.config.get("key")
+                        if not isinstance(teacher_key, str) or not teacher_key:
+                            raise ValueError(
+                                f"teacher config {binding.model.config_key!r} must declare a non-empty key"
+                            )
+                        if teacher_key in teacher_resource_pool:
+                            raise ValueError(f"multiple topology models reference teacher key {teacher_key!r}")
+                        teacher_resource_pool[teacher_key] = runtime.model_resource_pool(binding.model.name)
+            else:
+                teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
             self.teacher_model_manager = MultiTeacherModelManager(
                 config=self.config,
                 resource_pool=teacher_resource_pool,
             )
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
+            self.distillation_config = self.teacher_model_manager.distillation_config
         else:
             self.teacher_model_manager = None
             self.distillation_config = None
 
         # Support custom AgentLoopManager via config
-        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        manager_class_fqn = self.rollout_config.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
@@ -940,27 +954,34 @@ class RayPPOTrainer:
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        enable_agent_reward_loop = not self.use_rm or self.reward_model_config.enable_resource_pool
 
         self.llm_server_manager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+            config=self.config,
+            rollout_config=self.rollout_config,
+            model_config=self.rollout_model_config,
+            worker_group=rollout_worker_group,
+            rollout_resource_pool=rollout_resource_pool,
         )
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         # To stream teacher computation with actor rollout, we instead pass the full manager so that the
         # teacher loop workers can sleep/wake together with rollout workers
-        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        reward_loop_worker_group = self.reward_loop_manager.remote_worker_group if enable_agent_reward_loop else None
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
+            rollout_config=self.rollout_config,
+            model_config=self.rollout_model_config,
             llm_client=self.llm_server_manager.get_client(),
             teacher_client=self.teacher_model_manager.get_client() if self.use_teacher_policy else None,
-            reward_loop_worker_handles=reward_loop_worker_handles,
+            reward_loop_worker_group=reward_loop_worker_group,
+            worker_resource_pool=rollout_resource_pool,
         )
 
-        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        checkpoint_engine_config = omega_conf_to_dataclass(self.rollout_config.checkpoint_engine)
         # Support custom CheckpointEngineManager via config
-        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        checkpoint_manager_class_fqn = self.rollout_config.get("checkpoint_manager_class")
         if checkpoint_manager_class_fqn:
             CheckpointEngineManager = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
         else:
@@ -1028,12 +1049,8 @@ class RayPPOTrainer:
         torch.save(dataloader_state_dict, dataloader_local_path)
 
         # latest checkpointed iteration tracker (for atomic usage)
-        if (
-            hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
-            and self.config.actor_rollout_ref.actor.checkpoint.async_save
-        ) or (
-            "async_save" in self.config.actor_rollout_ref.actor.checkpoint
-            and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
+        if (hasattr(self.actor_config.checkpoint, "async_save") and self.actor_config.checkpoint.async_save) or (
+            "async_save" in self.actor_config.checkpoint and self.actor_config.checkpoint["async_save"]
         ):
             print("skip write latest_checkpointed_iteration.txt when async_save is True")
             return
@@ -1189,7 +1206,7 @@ class RayPPOTrainer:
 
         elif keep_minibatch:
             # Decouple the DP balancing and mini-batching.
-            minibatch_size = self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size")
+            minibatch_size = self.actor_config.get("ppo_mini_batch_size")
             minibatch_num = len(workload_lst) // minibatch_size
             global_partition_lst = [[] for _ in range(dp_size)]
             for i in range(minibatch_num):
@@ -1237,7 +1254,7 @@ class RayPPOTrainer:
         return DataProto.collect_worker_output(output, {"log_probs": "ref_log_prob"})
 
     def _compute_old_log_prob(self, batch: DataProto):
-        calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        calculate_sum_pi_squared = self.actor_config.get("calculate_sum_pi_squared", False)
 
         request = batch.prepare_worker_request(
             calculate_entropy=True,
@@ -1256,13 +1273,11 @@ class RayPPOTrainer:
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
-        rollout_config = self.config.actor_rollout_ref.rollout
+        rollout_config = self.rollout_config
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
-        calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
-            self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
-        )
+        calculate_entropy = self.actor_config.calculate_entropy or (self.actor_config.entropy_coeff != 0.0)
         distillation_use_topk = (
             self.distillation_config.distillation_loss.loss_settings.use_topk
             if is_distillation_enabled(self.config.get("distillation"))
@@ -1276,11 +1291,11 @@ class RayPPOTrainer:
                 and not distillation_loss_cfg.use_task_rewards
                 and not distillation_loss_cfg.use_policy_gradient
             )
-        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
-        seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        ppo_mini_batch_size = self.actor_config.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.rollout_config.n
+        ppo_epochs = self.actor_config.ppo_epochs
+        seed = self.actor_config.data_loader_seed
+        shuffle = self.actor_config.shuffle
         actor_meta = dict(
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
@@ -1305,11 +1320,11 @@ class RayPPOTrainer:
         return actor_output
 
     def _update_critic(self, batch: DataProto) -> DataProto:
-        ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        ppo_epochs = self.config.critic.ppo_epochs
-        seed = self.config.critic.data_loader_seed
-        shuffle = self.config.critic.shuffle
+        ppo_mini_batch_size = self.critic_config.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.rollout_config.n
+        ppo_epochs = self.critic_config.ppo_epochs
+        seed = self.critic_config.data_loader_seed
+        shuffle = self.critic_config.shuffle
         critic_meta = dict(
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
@@ -1406,7 +1421,7 @@ class RayPPOTrainer:
 
                 with marked_timer("dataplane/from_single_dict", timing_raw):
                     batch = DataProto.from_single_dict(batch_dict)
-                batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                batch.meta_info["temperature"] = self.rollout_config.temperature
 
                 # add uid to batch
                 batch.non_tensor_batch["uid"] = np.array(
@@ -1418,7 +1433,7 @@ class RayPPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
-                rollout_n = self.config.actor_rollout_ref.rollout.n
+                rollout_n = self.rollout_config.n
                 with marked_timer("dataplane/repeat_prepare", timing_raw):
                     gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
 
@@ -1472,7 +1487,7 @@ class RayPPOTrainer:
                     del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     with marked_timer("dataplane/repeat_union_gen", timing_raw):
-                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.repeat(repeat_times=self.rollout_config.n, interleave=True)
                         batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
@@ -1519,7 +1534,7 @@ class RayPPOTrainer:
                         apply_bypass_mode(
                             batch=batch,
                             rollout_corr_config=rollout_corr_config,
-                            policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
+                            policy_loss_config=self.actor_config.policy_loss,
                         )
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1528,7 +1543,7 @@ class RayPPOTrainer:
                             batch.prefetch(["response_mask"])
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
-                            actor_config = self.config.actor_rollout_ref.actor
+                            actor_config = self.actor_config
                             entropy_agg = agg_loss(
                                 loss_mat=entropys,
                                 loss_mask=response_masks,
@@ -1635,7 +1650,7 @@ class RayPPOTrainer:
                             adv_estimator=adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
+                            num_repeat=self.rollout_config.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )

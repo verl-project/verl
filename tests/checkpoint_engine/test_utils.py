@@ -14,14 +14,12 @@
 import asyncio
 from typing import Generator
 
-import ray
 import torch
 from transformers import AutoModelForCausalLM
 
 from verl.checkpoint_engine import CheckpointEngineRegistry, CheckpointEngineWorker
+from verl.runtime import ClassWithInitArgs, ResourcePool, WorkerGroup, current_runtime
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.utils.device import get_device_name
 from verl.utils.fs import copy_to_local
 from verl.workers.config import CheckpointEngineConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.engine_workers import TrainingWorker, TrainingWorkerConfig
@@ -89,17 +87,15 @@ class MockServerAdapter(BaseRollout):
 
 
 class MockReplica(RolloutReplica):
-    async def init_hybrid(self, worker_group: RayWorkerGroup):
+    async def init_hybrid(self, worker_group: WorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
 
         Args:
-            worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
+            worker_group: WorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
-        self.workers = worker_group.workers[
-            self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
-        ]
+        self._worker_group = worker_group.slice(self.world_size * self.replica_rank, self.world_size)
 
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
+    def get_class_with_init_args(self) -> ClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
         raise NotImplementedError
 
@@ -121,8 +117,8 @@ class CheckpointEngineWorkerTest(CheckpointEngineWorker):
 
 
 def create_trainer_worker_group(
-    resource_pool: RayResourcePool, model_config: HFModelConfig, checkpoint_engine_config: CheckpointEngineConfig
-) -> RayWorkerGroup:
+    resource_pool: ResourcePool, model_config: HFModelConfig, checkpoint_engine_config: CheckpointEngineConfig
+) -> WorkerGroup:
     engine_config = FSDPEngineConfig(forward_only=True, fsdp_size=resource_pool.world_size, strategy="fsdp")
     trainer_config = TrainingWorkerConfig(
         model_type="language_model",
@@ -130,38 +126,29 @@ def create_trainer_worker_group(
         engine_config=engine_config,
     )
 
-    ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(TrainingWorkerTest),
+    actor = ClassWithInitArgs(
+        cls=TrainingWorkerTest,
         config=trainer_config,
         checkpoint_engine_config=checkpoint_engine_config,
     )
-    ray_cls_with_init.update_options(
-        {
-            "runtime_env": {
-                "env_vars": {
-                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-                }
-            }
-        }
-    )
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name())
+    wg = current_runtime().create_worker_group(actor, on=resource_pool)
     return wg
 
 
 async def create_rollout_worker_group(
-    resource_pool: RayResourcePool,
+    resource_pool: ResourcePool,
     model_config: HFModelConfig,
     rollout_config: RolloutConfig,
     check_allclose: bool = True,
-) -> tuple[RayWorkerGroup, list[MockReplica]]:
+) -> tuple[WorkerGroup, list[MockReplica]]:
     # create rollout worker group
-    ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(CheckpointEngineWorkerTest),
+    actor = ClassWithInitArgs(
+        cls=CheckpointEngineWorkerTest,
         model_config=model_config,
         rollout_config=rollout_config,
         check_allclose=check_allclose,
     )
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name())
+    wg = await current_runtime().create_worker_group_async(actor, on=resource_pool)
 
     # create rollout replicas
     rollout_world_size = (

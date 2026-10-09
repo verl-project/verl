@@ -29,14 +29,14 @@ When working with Megatron:
 import logging
 import os
 import time
-from typing import Any, Generator, Optional
+from typing import Any, Generator
 
-import ray
 import torch
 from packaging import version as vs
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
+from verl.runtime import RemoteWorkerGroup, current_runtime
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
 from verl.utils.device import get_device_id, is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -114,10 +114,10 @@ class ServerAdapter(BaseRollout):
         replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
-        self.server_handle: ray.actor.ActorHandle = None
+        self.server_handle: RemoteWorkerGroup | None = None
 
         rank = int(os.environ["RANK"])
-        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE") or os.environ["RAY_LOCAL_WORLD_SIZE"])
         # PD asymmetric layout inflates per-replica footprint; must match
         # llm_server.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
         prefill_tp = self.config.tensor_model_parallel_size
@@ -144,9 +144,9 @@ class ServerAdapter(BaseRollout):
         # IPC handles stay on the GPU where they were created. Offset math
         # assumes prefill_replicas == 1 (enforced by vLLMPDReplica); if that
         # ever lifts, update both this block and vLLMPDReplica.launch_servers.
-        self._pd_role: Optional[str] = None
-        self._pd_server_index: Optional[int] = None
-        self._pd_tp_local_rank: Optional[int] = None
+        self._pd_role: str | None = None
+        self._pd_server_index: int | None = None
+        self._pd_tp_local_rank: int | None = None
         if disagg is not None and getattr(disagg, "enabled", False):
             footprint = prefill_tp + disagg.decode_replicas * decode_tp
             local = self.rollout_rank % footprint
@@ -188,11 +188,11 @@ class ServerAdapter(BaseRollout):
         # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
         # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
         # local_rank on every node. Include replica_rank to avoid collisions when
-        # multiple replicas share a node, and the Ray job id so two independent
+        # multiple replicas share a node, and the Runtime id so two independent
         # verl jobs on the same host (or a new run after a crashed one with a
         # stale socket file) cannot collide on the shared /tmp namespace.
         local_rank = self.rollout_rank % local_world_size
-        job_id = ray.get_runtime_context().get_job_id()
+        job_id = current_runtime().runtime_id
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
@@ -205,28 +205,24 @@ class ServerAdapter(BaseRollout):
             )
 
     def _ensure_server_handle(self) -> bool:
-        """Lazy-init server handle. Returns False if this rank should not proceed."""
+        """Return whether this rank owns server control and has its injected endpoint."""
         if not self._has_server:
             return False
-        # Lazy init http server adapter because http server is launched after hybrid engine.
         if self.server_handle is None:
-            prefix = self._get_server_name_prefix()
-            if self._pd_role == "prefill":
-                actor_name = f"{prefix}server_{self.replica_rank}_0"
-            elif self._pd_role == "decode":
-                actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
-            else:
-                actor_name = f"{prefix}server_{self.replica_rank}_{self.node_rank}"
-            self.server_handle = ray.get_actor(actor_name)
+            raise RuntimeError("rollout server endpoint has not been injected")
         return True
+
+    def set_server_endpoint(self, endpoint: RemoteWorkerGroup) -> None:
+        super().set_server_endpoint(endpoint)
+        self.server_handle = endpoint
 
     async def _execute_method(
         self,
         method: str,
         non_block: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
     ) -> Any:
         """Execute method on inference engine via ray.
 
@@ -243,7 +239,11 @@ class ServerAdapter(BaseRollout):
         if not self._ensure_server_handle():
             return None
 
-        future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
+        future = self.server_handle.submit(
+            "collective_rpc",
+            args=(method,),
+            kwargs={"engine_timeout": timeout, "args": args, "kwargs": kwargs},
+        )
         return future if non_block else await future
 
     async def resume(self, tags: list[str]):
@@ -253,12 +253,12 @@ class ServerAdapter(BaseRollout):
             tags: weights or kv_cache.
         """
         if self.config.free_cache_engine and self._ensure_server_handle():
-            await self.server_handle.wake_up.remote(tags=tags)
+            await self.server_handle.submit("wake_up", kwargs={"tags": tags})
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
         if self.config.free_cache_engine and self._ensure_server_handle():
-            await self.server_handle.sleep.remote()
+            await self.server_handle.submit("sleep")
 
     @torch.no_grad()
     async def update_weights(
@@ -290,9 +290,9 @@ class ServerAdapter(BaseRollout):
 
         # reset caches after updating weights
         if self._has_server:
-            await self.server_handle.clear_kv_cache.remote()
+            await self.server_handle.submit("clear_kv_cache")
             if global_steps is not None:
-                await self.server_handle.set_global_steps.remote(global_steps)
+                await self.server_handle.submit("set_global_steps", args=(global_steps,))
 
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")

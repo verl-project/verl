@@ -15,8 +15,8 @@ view used by the V0 trainer.
 Design principles
 -----------------
 
-1. Driver holds only **metadata + refs + indices**; it never pulls tensor
-   bytes into its own process.
+1. Driver holds only **metadata + refs + indices**; large payloads remain in
+   storage while deliberately inline ``LocalRef`` values travel with metadata.
 2. Workers call :meth:`NeoProto.materialize` to fetch only the keys /
    token ranges they need.
 3. Index operations (``select``, ``chunk``, ``concat``, ``repeat``,
@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 import os
 import pickle
 import time
@@ -49,12 +48,17 @@ except ImportError:  # pragma: no cover
 
 from verl.experimental.neoproto.storage.engine import (
     FieldSpec,
+    LocalRef,
     Ref,
     RefTable,
     SliceSpec,
     StorageEngine,
     compose_slice,
 )
+
+# Retain the original pickle import path for already serialized transports.
+from verl.experimental.neoproto.transport import _RefTableTransport as _RefTableTransport
+from verl.experimental.neoproto.transport import _resolve_transported_ref_table
 
 # Granularity tag for a batch-level ``ref_table`` entry whose single value lives
 # in ``Ref.dataptr`` (the old ``meta`` dict is stored this way). It is treated
@@ -65,6 +69,7 @@ FULL_GRANULARITY = "full"
 
 GLOBAL_ENGINE_DICT = {}
 
+
 # ---------------------------------------------------------------------------
 # IndexView
 # ---------------------------------------------------------------------------
@@ -73,6 +78,22 @@ GLOBAL_ENGINE_DICT = {}
 # All inputs must share the same ref identities per key for a cheap concat.
 # ``RefTable.copy()`` produces a new wrapper but keeps the underlying
 # ``Ref`` objects so ``is`` / value comparison per key is sufficient.
+def _same_ref_view(left: object, right: object) -> bool:
+    if left is right:
+        return True
+    if not isinstance(left, Ref) or not isinstance(right, Ref):
+        return False
+    # Ref equality intentionally identifies the stored payload by backend and
+    # uid. Concat needs the stronger logical-view identity: two slices of the
+    # same payload must not collapse into the first slice.
+    return (
+        left.backend == right.backend
+        and left.uid == right.uid
+        and repr(left.slice_spec) == repr(right.slice_spec)
+        and repr(left.apply_funcs) == repr(right.apply_funcs)
+    )
+
+
 def same_refs(a: NeoProto, b: NeoProto) -> bool:
     if set(a.ref_table.keys()) != set(b.ref_table.keys()):
         return False
@@ -81,10 +102,10 @@ def same_refs(a: NeoProto, b: NeoProto) -> bool:
         if va is vb:
             continue
         if isinstance(va, Ref) and isinstance(vb, Ref):
-            if va == vb:
+            if _same_ref_view(va, vb):
                 continue
         elif isinstance(va, np.ndarray | list) and isinstance(vb, np.ndarray | list):
-            if len(va) == len(vb) and all(x is y or x == y for x, y in zip(va, vb, strict=False)):
+            if len(va) == len(vb) and all(_same_ref_view(x, y) for x, y in zip(va, vb, strict=False)):
                 continue
         return False
     return True
@@ -243,10 +264,10 @@ class NeoProto:
     # Per-key type/shape descriptor; the driver reasons about sizes from here
     # without ever materializing payloads.
     schema: dict[str, FieldSpec] = field(default_factory=dict)
-    # Per-key handles (shared ``Ref`` or per-sample ``ndarray[Ref]``). Metadata
-    # only -- the actual bytes live in the storage engine. Batch-level metadata
-    # (the old ``meta`` dict) is also kept here as ``granularity="meta"`` local
-    # refs; use the ``*_meta`` helpers below rather than touching it directly.
+    # Per-key handles (shared ``Ref`` or per-sample ``ndarray[Ref]``). Stored
+    # refs point at a StorageEngine; LocalRef deliberately carries a small
+    # inline value. Batch-level metadata (the old ``meta`` dict) is also kept
+    # inline; use the ``*_meta`` helpers below rather than touching it directly.
     ref_table: RefTable = field(default_factory=lambda: RefTable(batch_size=0))
     # Sample-order + token-slice view; all index ops rewrite this, never refs.
     dim0_index: IndexView = field(default_factory=IndexView)
@@ -278,35 +299,13 @@ class NeoProto:
 
     def __getstate__(self):
         ref_table = self.ref_table
-        if hasattr(self, "_NEO_DUMP"):
-            if "ref_table" not in self._NEO_DUMP:
-                import ray
-
-                self._NEO_DUMP["ref_table"] = ray.put(self.ref_table)
-            ref_table = self._NEO_DUMP["ref_table"]
         if hasattr(self, "OBJ_REF") and hasattr(self, "LOCAL_REF"):
-            dump_start = time.time()
             ref_table = (self.OBJ_REF, self.LOCAL_REF)
-            dump_end = time.time()
-            logging.info(f"[neo-ser] dump ref_table ({type(ref_table)}) cost: {dump_end - dump_start}")
         return self.schema, ref_table, self.dim0_index
 
     def __setstate__(self, data):
-        import ray
-
-        self.schema, self.ref_table, self.dim0_index = data
-        ref_type = type(self.ref_table)
-        if isinstance(self.ref_table, ray.ObjectRef):
-            self.ref_table = ray.get(self.ref_table)
-        elif isinstance(self.ref_table, tuple):
-            dump_start = time.time()
-            self.OBJ_REF, self.LOCAL_REF = self.ref_table
-            obj_ref = ray.get(self.OBJ_REF)
-            local_ref = ray.get(self.LOCAL_REF)
-            obj_ref.update(local_ref)
-            self.ref_table = obj_ref
-            dump_end = time.time()
-            logging.info(f"[neo-ser] load ref_table ({ref_type}) cost: {dump_end - dump_start}")
+        self.schema, payload, self.dim0_index = data
+        self.ref_table = _resolve_transported_ref_table(payload)
         self.__post_init__()
 
     def __copy__(self):
@@ -318,17 +317,6 @@ class NeoProto:
         state["dirty_cache"] = dict(self.dirty_cache)
         new.__dict__.update(state)
         return new
-
-    def __del__(self):
-        import ray
-
-        if hasattr(self, "_NEO_DUMP") and "ref_table" in self._NEO_DUMP:
-            ray.internal.free([self._NEO_DUMP["ref_table"]])
-            del self._NEO_DUMP
-
-        for _attr in ("OBJ_REF", "LOCAL_REF"):
-            if hasattr(self, _attr):
-                delattr(self, _attr)
 
     def _cal_bs_size(self, value: Any) -> int:
         if isinstance(value, Ref):
@@ -363,8 +351,8 @@ class NeoProto:
         global GLOBAL_ENGINE_DICT
         from verl.experimental.neoproto.storage.default import get_engine_for_backend
 
-        if backend is None:
-            backend = "default"
+        if backend in (None, "default"):
+            return get_engine_for_backend(backend)
 
         engine = GLOBAL_ENGINE_DICT.get(backend, None)
         if engine is None:
@@ -472,7 +460,11 @@ class NeoProto:
         self.clear_cache()
 
     def clear_cache(self):
-        pass
+        self.dirty_cache = {}
+        for key in list(self.schema) + list(self.ref_table):
+            cache_name = self._get_cache_name(key)
+            if hasattr(self, cache_name):
+                delattr(self, cache_name)
 
     def pop(self, keys: Iterable[str]) -> NeoProto:
         keys = list(keys)
@@ -619,10 +611,8 @@ class NeoProto:
                 cursor += len(p)
             # Merge the same refs
             if len(merged) > 0 and isinstance(merged[0], Ref):
-                if len(set([ref.uid for ref in merged])) == 1 and not expanded_shared:
-                    merged = Ref.from_ref(merged[0])
                 # Meta Info
-                elif head.schema.get(k) is not None and head.schema[k].granularity == FULL_GRANULARITY:
+                if head.schema.get(k) is not None and head.schema[k].granularity == FULL_GRANULARITY:
                     merged = Ref.from_ref(merged[0])
             # TODO: Fix schema shape for "shards"
             new_table[k] = merged
@@ -771,7 +761,11 @@ class NeoProto:
         if sample_indices is None:
             return self
         n = int(len(sample_indices))
-        if np.array_equal(sample_indices, np.arange(n, dtype=sample_indices.dtype)):
+        physical_size = self.ref_table.batch_size
+        if n == physical_size and np.array_equal(
+            sample_indices,
+            np.arange(physical_size, dtype=sample_indices.dtype),
+        ):
             return self
         new_refs: dict[str, Any] = {}
         for key, entry in self.ref_table.items():
@@ -828,10 +822,8 @@ class NeoProto:
                     and right_spec is not None
                     and left_spec.granularity == FULL_GRANULARITY
                     and right_spec.granularity == FULL_GRANULARITY
-                    and isinstance(left_ref, Ref)
-                    and isinstance(v, Ref)
-                    and left_ref.backend == "local"
-                    and v.backend == "local"
+                    and isinstance(left_ref, LocalRef)
+                    and isinstance(v, LocalRef)
                     and not left_ref.apply_funcs
                     and not v.apply_funcs
                 ):
@@ -1027,7 +1019,12 @@ class NeoProto:
             for key in keys:
                 ref = self.ref_table.get(key)
                 spec = self.schema.get(key)
-                if isinstance(ref, Ref) and spec is not None and spec.granularity != FULL_GRANULARITY:
+                if (
+                    isinstance(ref, Ref)
+                    and not isinstance(ref, LocalRef)
+                    and spec is not None
+                    and spec.granularity != FULL_GRANULARITY
+                ):
                     eng = _engine_for(ref)
                     if hasattr(eng, "get_rows_many"):
                         # TODO: Promote batched row reads into the StorageEngine capability contract.
@@ -1038,14 +1035,14 @@ class NeoProto:
                 values = group["engine"].get_rows_many(group["refs"], sample_idx)
                 batched_rows.update(zip(group["keys"], values, strict=False))
 
-        # Ray can resolve a list of ObjectRefs in one call. Group shared
+        # Storage engines may resolve shared refs in one batch. Group shared
         # object-store columns that cannot use a backend-specific row reader,
         # then apply the logical sample/token views below exactly as before.
         batched_shared: dict[str, Any] = {}
         shared_get_groups: dict[int, dict[str, Any]] = {}
         for key in keys:
             ref = self.ref_table.get(key)
-            if not isinstance(ref, Ref) or ref.backend == "local" or key in batched_rows:
+            if not isinstance(ref, Ref) or isinstance(ref, LocalRef) or key in batched_rows:
                 continue
             spec = self.schema.get(key)
             eng = _engine_for(ref)
@@ -1069,22 +1066,27 @@ class NeoProto:
             if isinstance(ref_or_array, Ref):
                 # shared ref: fetch then apply sample index + token slice
                 spec = self.schema.get(k)
-                eng = _engine_for(ref_or_array)
                 do_index = sample_idx is not None and spec is not None and spec.granularity not in (FULL_GRANULARITY,)
                 # Row-addressable backends can read only the selected rows
                 # instead of fetching the whole [N, ...] block.
-                if k in batched_rows:
+                if isinstance(ref_or_array, LocalRef):
+                    value = ref_or_array.materialize()
+                    if do_index:
+                        value = self._index_along(value, 0, sample_idx)
+                elif k in batched_rows:
                     value = batched_rows[k]
                 elif k in batched_shared:
                     value = batched_shared[k]
                     if do_index:
                         value = self._index_along(value, 0, sample_idx)
-                elif do_index and hasattr(eng, "get_rows"):
-                    value = eng.get_rows(ref_or_array, sample_idx)
                 else:
-                    value = eng.get(ref_or_array)
-                    if do_index:
-                        value = self._index_along(value, 0, sample_idx)
+                    eng = _engine_for(ref_or_array)
+                    if do_index and hasattr(eng, "get_rows"):
+                        value = eng.get_rows(ref_or_array, sample_idx)
+                    else:
+                        value = eng.get(ref_or_array)
+                        if do_index:
+                            value = self._index_along(value, 0, sample_idx)
                 if token_slice:
                     from verl.experimental.neoproto.storage.engine import _BaseStorageEngine
 
@@ -1177,6 +1179,9 @@ class NeoProto:
         for i, r in enumerate(refs):
             if r is None:
                 continue
+            if isinstance(r, LocalRef):
+                results[i] = r.materialize()
+                continue
             ref_group_by_backend.setdefault(r.backend, []).append(r)
             indices_by_backend.setdefault(r.backend, []).append(i)
         for backend, ref_group in ref_group_by_backend.items():
@@ -1194,7 +1199,7 @@ class NeoProto:
         for entry in self.ref_table.values():
             refs = entry if isinstance(entry, list | np.ndarray) else [entry]
             for r in refs:
-                if isinstance(r, Ref):
+                if isinstance(r, Ref) and not isinstance(r, LocalRef):
                     if r.backend not in ref_group_by_backend:
                         ref_group_by_backend[r.backend] = []
                     ref_group_by_backend[r.backend].append(r)
@@ -1202,6 +1207,15 @@ class NeoProto:
             if backend == "None":
                 continue
             self._engine(backend).release(ref_group)
+        # Drop this instance's owned remote refs so the ObjectStore can reclaim
+        # memory through reference counting. Independent aliases that still hold
+        # the same store handle stay gettable.
+        for key in list(self.ref_table.keys()):
+            entry = self.ref_table[key]
+            refs = entry if isinstance(entry, list | np.ndarray) else [entry]
+            if any(isinstance(r, Ref) and not isinstance(r, LocalRef) for r in refs):
+                self.ref_table.pop(key)
+        self.clear_cache()
 
     # ------------------------------------------------------------------
     # Persistence

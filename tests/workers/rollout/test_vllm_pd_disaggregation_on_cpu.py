@@ -478,15 +478,14 @@ def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
 async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
     """End-to-end shape of ``_pd_dispatch``: prefill leg sets max_tokens=1 +
     do_remote_decode, decode leg gets the prefill's kv_transfer_params."""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     server_cls = _import_http_server()
 
-    # Mock decode peer (Ray actor handle): peer.generate.remote(...) returns
-    # a TokenOutput-shaped result.
+    # Mock the single-controller worker-group dispatch used by the decode peer.
     decode_peer = MagicMock()
     expected_decode_token_ids = [10, 20, 30]
-    decode_peer.generate.remote = MagicMock(return_value=_make_awaitable_token_output(expected_decode_token_ids))
+    decode_peer.submit = AsyncMock(return_value=_make_token_output(expected_decode_token_ids))
 
     # Stub server.generate: returns a TokenOutput with kv_transfer_params in
     # extra_fields, simulating the response NixlConnector populates.
@@ -533,14 +532,16 @@ async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
     assert "transfer_id" in pcall["kv_transfer_params"]
 
     # Decode peer was called with full sampling_params + the prefill's kv_transfer_params.
-    decode_peer.generate.remote.assert_called_once()
-    dkw = decode_peer.generate.remote.call_args
-    # generate(prompt_ids, sampling_params, request_id, **kw); first three are positional.
-    assert dkw.args[0] == [1, 2, 3]
-    assert dkw.args[1]["max_tokens"] == 64  # NOT clamped to 1 on decode leg
-    assert dkw.args[2] == "req-foo_D"
-    assert dkw.kwargs["kv_transfer_params"] == server_decode_kv
-    assert dkw.kwargs["priority"] == 0
+    decode_peer.submit.assert_awaited_once()
+    dcall = decode_peer.submit.call_args
+    assert dcall.args[0] == "generate"
+    dargs = dcall.kwargs["args"]
+    dkwargs = dcall.kwargs["kwargs"]
+    assert dargs[0] == [1, 2, 3]
+    assert dargs[1]["max_tokens"] == 64  # NOT clamped to 1 on decode leg
+    assert dargs[2] == "req-foo_D"
+    assert dkwargs["kv_transfer_params"] == server_decode_kv
+    assert dkwargs["priority"] == 0
 
     assert result.token_ids == expected_decode_token_ids
 
@@ -551,12 +552,12 @@ async def test_pd_dispatch_mooncake_constructs_decode_kv_params_locally():
     kv_transfer_params come back. _pd_dispatch must instead construct decode
     kv_transfer_params from the prefill state set by set_pd_peer (engine_id +
     bootstrap addr), preserving transfer_id across the two legs."""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     server_cls = _import_http_server()
 
     decode_peer = MagicMock()
-    decode_peer.generate.remote = MagicMock(return_value=_make_awaitable_token_output([7]))
+    decode_peer.submit = AsyncMock(return_value=_make_token_output([7]))
     captured_prefill = []
 
     async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
@@ -581,9 +582,10 @@ async def test_pd_dispatch_mooncake_constructs_decode_kv_params_locally():
     assert pkv["do_remote_decode"] is True
     transfer_id = pkv["transfer_id"]
 
-    decode_peer.generate.remote.assert_called_once()
-    dkw = decode_peer.generate.remote.call_args
-    dkv = dkw.kwargs["kv_transfer_params"]
+    decode_peer.submit.assert_awaited_once()
+    dcall = decode_peer.submit.call_args
+    assert dcall.args[0] == "generate"
+    dkv = dcall.kwargs["kwargs"]["kv_transfer_params"]
     assert dkv["do_remote_prefill"] is True
     assert dkv["do_remote_decode"] is False
     assert dkv["remote_engine_id"] == stub._pd_prefill_engine_id
@@ -614,14 +616,7 @@ async def test_pd_dispatch_raises_when_prefill_returns_no_kv_params():
         )
 
 
-def _make_awaitable_token_output(token_ids):
-    """Wrap a TokenOutput in an awaitable so the test can ``await`` the
-    decode_peer.generate.remote(...) MagicMock return value."""
+def _make_token_output(token_ids):
     from verl.workers.rollout.replica import TokenOutput
 
-    out = TokenOutput(token_ids=token_ids, stop_reason="completed")
-
-    async def _coro():
-        return out
-
-    return _coro()
+    return TokenOutput(token_ids=token_ids, stop_reason="completed")

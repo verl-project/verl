@@ -2,6 +2,7 @@
 set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-8}
+PPO_CONFIG_NAME=${PPO_CONFIG_NAME:-ppo_trainer}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -106,7 +107,7 @@ fi
 
 exp_name="${VERL_EXP_NAME:-$(basename "${MODEL_ID,,}")-function-reward-minimal}"
 
-python3 -m verl.trainer.main_ppo \
+python3 -m verl.trainer.main_ppo --config-name="${PPO_CONFIG_NAME}" \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
@@ -184,8 +185,11 @@ python3 -m verl.trainer.main_ppo \
     2>&1 | tee "${output_file}"
 
 if [ "${CUSTOM_REWARD_FN}" = "True" ]; then
-    python3 tests/special_e2e/check_custom_rwd_fn.py --output_file="${output_file}"
-    check_exit_code=$?
+    check_exit_code=0
+    if [ "${SKIP_CUSTOM_REWARD_STDOUT_CHECK:-False}" != "True" ]; then
+        python3 tests/special_e2e/check_custom_rwd_fn.py --output_file="${output_file}"
+        check_exit_code=$?
+    fi
     if [ "${generated_reward_fn_file}" = "True" ]; then
         rm -rf "${reward_fn_file_path}"
     fi

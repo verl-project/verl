@@ -13,18 +13,18 @@ from .storage import (
     FieldSpec,
     InMemoryStorageEngine,
     LocalRef,
+    RayStorageEngine,
     Ref,
     RefTable,
     StorageEngine,
     StorageRef,
+    configure_storage_engine,
     get_default_storage_engine,
     get_engine_for_backend,
     set_default_storage_engine,
+    storage_engine_for_runtime,
 )
 from .views import DataProto, DataProtoItem
-
-# Ray-oriented alias used by existing verl tests / smoke scripts.
-RayStorageEngine = DefaultStorageEngine
 
 __all__ = [
     "DataProto",
@@ -40,7 +40,9 @@ __all__ = [
     "RefTable",
     "StorageEngine",
     "StorageRef",
+    "configure_storage_engine",
     "get_default_storage_engine",
     "get_engine_for_backend",
     "set_default_storage_engine",
+    "storage_engine_for_runtime",
 ]

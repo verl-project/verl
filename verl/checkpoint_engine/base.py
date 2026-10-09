@@ -16,13 +16,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Generator
 
-import ray
 import torch
 
-from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, register
-from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from verl.utils.distributed import initialize_global_process_group_ray
+from verl.runtime import Dispatch, ExceptionGroup, RemoteCall, RemoteWorkerGroup, Worker, WorkerGroup, register
+from verl.utils.distributed import initialize_worker_process_group
 from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
@@ -317,7 +314,7 @@ class CheckpointEngineWorker(Worker):
                 **self.extra_rollout_kwargs,
             )
         # sglang and trt-llm need device_mesh for internal communication
-        initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
+        initialize_worker_process_group(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
@@ -338,8 +335,9 @@ class CheckpointEngineWorker(Worker):
         """Get leader rank flag from the underlying rollout server adapter."""
         return self.server_adapter.is_leader_rank
 
-
-_worker_cls = ray.remote(CheckpointEngineWorker)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
+    def set_server_endpoint(self, endpoint: RemoteWorkerGroup) -> None:
+        self.server_adapter.set_server_endpoint(endpoint)
 
 
 class CheckpointEngineManager:
@@ -374,7 +372,7 @@ class CheckpointEngineManager:
     def __init__(
         self,
         config: CheckpointEngineConfig,
-        actor_wg: RayWorkerGroup,
+        actor_wg,
         replicas: list[RolloutReplica],
     ) -> None:
         self.config = config
@@ -384,31 +382,68 @@ class CheckpointEngineManager:
         self.actor_wg = actor_wg
         self.replicas = replicas
 
-    def build_process_group(self, rollout: RayWorkerGroup):
+    @classmethod
+    async def _execute_checkpoint_engine(
+        cls,
+        groups: list[WorkerGroup[Worker]],
+        *,
+        methods: list[str],
+        kwargs: dict[str, list[Any]] | None = None,
+    ) -> list[Any]:
+        calls: list[RemoteCall] = []
+        rank_count = sum(group.world_size for group in groups)
+        if len(methods) != rank_count:
+            raise ValueError(f"method count {len(methods)} does not match WorkerGroup ranks {rank_count}")
+        offset = 0
+        for group in groups:
+            stop = offset + group.world_size
+            group_kwargs = {key: values[offset:stop] for key, values in (kwargs or {}).items()}
+            call = group.execute_checkpoint_engine(methods[offset:stop], **group_kwargs)
+            calls.append(call)
+            offset = stop
+        outcomes = await asyncio.gather(*calls, return_exceptions=True)
+        errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("runtime failures", errors)
+        return [item for group_result in outcomes for item in group_result]
+
+    def _rollout_worker_groups(self) -> list[WorkerGroup[Worker]]:
+        return [replica.worker_group for replica in self.replicas]
+
+    async def build_process_group(self, rollout_groups: list[WorkerGroup[Worker]]):
         """Build process group for actor worker group and rollout replicas."""
         actor_wg = self.actor_wg
+        actor_groups = [actor_wg]
+        rollout_world_size = sum(group.world_size for group in rollout_groups)
 
         # 1. prepare all workers
-        metadata = ray.get(
-            actor_wg.execute_checkpoint_engine(["prepare"] * actor_wg.world_size)
-            + rollout.execute_checkpoint_engine(["prepare"] * rollout.world_size)
+        metadata = await self._execute_checkpoint_engine(
+            actor_groups + rollout_groups,
+            methods=["prepare"] * (actor_wg.world_size + rollout_world_size),
         )
 
         # 2. build communication topology between all workers
         actor_wg_kwargs, rollout_kwargs = self.backend_cls.build_topology(
-            actor_wg.world_size, rollout.world_size, metadata
+            actor_wg.world_size, rollout_world_size, metadata
         )
         for k, v in actor_wg_kwargs.items():
             assert len(v) == actor_wg.world_size, f"actor_wg_kwargs[{k}] must have length of {actor_wg.world_size}"
         for k, v in rollout_kwargs.items():
-            assert len(v) == rollout.world_size, f"rollout_kwargs[{k}] must have length of {rollout.world_size}"
+            assert len(v) == rollout_world_size, f"rollout_kwargs[{k}] must have length of {rollout_world_size}"
 
         actor_wg_kwargs["method"] = ["init_process_group"] * actor_wg.world_size
-        rollout_kwargs["method"] = ["init_process_group"] * rollout.world_size
+        rollout_kwargs["method"] = ["init_process_group"] * rollout_world_size
 
         # 3. init process group between all workers
-        ray.get(
-            actor_wg.execute_checkpoint_engine(**actor_wg_kwargs) + rollout.execute_checkpoint_engine(**rollout_kwargs)
+        init_kwargs = {
+            key: [*actor_wg_kwargs[key], *rollout_kwargs[key]] for key in actor_wg_kwargs.keys() - {"method"}
+        }
+        await self._execute_checkpoint_engine(
+            actor_groups + rollout_groups,
+            methods=actor_wg_kwargs["method"] + rollout_kwargs["method"],
+            kwargs=init_kwargs,
         )
 
     def add_replicas(self, replicas: list[RolloutReplica]):
@@ -476,42 +511,52 @@ class CheckpointEngineManager:
 
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
-            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
-            return
+            call = self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
+            await call
+            return {}
 
         # 1. abort and save all unfinished requests for partial rollout
-        await self.abort_replicas()
-
         # 2. create a temporay worker group for all replicas
-        workers = []
-        for replica in self.replicas:
-            workers.extend(replica.workers)
-        rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
+        rollout_groups = self._rollout_worker_groups()
         actor_wg = self.actor_wg
+        sync_metrics: dict = {}
+        abort_attempted = False
+        release_attempted = False
+        try:
+            abort_attempted = True
+            await self.abort_replicas()
+            # 3. release kv_cache before weight sync (weights stay in place)
+            release_attempted = True
+            await self.release_kv_cache_replicas()
+            # 4. build process group
+            await self.build_process_group(rollout_groups)
 
-        # 3. release kv_cache before weight sync (weights stay in place)
-        await self.release_kv_cache_replicas()
-
-        # 4. build process group
-        self.build_process_group(rollout)
-
-        # 5. update weights of all workers
-        ray.get(
-            actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
-        )
-
-        # 6. finalize all workers
-        ray.get(
-            actor_wg.execute_checkpoint_engine(["finalize"] * actor_wg.world_size)
-            + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
-        )
-
-        # 7. restore kv_cache after weight sync
-        await self.resume_kv_cache_replicas()
-
-        # 8. resume all unfinished requests for partial rollout
-        await self.resume_generation_replicas()
+            # 5. update weights of all workers
+            update_calls: list[RemoteCall] = [
+                actor_wg.update_weights(global_steps=global_steps, mode=self.backend),
+                *(group.update_weights(global_steps=global_steps) for group in rollout_groups),
+            ]
+            outcomes = await RemoteCall.gather(update_calls)
+            results = [item for group_result in outcomes for item in group_result]
+            for result in results[: actor_wg.world_size]:
+                if isinstance(result, dict):
+                    sync_metrics.update(result)
+            return sync_metrics
+        finally:
+            try:
+                if release_attempted:
+                    # 6. finalize all workers
+                    await self._execute_checkpoint_engine(
+                        [actor_wg] + rollout_groups,
+                        methods=["finalize"]
+                        * (actor_wg.world_size + sum(group.world_size for group in rollout_groups)),
+                    )
+                    # 7. restore kv_cache after weight sync
+                    await self.resume_kv_cache_replicas()
+            finally:
+                if abort_attempted:
+                    # 8. resume all unfinished requests for partial rollout
+                    await self.resume_generation_replicas()
 
 
 async def split_weight_chunks(

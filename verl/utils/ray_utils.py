@@ -22,8 +22,6 @@ import inspect
 import os
 from typing import Any, Optional
 
-import ray
-
 
 def ray_noset_visible_devices(env_vars=os.environ):
     # Refer to
@@ -63,25 +61,18 @@ def parallel_put(data_list: list[Any], max_workers: Optional[int] = None):
     """
     assert len(data_list) > 0, "data_list must not be empty"
 
-    def put_data(index, data):
-        return index, ray.put(data)
+    from verl.single_controller.ray.object_store import RayObjectStore
+
+    store = RayObjectStore()
 
     if max_workers is None:
         max_workers = min(len(data_list), 16)
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers <= 0:
+        raise ValueError(f"max_workers must be a positive int, got {max_workers!r}")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        data_list_f = [executor.submit(put_data, i, data) for i, data in enumerate(data_list)]
-        res_lst = []
-        for future in concurrent.futures.as_completed(data_list_f):
-            res_lst.append(future.result())
-
-        # reorder based on index
-        output = [None for _ in range(len(data_list))]
-        for res in res_lst:
-            index, data_ref = res
-            output[index] = data_ref
-
-    return output
+        futures = [executor.submit(store.put, str(index), data) for index, data in enumerate(data_list)]
+        return [future.result() for future in futures]
 
 
 def get_event_loop():

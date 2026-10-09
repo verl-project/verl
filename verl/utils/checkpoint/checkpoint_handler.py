@@ -13,21 +13,26 @@
 # limitations under the License.
 
 
-# TODO: add unit tests
+from __future__ import annotations
 
+# TODO: add unit tests
 import json
 import logging
 import os
 import re
+import warnings
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 
 import verl.utils.hdfs_io as hdfs_io
-from verl.single_controller import WorkerGroup
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, get_checkpoint_tracker_filename
 from verl.utils.logger import log_with_rank
-from verl.workers.engine import BaseEngine
+
+if TYPE_CHECKING:
+    from verl.runtime import WorkerGroup
+    from verl.workers.engine import BaseEngine
 
 
 def extract_step(path):
@@ -43,7 +48,8 @@ logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 class OrchestrationMode(Enum):
     SPMD = 0
-    RAY = 1
+    RAY = 1  # DEPRECATED: Use WORKER_GROUP.
+    WORKER_GROUP = 2
 
 
 class CheckpointHandler:
@@ -73,6 +79,14 @@ class CheckpointHandler:
         self.resume_from_path = resume_from_path
         self.engine = engine
         self.train_dataloader = train_dataloader
+        if mode == OrchestrationMode.RAY:
+            warnings.warn(
+                "OrchestrationMode.RAY is deprecated; use OrchestrationMode.WORKER_GROUP instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            mode = OrchestrationMode.WORKER_GROUP
+
         self.mode = mode
         self.lora_train_meta = lora_train_meta
 
@@ -80,7 +94,7 @@ class CheckpointHandler:
             self.rank = torch.distributed.get_rank()
             self.is_mp_src_rank_with_outputs = self.engine.is_mp_src_rank_with_outputs()
             self.dp_rank = self.engine.get_data_parallel_rank()
-        elif self.mode == OrchestrationMode.RAY:
+        elif self.mode == OrchestrationMode.WORKER_GROUP:
             self.rank = 0
             self.is_mp_src_rank_with_outputs = True
             self.dp_rank = 0

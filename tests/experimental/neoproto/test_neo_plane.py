@@ -14,6 +14,8 @@
 
 """Tests for the V0 data-plane dispatch and worker adapter."""
 
+import pickle
+
 import numpy as np
 import pytest
 import torch
@@ -28,6 +30,7 @@ from verl.experimental.neoproto import (
     set_default_storage_engine,
 )
 from verl.experimental.neoproto.worker_bridge import finalize_engine_output, prepare_engine_input
+from verl.runtime.object_store import _close_object_store
 from verl.single_controller.base.decorator import _split_args_kwargs_data_proto
 from verl.workers.utils.batch_adapter import EngineBatchSpec, run_engine_batch, set_batch_control_fields
 
@@ -130,9 +133,9 @@ def test_neoproto_rejects_non_neo_worker_output():
         DataProto.collect_worker_output(output, {"log_probs": "old_log_probs"})
 
 
-def test_split_args_attaches_obj_ref_local_ref(storage):
-    # Force object_store-shaped refs via DefaultStorageEngine when Ray is up;
-    # with InMemoryStorageEngine, attach is still a no-op-safe path for local refs.
+def test_split_args_attaches_obj_ref_local_ref(storage, ray_only_runtime):
+    # Payloads use the in-memory engine; dispatch publishes their ref tables
+    # through the Runtime-owned object store.
     data = DataProto.from_dict(
         tensors={"input_ids": torch.arange(16).view(8, 2)},
         non_tensors={"uid": np.array([f"u{i}" for i in range(8)], dtype=object)},
@@ -148,14 +151,19 @@ def test_split_args_attaches_obj_ref_local_ref(storage):
 
 
 def test_attach_preserialized_ref_tables_with_ray_object_store():
+    started_ray = False
     try:
         import ray
 
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True, num_cpus=2)
+            started_ray = True
     except Exception:
         pytest.skip("Ray not available")
 
+    from verl.single_controller.ray.object_store import RayObjectStore
+
+    RayObjectStore.start()
     engine = DefaultStorageEngine()
     set_default_storage_engine(engine)
     try:
@@ -173,7 +181,7 @@ def test_attach_preserialized_ref_tables_with_ray_object_store():
         data.batch["token_level_scores"] = torch.zeros(8, 2)
         data.non_tensor_batch["raw_prompt"] = raw_prompts.copy()
         data.non_tensor_batch["reward_model"] = reward_models.copy()
-        assert data.ref_table["token_level_scores"].backend == "object_store"
+        assert data.ref_table["token_level_scores"].backend == "ray_object_store"
         assert data.ref_table["raw_prompt"].backend == "local"
         assert data.ref_table["reward_model"].backend == "local"
         small_batch = DataProto(
@@ -189,16 +197,38 @@ def test_attach_preserialized_ref_tables_with_ray_object_store():
             )
         )
         assert small_batch.ref_table["responses"].backend == "local"
-        assert large_batch.ref_table["responses"].backend == "object_store"
+        assert large_batch.ref_table["responses"].backend == "ray_object_store"
         chunks = _split_args_kwargs_data_proto(4, data)[0][0]
-        for c in chunks:
-            assert hasattr(c, "OBJ_REF")
-            assert hasattr(c, "LOCAL_REF")
-            # Round-trip pickle path uses OBJ_REF/LOCAL_REF
-            state = c.__getstate__()
-            assert isinstance(state[1], tuple)
+        payloads = [pickle.dumps(chunk) for chunk in chunks]
+        retry_payloads = [pickle.dumps(chunk) for chunk in chunks]
+        restored = [pickle.loads(payload) for payload in payloads]
+        retried = [pickle.loads(payload) for payload in retry_payloads]
+        for rank, (chunk, retry) in enumerate(zip(restored, retried, strict=True)):
+            expected = slice(rank * 2, (rank + 1) * 2)
+            torch.testing.assert_close(chunk.batch["input_ids"], data.batch["input_ids"][expected])
+            torch.testing.assert_close(retry.batch["token_level_scores"], data.batch["token_level_scores"][expected])
+            np.testing.assert_array_equal(chunk.non_tensor_batch["raw_prompt"], raw_prompts[expected])
     finally:
         set_default_storage_engine(None)
+        _close_object_store()
+        if started_ray:
+            ray.shutdown()
+
+
+def test_default_storage_without_runtime_follows_default_backend():
+    import ray
+
+    from verl.experimental.neoproto.storage import get_default_storage_engine
+
+    set_default_storage_engine(None)
+    engine = get_default_storage_engine()
+    assert isinstance(engine, DefaultStorageEngine)
+
+    ray.init(num_cpus=1)
+    try:
+        assert engine.get(engine.put(torch.arange(4))).tolist() == [0, 1, 2, 3]
+    finally:
+        ray.shutdown()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

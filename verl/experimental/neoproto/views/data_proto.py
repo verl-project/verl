@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from tensordict import TensorDict
@@ -41,8 +41,8 @@ try:  # pragma: no cover
 except ImportError:  # pragma: no cover
     _HAVE_TORCH = False
 
-from verl.experimental.neoproto.neo import FULL_GRANULARITY, IndexView, NeoProto, fieldspec_from_local
-from verl.experimental.neoproto.storage.engine import FieldSpec, Ref, RefTable, StorageEngine
+from verl.experimental.neoproto.neo import FULL_GRANULARITY, IndexView, NeoProto, fieldspec_from_local, same_refs
+from verl.experimental.neoproto.storage.engine import FieldSpec, LocalRef, Ref, RefTable, StorageEngine
 from verl.utils.device import get_device_name
 
 
@@ -93,19 +93,38 @@ _OBJECT_STORE_NON_TENSOR_KEYS = frozenset(
 )
 
 
-def _non_tensor_backend(key: str) -> str:
-    return "object_store" if key in _OBJECT_STORE_NON_TENSOR_KEYS else "local"
+_INLINE = "inline"
+_STORAGE = "storage"
 
 
-def _batch_tensor_backend(value: Any) -> str:
+def _non_tensor_placement(key: str) -> str:
+    return _STORAGE if key in _OBJECT_STORE_NON_TENSOR_KEYS else _INLINE
+
+
+def _batch_tensor_placement(value: Any) -> str:
     """Inline tiny constructor tensors; keep training-sized payloads in Ray."""
     if _HAVE_TORCH and isinstance(value, torch.Tensor):
         nbytes = value.numel() * value.element_size()
     elif isinstance(value, np.ndarray):
         nbytes = value.nbytes
     else:
-        return "object_store"
-    return "local" if nbytes <= _INLINE_TENSOR_MAX_BYTES else "object_store"
+        return _STORAGE
+    return _INLINE if nbytes <= _INLINE_TENSOR_MAX_BYTES else _STORAGE
+
+
+def _put_with_placement(
+    engine: StorageEngine,
+    value: Any,
+    *,
+    key_hint: str,
+    spec: FieldSpec,
+    placement: str,
+) -> Ref:
+    if placement == _INLINE:
+        return LocalRef.of(value, dtype=spec.dtype, shape=spec.shape)
+    if placement == _STORAGE:
+        return engine.put(value, key_hint=key_hint, spec=spec)
+    raise ValueError(f"unsupported NeoProto placement {placement!r}")
 
 
 def _is_full_key(owner: NeoProto, key: str) -> bool:
@@ -195,12 +214,12 @@ class DataProto(NeoProto, RLDataProto):
     def __init__(
         self,
         batch: Any = None,
-        non_tensor_batch: Optional[dict[str, Any]] = None,
-        meta_info: Optional[dict[str, Any]] = None,
+        non_tensor_batch: dict[str, Any] | None = None,
+        meta_info: dict[str, Any] | None = None,
         *,
-        schema: Optional[dict[str, FieldSpec]] = None,
-        ref_table: Optional[RefTable] = None,
-        dim0_index: Optional[IndexView] = None,
+        schema: dict[str, FieldSpec] | None = None,
+        ref_table: RefTable | None = None,
+        dim0_index: IndexView | None = None,
     ) -> None:
         NeoProto.__init__(
             self,
@@ -311,11 +330,12 @@ class DataProto(NeoProto, RLDataProto):
                 ),
             )
             self.schema[k] = spec
-            self.ref_table[k] = engine.put(
+            self.ref_table[k] = _put_with_placement(
+                engine,
                 v,
                 key_hint=k,
                 spec=spec,
-                backend=_batch_tensor_backend(v),
+                placement=_batch_tensor_placement(v),
             )
         if bs < 0 and hasattr(value, "batch_size") and len(value.batch_size) > 0:
             bs = int(value.batch_size[0])
@@ -366,11 +386,12 @@ class DataProto(NeoProto, RLDataProto):
                     granularity=granularity,
                 )
                 self.schema[k] = spec
-                self.ref_table[k] = engine.put(
+                self.ref_table[k] = _put_with_placement(
+                    engine,
                     v,
                     key_hint=k,
                     spec=spec,
-                    backend=_non_tensor_backend(k),
+                    placement=_non_tensor_placement(k),
                 )
             if bs > 0:
                 self.ref_table.batch_size = bs
@@ -381,15 +402,15 @@ class DataProto(NeoProto, RLDataProto):
     @classmethod
     def from_dict(
         cls,
-        tensors: Optional[dict[str, torch.Tensor]] = None,
-        non_tensors: Optional[dict[str, Any]] = None,
-        meta_info: Optional[dict[str, Any]] = None,
+        tensors: dict[str, torch.Tensor] | None = None,
+        non_tensors: dict[str, Any] | None = None,
+        meta_info: dict[str, Any] | None = None,
         num_batch_dims: int = 1,
         auto_padding: bool = False,
         *,
-        granularity: Optional[str] = "shared",
-        dim0_index: Optional[IndexView] = None,
-        storage: Optional[StorageEngine] = None,
+        granularity: str | None = "shared",
+        dim0_index: IndexView | None = None,
+        storage: StorageEngine | None = None,
     ) -> DataProto:
         assert num_batch_dims == 1, "NeoProto-backed DataProto supports exactly one batch dimension"
         tensors = tensors or {}
@@ -402,7 +423,7 @@ class DataProto(NeoProto, RLDataProto):
         else:
             engine = inst._engine()
 
-        batch_size: Optional[int] = None
+        batch_size: int | None = None
         for k, v in tensors.items():
             if isinstance(v, Ref):
                 inst.add_ref(k, v, granularity=granularity)
@@ -452,14 +473,21 @@ class DataProto(NeoProto, RLDataProto):
                 if granularity == "sample" and v.shape[0] > 1:
                     refs = np.empty(len(v), dtype=object)
                     for i in range(v.shape[0]):
-                        refs[i] = engine.put(
+                        refs[i] = _put_with_placement(
+                            engine,
                             v[i, ...],
                             key_hint=k,
                             spec=spec,
-                            backend=_non_tensor_backend(k),
+                            placement=_non_tensor_placement(k),
                         )
                 else:
-                    refs = engine.put(v, key_hint=k, spec=spec, backend=_non_tensor_backend(k))
+                    refs = _put_with_placement(
+                        engine,
+                        v,
+                        key_hint=k,
+                        spec=spec,
+                        placement=_non_tensor_placement(k),
+                    )
                 inst.ref_table[k] = refs
 
         for k, v in meta_info.items():
@@ -575,10 +603,10 @@ class DataProto(NeoProto, RLDataProto):
     def from_single_dict(
         cls,
         data: dict[str, Any],
-        meta_info: Optional[dict[str, Any]] = None,
+        meta_info: dict[str, Any] | None = None,
         auto_padding: bool = False,
         *,
-        storage: Optional[StorageEngine] = None,
+        storage: StorageEngine | None = None,
     ) -> DataProto:
         tensors: dict[str, Any] = {}
         non_tensors: dict[str, Any] = {}
@@ -602,9 +630,9 @@ class DataProto(NeoProto, RLDataProto):
     # ------------------------------------------------------------------
     def select(  # type: ignore[override]
         self,
-        batch_keys: Optional[list[str]] = None,
-        non_tensor_batch_keys: Optional[list[str]] = None,
-        meta_info_keys: Optional[list[str]] = None,
+        batch_keys: list[str] | None = None,
+        non_tensor_batch_keys: list[str] | None = None,
+        meta_info_keys: list[str] | None = None,
         deepcopy: bool = False,
     ) -> DataProto:
         tensor_keys = [
@@ -640,11 +668,7 @@ class DataProto(NeoProto, RLDataProto):
             self._non_tensor_batch_cache.clear()
 
     def prepare_dispatch(self, chunks) -> None:
-        """Attach rank-local ref tables before Ray serializes chunked views."""
-        import ray
-
-        if not ray.is_initialized():
-            return
+        """Attach rank-local ref tables before chunked views are pickled."""
         from verl.experimental.neoproto.dispatch import attach_preserialized_ref_tables
 
         attach_preserialized_ref_tables(self, chunks)
@@ -681,7 +705,7 @@ class DataProto(NeoProto, RLDataProto):
         """NeoProto payload refs already resolve to CPU tensors on workers."""
         return self
 
-    def prefetch(self, keys: Optional[list[str]] = None, *, device: str = "cpu") -> dict[str, Any]:
+    def prefetch(self, keys: list[str] | None = None, *, device: str = "cpu") -> dict[str, Any]:
         """Materialize ``keys`` once and seed the lazy ``.batch`` cache.
 
         Driver hot paths (adv / metrics) still read ``batch.batch[k]``; without
@@ -747,6 +771,7 @@ class DataProto(NeoProto, RLDataProto):
         from verl.protocol import list_of_dict_to_dict_of_list
 
         output = NeoProto.concat(items, new_index=new_index)
+        shared_table = all(same_refs(item, items[0]) for item in items)
         all_metrics = []
         merged_meta: dict[str, Any] = {}
         for item in items:
@@ -759,6 +784,9 @@ class DataProto(NeoProto, RLDataProto):
                         all_metrics.extend(value)
                     else:
                         all_metrics.append(value)
+                elif shared_table:
+                    # Concat already preserved this publication and its opaque aliases.
+                    continue
                 elif key in merged_meta:
                     assert merged_meta[key] == value, f"Conflicting values for meta_info key '{key}'"
                 else:
@@ -825,9 +853,9 @@ class DataProto(NeoProto, RLDataProto):
 
     def pop(  # type: ignore[override]
         self,
-        batch_keys: Optional[list[str]] = None,
-        non_tensor_batch_keys: Optional[list[str]] = None,
-        meta_info_keys: Optional[list[str]] = None,
+        batch_keys: list[str] | None = None,
+        non_tensor_batch_keys: list[str] | None = None,
+        meta_info_keys: list[str] | None = None,
     ) -> DataProto:
         keys = list(batch_keys or []) + list(non_tensor_batch_keys or []) + list(meta_info_keys or [])
         popped = NeoProto.pop(self, keys)
@@ -952,7 +980,7 @@ class DataProto(NeoProto, RLDataProto):
         cls,
         data: Any,
         *,
-        storage: Optional[StorageEngine] = None,
+        storage: StorageEngine | None = None,
     ) -> DataProto:
         """Wrap an existing verl ``DataProto`` into a ref-only Neo view.
 
@@ -1206,7 +1234,7 @@ class _BatchProxy:
             if _HAVE_TORCH and isinstance(physical_value, torch.Tensor):
                 physical_value = physical_value.detach().contiguous().clone()
             stored_ref = engine.put(physical_value, key_hint=key, spec=spec)
-            if shared_logical_physical and stored_ref.backend == "object_store":
+            if shared_logical_physical and stored_ref.backend == "ray_object_store":
                 # Ray object-store ``put`` owns a separate wire copy, so the
                 # cloned logical value can also seed the cache safely.
                 logical_value = physical_value
@@ -1216,11 +1244,12 @@ class _BatchProxy:
             self._owner.ref_table[key] = stored_ref
             self._owner._batch_cache[cache_key] = logical_value
         else:
-            self._owner.ref_table[key] = engine.put(
+            self._owner.ref_table[key] = _put_with_placement(
+                engine,
                 physical_value,
                 key_hint=key,
                 spec=spec,
-                backend=_non_tensor_backend(key),
+                placement=_non_tensor_placement(key),
             )
             self._owner._non_tensor_batch_cache[cache_key] = logical_value
 

@@ -21,7 +21,6 @@ import os
 from dataclasses import asdict
 from typing import Generator
 
-import ray
 import sglang.srt.entrypoints.engine
 import torch
 from peft import LoraConfig
@@ -37,6 +36,7 @@ from sglang.srt.weight_sync.utils import _preprocess_tensor_for_update_weights
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
+from verl.runtime import RemoteWorkerGroup
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -128,9 +128,10 @@ class ServerAdapter(BaseRollout):
             fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
+        self.server_actor: RemoteWorkerGroup | None = None
 
         rank = int(os.environ["RANK"])
-        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE") or os.environ["RAY_LOCAL_WORLD_SIZE"])
         # PD asymmetric layout inflates per-replica footprint; must match
         # agent_loop.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
         disagg = getattr(self.config, "disaggregation", None)
@@ -219,24 +220,22 @@ class ServerAdapter(BaseRollout):
                 return
 
         if self._pd_role == "prefill":
-            actor_name = f"sglang_server_{self.replica_rank}_0"
             timeout_kwargs = {}
         elif self._pd_role == "decode":
-            actor_name = f"sglang_server_decode_{self.replica_rank}_{self._pd_server_index}"
             # Decode init on long-prompt workloads can stall past the default
             # (60s × 12); shorter timeout + fewer attempts avoids trainer lockup.
             timeout_kwargs = {"timeout": 10.0, "max_attempts": 2}
         else:
-            actor_name = f"sglang_server_{self.replica_rank}_{self.node_rank}"
             timeout_kwargs = {}
 
-        self.server_actor = ray.get_actor(actor_name)
-        server_address, server_port = await self.server_actor.get_server_address.remote()
+        if self.server_actor is None:
+            raise RuntimeError("rollout server endpoint has not been injected")
+        server_address, server_port = await self.server_actor.submit("get_server_address")
         host = f"[{server_address}]" if is_valid_ipv6_address(server_address) else server_address
         logger.info(
             f"ServerAdapter {self._pd_role or 'colocated'}: "
             f"replica_rank={self.replica_rank}, rollout_rank={self.rollout_rank}, "
-            f"server={host}:{server_port}, actor={actor_name}"
+            f"server={host}:{server_port}"
         )
 
         self._engine = AsyncHttpServerAdapter(
@@ -247,6 +246,10 @@ class ServerAdapter(BaseRollout):
             trust_remote_code=self.model_config.trust_remote_code,
             **timeout_kwargs,
         )
+
+    def set_server_endpoint(self, endpoint: RemoteWorkerGroup) -> None:
+        super().set_server_endpoint(endpoint)
+        self.server_actor = endpoint
 
     def _is_server_tp_leader(self) -> bool:
         """True if this rank is TP-rank-0 of its server's group.
@@ -353,7 +356,7 @@ class ServerAdapter(BaseRollout):
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
             if global_steps is not None:
-                await self.server_actor.set_global_steps.remote(global_steps)
+                await self.server_actor.submit("set_global_steps", args=(global_steps,))
 
     def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
         # peft config

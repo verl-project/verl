@@ -15,7 +15,7 @@
 
 import ray
 
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+from verl.single_controller.ray import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 
 

@@ -25,9 +25,11 @@ with open(os.path.join(version_folder, "verl/version/version")) as f:
 
 install_requires = [
     "accelerate",
+    "cachetools",
     "codetiming",
     "datasets",
     "dill",
+    "exceptiongroup; python_version < '3.11'",
     "hydra-core",
     "numpy>=2.0.0",
     "pandas",
@@ -61,6 +63,13 @@ SGLANG_REQUIRES = [
 TRL_REQUIRES = ["trl<=0.9.6"]
 # Keep the legacy mbridge dependency available during its deprecation window.
 MCORE_REQUIRES = ["megatron-bridge", "mbridge"]
+# TorchStore still declares torchmonarch==0.4.1, so standard resolution reports
+# a dependency conflict. Pin both public repositories to the HEAD snapshots
+# verified by the Runtime E2E matrix instead of mixing a release with repo HEAD.
+MONARCH_REQUIRES = [
+    "torchmonarch @ git+https://github.com/meta-pytorch/monarch.git@2cd138b9a7c1130348859583f3473d587f72056a",
+    "torchstore @ git+https://github.com/meta-pytorch/torchstore.git@7cf8004db1b07e7c8e7b9c581dd65662ad1e7c45",
+]
 
 extras_require = {
     "test": TEST_REQUIRES,
@@ -72,6 +81,7 @@ extras_require = {
     "sglang": SGLANG_REQUIRES,
     "trl": TRL_REQUIRES,
     "mcore": MCORE_REQUIRES,
+    "monarch": MONARCH_REQUIRES,
     "trtllm": TRTLLM_REQUIRES,
 }
 

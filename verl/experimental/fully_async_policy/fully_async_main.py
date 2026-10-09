@@ -27,18 +27,17 @@ from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncT
 from verl.experimental.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
 from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
+from verl.runtime import Worker
 from verl.trainer.ppo.utils import Role
 from verl.utils.device import auto_set_device
 from verl.utils.fs import copy_to_local
 
 
-@ray.remote(num_cpus=1)
-class FullyAsyncTaskRunner:
-    """
-    Ray remote class for executing distributed PPO training tasks.
-    """
+class FullyAsyncTaskRunner(Worker):
+    """Execute distributed PPO training on the controller-pool TaskRunner."""
 
     def __init__(self):
+        super().__init__()
         self.running = False
         self.components = {}
         self.shutdown_event = threading.Event()

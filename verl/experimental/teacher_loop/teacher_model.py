@@ -15,10 +15,11 @@
 import asyncio
 import logging
 import os
+from typing import cast
 
 from omegaconf import DictConfig
 
-from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
+from verl.runtime import ClassWithInitArgs, WorkerGroup, current_runtime, split_resource_pool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig, HFModelConfig
@@ -41,7 +42,7 @@ class TeacherModelManager:
         self,
         distillation_config: DistillationConfig,
         teacher_model_config: DistillationTeacherModelConfig,
-        resource_pool: RayResourcePool,
+        resource_pool,
     ):
         """
         Initialize the teacher model manager.
@@ -49,7 +50,7 @@ class TeacherModelManager:
         Args:
             distillation_config (DistillationConfig): Distillation configuration.
             teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
-            resource_pool (RayResourcePool): Dedicated teacher resource pool.
+            resource_pool (ResourcePool): Dedicated teacher resource pool.
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
@@ -108,9 +109,9 @@ class TeacherModelManager:
         (tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size).
         It is not the teacher's total GPU footprint (`num_replicas * W`).
 
-        `split_resource_pool` walks bundles linearly and is oblivious to node
-        boundaries, so a replica's sub-pool can end up touching more nodes than W
-        implies when W does not divide the node layout cleanly.
+        ResourcePool slices expose their physical span through the backend-neutral
+        ``nnodes`` property. Backends reject non-rectangular slices before this
+        validation, and this check verifies the surviving view has the expected span.
 
         Example (P = n_gpus_per_node = 4, two teachers with W=3 and W=4):
 
@@ -130,14 +131,11 @@ class TeacherModelManager:
         W = per_replica_world_size
         expected_span = (W + P - 1) // P
         for i, sub_pool in enumerate(replica_pools):
-            start = sub_pool.start_bundle_index
-            first_node = start // P
-            last_node = (start + W - 1) // P
-            observed_span = last_node - first_node + 1
+            observed_span = sub_pool.nnodes
             if observed_span != expected_span:
                 raise ValueError(
-                    f"Teacher {key!r} replica {i} sub-pool bundles [{start}, {start + W}) "
-                    f"span {observed_span} node(s) but per_replica_world_size {W} with "
+                    f"Teacher {key!r} replica {i} sub-pool spans {observed_span} node(s) "
+                    f"but per_replica_world_size {W} with "
                     f"n_gpus_per_node {P} expects {expected_span}. Reorder teachers or "
                     f"adjust num_replicas / inference parallelism so each replica sub-pool "
                     f"aligns to node boundaries."
@@ -146,9 +144,24 @@ class TeacherModelManager:
     def _initialize_load_balancer_handle(self):
         from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
 
-        self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
-            servers=dict(zip(self.server_addresses, self.server_handles, strict=True))
+        runtime = current_runtime()
+        load_balancer_pool = runtime.create_resource_pool(
+            nnodes=1,
+            processes_per_node=1,
+            device_type="cpu",
+            on="controller",
         )
+        self._load_balancer_group = cast(
+            WorkerGroup[GlobalRequestLoadBalancer],
+            runtime.create_worker_group(
+                ClassWithInitArgs(
+                    GlobalRequestLoadBalancer,
+                    servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
+                ),
+                on=load_balancer_pool,
+            ),
+        )
+        self.load_balancer_handle = self._load_balancer_group.remote()
 
 
 class MultiTeacherModelManager:
@@ -157,14 +170,14 @@ class MultiTeacherModelManager:
     def __init__(
         self,
         config: DictConfig,
-        resource_pool: RayResourcePool,
+        resource_pool,
     ):
         """
         Initialize the multi-teacher model manager.
 
         Args:
             config (DictConfig): Full configuration.
-            resource_pool (RayResourcePool): Combined resource pool for all teachers.
+            resource_pool (ResourcePool): Combined resource pool for all teachers.
         """
         self.config = config
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)

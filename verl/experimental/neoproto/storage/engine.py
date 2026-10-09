@@ -132,12 +132,12 @@ def _infer_dtype(value: Any, spec: Optional[FieldSpec]) -> Optional[str]:
 
 
 def _infer_shape(value: Any, spec: Optional[FieldSpec]):
-    if spec is not None and spec.shape:
-        return tuple(spec.shape)
     if _HAVE_TORCH and isinstance(value, torch.Tensor):
         return tuple(value.shape)
     if isinstance(value, np.ndarray):
         return tuple(value.shape)
+    if spec is not None and spec.shape:
+        return tuple(spec.shape)
     return None
 
 
@@ -202,7 +202,7 @@ class Ref:
     Attributes
     ----------
     backend:
-        Identifier of the backend (for example, "object_store" or "local").
+        Identifier of the backend (for example, "ray_object_store", "torchstore", or inline "local").
     uid:
         Stable ID assigned by the backend (e.g. Ray object hex, local uuid).
     dtype / shape:
@@ -451,10 +451,25 @@ class LocalRef(Ref):
         ref.dataptr = self.dataptr + other.dataptr
         return ref
 
+    def materialize(self) -> Any:
+        value = _BaseStorageEngine.apply_slice(self.dataptr, self.slice_spec)
+        return self.apply_ops(value)
+
+    def release(self) -> None:
+        """Inline values own no external storage resource."""
+        return None
+
     @classmethod
     def of(cls, value: Any, *, dtype: str = "object", shape: tuple[int, ...] = ()) -> LocalRef:
         """Wrap an in-memory ``value`` as a ``backend="local"`` ref."""
-        return cls(backend="local", uid=new_uid(), dataptr=value, dtype=dtype, shape=shape)
+        physical_shape = _infer_shape(value, None)
+        return cls(
+            backend="local",
+            uid=new_uid(),
+            dataptr=value,
+            dtype=dtype,
+            shape=physical_shape if physical_shape is not None else shape,
+        )
 
 
 def _rebuild_ref(backend, uid, dataptr, dtype, shape, slice_spec, apply_funcs):  # pragma: no cover
@@ -506,12 +521,18 @@ def _release_ref_container(container: RefContainer) -> None:
     """Release every :class:`Ref` held by a (possibly nested) ref container."""
     from verl.experimental.neoproto.storage.default import get_engine_for_backend
 
+    if isinstance(container, LocalRef):
+        return
     if isinstance(container, Ref):
         container.release()
     elif isinstance(container, list | np.ndarray):
-        ref_list = [r for r in container if isinstance(r, Ref)]
-        if len(ref_list) > 0:
-            get_engine_for_backend(ref_list[0].backend).release(ref_list)
+        refs_by_backend: dict[str, list[Ref]] = {}
+        for ref in container:
+            if not isinstance(ref, Ref) or isinstance(ref, LocalRef):
+                continue
+            refs_by_backend.setdefault(ref.backend, []).append(ref)
+        for backend, refs in refs_by_backend.items():
+            get_engine_for_backend(backend).release(refs)
 
 
 # ---------------------------------------------------------------------------
@@ -614,11 +635,11 @@ class RefTable:
             old_ref = self._refs[key]
             if isinstance(old_ref, Ref):
                 if old_ref.uid != getattr(value, "uid", None):
-                    if old_ref.backend != "local":
+                    if not isinstance(old_ref, LocalRef):
                         self._gc_queue.append(old_ref)
             elif isinstance(old_ref, list | np.ndarray):
                 # per-sample column of Refs: retire the non-local ones for deferred GC
-                non_local = [r for r in old_ref if isinstance(r, Ref) and r.backend != "local"]
+                non_local = [r for r in old_ref if isinstance(r, Ref) and not isinstance(r, LocalRef)]
                 if non_local:
                     self._gc_queue.append(non_local)
         self._refs[key] = value
@@ -675,7 +696,7 @@ class RefTable:
         new_refs = {}
         for k, v in self._refs.items():
             if isinstance(v, Ref):
-                assert v.backend == "local" or idx == 0, f"Ref {v} backend {v.backend} not supported"
+                assert isinstance(v, LocalRef) or idx == 0, f"Ref {v} backend {v.backend} not supported"
                 new_refs[k] = v.copy()
             elif isinstance(v, np.ndarray):
                 new_refs[k] = v[idx]
@@ -927,6 +948,7 @@ _uid_lock = threading.Lock()
 
 
 def new_uid(prefix: str = "") -> str:
+    """Return a random hex UID, optionally prefixed, for naming stored payloads."""
     with _uid_lock:
         u = uuid.uuid4().hex
     return f"{prefix}{u}" if prefix else u

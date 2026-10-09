@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import numpy as np
-import ray
 import tensordict
 import torch
 import torch.distributed
@@ -35,6 +34,7 @@ from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
+from verl.runtime import RemoteCall
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.py_functional import list_of_dict_to_dict_of_list, union_two_dict
 from verl.utils.torch_functional import allgather_dict_tensors
@@ -1212,12 +1212,18 @@ class DataProtoFuture:
     operation on the DataProtoFuture in driver.
     """
 
-    collect_fn: Callable
-    futures: list[ray.ObjectRef]
+    collect_fn: Callable[[list[Any]], Any]
+    futures: list[RemoteCall[Any]]
     dispatch_fn: Callable = None
 
+    def __post_init__(self) -> None:
+        if not self.futures:
+            raise ValueError("DataProtoFuture requires at least one RemoteCall")
+        if not all(isinstance(future, RemoteCall) for future in self.futures):
+            raise TypeError("DataProtoFuture futures must contain only RemoteCall instances")
+
     @staticmethod
-    def concat(data: list[ray.ObjectRef]) -> "DataProtoFuture":
+    def concat(data: list[RemoteCall[Any]]) -> "DataProtoFuture":
         output = DataProtoFuture(collect_fn=DataProto.concat, futures=data)
         return output
 
@@ -1237,18 +1243,18 @@ class DataProtoFuture:
         return arg_future_lst
 
     def get(self):
-        output = ray.get(self.futures)  # dp_size.
+        output = RemoteCall.gather(self.futures).result()
         for o in output:
             assert isinstance(o, DataProto | TensorDict)
 
         if isinstance(output[0], DataProto):
-            output = type(output[0]).concat(output)  # select dp, concat
+            output = self.collect_fn(output)  # select dp, concat
         elif isinstance(output[0], TensorDict):
             from verl.utils.tensordict_utils import concat_tensordict
 
             output = concat_tensordict(output)
         else:
-            raise TypeError(f"Unknown type {type(o[0])} in DataProtoFuture")
+            raise TypeError(f"Unknown type {type(output[0])} in DataProtoFuture")
 
         if self.dispatch_fn is not None:
             output = self.dispatch_fn(output)  # split in batch dim, select using dp
@@ -1345,7 +1351,7 @@ class BatchData:
         if not data:
             raise ValueError("Cannot concatenate an empty list of data items.")
         sample = data[0]
-        if isinstance(sample, ray.ObjectRef):
+        if isinstance(sample, RemoteCall):
             return DataProtoFuture.concat(data)
         if isinstance(sample, TensorDict):
             from verl.utils.tensordict_utils import concat_tensordict
@@ -1362,7 +1368,7 @@ class BatchData:
 
     @classmethod
     def _concatable_types(cls):
-        return (DataProto, ray.ObjectRef, TensorDict)
+        return (DataProto, RemoteCall, TensorDict)
 
 
 def all_gather_data_proto(data: DataProto, process_group):

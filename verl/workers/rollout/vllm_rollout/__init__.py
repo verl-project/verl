@@ -13,8 +13,20 @@
 # limitations under the License.
 import os
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING, Any
 
-from .vllm_rollout import ServerAdapter  # noqa: F401
+if TYPE_CHECKING:
+    from .vllm_rollout import ServerAdapter
+
+__all__ = ["ServerAdapter"]
+
+
+def __getattr__(name: str) -> Any:
+    if name != "ServerAdapter":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from .vllm_rollout import ServerAdapter
+
+    return ServerAdapter
 
 
 def get_version(pkg):

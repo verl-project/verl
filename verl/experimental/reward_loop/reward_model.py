@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 
-from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
 from verl.workers.config import HFModelConfig, RewardModelConfig
 from verl.workers.rollout.replica import get_rollout_replica_class
 
@@ -30,31 +29,17 @@ class RewardModelManager:
     def __init__(
         self,
         config: RewardModelConfig,
-        resource_pool: RayResourcePool = None,
+        resource_pool=None,
     ):
         """
         Initialize the reward model manager.
 
         Args:
             config (RewardModelConfig): Reward model configuration.
-            resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+            resource_pool (ResourcePool, optional): Resource pool. Defaults to None.
         """
         self.config = config
         self.resource_pool = resource_pool
-
-        # Determinism workaround: vLLM /classify (pooling path) does not honor
-        # `priority` and is not covered by VLLM_BATCH_INVARIANT, so co-batched RM
-        # forward passes break bitwise reproducibility. Force max_num_seqs=1 to
-        # serialize RM inference whenever full_determinism is enabled.
-        if self.config.rollout.full_determinism and self.config.rollout.max_num_seqs != 1:
-            logger.warning(
-                "[reward_model] full_determinism=True: forcing rollout.max_num_seqs "
-                "from %d to 1. vLLM pooling/classify does not support priority "
-                "scheduling or batch invariance; serializing RM inference is "
-                "currently the only way to keep RM scores bitwise reproducible.",
-                self.config.rollout.max_num_seqs,
-            )
-            self.config.rollout.max_num_seqs = 1
 
         self._initialize_llm_servers()
         self._initialize_router()
@@ -75,10 +60,13 @@ class RewardModelManager:
             else self.config.n_gpus_per_node * self.config.nnodes  # standalone mode
         )
         num_replicas = world_size // rollout_world_size
-        assert num_replicas > 0, (
-            f"Not enough GPUs to run the reward model. "
-            f"world_size ({world_size}) < rollout_world_size ({rollout_world_size}). "
-            f"Check your resource pool or standalone config (n_gpus_per_node, nnodes)."
+        if num_replicas <= 0 or world_size % rollout_world_size:
+            raise ValueError(
+                f"reward model world size {world_size} must be a positive multiple of "
+                f"replica parallelism {rollout_world_size}"
+            )
+        gpus_per_node = (
+            self.resource_pool.processes_per_node if self.resource_pool is not None else self.config.n_gpus_per_node
         )
 
         rollout_replica_class = get_rollout_replica_class(rollout_config.name)
@@ -89,14 +77,16 @@ class RewardModelManager:
                 replica_rank=replica_rank,
                 config=rollout_config,
                 model_config=model_config,
-                gpus_per_node=self.config.n_gpus_per_node,
+                gpus_per_node=gpus_per_node,
                 is_reward_model=True,
             )
             for replica_rank in range(num_replicas)
         ]
-        if self.resource_pool:
-            split_resource_pools = split_resource_pool(self.resource_pool, split_size=rollout_world_size)
-            assert len(split_resource_pools) == len(self.rollout_replicas)
+        if self.resource_pool is not None:
+            split_resource_pools = [
+                self.resource_pool.slice(slice(start, start + rollout_world_size))
+                for start in range(0, world_size, rollout_world_size)
+            ]
             self._run_all(
                 [
                     server.init_colocated(resource_pool)

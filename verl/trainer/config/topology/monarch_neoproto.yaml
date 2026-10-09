@@ -1,0 +1,29 @@
+# Standard synchronous PPO topology for an applied Monarch GPU job.
+# Override trainer.nnodes and trainer.n_gpus_per_node to match the job.
+clusters:
+  - name: default
+    nnodes: ${trainer.nnodes}
+    n_gpus_per_node: ${trainer.n_gpus_per_node}
+
+device_pools:
+  - name: train
+    cluster: default
+    nnodes: ${trainer.nnodes}
+    n_gpus_per_node: ${trainer.n_gpus_per_node}
+
+# These are the model placements active in the default GAE PPO recipe.
+models:
+  - name: actor
+    worker: actor
+    config_key: actor_rollout_ref
+    resource_pool: train
+
+  - name: rollout
+    worker: rollout
+    config_key: actor_rollout_ref
+    resource_pool: train
+
+  - name: critic
+    worker: critic
+    config_key: critic
+    resource_pool: train

@@ -21,10 +21,8 @@ import uuid
 from pprint import pprint
 from typing import Any, Callable, Optional
 
-import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
-from ray.actor import ActorHandle
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import run_headless
@@ -36,15 +34,21 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from verl.plugin.platform import get_platform
+from verl.runtime import ClassWithInitArgs, RemoteCall, Worker, current_runtime
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.device import get_visible_devices_keyword, is_torch_npu_available
+from verl.utils.net_utils import get_free_port, get_local_ip_address, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
+from verl.workers.rollout.utils import (
+    get_max_position_embeddings,
+    qwen2_5_vl_dedup_image_tokens,
+    run_uvicorn,
+    stop_uvicorn,
+)
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -84,7 +88,12 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
-class vLLMHttpServer:
+def _forward_weight_transfer_runtime_id() -> None:
+    """Expose the attached Runtime id to vLLM worker subprocesses."""
+    os.environ["VERL_RAY_JOB_ID"] = current_runtime().runtime_id
+
+
+class vLLMHttpServer(Worker):
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
     vllm serve --tensor-parallel-size=8 ...
@@ -96,12 +105,13 @@ class vLLMHttpServer:
         config,
         model_config,
         rollout_mode: RolloutMode,
-        workers: list[ActorHandle],
+        worker_count: int,
         replica_rank: int,
         node_rank: int,
         gpus_per_node: int,
         nnodes: int,
         cuda_visible_devices: str,
+        env_vars: dict[str, str] | None = None,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
     ):
@@ -118,6 +128,9 @@ class vLLMHttpServer:
             disaggregation_role: PD role, or ``"null"`` for normal rollout.
             disaggregation_kv_transfer_config: vLLM KVTransferConfig dict for PD.
         """
+        if "WORLD_SIZE" in os.environ:
+            super().__init__()
+        os.environ.update(env_vars or {})
         if disaggregation_role not in ("null", "prefill", "decode"):
             raise ValueError(f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}")
         if disaggregation_role != "null" and disaggregation_kv_transfer_config is None:
@@ -127,21 +140,20 @@ class vLLMHttpServer:
         self._disaggregation_role = disaggregation_role
         self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
         # Filled by vLLMPDReplica.set_pd_peer for prefill-side routing.
-        self._pd_decode_peers: list[ActorHandle] = []
+        self._pd_decode_peers: list = []
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
 
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
-        # Forward the Ray job id into the vLLM worker subprocess so the
-        # colocated weight-transfer IPC socket path is unique per Ray job.
+        # Forward the Runtime id into the vLLM worker subprocess so the
+        # colocated weight-transfer IPC socket path is unique per job.
         # Without this, two concurrent verl jobs on the same node both bind
         # the same /tmp/rl-colocate-zmq-replica-0-rank-0.sock and one fails
         # with EADDRINUSE; a stale socket from a crashed run trips the same
         # error on restart.
-        os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
-
+        _forward_weight_transfer_runtime_id()
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
@@ -156,7 +168,7 @@ class vLLMHttpServer:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
         self.rollout_mode = rollout_mode
-        self.workers = workers
+        self.worker_count = worker_count
 
         self.replica_rank = replica_rank
         self.node_rank = node_rank
@@ -171,7 +183,7 @@ class vLLMHttpServer:
             self.config.load_format = "auto"
 
         # used for http server
-        self._server_address = ray.util.get_node_ip_address().strip("[]")
+        self._server_address = get_local_ip_address()
         self._server_port = None
 
         # used for controlling vllm server profiler
@@ -201,14 +213,41 @@ class vLLMHttpServer:
 
         self._post_init(cuda_visible_devices)
 
-    def get_master_address(self):
+    async def close(self) -> None:
+        """Stop request admission before shutting down vLLM native workers."""
+        server_task = getattr(self, "_server_task", None)
+        self._server_task = None
+        try:
+            await stop_uvicorn(server_task)
+        finally:
+            engine = getattr(self, "engine", None)
+            self.engine = None
+            try:
+                if engine is not None:
+                    try:
+                        # Older vLLM releases can leave sleep-mode MemPools for
+                        # interpreter finalization, where allocator-first GC aborts
+                        # the TP worker. Release them inside each worker while its
+                        # native allocator is still alive; newer vLLM handles the same
+                        # hook idempotently.
+                        await engine.collective_rpc(method="release_cumem_pools")
+                    finally:
+                        engine.shutdown()
+            finally:
+                for socket_name in ("_master_sock", "_dp_rpc_sock", "_dp_master_sock"):
+                    sock = getattr(self, socket_name, None)
+                    if sock is not None:
+                        setattr(self, socket_name, None)
+                        sock.close()
+
+    async def get_master_address(self):
         """Get master address and port for data parallel.
         Returns:
             tuple: (master_address, master_port, dp_rpc_port)
         """
         return self._master_address, self._master_port, self._dp_rpc_port
 
-    def get_server_address(self):
+    async def get_server_address(self):
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
@@ -222,13 +261,13 @@ class vLLMHttpServer:
     async def collective_rpc(
         self,
         method: str | Callable,
-        timeout: float | None = None,
+        engine_timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
         await self.engine.collective_rpc(
             method=method,
-            timeout=timeout,
+            timeout=engine_timeout,
             args=args,
             kwargs=kwargs,
         )
@@ -353,8 +392,8 @@ class vLLMHttpServer:
                 "gpus_per_node should be divisible by tensor_model_parallel_size"
             )
             data_parallel_size_local = self.gpus_per_node // self.config.tensor_model_parallel_size
-            assert len(self.workers) == data_parallel_size_local * self.config.tensor_model_parallel_size, (
-                f"num workers ({len(self.workers)}) should be equal to "
+            assert self.worker_count == data_parallel_size_local * self.config.tensor_model_parallel_size, (
+                f"num workers ({self.worker_count}) should be equal to "
                 f"dp_size_local ({data_parallel_size_local}) * tp_size ({self.config.tensor_model_parallel_size})"
             )
             dp_args = {
@@ -702,7 +741,7 @@ class vLLMHttpServer:
             extra_fields=extra_fields,
         )
 
-    def _select_decode_peer(self) -> ActorHandle:
+    def _select_decode_peer(self):
         """Round-robin across decode peers."""
         peer = self._pd_decode_peers[self._pd_peer_idx % len(self._pd_decode_peers)]
         self._pd_peer_idx += 1
@@ -762,16 +801,17 @@ class vLLMHttpServer:
             if decode_kv_params is None:
                 raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
 
-        return await decode_peer.generate.remote(
-            prompt_ids,
-            dict(sampling_params),
-            f"{request_id}_D",
-            image_data=image_data,
-            video_data=video_data,
-            audio_data=audio_data,
-            mm_processor_kwargs=mm_processor_kwargs,
-            priority=priority,
-            kv_transfer_params=decode_kv_params,
+        return await decode_peer.submit(
+            "generate",
+            args=(prompt_ids, dict(sampling_params), f"{request_id}_D"),
+            kwargs={
+                "image_data": image_data,
+                "video_data": video_data,
+                "audio_data": audio_data,
+                "mm_processor_kwargs": mm_processor_kwargs,
+                "priority": priority,
+                "kv_transfer_params": decode_kv_params,
+            },
         )
 
     async def wake_up(self, tags: list[str] | None = None):
@@ -1153,86 +1193,59 @@ class vLLMReplica(RolloutReplica):
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
-        self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):
         """Launch http server in each node."""
-        assert len(self.workers) == self.world_size, (
-            f"worker number {len(self.workers)} not equal to world size {self.world_size}"
-        )
-
-        self._validate_launch_requirements()
-
-        # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
-        worker_infos = await asyncio.gather(
-            *[
-                worker.__ray_call__.remote(
-                    lambda self: (
-                        ray.get_runtime_context().get_node_id(),
-                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
-                    )
-                )
-                for worker in self.workers
-            ]
-        )
-        worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
-        worker_node_ids = [worker_info[0] for worker_info in worker_infos]
-
-        # create server actor in each node with node affinity and cuda visible devices
+        if self._worker_group is None or self.resource_pool is None:
+            raise RuntimeError("rollout worker placement is not initialized")
+        worker_devices = await RemoteCall.gather(self._worker_group.execute_all_async("get_assigned_device_id"))
+        # Create one Runtime-owned server WorkerGroup on every source host.
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
         for node_rank in range(nnodes):
-            workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
-            node_cuda_visible_devices = ",".join(
-                worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
+            start = node_rank * gpus_per_replica_node
+            stop = (node_rank + 1) * gpus_per_replica_node
+            source_pool = self.resource_pool.slice(slice(start, stop))
+            node_cuda_visible_devices = self._merge_cuda_visible_devices(
+                worker_devices[start:stop], expected_count=gpus_per_replica_node
             )
-            node_id = worker_node_ids[node_rank * gpus_per_replica_node]
-            prefix = self._get_server_name_prefix()
-            if self.is_reward_model:
-                name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            elif self.is_teacher_model:
-                name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            else:
-                name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            env_vars = {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
-            }
-
-            server = self.server_class.options(
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=node_id,
-                    soft=False,
+            group = await self._create_server_worker_group(
+                ClassWithInitArgs(
+                    vLLMHttpServer,
+                    config=self.config,
+                    model_config=self.model_config,
+                    rollout_mode=self.rollout_mode,
+                    worker_count=gpus_per_replica_node,
+                    replica_rank=self.replica_rank,
+                    node_rank=node_rank,
+                    gpus_per_node=gpus_per_replica_node,
+                    nnodes=nnodes,
+                    cuda_visible_devices=node_cuda_visible_devices,
+                    env_vars=get_platform().rollout_env_vars(),
                 ),
-                runtime_env={"env_vars": env_vars},
-                name=name,
-                max_concurrency=self.max_concurrency,
-            ).remote(
-                config=self.config,
-                model_config=self.model_config,
-                rollout_mode=self.rollout_mode,
-                workers=workers,
-                replica_rank=self.replica_rank,
-                node_rank=node_rank,
-                gpus_per_node=gpus_per_replica_node,
-                nnodes=nnodes,
-                cuda_visible_devices=node_cuda_visible_devices,
+                source_pool=source_pool,
             )
-            self.servers.append(server)
+            self.servers.append(group.remote())
 
         # launch http server in each node
-        master_address, master_port, dp_rpc_port = await self.servers[0].get_master_address.remote()
+        master_address, master_port, dp_rpc_port = await self.servers[0].submit("get_master_address")
         await asyncio.gather(
             *[
-                server.launch_server.remote(
-                    master_address=master_address, master_port=master_port, dp_rpc_port=dp_rpc_port
+                server.submit(
+                    "launch_server",
+                    kwargs={
+                        "master_address": master_address,
+                        "master_port": master_port,
+                        "dp_rpc_port": dp_rpc_port,
+                    },
                 )
                 for server in self.servers
             ]
         )
 
         # get http server address from first server
-        server_address, server_port = await self.servers[0].get_server_address.remote()
+        server_address, server_port = await self.servers[0].submit("get_server_address")
         self._server_handle = self.servers[0]
+        await self._set_server_endpoints([server for server in self.servers for _ in range(gpus_per_replica_node)])
         self._server_address = (
             f"[{server_address}]:{server_port}"
             if is_valid_ipv6_address(server_address)
@@ -1242,8 +1255,8 @@ class vLLMReplica(RolloutReplica):
     async def sleep(self):
         """Sleep each rollout server."""
         # Drain DP engines for safe sleep.
-        await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        await self.servers[0].submit("wait_for_requests_to_drain")
+        await asyncio.gather(*[server.submit("sleep") for server in self.servers])
 
     async def abort_all_requests(self) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.
@@ -1251,7 +1264,7 @@ class vLLMReplica(RolloutReplica):
         Returns:
             dict[str, Any]: Combined abort results from all servers.
         """
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(*[server.submit("abort_all_requests") for server in self.servers])
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []
@@ -1266,7 +1279,7 @@ class vLLMReplica(RolloutReplica):
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("resume_generation") for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.
@@ -1278,7 +1291,7 @@ class vLLMReplica(RolloutReplica):
             dict[str, Any]: Abort result.
         """
         # TODO(petersh6): we should only abort on the server that has the request.
-        results = await asyncio.gather(*[server.abort_request.remote(request_id) for server in self.servers])
+        results = await asyncio.gather(*[server.submit("abort_request", args=(request_id,)) for server in self.servers])
 
         for r in results:
             if r.get("aborted", False):
@@ -1289,8 +1302,8 @@ class vLLMReplica(RolloutReplica):
     async def release_kv_cache(self):
         # Drain all in-flight requests so that vLLM worker threads go idle
         # before we touch engine.release_kv_cache()
-        await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+        await self.servers[0].submit("wait_for_requests_to_drain")
+        await asyncio.gather(*[server.submit("release_kv_cache") for server in self.servers])
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides

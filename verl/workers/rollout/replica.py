@@ -13,19 +13,15 @@
 # limitations under the License.
 import asyncio
 import logging
-import os
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
-import ray
 from omegaconf import DictConfig
 from pydantic import BaseModel
-from ray.actor import ActorHandle
 
-from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
+from verl.runtime import ClassWithInitArgs, RemoteWorkerGroup, ResourcePool, Worker, WorkerGroup, current_runtime
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import is_torch_npu_available
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
@@ -120,44 +116,93 @@ class RolloutReplica(ABC):
         self.name_suffix = f"_{name_suffix}" if name_suffix else ""
 
         self.rollout_mode: RolloutMode = None
-        self.workers: list[ActorHandle] = []
-        self.resource_pool: RayResourcePool = None
+        self.resource_pool: ResourcePool | None = None
         self.bundle_indices: list[int] = []
 
-        self.servers: list[ActorHandle] = []
+        self.servers: list[RemoteWorkerGroup] = []
+        self._server_groups: list[WorkerGroup[Worker]] = []
         self._server_address: str = None
-        self._server_handle: ActorHandle = None
+        self._server_handle: RemoteWorkerGroup | None = None
+        self._worker_group: WorkerGroup[Worker] | None = None
+        self._owns_worker_group = False
 
-    async def init_hybrid(self, worker_group: RayWorkerGroup):
+    def close(self) -> None:
+        """Close WorkerGroup resources created by this replica.
+
+        Process-level Runtime lifecycle stays with the composition that installed it.
+        """
+        from verl.runtime import ExceptionGroup
+
+        errors: list[Exception] = []
+        failed_server_groups: list[WorkerGroup[Worker]] = []
+        for server_group in reversed(self._server_groups):
+            try:
+                server_group.close()
+            except Exception as exc:  # noqa: BLE001 - close remaining sibling owners
+                errors.append(exc)
+                failed_server_groups.append(server_group)
+        self._server_groups = list(reversed(failed_server_groups))
+
+        if not self._server_groups:
+            self.servers.clear()
+            self._server_handle = None
+
+        worker_group = self._worker_group
+        if worker_group is not None and self._owns_worker_group:
+            try:
+                worker_group.close()
+            except Exception as exc:  # noqa: BLE001 - report after closing peer owners
+                errors.append(exc)
+            else:
+                self._worker_group = None
+                self._owns_worker_group = False
+        else:
+            self._worker_group = None
+            self._owns_worker_group = False
+
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("runtime failures", errors)
+
+    @property
+    def worker_group(self) -> WorkerGroup[Worker]:
+        """Return the exact WorkerGroup view used by checkpoint synchronization."""
+        if self._worker_group is None:
+            raise RuntimeError("rollout replica WorkerGroup is not initialized")
+        return self._worker_group
+
+    async def init_hybrid(self, worker_group: WorkerGroup[Worker], resource_pool: ResourcePool):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
 
         Args:
-            worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
+            worker_group: WorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
         """
         self.rollout_mode = RolloutMode.HYBRID
-        self.workers = worker_group.workers[
-            self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
-        ]
+        start = self.world_size * self.replica_rank
+        self._worker_group = worker_group.slice(start, self.world_size)
+        self.resource_pool = resource_pool.slice(slice(start, start + self.world_size))
+        self._owns_worker_group = False
         await self.launch_servers()
 
-    async def init_hybrid_colocated(self, worker_group: RayWorkerGroup, resource_pool: RayResourcePool):
+    async def init_hybrid_colocated(self, worker_group: WorkerGroup[Worker], resource_pool: ResourcePool):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
 
         Args:
-            worker_group: RayWorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
+            worker_group: WorkerGroup, fused workers where training engine(fsdp/megatron) have been initialized.
             resource_pool: RayResourcePool, ray placement group where hybrid engine processes have been launched.
             bundle_indices: list[int], bundle indices for this rollout replica.
         """
         self.rollout_mode = RolloutMode.HYBRID
-        self.workers = worker_group.workers[
-            self.world_size * self.replica_rank : self.world_size * (self.replica_rank + 1)
-        ]
-        self.resource_pool = resource_pool
+        start = self.world_size * self.replica_rank
+        self._worker_group = worker_group.slice(start, self.world_size)
+        self.resource_pool = resource_pool.slice(slice(start, start + self.world_size))
+        self._owns_worker_group = False
         self.bundle_indices = [self.replica_rank * self.world_size + idx for idx in range(self.world_size)]
         await self.launch_servers()
 
     # TODO(sgm): this should be the default solution, but need to make the RolloutMode more clear.
-    async def init_colocated(self, resource_pool: RayResourcePool):
+    async def init_colocated(self, resource_pool: ResourcePool):
         """Init colocated rollout server, rollout engine and hybrid engine colocated in same ray placement group
         but in separate processes.
 
@@ -166,7 +211,6 @@ class RolloutReplica(ABC):
         """
         self.rollout_mode = RolloutMode.COLOCATED
         self.resource_pool = resource_pool
-        use_gpu = self.rollout_worker_use_gpu()
 
         if self.is_reward_model:
             name_prefix = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
@@ -175,37 +219,27 @@ class RolloutReplica(ABC):
         else:
             name_prefix = f"rollout_colocate_{self.replica_rank}{self.name_suffix}"
 
-        worker_group = RayWorkerGroup(
-            resource_pool=self.resource_pool,
-            ray_cls_with_init=self.get_ray_class_with_init_args(),
-            bin_pack=False,
-            name_prefix=name_prefix,
-            use_gpu=use_gpu,
-            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
-        )
-        self.workers = worker_group.workers
+        worker_group = self._create_rollout_worker_group(name_prefix=name_prefix)
+        self._worker_group = worker_group
+        self._owns_worker_group = True
         await self.launch_servers()
 
-    async def init_standalone(self):
-        """Init standalone rollout server, create new resource pool for this rollout."""
-        # create resource pool for this rollout
+    async def init_standalone(self, resource_pool: ResourcePool | None = None) -> None:
+        """Init standalone rollout on a preselected per-replica pool.
+
+        When ``resource_pool`` is omitted, preserve the legacy behavior and
+        derive a fresh pool from the Runtime cluster.
+        """
         self.rollout_mode = RolloutMode.STANDALONE
-        if self.is_reward_model:
-            resource_pool_name = f"rollout_pool_reward_{self.replica_rank}{self.name_suffix}"
-        elif self.is_teacher_model:
-            resource_pool_name = f"rollout_pool_teacher_{self.replica_rank}{self.name_suffix}"
-        else:
-            resource_pool_name = f"rollout_pool_{self.replica_rank}{self.name_suffix}"
-        resource_pool_spec = {
-            resource_pool_name: [self.gpus_per_replica_node] * self.nnodes,
-        }
-        resource_pool_manager = ResourcePoolManager(
-            resource_pool_spec=resource_pool_spec,
-            mapping=None,
-            max_colocate_count=2,
-        )
-        resource_pool_manager.create_resource_pool()
-        self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
+        if resource_pool is None:
+            runtime = current_runtime()
+            process_on_nodes = [self.gpus_per_replica_node] * self.nnodes
+            resource_pool = runtime.create_resource_pool(
+                nnodes=len(process_on_nodes),
+                processes_per_node=process_on_nodes[0],
+                device_type="gpu",
+            )
+        self.resource_pool = resource_pool
 
         # create worker group for this rollout
         if self.is_reward_model:
@@ -214,29 +248,84 @@ class RolloutReplica(ABC):
             name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
         else:
             name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
-        worker_group = RayWorkerGroup(
-            resource_pool=self.resource_pool,
-            ray_cls_with_init=self.get_ray_class_with_init_args(),
-            bin_pack=False,
-            name_prefix=name_prefix,
-            use_gpu=True,
-            device_name="cuda" if not is_torch_npu_available(check_device=False) else "npu",
-        )
-        self.workers = worker_group.workers
+        worker_group = self._create_rollout_worker_group(name_prefix=name_prefix)
+        self._worker_group = worker_group
+        self._owns_worker_group = True
         await self.launch_servers()
 
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        """Get rollout worker actor class for colocated and standalone mode."""
+    def get_class_with_init_args(self) -> ClassWithInitArgs:
+        """Deferred constructor for colocated and standalone CheckpointEngineWorker ranks."""
+        legacy_method = type(self).get_ray_class_with_init_args
+        if legacy_method is not RolloutReplica.get_ray_class_with_init_args:
+            return legacy_method(self)
         from verl.checkpoint_engine.base import CheckpointEngineWorker
 
-        rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
-
-        return RayClassWithInitArgs(
-            cls=rollout_worker_actor_cls,
+        return ClassWithInitArgs(
+            CheckpointEngineWorker,
             rollout_config=self.config,
             model_config=self.model_config,
             replica_rank=self.replica_rank,
         )
+
+    def get_ray_class_with_init_args(self) -> ClassWithInitArgs:
+        """DEPRECATED: Use :meth:`get_class_with_init_args`."""
+        return self.get_class_with_init_args()
+
+    def _create_rollout_worker_group(self, *, name_prefix: str):
+        """Create a Runtime-owned WorkerGroup on this replica's resource pool."""
+        _ = name_prefix  # naming is owned by pool placement / Runtime actor naming
+        return current_runtime().create_worker_group(self.get_class_with_init_args(), on=self.resource_pool)
+
+    async def _create_server_worker_group(
+        self,
+        actor: ClassWithInitArgs[Worker],
+        *,
+        source_pool: ResourcePool,
+    ) -> WorkerGroup[Worker]:
+        runtime = current_runtime()
+        sidecar_pool = runtime.create_resource_pool(
+            nnodes=source_pool.nnodes,
+            processes_per_node=1,
+            device_type="cpu",
+            on=source_pool,
+        )
+        wg = cast(
+            WorkerGroup[Worker],
+            await runtime.create_worker_group_async(
+                actor,
+                on=sidecar_pool,
+            ),
+        )
+        self._server_groups.append(wg)
+        return wg
+
+    @staticmethod
+    def _merge_cuda_visible_devices(worker_devices: list[str], *, expected_count: int) -> str:
+        """Translate per-Worker physical visibility into one node-level list."""
+        devices: list[str] = []
+        for value in worker_devices:
+            if not value or value == "not set":
+                raise RuntimeError("GPU Worker did not report its visible devices")
+            for device in value.split(","):
+                device = device.strip()
+                if device and device not in devices:
+                    devices.append(device)
+        if not devices:
+            raise RuntimeError("GPU Workers reported an empty visible-device set")
+        if len(devices) != expected_count:
+            raise RuntimeError(f"GPU Workers reported {len(devices)} distinct devices; expected {expected_count}")
+        return ",".join(devices)
+
+    async def _set_server_endpoints(self, endpoints: list[RemoteWorkerGroup]) -> None:
+        if self._worker_group is None:
+            raise RuntimeError("rollout worker group is not initialized")
+        if len(endpoints) != self._worker_group.world_size:
+            raise ValueError(
+                f"server endpoint count {len(endpoints)} does not match rollout world size "
+                f"{self._worker_group.world_size}"
+            )
+        call = self._worker_group.submit("set_server_endpoint", args=(endpoints,))
+        await call
 
     @abstractmethod
     async def launch_servers(self):
@@ -249,8 +338,10 @@ class RolloutReplica(ABC):
         return self._server_address
 
     @property
-    def server_handle(self) -> ActorHandle:
+    def server_handle(self) -> RemoteWorkerGroup:
         """Get rollout server handle for Token-in-token-out generation."""
+        if self._server_handle is None:
+            raise RuntimeError("rollout server is not initialized")
         return self._server_handle
 
     @property
@@ -264,39 +355,39 @@ class RolloutReplica(ABC):
 
     async def wake_up(self):
         """Wake up each rollout server."""
-        await asyncio.gather(*[server.wake_up.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("wake_up") for server in self.servers])
 
     async def sleep(self):
         """Sleep each rollout server."""
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("sleep") for server in self.servers])
 
     async def abort_all_requests(self):
         """Partial rollout: abort and save all unfinished requests in each rollout server."""
-        await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("abort_all_requests") for server in self.servers])
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("resume_generation") for server in self.servers])
 
     async def clear_kv_cache(self):
         """reset kv cache in each rollout server."""
-        await asyncio.gather(*[server.clear_kv_cache.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("clear_kv_cache") for server in self.servers])
 
     async def release_kv_cache(self):
         """Release only the kv_cache GPU memory, keeping model weights in place."""
-        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("release_kv_cache") for server in self.servers])
 
     async def resume_kv_cache(self):
         """Restore the kv_cache GPU memory after a weight sync."""
-        await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("resume_kv_cache") for server in self.servers])
 
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
-        await asyncio.gather(*[server.start_profile.remote(**kwargs) for server in self.servers])
+        await asyncio.gather(*[server.submit("start_profile", kwargs=kwargs) for server in self.servers])
 
     async def stop_profile(self):
         """Stop profiling on the replica."""
-        await asyncio.gather(*[server.stop_profile.remote() for server in self.servers])
+        await asyncio.gather(*[server.submit("stop_profile") for server in self.servers])
 
 
 class RolloutReplicaRegistry:
@@ -325,46 +416,8 @@ def _load_vllm():
 
 
 def _load_sglang():
-    os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
-
-    try:
-        import vllm  # noqa: F401
-    except ImportError:
-        import sys
-        import types
-        from unittest.mock import Mock
-
-        mock_vllm = types.ModuleType("vllm")
-
-        mock_custom_ops = types.ModuleType("vllm._custom_ops")
-        mock_custom_ops.scaled_fp8_quant = Mock()
-        mock_vllm._custom_ops = mock_custom_ops
-
-        mock_model_executor = types.ModuleType("vllm.model_executor")
-        mock_layers = types.ModuleType("vllm.model_executor.layers")
-        mock_activation = types.ModuleType("vllm.model_executor.layers.activation")
-
-        class GeluAndMul:  # noqa: N801
-            pass
-
-        class SiluAndMul:  # noqa: N801
-            pass
-
-        mock_activation.GeluAndMul = GeluAndMul
-        mock_activation.SiluAndMul = SiluAndMul
-        mock_layers.activation = mock_activation
-        mock_model_executor.layers = mock_layers
-        mock_vllm.model_executor = mock_model_executor
-
-        sys.modules["vllm"] = mock_vllm
-        sys.modules["vllm._custom_ops"] = mock_custom_ops
-        sys.modules["vllm.model_executor"] = mock_model_executor
-        sys.modules["vllm.model_executor.layers"] = mock_layers
-        sys.modules["vllm.model_executor.layers.activation"] = mock_activation
-
     from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangReplica
 
-    del os.environ["SGLANG_USE_CPU_ENGINE"]
     return SGLangReplica
 
 
@@ -392,9 +445,6 @@ def get_rollout_replica_class(rollout: str, disaggregation_enabled: bool = False
     """
     if disaggregation_enabled:
         if rollout == "sglang":
-            # _load_sglang side-effect: installs vllm mocks needed by SGLangPDReplica's
-            # transitive imports. Cheap if already installed.
-            RolloutReplicaRegistry.get("sglang")
             from verl.workers.rollout.sglang_rollout.sglang_pd_replica import SGLangPDReplica
 
             return SGLangPDReplica

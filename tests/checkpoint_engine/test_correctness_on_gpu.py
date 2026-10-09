@@ -19,11 +19,7 @@ import torch
 
 from tests.checkpoint_engine.test_utils import create_rollout_worker_group, create_trainer_worker_group
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.single_controller.ray.base import (
-    RayResourcePool,
-    split_resource_pool,
-)
-from verl.utils.device import get_device_name
+from verl.runtime import Runtime, split_resource_pool
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
@@ -45,38 +41,46 @@ async def test_nccl_checkpoint_engine(
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
     model_path = os.path.expanduser(model_path)
-    ray.init(
-        runtime_env={
+    with Runtime.from_config(
+        {
+            "backend": "ray",
             "env_vars": {
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 "UCX_TLS": "rc,tcp,cuda",
                 "UCX_MAX_RNDV_RAILS": "4",
                 "UCX_LOG_LEVEL": "INFO",
                 "VERL_LOGGING_LEVEL": "DEBUG",
-            }
+            },
+            "ray": {},
         }
-    )
+    ) as runtime:
+        # initialize config
+        checkpoint_engine_config = CheckpointEngineConfig(
+            backend="nccl",
+            update_weights_bucket_megabytes=bucket_size_mb,
+            engine_kwargs={"nccl": {"rebuild_group": rebuild_group}},
+        )
+        model_config = HFModelConfig(path=model_path, use_remove_padding=True)
+        rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
 
-    # initialize config
-    checkpoint_engine_config = CheckpointEngineConfig(
-        backend="nccl",
-        update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"nccl": {"rebuild_group": rebuild_group}},
-    )
-    model_config = HFModelConfig(path=model_path, use_remove_padding=True)
-    rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
+        # create trainer and rollout worker group
+        resource_pool = runtime.create_resource_pool(nnodes=num_nodes, processes_per_node=num_gpus_per_node)
+        trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
+        actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+        actor_wg.reset()
+        rollout, replicas = await create_rollout_worker_group(
+            rollout_pool, model_config, rollout_config, check_allclose
+        )
 
-    # create trainer and rollout worker group
-    resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
-    trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    actor_wg.reset()
-    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+        # create checkpoint engine manager
+        checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas
+        )
+        for _ in range(3):
+            await checkpoint_manager.update_weights()
+            rollout.check_weights()
 
-    # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
-    for _ in range(3):
-        await checkpoint_manager.update_weights()
-        rollout.check_weights()
+        del checkpoint_manager, replicas, actor_wg, rollout
 
     ray.shutdown()
 
@@ -97,9 +101,11 @@ async def test_nixl_checkpoint_engine(
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
     model_path = os.path.expanduser(model_path)
-    ray.init(
-        runtime_env={
+    with Runtime.from_config(
+        {
+            "backend": "ray",
             "env_vars": {
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 # TODO: it's pretty hard to set these environment variables right, please consult
                 # with your network admin. Maybe auto adjust UCX_* according to NCCL_IB_*?
                 "UCX_TLS": "rc,ud,cuda",
@@ -113,29 +119,35 @@ async def test_nixl_checkpoint_engine(
                 "UCX_IB_ROCE_REACHABILITY_MODE": "all",
                 "UCX_LOG_LEVEL": "INFO",
                 "VERL_LOGGING_LEVEL": "DEBUG",
-            }
+            },
+            "ray": {},
         }
-    )
+    ) as runtime:
+        # initialize config
+        checkpoint_engine_config = CheckpointEngineConfig(
+            backend="nixl", update_weights_bucket_megabytes=bucket_size_mb, engine_kwargs={"nixl": {"device": device}}
+        )
+        model_config = HFModelConfig(path=model_path, use_remove_padding=True)
+        rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
 
-    # initialize config
-    checkpoint_engine_config = CheckpointEngineConfig(
-        backend="nixl", update_weights_bucket_megabytes=bucket_size_mb, engine_kwargs={"nixl": {"device": device}}
-    )
-    model_config = HFModelConfig(path=model_path, use_remove_padding=True)
-    rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
+        # create trainer and rollout worker group
+        resource_pool = runtime.create_resource_pool(nnodes=num_nodes, processes_per_node=num_gpus_per_node)
+        trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
+        actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+        actor_wg.reset()
+        rollout, replicas = await create_rollout_worker_group(
+            rollout_pool, model_config, rollout_config, check_allclose
+        )
 
-    # create trainer and rollout worker group
-    resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
-    trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    actor_wg.reset()
-    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+        # create checkpoint engine manager
+        checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas
+        )
+        for _ in range(3):
+            await checkpoint_manager.update_weights()
+            rollout.check_weights()
 
-    # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
-    for _ in range(3):
-        await checkpoint_manager.update_weights()
-        rollout.check_weights()
+        del checkpoint_manager, replicas, actor_wg, rollout
 
     ray.shutdown()
 
@@ -155,35 +167,42 @@ async def test_kimi_checkpoint_engine(
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
     model_path = os.path.expanduser(model_path)
-    ray.init(
-        runtime_env={
+    with Runtime.from_config(
+        {
+            "backend": "ray",
             "env_vars": {
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 "NCCL_IB_HCA": "mlx5",
                 "VERL_LOGGING_LEVEL": "DEBUG",
-            }
+            },
+            "ray": {},
         }
-    )
+    ) as runtime:
+        # initialize config
+        checkpoint_engine_config = CheckpointEngineConfig(
+            backend="kimi_ckpt_engine", engine_kwargs={"kimi_ckpt_engine": {"rebuild_group": rebuild_group}}
+        )
+        model_config = HFModelConfig(path=model_path, use_remove_padding=True)
+        rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
 
-    # initialize config
-    checkpoint_engine_config = CheckpointEngineConfig(
-        backend="kimi_ckpt_engine", engine_kwargs={"kimi_ckpt_engine": {"rebuild_group": rebuild_group}}
-    )
-    model_config = HFModelConfig(path=model_path, use_remove_padding=True)
-    rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
+        # create trainer and rollout worker group
+        resource_pool = runtime.create_resource_pool(nnodes=num_nodes, processes_per_node=num_gpus_per_node)
+        trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
+        actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+        actor_wg.reset()
+        rollout, replicas = await create_rollout_worker_group(
+            rollout_pool, model_config, rollout_config, check_allclose
+        )
 
-    # create trainer and rollout worker group
-    resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
-    resource_pool.get_placement_groups(device_name=get_device_name())
-    trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    actor_wg.reset()
-    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+        # create checkpoint engine manager
+        checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas
+        )
+        for _ in range(3):
+            await checkpoint_manager.update_weights()
+            rollout.check_weights()
 
-    # create checkpoint engine manager
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
-    for _ in range(3):
-        await checkpoint_manager.update_weights()
-        rollout.check_weights()
+        del checkpoint_manager, replicas, actor_wg, rollout
 
     ray.shutdown()
 

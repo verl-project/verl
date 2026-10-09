@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Generator
 
-import ray
 import torch
 import zmq
 from vllm.distributed.utils import StatelessProcessGroup
@@ -25,7 +24,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
 from verl.utils.device import is_torch_npu_available
 from verl.utils.distributed import stateless_init_process_group
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import get_free_port, get_local_ip_address, is_valid_ipv6_address
 
 if not is_torch_npu_available(check_device=False):
     raise ImportError("HCCLCheckpointEngine is unavailable because the torch.npu module is not available.")
@@ -166,7 +165,7 @@ class HCCLCheckpointEngine(CheckpointEngine):
         return actor_wg_kwargs, rollout_kwargs
 
     def _start_zmq_server(self):
-        self.ip = ray.util.get_node_ip_address().strip("[]")
+        self.ip = get_local_ip_address()
         self.zmq_port, _ = get_free_port(self.ip)
 
         context = zmq.Context()

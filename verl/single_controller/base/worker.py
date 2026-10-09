@@ -11,22 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """
 the class for Worker
 """
 
+from __future__ import annotations
+
+import inspect
 import os
 import socket
 import warnings
 from dataclasses import dataclass
 
-import ray
-
 from verl.utils.device import (
-    get_resource_name,
     get_torch_device,
     get_visible_devices_keyword,
 )
+from verl.utils.net_utils import get_local_ip_address
 
 from .decorator import Dispatch, Execute, register
 
@@ -48,12 +50,14 @@ class DistGlobalInfo:
 
 
 class WorkerHelper:
+    """Node address and free-port helpers shared by :class:`Worker` and rendezvous code."""
+
     @staticmethod
-    def _get_node_ip():
-        if os.getenv("WG_BACKEND", None) == "ray":
-            return ray.util.get_node_ip_address()
-        else:
-            raise NotImplementedError("WG_BACKEND now just support ray mode.")
+    def _get_node_ip() -> str:
+        injected = os.getenv("VERL_NODE_IP")
+        if injected:
+            return injected.strip("[]")
+        return get_local_ip_address()
 
     @staticmethod
     def _get_free_port():
@@ -82,6 +86,94 @@ class Worker(WorkerHelper):
     """
 
     fused_worker_attr_name = "fused_worker_dict"
+
+    @staticmethod
+    def _spmd_environment(
+        *,
+        world_size: int,
+        rank: int,
+        local_world_size: int,
+        local_rank: int,
+        master_addr: str,
+        master_port: str,
+        env_vars: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Build the backend-independent process environment for one SPMD rank."""
+        environment = {
+            "WORLD_SIZE": str(world_size),
+            "RANK": str(rank),
+            "LOCAL_WORLD_SIZE": str(local_world_size),
+            "LOCAL_RANK": str(local_rank),
+            "MASTER_ADDR": master_addr,
+            "MASTER_PORT": master_port,
+        }
+        conflict = set(environment) & set(env_vars or {})
+        if conflict:
+            raise ValueError(f"Cannot override protected SPMD environment: {conflict}")
+        environment.update(env_vars or {})
+        return environment
+
+    async def _shutdown(self) -> None:
+        """Run Worker cleanup and close the process-attached Runtime."""
+        from verl.runtime.core import close_attached_runtime
+
+        try:
+            result = self.close()
+            if inspect.isawaitable(result):
+                await result
+        finally:
+            close_attached_runtime()
+
+    def __init__(self, cuda_visible_devices=None) -> None:
+        """Initialize the worker with environment settings and device configuration.
+
+        Args:
+            cuda_visible_devices (str, optional):
+                CUDA visible devices configuration. Defaults to None.
+        """
+        self._world_size = 1
+        self._rank = 0
+        self._master_addr = ""
+        self._master_port = ""
+        self.fused_worker_dict = {}
+        self.__dispatch_dp_rank = {}
+        self.__collect_dp_rank = {}
+
+        if os.getenv("DISABLE_WORKER_INIT", "0") == "1":
+            return
+
+        self._configure_spmd(cuda_visible_devices=cuda_visible_devices)
+
+    def _configure_spmd(self, cuda_visible_devices=None) -> None:
+        """Load this Worker's SPMD identity from its process environment."""
+        self._setup_visible_devices()
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["RANK"])
+        self._rank = rank
+        self._world_size = world_size
+
+        master_addr = os.environ["MASTER_ADDR"]
+        master_port = os.environ["MASTER_PORT"]
+
+        local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        visible_devices = cuda_visible_devices
+        if visible_devices is None:
+            visible_devices = os.environ.get(get_visible_devices_keyword().upper())
+
+        store = {
+            "_world_size": world_size,
+            "_rank": rank,
+            "_local_world_size": local_world_size,
+            "_local_rank": local_rank,
+            "_master_addr": master_addr,
+            "_master_port": master_port,
+        }
+        if visible_devices is not None:
+            store[f"_{get_visible_devices_keyword()}".lower()] = visible_devices
+
+        self._configure_with_store(store=store)
 
     def _register_dispatch_collect_info(self, mesh_name: str, dp_rank: int, is_collect: bool):
         """Register the dp_rank for a given mesh name. This function is meant to be called by the worker
@@ -178,47 +270,6 @@ class Worker(WorkerHelper):
             get_visible_devices_keyword().upper(),
         ]
 
-    def __init__(self, cuda_visible_devices=None) -> None:
-        """Initialize the worker with environment settings and device configuration.
-
-        Args:
-            cuda_visible_devices (str, optional):
-                CUDA visible devices configuration. Defaults to None.
-        """
-        # construct a meta from environment variable. Note that the import must be inside the class because
-        # it is executed remotely
-        import os
-
-        self._setup_env_cuda_visible_devices()
-
-        world_size = int(os.environ["WORLD_SIZE"])
-        rank = int(os.environ["RANK"])
-        self._rank = rank
-        self._world_size = world_size
-
-        master_addr = os.environ["MASTER_ADDR"]
-        master_port = os.environ["MASTER_PORT"]
-
-        local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-
-        store = {
-            "_world_size": world_size,
-            "_rank": rank,
-            "_local_world_size": local_world_size,
-            "_local_rank": local_rank,
-            "_master_addr": master_addr,
-            "_master_port": master_port,
-        }
-        if cuda_visible_devices is not None:
-            store[f"_{get_visible_devices_keyword()}".lower()] = cuda_visible_devices
-
-        self._configure_with_store(store=store)
-
-        self.fused_worker_dict = {}
-        self.__dispatch_dp_rank = {}
-        self.__collect_dp_rank = {}
-
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.
 
@@ -228,11 +279,7 @@ class Worker(WorkerHelper):
         """
         return self.fused_worker_dict.get(worker_name, None)
 
-    def _setup_env_cuda_visible_devices(self):
-        from verl.utils.ray_utils import ray_noset_visible_devices
-
-        is_ray_noset_visible_devices = ray_noset_visible_devices()
-
+    def _setup_visible_devices(self):
         # Prevent use of clashing `{CUDA/HIP/ROCR}_VISIBLE_DEVICES``
         rocr_val = os.environ.get("ROCR_VISIBLE_DEVICES", None)
         hip_val = os.environ.get("HIP_VISIBLE_DEVICES", None)
@@ -270,15 +317,14 @@ class Worker(WorkerHelper):
             os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
             rocr_val = None
 
-        if is_ray_noset_visible_devices:
-            # NOTE: Ray will automatically set the *_VISIBLE_DEVICES
-            # environment variable for each actor, unless
-            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
-            # so we need to set local rank when the flag is set.
-            device_name = get_resource_name()
-            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
-            os.environ["LOCAL_RANK"] = local_rank
-            get_torch_device().set_device(int(local_rank))
+        visible_devices = os.environ.get(get_visible_devices_keyword().upper())
+        if visible_devices:
+            process_devices = [item for item in visible_devices.split(",") if item]
+            device_index = 0 if len(process_devices) == 1 else int(os.environ.get("LOCAL_RANK", "0"))
+            get_torch_device().set_device(device_index)
+
+    def _setup_env_cuda_visible_devices(self):
+        self._setup_visible_devices()
 
     def _configure_with_store(self, store: dict):
         """
@@ -296,6 +342,16 @@ class Worker(WorkerHelper):
             str(self._master_addr).replace("[", "").replace("]", "") if self._master_addr else ""
         )
 
+    @property
+    def world_size(self):
+        """Get the total number of workers in the distributed setup."""
+        return self._world_size
+
+    @property
+    def rank(self):
+        """Get the rank of this worker in the distributed setup."""
+        return self._rank
+
     def get_master_addr_port(self):
         """Get the master address and port for distributed communication."""
         return self._master_addr, self._master_port
@@ -307,15 +363,26 @@ class Worker(WorkerHelper):
         visible_devices = os.environ.get(get_visible_devices_keyword().upper(), "not set")
         return visible_devices
 
-    @property
-    def world_size(self):
-        """Get the total number of workers in the distributed setup."""
-        return self._world_size
+    def get_assigned_device_id(self) -> str:
+        """Return this Worker's host device ID after backend assignment."""
+        visible = os.environ.get(get_visible_devices_keyword().upper(), "")
+        devices = [item for item in visible.split(",") if item]
+        if not devices:
+            raise RuntimeError("GPU Worker has no visible device assignment")
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        index = 0 if len(devices) == 1 else local_rank
+        try:
+            return devices[index]
+        except IndexError as exc:
+            raise RuntimeError(f"LOCAL_RANK={local_rank} is outside visible devices {devices!r}") from exc
 
-    @property
-    def rank(self):
-        """Get the rank of this worker in the distributed setup."""
-        return self._rank
+    def get_node_ip_address(self) -> str:
+        """Return this worker process's reachable node address."""
+        return self._get_node_ip()
+
+    def close(self) -> None:
+        """Run process-local cleanup before the actor process is terminated."""
+        return None
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO_WITH_FUNC)
     def execute_with_func_generator(self, func, *args, **kwargs):

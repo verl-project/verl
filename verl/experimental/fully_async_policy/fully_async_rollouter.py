@@ -160,7 +160,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
 
         try:
             # Single atomic batch RPC: register all handles + add all to LB pool.
-            await self.global_load_balancer.add_servers.remote(servers=servers_to_add)
+            await self.global_load_balancer.add_servers(servers=servers_to_add)
 
             # Track locally for introspection / Prometheus.
             for rid in valid_resource_ids:
@@ -215,7 +215,7 @@ class FullyAsyncLLMServerManager(LLMServerManager):
 
         try:
             # Single atomic batch RPC: remove all from LB pool + purge handles.
-            await self.global_load_balancer.remove_servers.remote(server_ids=server_ids_to_remove)
+            await self.global_load_balancer.remove_servers(server_ids=server_ids_to_remove)
 
             # Clean up local tracking lists.
             for rid in valid_resource_ids:
@@ -277,6 +277,8 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             DataProto: Output batch.
         """
         worker = self._select_best_worker()
+        if getattr(self, "agent_loop_worker_group", None) is not None:
+            return await worker.generate_sequences(prompts)
         output_future = worker.generate_sequences.remote(prompts)
         return await asyncio.wrap_future(output_future.future())
 
@@ -617,7 +619,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         loop = asyncio.get_running_loop()
         self.reward_loop_manager = await loop.run_in_executor(
             None,
-            lambda: RewardLoopManager(config=self.config, rm_resource_pool=None),
+            lambda: RewardLoopManager(
+                config=self.config,
+                rm_resource_pool=None,
+                worker_resource_pool=self.get_hybrid_worker_group().resource_pool,
+            ),
         )
 
     async def _create_teacher_model_manager(self):
@@ -691,9 +697,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
         enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
-        # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
-        # to stream reward computation with actor rollout
-        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        reward_loop_worker_group = self.reward_loop_manager.remote_worker_group if enable_agent_reward_loop else None
 
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
@@ -708,7 +712,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
-            reward_loop_worker_handles=reward_loop_worker_handles,
+            reward_loop_worker_group=reward_loop_worker_group,
+            worker_resource_pool=self.get_hybrid_worker_group().resource_pool,
             teacher_client=self.teacher_model_manager.get_client() if self.teacher_model_manager else None,
         )
 

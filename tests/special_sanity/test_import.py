@@ -19,7 +19,7 @@ def test_import():
     print(verl.__version__)
 
 
-def test_single_controller_import():
-    import verl.single_controller
+def test_runtime_import():
+    import verl.runtime
 
-    print(verl.single_controller.__version__)
+    print(verl.runtime.Runtime)

@@ -20,6 +20,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
+from verl.runtime import RemoteWorkerGroup
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import HFModelConfig, RolloutConfig
 
@@ -40,6 +41,11 @@ class BaseRollout(ABC):
         self.config = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
         self.device_mesh = device_mesh
+        self.server_endpoint: RemoteWorkerGroup | None = None
+
+    def set_server_endpoint(self, endpoint: RemoteWorkerGroup) -> None:
+        """Bind the rollout server endpoint used by this adapter rank."""
+        self.server_endpoint = endpoint
 
     @abstractmethod
     async def resume(self, tags: list[str]):

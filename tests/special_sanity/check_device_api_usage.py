@@ -34,9 +34,11 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/profiler/torch_profile.py",  # appear in TorchProfiler
     "verl/utils/profiler/config.py",  # appear in TorchProfilerToolConfig
     "verl/utils/kernel/linear_cross_entropy.py",  # appear in nvidia nvtx
-    "verl/utils/rendezvous/ray_backend.py",  # appear in cupy importance
+    "verl/single_controller/ray/worker_group.py",  # Ray worker device placement defaults
+    "verl/single_controller/ray/actor.py",  # Legacy Ray CUDA visibility method and constructor keywords
     "verl/single_controller/ray/base.py",  # appear in default device_name
     "verl/trainer/ppo/ray_trainer.py",  # appear in default device_name
+    "verl/workers/rollout/vllm_rollout/utils.py",  # Upstream MemPool type and CLI option names
     "verl/experimental/one_step_off_policy/ray_trainer.py",  # appear in docstring as default device_name
     "verl/utils/reward_score/sandbox_fusion/utils.py",  # appear in sandbox language type
     "verl/third_party/torch/distributed/_state_dict_utils.py",  # torch monkey patch fixes

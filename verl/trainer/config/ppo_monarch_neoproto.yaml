@@ -1,0 +1,16 @@
+# Opt-in production recipe for Monarch Runtime plus the NeoProto data plane.
+# The default ppo_trainer configuration remains Ray-compatible and unchanged.
+defaults:
+  - ppo_trainer
+  - override topology: monarch_neoproto
+  - _self_
+
+runtime:
+  backend: monarch
+
+  monarch:
+    object_store:
+      store_name_prefix: verl_ppo
+      timeout_s: 300.0
+      strategy: host
+      local_cache_bytes: 67108864

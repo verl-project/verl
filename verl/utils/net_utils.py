@@ -28,6 +28,25 @@ import ipaddress
 import socket
 
 
+def get_local_ip_address() -> str:
+    """Return the local address selected by the host routing table."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # UDP connect selects a route without sending a packet.
+            sock.connect(("8.8.8.8", 53))
+            return str(sock.getsockname()[0])
+    except OSError as route_error:
+        try:
+            addresses = socket.getaddrinfo(socket.gethostname(), None, type=socket.SOCK_DGRAM)
+        except OSError as resolve_error:
+            raise RuntimeError("could not resolve a local IP address") from resolve_error
+        for _, _, _, _, sockaddr in addresses:
+            address = str(sockaddr[0])
+            if not ipaddress.ip_address(address).is_loopback:
+                return address
+        raise RuntimeError("could not resolve a non-loopback local IP address") from route_error
+
+
 def is_ipv4(ip_str: str) -> bool:
     """
     Check if the given string is an IPv4 address

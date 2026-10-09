@@ -17,42 +17,45 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import os
 import socket
+import sys
 
-import ray
 from omegaconf import OmegaConf
 
+from verl.runtime import Worker
 from verl.trainer.distillation import is_distillation_enabled
+from verl.trainer.ppo.model_config import PPOModelConfigs, PPORoleConfigs
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_critic, need_reference_policy
 from verl.utils.config import validate_config
 
 
-class BaseTaskRunner:
+class BaseTaskRunner(Worker):
     def __init__(self):
+        super().__init__()
         self.role_worker_mapping = {}
         self.mapping = {}
+        self.model_configs = None
 
     def add_actor_rollout_worker(self, config):
         """Add actor rollout worker using the unified model engine implementation."""
-        from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
         from verl.workers.engine_workers import ActorRolloutRefWorker
 
         actor_rollout_cls = ActorRolloutRefWorker
-        ray_worker_group_cls = RayWorkerGroup
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        actor_root = PPORoleConfigs.resolve(config, self.model_configs).actor
+        lora_rank = actor_root.model.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+            lora_rank = actor_root.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or actor_root.model.get("lora_adapter_path") is not None
         # Ref policy is fused into ActorRolloutRefWorker unless LoRA is used with a dedicated ref model.
-        if need_reference_policy(config) and not ref_in_actor:
+        if need_reference_policy(config, actor_root.actor) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout
-        self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
+        self.role_worker_mapping[role] = actor_rollout_cls
         self.mapping[role] = "global_pool"
-        return actor_rollout_cls, ray_worker_group_cls
+        return actor_rollout_cls
 
     def add_critic_worker(self, config):
         """Add critic worker to role mapping using the unified model engine implementation."""
@@ -61,11 +64,41 @@ class BaseTaskRunner:
 
         # The model-engine TrainingWorker handles all critic backends (fsdp/fsdp2/megatron/...)
         # internally based on ``config.critic.strategy``.
-        self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
+        self.role_worker_mapping[Role.Critic] = TrainingWorker
         self.mapping[Role.Critic] = "global_pool"
 
     def init_resource_pool_mgr(self, config):
         """Initialize resource pool manager."""
+
+        from verl.runtime import current_runtime
+        from verl.trainer.ppo.runtime_resource_pool import RuntimeResourcePoolManager
+        from verl.trainer.ppo.utils import Role
+
+        topology = current_runtime().topology
+        if topology.models:
+            actor_role = next(
+                role for role in (Role.ActorRolloutRef, Role.ActorRollout) if role in self.role_worker_mapping
+            )
+            runtime = current_runtime()
+            actor_model = self.model_configs.one("actor").model
+            ref_bindings = self.model_configs.all("ref")
+            actor_pool = runtime.model_resource_pool(actor_model.name)
+            ref_pool = runtime.model_resource_pool(ref_bindings[0].model.name) if ref_bindings else None
+            if ref_pool is not None and ref_pool is not actor_pool:
+                raise NotImplementedError(
+                    "the current fused ActorRolloutRefWorker requires actor and ref to share one placement"
+                )
+            mapping = {actor_role: actor_model.name}
+            if Role.Critic in self.role_worker_mapping:
+                mapping[Role.Critic] = self.model_configs.one("critic").model.name
+            if Role.RewardModel in self.mapping:
+                mapping[Role.RewardModel] = self.model_configs.one("rm").model.name
+            self.mapping = mapping
+            resource_pool_manager = RuntimeResourcePoolManager(
+                resource_pool_spec={},
+                mapping=self.mapping,
+            )
+            return resource_pool_manager
 
         global_pool_id = "global_pool"
         resource_pool_spec = {
@@ -94,19 +127,21 @@ class BaseTaskRunner:
             teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
             resource_pool_spec["teacher_pool"] = teacher_pool
 
-        from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        resource_pool_manager = RuntimeResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+        )
         return resource_pool_manager
 
     def add_reward_model_resource_pool(self, config):
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.reward.reward_model.enable:
+        reward_model_config = PPORoleConfigs.resolve(config, self.model_configs).reward_model
+        if reward_model_config.enable:
             # we do not use reward model workers, so we only register reward model in resource pool
             # without continue to register reward model worker in role mapping
-            if config.reward.reward_model.enable_resource_pool:
+            if reward_model_config.enable_resource_pool:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
                 self.mapping[Role.RewardModel] = "global_pool"
@@ -120,28 +155,18 @@ class BaseTaskRunner:
             # without registering a teacher model worker in role-worker mapping
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
-    def add_ref_policy_worker(self, config, ref_policy_cls):
-        """Ref policy is fused into ActorRolloutRefWorker in the unified model engine.
-
-        Kept for backward compatibility with subclasses that still invoke it; the method
-        is now a no-op because the reference policy lives on the same worker group as
-        the actor/rollout.
-        """
-        return
-
     def run(self, config):
         pass
 
 
-@ray.remote
 class TaskRunner(BaseTaskRunner):
-    """Ray remote class for executing distributed PPO training tasks.
+    """Worker for executing distributed PPO training tasks.
 
-    This class encapsulates the main training logic and runs as a Ray remote actor
-    to enable distributed execution across multiple nodes and GPUs.
+    This class encapsulates the main training logic and is instantiated as a
+    one-rank WorkerGroup by the common Runtime.
 
     Attributes:
-        role_worker_mapping: Dictionary mapping Role enums to Ray remote worker classes
+        role_worker_mapping: Dictionary mapping Role enums to Worker classes
         mapping: Dictionary mapping Role enums to resource pool IDs for GPU allocation
     """
 
@@ -167,28 +192,35 @@ class TaskRunner(BaseTaskRunner):
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 
-        actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
-        self.add_critic_worker(config)
+        from verl.runtime import current_runtime
+
+        topology = current_runtime().topology
+        self.model_configs = PPOModelConfigs(config, topology) if topology.models else None
+        roles = PPORoleConfigs.resolve(config, self.model_configs)
+
+        self.add_actor_rollout_worker(config)
+        if need_critic(config, roles.critic):
+            self.add_critic_worker(config)
 
         self.add_reward_model_resource_pool(config)
 
         self.add_teacher_model_resource_pool(config)
 
-        # Add a reference policy worker if KL loss or KL reward is used.
-        self.add_ref_policy_worker(config, actor_rollout_cls)
-
         # validate config
         validate_config(
             config=config,
-            use_reference_policy=need_reference_policy(config),
-            use_critic=need_critic(config),
+            use_reference_policy=need_reference_policy(config, roles.actor.actor),
+            use_critic=need_critic(config, roles.critic),
+            actor_model_config=roles.actor.model,
+            actor_config=roles.actor.actor,
+            rollout_config=roles.rollout.rollout,
+            ref_config=roles.ref.ref,
+            critic_config=roles.critic,
         )
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(
-            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
-        )
+        local_path = copy_to_local(roles.actor.model.path, use_shm=roles.actor.model.get("use_shm", False))
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
@@ -228,14 +260,27 @@ class TaskRunner(BaseTaskRunner):
             processor=processor,
             role_worker_mapping=self.role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
-            ray_worker_group_cls=ray_worker_group_cls,
+            model_configs=self.model_configs,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,
             train_sampler=train_sampler,
         )
-        # Initialize the workers of the trainer.
-        trainer.init_workers()
-
-        # Start the training process.
-        trainer.fit()
+        # The trainer creates rollout server processes during init_workers().
+        # Stop those servers before the enclosing Runtime tears down their
+        # WorkerGroups; otherwise vLLM native EngineCore processes are killed
+        # mid-cleanup and can terminate in C++ destructors.
+        try:
+            # Initialize the workers of the trainer.
+            trainer.init_workers()
+            # Start the training process.
+            trainer.fit()
+        finally:
+            body_failed = sys.exc_info()[0] is not None
+            llm_server_manager = getattr(trainer, "llm_server_manager", None)
+            if llm_server_manager is not None:
+                try:
+                    llm_server_manager.close()
+                except Exception:  # Cleanup must not replace the active training failure.
+                    if not body_failed:
+                        raise

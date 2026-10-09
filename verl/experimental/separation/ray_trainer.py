@@ -262,6 +262,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.reward_loop_manager = RewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
+            worker_resource_pool=self.actor_rollout_wg.resource_pool,
         )
 
     def _init_async_rollout_manager(self):

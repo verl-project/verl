@@ -9,24 +9,24 @@
 
 This module provides two concrete implementations of :class:`StorageEngine`:
 
-- :class:`InMemoryStorageEngine` -- process-local dict. Mostly useful for
-  unit tests and debugging; no Ray dependency.
-- :class:`DefaultStorageEngine` -- stores payloads with Ray ``ray.put`` /
-  ``ray.get`` (tensors are converted to numpy on the wire via
-  :meth:`DefaultStorageEngine.to_wire`).
+- :class:`InMemoryStorageEngine` -- process-local test adapter; no Runtime
+  dependency and not used as a production fallback.
+- :class:`RayStorageEngine` -- stores payloads through :mod:`verl.runtime`
+  (tensors are converted to numpy on the wire via
+  :meth:`RayStorageEngine.to_wire`).
 
-Users select a backend explicitly or rely on :func:`get_default_storage_engine`,
-which returns ``DefaultStorageEngine`` by default.
+The active Runtime backend selects the process default explicitly: Ray uses
+:class:`RayStorageEngine`; Monarch uses the experimental TorchStore adapter.
+Without a Runtime, the default Runtime backend selects it instead.
 """
 
 from __future__ import annotations
 
 import os
 import threading
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 import numpy as np
-import ray
 
 try:  # pragma: no cover - optional dep
     import torch
@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover
 
 from verl.experimental.neoproto.storage.engine import (
     FieldSpec,
+    LocalRef,
     Ref,
     StorageEngine,
     _BaseStorageEngine,
@@ -44,6 +45,8 @@ from verl.experimental.neoproto.storage.engine import (
     _infer_shape,
     new_uid,
 )
+from verl.runtime.config import DEFAULT_BACKEND
+from verl.runtime.object_store import ObjectStore, _object_store
 
 # ---------------------------------------------------------------------------
 # Data-plane I/O throughput accounting (gated by NEO_IO_STATS=1).
@@ -75,11 +78,11 @@ def io_stats_reset() -> None:
 class InMemoryStorageEngine(_BaseStorageEngine):
     """Trivial storage backed by a process-local dict.
 
-    Not thread-safe across processes; used for tests, notebooks, and the
-    "zero ray" debug path for :class:`NeoProto`.
+    Not thread-safe across processes; used only when tests explicitly inject
+    it as the default engine.
     """
 
-    backend = "local"
+    backend = "memory"
 
     def __init__(self) -> None:
         self._store: dict[str, Any] = {}
@@ -91,11 +94,10 @@ class InMemoryStorageEngine(_BaseStorageEngine):
         self,
         value: Any,
         *,
-        key_hint: Optional[str] = None,
-        spec: Optional[FieldSpec] = None,
-        backend: Optional[str] = None,
+        key_hint: str | None = None,
+        spec: FieldSpec | None = None,
     ) -> Ref:
-        del key_hint, backend  # API parity with DefaultStorageEngine.put
+        del key_hint
         uid = new_uid()
         with self._lock:
             self._store[uid] = value
@@ -109,7 +111,8 @@ class InMemoryStorageEngine(_BaseStorageEngine):
         )
 
     def get(self, ref: Ref) -> Any:
-        self._check_backend(ref)
+        if ref.backend != self.backend:
+            raise ValueError(f"Ref belongs to backend {ref.backend!r}, not {self.backend!r}")
         if ref.dataptr is not None:
             value = ref.dataptr
         else:
@@ -124,7 +127,8 @@ class InMemoryStorageEngine(_BaseStorageEngine):
             for r in refs:
                 if r is None:
                     continue
-                self._check_backend(r)
+                if r.backend != self.backend:
+                    raise ValueError(f"Ref belongs to backend {r.backend!r}, not {self.backend!r}")
                 c = self._refcount.get(r.uid, 0) - 1
                 if c <= 0:
                     self._store.pop(r.uid, None)
@@ -138,10 +142,6 @@ class InMemoryStorageEngine(_BaseStorageEngine):
                 if r is None:
                     continue
                 self._refcount[r.uid] = self._refcount.get(r.uid, 0) + 1
-
-    def _check_backend(self, ref: Ref) -> None:
-        if ref.backend != self.backend:
-            raise ValueError(f"Ref belongs to backend {ref.backend!r}, not {self.backend!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +172,13 @@ def _is_tensor_like(value: Any) -> bool:
 _REINTERPRET_INT = {1: "int8", 2: "int16", 4: "int32", 8: "int64"}
 
 
+def _key_prefix(key_hint: str | None) -> str:
+    if not key_hint:
+        return "neo"
+    normalized = "".join(character if character.isalnum() or character in "_.-" else "_" for character in key_hint)
+    return normalized[:64] or "neo"
+
+
 class _TensorAsNumpy:
     """Self-describing wire wrapper marking a numpy payload as a torch tensor.
 
@@ -193,35 +200,39 @@ class _TensorAsNumpy:
         self.data, self.torch_dtype, self.reinterpret = state
 
 
-class DefaultStorageEngine(_BaseStorageEngine):
+def _optional_ray_object_store() -> ObjectStore[Any] | None:
+    try:
+        return _object_store()
+    except RuntimeError:
+        import ray
+
+        if not ray.is_initialized():
+            return None
+    from verl.single_controller.ray.object_store import RayObjectStore
+
+    # Refs are plain ObjectRefs either way, so they stay readable once a Runtime starts.
+    return RayObjectStore()
+
+
+def _ray_object_store() -> ObjectStore[Any]:
+    store = _optional_ray_object_store()
+    if store is None:
+        raise RuntimeError("Ray storage needs a Runtime ObjectStore or an initialized Ray process")
+    return store
+
+
+class RayStorageEngine(_BaseStorageEngine):
     """Ray-based default storage engine.
 
-    All non-local payloads go through ``ray.put`` / ``ray.get``. Tensor values
-    are converted with :meth:`to_wire` / :meth:`from_wire` so stored buffers
-    are not corrupted by later in-place mutation. ``backend="local"`` falls
-    back to an in-process :class:`InMemoryStorageEngine`.
+    Payloads go through the ObjectStore installed by the Runtime; Ray processes
+    without a Runtime (raw ``ray.remote`` actors, drivers before Runtime start)
+    use Ray's object store directly. Processes without Ray keep payloads inline
+    in ``LocalRef`` instead of starting a Ray cluster. Tensor values are
+    converted with :meth:`to_wire` / :meth:`from_wire` so stored buffers are
+    not corrupted by later in-place mutation.
     """
 
-    backend = "ray"  # namespace; individual refs record ``object_store`` / ``local``
-
-    def __init__(self) -> None:
-        self._object_store = None  # type: ignore[assignment]
-        self._lock = threading.Lock()
-        # local fallback used for values that can't be sent to Ray (e.g. during tests)
-        self._fallback = InMemoryStorageEngine()
-
-    # ------------------------------------------------------------------
-    def _ray_available(self) -> bool:
-        """Return True only inside an initialized Ray process.
-
-        Library-level ``DataProto`` construction must not auto-start a Ray
-        cluster. Trainers and Ray actors initialize Ray before using the
-        object-store path; standalone callers use the local fallback.
-        """
-        try:
-            return ray.is_initialized()
-        except Exception:  # pragma: no cover
-            return False
+    backend = "ray_object_store"
 
     def to_wire(self, value: Any) -> Any:
         """Convert a ``torch.Tensor`` into a storable numpy payload (identity otherwise).
@@ -261,19 +272,21 @@ class DefaultStorageEngine(_BaseStorageEngine):
         self,
         value: Any,
         *,
-        key_hint: Optional[str] = None,
-        spec: Optional[FieldSpec] = None,
-        backend: Optional[str] = "object_store",
+        key_hint: str | None = None,
+        spec: FieldSpec | None = None,
     ) -> Ref:
-        if not self._ray_available() or backend == "local":
-            return self._fallback.put(value, key_hint=key_hint, spec=spec)
-
-        ref = ray.put(self.to_wire(value))
-        uid = ref.hex()
+        store = _optional_ray_object_store()
+        if store is None:
+            ref = LocalRef.of(value)
+            ref.dtype = _infer_dtype(value, spec)
+            ref.shape = _infer_shape(value, spec)
+            return ref
+        uid = new_uid(prefix=f"{_key_prefix(key_hint)}-")
+        reference = store.put(uid, self.to_wire(value))
         return Ref(
-            backend=backend,
+            backend=self.backend,
             uid=uid,
-            dataptr=ref,
+            dataptr=reference,
             dtype=_infer_dtype(value, spec),
             shape=_infer_shape(value, spec),
         )
@@ -282,71 +295,61 @@ class DefaultStorageEngine(_BaseStorageEngine):
         self,
         values: Iterable[Any],
         *,
-        key_hint: Optional[str] = None,
-        spec: Optional[FieldSpec] = None,
+        key_hint: str | None = None,
+        spec: FieldSpec | None = None,
     ) -> list[Ref]:
-        if not self._ray_available():
-            return self._fallback.put_many(values, key_hint=key_hint, spec=spec)
+        values = list(values)
         if not values:
             return []
-        # tensor path: one ray.put per value so each tensor can travel by RDMA
-        refs: list[Ref] = []
-        for v in values:
-            r = ray.put(self.to_wire(v))
-            refs.append(
-                Ref(
-                    backend="object_store",
-                    uid=r.hex(),
-                    dataptr=r,
-                    dtype=_infer_dtype(v, spec),
-                    shape=_infer_shape(v, spec),
-                )
-            )
-        return refs
+        return [self.put(value, key_hint=key_hint, spec=spec) for value in values]
 
     # ------------------------------------------------------------------
     def get(self, ref: Ref) -> Any:
-        if ref.backend == "local":
-            return self._fallback.get(ref)
-        if ref.backend == "object_store":
-            value = self.from_wire(ray.get(ref.dataptr))
-        else:  # pragma: no cover
-            raise ValueError(f"Unknown ref backend: {ref.backend}")
+        if ref.backend != self.backend:
+            raise ValueError(f"Ref belongs to backend {ref.backend!r}, not {self.backend!r}")
+        value = self.from_wire(_ray_object_store().get(ref.dataptr))
         slice_item = self.apply_slice(value, ref.slice_spec)
         slice_item = ref.apply_ops(slice_item)
         return slice_item
 
     def get_many(self, refs: list[Ref], apply_ops: bool = True) -> list[Any]:
-        backend = refs[0].backend
-        if backend == "local":
-            return [self.get(r) if r is not None else None for r in refs]
-        elif backend == "object_store":
-            values = ray.get([r.dataptr for r in refs])
-            for i in range(len(values)):
-                r = refs[i]
-                value = self.from_wire(values[i])
-                if apply_ops:
-                    value = self.apply_slice(value, r.slice_spec)
-                    value = r.apply_ops(value)
-                values[i] = value
-
-            return values
+        if not refs:
+            return []
+        for ref in refs:
+            if ref is not None and ref.backend != self.backend:
+                raise ValueError(f"Ref belongs to backend {ref.backend!r}, not {self.backend!r}")
+        indexed_refs = [(index, ref) for index, ref in enumerate(refs) if ref is not None]
+        remote_values = _ray_object_store().get_many([ref.dataptr for _, ref in indexed_refs])
+        values: list[Any] = [None] * len(refs)
+        for (index, ref), value in zip(indexed_refs, remote_values, strict=True):
+            value = self.from_wire(value)
+            if apply_ops:
+                value = ref.apply_ops(self.apply_slice(value, ref.slice_spec))
+            values[index] = value
+        return values
 
     def consolidate(
         self,
         old_engine,
         refs: list[Ref],
     ) -> Ref:
-        raise NotImplementedError("consolidate not implemented for DefaultStorageEngine")
+        raise NotImplementedError("consolidate not implemented for RayStorageEngine")
 
     def release(self, refs: Ref | list[Ref]) -> None:
         if isinstance(refs, Ref):
             refs = [refs]
-        os_refs: list[Ref] = [r.dataptr for r in refs if r.backend == "object_store"]
-        if len(os_refs) > 0:
-            # print(f"[NEO] release refs: {os_refs}")
-            ray.internal.free(os_refs)
-            # gc.collect()
+        for ref in refs:
+            if ref is not None and ref.backend != self.backend:
+                raise ValueError(f"Ref belongs to backend {ref.backend!r}, not {self.backend!r}")
+        remote = {ref.dataptr for ref in refs if ref is not None}
+        if remote:
+            store = _ray_object_store()
+            for reference in remote:
+                store.delete(reference)
+
+
+# Ray-oriented alias used by existing verl tests / smoke scripts.
+DefaultStorageEngine = RayStorageEngine
 
 
 # ---------------------------------------------------------------------------
@@ -354,29 +357,39 @@ class DefaultStorageEngine(_BaseStorageEngine):
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT: Optional[StorageEngine] = None
+_DEFAULT: StorageEngine | None = None
 _DEFAULT_LOCK = threading.Lock()
 
 
 def get_default_storage_engine() -> StorageEngine:
-    """Return the module-level default :class:`StorageEngine`.
+    """Return the explicit default or the engine for this process's Runtime backend.
 
-    Creates a :class:`DefaultStorageEngine` on first access.
+    Without an active Runtime, the engine follows the default Runtime backend,
+    the same backend a Runtime started in this process would use by default.
     """
-    global _DEFAULT
-    if _DEFAULT is None:
-        with _DEFAULT_LOCK:
-            if _DEFAULT is None:
-                _DEFAULT = DefaultStorageEngine()
-    return _DEFAULT
+    engine = _DEFAULT
+    if engine is not None:
+        return engine
+    from verl.runtime import current_runtime
+
+    try:
+        backend = current_runtime().backend
+    except RuntimeError:
+        backend = DEFAULT_BACKEND
+    # Implicit selection must not outlive the Runtime that selects the backend.
+    return storage_engine_for_runtime(backend)
 
 
-def set_default_storage_engine(engine: Optional[StorageEngine]) -> None:
+def set_default_storage_engine(engine: StorageEngine | None) -> None:
     """Install ``engine`` as the module-level default (used by tests)."""
     global _DEFAULT
     with _DEFAULT_LOCK:
         _DEFAULT = engine
-    # Keep NeoProto._engine() in sync for unit tests that inject a counting engine.
+    _sync_default_engine_registry(engine)
+
+
+def _sync_default_engine_registry(engine: StorageEngine | None) -> None:
+    """Keep NeoProto's compatibility registry aligned with the selected default."""
     from verl.experimental.neoproto import neo
 
     if engine is None:
@@ -386,24 +399,51 @@ def set_default_storage_engine(engine: Optional[StorageEngine]) -> None:
     backend = getattr(engine, "backend", None)
     if backend:
         neo.GLOBAL_ENGINE_DICT[backend] = engine
+    if isinstance(engine, RayStorageEngine):
+        neo.GLOBAL_ENGINE_DICT["ray_object_store"] = engine
 
 
-def get_engine_for_backend(backend: Optional[str] = None) -> StorageEngine:
+def get_engine_for_backend(backend: str | None = None) -> StorageEngine:
     """Return a :class:`StorageEngine` able to resolve a ref of ``backend``.
 
     Engines are reconstructable on demand because the live handle travels in
-    :attr:`Ref.dataptr` (the in-memory value for ``local`` refs, the Ray
-    ``ObjectRef`` for ``object_store`` refs). A :class:`NeoProto` therefore does
-    not need to carry a persistent engine; it derives one per ref at
-    materialize time from ``ref.backend``.
+    :attr:`Ref.dataptr`. A :class:`NeoProto` therefore does not need to carry a
+    persistent engine; it derives one per ref at materialize time from
+    ``ref.backend``.
 
-    - ``"local"`` -> a fresh :class:`InMemoryStorageEngine` (no Ray needed; the
-      payload is read straight back from ``ref.dataptr``).
-    - ``"object_store"`` or ``None`` for the write path -> the shared
-      :class:`DefaultStorageEngine`.
+    - ``"memory"`` -> a fresh :class:`InMemoryStorageEngine` for tests and
+      offline debug.
+    - ``"ray_object_store"`` -> the Ray adapter.
+    - ``None`` / ``"default"`` -> the explicitly configured Runtime adapter.
     """
     if backend == "local":
+        raise ValueError("LocalRef is inline and does not use a StorageEngine")
+    if backend == "memory":
         return InMemoryStorageEngine()
-    elif backend == "object_store":
-        return DefaultStorageEngine()
-    return get_default_storage_engine()
+    if backend == "ray_object_store":
+        return RayStorageEngine()
+    if backend == "torchstore":
+        from verl.experimental.neoproto.storage.torchstore import TorchStorageEngine
+
+        return TorchStorageEngine()
+    if backend in (None, "default"):
+        return get_default_storage_engine()
+    raise ValueError(f"unsupported NeoProto storage backend {backend!r}")
+
+
+def storage_engine_for_runtime(backend: str) -> StorageEngine:
+    """Construct the only NeoProto engine valid for ``backend``."""
+    if backend == "ray":
+        return RayStorageEngine()
+    if backend == "monarch":
+        from verl.experimental.neoproto.storage.torchstore import TorchStorageEngine
+
+        return TorchStorageEngine()
+    raise ValueError(f"unsupported NeoProto Runtime backend {backend!r}")
+
+
+def configure_storage_engine(backend: str) -> StorageEngine:
+    """Bind NeoProto storage to one explicit Runtime backend."""
+    engine = storage_engine_for_runtime(backend)
+    set_default_storage_engine(engine)
+    return engine

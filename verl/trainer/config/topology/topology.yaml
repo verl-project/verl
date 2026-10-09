@@ -1,0 +1,8 @@
+# Hardware clusters available to this job.
+clusters: []
+
+# Named groups of GPUs selected from clusters.
+device_pools: []
+
+# Model instances placed on resource pools.
+models: []

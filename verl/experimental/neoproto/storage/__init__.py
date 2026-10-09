@@ -4,9 +4,12 @@
 from verl.experimental.neoproto.storage.default import (
     DefaultStorageEngine,
     InMemoryStorageEngine,
+    RayStorageEngine,
+    configure_storage_engine,
     get_default_storage_engine,
     get_engine_for_backend,
     set_default_storage_engine,
+    storage_engine_for_runtime,
 )
 from verl.experimental.neoproto.storage.engine import (
     FieldSpec,
@@ -31,8 +34,11 @@ __all__ = [
     "compose_slice",
     "new_uid",
     "DefaultStorageEngine",
+    "RayStorageEngine",
     "InMemoryStorageEngine",
+    "configure_storage_engine",
     "get_default_storage_engine",
     "get_engine_for_backend",
     "set_default_storage_engine",
+    "storage_engine_for_runtime",
 ]

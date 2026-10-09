@@ -26,7 +26,6 @@ from typing import Any
 import numpy as np
 import torch
 
-_STEP_RE = re.compile(r"(?:^|\s)step:(\d+)\s+-\s+")
 _FORBIDDEN_LOG_MARKERS = (
     "Traceback (most recent call last)",
     "CUDA out of memory",
@@ -55,6 +54,140 @@ _IGNORED_METRIC_PREFIXES = (
     "perf/time_per_step",
 )
 _RESOURCE_TRACKER_PSM_RE = re.compile(r"KeyError: '/psm_[0-9a-f]+'")
+_RESOURCE_TRACKER_FILE_RE = re.compile(r'multiprocessing/resource_tracker.py", line (?:209|239), in main')
+# CPython prints "Exception ignored in: <function X.__del__ at 0x...>" only for
+# exceptions raised inside a __del__/GC finalizer. Those are interpreter-
+# shutdown destructor errors emitted AFTER training finished (e.g. Monarch
+# teardown hitting Tracking.__del__ -> TypeError, or RefTable.__del__ ->
+# ImportError "sys.meta_path is None"); they never appear in a real training
+# failure and must not be treated as failure markers.
+_IGNORED_DEL_FINALIZER_RE = re.compile(r"Exception ignored in: <function [\w.]+\.__del__ at 0x[0-9a-f]+>")
+_TRAINING_SUCCESS_MARKER = "Training Progress: 100%"
+_IGNORED_MONARCH_ATEXIT_PREFIX = (
+    "Exception ignored in atexit callback: <function _init_client_context.<locals>.<lambda>"
+)
+_IGNORED_MONARCH_ATEXIT_TERMINATOR = "TimeoutError:"
+_IGNORED_WANDB_ROUTER_HEADER = "Exception in thread MsgRouterThr:"
+_IGNORED_WANDB_ROUTER_TERMINATOR = "OSError: handle is closed"
+_IGNORED_WANDB_ROUTER_TRUNCATED_EOF_REQUIRED = (
+    "wandb/sdk/interface/router.py",
+    "msg = self._read_message()",
+    "wandb/sdk/interface/router_queue.py",
+    "msg = self._response_queue.get(timeout=1)",
+    "multiprocessing/queues.py",
+    "res = self._recv_bytes()",
+    "multiprocessing/connection.py",
+    "self._check_closed()",
+    "in _check_closed",
+)
+_TRACEBACK_TERMINATOR_RE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt|Exit)\b")
+
+
+def _strip_ignored_del_finalizer_noise(text: str) -> tuple[str, int]:
+    """Remove benign interpreter-shutdown ``__del__`` finalizer tracebacks.
+
+    A block starts at an ``Exception ignored in: <function ....__del__ ...>``
+    line and spans its ``Traceback (most recent call last):`` header, the
+    indented frame lines, and the terminating ``SomeError: ...`` line. Only
+    blocks anchored by the ``Exception ignored in: ...__del__`` fingerprint are
+    removed, so genuine tracebacks are left intact for the failure-marker scan.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    removed = 0
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _IGNORED_DEL_FINALIZER_RE.search(lines[i]):
+            j = i + 1
+            if j < n and "Traceback (most recent call last)" in lines[j]:
+                j += 1
+            while j < n and (lines[j].startswith("  ") or lines[j].startswith("\t")):
+                j += 1
+            if j < n and _TRACEBACK_TERMINATOR_RE.match(lines[j]):
+                j += 1
+            removed += 1
+            i = j
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out), removed
+
+
+def _strip_ignored_wandb_router_noise(text: str) -> tuple[str, int]:
+    """Remove only the known W&B router-thread traceback during shutdown.
+
+    The interpreter can exit after printing the final _check_closed frame but
+    before printing the terminating OSError. Accept that form only at EOF,
+    after successful training, and with the complete known stack fingerprint.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    removed = 0
+    training_succeeded = False
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _TRAINING_SUCCESS_MARKER in lines[i]:
+            training_succeeded = True
+        if lines[i] == _IGNORED_WANDB_ROUTER_HEADER:
+            j = i + 1
+            if j < n and lines[j] == "Traceback (most recent call last):":
+                j += 1
+                while j < n and (lines[j].startswith("  ") or lines[j].startswith("\t")):
+                    j += 1
+                if j < n and lines[j] == _IGNORED_WANDB_ROUTER_TERMINATOR:
+                    removed += 1
+                    i = j + 1
+                    continue
+                if training_succeeded and j == n:
+                    block = "\n".join(lines[i:j])
+                    if all(fingerprint in block for fingerprint in _IGNORED_WANDB_ROUTER_TRUNCATED_EOF_REQUIRED):
+                        removed += 1
+                        i = j
+                        continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out), removed
+
+
+def _strip_ignored_monarch_atexit_noise(text: str) -> tuple[str, int]:
+    """Remove only Monarch's known one-second atexit timeout after success."""
+    lines = text.splitlines()
+    out: list[str] = []
+    removed = 0
+    training_succeeded = False
+    i = 0
+    n = len(lines)
+    required = (
+        "Traceback (most recent call last):",
+        "monarch/_src/actor/actor_mesh.py",
+        "shutdown_context().get(timeout=1.0)",
+        "monarch/_src/actor/future.py",
+        'return cast("R", handle.get(timeout))',
+    )
+    while i < n:
+        if _TRAINING_SUCCESS_MARKER in lines[i]:
+            training_succeeded = True
+        if training_succeeded and lines[i].startswith(_IGNORED_MONARCH_ATEXIT_PREFIX):
+            stop = min(i + 40, n)
+            matched = False
+            for j in range(i, stop):
+                if lines[j].strip() != _IGNORED_MONARCH_ATEXIT_TERMINATOR:
+                    continue
+                block = "\n".join(lines[i : j + 1])
+                if block.count("Traceback (most recent call last):") == 1 and all(
+                    fingerprint in block for fingerprint in required
+                ):
+                    removed += 1
+                    i = j + 1
+                    matched = True
+                break
+            if matched:
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out), removed
 
 
 def _strip_known_resource_tracker_noise(text: str) -> tuple[str, int]:
@@ -73,7 +206,7 @@ def _strip_known_resource_tracker_noise(text: str) -> tuple[str, int]:
     if any("vLLMHttpServer" not in line for line in traceback_lines):
         return text, 0
 
-    resource_file_lines = [line for line in lines if 'multiprocessing/resource_tracker.py", line 239, in main' in line]
+    resource_file_lines = [line for line in lines if _RESOURCE_TRACKER_FILE_RE.search(line)]
     cache_remove_lines = [line for line in lines if "cache[rtype].remove(name)" in line]
     psm_keyerror_lines = [line for line in lines if _RESOURCE_TRACKER_PSM_RE.search(line)]
     if not (len(resource_file_lines) == len(cache_remove_lines) == len(psm_keyerror_lines) == count):
@@ -84,7 +217,7 @@ def _strip_known_resource_tracker_noise(text: str) -> tuple[str, int]:
         for line in lines
         if not (
             ("Traceback (most recent call last)" in line and "vLLMHttpServer" in line)
-            or 'multiprocessing/resource_tracker.py", line 239, in main' in line
+            or _RESOURCE_TRACKER_FILE_RE.search(line)
             or "cache[rtype].remove(name)" in line
             or _RESOURCE_TRACKER_PSM_RE.search(line)
         )
@@ -92,40 +225,33 @@ def _strip_known_resource_tracker_noise(text: str) -> tuple[str, int]:
     return "\n".join(filtered), count
 
 
-def _parse_float(text: str) -> float:
-    text = text.strip()
-    wrapper = re.fullmatch(r"(?:np\.)?float(?:16|32|64)?\((.*)\)", text)
-    if wrapper:
-        text = wrapper.group(1)
-    return float(text)
-
-
 def _parse_metrics(path: Path, expected_steps: int) -> tuple[str, dict[int, dict[str, float]]]:
     if not path.is_file():
         raise AssertionError(f"Missing training log: {path}")
     text = path.read_text(errors="replace")
-    scan_text, ignored_resource_tracker_count = _strip_known_resource_tracker_noise(text)
+    scan_text, ignored_del_finalizer_count = _strip_ignored_del_finalizer_noise(text)
+    scan_text, ignored_monarch_atexit_count = _strip_ignored_monarch_atexit_noise(scan_text)
+    scan_text, ignored_wandb_router_count = _strip_ignored_wandb_router_noise(scan_text)
+    scan_text, ignored_resource_tracker_count = _strip_known_resource_tracker_noise(scan_text)
     for marker in _FORBIDDEN_LOG_MARKERS:
         if marker in scan_text:
             raise AssertionError(f"{path} contains failure marker {marker!r}")
+    if ignored_del_finalizer_count:
+        print(f"IGNORED_SHUTDOWN_DEL_FINALIZER_TRACEBACKS path={path} count={ignored_del_finalizer_count}")
+    if ignored_monarch_atexit_count:
+        print(f"IGNORED_SHUTDOWN_MONARCH_ATEXIT_TRACEBACKS path={path} count={ignored_monarch_atexit_count}")
+    if ignored_wandb_router_count:
+        print(f"IGNORED_SHUTDOWN_WANDB_ROUTER_TRACEBACKS path={path} count={ignored_wandb_router_count}")
     if ignored_resource_tracker_count:
         print(f"IGNORED_KNOWN_RESOURCE_TRACKER_TRACEBACKS path={path} count={ignored_resource_tracker_count}")
 
     steps: dict[int, dict[str, float]] = {}
-    for line in text.splitlines():
-        match = _STEP_RE.search(line)
-        if match is None:
-            continue
-        step = int(match.group(1))
-        metrics: dict[str, float] = {}
-        for field in line[match.end() :].split(" - "):
-            if ":" not in field:
-                continue
-            key, raw_value = field.split(":", 1)
-            try:
-                metrics[key.strip()] = _parse_float(raw_value)
-            except ValueError:
-                continue
+    # Native Monarch capture truncates long console lines; read the file logger.
+    metrics_path = path.with_name("metrics.jsonl")
+    for line in metrics_path.read_text().splitlines():
+        record = json.loads(line)
+        step = int(record["step"])
+        metrics = {key: float(value) for key, value in record["data"].items() if isinstance(value, int | float)}
         if step in steps:
             raise AssertionError(f"{path} contains duplicate metrics for step {step}")
         steps[step] = metrics

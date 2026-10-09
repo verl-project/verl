@@ -26,7 +26,6 @@ with patch("importlib.metadata.distributions", return_value=[]):
 
 import nixl._api as nixl_api
 import nixl._bindings as nixl_bindings
-import ray
 import torch
 import zmq
 import zmq.asyncio
@@ -38,7 +37,7 @@ from verl.checkpoint_engine.base import (
     merge_weight_chunks,
     split_weight_chunks,
 )
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import get_free_port, get_local_ip_address, is_valid_ipv6_address
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -87,7 +86,7 @@ class NixlAgent:
         )
 
     def start_zmq_server(self):
-        self.ip = ray.util.get_node_ip_address().strip("[]")
+        self.ip = get_local_ip_address()
         self.listen_port, _ = get_free_port(self.ip)
 
         context = zmq.asyncio.Context()

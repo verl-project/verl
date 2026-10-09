@@ -15,21 +15,21 @@
 import inspect
 import itertools
 
-import ray
-
 from verl import DataProto
-from verl.experimental.reward_loop.reward_manager import register
-from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+from verl.runtime import ClassWithInitArgs, Worker, current_runtime
 from verl.utils.reward_score import default_compute_score
 
+from .base import RewardManagerBase
+from .registry import register
 
-@ray.remote(num_cpus=1)
-class RewardComputeWorker:
+
+class RewardComputeWorker(Worker):
     """
     WARNING: This class cannot have async methods.
     """
 
     def __init__(self, compute_score_fn):
+        super().__init__()
         # since the reward function may not be pickleable, we need to init it in the worker
         self.compute_score_fn = compute_score_fn
 
@@ -54,20 +54,21 @@ class RemoteRewardManager(RewardManagerBase):
         assert not self.is_async_reward_score, "Async reward score is not supported in remote reward manager. "
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
-        num_reward_workers = config.reward.num_workers
-        # in the rollout & reward parallel mode
-        # the sum of final reward workers will be agent_loop_workers * num_reward_workers
-        self.reward_worker = [
-            # register the reward worker in the same node
-            RewardComputeWorker.options(
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(),
-                    soft=True,
-                ),
-            ).remote(self.compute_score)
-            for _ in range(num_reward_workers)
-        ]
-        self.reward_worker_pool = itertools.cycle(self.reward_worker)
+
+        runtime = current_runtime()
+        host_pool = runtime.current_host_resource_pool()
+        compute_pool = runtime.create_resource_pool(
+            nnodes=1,
+            processes_per_node=config.reward.num_workers,
+            device_type="cpu",
+            on=host_pool,
+        )
+        self._worker_group = runtime.create_worker_group(
+            ClassWithInitArgs(RewardComputeWorker, *(self.compute_score,)),
+            on=compute_pool,
+        )
+        remote_group = self._worker_group.remote()
+        self.reward_worker_pool = itertools.cycle(remote_group.rank(rank) for rank in range(remote_group.world_size))
 
     def choose_reward_worker(self):
         return next(self.reward_worker_pool)
@@ -106,7 +107,8 @@ class RemoteRewardManager(RewardManagerBase):
         )
 
         reward_worker = self.choose_reward_worker()
-        result = await reward_worker.compute_score.remote(
+        result = await reward_worker.execute_rank_zero_async(
+            "compute_score",
             data_source=data_source,
             solution_str=response_str,
             ground_truth=ground_truth,
@@ -115,16 +117,14 @@ class RemoteRewardManager(RewardManagerBase):
         )
 
         reward_extra_info = {}
-
-        score: float
         if isinstance(result, dict):
             score = result["score"]
-            for key, value in result.items():
-                reward_extra_info[key] = value
+            reward_extra_info.update(result)
         else:
             score = result
             reward_extra_info["acc"] = score
 
-        reward = score
+        return {"reward_score": score, "reward_extra_info": reward_extra_info}
 
-        return {"reward_score": reward, "reward_extra_info": reward_extra_info}
+    def close(self):
+        self._worker_group.close()
