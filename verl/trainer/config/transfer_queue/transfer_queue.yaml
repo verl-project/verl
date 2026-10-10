@@ -18,8 +18,8 @@ backend:
     total_storage_size: null
 
     # Number of distributed storage units, round-robin scheduled across eligible alive Ray nodes.
-    # Recommended: >= 2 x number of nodes so each node hosts multiple units.
-    num_data_storage_units: 8
+    # If null, defaults to max(2, 2 x trainer.nnodes) so each node hosts multiple units.
+    num_data_storage_units: null
 
     # Store large field values on node-local SSD to reduce host-memory usage.
     ssd_offload:
