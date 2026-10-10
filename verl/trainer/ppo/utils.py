@@ -153,6 +153,21 @@ def create_rl_sampler(data_config, dataset):
     # torch.utils.data.RandomSampler could not recover properly
     from torchdata.stateful_dataloader.sampler import RandomSampler
 
+    # Custom sampler via config-driven dynamic loading (e.g., GroupRatioSampler).
+    # Takes precedence over the shuffle-based default below: a configured custom
+    # sampler owns its own shuffling policy, so data_config.shuffle is ignored
+    # when this block is active.
+    sampler_config = data_config.get("sampler", None)
+    if sampler_config is not None and sampler_config.get("class_path", None) is not None:
+        from verl.utils.import_utils import load_extern_object
+
+        sampler_cls = load_extern_object(
+            sampler_config.class_path,
+            sampler_config.class_name,
+        )
+        sampler = sampler_cls(data_source=dataset, data_config=data_config)
+        return sampler
+
     # Use a sampler to facilitate checkpoint resumption.
     # If shuffling is enabled in the data configuration, create a random sampler.
     if data_config.shuffle:
