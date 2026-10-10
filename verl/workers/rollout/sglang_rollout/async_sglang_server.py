@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from verl.utils.profiler import (
     relocate_rollout_traces,
     rollout_profiler_global_ranks,
 )
+from verl.utils.sglang.sampler_token_ban import run_scheduler_process_with_token_ban
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -62,7 +64,11 @@ from verl.workers.rollout.sglang_rollout.utils import (
     lora_served_as_adapter,
     sglang_lora_target_modules,
 )
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import (
+    get_max_position_embeddings,
+    get_vision_placeholder_token_ids,
+    run_uvicorn,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -172,6 +178,11 @@ class SGLangHttpServer:
                     f"max_model_len ({self.config.max_model_len}) should be less than or equal to "
                     f"max_position_embeddings ({max_position_embeddings})"
                 )
+        # A sampled <|image_pad|>/<|video_pad|> has no image behind it, and every consumer of the
+        # sequence assumes it does. Banned at the sampler together with the OOV tail, as on vLLM.
+        self._banned_token_ids = get_vision_placeholder_token_ids(self.model_config.processor)
+        if self._banned_token_ids:
+            logger.info(f"SGLang rollout: banning token ids {self._banned_token_ids} from being sampled")
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -413,7 +424,11 @@ class SGLangHttpServer:
         self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
             server_args=server_args,
             init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
-            run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
+            run_scheduler_process_func=functools.partial(
+                run_scheduler_process_with_token_ban,
+                verl_banned_token_ids=list(self._banned_token_ids),
+                verl_vocab_size=len(self.model_config.tokenizer),
+            ),
             run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
         )
 
