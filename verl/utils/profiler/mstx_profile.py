@@ -83,8 +83,10 @@ def marked_timer(name: str, timing_raw: dict[str, float], *args: Any, **kwargs: 
     mark_range = mark_start_range(message=name)
     from .performance import _timer
 
-    yield from _timer(name, timing_raw)
-    mark_end_range(mark_range)
+    try:
+        yield from _timer(name, timing_raw)
+    finally:
+        mark_end_range(mark_range)
 
 
 def get_npu_profiler(
@@ -202,9 +204,13 @@ class NPUProfiler(DistProfiler):
 
     def stop(self):
         if not self.discrete and NPUProfiler._define_count == 1:
-            self.profile_npu.step()
-            self.profile_npu.stop()
-            NPUProfiler._define_count -= 1
+            try:
+                try:
+                    self.profile_npu.step()
+                finally:
+                    self.profile_npu.stop()
+            finally:
+                NPUProfiler._define_count -= 1
 
     def step(self):
         """No-op per-mini-batch hook.
@@ -239,11 +245,8 @@ class NPUProfiler(DistProfiler):
                 # role and the function, which the method name alone cannot do for a colocated
                 # worker. Fall back to the method name for stages that declare no role.
                 profile_name = message or role or func.__name__
-                discrete_mode = self.discrete
-
-                if not discrete_mode:
-                    mark_range = mark_start_range(message=profile_name)
-                else:
+                profile_npu = None
+                if self.discrete:
                     profile_npu = get_npu_profiler(
                         contents=self.profile_contents,
                         profile_level=self.profile_level,
@@ -252,18 +255,18 @@ class NPUProfiler(DistProfiler):
                         role=role,
                     )
                     profile_npu.start()
+                try:
                     mark_range = mark_start_range(message=profile_name)
-
-                result = func(*args, **kwargs_inner)
-
-                if not discrete_mode:
-                    mark_end_range(mark_range)
-                else:
-                    mark_end_range(mark_range)
-                    profile_npu.step()
-                    profile_npu.stop()
-
-                return result
+                    try:
+                        return func(*args, **kwargs_inner)
+                    finally:
+                        mark_end_range(mark_range)
+                finally:
+                    if profile_npu is not None:
+                        try:
+                            profile_npu.step()
+                        finally:
+                            profile_npu.stop()
 
             return wrapper
 
