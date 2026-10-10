@@ -58,6 +58,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
+    set_fsdp2_gradient_sync,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
@@ -702,6 +703,9 @@ class FSDPEngine(BaseEngine):
         reduces FSDP gradient collectives from one reduce-scatter per
         micro-batch to a single round, at the cost of temporarily retaining
         unsharded gradients until the final backward.
+
+        A directly gathered fused LM head still synchronizes each micro-batch
+        through DTensor autograd; only its FSDP bookkeeping is excluded here.
         """
         defer_sync = getattr(
             self.engine_config,
@@ -717,11 +721,11 @@ class FSDPEngine(BaseEngine):
             with self.module.no_sync():
                 yield
         elif version == 2:
-            self.module.set_requires_gradient_sync(False)
+            set_fsdp2_gradient_sync(self.module, False)
             try:
                 yield
             finally:
-                self.module.set_requires_gradient_sync(True)
+                set_fsdp2_gradient_sync(self.module, True)
         else:
             yield
 
