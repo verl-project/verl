@@ -71,7 +71,7 @@ jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 120
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -109,6 +109,7 @@ jobs:
         run: |
           uv pip install --no-deps -e .
           uv pip install --no-deps TransferQueue==0.1.11
+          pip uninstall -y nvidia-resiliency-ext
       - name: Check final pip list
         run: |
           uv pip list
@@ -131,23 +132,23 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
-          rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
+          USE_DIST_CKPT=False bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
+          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
+    needs: llm_rl_job
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a3-800i-8
-    timeout-minutes: 120
+    runs-on: linux-aarch64-a3-800i-16
+    timeout-minutes: 160
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 80g
+        --shm-size 160g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable

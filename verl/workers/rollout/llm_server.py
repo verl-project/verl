@@ -155,6 +155,7 @@ class LLMServerClient:
                 video_data=video_data,
                 **multimodal_kwargs,
                 **priority_kwargs,
+                session_id=request_id,
                 **kwargs,
             )
             global_steps = output.extra_fields.get("global_steps")
