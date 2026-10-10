@@ -95,6 +95,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             lora_train_meta=lora_train_meta,
+            steps_per_epoch=self.steps_per_epoch,
         )
 
     def _get_lora_train_meta(self):
