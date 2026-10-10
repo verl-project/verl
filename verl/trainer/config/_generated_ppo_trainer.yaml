@@ -933,44 +933,22 @@ distillation:
   teacher_key: data_source
 transfer_queue:
   enable: false
-  metrics:
-    enabled: false
-    port: 0
-  controller:
-    sampler: SequentialSampler
-    polling_mode: false
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
       total_storage_size: null
       num_data_storage_units: 8
-      required_node_resource: null
       ssd_offload:
         enabled: false
         path: null
         threshold_bytes: 1048576
-        glibc_mmap_threshold_bytes: 1048576
     MooncakeStore:
       auto_init: false
       metadata_server: P2PHANDSHAKE
       master_server_address: localhost:50124
-      local_hostname: ''
-      protocol: tcp
       global_segment_size: 4294967296
       local_buffer_size: 1073741824
-      device_name: ''
       hard_pin: true
-      offload:
-        enabled: false
-        file_storage_path: /tmp/mooncake_offload
-        local_buffer_size_bytes: 2147483648
-        use_uring: false
-        heartbeat_interval_seconds: 2
-        client_port: 42052
-        eviction_high_watermark_ratio: 0.9
-        eviction_ratio: 0.1
-      use_gdr: false
-      gdr_staging_buffer_mb: 1024
 trainer:
   balance_batch: true
   total_epochs: 30

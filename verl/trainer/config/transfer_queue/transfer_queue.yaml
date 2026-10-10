@@ -1,24 +1,7 @@
 # Whether to enable TransferQueue
 enable: False
 
-# Metrics configuration for TransferQueue
-metrics:
-
-  # If true, exposes Prometheus-style metrics via an HTTP /metrics endpoint.
-  # If false, metrics are reported through the logger only.
-  enabled: false
-
-  # HTTP port for the /metrics endpoint (0 = auto-assign a free port)
-  port: 0
-
-# Controller configuration for TransferQueue
-controller:
-
-  # User-defined sampler. A sampler instance can override this string config.
-  sampler: SequentialSampler
-
-  # Return empty metadata when insufficient data is ready, allowing callers to poll.
-  polling_mode: False
+# Other settings use TransferQueue defaults; override them with ++transfer_queue.<key>=<value>.
 
 # Pluggable storage and transport backend for TransferQueue
 backend:
@@ -38,10 +21,6 @@ backend:
     # Recommended: >= 2 x number of nodes so each node hosts multiple units.
     num_data_storage_units: 8
 
-    # Optional Ray custom resource required on storage nodes.
-    # Set to null to keep all alive nodes eligible.
-    required_node_resource: null
-
     # Store large field values on node-local SSD to reduce host-memory usage.
     ssd_offload:
 
@@ -53,9 +32,6 @@ backend:
 
       # Per-field, per-sample encoded-size threshold in bytes for SSD placement.
       threshold_bytes: 1048576
-
-      # glibc-only allocator threshold for reclaiming large transient allocations.
-      glibc_mmap_threshold_bytes: 1048576
 
   # MooncakeStore: high-performance KV-based hierarchical storage
   # that supports RDMA transport between GPU and DRAM.
@@ -72,57 +48,12 @@ backend:
     # Address of the Mooncake master server.
     master_server_address: localhost:50124
 
-    # Local host address visible to the Mooncake cluster.
-    # Set to "" to auto-detect using Ray's node IP.
-    local_hostname: ""
-
-    # Transport protocol: tcp or rdma.
-    protocol: tcp
-
     # Global memory segment size in bytes **per client** for mounting (default: 4GB)
     global_segment_size: 4294967296
 
     # Local buffer size in bytes **per client** (default: 1GB)
     local_buffer_size: 1073741824
 
-    # Network device name for RDMA.
-    # Leave empty to let Mooncake auto-select available devices.
-    device_name: ""
-
     # Whether to hard-pin objects in memory so they cannot be evicted.
     # Set to null to disable hard pinning when offload is enabled and enable it otherwise.
     hard_pin: true
-
-    # SSD offload uses a single centralized mooncake_client on the initialization node.
-    # Ensure local_hostname is reachable from all nodes in the cluster.
-    offload:
-
-      # Whether to enable SSD offload.
-      enabled: false
-
-      # SSD directory for offloaded data.
-      file_storage_path: /tmp/mooncake_offload
-
-      # Local buffer size in bytes for the offload client (default: 2GB).
-      local_buffer_size_bytes: 2147483648
-
-      # Whether to use io_uring for async I/O (requires kernel >= 5.1 and liburing).
-      use_uring: false
-
-      # Offload client heartbeat interval in seconds; keep well below the master's client_ttl (30s).
-      heartbeat_interval_seconds: 2
-
-      # Port for the standalone mooncake_client process.
-      client_port: 42052
-
-      # Start eviction when memory usage exceeds this ratio.
-      eviction_high_watermark_ratio: 0.9
-
-      # Fraction of memory to free during each eviction cycle.
-      eviction_ratio: 0.1
-
-    # Enable GPUDirect RDMA; requires protocol: rdma and a GDR-capable GPU.
-    use_gdr: false
-
-    # Pre-registered CUDA staging buffer size in MB (only used when use_gdr: true).
-    gdr_staging_buffer_mb: 1024
