@@ -43,6 +43,7 @@ from verl.utils.ulysses import (
     set_ulysses_sequence_parallel_group,
     slice_input_tensor,
 )
+from verl.utils.veomni.chunk_logprobs_compat import install_chunk_logprobs_compat
 from verl.utils.veomni.router_replay import RouterReplayAction, VeOmniRouterReplay
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
@@ -353,6 +354,8 @@ class VeOmniEngine(FSDPEngine):
         ops_implementation = _build_ops_implementation_config(self.engine_config)
 
         veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+
+        install_chunk_logprobs_compat()
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
