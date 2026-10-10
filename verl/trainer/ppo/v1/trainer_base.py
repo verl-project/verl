@@ -1804,10 +1804,10 @@ class PPOTrainer(ABC):
     def _update_critic(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the critic network."""
         ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        num_prompts = len(set(k.rsplit("_", 2)[0] for k in batch.keys))
+        num_mini_batch = max(1, num_prompts // ppo_mini_batch_size)
         extra_info = {
-            "global_batch_size": ppo_mini_batch_size,
-            "mini_batch_size": ppo_mini_batch_size,
+            "num_mini_batch": num_mini_batch,
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
@@ -1827,7 +1827,8 @@ class PPOTrainer(ABC):
     def _update_actor(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the actor network."""
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        num_prompts = len(set(k.rsplit("_", 2)[0] for k in batch.keys))
+        num_mini_batch = max(1, num_prompts // ppo_mini_batch_size)
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
@@ -1852,8 +1853,7 @@ class PPOTrainer(ABC):
             "distillation_use_topk": distillation_use_topk,
             "distillation_only": distillation_only,
             "score_centering": score_centering,
-            "global_batch_size": ppo_mini_batch_size,
-            "mini_batch_size": ppo_mini_batch_size,
+            "num_mini_batch": num_mini_batch,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
