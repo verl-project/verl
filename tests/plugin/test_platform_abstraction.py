@@ -208,5 +208,100 @@ class TestPlatformRegistry:
             _create_platform("nonexistent_platform")
 
 
+class TestRayDeviceIndex:
+    """Test mapping Ray's physical accelerator ids onto a device index to pin."""
+
+    def setup_method(self):
+        self.platform = _make_mock_platform()()
+
+    def _resolve(self, accelerator_ids, visible=None):
+        env = {} if visible is None else {"MOCK_VISIBLE_DEVICES": visible}
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.platform.ray_device_index(accelerator_ids)
+
+    def test_unmasked_physical_id_is_the_index(self):
+        """RAY_EXPERIMENTAL_NOSET_*: every device is visible, so the id is the index."""
+        assert self._resolve(["0"]) == 0
+        assert self._resolve(["3"]) == 3
+
+    def test_masked_by_ray_relabels_from_zero(self):
+        """Ray's default: it masks this actor's own device, which becomes index 0."""
+        assert self._resolve(["2"], visible="2") == 0
+
+    def test_noncontiguous_mask_maps_to_position(self):
+        """A user-supplied subset: physical 4,5,6,7 -> logical 0,1,2,3."""
+        for physical, expected in zip("4567", range(4), strict=True):
+            assert self._resolve([physical], visible="4,5,6,7") == expected
+
+    def test_mask_that_cannot_be_indexed_falls_back_to_zero(self):
+        """CUDA's UUID mask form: the actor only sees what Ray gave it."""
+        assert self._resolve(["1"], visible="GPU-dead0000-beef") == 0
+
+    def test_platform_may_override_for_unhonored_masks(self):
+        """A runtime that ignores its own mask still sees every device."""
+
+        class _Unhonored(_make_mock_platform()):
+            def ray_device_index(self, accelerator_ids):
+                return int(accelerator_ids[0])
+
+        with mock.patch.dict(os.environ, {"MOCK_VISIBLE_DEVICES": "2"}, clear=True):
+            assert _Unhonored().ray_device_index(["2"]) == 2
+
+
+class TestRayNosetDetection:
+    """Test that noset detection follows the platform instead of a fixed list."""
+
+    def setup_method(self):
+        import verl.plugin.platform.platform_manager as pm
+
+        pm._current_platform = None
+
+    def teardown_method(self):
+        import verl.plugin.platform.platform_manager as pm
+
+        pm._current_platform = None
+
+    def test_platform_declared_var_is_honored(self):
+        """A platform naming a var absent from the hardcoded list is still detected."""
+        from verl.utils.ray_utils import ray_noset_visible_devices
+
+        set_platform(_make_mock_platform()())
+        assert get_platform().ray_noset_envvars() == ["RAY_EXPERIMENTAL_NOSET_MOCK_VISIBLE_DEVICES"]
+        assert ray_noset_visible_devices({"RAY_EXPERIMENTAL_NOSET_MOCK_VISIBLE_DEVICES": "1"})
+        assert not ray_noset_visible_devices({})
+
+    def test_legacy_cuda_var_still_honored(self):
+        from verl.utils.ray_utils import ray_noset_visible_devices
+
+        set_platform(_make_mock_platform()())
+        assert ray_noset_visible_devices({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
+
+
+class TestWorkerOutsideRay:
+    """Worker is also constructed in-process, where there is no Ray to ask."""
+
+    def test_init_outside_ray_does_not_query_ray(self):
+        """The SFT trainer builds TrainingWorker under torchrun; querying Ray's
+        assignment there would start a local Ray instance just to answer."""
+        import ray
+
+        from verl.single_controller.base import Worker
+
+        env = {
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "12345",
+        }
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(ray, "is_initialized", return_value=False),
+            mock.patch.object(ray, "get_runtime_context") as get_runtime_context,
+        ):
+            Worker()
+            get_runtime_context.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

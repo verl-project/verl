@@ -230,6 +230,33 @@ class PlatformBase(abc.ABC):
         """Return ``RAY_EXPERIMENTAL_NOSET_*`` env var names for this platform."""
         ...
 
+    def ray_device_index(self, accelerator_ids: list[str]) -> int:
+        """Map the accelerator ids Ray assigned to this actor to a device index to pin.
+
+        Ray reports *physical* device ids. Whether a physical id is also the index
+        to pass to ``set_device()`` depends on what the process can see:
+
+        * Ray masked :meth:`visible_devices_envvar` for this actor (its default),
+          or the user masked it themselves -- the visible devices are relabeled
+          from 0, so the index is the position of the physical id in that mask.
+        * Nothing is masked, e.g. ``RAY_EXPERIMENTAL_NOSET_*`` is set -- every
+          device on the node is visible and the physical id *is* the index.
+
+        Platforms whose runtime does not honor its own visibility mask must
+        override this and return the physical id, since masking there does not
+        relabel anything.
+        """
+        physical_id = str(accelerator_ids[0])
+        visible = os.environ.get(self.visible_devices_envvar())
+        if visible:
+            visible_ids = [dev.strip() for dev in visible.split(",") if dev.strip()]
+            if physical_id in visible_ids:
+                return visible_ids.index(physical_id)
+            # A mask we cannot index into (e.g. CUDA's UUID form). A masked actor
+            # only sees what Ray gave it, relabeled from 0.
+            return 0
+        return int(physical_id)
+
     def ray_resource_options(self, num_gpus: float) -> dict[str, Any]:
         """Return Ray actor resource options for allocating accelerators.
 

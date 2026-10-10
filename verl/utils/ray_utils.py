@@ -45,7 +45,19 @@ def ray_noset_visible_devices(env_vars=os.environ):
         "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",
         "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
     ]
-    return any(env_vars.get(env_var) for env_var in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST)
+    # The list above cannot follow an accelerator that renames the variable it
+    # masks: Ray's Intel GPU manager moved from ONEAPI_DEVICE_SELECTOR to
+    # ZE_AFFINITY_MASK in ray-project/ray#64440 and its NOSET name moved with it,
+    # which leaves the entry above naming a variable Ray no longer reads. Ray
+    # derives the NOSET name from the variable it masks, so derive it the same way
+    # and let the platform name any additional ones -- as the sglang rollout path
+    # already does in async_sglang_server.py.
+    from verl.utils.device import get_platform, get_visible_devices_keyword
+
+    candidates = set(NOSET_VISIBLE_DEVICES_ENV_VARS_LIST)
+    candidates.add(f"RAY_EXPERIMENTAL_NOSET_{get_visible_devices_keyword().upper()}")
+    candidates.update(get_platform().ray_noset_envvars())
+    return any(env_vars.get(env_var) for env_var in candidates)
 
 
 def parallel_put(data_list: list[Any], max_workers: Optional[int] = None):
