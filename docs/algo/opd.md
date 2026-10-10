@@ -297,6 +297,10 @@ distillation loss. Default: `true`.
 
 - `true`: final loss is `policy_loss + distillation_loss_coef × distill_loss`.
 - `false`: the PPO term is zeroed and only the distillation loss contributes.
+  The reward function (`_compute_score`) is **not called at all** when this is
+  `false`, so the dataset's `data_source` does not need to be registered in
+  `default_compute_score`. This is useful when training with custom datasets
+  that have no compatible reward function.
 
 Orthogonal to `use_policy_gradient` (which controls how the *distillation
 signal itself* is applied).
