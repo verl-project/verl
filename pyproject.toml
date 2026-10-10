@@ -31,7 +31,7 @@ math          = ["math-verify"]
 
 # Shared runtime deps, included by every backend via `verl[verl-core]`.
 verl-core = [
-    "TransferQueue>=0.1.10",
+    "TransferQueue>=0.1.11",
     "pyzmq",
     "msgspec",
     "accelerate",
@@ -445,7 +445,7 @@ requires-dist = []
 # `ray[default]` and a `tensordict>=0.10.0` that sits right on verl's `<=0.10.0`
 # cap, and its optional storage backends drag in extras we never use. verl-core
 # supplies what it actually imports (see the pyzmq / msgspec note there). No
-# `version` key on purpose — the requirement is an open-ended `>=0.1.10`, so this
+# `version` key on purpose — the requirement is an open-ended `>=0.1.11`, so this
 # has to apply to every release it may resolve to, not one pinned version.
 [[tool.uv.dependency-metadata]]
 name = "TransferQueue"
