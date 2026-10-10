@@ -41,6 +41,15 @@ torchrun --nproc_per_node 1 --nnodes 8 --node_rank ${RANK} -m verl.model_merger 
     --target_dir /path/to/merged_hf_model
 ```
 
+To merge VeOmni checkpoints (DeepSeek-V4 is exported in its original FP8/FP4 layout, which needs the base model):
+```sh
+python -m verl.model_merger merge \
+    --backend veomni \
+    --local_dir checkpoints/global_step_10/actor \
+    --base_model_path /path/to/DeepSeek-V4-Flash \
+    --target_dir /path/to/merged_hf_model
+```
+
 
 For more details, please refer to documentation:
 https://verl.readthedocs.io/en/latest/advance/checkpoint.html#convert-fsdp-and-megatron-checkpoints-to-huggingface-format-model
@@ -62,6 +71,10 @@ def main():
         from .megatron_model_merger import MegatronModelMerger
 
         merger = MegatronModelMerger(config)
+    elif config.backend == "veomni":
+        from .veomni_model_merger import VeOmniModelMerger
+
+        merger = VeOmniModelMerger(config)
     else:
         raise NotImplementedError(f"Unknown backend: {config.backend}")
 

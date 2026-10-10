@@ -56,7 +56,9 @@ class _FakeEngine:
         self.outputs = []
         self.sampling_params = []
 
-    async def generate(self, prompt, sampling_params, request_id, lora_request=None, priority=0):
+    async def generate(
+        self, prompt, sampling_params, request_id, lora_request=None, priority=0, data_parallel_rank=None
+    ):
         self.sampling_params.append(sampling_params)
         for output in self.outputs:
             yield output
