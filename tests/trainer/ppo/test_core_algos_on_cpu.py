@@ -18,18 +18,25 @@ import unittest
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 import verl.trainer.ppo.core_algos
+from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_policy_loss_bypass_mode,
+    compute_policy_loss_reinforce,
+    compute_policy_loss_vanilla,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
     kl_penalty,
     register_adv_est,
 )
+from verl.workers.config import ActorConfig, PolicyLossConfig
 
 
 def mock_test_fn():
@@ -379,6 +386,108 @@ def test_kl_penalty_k3_plus_uses_k2_gradient():
     (grad_k2,) = torch.autograd.grad(out_k2, logprob_k2)
 
     assert torch.allclose(grad_plus, grad_k2)
+
+
+def _bypass_config(loss_type, loss_agg_mode):
+    rollout_correction = RolloutCorrectionConfig(
+        bypass_mode=True, loss_type=loss_type, rollout_is=None, rollout_rs="token_k1", rollout_rs_threshold="0.8_1.2"
+    )
+    return ActorConfig(
+        strategy="fsdp",
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        policy_loss=PolicyLossConfig(loss_mode="bypass_mode", rollout_correction=rollout_correction),
+        loss_agg_mode=loss_agg_mode,
+    )
+
+
+def _bypass_micro_batch(seed, rejected):
+    """A 2x4 micro-batch whose ``rejected`` tokens have a policy ratio of e, so token_k1 rejects them."""
+    generator = torch.Generator().manual_seed(seed)
+    rollout_log_prob = torch.randn(2, 4, generator=generator)
+    log_prob = rollout_log_prob.clone()
+    kept_mask = torch.ones(2, 4)
+    for row, col in rejected:
+        log_prob[row, col] += 1.0
+        kept_mask[row, col] = 0.0
+    return rollout_log_prob, log_prob, torch.randn(2, 4, generator=generator), kept_mask
+
+
+def _loss_on_kept_tokens(loss_type, config, rollout_log_prob, log_prob, advantages, kept_mask):
+    if loss_type == "ppo_clip":
+        loss, _ = compute_policy_loss_vanilla(
+            old_log_prob=rollout_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=kept_mask,
+            loss_agg_mode=config.loss_agg_mode,
+            config=config,
+        )
+    else:
+        loss, _ = compute_policy_loss_reinforce(
+            rollout_log_prob, log_prob, advantages, kept_mask, config.loss_agg_mode, config
+        )
+    return loss
+
+
+@pytest.mark.parametrize("loss_agg_mode", ["token-mean", "seq-mean-token-mean"])
+@pytest.mark.parametrize("loss_type", ["ppo_clip", "reinforce"])
+def test_bypass_mode_rejection_normalizes_over_kept_tokens(loss_type, loss_agg_mode):
+    """Bypass mode rejects tokens inside the loss, after the engine counted the global batch's tokens, so
+    the loss must still equal the loss on the kept tokens alone, as in decoupled mode.
+
+    Regression test for #4852: two micro-batches that each keep 7 of 8 tokens gave 7/8 of the token-mean.
+    """
+    config = _bypass_config(loss_type, loss_agg_mode)
+    micro_batches = [_bypass_micro_batch(0, [(0, 1)]), _bypass_micro_batch(1, [(1, 3)])]
+    # set by the engine from the masks before rejection
+    config.global_batch_info.update(dp_size=1, batch_num_tokens=16, global_batch_size=4, loss_scale_factor=None)
+    loss = sum(
+        compute_policy_loss_bypass_mode(
+            rollout_log_prob, log_prob, advantages, torch.ones(2, 4), loss_agg_mode, config
+        )[0]
+        for rollout_log_prob, log_prob, advantages, _ in micro_batches
+    )
+
+    config.global_batch_info["batch_num_tokens"] = 14
+    batch = [torch.cat(tensors) for tensors in zip(*micro_batches, strict=True)]
+    torch.testing.assert_close(loss, _loss_on_kept_tokens(loss_type, config, *batch))
+
+
+def test_bypass_mode_rejection_without_global_batch_info_keeps_the_local_token_mean():
+    config = _bypass_config("ppo_clip", "token-mean")
+    rollout_log_prob, log_prob, advantages, kept_mask = _bypass_micro_batch(0, [(0, 1), (1, 2)])
+    loss, _ = compute_policy_loss_bypass_mode(
+        rollout_log_prob, log_prob, advantages, torch.ones(2, 4), "token-mean", config
+    )
+    expected = _loss_on_kept_tokens("ppo_clip", config, rollout_log_prob, log_prob, advantages, kept_mask)
+    torch.testing.assert_close(loss, expected)
+
+
+def _bypass_data_parallel_worker(rank, world_size, rendezvous_file):
+    dist.init_process_group(backend="gloo", init_method=f"file://{rendezvous_file}", rank=rank, world_size=world_size)
+    try:
+        config = _bypass_config("ppo_clip", "token-mean")
+        # rank 0 keeps 6 of its 8 tokens and rank 1 all 8: 14 of the global batch's 16
+        rollout_log_prob, log_prob, advantages, kept_mask = _bypass_micro_batch(
+            rank, [(0, 1), (1, 3)] if rank == 0 else []
+        )
+        config.global_batch_info.update(
+            dp_size=world_size, batch_num_tokens=16, global_batch_size=4, loss_scale_factor=None
+        )
+        loss, _ = compute_policy_loss_bypass_mode(
+            rollout_log_prob, log_prob, advantages, torch.ones(2, 4), "token-mean", config, dp_group=dist.group.WORLD
+        )
+
+        config.global_batch_info["batch_num_tokens"] = 14
+        expected = _loss_on_kept_tokens("ppo_clip", config, rollout_log_prob, log_prob, advantages, kept_mask)
+        torch.testing.assert_close(loss, expected)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_bypass_mode_rejection_counts_kept_tokens_across_data_parallel_ranks(tmp_path):
+    mp.spawn(_bypass_data_parallel_worker, args=(2, str(tmp_path / "rendezvous")), nprocs=2, join=True)
 
 
 if __name__ == "__main__":
