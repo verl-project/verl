@@ -147,6 +147,19 @@ lora:
   # Initialization method for the low-rank matrix B. Defaults to "zero".
   lora_B_init_method: zero
 
+  # When True, expert LoRA rank is dim // moe_router_topk; non-expert layers keep the full rank.
+  normalize_moe_lora: False
+
+  # When True, grouped MoE expert linears share one adapter across all local experts on the EP rank.
+  share_expert_adapters: True
+
+  # When True, grouped-expert LoRA shares one side of each adapter (gate_up lora_A, down lora_B)
+  # across experts while the other stays per-expert. Matches SGLang's serving contract.
+  experts_shared_outer_loras: False
+
+  # LoRA+ (https://arxiv.org/abs/2402.12354): lr_B = lora_plus_ratio * lr_A (optimizer-side split).
+  lora_plus_ratio: 1.0
+
   # Enables the experimental All-to-All (A2A) communication strategy. Defaults to False
   a2a_experimental: False
 
@@ -162,3 +175,8 @@ lora:
   freeze_vision_model: True
   freeze_vision_projection: True
   freeze_language_model: True
+
+  # Enable LoRA on multimodal vision tower/connector in the vLLM rollout.
+  # On by default to match the actor side. vLLM ignores this for models that
+  # do not opt in, so it is safe for text-only models. Set False to opt out.
+  enable_tower_connector_lora: True

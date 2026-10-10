@@ -651,6 +651,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            vllm_engine_kwargs = (self.config.rollout.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+            self.actor.engine.vllm_enable_moe_shared_loras = bool(
+                vllm_engine_kwargs.get("enable_moe_shared_loras", False)
+            )
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine
