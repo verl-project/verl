@@ -396,9 +396,23 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         logger.info("delta recv v=%s flushes=%d (yielded to server adapter)", global_steps, applied)
 
     def __init__(
-        self, *args, encoding: str = "indices", batch_gather: int = 32, verify_every: int = 0, **kwargs
+        self,
+        *args,
+        encoding: str = "indices",
+        batch_gather: int = 32,
+        verify_every: int = 0,
+        gather_round_megabytes: int | None = None,
+        **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        # Per-rank byte budget of one gather round in the steady sync
+        # (``sparse_gather.gather_slot_entries_to_rank0``'s ``max_round_bytes``).
+        # It bounds what rank 0 receives per round, so it should follow rank 0's
+        # GPU headroom; ``bucket_size`` is the flush size shipped to the rollout
+        # and wants to be large (fewer update_weights requests). The two were
+        # coupled (round budget == bucket_size); ``gather_round_megabytes``
+        # decouples them, ``None`` keeps the old behavior.
+        self.gather_round_bytes = int(gather_round_megabytes) << 20 if gather_round_megabytes else None
         assert encoding == "indices", f"delta_sharded ships only the 'indices' position encoding; got {encoding!r}"
         self.encoding = encoding
         # SGLang supports verify_every > 0; vLLM rejects it at startup.
@@ -625,7 +639,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
             _bucket_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
 
-        gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _bucket_slot_delta)
+        gq = _GatherQueue(batch_k, self.gather_round_bytes or self.bucket_size, is_r0, _bucket_slot_delta)
 
         # ``weights`` is the BACKEND's HF delta stream (hf_delta_export): entries
         # already carry final HF coordinates -- naming, conversion, diff and
