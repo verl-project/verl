@@ -72,3 +72,21 @@ def test_tied_parameter_identity_is_preserved():
     assert model.embed is embed
     assert model.head.weight is embed
     assert model.embed.dtype == torch.bfloat16
+def test_blanket_module_cast_rounds_fp32_buffers():
+    """Document the regression this helper avoids (verl-project/verl#8154).
+
+    A blanket ``nn.Module.to(dtype)`` also converts registered buffers, so the
+    FP32 ``inv_freq`` values are rounded and cannot be recovered; the
+    parameter-only cast keeps them bit-identical.
+    """
+    reference = _RotaryLikeModel().inv_freq.clone()
+
+    blanket = _RotaryLikeModel()
+    blanket.to(torch.bfloat16)
+    assert blanket.inv_freq.dtype == torch.bfloat16
+    assert not torch.equal(blanket.inv_freq.float(), reference)
+
+    protected = _RotaryLikeModel()
+    cast_module_params_to_dtype(protected, torch.bfloat16)
+    assert protected.inv_freq.dtype == torch.float32
+    assert torch.equal(protected.inv_freq, reference)
