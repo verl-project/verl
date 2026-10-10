@@ -33,15 +33,7 @@ name: sglang_ascend
 
 on:
   #  workflow_dispatch: # Manual
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - .github/workflows/sgl_ascend.yml
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main

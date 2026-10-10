@@ -2,31 +2,6 @@ name: e2e_v1_separate_async_ascend
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - ".github/workflows/e2e_v1_separate_async_ascend.yml"
-      - "tests/special_e2e/run_v1_separate_async.sh"
-      - "tests/special_e2e/run_v1_separate_async_ascend.sh"
-      - "examples/data_preprocess/gsm8k.py"
-      - "verl/trainer/main_ppo.py"
-      - "verl/trainer/ppo/v1/**"
-      - "verl/trainer/config/**"
-      - "verl/checkpoint_engine/**"
-      - "verl/experimental/separation/**"
-      - "verl/models/**"
-      - "verl/single_controller/**"
-      - "verl/workers/**"
-      - "verl/utils/device.py"
-      - "verl/utils/distributed.py"
-      - "verl/utils/fsdp_utils.py"
-      - "verl/utils/megatron_utils.py"
-      - "verl/utils/transferqueue_utils.py"
-      - "requirements-npu.txt"
-      - "pyproject.toml"
-      - "setup.py"
   pull_request:
     branches:
       - main

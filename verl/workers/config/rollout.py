@@ -221,6 +221,9 @@ class RolloutConfig(BaseConfig):
 
     calculate_log_probs: bool = False
 
+    # Sampler top-k log-probs per generated token for score centering; 0 disables.
+    topk_log_probs: int = 0
+
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
 
     trace: TraceConfig = field(default_factory=TraceConfig)
@@ -345,3 +348,19 @@ class RolloutConfig(BaseConfig):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
+
+        if self.topk_log_probs:
+            if self.name != "vllm":
+                raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
+            if (
+                not self.calculate_log_probs
+                or self.top_p != 1.0
+                or self.top_k != -1
+                or self.logprobs_mode != "processed_logprobs"
+            ):
+                raise ValueError(
+                    "rollout.topk_log_probs needs calculate_log_probs=True, top_p=1.0, top_k=-1 and "
+                    "logprobs_mode='processed_logprobs' so the returned head is the sampling distribution."
+                )
+            vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
+            vllm_kwargs["max_logprobs"] = max(vllm_kwargs.get("max_logprobs", 0), self.topk_log_probs)

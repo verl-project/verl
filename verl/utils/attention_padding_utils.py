@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Pure-PyTorch port of flash-attn's ``bert_padding.py``.
+
+Used by ``verl/utils/attention_utils.py`` for every backend that has no
+``flash_attn`` build available. Nothing here is device-specific: it is plain
+``torch`` + ``einops``, so it runs on NPU, XPU, CPU and CUDA alike.
+"""
 
 import torch
 import torch.nn.functional as F

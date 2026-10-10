@@ -5,6 +5,7 @@ rm -rf ~/verl/test/log
 mkdir -p ~/verl/test/log
 
 export VERL_FILE_LOGGER_ROOT=~/verl/test/log
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
 VPP_SIZE=${VPP_SIZE:-2}
 
 # test with single gpu as golden
@@ -37,14 +38,12 @@ BACKEND=megatron TP_SIZE=2 PP_SIZE=2 VPP_SIZE=${VPP_SIZE} CP_SIZE=2 NUM_GPUS=8 b
 echo "run with tp2 pp2 vpp2 cp2 num_gpus8 mode=ray"
 BACKEND=megatron TP_SIZE=2 PP_SIZE=2 VPP_SIZE=${VPP_SIZE} CP_SIZE=2 NUM_GPUS=8 mode=ray bash tests/special_e2e/sft/run_sft_engine.sh
 
-# TODO: Will add back torchtitan CI once everything is ready
-# # test with torchtitan fsdp=2
-# echo "run with tp1 pp1 cp1 fsdp2 num_gpus2"
-# BACKEND=torchtitan TP_SIZE=1 PP_SIZE=1 CP_SIZE=1 FSDP_SIZE=2 NUM_GPUS=2 bash tests/special_e2e/sft/run_sft_engine.sh
-
-# # test with torchtitan tp2 fsdp=2
-# echo "run with tp2 pp1 cp1 fsdp2 num_gpus4"
-# BACKEND=torchtitan TP_SIZE=2 PP_SIZE=1 CP_SIZE=1 FSDP_SIZE=2 NUM_GPUS=4 bash tests/special_e2e/sft/run_sft_engine.sh
+# test with torchtitan tp2 cp2 fsdp2 pad_to_length
+# The torchtitan engine supports text-only models, so VLM runs set RUN_TORCHTITAN=0.
+if [ "${RUN_TORCHTITAN:-1}" != 0 ]; then
+    echo "run with torchtitan tp2 pp1 cp2 fsdp2 num_gpus8 pad_to_length"
+    BACKEND=torchtitan TP_SIZE=2 PP_SIZE=1 CP_SIZE=2 FSDP_SIZE=2 NUM_GPUS=8 PAD_TO_LENGTH=True bash tests/special_e2e/sft/run_sft_engine.sh
+fi
 
 # # test with automodel dp=2
 # echo "run with automodel tp1 pp1 cp1 dp2 num_gpus2"

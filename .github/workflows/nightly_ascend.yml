@@ -59,6 +59,7 @@ jobs:
       options: >-
         --shm-size 16g
     env:
+      MODEL_PATH: /root/.cache/models/Qwen/Qwen3-8B
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TRANSFORMERS_VERBOSITY: 'error'
@@ -81,9 +82,6 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -256,13 +254,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           clean: true
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
       - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend
+        env:
+          MODEL_PATH: /root/.cache/models/Qwen/Qwen3-30B-A3B-Instruct-2507
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh
@@ -311,10 +308,9 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           clean: true
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Running nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend
+        env:
+          MODEL_PATH: /root/.cache/models/Qwen/Qwen3-30B-A3B-Instruct-2507
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
@@ -337,6 +333,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      MODEL_PATH: /root/.cache/models/Qwen/Qwen3.5-2B
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
@@ -357,9 +354,6 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
@@ -380,6 +374,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      MODEL_PATH: /root/.cache/models/Qwen/Qwen3.5-2B
     steps:
       - name: Check npu and CANN info
         run: |
@@ -402,9 +397,6 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
@@ -612,7 +604,7 @@ jobs:
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/modelscope/hub/models ~/models
+          ln -s /root/.cache/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k

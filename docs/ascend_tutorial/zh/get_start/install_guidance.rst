@@ -48,7 +48,7 @@ Atlas 800T A3
 
 ..
 
-   [说明] Ascend 950PR&DT系列产品的软件安装请参考 `安装指南（Ascend 950PR&DT系列产品） <install_guidance_950.rst>`_。
+   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 `安装指南（Ascend 950PR&950DT系列产品） <install_guidance_950.rst>`_。
 
 
 框架后端支持说明

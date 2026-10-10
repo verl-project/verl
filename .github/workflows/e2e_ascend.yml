@@ -32,25 +32,29 @@
 name: e2e_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
       - v0.*
     paths:
+      - "verl/**/*.py"
+      - "verl/trainer/config/**"
+      # Entrypoints and fixtures used by the jobs below.
       - ".github/workflows/e2e_ascend.yml"
-      - "examples/data_preprocess/**"
-      - "examples/grpo_trainer/**"
-      - "examples/ppo_trainer/**"
-      - "examples/sft/**"
-      - "tests/special_npu/**"
+      - "examples/data_preprocess/gsm8k.py"
+      - "examples/data_preprocess/geo3k.py"
+      - "scripts/converter_hf_to_mcore.py"
+      - "scripts/init_random_model.py"
+      - "tests/special_npu/run_qwen3_06b_ppo.sh"
+      - "tests/special_npu/run_qwen3_8b_grpo_profiling.sh"
+      - "tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh"
+      - "tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh"
+      - "tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh"
+      - "tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh"
+      - "tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json"
+      - "tests/utils/test_check_profiler_output.py"
       - "tests/special_sanity/check_device_api_usage.py"
-      - "verl/**"
       - "pyproject.toml"
       - "requirements-npu.txt"
       - "setup.py"

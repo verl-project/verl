@@ -17,6 +17,7 @@ The concrete Engine implementation using PyTorch TorchTitan parallelism (FSDP2 +
 
 import importlib
 import logging
+import math
 import os
 import re
 from contextlib import nullcontext
@@ -26,16 +27,16 @@ import torch
 import torch.distributed
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental._context_parallel._load_balancer import _HeadTailLoadBalancer
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer, ParamGroupConfig
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.train import Trainer
+from torchtitan.trainer import Trainer
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -50,9 +51,11 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
 )
 from verl.utils.model import extract_multi_modal_inputs
+from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import HFModelConfig, TorchtitanEngineConfig, TorchtitanOptimizerConfig
 from verl.workers.engine.torchtitan.utils import (
+    ContextParallelGather,
     NoOpDataLoader,
     derive_torchtitan_name_and_flavor,
     enable_fsdp_gradient_division,
@@ -60,7 +63,13 @@ from verl.workers.engine.torchtitan.utils import (
 )
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import detach_tree, enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from ..utils import (
+    detach_tree,
+    enable_full_determinism,
+    pad_packed_inputs,
+    postprocess_batch_func,
+    prepare_micro_batches,
+)
 
 
 def _hf_entry_row_slots(name, spec, place, lidx, lval):
@@ -182,6 +191,12 @@ class TorchTitanEngine(BaseEngine):
             training = TrainingConfig(enable_cpu_offload=True, **training_kwargs)
         else:
             training = TrainingConfig(**training_kwargs)
+        # Pad positions run 0..pad_size-1 (< bucket) and index the RoPE cache sized by seq_len.
+        if self.engine_config.pad_to_length and self.engine_config.pad_to_length_bucket > training.seq_len:
+            raise ValueError(
+                f"pad_to_length_bucket ({self.engine_config.pad_to_length_bucket}) must not exceed the RoPE "
+                f"cache length ({training.seq_len}); raise engine.max_seq_len or lower the bucket"
+            )
 
         # Activation checkpointing mode. Note: under spmd_backend="spmd_types" with
         # eager execution (use_torch_compile=False), selective/full AC recompute runs
@@ -346,16 +361,37 @@ class TorchTitanEngine(BaseEngine):
         raise NotImplementedError
 
     def get_context_parallel_group(self):
-        raise NotImplementedError
+        mesh = self.parallel_dims.get_optional_mesh("cp")
+        return None if mesh is None else mesh.get_group()
 
     def _get_data_parallel_mesh(self):
-        """Get the data parallel mesh, handling hybrid/fully/replicate shard modes."""
-        mesh = self.parallel_dims.get_optional_mesh("loss")
-        if mesh is None:
-            mesh = self.parallel_dims.get_optional_mesh("fsdp")
-        if mesh is None:
-            mesh = self.parallel_dims.get_optional_mesh("dp_replicate")
-        return mesh
+        """Data-parallel mesh (dp_replicate x dp_shard). Excludes cp: CP ranks share the same samples."""
+        return self.parallel_dims.get_optional_mesh("batch")
+
+    def _get_packed_pad_size(self, packed_length: int) -> int:
+        """Right-padding for a packed micro-batch.
+
+        Rounds up to the next ``pad_to_length_bucket`` boundary when ``pad_to_length`` is set, and to a
+        multiple of ``2 * cp`` under context parallelism (the head-tail load balancer splits the
+        sequence into ``2 * cp`` equal chunks).
+        """
+        alignment = self.engine_config.pad_to_length_bucket if self.engine_config.pad_to_length else 1
+        if self.parallel_dims.cp_enabled:
+            alignment = math.lcm(alignment, 2 * self.parallel_dims.cp)
+        return ceildiv(packed_length, alignment) * alignment - packed_length
+
+    def _gather_context_parallel(self, tensor: torch.Tensor, seq_len: int) -> torch.Tensor:
+        """All-gather a per-token tensor sharded along dim 0 by CP and restore the original token order."""
+        load_balancer_type = self.trainer.config.parallelism.context_parallel_load_balancer
+        load_balancer = None
+        if load_balancer_type == "headtail":
+            load_balancer = _HeadTailLoadBalancer(seq_len, self.parallel_dims.cp, tensor.device)
+        elif load_balancer_type is not None:
+            raise NotImplementedError(f"context_parallel_load_balancer={load_balancer_type!r} is not supported")
+        gathered = ContextParallelGather.apply(tensor, self.get_context_parallel_group())
+        if load_balancer is not None:
+            gathered = gathered[load_balancer._generate_indices(restore=True)[0]]
+        return gathered
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False):
         """Perform forward and optionally backward pass on a batch."""
@@ -734,6 +770,11 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 position_ids = position_ids.values().unsqueeze(0)
 
             labels = torch.roll(input_ids, shifts=-1, dims=1)
+            pad_size = self._get_packed_pad_size(input_ids.size(-1))
+            input_ids, position_ids = pad_packed_inputs(input_ids, position_ids, pad_size)
+            labels, _ = pad_packed_inputs(labels, None, pad_size)
+            output_args["pad_size"] = pad_size
+            output_args["padded_seq_len"] = input_ids.size(-1)
             attn_type = self.engine_config.attn_type
             attention_mask = get_attention_masks(
                 input_batch=input_ids,
@@ -741,6 +782,8 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 attn_type=attn_type,
             )
         else:
+            if self.parallel_dims.cp_enabled:
+                raise NotImplementedError("context parallelism requires use_remove_padding=True")
             loss_mask = micro_batch["loss_mask"]
             pad_token_id = tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0)
             batch_size = micro_batch.batch_size[0]
@@ -774,6 +817,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {"attention_masks": attention_mask}
         if self.parallel_dims.cp_enabled:
+            extra_kwargs["positions"] = extra_inputs.pop("positions")
             input_ids, labels, extra_kwargs = prepare_context_parallel_input(
                 input_ids,
                 labels,
@@ -782,6 +826,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 self.trainer.device,
                 self.trainer.config.parallelism.context_parallel_load_balancer,
             )
+            extra_inputs["positions"] = extra_kwargs.pop("positions")
 
         # TODO(jessicazhong): multimodal is not yet supported for Torchtitan engine
         extra_inputs.update(multi_modal_inputs)
@@ -826,6 +871,16 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                         entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                 else:
                     entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
+
+            if self.parallel_dims.cp_enabled:
+                log_probs = self._gather_context_parallel(log_probs, output_args["padded_seq_len"])
+                if calculate_entropy:
+                    entropy_rmpad = self._gather_context_parallel(entropy_rmpad, output_args["padded_seq_len"])
+            pad_size = output_args["pad_size"]
+            if pad_size:
+                log_probs = log_probs[:-pad_size]
+                if calculate_entropy:
+                    entropy_rmpad = entropy_rmpad[:-pad_size]
 
             log_probs = torch.nested.nested_tensor_from_jagged(log_probs.squeeze(0), cu_seqlens)
             if calculate_entropy:

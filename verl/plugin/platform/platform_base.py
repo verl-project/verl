@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from types import ModuleType
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 class PlatformBase(abc.ABC):
@@ -188,6 +188,18 @@ class PlatformBase(abc.ABC):
     def profiler_stop(self) -> None:
         """Stop the device profiler (no-op on unsupported platforms)."""
         ...
+
+    def profiler_markers(self) -> Optional[tuple[Callable, Callable, Callable, Callable]]:
+        """Return a ``(mark_start_range, mark_end_range, mark_annotate, marked_timer)`` tuple.
+
+        Lets a platform supply its own tracing-marker implementation (see
+        ``verl/utils/profiler/nvtx_profile.py`` / ``mstx_profile.py`` for the
+        expected signatures), asked for first by
+        ``verl/utils/profiler/__init__.py``. Return ``None`` (default) to use
+        ``nvtx``, the built-in device-specific module, or the generic
+        pure-Python fallback, in that order.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # vllm integration

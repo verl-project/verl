@@ -31,6 +31,27 @@ _GLM52_PATCH_MARKER = "_verl_vllm_ascend_glm52_patched"
 _glm52_original_run_engine_core = None
 
 
+def patch_vllm_ascend_v023_sched_yield():
+    """Disable sched_yield in vllm.distributed.utils on ARM hosts.
+
+    On ARM hosts (e.g. Atlas A2 machines) the scheduler busy-wait with
+    sched_yield degrades badly, so USE_SCHED_YIELD must stay disabled.
+    Drop this patch once the fix is included in the installed vllm-ascend release.
+    """
+    import sys
+
+    import vllm.distributed.utils
+    from vllm.platforms import CpuArchEnum, Platform
+
+    is_arm = Platform.get_cpu_architecture() == CpuArchEnum.ARM
+
+    use_sched_yield = (
+        (sys.version_info[:3] >= (3, 11, 1)) or (sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8)
+    ) and not is_arm
+
+    vllm.distributed.utils.USE_SCHED_YIELD = use_sched_yield
+
+
 def _glm52_patch_enabled() -> bool:
     return os.getenv(_GLM52_PATCH_ENV, "").strip().lower() in _GLM52_PATCH_TRUTHY_VALUES
 
@@ -272,6 +293,88 @@ def _patch_legacy_fused_moe_weight_loader(fused_moe) -> bool:
     return True
 
 
+def patch_vllm_ascend_v023_fia_decode_mask():
+    import inspect
+    import textwrap
+
+    # Import vllm_ascend.ops first to break a circular import in vllm-ascend:
+    # attention_v1 -> device_op -> vllm_ascend.ops.* -> fused_moe -> device_op.
+    import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.attention import attention_v1
+
+    # Each entry is an (old, new) pair applied to the inspect.getsource +
+    # textwrap.dedent'ed source of the method (def line at 0, body at 4),
+    # mirroring the upstream diff exactly.
+    replacements = {
+        "full_graph_fia": [
+            (
+                "    attn_mask = attn_metadata.attn_mask\n"
+                "    sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0\n",
+                "    # attn_state is forced to DecodeOnly during FULL graph capture, including\n"
+                "    # mixed prefill-decode graphs and spec-decode verify batches, which still\n"
+                "    # need the causal mask. Only genuine single-token decode may skip the mask;\n"
+                "    # max_query_len is 1 for pure decode and for uniform-decode capture, but\n"
+                "    # equals num_tokens for mixed-batch capture and 1 + num_spec_tokens for\n"
+                "    # spec-decode capture.\n"
+                "    is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly"
+                " and attn_metadata.max_query_len == 1\n"
+                "    attn_mask, sparse_mode = (\n"
+                "        (None, 0)\n"
+                "        if is_decode and not self.sliding_window\n"
+                "        else (attn_metadata.attn_mask, 4 if self.sliding_window else 3"
+                " if attn_metadata.causal else 0)\n"
+                "    )\n",
+            )
+        ],
+        "forward_fused_infer_attention": [
+            (
+                "            attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(\n"
+                "                query=query,\n"
+                "                key=key,\n"
+                "                value=value,\n"
+                "                atten_mask=attn_metadata.attn_mask,\n",
+                "            is_decode = (\n"
+                "                attn_metadata.attn_state == AscendAttentionState.DecodeOnly"
+                " and attn_metadata.max_query_len == 1\n"
+                "            )\n"
+                "            attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(\n"
+                "                query=query,\n"
+                "                key=key,\n"
+                "                value=value,\n"
+                "                atten_mask=None if is_decode else attn_metadata.attn_mask,\n",
+            ),
+            (
+                "                is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,\n"
+                "                sparse_mode=3,\n",
+                "                is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,\n"
+                "                sparse_mode=0 if is_decode else 3,\n",
+            ),
+        ],
+    }
+
+    module_globals = vars(attention_v1)
+    for method_name, method_replacements in replacements.items():
+        src = textwrap.dedent(inspect.getsource(getattr(attention_v1.AscendAttentionBackendImpl, method_name)))
+        if "is_decode" in src:
+            # The installed vllm-ascend already contains the fix.
+            continue
+        try:
+            for old, new in method_replacements:
+                assert src.count(old) == 1
+                src = src.replace(old, new, 1)
+        except AssertionError:
+            logger.warning(
+                "Skip patching AscendAttentionBackendImpl.%s: the installed vllm-ascend source "
+                "does not match the expected releases/v0.23.0 code.",
+                method_name,
+            )
+            continue
+        assert method_name not in module_globals
+        exec(src, module_globals)
+        patched_method = module_globals.pop(method_name)
+        setattr(attention_v1.AscendAttentionBackendImpl, method_name, patched_method)
+
+
 def patch_vllm013_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
@@ -321,6 +424,17 @@ def apply_npu_vllm_patches() -> None:
     """
     if not is_torch_npu_available(check_device=False):
         return
+
+    import vllm
+    from packaging import version
+
+    _VLLM_VERSION = version.parse(getattr(vllm, "__version__", "0.0.0"))
+    if version.parse("0.23.0") <= _VLLM_VERSION < version.parse("0.24.0"):
+        # On ARM hosts (e.g. Atlas A2) the scheduler busy-wait with sched_yield degrades badly.
+        patch_vllm_ascend_v023_sched_yield()
+        # Only genuine single-token decode may skip the causal attention mask; mixed
+        # prefill-decode and spec-decode FULL graph capture batches still need it.
+        patch_vllm_ascend_v023_fia_decode_mask()
 
     # Disable flash_attn in RotaryEmbedding (NPU)
     from vllm.model_executor.layers import fused_moe

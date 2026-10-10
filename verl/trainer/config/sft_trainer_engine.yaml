@@ -26,7 +26,7 @@ data:
   messages_key: messages  # Key for messages list in multi-turn mode
   tools_key: tools  # Key for tools list in multi-turn mode
   enable_thinking_key: enable_thinking  # Whether to enable thinking in multi-turn mode
-  enable_thinking_default: none         # The default value when enable_thinking_key is not present in the dataset
+  enable_thinking_default: null         # The default value when enable_thinking_key is not present in the dataset
   pad_mode: no_padding
   # for right padding
   max_length: 1024

@@ -551,6 +551,7 @@ class SGLangHttpServer:
         bootstrap_host: Optional[str] = None,
         bootstrap_port: Optional[int] = None,
         bootstrap_room: Optional[int] = None,
+        session_id: Optional[str] = None,
     ) -> TokenOutput:
         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
         # paired local-prefill + remote-decode calls; decode returns the tokens

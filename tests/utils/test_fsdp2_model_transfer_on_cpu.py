@@ -14,6 +14,12 @@
 
 from unittest.mock import Mock
 
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+
 from verl.utils import fsdp_utils
 
 
@@ -33,3 +39,37 @@ def test_load_fsdp2_model_to_gpu_uses_non_blocking_copy(monkeypatch):
     fsdp_utils.load_fsdp2_model_to_gpu(model)
 
     model.to.assert_called_once_with(device, non_blocking=True)
+
+
+def _sharded_snapshot_worker(rank, world_size, rendezvous_file):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        # On a CPU mesh the shards already live on CPU, as they do on GPU workers with param_offload=True.
+        mesh = init_device_mesh("cpu", (world_size,))
+        model = torch.nn.Linear(4, 4, bias=False)
+        fully_shard(model, mesh=mesh)
+        torch.nn.init.constant_(model.weight, 1.0)
+
+        cpu_sharded_state, _ = fsdp_utils.fsdp2_sharded_save_to_cpu(model)
+        torch.nn.init.constant_(model.weight, 0.0)
+
+        saved_weight, _ = cpu_sharded_state["weight"]
+        torch.testing.assert_close(saved_weight, torch.ones_like(saved_weight))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_fsdp2_sharded_save_to_cpu_copies_cpu_shards(tmp_path):
+    world_size = 2
+    rendezvous_file = str(tmp_path / "fsdp2_rdzv")
+    mp.spawn(
+        _sharded_snapshot_worker,
+        args=(world_size, rendezvous_file),
+        nprocs=world_size,
+        join=True,
+    )

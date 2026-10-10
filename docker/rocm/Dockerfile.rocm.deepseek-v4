@@ -3,11 +3,21 @@ FROM vllm/vllm-openai-rocm:v0.26.0 AS verl_base
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/apex-1.9.0%2Brocm7.2.3.git355db9b8-cp312-cp312-linux_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/transformer_engine-2.6.0-py3-none-any.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/transformer_engine_rocm-2.6.0-py3-none-manylinux_2_28_x86_64.whl
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/apex-1.9.0%2Brocm7.2.3.git355db9b8-cp312-cp312-linux_x86_64.whl
 
-RUN pip install --no-build-isolation  https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/transformer_engine_torch-2.6.0.tar.gz
+# Transformer Engine (ROCm build) 2.18.0.dev0+8c116a51b: the Triton grouped GEMM path that avoids the
+# bf16 grouped-GEMM backward hang on gfx950, and the float-scale blockwise FP8 GEMM kernel.
+ARG TE_WHEEL="transformer_engine-2.18.0.dev0+8c116a51b-cp312-cp312-linux_x86_64.whl"
+ARG TE_WHEEL_URL="https://github.com/PeterYang12/Daily_LLM/releases/download/v0.0.2/${TE_WHEEL}"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    wget -q -O /tmp/${TE_WHEEL} "${TE_WHEEL_URL}" && \
+    pip install --no-build-isolation /tmp/${TE_WHEEL} && \
+    rm /tmp/${TE_WHEEL}
+
+# ROCm 7.2.x driver will not return memory when large torch tensor allocated and 'expandable_segments:True' is on.
+# This issue has been fixed in higher ROCm versions, so a self-built libhsa-runtime bypasses the OOM.
+RUN wget -q https://github.com/PeterYang12/Daily_LLM/releases/download/v0.0.1/libhsa-runtime64.so.1.18.0 && \
+    install -m 0644 /app/libhsa-runtime64.so.1.18.0 /opt/rocm-7.2.3/lib/libhsa-runtime64.so.1.18.70203
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -U git+https://github.com/ISEEKYAN/mbridge.git@v0.15.1 && \
@@ -15,30 +25,45 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install qwen_vl_utils && \
     pip install flash-linear-attention
 
-ARG MEGATRON_LM_REPO="https://github.com/NVIDIA/Megatron-LM.git"
-ARG MEGATRON_LM_COMMIT="fd1121b8ff7e3a4f83a28d35aed172d7bc0260e1"
+# NVIDIA/Megatron-LM fd1121b8f plus the DeepSeek-V4 ROCm commits: distributed-optimizer non-leaf fix,
+# config-driven FP8 fake quantization (QAT) and the FP8-training alignment options.
+ARG MEGATRON_LM_REPO="https://github.com/PeterYang12/Megatron-LM.git"
+ARG MEGATRON_LM_BRANCH="deepseek-v4-rocm-support"
 
 COPY docker/rocm/patches /opt/patches
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-deps "nvidia-modelopt>=0.37.0" "pulp<4.0" && \
-    git clone ${MEGATRON_LM_REPO} /opt/Megatron-LM && \
+    git clone -b ${MEGATRON_LM_BRANCH} ${MEGATRON_LM_REPO} /opt/Megatron-LM && \
     cd /opt/Megatron-LM && \
-    git fetch --depth 1 origin ${MEGATRON_LM_COMMIT} && \
-    git checkout ${MEGATRON_LM_COMMIT} && \
-    git apply /opt/patches/non-leaf-fix.patch && \
     pip install -e . --no-deps
 
-ARG MEGATRON_BRIDGE_REPO="https://github.com/NVIDIA-NeMo/Megatron-Bridge"
-ARG MEGATRON_BRIDGE_COMMIT="v0.5.0"
+# Megatron-Bridge v0.5.0 plus the ue8m0 export fix: the FP8 weight export keeps the power-of-two
+# scale grid of the DeepSeek-V4 checkpoint instead of re-rounding every weight on each sync.
+ARG MEGATRON_BRIDGE_REPO="https://github.com/PeterYang12/Megatron-Bridge"
+ARG MEGATRON_BRIDGE_BRANCH="deepseek-v4-rocm-support"
 
 RUN pip install --no-deps --no-build-isolation --ignore-requires-python \
-    git+${MEGATRON_BRIDGE_REPO}@${MEGATRON_BRIDGE_COMMIT}
+    git+${MEGATRON_BRIDGE_REPO}@${MEGATRON_BRIDGE_BRANCH}
 
 RUN pip install "transformers==5.12.1"  "TransferQueue==0.1.10"
 
-ARG BUILD_DATE="2026-08-07"
+# vLLM 0.26.0 fixes needed by DeepSeek-V4 on ROCm (see the header of each patch for the upstream change):
+#   sparse-topk-guard  NaN logits from the FP8 indexer cache break the radix top-k
+#   cumem-wake         release cached allocator memory before CuMem wake (vllm#49857)
+#   indexer-blockflat  indexer K-cache layout on gfx950/gfx942 (vllm#50455)
+#   swiglu-clamp       FP8 Triton fused MoE dropped the SwiGLU clamp
+RUN cd /usr/local/lib/python3.12/dist-packages && \
+    patch -p1 < /opt/patches/vllm-dsv4-rocm-sparse-topk-guard.patch && \
+    patch -p1 < /opt/patches/vllm-cumem-wake-empty-cache.patch && \
+    patch -p1 < /opt/patches/vllm-dsv4-indexer-blockflat-layout.patch && \
+    patch -p1 < /opt/patches/vllm-dsv4-triton-moe-swiglu-clamp.patch && \
+    cd /app
+
+ARG BUILD_DATE="2026-10-08"
+ARG VERL_REPO="https://github.com/PeterYang12/verl.git"
+ARG VERL_BRANCH="dsv4-rocm"
 RUN --mount=type=cache,target=/root/.cache/pip \
-    git clone https://github.com/verl-project/verl.git && \
+    git clone -b ${VERL_BRANCH} ${VERL_REPO} && \
     cd verl && \
     pip install -e .
 

@@ -29,14 +29,6 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-# NOTE: The TorchTitan engine requires a *nightly* PyTorch + torchtitan (the ``spmd_types`` APIs
-# are nightly-only). To avoid maintaining a dedicated Docker image, this workflow installs those
-# nightlies in-job on top of the standard CI image (see the install step). Because the image's
-# vLLM is built against a *stable* torch, the run step preloads the nightly cuBLAS to resolve the
-# resulting ``undefined symbol: cublasGemmEx`` mismatch. The pinned nightly versions need periodic
-# bumping (old nightly wheels are garbage-collected from the index). Consider running this on a
-# schedule / as non-blocking if the nightly toolchain proves flaky.
-
 name: e2e_ppo_trainer_torchtitan_vllm
 
 on:
@@ -49,6 +41,9 @@ on:
     paths:
       - "verl/workers/engine/torchtitan/**"
       - "verl/workers/config/engine.py"
+      # Validate changes to the environment consumed by uv run --frozen.
+      - "pyproject.toml"
+      - "uv.lock"
   pull_request:
     branches:
       - main
@@ -63,6 +58,8 @@ on:
       - "tests/special_e2e/run_ppo_trainer_torchtitan.sh"
       - "verl/workers/engine/torchtitan/**"
       - "verl/workers/config/engine.py"
+      - "pyproject.toml"
+      - "uv.lock"
       - "examples/data_preprocess/gsm8k.py"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_trainer.yaml"
@@ -77,7 +74,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -103,54 +100,26 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # Match the extras run_ppo_trainer_torchtitan.sh passes to its launcher and Ray workers.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra fsdp --extra torchtitan --extra math"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # Diagnostic: show whether this runner can reach the outside world at all
-      # before pip needs it. Never fails the job.
-      - name: Install the current repository + TorchTitan nightly stack
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          # TorchTitan's spmd_types APIs require a nightly PyTorch; the image's vLLM is built against
-          # a stable torch (ABI-incompatible -> undefined symbol: torch::Library::_def). Install a
-          # nightly-torch stack from the PyTorch index. Why these versions:
-          #   vllm        1.0.0.dev20260620 : newest nightly-torch vLLM whose API verl's rollout code
-          #                                    supports (0704+ refactored vllm.utils and dropped the
-          #                                    `FlexibleArgumentParser` import path verl relies on).
-          #   torch       2.14.0.dev20260625 : >= the spmd_types DTensor/fully_shard fix floor, and
-          #                                    ~5 days from vLLM's dev0620 build -> ABI-compatible.
-          #   torchvision 0.29.0.dev20260626 : pins torch dev0625 exactly (0-day ABI gap).
-          #   torchtitan  0.1.0.dev20260701 : provides spmd_backend; declares no torch dep.
-          # vLLM pins torch==dev0620, so install it (with deps) first, then bump torch/torchvision to
-          # the versions above with --no-deps (keeps the ABI-safe gap, preserves vLLM's dep set).
-          INDEX="https://download.pytorch.org/whl/nightly/cu130"
-          pip3 install --pre vllm==1.0.0.dev20260620+cu130 --extra-index-url "${INDEX}"
-          pip3 install --pre torchtitan==0.1.0.dev20260701+cu130 --extra-index-url "${INDEX}"
-          pip3 install --pre --no-deps \
-            torch==2.14.0.dev20260625+cu130 \
-            torchvision==0.29.0.dev20260626+cu130 \
-            --extra-index-url "${INDEX}"
-          # The image ships classic flash-attn 2 (flash_attn_2_cuda.so) built against stable torch;
-          # under nightly torch it fails to load (undefined symbol: c10::...materialize_cow_storage).
-          # vLLM's rotary-embedding path imports flash_attn unconditionally and crashes on the broken
-          # .so. Remove it so vLLM falls back to its native rotary kernel.
-          pip3 uninstall -y flash-attn
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
-      - name: Prepare GSM8K dataset21
+          $UV_RUN uv pip list
+      - name: Prepare GSM8K dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Running GSM8K E2E training test on 8 L20 GPUs with TorchTitan engine (FSDP_SIZE=8, spmd_types, flex, selective AC)
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+      - name: Running GSM8K E2E training test on 8 L20 GPUs with TorchTitan engine (FSDP_SIZE=8, flex, selective AC)
         run: |
-          ray stop --force
-          # vLLM in the base image is built against stable torch; preload the nightly cuBLAS so
-          # its C extensions resolve against the nightly torch (fixes undefined symbol cublasGemmEx).
-          export LD_PRELOAD="$(python3 -c 'import glob, os, sysconfig; c = glob.glob(os.path.join(sysconfig.get_paths()["purelib"], "nvidia", "cu13", "lib", "libcublas.so.13")); print(c[0] if c else "")')"
+          $UV_RUN ray stop --force
           NUM_GPUS=8 FSDP_SIZE=8 TOTAL_TRAIN_STEPS=2 \
             bash tests/special_e2e/run_ppo_trainer_torchtitan.sh
 

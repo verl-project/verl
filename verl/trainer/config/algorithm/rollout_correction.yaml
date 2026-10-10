@@ -26,3 +26,7 @@ loss_type: ppo_clip
 
 # Batch normalize IS weights: false = raw weights, true = normalize to mean=1.0
 rollout_is_batch_normalize: false
+
+# Score centering (bypass_mode=true, loss_type=reinforce, rollout_is null or "token").
+# Needs actor_rollout_ref.rollout.topk_log_probs > 0.
+score_centering: false
