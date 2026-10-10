@@ -122,7 +122,16 @@ class RewardLoopWorker:
         if input_tokenizer_path is None:
             input_tokenizer_path = self.config.actor_rollout_ref.model.path
         input_tokenizer_local_path = copy_to_local(input_tokenizer_path)
-        self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
+        tok_kwargs = {"trust_remote_code": True}
+        revision = None
+        model_cfg = self.config.actor_rollout_ref.model
+        if hasattr(model_cfg, "get"):
+            revision = model_cfg.get("revision")
+        else:
+            revision = getattr(model_cfg, "revision", None)
+        if revision and input_tokenizer_path and not str(input_tokenizer_path).startswith("/"):
+            tok_kwargs["revision"] = revision
+        self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, **tok_kwargs)
         self.reward_model_tokenizer = None
         if self.config.reward.reward_model.enable:
             reward_model_tokenizer_local_path = copy_to_local(self.config.reward.reward_model.model_path)
