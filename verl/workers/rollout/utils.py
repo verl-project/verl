@@ -14,6 +14,8 @@
 import asyncio
 import logging
 import os
+import re
+from typing import Any
 
 import numpy as np
 import ray
@@ -88,6 +90,52 @@ async def ensure_async_iterator(iterable):
     else:
         for item in iterable:
             yield item
+
+
+def qwen2_5_vl_dedup_video_tokens(
+    prompt_ids: list[int],
+    processor: Any,
+    video_grid_thw: Any | None = None,
+) -> list[int]:
+    """Collapse Qwen timestamp-expanded compact video groups."""
+    tokenizer = getattr(processor, "tokenizer", None) or processor
+    decoded_before = tokenizer.decode(
+        prompt_ids,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    target = "<|vision_start|><|video_pad|><|vision_end|>"
+    group_pattern = re.compile(r"<\d+(?:\.\d+)? seconds>" + re.escape(target))
+    matches = list(group_pattern.finditer(decoded_before))
+
+    # Get the number of timestamp groups for each raw video from video_grid_thw.
+    group_counts: list[int] = []
+    if video_grid_thw is not None:
+        group_counts = [int(row[0]) for row in video_grid_thw.tolist()]
+
+    expected_group_count = sum(group_counts)
+    if expected_group_count == 0 and not matches:
+        return prompt_ids
+    if len(matches) != expected_group_count:
+        raise ValueError("compact timestamp group count mismatch")
+
+    # Replace each video's timestamp groups with a single raw video placeholder.
+    pieces: list[str] = []
+    cursor = 0
+    match_idx = 0
+    for group_count in group_counts:
+        if group_count <= 0:
+            raise ValueError("invalid temporal grid count")
+        first = matches[match_idx]
+        last = matches[match_idx + group_count - 1]
+        pieces.append(decoded_before[cursor : first.start()])
+        pieces.append(target)
+        cursor = last.end()
+        match_idx += group_count
+
+    pieces.append(decoded_before[cursor:])
+    decoded_after = "".join(pieces)
+    return tokenizer.encode(decoded_after, add_special_tokens=False)
 
 
 def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):

@@ -106,6 +106,7 @@ class LLMServerClient:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        video_grid_thw: Optional[Any] = None,
         **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
@@ -134,6 +135,8 @@ class LLMServerClient:
                 multimodal_kwargs["audio_data"] = audio_data
             if mm_processor_kwargs:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            if video_grid_thw is not None and self.config.actor_rollout_ref.rollout.name == "vllm":
+                multimodal_kwargs["video_grid_thw"] = video_grid_thw
             # SGLang cannot take raw frames: its video_data accepts only a path/url/base64 or a
             # processor_output dict. Always hand it the pre-computed payload (None when the model's
             # processor produced no pixel_values_videos, e.g. a non-Qwen-VL family) and never the raw
@@ -232,6 +235,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        video_grid_thw: Optional[Any] = None,
         **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
@@ -296,6 +300,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+                video_grid_thw=video_grid_thw,
                 **kwargs,
             )
 
