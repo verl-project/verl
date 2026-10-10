@@ -32,10 +32,9 @@
 name: nightly_ci_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  # For push, for now only anti-patterns are specified so it is more conservative
-  # and achieves higher coverage.
+  # Temporary: validate the three 16-NPU FSDP2 jobs on pull requests.
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -98,13 +97,13 @@ jobs:
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event_name == 'pull_request' || github.event.schedule == '0 17 * * *') }}
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 160g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -137,7 +136,8 @@ jobs:
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+          NDEVICES_PER_NODE=16 TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=16 \
+            bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
@@ -408,13 +408,13 @@ jobs:
 
 # Test quick start vllm fsdp2
   quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event_name == 'pull_request' || github.event.schedule == '0 18 * * *') }}
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 160g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -447,7 +447,7 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+          NDEVICES_PER_NODE=16 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
   # Test quick start vllm megatron
   quick_start_qwen3_0_6b_megatron_vllm_ascend:
@@ -615,13 +615,13 @@ jobs:
 
   # Test gspo qwen3-8b fsdp vllm
   nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event_name == 'pull_request' || github.event.schedule == '0 19 * * *') }}
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 160g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
