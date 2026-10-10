@@ -139,7 +139,11 @@ class McoreOptimizerConfig(OptimizerConfig):
         weight_decay_incr_style (str): Weight decay increment style: "constant" or "cosine".
         lr_wsd_decay_style (str): Weight-standard-deviation decay style: "constant", "exponential", or "cosine".
         lr_wsd_decay_steps (Optional[int]): Number of steps for weight-standard-deviation decay.
-        use_checkpoint_opt_param_scheduler (bool): Whether to use checkpoint optimizer parameter scheduler.
+        use_checkpoint_opt_param_scheduler (bool): Where the scheduler's hyper-parameters come
+            from on resume. False (default) keeps the configured learning rate, warmup and decay;
+            True takes them from the checkpoint. Either way the scheduler state is saved and its
+            position in the schedule is restored, so this does not control whether the schedule
+            resumes.
         use_precision_aware_optimizer (bool): Enable Megatron's precision-aware optimizer so the
             grad-accumulation buffer and Adam moments can be stored below fp32 (bf16 training only).
             Opt-in; default False keeps the fp32 optimizer state and prior numerics. Requires
