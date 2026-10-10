@@ -377,3 +377,78 @@ class TestGetRouterHandlePrecedence:
 
         status = ray.get(manager.global_load_balancer.get_status.remote())
         assert status["active_servers"] == 2
+
+
+class TestFullDeterminismRouting:
+    """Validate that GlobalRequestLoadBalancer full_determinism routing is
+    cross-process reproducible (independent of PYTHONHASHSEED) and invariant
+    to server dictionary insertion order."""
+
+    def test_full_determinism_insertion_order_invariant(self):
+        """Routing under full_determinism must not depend on dictionary insertion order."""
+        servers_order1 = {"s0": "h0", "s1": "h1", "s2": "h2", "s3": "h3"}
+        servers_order2 = {"s3": "h3", "s1": "h1", "s0": "h0", "s2": "h2"}
+        servers_order3 = {"s2": "h2", "s0": "h0", "s3": "h3", "s1": "h1"}
+
+        lb1 = GlobalRequestLoadBalancer(servers=servers_order1, full_determinism=True)
+        lb2 = GlobalRequestLoadBalancer(servers=servers_order2, full_determinism=True)
+        lb3 = GlobalRequestLoadBalancer(servers=servers_order3, full_determinism=True)
+
+        for i in range(50):
+            req_id = f"det-{i}"
+            s1, _ = lb1.acquire_server(req_id)
+            s2, _ = lb2.acquire_server(req_id)
+            s3, _ = lb3.acquire_server(req_id)
+            assert s1 == s2 == s3, f"Mismatch for {req_id}: {s1} vs {s2} vs {s3}"
+
+    def test_full_determinism_cross_process_reproducibility(self):
+        """Different Python processes with different PYTHONHASHSEED must compute
+        identical server assignments for the same request IDs."""
+        import json
+        import subprocess
+        import sys
+
+        code = """
+import json
+import sys
+from verl.workers.rollout.router import GlobalRequestLoadBalancer
+
+servers = {"s0": None, "s1": None, "s2": None, "s3": None}
+lb = GlobalRequestLoadBalancer(servers=servers, full_determinism=True)
+results = [lb.acquire_server(f"det-{i}")[0] for i in range(30)]
+print(json.dumps(results))
+"""
+        seeds = ["0", "42", "12345", "random"]
+        all_results = []
+        for seed in seeds:
+            env = {"PYTHONPATH": ".", "PYTHONHASHSEED": seed}
+            res = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env,
+            )
+            all_results.append(json.loads(res.stdout.strip()))
+
+        baseline = all_results[0]
+        for idx, (seed, r) in enumerate(zip(seeds, all_results, strict=True)):
+            assert r == baseline, f"Process with PYTHONHASHSEED={seed} produced divergent routing: {r} != {baseline}"
+
+    def test_full_determinism_sticky_session_and_clear(self):
+        """Sticky session returns the cached server, and clear_sticky_cache re-routes deterministically."""
+        servers = {"s0": "h0", "s1": "h1", "s2": "h2"}
+        lb = GlobalRequestLoadBalancer(servers=servers, full_determinism=True)
+
+        s_first, _ = lb.acquire_server("det-0")
+        s_second, _ = lb.acquire_server("det-0")
+        assert s_first == s_second
+        assert lb.get_inflight_count(s_first) == 2
+
+        lb.release_server(s_first)
+        lb.release_server(s_first)
+        assert lb.get_inflight_count(s_first) == 0
+
+        lb.clear_sticky_cache()
+        s_third, _ = lb.acquire_server("det-0")
+        assert s_third == s_first
