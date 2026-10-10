@@ -262,6 +262,10 @@ class vLLMHttpServer:
             kwargs=kwargs,
         )
 
+    async def get_weight_dtype_metadata(self):
+        """Dedicated return-value RPC for opt-in receiver export preflight."""
+        return await self.engine.collective_rpc("get_weight_dtype_metadata")
+
     async def set_pd_peer(
         self,
         decode_peers: list,

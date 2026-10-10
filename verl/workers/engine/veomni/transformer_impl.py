@@ -646,19 +646,21 @@ class VeOmniEngine(FSDPEngine):
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
         # shard instead, so the manual whole-model move is unnecessary under CPU offload.
-        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
-            load_veomni_model_to_gpu(self.module)
-
-        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
+        # Ordinary FSDP2 export only collects DTensor references. Stage each
+        # tensor below instead of loading and offloading the whole model merely
+        # to obtain its state_dict. A checkpoint-loading converter (e.g. Qwen3
+        # MoE) does not require staging unless it also implements weight export.
         converter = get_checkpoint_tensor_converter(self.module)
-        if converter is not None and hasattr(converter, "export_weights"):
+        if converter is not None and callable(getattr(converter, "export_weights", None)):
+            if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+                load_veomni_model_to_gpu(self.module)
             return converter.export_weights(self.module), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self._is_offload_param:
-            offload_veomni_model_to_cpu(self.module)
+        export_dtypes = kwargs.get("receiver_export_dtypes")
+        if export_dtypes is not None and params.keys() != export_dtypes.keys():
+            raise ValueError("Trainer export names changed after receiver preflight")
 
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
@@ -668,8 +670,14 @@ class VeOmniEngine(FSDPEngine):
 
         def param_generator():
             for name, param in params.items():
+                if export_dtypes is not None:
+                    from verl.utils.rollout_weight_dtype import stage_export_tensor
+
+                    param = stage_export_tensor(param, device, export_dtypes[name])
                 unsharded_tensor = (
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                    param.to(device, non_blocking=True).full_tensor()
+                    if isinstance(param, DTensor)
+                    else param.to(device, non_blocking=True)
                 )
 
                 is_expert_layer = "mlp.experts." in name
@@ -691,6 +699,38 @@ class VeOmniEngine(FSDPEngine):
 
         # TODO: support VeOmni LoRA
         return param_generator(), None
+
+    def prepare_receiver_export_dtypes(self, workers, tensor_parallel_size):
+        """Validate export metadata without gathering/staging any model tensor."""
+        from verl.utils.rollout_weight_dtype import RolloutWeightDtypeContract
+
+        converter = get_checkpoint_tensor_converter(self.module)
+        if converter is not None and callable(getattr(converter, "export_weights", None)):
+            raise ValueError("Checkpoint converter export is unsupported for receiver dtype staging")
+        contract = RolloutWeightDtypeContract.from_workers(workers, tensor_parallel_size=tensor_parallel_size)
+        model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        params = self.module.state_dict()
+        named = dict(self.module.named_parameters())
+        if not named.keys() <= params.keys():
+            raise ValueError("Trainer named parameters do not match export state_dict")
+        converted = convert_weight_keys(params, model)
+        named = convert_weight_keys(named, model)
+        if len(converted) != len(params):
+            raise ValueError("Trainer export key conversion collided")
+        contract.validate_export_parameters(list(named))
+        expected_experts = getattr(self.module.config, "num_experts", None)
+        if type(expected_experts) is not int or not contract.expert_counts:
+            raise ValueError("Qwen3 MoE expert count is unavailable")
+        if any(count != expected_experts for count in contract.expert_counts.values()):
+            raise ValueError("Receiver expert count differs from trainer model")
+        ps = parallel_state.get_parallel_state()
+        for name, tensor in named.items():
+            if ".mlp.experts." in name:
+                ep_size = ps.ep_size if ps.ep_enabled else 1
+                if tensor.ndim != 3 or tensor.shape[0] * ep_size != expected_experts:
+                    raise ValueError("Trainer expert tensor does not cover all receiver experts")
+        export_dtypes = {name: contract.dtype_for_export(name, is_parameter=name in named) for name in converted}
+        return export_dtypes, dict(contract.parameters)
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

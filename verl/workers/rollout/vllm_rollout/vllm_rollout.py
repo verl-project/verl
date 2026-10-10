@@ -201,6 +201,16 @@ class ServerAdapter(BaseRollout):
         if self.config.free_cache_engine and self._ensure_server_handle():
             await self.server_handle.wake_up.remote(tags=tags)
 
+    async def get_weight_dtype_metadata(self):
+        # Every trainer rank preflights its export, including non-leader TP ranks.
+        # The control-method handle is deliberately restricted to leaders; metadata
+        # is read from the replica's engine owner without changing that restriction.
+        if self._pd_role is not None:
+            raise ValueError("Receiver dtype metadata requires a TP-only rollout replica")
+        prefix = self._get_server_name_prefix()
+        server = ray.get_actor(f"{prefix}server_{self.replica_rank}_0")
+        return await server.get_weight_dtype_metadata.remote()
+
     async def release(self):
         """Release weights and kv cache in GPU memory."""
         if self.config.free_cache_engine and self._ensure_server_handle():

@@ -307,6 +307,10 @@ checkpoint_engine:
   # when using Tensor Parallelism (TP) >= 8.
   update_weights_bucket_megabytes: 2048
 
+  # Verify every recipient before casting temporary VeOmni export shards.
+  # Supports naive colocated unquantized Qwen3 MoE only; disabled by default.
+  export_receiver_dtype: false
+
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 

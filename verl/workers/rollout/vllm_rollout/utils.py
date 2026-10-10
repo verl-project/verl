@@ -160,6 +160,11 @@ class vLLMColocateWorkerExtension:
     2. Online FP8 quantization
     """
 
+    def get_weight_dtype_metadata(self):
+        from verl.utils.rollout_weight_dtype import worker_weight_dtype_metadata
+
+        return worker_weight_dtype_metadata(self)
+
     def __new__(cls, **kwargs):
         set_death_signal()
 

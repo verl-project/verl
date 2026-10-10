@@ -133,12 +133,20 @@ class CheckpointEngineConfig(BaseConfig):
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
+    # Opt-in verified receiver dtype for temporary VeOmni export shards.
+    export_receiver_dtype: bool = False
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
     # If set, this Python module is imported on every worker process before the
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+
+    def __post_init__(self):
+        if type(self.export_receiver_dtype) is not bool:
+            raise ValueError("export_receiver_dtype must be a boolean")
+        if self.export_receiver_dtype and self.backend != "naive":
+            raise ValueError("export_receiver_dtype requires the naive checkpoint backend")
 
 
 @dataclass

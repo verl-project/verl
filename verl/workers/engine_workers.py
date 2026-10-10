@@ -732,6 +732,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    async def prepare_receiver_export_dtypes(self):
+        """No collectives: every rank must return successfully before weight sync."""
+        from verl.workers.engine.veomni.transformer_impl import VeOmniEngine
+
+        self._receiver_export_dtypes = None
+        if not self.config.rollout.checkpoint_engine.export_receiver_dtype:
+            raise ValueError("Receiver export dtype preflight requires explicit opt-in")
+        if (
+            self.config.rollout.checkpoint_engine.backend != "naive"
+            or self.config.rollout.name != "vllm"
+            or not isinstance(self.actor.engine, VeOmniEngine)
+            or self.config.model.lora_rank > 0
+            or self.config.model.lora.get("rank", 0) > 0
+            or self.config.rollout.data_parallel_size != 1
+            or self.config.rollout.expert_parallel_size != 1
+        ):
+            raise ValueError("Receiver export dtype requires naive VeOmni/vLLM TP-only without LoRA")
+        workers = await self.rollout.get_weight_dtype_metadata()
+        dtypes, receiver_parameters = self.actor.engine.prepare_receiver_export_dtypes(
+            workers, self.config.rollout.tensor_model_parallel_size
+        )
+        self._receiver_export_dtypes = dtypes
+        return receiver_parameters
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
@@ -760,6 +785,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # Resolve mode: "auto" falls back to config, explicit values take precedence
         effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+        export_dtypes = None
+        if getattr(self.config.rollout.checkpoint_engine, "export_receiver_dtype", False):
+            export_dtypes = getattr(self, "_receiver_export_dtypes", None)
+            if effective_mode != "naive" or export_dtypes is None:
+                raise ValueError("Receiver export dtype requires successful all-rank naive preflight")
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
@@ -793,7 +823,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon,
+            base_sync_done=True,
+            **({"receiver_export_dtypes": export_dtypes} if export_dtypes is not None else {}),
         )
 
         do_lora_base_sync = False

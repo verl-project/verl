@@ -516,8 +516,17 @@ class CheckpointEngineManager:
 
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
+            if getattr(self.config, "export_receiver_dtype", False):
+                recipients = ray.get(self.actor_wg.prepare_receiver_export_dtypes())
+                if len(recipients) != self.actor_wg.world_size or not recipients:
+                    raise ValueError("Receiver preflight did not cover all actor ranks")
+                if any(recipient != recipients[0] for recipient in recipients):
+                    raise ValueError("Rollout replicas disagree about parameter names or dtypes")
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
+
+        if getattr(self.config, "export_receiver_dtype", False):
+            raise ValueError("Receiver export dtype is only supported by the naive backend")
 
         # 1. abort and save all unfinished requests for partial rollout
         await self.abort_replicas()
