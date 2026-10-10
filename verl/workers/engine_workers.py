@@ -110,6 +110,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 self.model_config, self.device_name
             )
 
+        if (
+            self.checkpoint_config is not None
+            and self.checkpoint_config.async_save
+            and self.engine_config.strategy != "megatron"
+        ):
+            raise NotImplementedError(
+                f"{self.engine_config.strategy} does not support checkpoint.async_save; use the Megatron engine"
+            )
+
         # we use the one defined in model
         # TODO: this is not elegant and should refactor later
         self.engine_config.use_remove_padding = self.model_config.get("use_remove_padding", False)
@@ -442,8 +451,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return final_output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
-        return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None, blocking=False):
+        """Save on every rank, optionally waiting for asynchronous writes to finish."""
+        return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep, blocking=blocking)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
