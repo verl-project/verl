@@ -194,19 +194,22 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
+    # On NPU, FSDPModule._apply may repad uneven shards on CPU inside model.to().
+    # Wait for each D2H copy before that CPU read; synchronizing after model.to()
+    # cannot repair values already copied from an unfinished transfer.
+    non_blocking = get_device_name() != "npu"
+
     # PyTorch currently allocates pinned host storage for CUDA-to-CPU
     # Tensor.to() copies when non_blocking=True. This behavior is not strictly
     # documented, so keep it covered by the FSDP2 model-transfer regression
     # test. The pinned parameters also make the subsequent CPU-to-GPU copy
     # asynchronous.
     #
-    # The CPU tensors are not safe for host access until the D2H copy finishes.
-    # Current callers reload them on the same CUDA stream, whose ordering keeps
-    # the D2H-to-H2D round trip correct. A caller that reads the tensors on the
-    # host must synchronize first, and a caller that reloads them on another
-    # stream must establish an explicit stream dependency. empty_cache() below
-    # is not a synchronization point.
-    model.to("cpu", non_blocking=True)
+    # Non-blocking transfers require completion before host access. Reloading
+    # on the same CUDA stream preserves device-copy ordering; CPU reads still
+    # require synchronization. Reloading on another stream requires an explicit
+    # stream dependency. empty_cache() below is not a synchronization point.
+    model.to("cpu", non_blocking=non_blocking)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -522,7 +525,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         dist.broadcast(buf, src=0)
 
     if cpu_offload:
-        model.to("cpu", non_blocking=True)
+        offload_fsdp2_model_to_cpu(model, empty_cache=False)
         for buf in model.buffers():
             buf.data = buf.data.to(get_device_id())
 
