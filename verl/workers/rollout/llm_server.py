@@ -18,6 +18,7 @@ Utility classes for manage and request LLM servers:
 """
 
 import asyncio
+import copy
 import logging
 import os
 from typing import Any, Optional
@@ -248,6 +249,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         Returns:
             TokenOutput: token output
         """
+        resume_state = kwargs.pop("partial_rollout_state", None)
+        checkpoint_callback = kwargs.pop("partial_rollout_checkpoint_callback", None)
         prompt_ids = normalize_token_ids(prompt_ids)
 
         limit_key = None
@@ -286,7 +289,48 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
 
-        while True:
+        complete = False
+        if resume_state is not None:
+            if resume_state.get("schema_version") != 1:
+                raise ValueError("Unsupported partial rollout checkpoint schema")
+            if resume_state["prompt_ids"] != prompt_ids or resume_state["sampling_params"] != sampling_params:
+                raise ValueError("Partial rollout checkpoint prompt or sampling parameters changed")
+            final_output = TokenOutput(**copy.deepcopy(resume_state["output"]))
+            min_global_steps = resume_state["min_global_steps"]
+            max_global_steps = resume_state["max_global_steps"]
+            num_cached_tokens = resume_state["num_cached_tokens"]
+            complete = resume_state["complete"]
+            if original_max_tokens is not None:
+                remaining = original_max_tokens - len(final_output.token_ids)
+                if remaining < 0:
+                    raise ValueError("Partial rollout checkpoint exceeds response budget")
+                sampling_params[limit_key] = remaining
+                complete = complete or remaining == 0
+
+        # Persist at client-visible attempt boundaries. KV is rebuilt from tokens on restart.
+        checkpoint_sampling_params = dict(sampling_params)
+        if limit_key:
+            checkpoint_sampling_params[limit_key] = original_max_tokens
+        global_steps = max_global_steps
+
+        def publish_state():
+            if checkpoint_callback is not None:
+                # The callback is synchronous; worker snapshotting runs on this same event loop.
+                checkpoint_callback(
+                    {
+                        "schema_version": 1,
+                        "prompt_ids": prompt_ids,
+                        "sampling_params": checkpoint_sampling_params,
+                        "output": final_output,
+                        "min_global_steps": min_global_steps,
+                        "max_global_steps": max_global_steps,
+                        "num_cached_tokens": num_cached_tokens,
+                        "complete": complete,
+                    }
+                )
+
+        publish_state()
+        while not complete:
             # 1. generate tokens
             output = await super().generate(
                 request_id=request_id,
@@ -340,7 +384,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
                 if len(final_output.token_ids) >= original_max_tokens:
                     final_output.stop_reason = "length"
-                    break
+                    complete = True
 
             # 4. check stop reason
             # If partial rollout not enable, aborted samples will be dropped.
@@ -348,10 +392,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             should_retry = True
             if hasattr(self.config, "async_training") and not self.config.async_training.partial_rollout:
                 should_retry = False
-            if output.stop_reason not in ("aborted", "abort") or not should_retry:
-                break
-
-            await asyncio.sleep(1)
+            complete = complete or output.stop_reason not in ("aborted", "abort") or not should_retry
+            publish_state()
+            if not complete:
+                await asyncio.sleep(1)
 
         final_output.extra_fields["global_steps"] = global_steps
         final_output.extra_fields["min_global_steps"] = min_global_steps

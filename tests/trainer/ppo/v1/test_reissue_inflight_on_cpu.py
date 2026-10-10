@@ -407,3 +407,109 @@ def test_save_load_terminal_only_counts_prompts_without_reissue(tq_init, partiti
         assert stub.agent_loop_manager.batches == []
     finally:
         _clear_partition(partition_id)
+
+
+def test_partial_state_roundtrip_with_mixed_prompt_columns(tq_init, partition_id, tmp_path, monkeypatch):
+    """A real TQ save/load retains prefixes even when another row has no state column."""
+    import asyncio
+
+    import numpy as np
+
+    from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ
+    from verl.workers.rollout import llm_server
+    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
+    from verl.workers.rollout.replica import TokenOutput
+
+    running, pending = _uid(), _uid()
+    _submit_prompt(partition_id, running, "running", global_steps=3)
+    _submit_prompt(partition_id, pending, "pending", global_steps=3)
+    config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"response_length": 5, "name": "vllm"}}})
+    calls = []
+
+    async def backend(self, request_id, *, prompt_ids, sampling_params, **kwargs):
+        assert "partial_rollout_state" not in kwargs
+        calls.append((list(prompt_ids), dict(sampling_params)))
+        if len(calls) == 1:
+            return TokenOutput(
+                token_ids=[10, 11],
+                log_probs=[-0.1, -0.2],
+                stop_reason="aborted",
+                routed_experts=np.array([[1], [2], [3]]),
+                extra_fields={"global_steps": 3, "num_cached_tokens": 1},
+            )
+        return TokenOutput(
+            token_ids=[12, 13, 14],
+            log_probs=[-0.3, -0.4, -0.5],
+            stop_reason="length",
+            routed_experts=np.array([[8], [8], [8], [4], [5], [6]]),
+            extra_fields={"global_steps": 4},
+        )
+
+    monkeypatch.setattr(llm_server.LLMServerClient, "generate", backend)
+    worker_cls = AgentLoopWorkerTQ.__ray_actor_class__
+    worker = worker_cls.__new__(worker_cls)
+    worker.partial_rollout_states = {running: {}}
+
+    class Interrupted(Exception):
+        pass
+
+    def capture(state):
+        worker.partial_rollout_states[running]["0"] = state
+        if state["output"].token_ids:
+            raise Interrupted
+
+    async def interrupt():
+        client = FullyAsyncLLMServerClient(config=config)
+        with pytest.raises(Interrupted):
+            await client.generate(
+                "first",
+                prompt_ids=[1],
+                sampling_params={"temperature": 1.0},
+                partial_rollout_checkpoint_callback=capture,
+            )
+
+    asyncio.run(interrupt())
+    # The worker writes to the training partition in production; isolate this test's partition.
+    real_put = tq.async_kv_put
+
+    async def isolated_put(*, partition_id: str, **kwargs):
+        return await real_put(partition_id=test_partition, **kwargs)
+
+    test_partition = partition_id
+    monkeypatch.setattr(tq, "async_kv_put", isolated_put)
+    asyncio.run(worker.save_partial_rollout_states())
+    # Verify repeated saves overwrite the column instead of retaining the first snapshot.
+    worker.partial_rollout_states[running]["0"]["output"].num_preempted = 7
+    asyncio.run(worker.save_partial_rollout_states())
+    checkpoint = str(tmp_path / "partial-queue")
+    tq.save_checkpoint(checkpoint)
+    _clear_partition(partition_id)
+    tq.load_checkpoint(checkpoint)
+    stub = _make_trainer_stub(global_steps=4)
+    try:
+        assert stub._reissue_inflight_prompts(partition_id) == 2
+        batch = stub.agent_loop_manager.batches[0]
+        index = list(batch["uid"]).index(running)
+        state = tu.unwrap_non_tensor_data(batch["partial_rollout_states"][index])["0"]
+        pending_index = list(batch["uid"]).index(pending)
+        assert not tu.unwrap_non_tensor_data(batch["partial_rollout_states"][pending_index])
+        assert state["output"]["num_preempted"] == 7
+
+        async def resume():
+            return await FullyAsyncLLMServerClient(config=config).generate(
+                "second",
+                prompt_ids=[1],
+                sampling_params={"temperature": 1.0},
+                partial_rollout_state=state,
+            )
+
+        output = asyncio.run(resume())
+        assert calls[1][0] == [1, 10, 11]
+        assert calls[1][1]["max_tokens"] == 3
+        assert output.token_ids == [10, 11, 12, 13, 14]
+        assert output.log_probs == [-0.1, -0.2, -0.3, -0.4, -0.5]
+        np.testing.assert_array_equal(output.routed_experts[:, 0], [1, 2, 3, 4, 5, 6])
+        assert output.extra_fields["min_global_steps"] == 3
+        assert output.extra_fields["num_cached_tokens"] == 1
+    finally:
+        _clear_partition(partition_id)

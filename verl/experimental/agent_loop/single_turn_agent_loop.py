@@ -77,6 +77,11 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 mm_processor_output=mm_processor_output,
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
+                **{
+                    key: kwargs[key]
+                    for key in ("partial_rollout_state", "partial_rollout_checkpoint_callback")
+                    if key in kwargs
+                },
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
