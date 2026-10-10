@@ -394,6 +394,30 @@ def test_exact_icepop_zeroes_weights_without_changing_mask():
     assert metrics["rollout_corr/rollout_is_eff_sample_size"] == pytest.approx(1.0 / 3.0, abs=1e-6)
 
 
+@pytest.mark.parametrize("rollout_is", ["token", "sequence"])
+def test_icepop_all_zero_weights_report_zero_ess(rollout_is):
+    """A fully filtered IcePop batch has zero effective samples and must not crash."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    raw_is_weights = torch.tensor([[0.1, 0.1], [10.0, 10.0]], device=device)
+    old_log_prob = torch.zeros_like(raw_is_weights)
+    rollout_log_prob = -torch.log(raw_is_weights)
+    response_mask = torch.ones_like(raw_is_weights)
+
+    weights_proto, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is=rollout_is,
+        rollout_is_threshold="0.5_5.0",
+        rollout_rs=None,
+    )
+
+    assert torch.count_nonzero(weights_proto.batch["rollout_is_weights"]) == 0
+    assert torch.equal(modified_response_mask, response_mask)
+    assert metrics["rollout_corr/rollout_is_eff_sample_size"] == 0.0
+
+
 def test_bool_rollout_is_threshold_is_rejected():
     """Boolean thresholds should not be silently accepted via bool <: int."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
