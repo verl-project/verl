@@ -417,7 +417,12 @@ def compute_gdpo_outcome_advantage(
         )
         device = token_level_rewards.device
         prompt_length = batch["prompts"].size(1)
-        valid_response_length = batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
+        response_attention = batch["attention_mask"][:, prompt_length:]
+        valid_response_length = response_attention.sum(dim=1) - 1
+        # Mask for responses that have at least one valid token
+        has_response = response_attention.sum(dim=1) > 0
+        # Clamp to avoid negative indexing for fully-padded responses
+        valid_response_length = valid_response_length.clamp(min=0)
 
         score_list = []
         for key in gdpo_reward_keys:
@@ -430,6 +435,8 @@ def compute_gdpo_outcome_advantage(
             rm_score = torch.tensor(np.asarray(comp, dtype=np.float32), device=device)
             rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
             rm_scores[torch.arange(rm_scores.size(0), device=device), valid_response_length] = rm_score
+            # Zero out scores for fully-padded responses to avoid misplaced rewards
+            rm_scores[~has_response] = 0.0
             score_list.append(rm_scores)
 
         gdpo_weights = config.get("gdpo_reward_weights", None)
