@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 09/29/2026
+Last updated: 10/10/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -212,6 +212,91 @@ actor_rollout_ref.rollout:
 Results and observations:
 - FP8 E2E achieves comparable accuracy to the BF16 baseline, with the two curves closely aligned throughout training.
 - The training/inference precision mismatch (measured by KL divergence) follows the ordering: FP8 rollout-only > FP8 E2E > BF16 E2E. This is expected, as FP8 E2E maintains consistent precision across both training and inference, resulting in lower distribution mismatch than the FP8 rollout-only setting where training remains in BF16.
+
+---
+
+## MXFP8 Training (Blackwell)
+
+MXFP8 is the OCP microscaling FP8 format: E4M3 elements with one shared E8M0 scale per
+32-element block, natively accelerated by Blackwell tensor cores. Compared to the
+`blockwise` recipe above (1x128 activation / 128x128 weight scaling, designed for Hopper),
+MXFP8 uses hardware-decoded block scales and needs no `NVTE_FP8_BLOCK_SCALING_FP32_SCALES`
+workaround.
+
+### Requirements
+
+- **Blackwell GPUs** (SM100+). On Hopper, use `fp8_recipe: "blockwise"` as described in
+  the FP8 End-to-End section instead — Hopper tensor cores cannot consume MXFP8 block scales.
+- **Megatron-Core >= 0.13** and **Transformer Engine >= 2.1**
+
+### Key Configuration
+
+```yaml
+# MXFP8 training via Transformer Engine
+actor_rollout_ref.actor.megatron.override_transformer_config:
+  fp8: "e4m3"                # element format; "hybrid" (e4m3 fwd + e5m2 bwd) also supported
+  fp8_recipe: "mxfp8"        # 32-element block scaling
+```
+
+Notes:
+
+- Training uses the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`),
+  which is now the only Megatron model-building path in verl.
+- Model weights stay in bf16 (`fp8_param` is not supported); only GEMM inputs are cast to
+  MXFP8 on the fly, so checkpointing is unchanged.
+- verl pads packed sequences to the 32-token block boundaries MXFP8 quantization requires
+  (`lcm(32, ...)` per sequence instead of the blockwise recipe's `lcm(16, ...)`); this is automatic
+  once `fp8_recipe: "mxfp8"` is set.
+- QAT and Transformer Engine FP8 training are mutually exclusive (QAT fake-quantizes weights inside
+  bf16 GEMMs, while an FP8 recipe switches the GEMMs themselves to FP8); the engine refuses the
+  combination at initialization.
+- `verl.utils.mxfp8_quant.mxfp8_quantize` exposes the TE `MXFP8Quantizer` the learner applies to its
+  weights, for weight synchronization to an MXFP8 rollout engine; `lm_head` and the token embedding
+  stay in high precision there (`MXFP8_KEEP_HIGH_PRECISION_LAYERS`).
+
+### MXFP8 Rollout and Train-Inference Consistency
+
+With `quantization: mxfp8`, the rollout engine is launched in MXFP8 mode against the bf16
+checkpoint (a `quantization_config` override, no offline conversion), and every weight sync
+quantizes the bf16 actor weights to MXFP8 on the fly:
+
+```yaml
+actor_rollout_ref.rollout:
+  name: vllm
+  quantization: mxfp8
+```
+
+The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`**
+(`verl.utils.mxfp8_quant`), the same quantizer the trainer's FP8 GEMMs apply to weights, so the
+rollout engine serves exactly the weight grid the training forward pass saw. An independent
+quantization kernel can round E8M0 scales differently at block boundaries and reintroduce
+train-inference mismatch. Two things still differ by construction: the engine quantizes activations
+with its own kernels, and its GEMMs accumulate in a different order. Pairing with token-level TIS is
+recommended, as with the blockwise FP8 E2E recipe.
+
+For vLLM, the config maps to `ModelOptMxFp8Config` (weight `fp8_e4m3fn` + `uint8` UE8M0
+`weight_scale`, block `[1, 32]`). `lm_head`, the token embedding and the MoE routers stay in bf16
+through `ignored_layers`, and verl opts its generated config into exact module-path matching of those
+exclusions ([mxfp8_exclusion_patch.md](mxfp8_exclusion_patch.md)); vLLM 0.24's substring fallback would
+otherwise also exclude `mlp.gate_up_proj` through the router entry `mlp.gate`. Refits reuse the same
+pristine-layout record → stage → load → reprocess → fold cycle as the blockwise FP8 path, which keeps
+the storage that CUDA graphs captured. vLLM's Marlin/emulation fallbacks allow serving MXFP8 weights on
+pre-Blackwell GPUs (SM80+); the served weight grid is still produced by TE's quantizer.
+
+The staging cycle decides per layer whether a refit must go through stage → load → reprocess by
+comparing the live parameters with the checkpoint layout recorded at load. A kernel that hands back a
+*rewritten copy with the checkpoint's shape and dtype* is invisible to that comparison. FlashInfer
+TRT-LLM's MXFP8 MoE preparation (`ModelOptMxFp8FusedMoE` on Blackwell: W13→W31 swap, gate/up row
+interleave, tile shuffle of weights and scales) is such a kernel, so verl's patched `replace_parameter`
+records the rewrite (the same-shape record was merged upstream as verl-project/verl#7986) and the layer
+is staged on every refit. vLLM 0.24's ModelOpt MXFP8 MoE method also processes its weights only once per
+layer and returns early afterwards; verl's patched hook clears that flag on every refit, so the kernel
+layout is re-derived from the synced scales. Measured on 1×B200 (vLLM 0.24, a tiny Qwen3-MoE, TP1), an
+expert's output read relative error 1.739 against a dequantized reference after the first sync without
+the record, and 0.052 with it.
+
+On Qwen3-30B-A3B (4×B200, vLLM 0.24) the MXFP8 rollout generated 24% faster than bf16; on the dense
+Qwen3-8B the measured difference was within run-to-run variation.
 
 ---
 
