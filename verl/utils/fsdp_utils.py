@@ -786,6 +786,11 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                 name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
                 lora_params[name] = param.detach().cpu()
             model = model.to(orig_dev)
+    if base_sync_done:
+        assert lora_params, (
+            "LoRA parameter collection returned an empty dictionary. "
+            "Aborting weight synchronization to avoid a rollout hang. "
+        )
     return lora_params
 
 
