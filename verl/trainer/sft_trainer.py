@@ -438,7 +438,7 @@ class SFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if self.save_freq > 0 and (is_last_step or is_save_step):
                     aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 

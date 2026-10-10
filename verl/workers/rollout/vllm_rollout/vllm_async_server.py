@@ -895,10 +895,12 @@ class vLLMHttpServer:
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # Routing replay's AuxOutput connector requires PAUSED_ALL for cache reset.
+        # vLLM's default abort mode only pauses new requests.
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -920,7 +922,7 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         await self.engine.wake_up(tags=["weights"])
 
     async def resume_kv_cache(self):
@@ -1133,6 +1135,7 @@ class vLLMHttpServer:
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
             await self.engine.pause_generation(
+                mode="keep",
                 wait_for_inflight_requests=False,
                 clear_cache=reset_prefix_cache,
             )
@@ -1345,14 +1348,15 @@ class vLLMHttpServer:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
-            repetition_penalty=1.0,
+            repetition_penalty=self.config.repetition_penalty,
             max_new_tokens=self.config.response_length,
         )
 
     def _apply_quantization(self) -> tuple[Optional[str], dict]:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
-        hf_overrides = {}
+        vllm_engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
+        hf_overrides = dict(vllm_engine_kwargs.get("hf_overrides", {}) or {})
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
@@ -1385,17 +1389,38 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+                # Ignore MoE router layers for FP8 quantization.
+                ignored_layers = []
+                hf_cfg = self.model_config.hf_config
+                text_cfg = hf_cfg.get_text_config()
+                num_layers = text_cfg.num_hidden_layers
+                model_type = getattr(hf_cfg, "model_type", "")
+
+                if model_type == "glm5_next":
+                    # Reuse the checkpoint's own modules_to_not_convert list so the
+                    # rollout FP8 scope matches native vLLM exactly.
+                    ckpt_quant = getattr(hf_cfg, "quantization_config", {}) or {}
+                    ignored_layers = list(ckpt_quant.get("modules_to_not_convert", []) or [])
+                    if not ignored_layers:
+                        raise ValueError(
+                            "glm5_next FP8 rollout needs modules_to_not_convert "
+                            "in the checkpoint quantization_config, but it is empty."
+                        )
+                else:
+                    layer_pfx = "language_model.model.layers" if model_type == "glm5_next" else "model.layers"
+                    for layer in range(num_layers):
+                        ignored_layers.append(f"{layer_pfx}.{layer}.mlp.gate")
+                    if model_type == "glm_moe_dsa":
+                        # GLM5.2 DSA: keep rollout kv_b_proj BF16.
+                        for layer in range(num_layers):
+                            ignored_layers.append(f"{layer_pfx}.{layer}.self_attn.kv_b_proj")
 
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
+                    "ignored_layers": ignored_layers,
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
@@ -1404,7 +1429,11 @@ class vLLMHttpServer:
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
-        if quantization is None and model_quantization_config.get("quant_method") == "fp8":
+        if (
+            quantization is None
+            and "quantization_config" not in hf_overrides
+            and model_quantization_config.get("quant_method") == "fp8"
+        ):
             apply_vllm_quant_patches()
             os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
@@ -1473,7 +1502,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         await self.engine.reset_encoder_cache()
 
 

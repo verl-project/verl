@@ -517,6 +517,7 @@ class CheckpointEngineManager:
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            await self.resume_generation_replicas()
             return {}
 
         # 1. abort and save all unfinished requests for partial rollout

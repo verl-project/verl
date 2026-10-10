@@ -39,10 +39,10 @@ from verl.utils.vllm.vllm_quant_utils import (
     process_quanted_weights_after_loading,
 )
 from verl.utils.vllm.vllm_unquant_utils import fold_unquantized_moe_params, stage_unquantized_moe_params
-from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
     drop_tied_alias_updates,
+    refresh_weight_caches,
     split_buffer_updates,
 )
 
@@ -251,6 +251,17 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    def _post_process_adapter_sync(self) -> int:
+        """Refresh safe model runtime layouts after an adapter-only refit."""
+        processed = 0
+        for model, _ in self._iter_all_models_with_config():
+            process = getattr(model, "process_weights_after_loading", None)
+            if process is None:
+                continue
+            process()
+            processed += 1
+        return processed
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV and other illegal tokens
@@ -307,6 +318,10 @@ class vLLMColocateWorkerExtension:
                 staged_moe_layers.extend(stage_unquantized_moe_params(model))
 
         # =========================== step 2: receive weights and update ===========================
+        # Import lazily so the receiver can be selected after this extension is
+        # loaded (and so CPU tests can provide a lightweight transport stub).
+        from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
@@ -352,7 +367,11 @@ class vLLMColocateWorkerExtension:
             modelopt_process_weights_after_loading(self.model_runner.model)
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif peft_config and base_sync_done:
-            logger.info("LoRA adapter sync, no post-process needed")
+            processed = self._post_process_adapter_sync()
+            logger.info(
+                "LoRA adapter sync: ran model post-process for %d model(s)",
+                processed,
+            )
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
@@ -363,6 +382,12 @@ class vLLMColocateWorkerExtension:
             with fold_unquantized_moe_params(staged_moe_layers):
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
+
+        if not (peft_config and base_sync_done):
+            for model in self._iter_all_models():
+                refreshed = refresh_weight_caches(model)
+                if refreshed:
+                    logger.info("Refreshed %d weight caches", refreshed)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
@@ -383,9 +408,7 @@ class vLLMColocateWorkerExtension:
         base_sync_done: bool,
     ):
         if peft_config and base_sync_done:
-            # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
-            # past this callback, so views into the freed/overwritten buffer crash later (#6454).
-            weights = {name: tensor.clone() for name, tensor in weights}
+            weights = dict(weights)
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
@@ -403,10 +426,14 @@ class vLLMColocateWorkerExtension:
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
                 model_updates = drop_tied_alias_updates(self.model_runner.model, param_updates)
-                loaded_params = load_quanted_weights(model_updates, self.model_runner) if model_updates else []
+                loaded_params = (
+                    load_quanted_weights(model_updates, self.model_runner, peft_config=peft_config)
+                    if model_updates
+                    else []
+                )
                 # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and model_updates:
-                    load_quanted_weights(model_updates, self.model_runner, is_drafter=True)
+                    load_quanted_weights(model_updates, self.model_runner, is_drafter=True, peft_config=peft_config)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
