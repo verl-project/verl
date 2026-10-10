@@ -126,8 +126,19 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
+    assert sequence_offsets[-1].item() <= values.shape[0]
     assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
+
+    # TPU engines return a detached copy of the output and attach the differentiable, bucket-padded device tensor
+    # as `_tpu_padded_values`: gather all responses from it with one static-shape index_select.
+    padded_values = getattr(tensor, "_tpu_padded_values", None)
+    if padded_values is not None:
+        cols = torch.arange(max_response_len)
+        valid = cols < response_lens.cpu().unsqueeze(1)
+        index = torch.where(valid, (sequence_offsets - response_lens - 1).cpu().unsqueeze(1) + cols, 0)
+        output = padded_values.index_select(0, index.flatten().to(padded_values.device))
+        output = output.view(*index.shape, *padded_values.shape[1:])
+        return output * valid.view(*valid.shape, *[1] * (padded_values.ndim - 1)).to(output)
 
     response_list = []
     # Skip padding dimensions after sequence dimensions, if any.

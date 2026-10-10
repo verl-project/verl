@@ -94,6 +94,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
     data = data.select(*fields).to_padded_tensor()
+    if hasattr(model_output["log_probs"], "_tpu_padded_values"):
+        # TPU engines pad responses to a bucketed length on device (see no_padding_2_padding): match log_prob.
+        width = log_prob.shape[1]
+        data = {k: torch.nn.functional.pad(v, (0, width - v.shape[1])).to(log_prob.device) for k, v in data.items()}
 
     response_mask = data["response_mask"].to(bool)
     # compute policy loss

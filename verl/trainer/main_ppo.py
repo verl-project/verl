@@ -19,6 +19,7 @@ import hydra
 import ray
 from omegaconf import DictConfig, OmegaConf
 
+from verl.plugin.platform import get_platform
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -68,7 +69,10 @@ def run_ppo(config, task_runner_class) -> None:
             # DictConfig, so adding an `env_vars` key to it raises ConfigKeyError.
             default_runtime_env.setdefault("env_vars", {})["TRANSFER_QUEUE_ENABLE"] = "1"
 
-        runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        # Platform settings (e.g. TPU's worker_process_setup_hook) sit between verl's defaults and the
+        # user's ray_kwargs.ray_init.runtime_env, so the user's config wins on conflicts.
+        platform_runtime_env = get_platform().get_ray_init_kwargs().get("runtime_env", {})
+        runtime_env = OmegaConf.merge(default_runtime_env, platform_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
