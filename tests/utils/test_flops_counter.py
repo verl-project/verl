@@ -456,6 +456,46 @@ CONFIG = {
             709446422495232 / 1e12,
         ),
     },
+    "qwen3_vl_4b": {
+        "config": {  # Qwen/Qwen3-VL-4B-Instruct
+            # num_attention_heads * head_dim (32 * 128 = 4096) != hidden_size (2560),
+            # so head_dim must be read from the config instead of being derived.
+            "model_type": "qwen3_vl",
+            # -------- Text config --------
+            "text_config": {
+                "vocab_size": 151936,
+                "hidden_size": 2560,
+                "intermediate_size": 9728,
+                "num_hidden_layers": 36,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+            },
+            # -------- Vision config (ViT) --------
+            "vision_config": {
+                "deepstack_visual_indexes": [5, 11, 17],
+                "num_heads": 16,
+                "depth": 24,
+                "hidden_size": 1024,
+                "intermediate_size": 4096,
+                "out_hidden_size": 2560,
+                "spatial_merge_size": 2,
+                "temporal_patch_size": 2,
+                "in_channels": 3,
+                "patch_size": 16,
+            },
+        },
+        "batch_seqlens_tuple": (
+            [512, 1024, 2048],
+            [4096, 4096, 4096],
+        ),
+        "images_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # head_dim is taken from the config (128), not hidden_size // num_attention_heads (80).
+        "expected_flops_tuple": (
+            110225906466816 / 1e12,
+            415025911037952 / 1e12,
+        ),
+    },
     "qwen3_vl_moe": {
         "config": {  # Qwen/Qwen3-VL-30B-A3B
             "model_type": "qwen3_vl_moe",
@@ -540,6 +580,7 @@ CONFIG = {
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_vl",
+        "qwen3_vl_4b",
         "qwen3_vl_moe",
     ],
 )

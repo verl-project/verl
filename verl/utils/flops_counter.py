@@ -133,7 +133,7 @@ def _estimate_qwen3_vl_flops(config, tokens_sum, batch_seqlens, delta_time, **ka
     num_attention_heads = config.text_config.num_attention_heads
     intermediate_size = config.text_config.intermediate_size
 
-    head_dim = hidden_size // num_attention_heads
+    head_dim = getattr(config.text_config, "head_dim", hidden_size // num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
