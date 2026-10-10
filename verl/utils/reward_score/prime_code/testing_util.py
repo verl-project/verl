@@ -232,14 +232,24 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             raw_inputs = inputs
             raw_outputs = in_outs["outputs"][index]
             if which_type == CODE_TYPE.call_based:
-                inputs = [json.loads(line) for line in inputs.split("\n")]
-                in_outs["outputs"][index] = json.loads(in_outs["outputs"][index])
+                if isinstance(inputs, str):
+                    # LiveCodeBench-style layout: each input is a string holding one JSON
+                    # value per line, and each expected output is its JSON encoding.
+                    inputs = [json.loads(line) for line in inputs.split("\n")]
+                    in_outs["outputs"][index] = json.loads(in_outs["outputs"][index])
 
-                truncate_line_size = 300 // (raw_inputs.count("\n") + 1)
-                raw_inputs = "\n".join(
-                    [truncatefn(line, truncate_line_size) for line in raw_inputs.strip().split("\n")]
-                )
-                raw_outputs = truncatefn(raw_outputs, 200)
+                    truncate_line_size = 300 // (raw_inputs.count("\n") + 1)
+                    raw_inputs = "\n".join(
+                        [truncatefn(line, truncate_line_size) for line in raw_inputs.strip().split("\n")]
+                    )
+                    raw_outputs = truncatefn(raw_outputs, 200)
+                else:
+                    # APPS/TACO-style layout: each input is already the list of arguments
+                    # for the call and each expected output is the value itself, so both
+                    # are used as-is for the comparison below and JSON-encoded only for
+                    # the truncated metadata.
+                    raw_inputs = truncatefn(json.dumps(inputs), 300)
+                    raw_outputs = truncatefn(json.dumps(raw_outputs), 200)
             else:
                 raw_inputs = truncatefn(raw_inputs)
                 raw_outputs = truncatefn(raw_outputs, 200)
