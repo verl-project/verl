@@ -49,6 +49,7 @@ class SingleTurnTrajectory:
     raw_prompt: tuple[dict[str, Any], ...]
     assistant_response: str
     expected_num_turns: int = 2
+    assistant_reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,8 +112,15 @@ def _schema(
     )
 
 
-def _assistant(content: str, tool_calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _assistant(
+    content: str,
+    tool_calls: list[dict[str, Any]] | None = None,
+    *,
+    reasoning_content: str | None = None,
+) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": content}
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
     if tool_calls:
         message["tool_calls"] = tool_calls
     return message
@@ -492,7 +500,70 @@ MULTITURN_RETRY_SYSTEM = ToolAgentTrajectory(
 )
 
 
-SINGLE_TURN_TRAJECTORIES: tuple[SingleTurnTrajectory, ...] = (SINGLE_TURN_CHAT,)
+SINGLE_TURN_REASONING_CHAT = SingleTurnTrajectory(
+    name="singleturnreasoning",
+    description="A single assistant response includes separate reasoning_content and final content.",
+    raw_prompt=(
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is 2 + 2?"},
+    ),
+    assistant_reasoning_content="Adding two and two gives four.",
+    assistant_response="2 + 2 = 4.",
+)
+
+
+MULTITURN_REASONING_TOOL = ToolAgentTrajectory(
+    name="multiturnreasoningtool",
+    description="Reasoning-bearing assistant turns surround a tool response and its merge boundary.",
+    raw_prompt=(
+        {"role": "system", "content": "You are a weather assistant. Use the weather tool before answering."},
+        {"role": "user", "content": "What is the weather in Seattle today?"},
+    ),
+    tools=TOOLS[:1],
+    steps=(
+        TrajectoryStep(
+            assistant=_assistant(
+                "I will check today's weather.",
+                [_tool_call("call_reasoning_weather", "get_weather", {"city": "Seattle", "day": "today"})],
+                reasoning_content="I need current weather data to answer accurately.",
+            ),
+            appended_messages=(
+                _tool_message("call_reasoning_weather", "get_weather", get_weather("Seattle", "today")),
+            ),
+        ),
+        TrajectoryStep(
+            assistant=_assistant(
+                "Seattle is rainy today, with a high of 12 C.",
+                reasoning_content="The tool reports rain and a high of 12 C for Seattle today.",
+            ),
+        ),
+    ),
+)
+
+
+MULTITURN_REASONING_USER = ToolAgentTrajectory(
+    name="multiturnreasoninguser",
+    description="A user follow-up adds context after an assistant turn carrying reasoning_content.",
+    raw_prompt=(
+        {"role": "system", "content": "You are a helpful arithmetic assistant."},
+        {"role": "user", "content": "What is 2 + 2?"},
+    ),
+    tools=(),
+    steps=(
+        TrajectoryStep(
+            assistant=_assistant("2 + 2 = 4.", reasoning_content="Adding two and two gives four."),
+            appended_messages=({"role": "user", "content": "Now multiply that result by 3."},),
+        ),
+        TrajectoryStep(
+            assistant=_assistant(
+                "4 times 3 is 12.", reasoning_content="The previous result was four; four times three is twelve."
+            ),
+        ),
+    ),
+)
+
+
+SINGLE_TURN_TRAJECTORIES: tuple[SingleTurnTrajectory, ...] = (SINGLE_TURN_CHAT, SINGLE_TURN_REASONING_CHAT)
 
 
 TOOL_AGENT_TRAJECTORIES: tuple[ToolAgentTrajectory, ...] = (
@@ -500,6 +571,8 @@ TOOL_AGENT_TRAJECTORIES: tuple[ToolAgentTrajectory, ...] = (
     MULTITURN_MULTI_TOOL,
     MULTITURN_RETRY_USER,
     MULTITURN_RETRY_SYSTEM,
+    MULTITURN_REASONING_TOOL,
+    MULTITURN_REASONING_USER,
 )
 
 
