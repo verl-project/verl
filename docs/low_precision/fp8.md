@@ -158,6 +158,23 @@ Results and observations:
 - FP8 rollout : over 35% rollout speedup
 - Expecting more perf gain with CUDA 12.9
 
+### Failing loudly on a broken quantized rollout
+
+Two failures met while validating quantized rollouts on B200 were silent: the run kept going with
+exit code 0 and normal-looking logs while every sample was garbage (a quantized `lm_head` producing
+`nan` logits; an engine serving stale kernel scale layouts after a weight sync). When
+`actor_rollout_ref.rollout.quantization` is set, both trainers therefore check the step metrics after
+each step and raise a `RuntimeError` naming the likely causes if
+
+- `training/rollout_probs_diff_mean` is non-finite while the batch had valid tokens;
+- `rollout_corr/kl` is non-finite or above 1.0 (healthy quantized rollouts read about 0.001–0.03);
+- every response hits the length cap (`response_length/clip_ratio` close to 1) on two consecutive steps.
+
+Disable with `VERL_QUANT_SENTINEL=0`; tune with `VERL_QUANT_SENTINEL_KL_MAX` and
+`VERL_QUANT_SENTINEL_CLIP_STEPS`. Runs without rollout quantization are never checked. The sentinel
+only catches gross failures: a moderate fault, such as one layer type left unquantized (KL 0.007–0.010),
+stays inside the range of healthy quantized rollouts.
+
 ---
 
 ## FP8 End-to-End (Training + Rollout)
