@@ -29,10 +29,110 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import typing
 
 import torch
 import torch.distributed as dist
+
+_LIGER_FUNCTION = None
+
+
+def _require_liger_runtime():
+    global _LIGER_FUNCTION
+
+    if _LIGER_FUNCTION is not None:
+        return _LIGER_FUNCTION
+
+    try:
+        from liger_kernel.ops import LigerFusedLinearScaledCrossEntropyTPFunction
+    except ImportError as exc:
+        raise RuntimeError("The Liger TP-FLSCE backend requires `liger-kernel==0.8.4`") from exc
+
+    _LIGER_FUNCTION = LigerFusedLinearScaledCrossEntropyTPFunction
+    return _LIGER_FUNCTION
+
+
+def configure_liger_flsce(
+    *,
+    max_tokens: int,
+    hidden_size: int,
+    local_vocab_size: int,
+    process_group: dist.ProcessGroup,
+    device: torch.device,
+) -> bool:
+    """Configure through Liger collectively on WORLD, including non-output PP stages."""
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0
+        for value in (max_tokens, hidden_size, local_vocab_size)
+    ):
+        raise ValueError("Liger TP-FLSCE workspace dimensions must be positive integers")
+    if process_group is None:
+        raise ValueError("A tensor-parallel process group is required to configure Liger TP-FLSCE")
+    try:
+        from liger_kernel.ops.configure import FusedLinearCrossEntropyConfig, configure
+    except ImportError as exc:
+        raise RuntimeError(
+            "Megatron's Liger backend requires `liger-kernel==0.8.4` with the public configure API."
+        ) from exc
+
+    # Names must agree across WORLD but must not be reused for a different
+    # partition, even when a later engine uses the same TP size.
+    partitions = [None] * dist.get_world_size()
+    dist.all_gather_object(partitions, tuple(dist.get_process_group_ranks(process_group)))
+    partition_id = hashlib.sha256(repr(partitions).encode("ascii")).hexdigest()
+    group_name = f"verl_tp_{partition_id}"
+    return configure(
+        process_groups={group_name: process_group},
+        bootstrap_group=dist.group.WORLD,
+        device=device,
+        flsce=FusedLinearCrossEntropyConfig(
+            max_tokens=max_tokens,
+            hidden_size=hidden_size,
+            local_vocab_size=local_vocab_size,
+            group=group_name,
+        ),
+    )
+
+
+def _linear_cross_entropy_liger(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float,
+    reduction: str,
+    dist_process_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not isinstance(reduction, str):
+        raise TypeError(f"reduction must be a string, got {type(reduction)}")
+    if reduction.lower() != "none":
+        raise NotImplementedError("The Liger TP-FLSCE backend currently supports reduction='none' only")
+    if dist_process_group is None:
+        raise ValueError("A tensor-parallel process group is required for the Liger TP-FLSCE backend")
+    if hidden.ndim not in (2, 3):
+        raise ValueError(f"hidden must be 2D or 3D, got shape {tuple(hidden.shape)}")
+    if weight.ndim != 2:
+        raise ValueError(f"weight must be 2D, got shape {tuple(weight.shape)}")
+
+    tp_function = _require_liger_runtime()
+
+    hidden = hidden.reshape(-1, hidden.shape[-1])
+    labels = labels.reshape(-1).to(torch.int64)
+    if hidden.shape[0] != labels.shape[0]:
+        raise ValueError(f"hidden has {hidden.shape[0]} tokens, but labels has {labels.shape[0]} elements")
+    if hidden.shape[0] == 0:
+        raise ValueError("The Liger TP-FLSCE backend requires at least one token")
+
+    nll, entropy = tp_function.apply(
+        hidden,
+        weight,
+        labels,
+        dist_process_group,
+        temperature=temperature,
+        ignore_index=-100,
+        return_entropy=True,
+    )
+    return -nll, entropy
 
 
 class LinearCrossEntropy(torch.autograd.Function):
@@ -116,4 +216,35 @@ class LinearCrossEntropy(torch.autograd.Function):
         return (d_hidden, d_weight, None, None, None, None)
 
 
-linear_cross_entropy = LinearCrossEntropy.apply
+def linear_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: typing.Optional[float] = 1.0,
+    reduction: typing.Optional[str] = "none",
+    dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+    *,
+    impl_backend: str = "triton",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not isinstance(impl_backend, str):
+        raise TypeError(f"impl_backend must be a string, got {type(impl_backend)}")
+    impl_backend = impl_backend.lower()
+    if impl_backend == "triton":
+        return LinearCrossEntropy.apply(
+            hidden,
+            weight,
+            labels,
+            temperature,
+            reduction,
+            dist_process_group,
+        )
+    if impl_backend == "liger":
+        return _linear_cross_entropy_liger(
+            hidden,
+            weight,
+            labels,
+            temperature,
+            reduction,
+            dist_process_group,
+        )
+    raise ValueError(f"Unsupported linear cross entropy backend {impl_backend!r}; choose 'triton' or 'liger'")

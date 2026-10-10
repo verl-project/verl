@@ -482,7 +482,7 @@ class MegatronEngine(BaseEngine):
         from verl.models.mcore.model_forward_fused import patch_fused_forward
 
         for model in self.module:
-            patch_fused_forward(model)
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config

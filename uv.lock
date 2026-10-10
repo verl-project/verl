@@ -1816,15 +1816,15 @@ wheels = [
 
 [[package]]
 name = "liger-kernel"
-version = "0.8.2"
+version = "0.8.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "torch", version = "2.13.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "triton" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ff/a5/27575f85fd91cb92a0d72b4c37daa79021334926b5c4624f7ce9fa15e6ae/liger_kernel-0.8.2.tar.gz", hash = "sha256:387673ed6bf64fc8150cc8315fed578d2fc717ec3450f53489f480880223c1b8", size = 6136426, upload-time = "2026-08-18T20:54:30.62Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/a9/6689c0790bc680fac910d6203246f9f7fb382a7614424eef9080cc5025f4/liger_kernel-0.8.4.tar.gz", hash = "sha256:e4ef9b7a30c69f207ffbe37fdf95e391ba72ac5b4ee0a333f55732c47e661750", size = 6800691, upload-time = "2026-09-30T20:46:10.682Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/b3/a66f1d9143697784ad2c2abf665b02c47aa17857232ed72224588186103c/liger_kernel-0.8.2-py3-none-any.whl", hash = "sha256:84c0a7bc9bf4d4cf8ea5ba89ff84d28686afc94215b220851d9f57dc87852741", size = 644266, upload-time = "2026-08-18T20:54:28.728Z" },
+    { url = "https://files.pythonhosted.org/packages/58/9f/c54c1285491e530c898de7be389368265660a2292afc18777f5d6c37f0ad/liger_kernel-0.8.4-py3-none-any.whl", hash = "sha256:9a5f184020080917111aba265ccf260547d7d93274829d6f02196d387a6a4111", size = 900182, upload-time = "2026-09-30T20:46:08.42Z" },
 ]
 
 [[package]]
@@ -5526,8 +5526,8 @@ requires-dist = [
     { name = "hf-transfer", marker = "extra == 'ci'" },
     { name = "hydra-core" },
     { name = "hydra-core", marker = "extra == 'verl-core'" },
-    { name = "liger-kernel", marker = "extra == 'fsdp'", specifier = ">=0.8.2" },
-    { name = "liger-kernel", marker = "extra == 'megatron'", specifier = ">=0.8.2" },
+    { name = "liger-kernel", marker = "extra == 'fsdp'", specifier = "==0.8.4" },
+    { name = "liger-kernel", marker = "extra == 'megatron'", specifier = "==0.8.4" },
     { name = "math-verify", marker = "extra == 'math'" },
     { name = "mathruler", marker = "extra == 'verl-core'" },
     { name = "matplotlib", marker = "extra == 'megatron'" },

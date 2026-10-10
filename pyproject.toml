@@ -140,7 +140,7 @@ fsdp = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    "liger-kernel>=0.8.2",
+    "liger-kernel==0.8.4",
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
     # transformers NOT pinned here: verl-core carries it and the project-wide
@@ -163,7 +163,7 @@ megatron = [
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
-    "liger-kernel>=0.8.2",
+    "liger-kernel==0.8.4",
     # Megatron-Bridge is imported as megatron.bridge and installed deps-free — see
     # [[tool.uv.dependency-metadata]] below. The wheelhouse builds tag v0.6.2.
     "megatron-bridge==0.6.2",
