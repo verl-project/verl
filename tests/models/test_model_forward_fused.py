@@ -308,7 +308,12 @@ def test_output_processor_gathers_before_kernel_and_resolves_weight(monkeypatch,
         seen.update(hidden=hidden, weight=weight, labels=labels_arg, temperature=temperature)
         return torch.tensor([11.0]), torch.tensor([13.0])
 
+    def fake_ensure_ready(weight):
+        events.append("weight_ready")
+        assert weight is (tied_weight if use_tied_weight else output_layer_weight)
+
     monkeypatch.setattr(mff, "gather_from_sequence_parallel_region", fake_gather)
+    monkeypatch.setattr(mff, "ensure_fused_weight_ready", fake_ensure_ready)
     monkeypatch.setattr(mff, "linear_cross_entropy", fake_linear_cross_entropy)
     monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
 
@@ -324,7 +329,7 @@ def test_output_processor_gathers_before_kernel_and_resolves_weight(monkeypatch,
 
     expected_hidden = gathered_hidden_states if sequence_parallel else hidden_states
     expected_weight = tied_weight if use_tied_weight else output_layer_weight
-    assert events == (["gather"] if sequence_parallel else []) + ["linear_cross_entropy"]
+    assert events == (["gather"] if sequence_parallel else []) + ["weight_ready", "linear_cross_entropy"]
     assert seen["hidden"] is expected_hidden
     assert seen["weight"] is expected_weight
     assert seen["labels"] is labels
