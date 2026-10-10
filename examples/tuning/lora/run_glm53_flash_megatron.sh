@@ -242,7 +242,6 @@ REF=(
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.ref.megatron.use_mbridge=True
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=False
     actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${REF_PP}
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=${REF_EP}
