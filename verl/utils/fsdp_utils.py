@@ -1164,7 +1164,7 @@ def fsdp2_sharded_save_to_cpu(
         # Only process sharded parameters of DTensor type (core parameters of FSDP2)
         if not isinstance(param, DTensor):
             # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
-            cpu_tensor = param.detach().cpu()
+            cpu_tensor = param.detach().to("cpu", copy=True)
             cpu_sharded_state[param_name] = (cpu_tensor, None)
             continue
 
@@ -1177,7 +1177,7 @@ def fsdp2_sharded_save_to_cpu(
         # 1. Extract local shard data from the current GPU (_local_tensor)
         local_gpu_tensor = param._local_tensor  # Local shard attribute defined in your DTensor class
         # 2. Move to CPU memory and detach from computation graph
-        local_cpu_tensor = local_gpu_tensor.detach().cpu()
+        local_cpu_tensor = local_gpu_tensor.detach().to("cpu", copy=True)
         # 3. Save CPU shard + original DTensorSpec (ensure sharding rules remain unchanged)
         cpu_sharded_state[param_name] = (local_cpu_tensor, param._spec)
 

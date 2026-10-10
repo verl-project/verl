@@ -259,6 +259,13 @@ class VeOmniEngine(FSDPEngine):
             # or disabling router_replay).
             self._router_replay.install(self.module)
 
+        mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+        converter = get_checkpoint_tensor_converter(self.module)
+        # A converter's export_weights picks its own output dtypes (e.g. FP8 weights with FP32 scales).
+        if mixed_precision_config.enable and not hasattr(converter, "export_weights"):
+            hf_export_dtype = getattr(torch, mixed_precision_config.param_dtype)
+        else:
+            hf_export_dtype = None
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.module,
             optimizer=self.optimizer,
@@ -266,6 +273,8 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
+            per_tensor_param_fn=self.get_per_tensor_param,
+            hf_export_dtype=hf_export_dtype,
         )
 
         self.to(

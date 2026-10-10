@@ -385,14 +385,23 @@ HuggingFace to Megatron DistCheckpoint details
 
 The training engine can load HF weights directly through Megatron-Bridge, so an
 initial conversion is optional. For workflows requiring MCore distributed weights,
-the converter uses Bridge to load HF weights and saves a v2 model-only checkpoint:
+the converter uses Bridge to load HF weights and saves a model-only checkpoint
+in verl's v2 directory layout.
+
+The converter accepts ``--tp_size``, ``--pp_size``, ``--ep_size``, and
+``--etp_size``. All four default to 1. When PP is 1, it is inferred as
+``WORLD_SIZE // lcm(TP, ETP * EP)``. The world size must be
+divisible by both ``TP * PP`` and ``ETP * EP * PP``. Virtual pipeline
+parallelism is disabled during conversion.
+
+For example, to convert a MoE model with TP2/PP2/EP4/ETP1 on 8 GPUs:
 
 .. code:: bash
 
-    torchrun --standalone --nproc_per_node=4 scripts/converter_hf_to_mcore.py \
+    torchrun --standalone --nproc_per_node=8 scripts/converter_hf_to_mcore.py \
         --hf_model_path Qwen/Qwen3-30B-A3B \
         --output_path /path/to/mcore_checkpoint \
-        --pp_size 4 \
+        --tp_size 2 --pp_size 2 --ep_size 4 --etp_size 1 \
         --test
 
 The converter uses BF16. ``--test`` reloads the saved

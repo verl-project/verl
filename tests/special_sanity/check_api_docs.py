@@ -46,8 +46,6 @@ _ALLOW_LIST = [
     "verl.utils.profiler.mark_annotate",
     "verl.utils.profiler.mark_end_range",
     "verl.utils.profiler.mark_start_range",
-    "verl.models.mcore.qwen2_5_vl.get_vision_model_config",
-    "verl.models.mcore.qwen2_5_vl.get_vision_projection_config",
     "verl.utils.transformers_compat.flash_attn_supports_top_left_mask",
 ]
 

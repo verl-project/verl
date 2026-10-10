@@ -221,7 +221,11 @@ class FSDPEngine(BaseEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
+            per_tensor_param_fn=self._get_hf_export_per_tensor_param,
+            hf_export_dtype=self._autocast_dtype,
         )
+        if self._qat_enabled and self.checkpoint_manager.should_save_hf_model:
+            raise NotImplementedError("Saving 'hf_model' in checkpoints is not supported with QAT enabled.")
 
         self.to(
             device="cpu",
@@ -1090,6 +1094,12 @@ class FSDPEngine(BaseEngine):
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.module)
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
+        if self._is_lora:
+            return self._merged_lora_per_tensor_param(), None
+        return self.get_per_tensor_param()
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()

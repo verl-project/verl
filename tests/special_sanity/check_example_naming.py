@@ -79,6 +79,7 @@ ALLOWED_BACKENDS = (
     "mindspeed",
     "automodel",
     "veomni",
+    "torchtitan",
 )
 
 # Directories whose scripts have their own conventions and are exempt from
@@ -106,6 +107,12 @@ DEFAULT_IGNORE_FILES = (
     # folding ``_multi_rs`` into a ROLLOUT_SERVER env-var toggle rather than
     # in this PR.
     "examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh",
+    # ROCm (4 nodes x 8 MI355X) sibling of run_deepseek_v4_flash_megatron.sh;
+    # it pins the dedicated docker/rocm/Dockerfile.rocm.deepseek-v4 image and
+    # exposes the qat/fp8/bf16 flavours via TRAIN_MODE. The canonical script
+    # does not yet carry a ROCm platform switch; migrate by folding ``_rocm``
+    # into a platform/DEVICE env-var toggle rather than in this PR.
+    "examples/grpo_trainer/run_deepseek_v4_flash_megatron_rocm.sh",
 )
 
 

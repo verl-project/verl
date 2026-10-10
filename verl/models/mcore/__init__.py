@@ -22,11 +22,9 @@ neutralize_broken_flash_attn_cute()
 from .registry import (  # noqa: E402
     get_mcore_engine_forward_fn,
     get_mcore_forward_fused_model_engine_fn,
-    hf_to_mcore_config,
 )
 
 __all__ = [
-    "hf_to_mcore_config",
     "get_mcore_engine_forward_fn",
     "get_mcore_forward_fused_model_engine_fn",
 ]
