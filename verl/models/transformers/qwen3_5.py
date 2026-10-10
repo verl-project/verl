@@ -654,6 +654,9 @@ def forward_with_triton_backend(
         temperature,
         "none",
     )
+    batch_size, seq_len, _ = hidden_states.shape
+    log_probs = log_probs.reshape(batch_size, seq_len)
+    entropy = entropy.reshape(batch_size, seq_len)
     return Qwen3_5CausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
