@@ -180,4 +180,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${ROLLOUT[@]}" \
     "${TRAINER[@]}" \
-    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log
+    "$@"
