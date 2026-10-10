@@ -247,6 +247,10 @@ class FSDPEngineConfig(EngineConfig):
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
+        batch_invariant (bool): If true, export vLLM's batch-invariant env at the entrypoint, install vLLM's
+            batch-invariant kernel overrides in the training process and compute log-probs with the vLLM sampler
+            formula (fp32 log_softmax + gather), so the actor forward can be compared bitwise with a rollout
+            running under VLLM_BATCH_INVARIANT=1. Not compatible with use_fused_kernels.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
         use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
@@ -289,6 +293,7 @@ class FSDPEngineConfig(EngineConfig):
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    batch_invariant: bool = False
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
     turbo_config: dict[str, Any] = field(default_factory=dict)
 

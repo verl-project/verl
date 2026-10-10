@@ -17,7 +17,12 @@ from unittest.mock import patch
 
 from omegaconf import OmegaConf
 
-from verl.trainer.constants_ppo import NVTX_INJECTION_ENV, get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import (
+    BATCH_INVARIANT_ENV,
+    NVTX_INJECTION_ENV,
+    export_batch_invariant_env,
+    get_ppo_ray_runtime_env,
+)
 
 _INHERITED = "/usr/local/cuda/lib64/libcupti.so"
 
@@ -49,3 +54,15 @@ def test_nvtx_injection_override_can_be_opted_out():
         env_vars = get_ppo_ray_runtime_env(_config("torch"))["env_vars"]
 
     assert NVTX_INJECTION_ENV not in env_vars
+
+
+def test_batch_invariant_env_is_forwarded_to_workers():
+    with patch.dict(os.environ, {}, clear=True):
+        export_batch_invariant_env()
+        env_vars = get_ppo_ray_runtime_env(_config(None))["env_vars"]
+
+    for key, value in BATCH_INVARIANT_ENV.items():
+        assert env_vars[key] == value
+    assert env_vars["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    for key in ("NCCL_ALGO", "NCCL_PROTO", "NCCL_NTHREADS", "NCCL_MIN_NCHANNELS", "NCCL_P2P_NET_DISABLE"):
+        assert key not in env_vars
