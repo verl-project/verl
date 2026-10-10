@@ -39,7 +39,7 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
-from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
+from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder, DeepSeekV41ContinuousTokenBuilder
 
 
 class _DummyTokenizer:
@@ -491,6 +491,8 @@ def test_builtin_family_surface():
         "deepseekvl2",
         "deepseekv4",
         "deepseekv4vl",
+        "deepseekv41",
+        "deepseekv41vl",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -519,6 +521,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEKV4, DeepSeekV4ContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEKV41, DeepSeekV41ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -542,6 +545,7 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("deepseek_v2", ContinuousTokenModelFamily.DEEPSEEK),
         ("deepseek_v3", ContinuousTokenModelFamily.DEEPSEEK),
         ("deepseek_v4", ContinuousTokenModelFamily.DEEPSEEKV4),
+        ("deepseek_v41", ContinuousTokenModelFamily.DEEPSEEKV41),
         # VL families.
         ("qwen2_5_vl", ContinuousTokenModelFamily.QWEN25_VL),
         ("qwen3_vl", ContinuousTokenModelFamily.QWEN3_VL),
@@ -1727,6 +1731,33 @@ def test_deepseek_v4_does_not_duplicate_existing_assistant_eos():
 
     assert result.token_ids == [10, tokenizer.eos_id, 30, 40]
     assert result.inserted_token_ids == []
+
+
+def test_deepseek_v41_thinking_adds_numeric_reasoning_effort_prefix():
+    tokenizer = _DeepSeekBoundaryTokenizer()
+    builder = DeepSeekV41ContinuousTokenBuilder(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    token_ids = builder.build_initial_tokens([{"role": "user", "content": "question"}])
+    rendered = (
+        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the"
+        + "higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>"
+    )
+    assert token_ids == [ord(char) for char in rendered]
+
+
+def test_deepseek_v4_thinking_does_not_add_v41_reasoning_prefix():
+    tokenizer = _DeepSeekBoundaryTokenizer()
+    builder = DeepSeekV4ContinuousTokenBuilder(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    token_ids = builder.build_initial_tokens([{"role": "user", "content": "question"}])
+    rendered = "<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜><think>"
+    assert token_ids == [ord(char) for char in rendered]
 
 
 def test_unknown_family_fails_during_resolution():

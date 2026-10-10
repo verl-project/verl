@@ -35,9 +35,9 @@ loss_agg_mode="token-mean"
 
 # Keep the trajectory batch divisible by the training data-parallel size and
 # by ppo_mini_batch_size * rollout.n.
-train_prompt_bsz=${TRAIN_BATCH_SIZE:-48}
+train_prompt_bsz=${TRAIN_BATCH_SIZE:-64}
 n_resp_per_prompt=${ROLLOUT_N:-8}
-train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-48}
+train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-64}
 
 rollout_is="token"
 rollout_is_threshold="0.5_5.0"
@@ -185,8 +185,9 @@ run python3 -m verl.trainer.main_ppo \
     data.image_key=images \
     data.trust_remote_code=True \
     data.return_raw_chat=True \
-    +data.apply_chat_template_kwargs.enable_thinking=True \
-    data.filter_overlong_prompts=False \
+    +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-False} \
+    +data.apply_chat_template_kwargs.reasoning_effort=${REASONING_EFFORT:-high} \
+    data.filter_overlong_prompts=${FILTER_OVERLONG_PROMPTS:-True} \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

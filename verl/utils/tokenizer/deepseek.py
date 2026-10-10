@@ -45,6 +45,7 @@ LATEST_REMINDER_TOKEN = "<｜latest_reminder｜>"
 THINK_START_TOKEN = "<think>"
 THINK_END_TOKEN = "</think>"
 DSML_TOKEN = "｜DSML｜"
+SYSTEM_TOKEN = "<｜System｜>"
 
 TOOL_CALLS_START_TOKEN = f"<{DSML_TOKEN}tool_calls>"
 TOOL_CALLS_END_TOKEN = f"</{DSML_TOKEN}tool_calls>"
@@ -97,6 +98,11 @@ REASONING_EFFORT_MAX = (
     "considered alternative, and rejected hypothesis to ensure absolutely no assumption is left "
     "unchecked.\n\n"
 )
+
+REASONING_EFFORT_TEMPLATE = (
+    "Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
+)
+REASONING_EFFORT_MAPPINGS = {"low": 25, "high": 50, "xhigh": 75, "max": 100}
 
 TOOLS_TEMPLATE = """## Tools
 
@@ -188,7 +194,8 @@ def encode_messages(
     add_bos_token: bool = True,
     enable_thinking: bool = False,
     drop_thinking: bool = True,
-    reasoning_effort: Optional[str] = None,
+    reasoning_effort: Optional[str | int] = None,
+    v41_reasoning_effort: bool = False,
 ) -> str:
     """Encode a conversation into a DeepSeek-V4 prompt.
 
@@ -220,7 +227,16 @@ def encode_messages(
     out: list[str] = []
     if add_bos_token:
         out.append(BOS_TOKEN)
-    if think and reasoning_effort in ("max", "xhigh"):
+    if think and v41_reasoning_effort:
+        effort = "high" if reasoning_effort is None else reasoning_effort
+        if isinstance(effort, str):
+            if effort not in REASONING_EFFORT_MAPPINGS:
+                raise ValueError(f"Invalid DeepSeek-V4.1 reasoning_effort: {effort!r}")
+            effort = REASONING_EFFORT_MAPPINGS[effort]
+        if not isinstance(effort, int) or not 1 <= effort <= 100:
+            raise ValueError("DeepSeek-V4.1 reasoning_effort must be an int in [1, 100]")
+        out.extend((SYSTEM_TOKEN, REASONING_EFFORT_TEMPLATE.format(budget=effort)))
+    elif think and reasoning_effort in ("max", "xhigh"):
         out.append(REASONING_EFFORT_MAX)
     if tools:
         out.append("\n\n" + render_tools(tools))
@@ -294,6 +310,8 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
     stopped before emitting it.
     """
 
+    _v41_reasoning_effort = False
+
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
         self._eos_id = require_token_id(tokenizer, EOS_TOKEN)
@@ -353,6 +371,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             enable_thinking=self._enable_thinking,
             drop_thinking=self._drop_thinking if drop_thinking is None else drop_thinking,
             reasoning_effort=self._reasoning_effort,
+            v41_reasoning_effort=self._v41_reasoning_effort,
         )
         return normalize_token_ids(self.tokenizer.encode(text, add_special_tokens=False))
 
@@ -440,3 +459,15 @@ class DeepSeekV4VLContinuousTokenBuilder(DeepSeekV4ContinuousTokenBuilder):
                 for block in content
             ]
         return super()._encode(messages, tools=tools, add_bos_token=add_bos_token, drop_thinking=drop_thinking)
+
+
+class DeepSeekV41ContinuousTokenBuilder(DeepSeekV4ContinuousTokenBuilder):
+    """DeepSeek-V4.1 text protocol, including its numeric reasoning prefix."""
+
+    _v41_reasoning_effort = True
+
+
+class DeepSeekV41VLContinuousTokenBuilder(DeepSeekV4VLContinuousTokenBuilder):
+    """DeepSeek-V4.1 vision-language protocol."""
+
+    _v41_reasoning_effort = True
