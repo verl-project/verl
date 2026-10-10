@@ -455,6 +455,21 @@ class vLLMHttpServer:
         if self._disaggregation_role != "null":
             args["kv_transfer_config"] = json.dumps(self._disaggregation_kv_transfer_config)
 
+        if self.config.trace.enable_otel:
+            otlp_traces_endpoint = RLInsightLogger.otlp_traces_endpoint()
+            if otlp_traces_endpoint:
+                resource_attributes = {
+                    "project": self.config.trace.project_name,
+                    "experiment_name": self.config.trace.experiment_name,
+                    "replica": str(self.replica_rank),
+                }
+                os.environ["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(
+                    f"{key}={value}" for key, value in resource_attributes.items() if value
+                )
+                # vLLM defaults to gRPC. Use HTTP.
+                os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+                args["otlp-traces-endpoint"] = otlp_traces_endpoint
+
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
