@@ -86,6 +86,9 @@ class AgentData:
         self.response_logprobs: list[float] = []
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
+        # BaseTool instance ids by tool name: one instance per tool per trajectory.
+        self.tool_instances: dict[str, str] = {}
+        self.tool_instance_lock = asyncio.Lock()
         self.user_turns = 0
         self.assistant_turns = 0
 
@@ -167,17 +170,20 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data._active_tool_schemas = self.tool_schemas
 
         # State machine loop
-        state = AgentState.PENDING
-        while state != AgentState.TERMINATED:
-            if state == AgentState.PENDING:
-                state = await self._handle_pending_state(agent_data, sampling_params)
-            elif state == AgentState.GENERATING:
-                state = await self._handle_generating_state(agent_data, sampling_params)
-            elif state == AgentState.PROCESSING_TOOLS:
-                state = await self._handle_processing_tools_state(agent_data)
-            else:
-                logger.error(f"Invalid state: {state}")
-                state = AgentState.TERMINATED
+        try:
+            state = AgentState.PENDING
+            while state != AgentState.TERMINATED:
+                if state == AgentState.PENDING:
+                    state = await self._handle_pending_state(agent_data, sampling_params)
+                elif state == AgentState.GENERATING:
+                    state = await self._handle_generating_state(agent_data, sampling_params)
+                elif state == AgentState.PROCESSING_TOOLS:
+                    state = await self._handle_processing_tools_state(agent_data)
+                else:
+                    logger.error(f"Invalid state: {state}")
+                    state = AgentState.TERMINATED
+        finally:
+            await self._release_tool_instances(agent_data)
 
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
@@ -211,6 +217,15 @@ class ToolAgentLoop(AgentLoopBase):
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
+
+    async def _release_tool_instances(self, agent_data: AgentData) -> None:
+        """Release every BaseTool instance of the trajectory; one failing release does not skip the others."""
+        active_tools = getattr(agent_data, "_active_tools", self.tools)
+        for tool_name, instance_id in agent_data.tool_instances.items():
+            try:
+                await active_tools[tool_name].release(instance_id)
+            except Exception as e:
+                logger.warning(f"Error releasing tool '{tool_name}' instance {instance_id}: {e}")
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
@@ -469,7 +484,6 @@ class ToolAgentLoop(AgentLoopBase):
             return ToolResponse(text=msg), 0.0, {}
 
         # Execute tool
-        tool, instance_id = None, None
         try:
             tool = active_tools[tool_name]
 
@@ -481,19 +495,19 @@ class ToolAgentLoop(AgentLoopBase):
                 raw = await tool.call(tool_args)
                 tool_execution_response, tool_reward, res = normalize_function_tool_return(raw)
             else:
-                # BaseTool subclass
-                kwargs = tools_kwargs.get(tool_name, {})
-                instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+                # BaseTool subclass: created on first use, reused for the rest of the trajectory.
+                async with agent_data.tool_instance_lock:
+                    instance_id = agent_data.tool_instances.get(tool_name)
+                    if instance_id is None:
+                        kwargs = tools_kwargs.get(tool_name, {})
+                        instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+                        agent_data.tool_instances[tool_name] = instance_id
                 tool_execution_response, tool_reward, res = await tool.execute(
                     instance_id, tool_args, agent_data=agent_data
                 )
         except Exception as e:
             logger.warning(f"Error executing tool '{tool_name}': {e}")
             return ToolResponse(text=f"Error executing tool '{tool_name}': {e}"), 0.0, {}
-        finally:
-            # Only BaseTool instances need release (function tools never set instance_id).
-            if tool and instance_id and not isinstance(tool, FunctionTool):
-                await tool.release(instance_id)
 
         tool_response_text = tool_execution_response.text
         if tool_response_text and len(tool_response_text) > self.max_tool_response_length:
