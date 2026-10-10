@@ -218,3 +218,24 @@ def test_rollout_failure_evicted_samples_are_summed_across_iterations():
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 1})
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 2})
     assert agg.get_aggregated_metrics()["training/rollout_failure/evicted_samples"] == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("role", ["actor", "critic"])
+@pytest.mark.parametrize("phase", ["forward_backward", "optimizer"])
+def test_update_phase_means_weight_by_optimizer_updates(role, phase):
+    agg = MetricsAggregator()
+    key = f"timing_s/{role}_{phase}_mean"
+    agg.add_step_metrics({key: 2.0, f"{role}/mini_batches_executed": 1}, sample_count=100)
+    agg.add_step_metrics({key: 4.0, f"{role}/mini_batches_executed": 3}, sample_count=1)
+    out = agg.get_aggregated_metrics()
+    assert out[key] == pytest.approx(3.5)
+    assert out[f"{role}/mini_batches_executed"] == 4
+
+
+def test_phase_mean_default_weight_and_driver_duration_remain_distinct():
+    agg = MetricsAggregator()
+    agg.add_step_metrics({"timing_s/actor_optimizer_mean": 2, "timing_s/update_actor": 5})
+    agg.add_step_metrics({"timing_s/actor_optimizer_mean": 4, "timing_s/update_actor": 7})
+    out = agg.get_aggregated_metrics()
+    assert out["timing_s/actor_optimizer_mean"] == 3
+    assert out["timing_s/update_actor"] == 12

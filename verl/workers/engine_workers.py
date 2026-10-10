@@ -204,6 +204,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if isinstance(grad_norm, torch.Tensor):
             grad_norm = grad_norm.detach().item()
         lr = metrics.pop("lr", None)
+        # Phase timers are local wall times. allgather would wrap the floats in a list and break
+        # the micro-batch flattener, which iterates each gathered value.
+        forward_backward_seconds = metrics.pop("timing_s/forward_backward", None)
+        optimizer_seconds = metrics.pop("timing_s/optimizer", None)
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
         if dp_group is not None:
@@ -226,14 +230,35 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if k.startswith("mtp_losses"):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
+        phase_metrics = {}
         # compute mfu
         if global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
-            final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
+            world_size = torch.distributed.get_world_size()
+            final_metrics["mfu"] = estimated_flops / promised_flops / world_size
             if forward_only:
                 final_metrics["mfu"] /= 3.0
+            # Same token FLOPs as mfu, with optimizer and zero_grad removed from the denominator.
+            if forward_backward_seconds is not None and forward_backward_seconds > 0:
+                forward_flops, forward_promised = self.flops_counter.estimate_flops(
+                    global_token_num, forward_backward_seconds, images_seqlens=images_seqlens
+                )
+                phase_metrics["mfu_forward_backward"] = forward_flops / forward_promised / world_size
+                if forward_only:
+                    phase_metrics["mfu_forward_backward"] /= 3.0
+        if forward_backward_seconds is not None:
+            phase_metrics["timing_s/forward_backward"] = forward_backward_seconds
+        if optimizer_seconds is not None:
+            phase_metrics["timing_s/optimizer"] = optimizer_seconds
+        if phase_metrics and dp_group is not None:
+            # Metadata-only TensorDict collection keeps the first reporting rank.
+            # Reduce local scalar observations across DP first, leaving scalars
+            # for the mini-batch flattener rather than nested lists of floats.
+            gathered = allgather_dict_into_dict(data=phase_metrics, group=dp_group)
+            phase_metrics = {key: sum(values) / len(values) for key, values in gathered.items()}
+        final_metrics.update(phase_metrics)
         # model outputs
         model_output = output.pop("model_output", {})
         # We only return final_metrics
@@ -334,6 +359,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                             )
                     append_to_dict(metrics, output)
 
+                metrics["mini_batches_executed"] = [len(output_lst)]
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:
                 output = None

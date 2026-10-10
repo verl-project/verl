@@ -1,6 +1,9 @@
 # Target class for this configuration
 _target_: verl.workers.config.AutomodelEngineConfig
 
+# Synchronize phase boundaries to report forward/backward and optimizer wall time.
+enable_update_phase_timing: false
+
 # Backend strategy identifier
 strategy: automodel
 

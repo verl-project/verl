@@ -479,6 +479,9 @@ class VeOmniEngine(FSDPEngine):
                 output_lst.append(meta_info)
 
             result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+            if not forward_only:
+                # Report the synchronized microbatch count once per completed backward batch.
+                result["metrics"]["perf/micro_batch_count"] = [len(micro_batches)]
             return result
         finally:
             if rr_active:

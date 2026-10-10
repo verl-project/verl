@@ -81,6 +81,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
+from verl.utils.metric.utils import promote_update_phase_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
@@ -564,11 +565,12 @@ class PPOTrainer(ABC):
         # 1. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
             self.on_sample_begin()
-            batch, off_policy_metrics = self.replay_buffer.sample(
-                global_steps=self.global_steps,
-                partition_id="train",
-                batch_size=sample_batch_size,
-            )
+            with marked_timer("group_wait", timing_raw, color="red"):
+                batch, off_policy_metrics = self.replay_buffer.sample(
+                    global_steps=self.global_steps,
+                    partition_id="train",
+                    batch_size=sample_batch_size,
+                )
             metrics.update(off_policy_metrics)
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
@@ -1819,6 +1821,7 @@ class PPOTrainer(ABC):
         output: TensorDict = output.get()
         output = rename_dict(output["metrics"], "critic/")
         output["perf/mfu/critic"] = output.pop("critic/mfu")
+        promote_update_phase_metrics(output, "critic")
         critic_metrics = reduce_metrics(output)
         metrics.update(critic_metrics)
 
@@ -1864,6 +1867,7 @@ class PPOTrainer(ABC):
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
         output["perf/mfu/actor"] = output.pop("actor/mfu")
+        promote_update_phase_metrics(output, "actor")
         actor_metrics = reduce_metrics(output)
         metrics.update(actor_metrics)
 

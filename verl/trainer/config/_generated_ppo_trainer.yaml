@@ -26,6 +26,7 @@ actor_rollout_ref:
       override_optimizer_config: null
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
+      enable_update_phase_timing: false
       wrap_policy:
         min_num_params: 0
       param_offload: false
@@ -234,6 +235,7 @@ actor_rollout_ref:
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
+      enable_update_phase_timing: false
       wrap_policy:
         min_num_params: 0
       param_offload: false
@@ -556,6 +558,7 @@ critic:
     override_optimizer_config: null
   fsdp:
     _target_: verl.workers.config.FSDPEngineConfig
+    enable_update_phase_timing: false
     wrap_policy:
       min_num_params: 0
     param_offload: false

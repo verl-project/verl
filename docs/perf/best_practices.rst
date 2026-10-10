@@ -241,3 +241,43 @@ Trainer
     Number of validation samples stored in logs. Start with 10 and adjust as needed.
   - ``trainer.val_before_train``:
     Run validation before training begins when you require a baseline checkpoint.
+
+
+Opt-in Update Phase Timing
+--------------------------
+
+Set ``actor_rollout_ref.actor.engine.enable_update_phase_timing=true`` to report
+forward/backward and optimizer wall times separately. The default is false and
+adds no phase synchronization. The critic engine supports the same option.
+
+With timing enabled, device synchronization at phase boundaries attributes
+queued work to the correct phase. ``perf/mfu/actor`` remains the whole-update
+MFU; ``perf/mfu/actor_forward_backward`` uses the model forward/backward time.
+``timing_s/actor_optimizer_mean`` includes zeroing gradients and optimizer work.
+``timing_s/actor_forward_backward_mean`` reports the forward/backward interval.
+Both phase durations explicitly average reporting DP ranks before metadata
+collection and then average update mini-batches. Forward/backward MFU averages
+the per-rank ratios over the same reporting ranks; critic metrics use
+the corresponding ``critic`` names.
+
+These are local synchronized wall intervals. Existing metric aggregation
+reduces reporting ranks; the intervals are not a global maximum over every
+rank and must not be subtracted from driver RPC time to infer transfer cost.
+Synchronization can affect overlap, so enable it for diagnosis and compare
+performance with the same timing setting.
+
+The v1 colocated async trainer also records host wall intervals for
+``group_wait``, ``rollout_abort``, ``rollout_sleep``, ``weight_sync`` and
+``rollout_resume``. Existing aggregate ``gen`` and ``update_weights`` timers
+remain available; nested intervals must not be added to their parents.
+``weight_sync`` includes backend wake/load/offload work, not only transport.
+VeOmni reports its completed backward batch's microbatch count under
+``actor/perf/micro_batch_count``. The ordinary metric path averages this count
+over reporting DP ranks and update mini-batches; it is not a sum over the
+cluster and does not count duplicate sequence/model-parallel work. These host
+timers and the count do not add device synchronization.
+
+Across a V1 parameter synchronization cycle, update phase means are weighted by
+``actor/mini_batches_executed`` (or the corresponding critic key), with one update
+as the fallback when that metric is absent. Driver wall intervals continue to sum
+across iterations; phase means must not be summed with those intervals.

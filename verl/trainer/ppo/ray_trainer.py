@@ -65,6 +65,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import deprecated, load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.metric.utils import promote_update_phase_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip.skip_manager import SkipManager
@@ -1371,6 +1372,7 @@ class RayPPOTrainer:
         actor_output = rename_dict(actor_output, "actor/")
         # modify key name
         actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+        promote_update_phase_metrics(actor_output, "actor")
         actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
         return actor_output
@@ -1399,6 +1401,7 @@ class RayPPOTrainer:
         output = rename_dict(output, "critic/")
         # modify key name
         output["perf/mfu/critic"] = output.pop("critic/mfu")
+        promote_update_phase_metrics(output, "critic")
         critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
         return critic_output
 
