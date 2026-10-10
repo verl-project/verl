@@ -17,7 +17,12 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = [
+    "AlgoConfig",
+    "FilterGroupsConfig",
+    "KLControlConfig",
+    "RolloutCorrectionConfig",
+]
 
 
 @dataclass
