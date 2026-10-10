@@ -76,6 +76,52 @@ def test_empty_registry_is_a_noop_for_replay_disabled_engine():
     assert rr_utils.RouterReplayHelper.is_replay_backward_action(tf_config) is False
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("precision", ["bf16", "fp8", "fp4"])
+def test_record_replay_roundtrip_uses_model_padding(monkeypatch, nested, precision):
+    """Use real pack/unpack functions and unequal lengths, not a padding flag mock."""
+    config = _config(num_layers=1)
+    config.fp8 = "e4m3" if precision == "fp8" else None
+    config.fp4 = "nvfp4" if precision == "fp4" else None
+    config.pipeline_model_parallel_size = 1
+    monkeypatch.setattr(rr_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_rank", lambda: 0)
+    # postprocess_thd_engine obtains the group even for CP=1; no collective
+    # uses it in this fixture, which intentionally has no distributed runtime.
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_group", lambda: None)
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "gather_from_sequence_parallel_region", lambda tensor, **_kwargs: tensor)
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+
+    input_ids = torch.arange(10).reshape(2, 5)
+    mask = torch.tensor([[True, True, True, False, False], [True] * 5])
+    routes = (torch.arange(20) + 300).reshape(2, 5, 1, 2).to(torch.int16)
+    use_padding = rr_utils.use_transformer_engine_padding(config)
+    if nested:
+        input_ids = torch.nested.as_nested_tensor([input_ids[0, :3], input_ids[1]], layout=torch.jagged)
+        routes = torch.nested.as_nested_tensor([routes[0, :3], routes[1]], layout=torch.jagged)
+        mask = None
+        packed, _, _ = rr_utils.preprocess_thd_engine(routes, use_fp8_padding=use_padding)
+    else:
+        packed, _ = rr_utils.preprocess_packed_seqs(routes, mask, use_fp8_padding=use_padding)
+    assert packed.shape[1] == (8 if precision == "bf16" else 128)
+    router = _FakeRouter(packed[0, :, 0, :].clone(), RouterReplayAction.RECORD)
+    model = object()
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter([(1, router)]))
+    recorded = []
+    rr_utils.merge_router_topk_indices(mask, input_ids, recorded, config, model=model)
+    assert len(recorded) == 1
+    if nested:
+        torch.testing.assert_close(recorded[0].values(), routes.values())
+        torch.testing.assert_close(recorded[0].offsets(), routes.offsets())
+    else:
+        torch.testing.assert_close(recorded[0][mask], routes[mask])
+        assert torch.count_nonzero(recorded[0][~mask]) == 0
+    rr_utils.set_router_replay_data(recorded[0], mask, config, model=model)
+    torch.testing.assert_close(router.target_topk_idx, router.recorded_topk_idx.to(torch.int64))
+
+
 def test_action_queries_use_forwarded_model_instead_of_global_registry(monkeypatch):
     stale_router = _FakeRouter(router_replay_action=RouterReplayAction.REPLAY_FORWARD)
     live_router = _FakeRouter(router_replay_action=RouterReplayAction.RECORD)

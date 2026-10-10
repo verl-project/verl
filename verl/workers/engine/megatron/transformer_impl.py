@@ -206,6 +206,19 @@ class MegatronEngine(BaseEngine):
         if self._qat_enabled:
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
 
+        # Real NVFP4 is a separate TE execution path, not a QAT mode.
+        self._real_nvfp4_config = getattr(self.engine_config, "real_nvfp4", None)
+        self._real_nvfp4_enabled = self._real_nvfp4_config is not None and getattr(
+            self._real_nvfp4_config, "enable", False
+        )
+        if self._real_nvfp4_enabled:
+            logger.info(
+                "Real NVFP4 enabled in MegatronEngine: backward=%s, BF16 layers at start/end=%d/%d",
+                self._real_nvfp4_config.backward_override,
+                self._real_nvfp4_config.num_layers_at_start_in_bf16,
+                self._real_nvfp4_config.num_layers_at_end_in_bf16,
+            )
+
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
@@ -282,6 +295,8 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self._real_nvfp4_enabled:
+            self._apply_real_nvfp4_overrides(override_transformer_config)
         if self.is_value_model:
             # A value head cannot share weights with the vocabulary embedding. Force the HF
             # flag off and record it for the checkpoint manager. Apply the
@@ -389,6 +404,125 @@ class MegatronEngine(BaseEngine):
         self.peft_cls = get_peft_cls(
             model_config=self.model_config, bridge=self.bridge, provider=self.provider, dtype=self.param_dtype
         )
+
+    def _apply_real_nvfp4_overrides(self, override_transformer_config: dict) -> None:
+        """Set the MCore FP4 options and per-module recipe owned by real_nvfp4.
+
+        An explicit override may restate a value but not contradict it.
+        """
+
+        from megatron.core.quantization.quant_config import RecipeConfig
+
+        from verl.utils.real_nvfp4 import (
+            real_nvfp4_quant_recipe_config,
+            validate_real_nvfp4_model_contract,
+            validate_real_nvfp4_parallelism,
+        )
+
+        hf_config = self.model_config.hf_config
+        validate_real_nvfp4_model_contract(hf_config)
+        # Layer-index recipes and the post-build attestation use global layer
+        # indices, which only holds without pipeline splitting.
+        validate_real_nvfp4_parallelism(
+            pipeline_size=self.engine_config.pipeline_model_parallel_size,
+            virtual_pipeline_size=self.engine_config.virtual_pipeline_model_parallel_size,
+        )
+        if override_transformer_config.get("fp8") not in (None, False):
+            raise ValueError("real_nvfp4 cannot be combined with an FP8 transformer recipe")
+        if override_transformer_config.get("quant_recipe") is not None:
+            raise ValueError("real_nvfp4 owns override_transformer_config.quant_recipe")
+
+        start = self._real_nvfp4_config.num_layers_at_start_in_bf16
+        end = self._real_nvfp4_config.num_layers_at_end_in_bf16
+        # first_last_layers_bf16 keeps the carved-out layers outside the FP4
+        # autocast; the per-module recipe below must agree with it.
+        required_overrides = {
+            "fp4": "e2m1",
+            "fp4_recipe": "nvfp4",
+            # BF16 master parameters for Adam and refit; W4A4 refers to GEMMs.
+            "fp4_param": False,
+            "first_last_layers_bf16": start + end > 0,
+            "num_layers_at_start_in_bf16": start,
+            "num_layers_at_end_in_bf16": end,
+        }
+        for key, expected in required_overrides.items():
+            configured = override_transformer_config.get(key)
+            if configured is not None and configured != expected:
+                raise ValueError(
+                    f"real_nvfp4 requires override_transformer_config.{key}={expected!r}, got {configured!r}"
+                )
+            override_transformer_config[key] = expected
+        override_transformer_config["quant_recipe"] = RecipeConfig.from_config_dict(
+            real_nvfp4_quant_recipe_config(int(hf_config.num_hidden_layers), start, end)
+        )
+
+    def _attest_real_nvfp4_runtime(self) -> None:
+        """Prove that the built Megatron model will enter TE's NVFP4 context."""
+
+        if not self._real_nvfp4_enabled:
+            return
+        fp4 = self.tf_config.fp4
+        fp4_recipe = getattr(self.tf_config.fp4_recipe, "value", self.tf_config.fp4_recipe)
+        if fp4 != "e2m1" or fp4_recipe != "nvfp4":
+            raise RuntimeError(f"Megatron finalized a different FP4 config: fp4={fp4!r}, fp4_recipe={fp4_recipe!r}")
+
+        from megatron.core.fp4_utils import get_fp4_recipe
+
+        from verl.utils.real_nvfp4 import real_nvfp4_moe_layer_partition, validate_real_nvfp4_te_recipe
+
+        recipe = get_fp4_recipe(self.tf_config)
+        if type(recipe).__name__ != "NVFP4BlockScaling":
+            raise RuntimeError(f"Expected Transformer Engine NVFP4BlockScaling, got {type(recipe).__name__}")
+        validate_real_nvfp4_te_recipe(recipe, backward_override=self._real_nvfp4_config.backward_override)
+
+        # Count the effective per-module precision of every attention and
+        # routed-expert linear layer, then compare with the requested layout.
+        hf_config = self.model_config.hf_config
+        quantized_layers, bf16_layers = real_nvfp4_moe_layer_partition(
+            hf_config,
+            num_layers_at_start_in_bf16=self._real_nvfp4_config.num_layers_at_start_in_bf16,
+            num_layers_at_end_in_bf16=self._real_nvfp4_config.num_layers_at_end_in_bf16,
+        )
+        num_layers = int(hf_config.num_hidden_layers)
+        expected_counts = {
+            ("linear_qkv", None): num_layers,
+            ("linear_proj", None): num_layers,
+            ("linear_fc1", "nvfp4"): len(quantized_layers),
+            ("linear_fc2", "nvfp4"): len(quantized_layers),
+            ("linear_fc1", None): len(bf16_layers),
+            ("linear_fc2", None): len(bf16_layers),
+        }
+        counts = dict.fromkeys(expected_counts, 0)
+        suffixes = (
+            ".self_attention.linear_qkv",
+            ".self_attention.linear_proj",
+            ".mlp.experts.linear_fc1",
+            ".mlp.experts.linear_fc2",
+        )
+
+        def recipe_name(training_recipe, field):
+            value = getattr(training_recipe, field, None)
+            return getattr(value, "value", value)
+
+        for model_chunk in self.module:
+            for name, submodule in unwrap_model(model_chunk).named_modules():
+                if not name.endswith(suffixes):
+                    continue
+                quant_params = getattr(submodule, "te_quant_params", None)
+                if quant_params is None:
+                    raise RuntimeError(f"real_nvfp4 per-module recipe did not match {name}")
+                if recipe_name(quant_params.training_recipe, "fp8_quantization_recipe") is not None:
+                    raise RuntimeError(f"real_nvfp4 module {name} carries an FP8 recipe")
+                key = (name.rsplit(".", 1)[1], recipe_name(quant_params.training_recipe, "fp4_quantization_recipe"))
+                if key not in counts:
+                    raise RuntimeError(f"real_nvfp4 module {name} has unexpected precision {key[1]!r}")
+                counts[key] += 1
+
+        if counts != expected_counts:
+            raise RuntimeError(
+                "real_nvfp4 did not apply the per-module recipe to the expected layers: "
+                f"actual={counts}, expected={expected_counts}"
+            )
 
     def _resolve_override_ddp_config(self):
         """Keep the DDP grad-bucket dtype consistent with the optimizer's grad buffer.
@@ -527,6 +661,8 @@ class MegatronEngine(BaseEngine):
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
 
         self.module = self._build_megatron_module()
+
+        self._attest_real_nvfp4_runtime()
 
         if self._qat_enabled and not self.engine_config.forward_only:
             from verl.utils.modelopt import apply_qat_to_modules

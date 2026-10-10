@@ -48,6 +48,11 @@ version = "0.3.0"
 name = "transferqueue"
 
 [[manifest.dependency-metadata]]
+name = "transformer-engine-torch"
+version = "2.18.0"
+requires-dist = ["einops", "nvdlfw-inspect", "nvidia-cudnn-frontend>=1.25.0", "onnx", "onnxscript", "packaging", "pydantic", "torch>=2.1", "transformer-engine-cu13==2.18.0"]
+
+[[manifest.dependency-metadata]]
 name = "veomni"
 version = "0.1.12"
 
@@ -1163,6 +1168,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d2/76/c180949eae5161b9fcf4c928cab52f0c257ce84c1a59b4462b1d2b6e5883/flash_linear_attention-0.5.2.tar.gz", hash = "sha256:c053d3a75c8f5b725063f719ae6bce0f4d9dac6da32735be8ae7d485a6c9820f", size = 208110, upload-time = "2026-07-27T18:26:20.536Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/90/d2/2070e3cf2148c5cce99ca4876633c4b7b89ec085323600bd3d47aeacd306/flash_linear_attention-0.5.2-py3-none-any.whl", hash = "sha256:dcf405d81f5426393b59037097aa700d0f4a841465d5028d5aa543f4502f2400", size = 399590, upload-time = "2026-07-27T18:26:17.912Z" },
+]
+
+[[package]]
+name = "flashinfer-cubin"
+version = "0.6.18"
+source = { registry = "https://flashinfer.ai/whl" }
+wheels = [
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_cubin-0.6.18-py3-none-any.whl", hash = "sha256:2dd65c0fcfc6bc44c67f148530de5372979c2e3d260e47935730f94156d4d873" },
+]
+
+[[package]]
+name = "flashinfer-jit-cache"
+version = "0.6.18+cu130"
+source = { registry = "https://flashinfer.ai/whl/cu130" }
+wheels = [
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu130-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:c97664eab2f21a01f6b8d24d10ba33631a1a64b981f788c3f61d81ebbf905970" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu130-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:428a47a554ade93c30a818e142b781df58582bf056bab94611fb4c906cc366bf" },
 ]
 
 [[package]]
@@ -4999,24 +5021,50 @@ wheels = [
 
 [[package]]
 name = "transformer-engine"
-version = "2.16.1"
-source = { registry = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" }
+version = "2.18.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/6a/29b7ac32c9df481c0284a57ac9639d9f3dbd4e6f8e899f03e685268d7c8d/transformer_engine-2.18.0-py3-none-any.whl", hash = "sha256:9d7c4bd74247e57eeed2af46f7b91c133cc405404953f1f3f2e38be8c47cdb7e", size = 1017270, upload-time = "2026-08-11T00:49:41.88Z" },
+]
+
+[package.optional-dependencies]
+core-cu13 = [
+    { name = "transformer-engine-cu13" },
+]
+pytorch = [
+    { name = "transformer-engine-torch" },
+]
+
+[[package]]
+name = "transformer-engine-cu13"
+version = "2.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-metadata" },
+    { name = "packaging" },
+    { name = "pydantic" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/37/b2010e5c18b25b5016064685dbf858d880bdeb859e2d1b2d5b9cd69230fa/transformer_engine_cu13-2.18.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:d5e9049256d66e1fb1743b5e1ff78e65a580bc09c371f4977ca71cdf7899fca4", size = 278015862, upload-time = "2026-08-11T00:50:33.011Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/6e/0b069ec61e499d147b34a17af389384a81be02435d37bcbf72d8590ac2f2/transformer_engine_cu13-2.18.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:38e842ab60fdb9f7ca4d0345bdea1f7f9219a3d712a169b4973a95bc38011263", size = 279471780, upload-time = "2026-08-11T20:02:03.84Z" },
+]
+
+[[package]]
+name = "transformer-engine-torch"
+version = "2.18.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
-    { name = "importlib-metadata" },
     { name = "nvdlfw-inspect" },
+    { name = "nvidia-cudnn-frontend" },
     { name = "onnx" },
     { name = "onnxscript" },
     { name = "packaging" },
     { name = "pydantic" },
     { name = "torch", version = "2.13.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "transformer-engine-cu13" },
 ]
-wheels = [
-    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/transformer-engine-v2.16.1-py3.11-torch2.13.0/transformer_engine-2.16.1-cp311-cp311-linux_aarch64.whl" },
-    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/transformer-engine-v2.16.1-py3.11-torch2.13.0/transformer_engine-2.16.1-cp311-cp311-linux_x86_64.whl" },
-    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/transformer-engine-v2.16.1-py3.12-torch2.13.0/transformer_engine-2.16.1-cp312-cp312-linux_aarch64.whl" },
-    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/transformer-engine-v2.16.1-py3.12-torch2.13.0/transformer_engine-2.16.1-cp312-cp312-linux_x86_64.whl" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/db/f9/34ad04b8e32f3d43f6dd166831a68741eea0a4448a3b30d87e4b6da00bbd/transformer_engine_torch-2.18.0.tar.gz", hash = "sha256:47b812b1cb7b6941fedd3d160a2239a346ee88c28c60937a694f49f54ddccf79", size = 412496, upload-time = "2026-08-11T00:49:35.528Z" }
 
 [[package]]
 name = "transformers"
@@ -5365,11 +5413,12 @@ megatron = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.28.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "transferqueue" },
-    { name = "transformer-engine" },
+    { name = "transformer-engine", extra = ["core-cu13", "pytorch"], marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
     { name = "transformers" },
     { name = "trl" },
     { name = "uvicorn" },
     { name = "wandb" },
+    { name = "wheel" },
 ]
 sglang = [
     { name = "accelerate" },
@@ -5473,6 +5522,8 @@ vllm = [
     { name = "dill" },
     { name = "einops" },
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" } },
+    { name = "flashinfer-cubin" },
+    { name = "flashinfer-jit-cache" },
     { name = "hydra-core" },
     { name = "mathruler" },
     { name = "msgspec" },
@@ -5523,6 +5574,8 @@ requires-dist = [
     { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch213'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
     { name = "flash-linear-attention", marker = "extra == 'fsdp'", specifier = "==0.5.2" },
     { name = "flash-linear-attention", marker = "extra == 'megatron'", specifier = "==0.5.2" },
+    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.18", index = "https://flashinfer.ai/whl" },
+    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.18", index = "https://flashinfer.ai/whl/cu130" },
     { name = "hf-transfer", marker = "extra == 'ci'" },
     { name = "hydra-core" },
     { name = "hydra-core", marker = "extra == 'verl-core'" },
@@ -5600,7 +5653,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'sglang'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "sglang" } },
     { name = "torchvision", marker = "extra == 'vllm'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "vllm" } },
     { name = "transferqueue", marker = "extra == 'verl-core'", specifier = ">=0.1.10" },
-    { name = "transformer-engine", marker = "extra == 'megatron'", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
+    { name = "transformer-engine", extras = ["core-cu13", "pytorch"], marker = "extra == 'megatron'", specifier = "==2.18.0" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.13" },
     { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.12.1" },
     { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.12.1" },
@@ -5624,6 +5677,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.29.0" },
     { name = "wandb" },
     { name = "wandb", marker = "extra == 'verl-core'" },
+    { name = "wheel", marker = "extra == 'megatron'" },
 ]
 provides-extras = ["test", "math", "verl-core", "flash-attn-cu130torch213", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "torchtitan", "cpu"]
 
@@ -5846,6 +5900,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/dd/b2/381be8cfdee792dd117872481b6e378f85c957dd7c5bca38897b08f765fd/werkzeug-3.1.8.tar.gz", hash = "sha256:9bad61a4268dac112f1c5cd4630a56ede601b6ed420300677a869083d70a4c44", size = 875852, upload-time = "2026-04-02T18:49:14.268Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/93/8c/2e650f2afeb7ee576912636c23ddb621c91ac6a98e66dc8d29c3c69446e1/werkzeug-3.1.8-py3-none-any.whl", hash = "sha256:63a77fb8892bf28ebc3178683445222aa500e48ebad5ec77b0ad80f8726b1f50", size = 226459, upload-time = "2026-04-02T18:49:12.72Z" },
+]
+
+[[package]]
+name = "wheel"
+version = "0.48.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/20/50ed6bdf27dec98b568a8ae25dc599f35baa3d9709f9e83fd1edb56b9a90/wheel-0.48.0.tar.gz", hash = "sha256:94800765601e9171bf5d58d066e640662842bcedcbab982b2c90787a2c987322", size = 66471, upload-time = "2026-08-11T22:02:27.327Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl", hash = "sha256:3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab", size = 33320, upload-time = "2026-08-11T22:02:26.1Z" },
 ]
 
 [[package]]

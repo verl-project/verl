@@ -36,6 +36,7 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
+    "RealNVFP4EngineConfig",
 ]
 
 
@@ -145,6 +146,34 @@ class QATEngineConfig(BaseConfig):
 
 
 @dataclass
+class RealNVFP4EngineConfig(BaseConfig):
+    """Real W4A4 execution through Megatron-Core and Transformer Engine.
+
+    Unlike :class:`QATEngineConfig`, this mode does not replace linear layers
+    with ModelOpt fake-quant modules. Routed-expert MLP GEMMs run Transformer
+    Engine's NVFP4 recipe while parameters stay BF16; refit transports BF16
+    and the vLLM worker quantizes it. Attention remains BF16 on both sides.
+    """
+
+    enable: bool = False
+    backward_override: str = "dequantized"
+    num_layers_at_start_in_bf16: int = 0
+    num_layers_at_end_in_bf16: int = 0
+
+    def __post_init__(self) -> None:
+        if self.backward_override not in {"dequantized", "high_precision"}:
+            raise ValueError(
+                "real_nvfp4.backward_override must be 'dequantized' or 'high_precision', "
+                f"got {self.backward_override!r}"
+            )
+        if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:
+            raise ValueError(
+                "real_nvfp4 BF16 layer carve-out must be non-negative, got "
+                f"{self.num_layers_at_start_in_bf16}/{self.num_layers_at_end_in_bf16}"
+            )
+
+
+@dataclass
 class McoreEngineConfig(EngineConfig):
     """Configuration for Megatron parallelism.
 
@@ -208,12 +237,20 @@ class McoreEngineConfig(EngineConfig):
     use_megatron_fsdp: bool = False
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    real_nvfp4: RealNVFP4EngineConfig = field(default_factory=RealNVFP4EngineConfig)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.real_nvfp4.enable:
+            if self.qat.enable:
+                raise ValueError("real_nvfp4 and legacy ModelOpt QAT are mutually exclusive")
+            if self.dtype != "bfloat16":
+                raise ValueError("real_nvfp4 currently requires dtype='bfloat16'")
+            if self.use_megatron_fsdp:
+                raise ValueError("real_nvfp4 is a Megatron-DDP path and does not support Megatron-FSDP")
         if self.dynamic_context_parallel and (
             not isinstance(self.max_seqlen_per_dp_cp_rank, int)
             or isinstance(self.max_seqlen_per_dp_cp_rank, bool)

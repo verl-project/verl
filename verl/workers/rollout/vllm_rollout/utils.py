@@ -160,6 +160,9 @@ class vLLMColocateWorkerExtension:
     2. Online FP8 quantization
     """
 
+    # Set per instance in __new__ from vLLM's quantization method.
+    _is_real_nvfp4 = False
+
     def __new__(cls, **kwargs):
         set_death_signal()
 
@@ -194,6 +197,8 @@ class vLLMColocateWorkerExtension:
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
         _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
         _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
+        model_quantization = getattr(getattr(vllm_config, "model_config", None), "quantization", None)
+        _is_real_nvfp4 = model_quantization == "nvfp4_per_token"
         if _is_qat_model:
             from verl.utils.qat import apply_qat_patches
 
@@ -216,6 +221,7 @@ class vLLMColocateWorkerExtension:
         instance = super().__new__(cls)
         instance._is_qat_model = _is_qat_model
         instance._is_modelopt_qat = _is_modelopt_qat
+        instance._is_real_nvfp4 = _is_real_nvfp4
         return instance
 
     def _get_drafter_model(self):
@@ -257,6 +263,63 @@ class vLLMColocateWorkerExtension:
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
+        if self._is_real_nvfp4:
+            self._attest_real_nvfp4_runtime()
+
+    def _attest_real_nvfp4_runtime(self):
+        """Check the NVFP4/BF16 routed-expert layout and refit scale state."""
+        from verl.utils.real_nvfp4 import attest_vllm_native_nvfp4_runtime, real_nvfp4_moe_layer_partition
+
+        quantized_layers, bf16_layers = real_nvfp4_moe_layer_partition(
+            self.model_runner.vllm_config.model_config.hf_config,
+            num_layers_at_start_in_bf16=int(os.environ.get("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")),
+            num_layers_at_end_in_bf16=int(os.environ.get("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")),
+        )
+        # get_model() unwraps vLLM's CUDA-graph wrapper.
+        attest_vllm_native_nvfp4_runtime(
+            self.model_runner.get_model(),
+            quantized_layer_indices=quantized_layers,
+            bf16_layer_indices=bf16_layers,
+        )
+
+    def _update_real_nvfp4_weights(self, use_shm: bool):
+        """Refit through vLLM's layerwise reload, which re-quantizes each complete expert layer.
+
+        This is ``model_runner.reload_weights`` split into per-bucket loads, as the delta
+        weight-sync consumer does; the processed tensors are copied back into the storage
+        captured by CUDA graphs.
+        """
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload, initialize_layerwise_reload
+
+        from verl.utils.real_nvfp4 import RealNVFP4BF16TransportCheck
+
+        model = self.model_runner.get_model()
+        model_config = self.model_runner.vllm_config.model_config
+        transport = RealNVFP4BF16TransportCheck(model_config.hf_config)
+        error = None
+
+        def load_bucket(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            nonlocal error
+            if error is not None:
+                return
+            try:
+                transport.check_bucket(weights)
+                # Layerwise reload holds a layer's tensors until the layer is complete,
+                # while the receiver reuses its IPC buffer for the next bucket.
+                model.load_weights([(name, tensor.clone()) for name, tensor in weights])
+            except BaseException as exc:
+                # Keep acknowledging the remaining buckets so the sender is not left
+                # blocked, then raise once the round has finished.
+                error = exc
+
+        initialize_layerwise_reload(model)
+        receiver = BucketedWeightReceiver(zmq_handle=self._get_zmq_handle(), device=self.device, use_shm=use_shm)
+        receiver.receive_weights(on_bucket_received=load_bucket)
+        if error is not None:
+            raise error
+        transport.finish()
+        finalize_layerwise_reload(model, model_config)
+        self._attest_real_nvfp4_runtime()
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -275,6 +338,14 @@ class vLLMColocateWorkerExtension:
         if torch.version.hip is not None:
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
+
+        if self._is_real_nvfp4:
+            if peft_config is not None:
+                raise NotImplementedError("real W4A4 native reload does not support LoRA weight sync")
+            if self._use_mtp_drafter_weight_sync():
+                raise NotImplementedError("real W4A4 native reload does not support MTP drafter weight sync")
+            self._update_real_nvfp4_weights(use_shm)
+            return
 
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets

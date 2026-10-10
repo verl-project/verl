@@ -93,6 +93,8 @@ vllm = [
     # PyPI's 0.29.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
     # no wheelhouse routing and no source build.
     "vllm==0.29.0",
+    "flashinfer-cubin==0.6.18",
+    "flashinfer-jit-cache==0.6.18",
     # flashinfer is a transitive dep vllm 0.29 hard-pins to ==0.6.18 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
     # vllm 0.29 needs transformers>=5.10.4; 5.12.1 is the project-wide pin
@@ -147,9 +149,9 @@ fsdp = [
     # override below settles the version (5.12.1). See override-dependencies.
 ]
 
-# apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# megatron-core is git-sourced (built at sync time). onnxscript: works around an
-# undeclared TE import.
+# Apex, flash-attn and Megatron-Bridge come prebuilt from the wheelhouse.
+# Core is git-sourced; TE 2.18 uses its official PyPI release and extension.
+# onnxscript works around an undeclared TE import.
 megatron = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch213]",
@@ -159,7 +161,9 @@ megatron = [
     "torchaudio==2.11.0",
     "nvidia-mathdx",
     "apex",
-    "transformer-engine",
+    "transformer-engine[pytorch,core-cu13]==2.18.0",
+    # TE builds in the selected environment and imports wheel.bdist_wheel.
+    "wheel",
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
@@ -311,6 +315,8 @@ verl = [
 # One universal uv.lock: `uv lock` resolves every extra; conflicting extras
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
+# Follow TE's documented installation against the selected runtime dependencies.
+no-build-isolation-package = ["transformer-engine-torch"]
 # Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
 # aarch64 (GH200 / GB200 superchips).
 #
@@ -323,11 +329,12 @@ verl = [
 # That works because everything the cu130 backends need is published for both:
 # torch / torchvision / torchaudio cu130 (download.pytorch.org ships
 # manylinux_2_28_aarch64), vllm / sglang / sglang-kernel / cupy-cuda13x /
-# sglang-router (PyPI), and the three native wheelhouse builds apex /
-# flash-attn / transformer-engine (the wheelhouse builds those on
+# sglang-router (PyPI), and the two native wheelhouse builds apex /
+# flash-attn (the wheelhouse builds those on
 # ubuntu-24.04-arm with TORCH_CUDA_ARCH_LIST "9.0;10.0" — the only CUDA parts an
 # arm64 wheel can land on). megatron-bridge is py3-none-any; megatron-core
-# builds from git. The second entry costs one extra package (sglang's
+# builds from git; TE uses PyPI and may build its Torch extension.
+# The second entry costs one extra package (sglang's
 # aarch64-only decord2) and leaves every pinned version unchanged.
 #
 # If a package ever IS arch-specific, do NOT fork the backend into
@@ -451,8 +458,8 @@ requires-dist = []
 name = "TransferQueue"
 requires-dist = []
 
-# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.13
-# / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
+# Apex and flash-attn come prebuilt from the verl wheelhouse (cu130 / torch 2.13
+# / cp312, built for x86_64 AND aarch64). megatron-bridge
 # rides along (pure-python wheel off the same wheelhouse, so no git clone / build
 # either), and being py3-none-any it is the one wheelhouse component with a single
 # arch-independent build.
@@ -460,13 +467,13 @@ requires-dist = []
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
 # torch-2.13 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
 # so the wheelhouse copies bought nothing (same builds, same download size, same
-# install time) while costing a hash-less index entry. flashinfer stays on PyPI
-# for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
-# matches neither.
+# install time) while costing a hash-less index entry. FlashInfer Python stays
+# on PyPI; cubin and CUDA JIT caches use the matching official FlashInfer indices.
 [tool.uv.sources]
+flashinfer-cubin = { index = "flashinfer" }
+flashinfer-jit-cache = { index = "flashinfer-cu130" }
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
-transformer-engine   = { index = "verl-wheelhouse" }
 megatron-bridge      = { index = "verl-wheelhouse" }
 veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
 
@@ -518,3 +525,36 @@ explicit = true
 name = "verl-wheelhouse"
 url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/"
 explicit = true
+
+# Keep TE's extension build cache scoped to the selected Torch ABI.
+[tool.uv.extra-build-dependencies]
+transformer-engine-torch = [
+    { requirement = "torch", match-runtime = true },
+]
+
+[[tool.uv.index]]
+name = "flashinfer"
+url = "https://flashinfer.ai/whl"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
+explicit = true
+
+[[tool.uv.dependency-metadata]]
+# Published 2.18.0 sdist metadata; avoid executing its CUDA build backend
+# during lock resolution on login/CPU hosts. Do not suppress runtime dependencies.
+name = "transformer-engine-torch"
+version = "2.18.0"
+requires-dist = [
+    "einops",
+    "nvdlfw-inspect",
+    "nvidia-cudnn-frontend>=1.25.0",
+    "onnx",
+    "onnxscript",
+    "packaging",
+    "pydantic",
+    "torch>=2.1",
+    "transformer-engine-cu13==2.18.0",
+]

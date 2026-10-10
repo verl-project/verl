@@ -27,6 +27,7 @@ from .util import (
     preprocess_bshd_engine,
     preprocess_thd_engine,
     preprocess_vlm_thd_engine,
+    use_transformer_engine_padding,
 )
 
 
@@ -138,8 +139,8 @@ def gptmodel_forward_model_engine(
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
-    fp8 = unwrap_model(model).config.fp8
-    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+    model_config = unwrap_model(model).config
+    use_fp8_padding = use_transformer_engine_padding(model_config)
 
     model_kwargs = {}
     if "pixel_values" in multi_modal_inputs:
