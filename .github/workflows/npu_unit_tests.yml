@@ -116,6 +116,9 @@ jobs:
       - name: Running NPU profiling unit tests
         run: |
           pytest -s -x tests/utils/test_special_mstx_profile.py
+      - name: Running FSDP2 NPU model transfer regression
+        run: |
+          PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=2 tests/special_distributed/test_fsdp2_npu_model_transfer.py
       - name: Running NPU checkpoint_engine unit tests
         run: |
           pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py
