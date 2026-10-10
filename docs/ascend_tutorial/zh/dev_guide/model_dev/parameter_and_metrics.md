@@ -31,7 +31,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
-| `actor_rollout_ref.actor.strategy` | `fsdp` / `megatron` | 训练策略，FSDP 方案为 fsdp，Megatron 方案为 megatron |
+| `actor_rollout_ref.actor.strategy` | `fsdp` / `fsdp2` / `fsdp_turbo` / `megatron` | 顶层训练策略，也是 FSDP 后端的唯一配置入口；不要通过 `actor.fsdp_config.strategy` 选择后端 |
 | `actor_rollout_ref.actor.ppo_mini_batch_size` | `256` | PPO 训练的 mini batch 大小 |
 | `actor_rollout_ref.actor.ppo_micro_batch_size` | `null` | PPO 训练的 micro batch 大小 |
 | `actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu` | `null` | 每 GPU 的 PPO micro batch 大小 |
@@ -436,7 +436,6 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.actor.fsdp_config.seed` | `42` | 随机种子 |
 | `actor_rollout_ref.actor.fsdp_config.full_determinism` | `false` | 是否启用完全确定性 |
 | `actor_rollout_ref.actor.fsdp_config.forward_only` | `false` | 是否仅前向计算（Actor 为 false） |
-| `actor_rollout_ref.actor.fsdp_config.strategy` | `fsdp` | 策略类型 |
 | `actor_rollout_ref.actor.fsdp_config.dtype` | `bfloat16` | 模型存储数据类型 |
 
 #### 1.2.3 Reference FSDP 引擎配置
