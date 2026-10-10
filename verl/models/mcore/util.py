@@ -516,14 +516,18 @@ def postprocess_thd_engine(
         packed_output = torch.cat([rank_output[0] for rank_output in output_list], dim=0)
         for i in range(batch_size):
             sequence_start = cu_padded_cpu[i]
-            output_new.append(packed_output[sequence_start : sequence_start + seq_lens_cpu[i]])
+            # Contiguous materialization is required: on some NPU builds,
+            # as_nested_tensor() may keep the base storage of a view, so
+            # values.numel() no longer matches sum(lengths) and unbind() fails
+            # with split_with_sizes mismatch.
+            output_new.append(packed_output[sequence_start : sequence_start + seq_lens_cpu[i]].contiguous())
         return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
     for i in range(batch_size):
         if cp_size <= 1:
             s = seq_lens_cpu[i]
             start_idx = cu_padded_cpu[i]
-            output_new.append(output[0][start_idx : start_idx + s])
+            output_new.append(output[0][start_idx : start_idx + s].contiguous())
             continue
         s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
         half_seqlen = s_len_padded_chunk // 2
@@ -540,7 +544,7 @@ def postprocess_thd_engine(
             )
             tmp[j * half_seqlen : (j + 1) * half_seqlen] = o0
             tmp[s_len_padded - (j + 1) * half_seqlen : s_len_padded - j * half_seqlen] = o1
-        output_new.append(tmp[:s_len])
+        output_new.append(tmp[:s_len].contiguous())
 
     output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
@@ -714,7 +718,7 @@ def postprocess_bshd_engine(
     for i in range(batch_size):
         if cp_size <= 1:
             mask = attention_mask[i].bool()
-            output_new.append(output[i][mask])
+            output_new.append(output[i][mask].contiguous())
             continue
 
         local_seqlen = output.shape[1]
@@ -742,7 +746,7 @@ def postprocess_bshd_engine(
             full_mask[front_start:front_end] = m0
             full_mask[back_start:back_end] = m1
 
-        output_new.append(tmp[full_mask])
+        output_new.append(tmp[full_mask].contiguous())
 
     output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 

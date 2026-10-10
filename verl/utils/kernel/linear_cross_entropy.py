@@ -116,4 +116,39 @@ class LinearCrossEntropy(torch.autograd.Function):
         return (d_hidden, d_weight, None, None, None, None)
 
 
-linear_cross_entropy = LinearCrossEntropy.apply
+def linear_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: typing.Optional[float] = 1.0,
+    reduction: typing.Optional[str] = "none",
+    dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+):
+    """Fused linear + cross-entropy (+ token entropy).
+
+    Always returns ``(logprobs, entropy)``. On Ascend NPU, dispatches to CANN
+    vocab-parallel fused CE when available (``VERL_NPU_LCE_BACKEND=auto|cann``).
+    Hybrid backward: CANN CE when ``dentropy==0``; chunked PyTorch CE+entropy
+    (Triton-aligned) when ``dentropy!=0``.
+    """
+    if temperature is None:
+        temperature = 1.0
+    if reduction is None:
+        reduction = "none"
+
+    if hidden.device.type == "npu":
+        from verl.utils.kernel.npu.cann_linear_ce import CannLinearCrossEntropy, should_use_cann_linear_ce
+
+        if should_use_cann_linear_ce(hidden.device):
+            hidden_2d = hidden.view(-1, hidden.shape[-1]) if len(hidden.shape) != 2 else hidden
+            labels_1d = labels.view(-1) if len(labels.shape) != 1 else labels
+            return CannLinearCrossEntropy.apply(
+                hidden_2d, weight, labels_1d, float(temperature), str(reduction), dist_process_group
+            )
+        raise RuntimeError(
+            "Fused linear_cross_entropy on NPU requires CANN torch_npu APIs "
+            "(VERL_NPU_LCE_BACKEND=auto|cann). Disable use_fused_kernels, or install "
+            "a torch_npu build that provides the fused linear-CE ops."
+        )
+
+    return LinearCrossEntropy.apply(hidden, weight, labels, float(temperature), str(reduction), dist_process_group)
