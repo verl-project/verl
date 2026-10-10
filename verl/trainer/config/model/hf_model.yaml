@@ -67,6 +67,9 @@ fused_kernel_options:
   # Megatron only supports triton.
   impl_backend: torch
 
+# output projection dtype; null preserves each backend's default behavior
+lm_head_dtype: null
+
 # TiledMLP configuration for memory-efficient MLP computation.
 # Reduces peak memory by processing MLP forward/backward in tiles.
 tiled_mlp:
