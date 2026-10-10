@@ -14,6 +14,7 @@
 
 import asyncio
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -21,6 +22,63 @@ from omegaconf import OmegaConf
 import verl.trainer.ppo.v1.agent_loop_tq as agent_loop_tq_module
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session_tasks
+from verl.utils import tensordict_utils as tu
+
+
+def _generate_sampling_params(monkeypatch, validate: bool, val_sampling: dict | None):
+    """Run AgentLoopWorkerTQ.generate_sequences and return the (sampling_params, prompt) it spawned."""
+    spawned = []
+
+    async def fake_trajectory_info(global_steps, index, validate):
+        return [{"validate": validate}] * len(index)
+
+    async def fake_run_prompt(prompt, sampling_params, trajectory, trace=False):
+        spawned.append((sampling_params, prompt))
+
+    monkeypatch.setattr("verl.trainer.ppo.v1.agent_loop_tq.get_trajectory_info", fake_trajectory_info)
+    # AgentLoopWorkerTQ is a Ray actor class; exercise the undecorated class in-process.
+    worker_cls = AgentLoopWorkerTQ.__ray_actor_class__
+    worker = worker_cls.__new__(worker_cls)
+    worker.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "calculate_log_probs": True,
+                    "topk_log_probs": 0,
+                    "val_kwargs": {"temperature": 0.7, "top_p": 0.95, "top_k": -1},
+                    "agent": {"default_agent_loop": "single_turn_agent"},
+                }
+            }
+        }
+    )
+    worker.background_tasks = set()
+    worker._run_prompt = fake_run_prompt
+    batch = tu.get_tensordict({"index": np.array([0]), "raw_prompt": np.array(["q"], dtype=object)})
+    tu.assign_non_tensor_data(batch, "global_steps", 1)
+    tu.assign_non_tensor_data(batch, "validate", validate)
+    if val_sampling is not None:
+        tu.assign_non_tensor_data(batch, "val_sampling", val_sampling)
+
+    async def run():
+        await worker.generate_sequences(batch)
+        await asyncio.gather(*list(worker.background_tasks))
+
+    asyncio.run(run())
+    assert len(spawned) == 1
+    return spawned[0]
+
+
+def test_generate_sequences_applies_extra_validation_profile(monkeypatch):
+    params, prompt = _generate_sampling_params(monkeypatch, validate=True, val_sampling=None)
+    assert (params["temperature"], params["top_p"]) == (0.7, 0.95)
+
+    train_sampling = {"temperature": 1.0, "top_p": 1.0, "top_k": -1}
+    params, prompt = _generate_sampling_params(monkeypatch, validate=True, val_sampling=train_sampling)
+    assert (params["temperature"], params["top_p"], params["top_k"]) == (1.0, 1.0, -1)
+    assert "val_sampling" not in prompt
 
 
 def test_settle_session_tasks_waits_for_siblings_after_failure():

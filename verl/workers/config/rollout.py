@@ -44,6 +44,24 @@ class SamplingConfig(BaseConfig):
     n: int = 1
 
 
+EXTRA_VAL_SAMPLING_KEYS = ("temperature", "top_p", "top_k")
+
+
+def validate_extra_val_kwargs(extra_val_kwargs) -> None:
+    """Check ``rollout.extra_val_kwargs``: profile name -> sampling-key overrides.
+
+    Profile names become metric-key namespace components and dump-directory names, so they must be plain identifiers.
+    """
+    for name, overrides in (extra_val_kwargs or {}).items():
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError(f"extra_val_kwargs profile name must be an identifier, got {name!r}")
+        if not isinstance(overrides, dict | DictConfig):
+            raise ValueError(f"extra_val_kwargs.{name} must be a mapping of sampling overrides")
+        unknown = set(overrides) - set(EXTRA_VAL_SAMPLING_KEYS)
+        if unknown:
+            raise ValueError(f"extra_val_kwargs.{name} only supports {EXTRA_VAL_SAMPLING_KEYS}, got {sorted(unknown)}")
+
+
 @dataclass
 class MultiTurnConfig(BaseConfig):
     _mutable_fields = {"max_assistant_turns", "max_user_turns"}
@@ -202,6 +220,13 @@ class RolloutConfig(BaseConfig):
 
     val_kwargs: SamplingConfig = field(default_factory=SamplingConfig)
 
+    # Additional named validation passes run after the ``val_kwargs`` pass on the same prompts,
+    # e.g. ``{"train_sampling": {"temperature": 1.0, "top_p": 1.0, "top_k": -1}}``. Each profile
+    # overrides only these sampling keys (``n`` follows ``val_kwargs``) and reports
+    # metrics under ``val-core/profiles/<profile>/<data_source>/...``. Only the v1 trainer honors this field.
+    # V1 selects greedy sampling with temperature=0 and does not consult val_kwargs.do_sample.
+    extra_val_kwargs: dict = field(default_factory=dict)
+
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
@@ -283,6 +308,7 @@ class RolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the rollout config"""
+        validate_extra_val_kwargs(self.extra_val_kwargs)
         # Deprecation warning for mode field - only async mode is supported
         if self.mode == "sync":
             raise ValueError(

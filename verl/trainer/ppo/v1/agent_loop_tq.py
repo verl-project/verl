@@ -60,6 +60,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         """Spawn agent loop for each sample in the batch without waiting for the results."""
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
+        # Sampling overrides of an extra validation profile (rollout.extra_val_kwargs); popped so the
+        # agent loops never receive it as a prompt field.
+        val_sampling = batch["val_sampling"] if "val_sampling" in batch else None
+        batch.pop("val_sampling", None)
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -77,6 +81,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
+            if val_sampling:
+                sampling_params.update(val_sampling)
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch:

@@ -86,6 +86,7 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
+from verl.workers.config.rollout import validate_extra_val_kwargs
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 from verl.workers.utils.losses import value_loss
@@ -1029,6 +1030,20 @@ class PPOTrainer(ABC):
         )
 
     def _validate(self) -> dict[str, float]:
+        """Run the ``val_kwargs`` pass, then one pass per ``rollout.extra_val_kwargs`` profile."""
+        rollout_config = self.config.actor_rollout_ref.rollout
+        extra_profiles = rollout_config.get("extra_val_kwargs", None) or {}
+        if isinstance(extra_profiles, DictConfig):
+            extra_profiles = OmegaConf.to_container(extra_profiles, resolve=True)
+        validate_extra_val_kwargs(extra_profiles)
+
+        metric_dict = self._validate_profile(profile=None, val_sampling=None)
+        for profile, val_sampling in extra_profiles.items():
+            metric_dict.update(self._validate_profile(profile=profile, val_sampling=dict(val_sampling)))
+        return metric_dict
+
+    def _validate_profile(self, profile: str | None, val_sampling: dict | None) -> dict[str, float]:
+        """One validation pass; a named profile suffixes data sources and dumps to its own subdir."""
         # Lists to collect samples for the table
         sample_uids = []
         sample_inputs = []
@@ -1064,6 +1079,8 @@ class PPOTrainer(ABC):
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
+            if val_sampling:
+                tu.assign_non_tensor_data(batch, "val_sampling", val_sampling)
             # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
             # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
             tags = [
@@ -1158,12 +1175,15 @@ class PPOTrainer(ABC):
             # 5. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
 
-        # logger to wandb
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        # logger to wandb; the generation table only covers the val_kwargs pass
+        if profile is None:
+            self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump to local dir
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            if profile is not None:
+                val_data_dir = os.path.join(val_data_dir, profile)
             # Sort according to uid (so that generations in the same rollout are together)
             sort_keys = []
             for key in dump_all_keys:
@@ -1194,13 +1214,22 @@ class PPOTrainer(ABC):
                 dump_path=val_data_dir,
             )
 
-        return self._val_metrics_update(
+        # Preserve data-source identities for scoring and metric aggregation.
+        metrics = self._val_metrics_update(
             data_sources,
             sample_uids,
             reward_extra_infos_dict,
             sample_turns,
             expected_acc_counts=expected_acc_counts,
         )
+        if profile is None:
+            return metrics
+        # Namespace every validation metric, including data-source-independent auxiliaries.
+        return {
+            f"{section}/profiles/{profile}/{name}": value
+            for key, value in metrics.items()
+            for section, name in [key.split("/", 1)]
+        }
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""

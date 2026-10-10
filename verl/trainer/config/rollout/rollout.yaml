@@ -177,6 +177,13 @@ val_kwargs:
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
 
+# Extra named validation passes after the val_kwargs pass (v1 trainer only), e.g.
+# {train_sampling: {temperature: 1.0, top_p: 1.0, top_k: -1}}. A profile overrides only
+# temperature/top_p/top_k; n follows val_kwargs. In the v1 trainer, temperature=0
+# selects greedy sampling; val_kwargs.do_sample is not consulted. Metrics use
+# val-core/profiles/<profile>/<data_source>/... and val-aux/profiles/<profile>/....
+extra_val_kwargs: {}
+
 # Null uses the built-in router; set a plugin YAML path to use an external router.
 # Relative paths resolve against the working directory, then the verl package root.
 router_config_path: null
