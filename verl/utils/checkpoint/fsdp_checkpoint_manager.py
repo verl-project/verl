@@ -32,7 +32,7 @@ from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
-from verl.utils.fsdp_utils import fsdp_version, get_fsdp_state_ctx
+from verl.utils.fsdp_utils import fsdp_version, get_fsdp_state_ctx, normalize_peft_param_name
 from verl.utils.logger import log_with_rank
 from verl.utils.model import convert_weight_keys
 
@@ -117,7 +117,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
     def _to_export_names(self, unwrap_model: torch.nn.Module, names) -> set[str]:
         """Map module FQNs to the HF names ``per_tensor_param_fn`` yields."""
-        return set(convert_weight_keys(dict.fromkeys(clean_tensor_name(name) for name in names), unwrap_model))
+        names = normalize_peft_param_name(dict.fromkeys(clean_tensor_name(name) for name in names))
+        return set(convert_weight_keys(names, unwrap_model))
 
     def _get_dtype_preserved_names(self, unwrap_model: torch.nn.Module) -> set[str]:
         """Tensors the forward uses in their stored dtype: buffers and params of mixed-precision-ignored modules."""
