@@ -22,12 +22,8 @@ a stub engine for both branches with distillation_use_topk=True and asserts
 the distillation keys produced by logits_processor_func are propagated into
 model_output as nested tensors in both cases.
 
-``logprobs_from_logits`` is patched out: in CI environments where flash-attn
-is installed, it dispatches to a Triton CrossEntropyLoss kernel that cannot
-operate on CPU tensors. The substitute returns a dummy ``log_probs`` tensor
-of the right shape, which is sufficient for this test — the contract under
-test is the propagation of distillation keys, not the numerical correctness
-of log-prob computation.
+The engine uses the real log-probability implementation, including when
+optional accelerator kernels are installed in the test environment.
 """
 
 import os
@@ -35,7 +31,6 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -136,21 +131,13 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding, 
 
     eng = _make_engine_stub()
 
-    # Patch logprobs_from_logits because flash-attn's Triton CrossEntropyLoss
-    # cannot operate on CPU tensors. The shape is what downstream code asserts
-    # against (v.shape == log_probs.shape), and prepare_model_outputs reduces
-    # both branches to a (total_nnz,) log_probs over the rmpad'ed logits.
-    with patch(
-        "verl.workers.engine.fsdp.transformer_impl.logprobs_from_logits",
-        return_value=torch.zeros(total_nnz),
-    ):
-        model_output = FSDPEngineWithLMHead.prepare_model_outputs(
-            eng,
-            output=output,
-            output_args=output_args,
-            micro_batch=micro_batch,
-            logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS),
-        )
+    model_output = FSDPEngineWithLMHead.prepare_model_outputs(
+        eng,
+        output=output,
+        output_args=output_args,
+        micro_batch=micro_batch,
+        logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS),
+    )
 
     if distillation_only:
         assert "log_probs" not in model_output, (
@@ -161,6 +148,13 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding, 
         assert "log_probs" in model_output, (
             f"log_probs missing (use_remove_padding={use_remove_padding}); keys: {list(model_output.keys())}"
         )
+        packed_logits = (
+            output.logits.squeeze(0)
+            if use_remove_padding
+            else torch.cat([row[:length] for row, length in zip(output.logits, seq_lengths_list, strict=True)])
+        )
+        expected_log_probs = packed_logits.log_softmax(-1).gather(-1, input_ids_rmpad_rolled.unsqueeze(-1)).squeeze(-1)
+        torch.testing.assert_close(model_output["log_probs"].values(), expected_log_probs)
 
     for k in _DISTILLATION_KEYS:
         assert k in model_output, (

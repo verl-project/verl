@@ -74,8 +74,9 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
     """
     Compute per-token log-probabilities for the given labels.
 
-    Uses a Flash-Attention–based cross-entropy (if available) for efficient backward,
-    otherwise falls back to a standard log-softmax+gather approach.
+    Uses optimized cross-entropy on CUDA or NPU tensors when its kernel is
+    available, otherwise falls back to the PyTorch implementation. Installing
+    an accelerator package does not change how CPU tensors are handled.
 
     See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
 
@@ -92,7 +93,11 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
     # attention kernels) nor by torch.use_deterministic_algorithms (Triton custom ops
     # don't trigger warn_only). Set VERL_DISABLE_FLASH_ATTN_CE=1 to force the pure
     # PyTorch log_softmax+gather path for bitwise-reproducible log_probs.
-    _use_flash_ce = FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE and os.environ.get("VERL_DISABLE_FLASH_ATTN_CE", "0") != "1"
+    _use_flash_ce = (
+        logits.device.type == "cuda"
+        and FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE
+        and os.environ.get("VERL_DISABLE_FLASH_ATTN_CE", "0") != "1"
+    )
     if _use_flash_ce:
         batch_dim = logits.shape[:-1]
         last_dim = logits.shape[-1]
@@ -100,7 +105,7 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
         labels = labels.reshape(-1)
         output = logprobs_from_logits_flash_attn(logits, labels, inplace_backward=inplace_backward)
         output = output.view(*batch_dim)
-    elif NPU_CROSS_ENTROPY_LOSS_AVAILABLE:
+    elif logits.device.type == "npu" and NPU_CROSS_ENTROPY_LOSS_AVAILABLE:
         output = logprobs_from_logits_torch_npu(logits, labels)
     else:
         output = logprobs_from_logits_v2(logits, labels)
