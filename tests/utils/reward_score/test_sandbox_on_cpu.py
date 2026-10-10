@@ -124,6 +124,17 @@ def test_prime_code():
         assert float(score) == score_
 
 
+def test_prime_code_wrong_answer_after_first_ten_cases():
+    """A program that passes the first 10 cases but fails the 11th must not get the full reward."""
+    ground_truth = json.dumps(
+        {"inputs": [f"{i}\n" for i in range(1, 12)], "outputs": [f"{2 * i}\n" for i in range(1, 12)]}
+    )
+    wrong = "```python\nn = int(input())\nprint(2 * n if n <= 10 else 0)\n```"
+    right = "```python\nn = int(input())\nprint(2 * n)\n```"
+    assert default_compute_score("codecontests", wrong, ground_truth) == pytest.approx(10 / 11)
+    assert default_compute_score("codecontests", right, ground_truth) == 1.0
+
+
 # Use the pytest.mark.skipif decorator to skip the test
 @pytest.mark.skipif(not os.environ.get("SANDBOX_FUSION_URL"), reason="SANDBOX_FUSION_URL environment variable not set")
 def test_prime_code_sandbox_fusion():
