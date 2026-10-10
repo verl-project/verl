@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import warnings
+from copy import deepcopy
 from enum import Enum
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 
 from verl.single_controller.base import Worker
 from verl.trainer.distillation import is_distillation_enabled
@@ -124,6 +125,18 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
 
     # Get the dataset class
     dataset_cls = get_dataset_class(data_config)
+
+    if not is_train:
+        # The max_samples subsample inside the dataset keys off data.shuffle, which
+        # only describes the train split. For val datasets it must follow
+        # data.validation_shuffle -- the same flag the val dataloader sampler uses --
+        # so that validation_shuffle=False yields a deterministic head slice instead
+        # of a random subsample. Falls back to data.shuffle when validation_shuffle
+        # is unset to preserve the existing behavior (#7824).
+        validation_shuffle = data_config.get("validation_shuffle", data_config.get("shuffle", False))
+        data_config = deepcopy(data_config)
+        with open_dict(data_config):
+            data_config.shuffle = validation_shuffle
 
     # Instantiate the dataset using the determined dataset class
     dataset = dataset_cls(
