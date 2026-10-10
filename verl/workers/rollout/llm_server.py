@@ -20,6 +20,7 @@ Utility classes for manage and request LLM servers:
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -78,12 +79,29 @@ class LLMServerClient:
             self._lb_require_acquire_fields = list(acquire_fields)
             self._lb_require_release_fields = list(release_fields)
         fields = {name: extra[name] for name in self._lb_require_acquire_fields if name in extra}
-        return await self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
+        acquisition = self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
+        if "admission_id" not in self._lb_require_acquire_fields:
+            return await acquisition
+        pending = acquisition.as_future()
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
 
-    def _release_server(self, server_id: str, request_id: str | None = None) -> None:
+            def release_cancelled(future):
+                try:
+                    server_id, _ = future.result()
+                except (asyncio.CancelledError, ray.exceptions.RayError):
+                    return
+                self._release_server(server_id, admission_id=extra.get("admission_id", request_id))
+
+            pending.add_done_callback(release_cancelled)
+            ray.cancel(acquisition, recursive=False)
+            raise
+
+    def _release_server(self, server_id: str, request_id: str | None = None, **extra) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
-        pool = {"request_id": request_id}
+        pool = {"request_id": request_id, **extra}
         fields = {name: pool[name] for name in self._lb_require_release_fields if name in pool}
         self._load_balancer.release_server.remote(server_id=server_id, **fields)
 
@@ -118,6 +136,8 @@ class LLMServerClient:
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
+        request_context = kwargs.get("request_context")
+        admission_id = uuid4().hex
         server_id, server = await self._acquire_server(
             request_id,
             prompt_ids=prompt_ids,
@@ -126,8 +146,11 @@ class LLMServerClient:
             video_data=video_data,
             audio_data=audio_data,
             mm_processor_kwargs=mm_processor_kwargs,
+            admission_id=admission_id,
             **kwargs,
         )
+        request_kind = request_context.get("request_kind") if isinstance(request_context, dict) else None
+        release_on_completion = False
         try:
             multimodal_kwargs = {}
             if audio_data is not None:
@@ -140,6 +163,7 @@ class LLMServerClient:
             # frames -- dropping video beats sending SGLang tensors it cannot parse. vLLM keeps the
             # frames and never enters this branch. Neither server signature accepts **kwargs, so pop.
             mm_processor_output = kwargs.pop("mm_processor_output", None)
+            kwargs.pop("request_context", None)
             if self.config.actor_rollout_ref.rollout.name == "sglang":
                 video_data = mm_processor_output
             # priority is only supported by vLLM rollout server.
@@ -147,7 +171,7 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
-            output: TokenOutput = await server.generate.remote(
+            generation = server.generate.remote(
                 request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
@@ -158,15 +182,34 @@ class LLMServerClient:
                 session_id=request_id,
                 **kwargs,
             )
+            if "admission_id" in (self._lb_require_release_fields or []):
+                pending = generation.as_future()
+                try:
+                    output: TokenOutput = await asyncio.shield(pending)
+                except asyncio.CancelledError:
+
+                    def release_completed(future):
+                        if not future.cancelled():
+                            future.exception()
+                        self._release_server(server_id, request_id=request_id, admission_id=admission_id)
+
+                    pending.add_done_callback(release_completed)
+                    release_on_completion = True
+                    raise
+            else:
+                output = await generation
             global_steps = output.extra_fields.get("global_steps")
             output.extra_fields.setdefault("min_global_steps", global_steps)
             output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
         finally:
-            self._release_server(
-                server_id,
-                request_id=request_id,
-            )
+            if not release_on_completion:
+                self._release_server(
+                    server_id,
+                    request_id=request_id,
+                    request_kind=request_kind,
+                    admission_id=admission_id,
+                )
 
 
 class FullyAsyncLLMServerClient(LLMServerClient):
@@ -287,17 +330,32 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
 
+        attempt_index = 0
         while True:
             # 1. generate tokens
+            attempt_prompt_ids = prompt_ids + final_output.token_ids
+            attempt_kwargs = dict(kwargs)
+            request_context = attempt_kwargs.get("request_context")
+            if request_context is not None:
+                request_context = dict(request_context)
+                request_context["attempt_index"] = attempt_index
+                request_context["enqueued_at"] = time.time()
+                request_context["prompt_tokens"] = len(attempt_prompt_ids)
+                if limit_key is not None:
+                    request_context["expected_output_tokens"] = max(0, int(sampling_params[limit_key]))
+                if attempt_index > 0:
+                    request_context["request_kind"] = "retry"
+                    request_context["estimated_uncached_tokens"] = None
+                attempt_kwargs["request_context"] = request_context
             output = await super().generate(
                 request_id=request_id,
-                prompt_ids=prompt_ids + final_output.token_ids,
+                prompt_ids=attempt_prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
-                **kwargs,
+                **attempt_kwargs,
             )
 
             # 2. merge output into final_output
@@ -352,6 +410,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             if output.stop_reason not in ("aborted", "abort") or not should_retry:
                 break
 
+            attempt_index += 1
             await asyncio.sleep(1)
 
         final_output.extra_fields["global_steps"] = global_steps

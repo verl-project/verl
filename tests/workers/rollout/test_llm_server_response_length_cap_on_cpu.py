@@ -57,10 +57,12 @@ class FakeRolloutServer:
     def __init__(self, abort_every: int):
         self.abort_every = abort_every
         self.grants: list[tuple[int, int]] = []
+        self.request_contexts: list[dict[str, Any] | None] = []
 
     async def generate(self, request_id, *, prompt_ids, sampling_params, **kwargs):
         # Requests cross a Ray boundary, so the server only ever mutates its own copy.
         params = dict(sampling_params)
+        self.request_contexts.append(kwargs.get("request_context"))
 
         max_possible_tokens = MAX_MODEL_LEN - len(prompt_ids)
         assert max_possible_tokens >= 1
@@ -106,12 +108,18 @@ def _config(*, include_async_training: bool = True) -> Any:
     return OmegaConf.create(config)
 
 
-async def _generate(config: Any, prompt_len: int, sampling_params: dict[str, Any]) -> TokenOutput:
+async def _generate(
+    config: Any,
+    prompt_len: int,
+    sampling_params: dict[str, Any],
+    **kwargs: Any,
+) -> TokenOutput:
     client = FullyAsyncLLMServerClient(config=config, load_balancer_handle=None)
     return await client.generate(
         request_id="req-0",
         prompt_ids=list(range(prompt_len)),
         sampling_params=sampling_params,
+        **kwargs,
     )
 
 
@@ -170,3 +178,47 @@ async def test_config_without_rollout_section_is_tolerated(server):
     output = await _generate(SimpleNamespace(), 136, {"temperature": 1.0})
 
     assert len(output.token_ids) > 0
+
+
+@pytest.mark.asyncio
+async def test_partial_rollout_attempts_update_request_context(server):
+    original_context = {
+        "trajectory_id": "trajectory-1",
+        "request_kind": "continuation",
+        "turn_index": 2,
+        "attempt_index": 0,
+        "prompt_tokens": 136,
+        "estimated_uncached_tokens": 12,
+        "enqueued_at": 1.0,
+    }
+
+    await _generate(
+        _config(),
+        136,
+        {"temperature": 1.0, "max_tokens": 4500},
+        request_context=original_context,
+    )
+
+    assert len(server.request_contexts) == 3
+    first, second, third = server.request_contexts
+    assert first is not None and second is not None and third is not None
+    assert first["request_kind"] == "continuation"
+    assert first["attempt_index"] == 0
+    assert first["estimated_uncached_tokens"] == 12
+    assert first["prompt_tokens"] == 136
+    assert first["expected_output_tokens"] == 4500
+    assert second["request_kind"] == "retry"
+    assert second["attempt_index"] == 1
+    assert second["estimated_uncached_tokens"] is None
+    assert second["prompt_tokens"] > first["prompt_tokens"]
+    assert second["expected_output_tokens"] < first["expected_output_tokens"]
+    assert third["request_kind"] == "retry"
+    assert third["attempt_index"] == 2
+    assert third["estimated_uncached_tokens"] is None
+    assert third["prompt_tokens"] > second["prompt_tokens"]
+    assert third["expected_output_tokens"] < second["expected_output_tokens"]
+    assert first["enqueued_at"] > original_context["enqueued_at"]
+    assert second["enqueued_at"] >= first["enqueued_at"]
+    assert third["enqueued_at"] >= second["enqueued_at"]
+    assert original_context["request_kind"] == "continuation"
+    assert original_context["attempt_index"] == 0

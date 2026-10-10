@@ -12,9 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
+import math
 import os
 import random
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from functools import wraps
 from typing import Any, Protocol
 
 import ray
@@ -59,11 +66,12 @@ class RequestLoadBalancer(Protocol):
         ...
 
     def require_release_fields(self) -> list[str]:
-        """Identity fields this router consumes at release time (currently
-        only ``"request_id"``); ``[]`` if counting by ``server_id`` alone."""
+        """Fields this router consumes at release time, such as
+        ``"request_id"`` or ``"request_kind"``; ``[]`` if counting by
+        ``server_id`` alone."""
         ...
 
-    def release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def release_server(self, server_id: str, request_id: str | None = None, **extra: Any) -> None:
         """Release a server after a request completes.
 
         Args:
@@ -72,6 +80,8 @@ class RequestLoadBalancer(Protocol):
                 the prompt length at release time look it up by this id from
                 their own acquire-time bookkeeping, so the full token list is
                 not re-serialized over RPC.
+            **extra: Additional fields declared by
+                :meth:`require_release_fields`.
         """
         ...
 
@@ -298,6 +308,341 @@ class GlobalRequestLoadBalancer:
         return sum(self._inflight_requests.values())
 
 
+@dataclass
+class _AdmissionWaiter:
+    request_id: str
+    admission_id: str
+    request_kind: str
+    enqueued_at: float
+    future: asyncio.Future[tuple[str, Any]]
+    thread_id: int
+    admitted_server_id: str | None = None
+
+
+def _admission_locked(method):
+    """Serialize shared state across Ray admission and control event loops."""
+
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._admission_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+class SoftAdmissionRequestLoadBalancer(GlobalRequestLoadBalancer):
+    """Work-conserving admission for fresh and resumed rollout requests.
+
+    The base capacity remains available to every request. When resumed requests
+    are queued, the router can temporarily admit additional continuations and
+    retries. An optional lower burst cap applies while fresh requests remain
+    queued, then expands after the fresh queue drains. Fresh requests may use
+    base-capacity slots released by resumed requests, while an optional wait
+    threshold stops new burst admissions when fresh requests are overdue.
+
+    This class is selected through ``rollout.router_config_path`` and receives
+    the router YAML as ``router_kwargs``. It is disabled unless explicitly
+    configured, so the default load balancer retains its existing behavior.
+    """
+
+    _REQUEST_KINDS = ("fresh", "continuation", "retry")
+    _RESUME_KINDS = frozenset(("continuation", "retry"))
+
+    def __init__(self, servers: dict[str, Any], router_kwargs: dict[str, Any]):
+        capacity = router_kwargs.get("max_concurrent_requests")
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
+            raise ValueError("max_concurrent_requests must be a positive integer")
+
+        fresh_max_wait = router_kwargs.get("fresh_max_wait_seconds")
+        if fresh_max_wait is not None and (
+            not isinstance(fresh_max_wait, int | float) or isinstance(fresh_max_wait, bool) or fresh_max_wait <= 0
+        ):
+            raise ValueError("fresh_max_wait_seconds must be positive or null")
+
+        max_resume_burst = router_kwargs.get("max_resume_burst_requests", 0)
+        if not isinstance(max_resume_burst, int) or isinstance(max_resume_burst, bool) or max_resume_burst < 0:
+            raise ValueError("max_resume_burst_requests must be a non-negative integer")
+
+        fresh_wave_max_resume_burst = router_kwargs.get(
+            "fresh_wave_max_resume_burst_requests",
+            0,
+        )
+        if (
+            not isinstance(fresh_wave_max_resume_burst, int)
+            or isinstance(fresh_wave_max_resume_burst, bool)
+            or fresh_wave_max_resume_burst < 0
+        ):
+            raise ValueError("fresh_wave_max_resume_burst_requests must be a non-negative integer")
+        if fresh_wave_max_resume_burst > max_resume_burst:
+            raise ValueError("fresh_wave_max_resume_burst_requests must not exceed max_resume_burst_requests")
+
+        super().__init__(
+            servers=servers,
+            max_cache_size=router_kwargs.get("max_cache_size", DEFAULT_ROUTING_CACHE_SIZE),
+            full_determinism=router_kwargs.get("full_determinism", False),
+        )
+        self._capacity = capacity
+        self._fresh_max_wait = fresh_max_wait
+        self._max_resume_burst = max_resume_burst
+        self._fresh_wave_max_resume_burst = fresh_wave_max_resume_burst
+        self._fresh_waiters: deque[_AdmissionWaiter] = deque()
+        self._resume_waiters: deque[_AdmissionWaiter] = deque()
+        self._admissions: dict[str, _AdmissionWaiter] = {}
+        self._admission_lock = threading.RLock()
+        self._inflight_by_kind = dict.fromkeys(self._REQUEST_KINDS, 0)
+        self._admitted_by_kind = dict.fromkeys(self._REQUEST_KINDS, 0)
+        self._total_wait_by_kind = dict.fromkeys(self._REQUEST_KINDS, 0.0)
+        self._max_wait_by_kind = dict.fromkeys(self._REQUEST_KINDS, 0.0)
+        self._admitted_requests = 0
+        self._max_admitted_requests = 0
+        self._burst_admissions = 0
+        self._max_resume_burst_target = 0
+        self._clock = time.monotonic
+
+    def require_acquire_fields(self) -> list[str]:
+        """Receive only the backend-neutral scheduling context."""
+        return ["request_context", "admission_id"]
+
+    def require_release_fields(self) -> list[str]:
+        """Match completion to the exact admission attempt."""
+        return ["admission_id"]
+
+    @classmethod
+    def _request_kind(cls, request_context: dict[str, Any] | None) -> str:
+        if request_context is None:
+            return "fresh"
+        request_kind = request_context.get("request_kind", "fresh")
+        if request_kind not in cls._REQUEST_KINDS:
+            raise ValueError(f"Unknown rollout request kind: {request_kind!r}")
+        return request_kind
+
+    @ray.method(concurrency_group="admission")
+    async def acquire_server(
+        self,
+        request_id: str,
+        request_context: dict[str, Any] | None = None,
+        admission_id: str | None = None,
+    ) -> tuple[str, Any]:
+        """Wait for admission, then apply sticky least-loaded routing."""
+        with self._admission_lock:
+            if not self._servers:
+                raise RuntimeError("No available servers in load balancer")
+
+            request_kind = self._request_kind(request_context)
+            future = asyncio.get_running_loop().create_future()
+            waiter = _AdmissionWaiter(
+                request_id=request_id,
+                admission_id=admission_id or request_id,
+                request_kind=request_kind,
+                enqueued_at=self._clock(),
+                future=future,
+                thread_id=threading.get_ident(),
+            )
+            self._admissions[waiter.admission_id] = waiter
+            queue = self._resume_waiters if request_kind in self._RESUME_KINDS else self._fresh_waiters
+            queue.append(waiter)
+            self._dispatch_waiters()
+
+        try:
+            return await future
+        except asyncio.CancelledError:
+            with self._admission_lock:
+                if waiter.admitted_server_id is None:
+                    self._remove_waiter(waiter)
+                    self._admissions.pop(waiter.admission_id, None)
+                    self._dispatch_waiters()
+                else:
+                    self._release_admission(waiter.admitted_server_id, waiter.admission_id)
+            raise
+
+    async def release_server(
+        self,
+        server_id: str,
+        request_id: str | None = None,
+        request_kind: str | None = None,
+        admission_id: str | None = None,
+    ) -> None:
+        """Return an admission slot and wake queued requests."""
+        del request_kind
+        with self._admission_lock:
+            self._release_admission(server_id, admission_id or request_id)
+
+    def _release_admission(
+        self,
+        server_id: str,
+        admission_id: str | None,
+    ) -> None:
+        waiter = self._admissions.get(admission_id)
+        if waiter is None or waiter.admitted_server_id != server_id:
+            return
+        del self._admissions[admission_id]
+        super().release_server(server_id)
+        self._inflight_by_kind[waiter.request_kind] -= 1
+        self._admitted_requests -= 1
+        self._dispatch_waiters()
+
+    def _remove_waiter(self, waiter: _AdmissionWaiter) -> None:
+        queue = self._resume_waiters if waiter.request_kind in self._RESUME_KINDS else self._fresh_waiters
+        try:
+            queue.remove(waiter)
+        except ValueError:
+            pass
+
+    def _drop_cancelled_waiters(self) -> None:
+        while self._fresh_waiters and self._fresh_waiters[0].future.cancelled():
+            waiter = self._fresh_waiters.popleft()
+            self._admissions.pop(waiter.admission_id, None)
+        while self._resume_waiters and self._resume_waiters[0].future.cancelled():
+            waiter = self._resume_waiters.popleft()
+            self._admissions.pop(waiter.admission_id, None)
+
+    def _fresh_is_overdue(self) -> bool:
+        return bool(
+            self._fresh_waiters
+            and self._fresh_max_wait is not None
+            and self._clock() - self._fresh_waiters[0].enqueued_at >= self._fresh_max_wait
+        )
+
+    def _select_waiter(self) -> _AdmissionWaiter | None:
+        self._drop_cancelled_waiters()
+
+        if not self._fresh_waiters:
+            return self._resume_waiters.popleft() if self._resume_waiters else None
+        if not self._resume_waiters:
+            return self._fresh_waiters.popleft()
+
+        oldest_fresh = self._fresh_waiters[0]
+        if self._fresh_is_overdue():
+            return self._fresh_waiters.popleft()
+
+        oldest_resume = self._resume_waiters[0]
+        if oldest_fresh.enqueued_at <= oldest_resume.enqueued_at:
+            return self._fresh_waiters.popleft()
+        return self._resume_waiters.popleft()
+
+    def _resume_burst_target(self) -> int:
+        if self._fresh_is_overdue():
+            return 0
+        burst_cap = self._fresh_wave_max_resume_burst if self._fresh_waiters else self._max_resume_burst
+        if burst_cap == 0:
+            return 0
+        resume_pressure = sum(self._inflight_by_kind[kind] for kind in self._RESUME_KINDS) + len(self._resume_waiters)
+        if resume_pressure == 0:
+            return 0
+        fresh_pressure = self._inflight_by_kind["fresh"] + len(self._fresh_waiters)
+        target = math.ceil(self._capacity * resume_pressure / (resume_pressure + fresh_pressure))
+        target = min(burst_cap, target)
+        self._max_resume_burst_target = max(self._max_resume_burst_target, target)
+        return target
+
+    def _select_admissible_waiter(self) -> _AdmissionWaiter | None:
+        self._drop_cancelled_waiters()
+        burst_target = self._resume_burst_target()
+        resume_inflight = sum(self._inflight_by_kind[kind] for kind in self._RESUME_KINDS)
+        admission_limit = self._capacity + burst_target
+
+        if self._admitted_requests >= admission_limit:
+            return None
+
+        if self._max_resume_burst > 0 and self._fresh_waiters and self._inflight_by_kind["fresh"] < self._capacity:
+            if self._admitted_requests >= self._capacity or resume_inflight >= burst_target:
+                return self._fresh_waiters.popleft()
+
+        if self._admitted_requests < self._capacity:
+            return self._select_waiter()
+
+        if self._resume_waiters and burst_target > 0 and self._admitted_requests < self._capacity + burst_target:
+            return self._resume_waiters.popleft()
+        return None
+
+    def _dispatch_waiters(self) -> None:
+        while self._servers:
+            waiter = self._select_admissible_waiter()
+            if waiter is None:
+                break
+            if waiter.future.cancelled():
+                continue
+
+            server_id, server = super().acquire_server(waiter.request_id)
+            waiter.admitted_server_id = server_id
+            if self._admitted_requests >= self._capacity:
+                self._burst_admissions += 1
+            self._admitted_requests += 1
+            self._max_admitted_requests = max(self._max_admitted_requests, self._admitted_requests)
+            self._inflight_by_kind[waiter.request_kind] += 1
+            wait_seconds = max(0.0, self._clock() - waiter.enqueued_at)
+            self._admitted_by_kind[waiter.request_kind] += 1
+            self._total_wait_by_kind[waiter.request_kind] += wait_seconds
+            self._max_wait_by_kind[waiter.request_kind] = max(self._max_wait_by_kind[waiter.request_kind], wait_seconds)
+            result = (server_id, server)
+            if waiter.thread_id == threading.get_ident():
+                self._complete_waiter(waiter, result)
+            else:
+                waiter.future.get_loop().call_soon_threadsafe(self._complete_waiter, waiter, result)
+
+    @staticmethod
+    def _complete_waiter(waiter: _AdmissionWaiter, result: tuple[str, Any]) -> None:
+        if not waiter.future.done():
+            waiter.future.set_result(result)
+
+    @_admission_locked
+    def add_servers(self, servers: dict[str, Any]) -> None:
+        super().add_servers(servers)
+        for sid in servers:
+            self._inflight_requests[sid] = sum(waiter.admitted_server_id == sid for waiter in self._admissions.values())
+        self._dispatch_waiters()
+
+    @_admission_locked
+    def remove_servers(self, server_ids: list[str]) -> None:
+        """Retire removed-server grants before waking requests on active servers."""
+        super().remove_servers(server_ids)
+        removed = set(server_ids)
+        for admission_id, waiter in list(self._admissions.items()):
+            if waiter.admitted_server_id in removed:
+                del self._admissions[admission_id]
+                self._inflight_by_kind[waiter.request_kind] -= 1
+                self._admitted_requests -= 1
+        self._dispatch_waiters()
+
+    get_inflight_count = _admission_locked(GlobalRequestLoadBalancer.get_inflight_count)
+    get_all_servers = _admission_locked(GlobalRequestLoadBalancer.get_all_servers)
+    get_total_inflight = _admission_locked(GlobalRequestLoadBalancer.get_total_inflight)
+    clear_sticky_cache = _admission_locked(GlobalRequestLoadBalancer.clear_sticky_cache)
+
+    @_admission_locked
+    def get_status(self) -> dict:
+        status = super().get_status()
+        now = self._clock()
+        status["admission"] = {
+            "capacity": self._capacity,
+            "max_resume_burst_requests": self._max_resume_burst,
+            "fresh_wave_max_resume_burst_requests": self._fresh_wave_max_resume_burst,
+            "resume_burst_target": self._resume_burst_target(),
+            "max_resume_burst_target": self._max_resume_burst_target,
+            "burst_admissions": self._burst_admissions,
+            "max_admitted_requests": self._max_admitted_requests,
+            "inflight_by_kind": dict(self._inflight_by_kind),
+            "admitted_by_kind": dict(self._admitted_by_kind),
+            "mean_wait_seconds_by_kind": {
+                kind: (
+                    self._total_wait_by_kind[kind] / self._admitted_by_kind[kind]
+                    if self._admitted_by_kind[kind]
+                    else 0.0
+                )
+                for kind in self._REQUEST_KINDS
+            },
+            "max_wait_seconds_by_kind": dict(self._max_wait_by_kind),
+            "queued_by_kind": {
+                "fresh": len(self._fresh_waiters),
+                "resume": len(self._resume_waiters),
+            },
+            "oldest_fresh_wait_seconds": (
+                max(0.0, now - self._fresh_waiters[0].enqueued_at) if self._fresh_waiters else 0.0
+            ),
+        }
+        return status
+
+
 def _create_global_sticky_inflight(
     servers: dict[str, Any],
     full_determinism: bool = False,
@@ -390,7 +735,10 @@ def _create_plugin_extension(
         len(servers),
         yaml_config,
     )
-    ray_cls = cls if isinstance(cls, ray.actor.ActorClass) else ray.remote(cls)
+    if isinstance(cls, type) and issubclass(cls, SoftAdmissionRequestLoadBalancer):
+        ray_cls = ray.remote(concurrency_groups={"admission": 1000}, max_concurrency=1)(cls)
+    else:
+        ray_cls = cls if isinstance(cls, ray.actor.ActorClass) else ray.remote(cls)
     return ray_cls.remote(servers, yaml_config)
 
 

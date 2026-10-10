@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
@@ -34,6 +35,10 @@ from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSch
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.request_scheduling import (
+    RolloutRequestContext,
+    RolloutRequestKind,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -91,6 +96,7 @@ class AgentData:
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
+        self.last_model_sequence_length = 0
 
         self.routed_experts = None
 
@@ -241,16 +247,7 @@ class ToolAgentLoop(AgentLoopBase):
             sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
 
         with simple_timer("generate_sequences", agent_data.metrics):
-            output: TokenOutput = await self.server_manager.generate(
-                request_id=agent_data.request_id,
-                prompt_ids=agent_data.prompt_ids,
-                sampling_params=sampling_params,
-                image_data=agent_data.image_data,
-                video_data=agent_data.video_data,
-                mm_processor_output=agent_data.mm_processor_output,
-                audio_data=agent_data.audio_data,
-                mm_processor_kwargs=agent_data.mm_processor_kwargs,
-            )
+            output = await self._generate(agent_data, sampling_params)
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
             agent_data.metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
@@ -278,6 +275,7 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs if (agent_data.response_logprobs or output.log_probs) else None,
             assistant_logprobs=output.log_probs if output.log_probs else None,
         )
+        agent_data.last_model_sequence_length = len(merge_result.token_ids)
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
         if response_logprobs is not None:
@@ -304,8 +302,38 @@ class ToolAgentLoop(AgentLoopBase):
 
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
-        else:
-            return AgentState.TERMINATED
+        return AgentState.TERMINATED
+
+    async def _generate(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> TokenOutput:
+        request_kind = RolloutRequestKind.FRESH if agent_data.assistant_turns == 0 else RolloutRequestKind.CONTINUATION
+        prompt_tokens = len(agent_data.prompt_ids)
+        estimated_uncached_tokens = max(0, prompt_tokens - agent_data.last_model_sequence_length)
+        expected_output_tokens = max(0, self.response_length - len(agent_data.response_mask))
+        request_max_tokens = sampling_params.get("max_tokens", sampling_params.get("max_new_tokens"))
+        if request_max_tokens is not None:
+            expected_output_tokens = min(expected_output_tokens, int(request_max_tokens))
+        request_context = RolloutRequestContext(
+            trajectory_id=agent_data.request_id,
+            request_kind=request_kind,
+            turn_index=agent_data.assistant_turns,
+            attempt_index=0,
+            prompt_tokens=prompt_tokens,
+            estimated_uncached_tokens=estimated_uncached_tokens,
+            enqueued_at=time.time(),
+            expected_output_tokens=expected_output_tokens,
+        )
+
+        return await self.server_manager.generate(
+            request_id=agent_data.request_id,
+            prompt_ids=agent_data.prompt_ids,
+            sampling_params=sampling_params,
+            image_data=agent_data.image_data,
+            video_data=agent_data.video_data,
+            mm_processor_output=agent_data.mm_processor_output,
+            audio_data=agent_data.audio_data,
+            mm_processor_kwargs=agent_data.mm_processor_kwargs,
+            request_context=request_context.as_dict(),
+        )
 
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
