@@ -857,6 +857,40 @@ def bootstrap_metric(
     return result
 
 
+def compute_best_worst_at_k(data: list[float], subset_size: int) -> list[tuple[float, float]]:
+    """Return exact (mean, std) of the max and min of k draws without replacement.
+
+    For n sorted observations, the maximum's probability mass at rank i is
+    C(i-1, k-1) / C(n, k) for i >= k, and zero otherwise.
+    Reversing these weights gives the minimum's mass.
+    Duplicate observations retain their individual ranks and their masses add up.
+    These are moments of the empirical sampling distribution, not standard errors.
+    At k=n, the extrema are deterministic and both standard deviations are zero.
+    """
+    if len(data) == 0:
+        raise ValueError("data must not be empty")
+    if not 1 <= subset_size <= len(data):
+        raise ValueError("subset_size must be between 1 and len(data)")
+
+    values = np.sort(np.asarray(data, dtype=np.float64))
+    if subset_size == len(values):
+        return [(float(values[-1]), 0.0), (float(values[0]), 0.0)]
+    # Start at P(max rank = n) = k/n and recurse downward to avoid large binomial coefficients.
+    weights = np.zeros(len(values), dtype=np.float64)
+    weights[-1] = subset_size / len(values)
+    for rank in range(len(values), subset_size, -1):
+        weights[rank - 2] = weights[rank - 1] * (rank - subset_size) / (rank - 1)
+    weights /= weights.sum()
+    # Center each distribution at its extremum to preserve that value at k=n.
+    result = []
+    for mass, origin in ((weights, values[-1]), (weights[::-1], values[0])):
+        centered = values - origin
+        mean_offset = np.dot(mass, centered)
+        variance = np.dot(mass, (centered - mean_offset) ** 2)
+        result.append((float(origin + mean_offset), float(np.sqrt(variance))))
+    return result
+
+
 def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
     """
     Calculate a value based on majority voting.
@@ -905,8 +939,9 @@ def process_validation_metrics(
 
     This function organizes validation metrics by data source and prompt, then computes
     various statistical measures including means, standard deviations, best/worst values,
-    and majority voting results. It also performs bootstrap sampling to estimate statistics
-    for different sample sizes.
+    and majority voting results. Best/worst statistics are computed exactly for sampling
+    without replacement; majority voting statistics are estimated by bootstrap sampling
+    with replacement.
 
     Args:
         data_sources: List of data source identifiers for each sample.
@@ -930,10 +965,10 @@ def process_validation_metrics(
         Where metric_name includes:
         - "mean@N": Mean value across N samples
         - "std@N": Standard deviation across N samples
-        - "best@N/mean": Mean of the best values in bootstrap samples of size N
-        - "best@N/std": Standard deviation of the best values in bootstrap samples
-        - "worst@N/mean": Mean of the worst values in bootstrap samples
-        - "worst@N/std": Standard deviation of the worst values in bootstrap samples
+        - "best@N/mean": Exact mean of the maximum of N draws without replacement
+        - "best@N/std": Exact standard deviation of that maximum
+        - "worst@N/mean": Exact mean of the minimum of N draws without replacement
+        - "worst@N/std": Exact standard deviation of that minimum
         - "maj@N/mean": Mean of majority voting results in bootstrap samples (if "pred" exists)
         - "maj@N/std": Standard deviation of majority voting results (if "pred" exists)
 
@@ -972,7 +1007,6 @@ def process_validation_metrics(
 
     np_mean = np.mean
     np_std = np.std
-    reduce_fns_best_worst = [np.max, np.min]
     n_bootstrap = 1000
 
     # 2. cache ns list
@@ -1026,13 +1060,9 @@ def process_validation_metrics(
 
                     # compute best/worst metrics
                     for n in ns:
-                        # compute best/worst metrics
-                        (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
+                        (bon_mean, bon_std), (won_mean, won_std) = compute_best_worst_at_k(
                             data=var_vals,
                             subset_size=n,
-                            reduce_fns=reduce_fns_best_worst,
-                            n_bootstrap=n_bootstrap,
-                            seed=seed,
                         )
                         metric[f"best@{n}/mean"] = bon_mean
                         metric[f"best@{n}/std"] = bon_std

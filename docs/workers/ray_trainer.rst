@@ -1,7 +1,7 @@
 PPO Ray Trainer
 ===============
 
-Last updated: 02/12/2025.
+Last updated: 10/04/2026.
 
 We implement the RayPPOTrainer, which is a trainer runs on the driver
 process on a single CPU/GPU node (default is CPU).
@@ -108,6 +108,30 @@ computation of PPO micro batches is processed in ``update_actor`` and
 
 To extend to other RLHF algorithms, such as DPO, GRPO, please refer to
 :doc:`../advance/dpo_extension`.
+
+Validation best/worst metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For each prompt with ``n`` validation responses, ``best@k/mean`` and
+``worst@k/mean`` are the exact expected maximum and minimum over uniformly
+selected subsets of ``k`` distinct responses. Responses with the same score
+remain separate observations. These metrics support arbitrary numeric scores
+and use sampling without replacement, with ``1 <= k <= n``.
+
+The corresponding ``/std`` metrics describe the variation of the subset extrema,
+not the standard error of the estimated expectation. At ``k = n``, the means
+are the observed maximum and minimum, and both standard deviations are zero.
+Per-prompt means and standard deviations are averaged across prompts.
+
+For example, scores ``[0, 0, 0, 1]`` give ``best@2/mean = 0.5`` and
+``best@4/mean = 1.0``. Previously, these metrics used 1000 bootstrap samples
+with replacement, whose expected values in this example were ``0.4375`` and
+``0.68359375``. Metric names remain the same, but historical values computed
+with replacement are not directly comparable. ``maj@k`` continues to use
+bootstrap sampling with replacement.
+
+PPO Training Example
+~~~~~~~~~~~~~~~~~~~~
 
 .. code:: python
 
