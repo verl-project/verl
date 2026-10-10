@@ -2,7 +2,6 @@
 set -xeuo pipefail
 
 # DeepSeek-V4.1-Flash VLM BF16 LoRA merge=False — Geo3K alignment test.
-# Follow the GLM-5.3-Flash Megatron LoRA/R3 recipe, with V4.1 model constraints.
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_NVLS_ENABLE=0
@@ -27,16 +26,18 @@ clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
-max_response_length=${MAX_RESPONSE_LENGTH:-2048}
+max_response_length=${MAX_RESPONSE_LENGTH:-16384}
 enable_overlong_buffer=False
 overlong_buffer_len=${max_response_length}
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-train_prompt_bsz=${TRAIN_BATCH_SIZE:-64}
-n_resp_per_prompt=${ROLLOUT_N:-4}
-train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-32}
+# Keep the trajectory batch divisible by the training data-parallel size and
+# by ppo_mini_batch_size * rollout.n.
+train_prompt_bsz=${TRAIN_BATCH_SIZE:-48}
+n_resp_per_prompt=${ROLLOUT_N:-8}
+train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-48}
 
 rollout_is="token"
 rollout_is_threshold="0.5_5.0"
@@ -59,7 +60,7 @@ top_p=1.0
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 
 use_dynamic_bsz=True
-actor_ppo_max_token_len=${PPO_MAX_TOKEN_LEN_PER_GPU:-2048}
+actor_ppo_max_token_len=${PPO_MAX_TOKEN_LEN_PER_GPU:-12288}
 infer_ppo_max_token_len=${actor_ppo_max_token_len}
 gen_tp=${ROLLOUT_TP:-8}
 gen_ep=${gen_tp}
@@ -67,27 +68,102 @@ gen_pp=1
 gen_dcp=1
 train_tp=1
 train_pp=1
-train_ep=$((NNODES * 8))
+train_cp=${TRAIN_CP:-${ACTOR_CP:-4}}
+train_ep=${TRAIN_EP:-$((NNODES * 8))}
 train_etp=1
-train_cp=1
+
+RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-full}
+RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-uniform}
+RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-1}
+
+use_remove_padding=True
+RECOMPUTE_ARGS=(
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=${RECOMPUTE_METHOD}
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=${RECOMPUTE_GRANULARITY}
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=${RECOMPUTE_NUM_LAYERS}
+)
 
 lora_rank=16
 lora_alpha=32
 
-ROLLOUT_RESYNC_BASE=${ROLLOUT_RESYNC_BASE:-True}
-ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.35}
-ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-2048}
-ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${ROLLOUT_MAX_MODEL_LEN}}
+# ``last20_vision`` is the default training scope: the last 20 of 40 HF
+# decoder blocks (20..39, native
+# layers 40..79) plus the vision-to-language aligner head.  The native model
+# interleaves attention (even layers) and MoE (odd layers), so generate
+# only the module patterns that can actually exist at each layer.  The
+# layer-qualified patterns are consumed by Megatron-Bridge; the vLLM PEFT
+# metadata remains the backend-wide ``all-linear`` placeholder.
+lora_scope=${LORA_SCOPE:-last20_vision}
+lora_target_modules='["linear_wkv","linear_wgate","linear_wq_b","linear_weights_proj","linear_wk","linear_kv_proj","linear_q_down_proj","linear_q_up_proj","linear_proj","linear_fc1","linear_fc2","vision.patch_embed.proj","vision.blocks.*.attn.wqkv","vision.blocks.*.attn.wo","vision.blocks.*.mlp.w1","vision.blocks.*.mlp.w2","aligner.w1","aligner.w2"]'
+if [[ "${lora_scope}" == "last20_vision" || "${lora_scope}" == "last20_all_vision" ]]; then
+    decoder_hf_total_layers=40
+    decoder_hf_lora_layer_count=20
+    decoder_native_start_layer=$((2 * (decoder_hf_total_layers - decoder_hf_lora_layer_count)))
+    decoder_native_total_layers=$((2 * decoder_hf_total_layers))
+    if ((decoder_native_start_layer < 0)); then
+        echo "Invalid DeepSeek-V4.1 decoder layer range" >&2
+        exit 1
+    fi
+
+    lora_target_modules="["
+    first_target=1
+    for ((layer=decoder_native_start_layer; layer<decoder_native_total_layers; layer++)); do
+        if ((layer % 2 == 0)); then
+            # CSA2 keeps the compressor only on KV-source layers and the
+            # indexer only on index-source layers.  The last 20 HF blocks
+            # (native layers 40..79) contain one KV source (40) and four
+            # later index sources (48, 56, 64, 72); listing only modules that
+            # exist avoids Bridge's unmatched-target warnings and keeps the
+            # adapter set minimal.
+            layer_modules=(linear_kv_proj linear_q_down_proj linear_q_up_proj linear_proj)
+            if ((layer == 40)); then
+                layer_modules+=(linear_wkv linear_wq_b linear_wk linear_weights_proj)
+            elif ((layer == 48 || layer == 56 || layer == 64 || layer == 72)); then
+                # Reindex layers reuse the Full layer's K projection.
+                layer_modules+=(linear_wq_b linear_weights_proj)
+            fi
+        else
+            layer_modules=(linear_fc1 linear_fc2)
+        fi
+        for module in "${layer_modules[@]}"; do
+            if ((first_target == 0)); then lora_target_modules+=","; fi
+            lora_target_modules+="\"*.layers.${layer}.*.${module}\""
+            first_target=0
+        done
+    done
+    if [[ "${lora_scope}" == "last20_all_vision" ]]; then
+        lora_target_modules+=',"vision.patch_embed.proj","vision.blocks.*.attn.wqkv","vision.blocks.*.attn.wo","vision.blocks.*.mlp.w1","vision.blocks.*.mlp.w2"'
+    fi
+    lora_target_modules+=',"aligner.w1","aligner.w2"]'
+elif [[ "${lora_scope}" != "all" ]]; then
+    echo "Unsupported LORA_SCOPE=${lora_scope}; use all, last20_vision, or last20_all_vision" >&2
+    exit 1
+fi
+
+# Adapter-only post-processing is fixed in the current Verl path.  Keeping the
+# base resident avoids reloading the full model on every update and preserves
+# the tested low-overhead sleep-level-1 path.
+ROLLOUT_RESYNC_BASE=${ROLLOUT_RESYNC_BASE:-False}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.30}
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-32768}
+ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-4096}
 ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-400}
-PARAM_OFFLOAD=${PARAM_OFFLOAD:-True}
-OPTIMIZER_OFFLOAD=${OPTIMIZER_OFFLOAD:-True}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-13}
+SAVE_FREQ=${SAVE_FREQ:--1}
+PARAM_OFFLOAD=${PARAM_OFFLOAD:-False}
+OPTIMIZER_OFFLOAD=${OPTIMIZER_OFFLOAD:-False}
 OPTIMIZER_OFFLOAD_FRACTION=${OPTIMIZER_OFFLOAD_FRACTION:-1.0}
 LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-3}
 ENGRAM_CPU_LOOKUP=${ENGRAM_CPU_LOOKUP:-True}
 
 if ((gen_tp < 1 || 24 % gen_tp != 0 || train_ep % gen_tp != 0)); then
     echo "DeepSeek-V4.1 Engram requires rollout TP/EP to divide 24 (got ${gen_tp})." >&2
+    exit 1
+fi
+train_data_bsz=$((train_prompt_bsz * n_resp_per_prompt))
+if ((train_data_bsz % (train_prompt_mini_bsz * n_resp_per_prompt) != 0)); then
+    echo "Trajectory batch ${train_data_bsz} is not divisible by mini*n=${train_prompt_mini_bsz}*${n_resp_per_prompt}" >&2
     exit 1
 fi
 
@@ -109,8 +185,8 @@ run python3 -m verl.trainer.main_ppo \
     data.image_key=images \
     data.trust_remote_code=True \
     data.return_raw_chat=True \
-    +data.apply_chat_template_kwargs.enable_thinking=False \
-    data.filter_overlong_prompts=True \
+    +data.apply_chat_template_kwargs.enable_thinking=True \
+    data.filter_overlong_prompts=False \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -148,13 +224,11 @@ run python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.lora.merge=False \
     actor_rollout_ref.model.lora.resync_base=${ROLLOUT_RESYNC_BASE} \
     actor_rollout_ref.model.lora.dtype=bf16 \
-    actor_rollout_ref.model.lora.target_modules='["linear_wkv","linear_wgate","linear_wq_b","linear_weights_proj","linear_wk","linear_kv_proj","linear_q_down_proj","linear_q_up_proj","linear_proj","linear_fc1","linear_fc2","vision.patch_embed.proj","vision.blocks.*.attn.wqkv","vision.blocks.*.attn.wo","vision.blocks.*.mlp.w1","vision.blocks.*.mlp.w2","aligner.w1","aligner.w2"]' \
+    actor_rollout_ref.model.lora.target_modules="${lora_target_modules}" \
     actor_rollout_ref.model.lora.enable_tower_connector_lora=True \
-    actor_rollout_ref.model.lora.freeze_vision_model=True \
-    actor_rollout_ref.model.lora.freeze_vision_projection=True \
-    actor_rollout_ref.model.use_remove_padding=False \
-    actor_rollout_ref.actor.megatron.use_remove_padding=False \
-    actor_rollout_ref.ref.megatron.use_remove_padding=False \
+    actor_rollout_ref.model.use_remove_padding=${use_remove_padding} \
+    actor_rollout_ref.actor.megatron.use_remove_padding=${use_remove_padding} \
+    actor_rollout_ref.ref.megatron.use_remove_padding=${use_remove_padding} \
     actor_rollout_ref.actor.optim.lr=5e-5 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS} \
     actor_rollout_ref.actor.optim.weight_decay=0 \
@@ -195,15 +269,14 @@ run python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=False \
     +actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=selective \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_modules='["moe","shared_experts","moe_act","mla_up_proj","mhc"]' \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.mhc_recompute_layer_num=2 \
+    "${RECOMPUTE_ARGS[@]}" \
     +actor_rollout_ref.actor.megatron.override_transformer_config.engram_cpu_lookup=${ENGRAM_CPU_LOOKUP} \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=${OPTIMIZER_OFFLOAD_FRACTION} \
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=False \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=${OPTIMIZER_OFFLOAD} \
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=False \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
+    actor_rollout_ref.rollout.load_format=dummy \
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
     actor_rollout_ref.rollout.enforce_eager=${ENFORCE_EAGER:-False} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
@@ -229,7 +302,6 @@ run python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=2048 \
     actor_rollout_ref.ref.megatron.use_mbridge=True \
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=False \
     actor_rollout_ref.ref.megatron.sequence_parallel=False \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
@@ -250,10 +322,11 @@ run python3 -m verl.trainer.main_ppo \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
     trainer.test_freq=-1 \
-    trainer.save_freq=-1 \
-    trainer.total_epochs=5 \
+    trainer.save_freq=${SAVE_FREQ} \
+    trainer.total_epochs=${TOTAL_EPOCHS} \
     trainer.total_training_steps=${TOTAL_TRAINING_STEPS} \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=disable \
     trainer.log_val_generations=0 \
+    transfer_queue.backend.SimpleStorage.num_data_storage_units=1 \
     "$@"
