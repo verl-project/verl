@@ -539,7 +539,8 @@ def maybe_patch_fsdp_module(model):
         pass
 
     try:
-        if isinstance(model, ABC):
+        mro = type(model).__mro__
+        if ABC in mro and mro.index(ABC) < mro.index(nn.Module):
             fully_shard_module.FSDPModule = FSDPModuleABC
         yield
     finally:
