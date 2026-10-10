@@ -646,19 +646,18 @@ class VeOmniEngine(FSDPEngine):
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
         # shard instead, so the manual whole-model move is unnecessary under CPU offload.
-        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
-            load_veomni_model_to_gpu(self.module)
-
-        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
+        # Ordinary FSDP2 export only collects DTensor references. Stage each
+        # tensor below instead of loading and offloading the whole model merely
+        # to obtain its state_dict. A checkpoint-loading converter (e.g. Qwen3
+        # MoE) does not require staging unless it also implements weight export.
         converter = get_checkpoint_tensor_converter(self.module)
-        if converter is not None and hasattr(converter, "export_weights"):
+        if converter is not None and callable(getattr(converter, "export_weights", None)):
+            if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+                load_veomni_model_to_gpu(self.module)
             return converter.export_weights(self.module), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self._is_offload_param:
-            offload_veomni_model_to_cpu(self.module)
 
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
@@ -669,7 +668,9 @@ class VeOmniEngine(FSDPEngine):
         def param_generator():
             for name, param in params.items():
                 unsharded_tensor = (
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                    param.to(device, non_blocking=True).full_tensor()
+                    if isinstance(param, DTensor)
+                    else param.to(device, non_blocking=True)
                 )
 
                 is_expert_layer = "mlp.experts." in name
