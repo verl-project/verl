@@ -40,6 +40,13 @@ on:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
     - cron: "0 19 * * *"
+  # Let a pull request that touches the FSDP case run it on its own merge commit.
+  pull_request:
+    paths:
+      - ".github/workflows/nightly_ascend.yml"
+      - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp_turbo_npu.sh"
+      - "verl/workers/engine/fsdp/**"
+      - "verl/workers/config/engine.py"
 
 # Declare permissions just read content.
 permissions:
@@ -364,8 +371,8 @@ jobs:
 
   # Test grpo qwen3_5_2b fsdp_turbo vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-8
+    if: ${{ github.repository_owner == 'verl-project' && (github.event.schedule == '0 19 * * *' || github.event_name == 'pull_request') }}
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -394,6 +401,10 @@ jobs:
       - name: Clone FSDPTurbo
         run: |
           git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
+          # Pin to the commit right before 3fd503c, which calls
+          # torch.accelerator.current_device() and breaks on torch 2.10.
+          # Remove this pin once FSDPTurbo fixes it upstream.
+          git -C /FSDPTurbo checkout 0a4b3bc3965fac3fb7423115da2ab0627dfe0076
       - name: Check final pip list
         run: |
           pip list
