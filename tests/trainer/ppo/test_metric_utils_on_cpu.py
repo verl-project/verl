@@ -16,6 +16,8 @@ Tests for the metric utilities in verl.trainer.ppo.metric_utils.
 """
 
 import unittest
+from itertools import combinations, product
+from math import comb
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -24,9 +26,11 @@ import torch
 from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
     calc_maj_val,
+    compute_best_worst_at_k,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    majority_vote_metric,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -492,6 +496,47 @@ class TestBootstrapMetric(unittest.TestCase):
             bootstrap_metric([], subset_size=1, reduce_fns=[np.mean])
 
 
+class TestBestWorstAtK(unittest.TestCase):
+    def test_matches_exhaustive_sampling_without_replacement(self):
+        for data in ([0.0, 1.0], [-3.0, 0.5, 2.0], [2.0, -1.0, 2.0], [7.0], [4.0, 4.0]):
+            for k in range(1, len(data) + 1):
+                with self.subTest(data=data, k=k):
+                    samples = np.array(list(combinations(data, k)))
+                    expected = [
+                        (np.mean(extrema), np.std(extrema)) for extrema in (samples.max(axis=1), samples.min(axis=1))
+                    ]
+                    np.testing.assert_allclose(compute_best_worst_at_k(data, k), expected, atol=1e-14)
+
+    def test_binary_scores(self):
+        n, c = 128, 32
+        for k in (1, 2, 8, 64, 128):
+            with self.subTest(k=k):
+                all_incorrect = comb(n - c, k) / comb(n, k)
+                best = 1 - all_incorrect
+                worst = comb(c, k) / comb(n, k)
+                expected = [
+                    (best, np.sqrt(all_incorrect * best)),
+                    (worst, np.sqrt(worst * (1 - worst))),
+                ]
+                np.testing.assert_allclose(compute_best_worst_at_k([0] * (n - c) + [1] * c, k), expected, atol=1e-14)
+
+    def test_large_offset_preserves_std(self):
+        result = compute_best_worst_at_k([1e12, 1e12 + 1, 1e12 + 2], 2)
+        np.testing.assert_allclose([std for _, std in result], [np.sqrt(2 / 9)] * 2, atol=1e-14)
+        np.testing.assert_array_equal([mean for mean, _ in result], [1e12 + 5 / 3, 1e12 + 1 / 3])
+
+    def test_full_sample_has_zero_std(self):
+        self.assertEqual(compute_best_worst_at_k([2, -3, 5, 2], 4), [(5.0, 0.0), (-3.0, 0.0)])
+        for data in ([-1e16, 1.0], [-1e12, 1e-5], [-1.0, 1e16], [-1e308, 1e308]):
+            with self.subTest(data=data), np.errstate(over="raise", invalid="raise"):
+                self.assertEqual(compute_best_worst_at_k(data, len(data)), [(max(data), 0.0), (min(data), 0.0)])
+
+    def test_invalid_input(self):
+        for data, k in (([], 1), ([1], 0), ([1], -1), ([1, 2], 3)):
+            with self.subTest(data=data, k=k), self.assertRaises(ValueError):
+                compute_best_worst_at_k(data, k)
+
+
 class TestCalcMajVal(unittest.TestCase):
     """Tests for the calc_maj_val function."""
 
@@ -505,8 +550,8 @@ class TestCalcMajVal(unittest.TestCase):
 
         result = calc_maj_val(data, vote_key="pred", val_key="val")
 
-        # "A" is the majority vote, so we should get the first "val" for "A"
-        self.assertEqual(result, 0.9)
+        # Select uniformly among A's rows.
+        self.assertAlmostEqual(result, 0.8)
 
     def test_calc_maj_val_tie(self):
         """Test calc_maj_val with tied votes."""
@@ -517,16 +562,128 @@ class TestCalcMajVal(unittest.TestCase):
             {"pred": "A", "val": 0.6},
         ]
 
-        # In case of a tie, the first key in sorted order wins
-        # This depends on Python's dict implementation, but for this test
-        # we just verify that one of the valid values is returned
         result = calc_maj_val(data, vote_key="pred", val_key="val")
+        self.assertAlmostEqual(result, 0.75)
+        self.assertAlmostEqual(calc_maj_val(data[::-1], "pred", "val"), result)
 
-        self.assertTrue(result in [0.9, 0.8])
+
+class TestMajorityVoteMetric(unittest.TestCase):
+    @staticmethod
+    def exhaustive_moments(data, k):
+        first, second = [], []
+        for subset in combinations(data, k):
+            groups = {}
+            for row in subset:
+                groups.setdefault(row["pred"], []).append(row["val"])
+            largest = max(map(len, groups.values()))
+            winners = [vals for vals in groups.values() if len(vals) == largest]
+            first.append(np.mean([np.mean(vals) for vals in winners]))
+            second.append(np.mean([np.mean(np.square(vals)) for vals in winners]))
+        mean = np.mean(first)
+        return mean, np.sqrt(max(0, np.mean(second) - mean**2))
+
+    def test_matches_exhaustive_subsets(self):
+        # Two/three/four-group populations, every k.
+        # Distinct scores within groups also exercise random row selection.
+        populations = [
+            *product(range(1, 4), repeat=2),
+            *product(range(1, 4), repeat=3),
+            *product(range(1, 3), repeat=4),
+        ]
+        for counts in populations:
+            data = [
+                {"pred": group, "val": (group - 1) * 0.7 + row * 0.2}
+                for group, count in enumerate(counts)
+                for row in range(count)
+            ]
+            for k in range(1, len(data) + 1):
+                with self.subTest(counts=counts, k=k):
+                    actual = majority_vote_metric(data, k, "pred", "val")
+                    np.testing.assert_allclose(actual, self.exhaustive_moments(data, k), atol=1e-12)
+
+    def test_without_replacement_and_full_population_ties(self):
+        data = [{"pred": "A", "val": 1.0}] * 2 + [{"pred": "B", "val": 0.0}] * 2
+        # All six 2-subsets: AA, BB and four AB, with fair tie breaking.
+        np.testing.assert_allclose(majority_vote_metric(data, 2, "pred", "val"), (0.5, 0.5))
+        np.testing.assert_allclose(majority_vote_metric(data, 4, "pred", "val"), (0.5, 0.5))
+        data.append({"pred": "A", "val": 1.0})
+        # At k=N the unique plurality always wins; replacement would allow B.
+        self.assertEqual(majority_vote_metric(data, 5, "pred", "val"), (1.0, 0.0))
+
+    def test_permutation_and_single_group(self):
+        data = [{"pred": "A", "val": 0.0}, {"pred": "A", "val": 1.0}, {"pred": "B", "val": 0.3}]
+        for k in range(1, 4):
+            np.testing.assert_allclose(
+                majority_vote_metric(data, k, "pred", "val"),
+                majority_vote_metric(data[::-1], k, "pred", "val"),
+                atol=1e-14,
+            )
+        for k in (1, 2):
+            self.assertEqual(majority_vote_metric(data[:2], k, "pred", "val"), (0.5, 0.5))
+
+    def test_invalid_subset_sizes(self):
+        for data, k in (([], 1), ([{"pred": "A", "val": 1}], 0), ([{"pred": "A", "val": 1}], 2)):
+            with self.assertRaises(ValueError):
+                majority_vote_metric(data, k, "pred", "val")
+
+    def test_large_binary_population(self):
+        # Independently evaluate the hypergeometric tail with integer counts.
+        from math import comb
+
+        data = [{"pred": "A", "val": 1.0}] * 600 + [{"pred": "B", "val": 0.0}] * 424
+        k = 512
+        expected = sum(
+            comb(600, m) * comb(424, k - m) * (0.5 if 2 * m == k else 1.0) for m in range(k // 2, min(600, k) + 1)
+        ) / comb(1024, k)
+        mean, std = majority_vote_metric(data, k, "pred", "val")
+        self.assertAlmostEqual(mean, expected, places=12)
+        self.assertAlmostEqual(std, np.sqrt(expected * (1 - expected)), places=6)
 
 
 class TestProcessValidationMetrics(unittest.TestCase):
     """Tests for the process_validation_metrics function."""
+
+    def test_best_worst_and_majority_share_exact_without_replacement_semantics(self):
+        infos = {"score": [0, 0, 0, 1], "pred": ["B", "B", "B", "A"]}
+        with patch(
+            "verl.trainer.ppo.metric_utils.bootstrap_metric", side_effect=AssertionError("unexpected bootstrap")
+        ):
+            result = process_validation_metrics(["source"] * 4, ["prompt"] * 4, infos, seed=42)
+            permuted = process_validation_metrics(
+                ["source"] * 4, ["prompt"] * 4, {key: values[::-1] for key, values in infos.items()}, seed=123
+            )
+        self.assertEqual(result, permuted)
+        metrics = result["source"]["score"]
+        for key, expected in {
+            "best@2/mean": 0.5,
+            "best@4/mean": 1.0,
+            "best@4/std": 0.0,
+            "worst@2/mean": 0.0,
+            "worst@4/mean": 0.0,
+            "worst@4/std": 0.0,
+            "maj@2/mean": 0.25,
+            "maj@4/mean": 0.0,
+            "maj@4/std": 0.0,
+        }.items():
+            with self.subTest(key=key):
+                self.assertAlmostEqual(metrics[key], expected)
+
+    def test_best_worst_are_exact_and_seed_independent(self):
+        kwargs = {
+            "data_sources": ["source1"] * 4,
+            "sample_uids": ["prompt1"] * 4,
+            "infos_dict": {"score": [0, 0, 0, 1]},
+        }
+        with patch(
+            "verl.trainer.ppo.metric_utils.bootstrap_metric", side_effect=AssertionError("unexpected bootstrap")
+        ):
+            result = process_validation_metrics(**kwargs, seed=42)
+            self.assertEqual(result, process_validation_metrics(**kwargs, seed=123))
+        metrics = result["source1"]["score"]
+        for k in (2, 4):
+            for name, mean in (("best", k / 4), ("worst", 0.0)):
+                self.assertAlmostEqual(metrics[f"{name}@{k}/mean"], mean)
+                self.assertAlmostEqual(metrics[f"{name}@{k}/std"], np.sqrt(mean * (1 - mean)))
 
     def test_process_validation_metrics_basic(self):
         """Test process_validation_metrics with simple data."""
@@ -560,13 +717,24 @@ class TestProcessValidationMetrics(unittest.TestCase):
             "pred": ["A", "B", "A"],
         }
 
-        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+        with patch(
+            "verl.trainer.ppo.metric_utils.bootstrap_metric", side_effect=AssertionError("unexpected bootstrap")
+        ):
+            result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
 
         # Check that majority voting metrics are present
         self.assertIn("maj@2/mean", result["source1"]["score"])
 
-        # For bootstrap with n=2, the majority vote could be either A or B
-        # depending on the random sampling, so we don't check the exact value
+        metrics = result["source1"]["score"]
+        self.assertAlmostEqual(metrics["maj@2/mean"], 0.8)
+        self.assertAlmostEqual(metrics["maj@3/mean"], 0.75)
+        self.assertAlmostEqual(metrics["maj@3/std"], 0.05)
+        reversed_result = process_validation_metrics(
+            data_sources, sample_inputs, {key: values[::-1] for key, values in infos_dict.items()}, seed=123
+        )
+        for name, value in metrics.items():
+            if name.startswith("maj@"):
+                self.assertAlmostEqual(value, reversed_result["source1"]["score"][name])
 
     def test_process_validation_metrics_counts_missing_sessions_as_incorrect(self):
         data_sources = ["source1", "source1"]

@@ -1,7 +1,7 @@
 PPO Ray Trainer
 ===============
 
-Last updated: 02/12/2025.
+Last updated: 10/04/2026.
 
 We implement the RayPPOTrainer, which is a trainer runs on the driver
 process on a single CPU/GPU node (default is CPU).
@@ -108,6 +108,30 @@ computation of PPO micro batches is processed in ``update_actor`` and
 
 To extend to other RLHF algorithms, such as DPO, GRPO, please refer to
 :doc:`../advance/dpo_extension`.
+
+Validation best/worst metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For each prompt with ``n`` validation responses, ``best@k/mean`` and
+``worst@k/mean`` are the exact expected maximum and minimum over uniformly
+selected subsets of ``k`` distinct responses. Responses with the same score
+remain separate observations. These metrics support arbitrary numeric scores
+and use sampling without replacement, with ``1 <= k <= n``.
+
+The corresponding ``/std`` metrics describe the variation of the subset extrema,
+not the standard error of the estimated expectation. At ``k = n``, the means
+are the observed maximum and minimum, and both standard deviations are zero.
+Per-prompt means and standard deviations are averaged across prompts.
+
+For example, scores ``[0, 0, 0, 1]`` give ``best@2/mean = 0.5`` and
+``best@4/mean = 1.0``. Previously, these metrics used 1000 bootstrap samples
+with replacement, whose expected values in this example were ``0.4375`` and
+``0.68359375``. Metric names remain the same, but historical values computed
+with replacement are not directly comparable. ``maj@k`` also uses an exact
+without-replacement calculation, as described below.
+
+PPO Training Example
+~~~~~~~~~~~~~~~~~~~~
 
 .. code:: python
 
@@ -239,3 +263,31 @@ To extend to other RLHF algorithms, such as DPO, GRPO, please refer to
        if self.val_reward_fn is not None:
            val_metrics = self._validate()
            pprint(f'Final validation metrics: {val_metrics}')
+
+Validation majority-vote metrics
+-------------------------------
+
+When reward extra information contains a ``pred`` answer for each response,
+validation reports ``maj@k/mean`` and ``maj@k/std`` for numeric scores.
+These metrics use uniformly selected subsets of ``k`` distinct responses
+without replacement. The answer with the highest count wins; when multiple
+answers share that count, each tied answer has equal probability of winning.
+The score is selected uniformly from the sampled responses having the winning
+answer. Neither answer order nor response order determines the winner or score.
+
+``maj@k/mean`` is the expected score, and ``maj@k/std`` is the standard
+deviation of that random score, including subset selection, tied answers,
+and score selection within an answer. It is not the standard error of an
+estimator. Both moments are computed analytically using the multivariate
+hypergeometric distribution; there is no Monte Carlo sampling noise.
+Per-prompt means and standard deviations retain the existing averaging across
+prompts.
+
+For three responses with answers ``[A, A, B]`` and scores ``[1, 1, 0]``,
+``maj@2/mean`` is ``2/3`` and ``maj@3/mean`` is ``1``. At ``k`` equal to the
+number of responses, the full set is used, although ties and differing scores
+within the winning answer can still yield a nonzero standard deviation.
+Earlier versions used sampling with replacement and selected the first
+occurring tied answer and score. Metric names are preserved, but historical
+values use a different probability definition and should not be compared
+directly with these values.
