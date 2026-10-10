@@ -915,6 +915,14 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
+  checkpoint_retention:
+    enable: false
+    metric: null
+    mode: max
+    keep_last: 1
+    window: 1
+    converge_tolerance: null
+    milestone_interval: null
   ray_wait_register_center_timeout: 300
   device: cuda
   use_v1: true

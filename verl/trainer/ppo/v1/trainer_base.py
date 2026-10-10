@@ -49,6 +49,7 @@ from verl.single_controller.ray import (
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
+from verl.trainer.ppo.checkpoint_retention import build_checkpoint_retention
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
@@ -120,6 +121,7 @@ class PPOTrainer(ABC):
     def __init__(self, config: DictConfig):
         self.config = config
         self.checkpoint_callback = build_checkpoint_callback(config)
+        self.checkpoint_retention = build_checkpoint_retention(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
@@ -390,6 +392,8 @@ class PPOTrainer(ABC):
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
         self._load_checkpoint()
+        if self.checkpoint_retention.enabled:
+            self.checkpoint_retention.load(self.global_steps)
 
         logger.info("all initialize finished, ready to fit")
 
@@ -442,6 +446,8 @@ class PPOTrainer(ABC):
             self.on_validate_end()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
+            if self.checkpoint_retention.enabled:
+                val_metrics.update(self.checkpoint_retention.observe_validation(self.global_steps, val_metrics))
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
@@ -478,9 +484,10 @@ class PPOTrainer(ABC):
                 self._stop_profiling()
 
                 # 2. save checkpoint
-                if self.config.trainer.save_freq > 0 and (
+                saved_checkpoint = self.config.trainer.save_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
+                )
+                if saved_checkpoint:
                     with marked_timer("save_checkpoint", self.timing_raw, color="green"):
                         self._save_checkpoint()
 
@@ -488,16 +495,23 @@ class PPOTrainer(ABC):
                 metrics.update(self._consume_sync_metrics())
 
             # 4. validate
+            val_metrics = None
             if self.config.trainer.test_freq > 0 and (
                 is_last_step or self.global_steps % self.config.trainer.test_freq == 0
             ):
                 with marked_timer("testing", self.timing_raw, color="green"):
                     self.on_validate_begin()
-                    val_metrics: dict = self._validate()
+                    val_metrics = self._validate()
                     self.on_validate_end()
                     if is_last_step:
                         last_val_metrics = val_metrics
                 metrics.update(val_metrics)
+
+            # Checkpoints are saved before validation, so score-based retention can only decide
+            # once this step's validation is known.
+            if self.checkpoint_retention.enabled and (saved_checkpoint or val_metrics is not None):
+                with marked_timer("checkpoint_retention", self.timing_raw, color="green"):
+                    metrics.update(self.checkpoint_retention.on_step_end(self.global_steps, val_metrics))
 
             # 5. record metrics
             self._compute_metrics(batch, metrics, self.timing_raw, global_steps=self.global_steps, epoch=current_epoch)
@@ -1006,6 +1020,10 @@ class PPOTrainer(ABC):
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
             )
+
+        checkpoint_retention = getattr(self, "checkpoint_retention", None)
+        if checkpoint_retention is not None and checkpoint_retention.enabled:
+            checkpoint_retention.on_save(self.global_steps)
 
         # write latest checkpointed iteration tracker for atomic resume
         actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})

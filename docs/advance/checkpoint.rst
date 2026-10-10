@@ -38,6 +38,55 @@ Megatron:
     For FSDP, ``checkpoint.save_contents`` other than ``hf_model`` are binded together to save and
     load. We recommend to include ``model``, ``optimizer`` and ``extra`` all.
 
+Score-aware Checkpoint Retention
+--------------------------------
+
+``trainer.max_actor_ckpt_to_keep`` rotates checkpoints purely by save order. With
+the v1 trainer, ``trainer.checkpoint_retention`` instead keeps checkpoints by
+their role. Checkpoints are still saved every ``save_freq`` steps; after the
+validation of the same step, only these are kept:
+
+- ``latest``: the ``keep_last`` most recent checkpoints and the one named in
+  ``latest_checkpointed_iteration.txt``, to resume training;
+- ``best``: the highest-scoring checkpoint so far, to restart from when the
+  training dynamics need fixing;
+- ``converged``: the earliest checkpoint whose score is within
+  ``converge_tolerance`` of the best, to study the dynamics before convergence;
+- ``milestone``: sparse rollback points. A checkpoint that sets a new best at
+  least ``milestone_interval`` steps after the previous milestone (or the start
+  of the run) is kept permanently.
+
+``best``, ``converged`` and ``milestone`` are always checkpoints that beat every earlier
+checkpoint when they were scored. As the best score rises, such checkpoints that
+fall more than ``converge_tolerance`` below it can never become ``converged``
+again and are deleted; the ones still inside the band are kept as candidates
+(``converge_candidate``). The early fast rise therefore leaves no checkpoints
+behind. Scores can be averaged over the last ``window`` validation points so a
+single lucky evaluation does not define the best.
+
+.. code:: yaml
+
+    trainer:
+      save_freq: 80
+      test_freq: 40            # save_freq must be a multiple of test_freq to score every checkpoint
+      max_actor_ckpt_to_keep: null
+      checkpoint_retention:
+        enable: true
+        metric: [val-core/aime24/acc/mean@32, val-core/aime25/acc/mean@32]  # score = mean
+        keep_last: 1
+        window: 2
+        converge_tolerance: 0.02
+        milestone_interval: 400
+
+Scores and decisions persist in ``<default_local_dir>/checkpoint_retention.json``
+and are logged under ``checkpoint_retention/*`` (including ``best_step``,
+``converged_step`` and ``is_milestone``). Only checkpoints registered in that file are deleted;
+directories from other runs or written before the policy was enabled are never
+touched. Deletion runs on the driver, so ``default_local_dir`` must be on a
+filesystem the driver can see; copies under ``default_hdfs_dir`` are not pruned.
+The policy cannot be combined with ``max_actor_ckpt_to_keep``/``max_critic_ckpt_to_keep``,
+and needs ``keep_last >= 2`` with asynchronous saving.
+
 Checkpoint Callback
 -------------------
 
@@ -445,3 +494,13 @@ a distributed accelerator environment is still required for conversion collectiv
 
     This may increase CPU memory usage and lead to OOM issues for large models.
     We recommend using the default dp-reshardable format in most cases.
+
+With asynchronous checkpoint saving, every registered step newer than the worker durability tracker is retained until completion, even when more than ``keep_last`` saves are queued. If no tracker exists yet, all registered saves are protected. Once the tracker advances, completed checkpoints follow the configured retention policy.
+
+Score-aware retention requires synchronous critic checkpoint saving when the critic is enabled (including automatic critic use with GAE). Set ``critic.checkpoint.async_save=false``. Actor and critic asynchronous writers finalize independently and share one tracker, which cannot establish joint durability; active asynchronous critic saving is therefore rejected while this policy is enabled. An unused critic configuration is unaffected.
+
+Asynchronous actor retention cannot roll back to a step older than an existing durability tracker in the same run directory. Such a marker belongs to the previous run and cannot prove completion of newly written lower-numbered checkpoints. The policy rejects this load before any new checkpoint write; use synchronous saving or a fresh checkpoint directory for rollback. It never rewinds the global tracker. Synchronous rollback and disabled retention remain supported.
+
+The retention registry records the metric keys, ranking mode and smoothing window that produced its scores. Resuming with a different ``metric``, ``mode`` or ``window`` is rejected before a new checkpoint write or pruning, because the saved scores and record flags cannot be reused safely. Settings such as ``keep_last`` can change while the scoring policy stays the same.
+
+Older registries without score-policy provenance are also rejected when retention is enabled. To continue, disable score-aware retention for the existing directory, or restore the chosen checkpoint with a fresh ``trainer.default_local_dir`` so new saves start a new registry. Keep the original registry and checkpoint directories intact; removing or relabeling the registry would not recover already pruned candidates or prove how its scores were computed. Ordinary checkpoint recovery with retention disabled does not require registry migration.
