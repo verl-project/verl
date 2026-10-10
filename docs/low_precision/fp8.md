@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 09/29/2026
+Last updated: 10/10/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -245,8 +245,8 @@ actor_rollout_ref.rollout:
 
 Notes:
 
-- Training requires the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`,
-  the default). The legacy model-building path does not support FP8 recipes and fails loudly.
+- Training uses the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`),
+  which is now the only Megatron model-building path in verl.
 - Model weights stay in bf16 (`fp8_param` is not supported); only GEMM inputs are cast to
   MXFP8 on the fly, so checkpointing is unchanged.
 - verl pads packed sequences to the 32-token block boundaries MXFP8 quantization requires;
