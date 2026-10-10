@@ -116,6 +116,9 @@ jobs:
       - name: Running NPU profiling unit tests
         run: |
           pytest -s -x tests/utils/test_special_mstx_profile.py
+      - name: Running Qwen3-VL-MoE NPU patch regression tests
+        run: |
+          pytest -s -x tests/models/test_qwen3_vl_moe_npu_patch.py
       - name: Running NPU checkpoint_engine unit tests
         run: |
           pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py

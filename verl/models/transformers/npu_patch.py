@@ -381,7 +381,12 @@ def _patch_qwen3_vl():
 def _patch_qwen3_vl_moe():
     from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 
-    modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
+    if hasattr(modeling_qwen3_vl_moe, "Qwen3VLMoeTextTopKRouter"):
+        # Transformers 5 uses [experts, out_features, in_features] weights
+        # and a separate top-k router. Keep their checkpoint and hook APIs.
+        modeling_qwen3_vl_moe.Qwen3VLMoeTextExperts.forward = qwen3_5_moe_experts_forward_npu
+    else:
+        modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
     modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
     modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
