@@ -953,6 +953,7 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    resume_discard_rollout: false
     trainer_mode: sync
     sync: {}
     colocate_async:

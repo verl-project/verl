@@ -445,3 +445,15 @@ a distributed accelerator environment is still required for conversion collectiv
 
     This may increase CPU memory usage and lead to OOM issues for large models.
     We recommend using the default dp-reshardable format in most cases.
+
+Async rollout recovery
+~~~~~~~~~~~~~~~~~~~~~~
+
+The v1 asynchronous trainers restore checkpointed TransferQueue data by default.
+Finished trajectories remain available for training; pending and running groups
+restart from their saved prompts. Warmup fills only the missing prompt groups.
+
+Set ``trainer.v1.resume_discard_rollout=true`` to skip queue restoration.
+The model, optimizer, training step, and dataloader still resume from the checkpoint.
+Normal warmup reads subsequent prompts from the restored dataloader; saved prompts
+are not reissued. The checkpoint on disk remains available for a later restore.

@@ -234,6 +234,9 @@ trainer:
   # V1 trainer mode configs
   v1:
 
+    # Skip checkpointed rollout data while restoring model, optimizer, and dataloader.
+    resume_discard_rollout: false
+
     # Trainer mode: "sync", "colocate_async", "separate_async"
     trainer_mode: sync
 
