@@ -332,8 +332,9 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        use_fp8_padding = getattr(tf_config, "fp8", None) in ("e4m3", "hybrid")
+        # Same rule as verl.models.mcore.util.get_fp8_padding_options (inlined: CPU tests stub that module).
+        fp8_recipe = getattr(tf_config, "fp8_recipe", None) if use_fp8_padding else None
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -347,6 +348,7 @@ def merge_router_topk_indices(
                 input_ids,
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
@@ -368,7 +370,7 @@ def merge_router_topk_indices(
         else:
             batch_size, seq_len = attention_mask.shape[:2]
             _, packed_seq_params = preprocess_packed_seqs(
-                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding, fp8_recipe=fp8_recipe
             )
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
@@ -467,8 +469,9 @@ def set_router_replay_data(
 
     with torch.no_grad():
         vp_rank = 0 if vp_rank is None else vp_rank
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        use_fp8_padding = getattr(tf_config, "fp8", None) in ("e4m3", "hybrid")
+        # Same rule as verl.models.mcore.util.get_fp8_padding_options (inlined: CPU tests stub that module).
+        fp8_recipe = getattr(tf_config, "fp8_recipe", None) if use_fp8_padding else None
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -482,6 +485,7 @@ def set_router_replay_data(
                 layers_topk_idx,
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
@@ -491,6 +495,7 @@ def set_router_replay_data(
                     replay_mask,
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
+                    fp8_recipe=fp8_recipe,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
                     cp_layout=cp_layout,
@@ -499,7 +504,11 @@ def set_router_replay_data(
             if attention_mask is None:
                 raise RuntimeError("router replay REPLAY requires attention_mask for non-nested BSHD inputs.")
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
-                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                layers_topk_idx,
+                attention_mask,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
             )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 

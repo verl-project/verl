@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 09/29/2026
+Last updated: 10/10/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -212,6 +212,121 @@ actor_rollout_ref.rollout:
 Results and observations:
 - FP8 E2E achieves comparable accuracy to the BF16 baseline, with the two curves closely aligned throughout training.
 - The training/inference precision mismatch (measured by KL divergence) follows the ordering: FP8 rollout-only > FP8 E2E > BF16 E2E. This is expected, as FP8 E2E maintains consistent precision across both training and inference, resulting in lower distribution mismatch than the FP8 rollout-only setting where training remains in BF16.
+
+---
+
+## MXFP8 Training (Blackwell)
+
+MXFP8 is the OCP microscaling FP8 format: E4M3 elements with one shared E8M0 scale per
+32-element block, natively accelerated by Blackwell tensor cores. Compared to the
+`blockwise` recipe above (1x128 activation / 128x128 weight scaling, designed for Hopper),
+MXFP8 uses hardware-decoded block scales and needs no `NVTE_FP8_BLOCK_SCALING_FP32_SCALES`
+workaround.
+
+### Requirements
+
+- **Blackwell GPUs** (SM100+). On Hopper, use `fp8_recipe: "blockwise"` as described in
+  the FP8 End-to-End section instead — Hopper tensor cores cannot consume MXFP8 block scales.
+- **Megatron-Core >= 0.13** and **Transformer Engine >= 2.1**
+
+### Key Configuration
+
+```yaml
+# MXFP8 training via Transformer Engine
+actor_rollout_ref.actor.megatron.override_transformer_config:
+  fp8: "e4m3"                # element format; "hybrid" (e4m3 fwd + e5m2 bwd) also supported
+  fp8_recipe: "mxfp8"        # 32-element block scaling
+```
+
+Notes:
+
+- Training uses the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`),
+  which is now the only Megatron model-building path in verl.
+- Model weights stay in bf16 (`fp8_param` is not supported); only GEMM inputs are cast to
+  MXFP8 on the fly, so checkpointing is unchanged.
+- verl pads packed sequences to the 32-token block boundaries MXFP8 quantization requires
+  (`lcm(32, ...)` per sequence instead of the blockwise recipe's `lcm(16, ...)`); this is automatic
+  once `fp8_recipe: "mxfp8"` is set.
+- QAT and Transformer Engine FP8 training are mutually exclusive (QAT fake-quantizes weights inside
+  bf16 GEMMs, while an FP8 recipe switches the GEMMs themselves to FP8); the engine refuses the
+  combination at initialization.
+- `verl.utils.mxfp8_quant.mxfp8_quantize` exposes the TE `MXFP8Quantizer` the learner applies to its
+  weights, for weight synchronization to an MXFP8 rollout engine; `lm_head` and the token embedding
+  stay in high precision there (`MXFP8_KEEP_HIGH_PRECISION_LAYERS`).
+
+### MXFP8 Rollout on SGLang
+
+```yaml
+actor_rollout_ref.rollout:
+  name: sglang
+  quantization: mxfp8
+```
+
+SGLang is launched in MXFP8 mode against the bf16 checkpoint (its FP8 method with `use_mxfp8`, through a
+`quantization_config` override), and every weight sync quantizes the bf16 actor weights on the trainer
+side with TransformerEngine's `MXFP8Quantizer` (`verl.utils.mxfp8_quant`), the quantizer the learner's
+FP8 GEMMs apply to weights, before streaming them. The rollout therefore serves the learner's weight
+grid. `lm_head` and the token embedding stay in bf16 through `ignored_layers`; SGLang's MoE blocks build
+their routers without a quantization config.
+
+Layer skipping follows the same rules as FP8 rollout (`ignored_layers`, `modules_to_not_convert`, or
+the `SGLANG_FP8_IGNORED_LAYERS` env var). Layers whose last weight dim is not a multiple of 32 cannot
+be MXFP8-quantized and must be excluded this way, e.g. vision towers of VLMs
+(`SGLANG_FP8_IGNORED_LAYERS=visual`); weight sync fails with an actionable error if such a layer is
+selected. If you enable `first_last_layers_bf16` on the training side, keep the two sides consistent
+by excluding the same layers from rollout quantization, e.g. for a 36-layer model with the first and
+last layer in bf16:
+
+```json
+{
+  "quantization_config": {
+    "ignored_layers": ["re:model\\.layers\\.(0|35)\\..*"]
+  }
+}
+```
+
+The delta checkpoint engine (`wire_format="delta_flush"`) applies raw bf16 tensors in place and would
+bypass the weight-sync quantization, so it is rejected when rollout quantization is set (fp8 included).
+
+#### SGLang MXFP8 GEMM backend
+
+Which kernel SGLang uses for MXFP8 dense GEMMs depends on the SGLang version:
+
+- **sglang <= 0.5.17** (e.g. 0.5.12) runs them on a generic Triton kernel unless a FlashInfer
+  backend is requested. On 2xB200 (Qwen3-8B), MXFP8 decode on that path was about 1.9x slower
+  than bf16 decode (52 vs. 27 ms per response token); the FlashInfer CUTLASS backend was about 1.3x
+  slower than bf16 (34 ms). verl logs a warning at launch on these versions when no backend is set.
+  Select CUTLASS with
+
+  ```bash
+  +actor_rollout_ref.rollout.engine_kwargs.sglang.fp8_gemm_runner_backend=flashinfer_cutlass
+  ```
+
+  (`fp8_gemm_runner_backend` is the `ServerArgs` field name; the CLI spelling
+  `--fp8-gemm-backend` is not accepted through `engine_kwargs`.)
+- **sglang >= 0.5.18** (sgl-project/sglang#33208) removed the Triton path. With no backend set,
+  Blackwell uses FlashInfer CuTe-DSL when available, otherwise FlashInfer CUTLASS; Hopper uses
+  DeepGEMM. No flag is needed.
+
+Two constraints on this path:
+
+- Every one of these FlashInfer / DeepGEMM backends derives a kernel-specific copy of the
+  weight scales at load time (`weight_scale_inv_swizzled` / `weight_scale_inv_deepgemm`), and
+  SGLang's weight-update path does not rebuild it. verl therefore registers an MXFP8 refit loader
+  (`mxfp8_refit_loader.py`) that re-runs the post-load processing after every weight sync; it reads
+  the backend each layer actually resolved to, so it covers the version-dependent defaults above.
+  Without it the engine keeps serving load-time scales against freshly synced weights and generates
+  garbage from step 0. `flashinfer_trtllm` shuffles the weight tensor itself in place at load and is
+  rejected by the loader.
+- Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for an SGLang rollout: verl
+  launches SGLang with `enable_memory_saver=True`, and `torch_memory_saver` refuses that
+  allocator mode, killing the server in `load_model`. The vLLM path tolerates the variable.
+
+**MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at load
+(swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them back to the
+canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout afterwards into the
+storage the CUDA graph captured. This path is covered by CPU tests and has not been validated on
+hardware.
 
 ---
 
