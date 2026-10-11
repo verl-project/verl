@@ -31,6 +31,9 @@ forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
 # Forward-only batch size during inference (per GPU)
 forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
 
+# Infer-time local per-GPU micro batch size. Prefer the forward-only knob.
+ppo_infer_micro_batch_size_per_gpu: ${.forward_micro_batch_size_per_gpu}
+
 # Sequence parallelism size for Ulysses-style model parallelism
 # [DEPRECATED] use fsdp_config.ulysses_sequence_parallel_size instead
 ulysses_sequence_parallel_size: 1
