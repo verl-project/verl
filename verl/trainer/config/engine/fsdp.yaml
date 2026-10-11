@@ -123,3 +123,9 @@ turbo_config:
       fsdp_implementation: native
       num_to_forward_prefetch: 1
       num_to_backward_prefetch: 1
+
+# Router replay mode: disabled, R3. R3 passes the rollout's top-k expert indices to the model
+# as the forward argument `routed_experts` (needs rollout.enable_rollout_routing_replay=True).
+router_replay:
+  _target_: verl.workers.config.EngineRouterReplayConfig
+  mode: disabled
