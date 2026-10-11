@@ -20,6 +20,8 @@ Utility classes for manage and request LLM servers:
 import asyncio
 import logging
 import os
+import time
+from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -40,6 +42,26 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@dataclass
+class _EngineRecovery:
+    timeout: float
+    max_retries: int
+    retries: int = 0
+    deadline: float | None = None
+
+    def remaining(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for rollout engine recovery")
+        return remaining
+
+    def failed(self) -> None:
+        self.retries += 1
+        if self.deadline is None:
+            self.deadline = time.monotonic() + self.timeout
+        self.remaining()
+
+
 class LLMServerClient:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
@@ -51,6 +73,8 @@ class LLMServerClient:
         self,
         config: DictConfig,
         load_balancer_handle: ray.actor.ActorHandle = None,
+        engine_recovery_timeout: float | None = None,
+        max_engine_retries: int = 3,
         **kwargs,
     ):
         """Initialize the LLMServerClient.
@@ -60,9 +84,20 @@ class LLMServerClient:
             load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
                 that also holds the server-handle registry. Optional; subclasses that
                 manage server routing externally can pass None.
+            engine_recovery_timeout: Opt into engine-failure replay and bound waiting
+                for the routing owner to publish a recovered server. The owner must
+                restore the current committed weight version for synchronous rollout.
+                None preserves the existing exception behavior.
+            max_engine_retries: Maximum engine failures to replay per generation.
         """
+        if engine_recovery_timeout is not None and (engine_recovery_timeout <= 0 or load_balancer_handle is None):
+            raise ValueError("engine recovery requires a positive timeout and a load balancer")
+        if max_engine_retries < 0:
+            raise ValueError("max_engine_retries must be nonnegative")
         self.config = config
         self._load_balancer = load_balancer_handle
+        self._engine_recovery_timeout = engine_recovery_timeout
+        self._max_engine_retries = max_engine_retries
         # Balancer field declarations, queried lazily once.
         self._lb_require_acquire_fields: list[str] | None = None
         self._lb_require_release_fields: list[str] | None = None
@@ -80,12 +115,50 @@ class LLMServerClient:
         fields = {name: extra[name] for name in self._lb_require_acquire_fields if name in extra}
         return await self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
 
-    def _release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def _release_server(
+        self, server_id: str, request_id: str | None = None, expected_handle: ray.actor.ActorHandle = None
+    ) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
         pool = {"request_id": request_id}
         fields = {name: pool[name] for name in self._lb_require_release_fields if name in pool}
+        if expected_handle is not None:
+            fields["expected_handle"] = expected_handle
         self._load_balancer.release_server.remote(server_id=server_id, **fields)
+
+    def _new_engine_recovery(self) -> _EngineRecovery | None:
+        if self._engine_recovery_timeout is None:
+            return None
+        return _EngineRecovery(self._engine_recovery_timeout, self._max_engine_retries)
+
+    def _resume_failed_partial(self) -> bool:
+        return False
+
+    def _is_engine_failure(self, error: Exception) -> bool:
+        cause = error.cause if isinstance(error, ray.exceptions.RayTaskError) else error
+        if isinstance(cause, ray.exceptions.ActorDiedError):
+            return True
+        if self.config.actor_rollout_ref.rollout.name == "vllm":
+            from vllm.v1.engine.exceptions import EngineDeadError
+
+            return isinstance(cause, EngineDeadError)
+        return False
+
+    async def _acquire_for_generation(self, request_id: str, recovery: _EngineRecovery | None, **extra):
+        while True:
+            try:
+                if recovery is not None and recovery.deadline is not None:
+                    timeout = recovery.remaining()
+                    return await asyncio.wait_for(self._acquire_server(request_id, **extra), timeout=timeout)
+                return await self._acquire_server(request_id, **extra)
+            except RuntimeError as exc:
+                if (
+                    recovery is None
+                    or recovery.deadline is None
+                    or "No available servers in load balancer" not in str(exc)
+                ):
+                    raise
+                await asyncio.sleep(min(1.0, recovery.remaining()))
 
     def _vllm_request_id(self, request_id: str) -> str:
         # request_id passed to vLLM. Default: a fresh uuid per turn so each turn
@@ -106,6 +179,7 @@ class LLMServerClient:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        _engine_recovery: _EngineRecovery | None = None,
         **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
@@ -118,8 +192,38 @@ class LLMServerClient:
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
-        server_id, server = await self._acquire_server(
+        recovery = _engine_recovery or self._new_engine_recovery()
+        while True:
+            output = await self._generate_once(
+                request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                recovery=recovery,
+                **kwargs,
+            )
+            if recovery is None or not output.extra_fields.get("engine_failed") or self._resume_failed_partial():
+                return output
+
+    async def _generate_once(
+        self,
+        request_id,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        recovery: _EngineRecovery | None,
+        **kwargs: Any,
+    ) -> TokenOutput:
+        server_id, server = await self._acquire_for_generation(
             request_id,
+            recovery,
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
             image_data=image_data,
@@ -147,17 +251,33 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
-            output: TokenOutput = await server.generate.remote(
-                request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-                **multimodal_kwargs,
-                **priority_kwargs,
-                session_id=request_id,
-                **kwargs,
-            )
+            if recovery is not None and self.config.actor_rollout_ref.rollout.name == "vllm":
+                kwargs["recover_engine_failure"] = True
+            try:
+                output: TokenOutput = await server.generate.remote(
+                    request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
+                    prompt_ids=prompt_ids,
+                    sampling_params=sampling_params,
+                    image_data=image_data,
+                    video_data=video_data,
+                    **multimodal_kwargs,
+                    **priority_kwargs,
+                    session_id=request_id,
+                    **kwargs,
+                )
+            except Exception as exc:
+                if recovery is None or not self._is_engine_failure(exc):
+                    raise
+                # A dead Ray actor cannot return its current attempt's progress.
+                output = TokenOutput(token_ids=[], stop_reason="aborted", extra_fields={"engine_failed": True})
+            if recovery is not None and output.extra_fields.get("engine_failed"):
+                recovery.failed()
+                await asyncio.wait_for(
+                    self._load_balancer.remove_server_if_current.remote(server_id, server),
+                    timeout=recovery.remaining(),
+                )
+                if recovery.retries > recovery.max_retries:
+                    raise RuntimeError("rollout engine recovery retry limit exceeded")
             global_steps = output.extra_fields.get("global_steps")
             output.extra_fields.setdefault("min_global_steps", global_steps)
             output.extra_fields.setdefault("max_global_steps", global_steps)
@@ -166,6 +286,7 @@ class LLMServerClient:
             self._release_server(
                 server_id,
                 request_id=request_id,
+                **({"expected_handle": server} if recovery is not None else {}),
             )
 
 
@@ -221,6 +342,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         if isinstance(response_length, int) and response_length > 0:
             return response_length
         return None
+
+    def _resume_failed_partial(self) -> bool:
+        return not hasattr(self.config, "async_training") or self.config.async_training.partial_rollout
 
     @rollout_trace_op
     async def generate(
@@ -286,6 +410,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # must carry it forward explicitly or the consumer sees 0. Take the first
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
+        recovery = self._new_engine_recovery()
 
         while True:
             # 1. generate tokens
@@ -297,6 +422,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
+                _engine_recovery=recovery,
                 **kwargs,
             )
 

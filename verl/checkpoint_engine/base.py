@@ -13,7 +13,9 @@
 # limitations under the License.
 import asyncio
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, AsyncGenerator, Generator
 
 import ray
@@ -27,6 +29,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout.replica import RolloutMode
 from verl.workers.rollout.utils import ensure_async_iterator
 
 
@@ -359,6 +362,11 @@ class CheckpointEngineWorker(Worker):
             wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
         )
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def bind_server_handle(self, server_handle: ray.actor.ActorHandle) -> None:
+        """Bind retained weight receivers to a replacement inference server."""
+        self.server_adapter.bind_server_handle(server_handle)
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
@@ -418,6 +426,50 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+        self._weight_sync_lock = Lock()
+        self._pending_restarts: list[RolloutReplica] = []
+
+    @contextmanager
+    def _weight_sync_operation(self):
+        """Prevent restart and weight synchronization from using receivers concurrently."""
+        if not self._weight_sync_lock.acquire(blocking=False):
+            raise RuntimeError("weight synchronization or replica restart is already in progress")
+        try:
+            yield
+        finally:
+            self._weight_sync_lock.release()
+
+    @auto_await
+    async def restart_replica(self, replica: RolloutReplica, timeout: float = 60.0) -> None:
+        """Stage next_weight_sync recovery and rebind retained weight receivers.
+
+        The caller serializes this operation with trainer GPU/optimizer phases.
+        The replacement remains paused until a successful, versioned update_weights().
+        Request routing and publication of the new address remain with the caller.
+        """
+        if not any(registered is replica for registered in self.replicas):
+            raise ValueError("restart requires a replica registered with this checkpoint manager")
+        if (
+            self.backend == "naive"
+            or self.backend_cls.wire_format != "named_tensors"
+            or replica.rollout_mode != RolloutMode.STANDALONE
+            or replica.nnodes != 1
+            or replica.config.name != "vllm"
+            or replica.config.disaggregation.enabled
+        ):
+            raise NotImplementedError("restart requires single-node standalone vLLM with full weight synchronization")
+        lora = replica.model_config.lora
+        if (lora.get("rank", 0) or replica.model_config.lora_rank) and not lora.get("merge", False):
+            raise NotImplementedError("restart requires full model weights or merged LoRA")
+        with self._weight_sync_operation():
+            if not any(pending is replica for pending in self._pending_restarts):
+                self._pending_restarts.append(replica)
+            await replica.restart(timeout=timeout)
+            await replica.abort_all_requests(reject_request=True)
+            rollout = RayWorkerGroup(
+                worker_handles=replica.workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls)
+            )
+            ray.get(rollout.bind_server_handle(replica.server_handle))
 
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for actor worker group and rollout replicas."""
@@ -462,6 +514,7 @@ class CheckpointEngineManager:
         """
         replicas_set = set(replicas)
         self.replicas = [r for r in self.replicas if r not in replicas_set]
+        self._pending_restarts = [r for r in self._pending_restarts if r not in replicas_set]
 
     @auto_await
     async def sleep_replicas(self):
@@ -514,6 +567,17 @@ class CheckpointEngineManager:
             global_steps: The global steps of the actor worker group.
         """
 
+        with self._weight_sync_operation():
+            if self._pending_restarts:
+                if self.backend == "naive" or self.backend_cls.wire_format != "named_tensors":
+                    raise NotImplementedError("restarted replicas require full weight synchronization")
+                if type(global_steps) is not int or global_steps < 0:
+                    raise ValueError("restarted replicas require a non-negative integer weight version")
+            return await self._update_weights(global_steps)
+
+    async def _update_weights(self, global_steps: int = None):
+        """Run the existing full-group weight synchronization and reopen healthy replacements."""
+
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
@@ -557,7 +621,9 @@ class CheckpointEngineManager:
         await self.resume_kv_cache_replicas()
 
         # 8. resume all unfinished requests for partial rollout
+        await asyncio.gather(*[replica.server_handle.check_health.remote() for replica in self._pending_restarts])
         await self.resume_generation_replicas()
+        self._pending_restarts.clear()
 
         return sync_metrics
 

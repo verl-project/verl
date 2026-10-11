@@ -28,7 +28,9 @@ _preprocess_sampling_params before admission, _postprocess_output after release.
 """
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -36,6 +38,7 @@ pytest.importorskip("ray")
 pytest.importorskip("vllm")
 
 from vllm.logprobs import Logprob
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.vllm_rollout import vllm_async_server
@@ -289,6 +292,131 @@ def test_snapshot_rejects_headless_node_without_touching_engine():
     asyncio.run(main())
 
 
+def test_health_works_without_metrics_and_snapshot_propagates_engine_failure():
+    server = _make_server()
+    assert RolloutConfig().disable_log_stats
+    server.engine.logger_manager = None
+    server.engine.check_health = AsyncMock()
+    server._engine_cleanup = Mock()
+    asyncio.run(server.check_health())
+    server.engine.check_health.assert_awaited_once_with()
+    server._engine_cleanup.record.assert_called_once_with()
+
+    failure = EngineDeadError()
+    server.engine.check_health.reset_mock(side_effect=True)
+    server.engine.check_health.side_effect = failure
+    # No logger is installed: the failed health check must precede gauge reads.
+    with pytest.raises(EngineDeadError) as caught:
+        asyncio.run(server.snapshot())
+    assert caught.value is failure
+    server.engine.check_health.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("survivors", [False, True])
+def test_engine_cleanup_reaps_owned_orphans_and_refuses_survivors(monkeypatch, survivors):
+    orphan, unrelated, unrelated_child, actor = Mock(), Mock(), Mock(), Mock()
+    actor.children.return_value = [unrelated]
+    unrelated.children.return_value = []
+    monkeypatch.setattr(vllm_async_server.psutil, "Process", Mock(return_value=actor))
+    cleanup = vllm_async_server._LegacyMPEngineCleanup()
+
+    # Record the engine while healthy; a pre-existing child later gains a child.
+    unrelated.children.return_value = [unrelated_child]
+    actor.children.return_value = [unrelated, unrelated_child, orphan]
+    cleanup.record()
+    actor.children.return_value = [unrelated, unrelated_child]  # Engine worker is orphaned.
+    wait = Mock(side_effect=[([], [orphan]), ([], [orphan]), ([], [orphan]) if survivors else ([orphan], [])])
+    monkeypatch.setattr(vllm_async_server.psutil, "wait_procs", wait)
+    engine = Mock()
+    if survivors:
+        with pytest.raises(RuntimeError, match="owned engine processes alive"):
+            asyncio.run(cleanup.shutdown(engine))
+    else:
+        asyncio.run(cleanup.shutdown(engine))
+    engine.shutdown.assert_called_once_with()
+    orphan.terminate.assert_called_once_with()
+    orphan.kill.assert_called_once_with()
+    assert all(call.args[0] == [orphan] for call in wait.call_args_list)
+    for process in (unrelated, unrelated_child):
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+
+
+def _make_restart_replica(monkeypatch):
+    server = SimpleNamespace(
+        shutdown=SimpleNamespace(remote=AsyncMock(return_value=(1234, 1.0))),
+        get_server_address=SimpleNamespace(
+            remote=AsyncMock(side_effect=vllm_async_server.ray.exceptions.ActorDiedError())
+        ),
+    )
+    worker = SimpleNamespace(__ray_call__=SimpleNamespace(remote=AsyncMock(return_value=False)))
+    replica = object.__new__(vllm_async_server.vLLMReplica)
+    replica.rollout_mode = vllm_async_server.RolloutMode.STANDALONE
+    replica.nnodes = 1
+    replica.config = SimpleNamespace(disaggregation=SimpleNamespace(enabled=False))
+    replica.servers = [server]
+    replica._server_handle = server
+    replica._server_address = "old-address"
+    replica.workers, replica.resource_pool = [worker], object()
+    replica.launch_servers = AsyncMock()
+    kill = Mock()
+    monkeypatch.setattr(vllm_async_server.ray, "kill", kill)
+    return replica, server, kill
+
+
+def test_restart_waits_for_old_server_exit_and_retains_workers_and_pool(monkeypatch):
+    replica, server, kill = _make_restart_replica(monkeypatch)
+    workers, pool = replica.workers, replica.resource_pool
+    process_probe = workers[0].__ray_call__.remote
+    process_probe.side_effect = [True, False]
+    events = Mock()
+    for name, mock in (
+        ("shutdown", server.shutdown.remote),
+        ("kill", kill),
+        ("ray_exit", server.get_server_address.remote),
+        ("process_exit", process_probe),
+        ("launch", replica.launch_servers),
+    ):
+        events.attach_mock(mock, name)
+    asyncio.run(replica.restart())
+    assert [call[0] for call in events.mock_calls] == [
+        "shutdown",
+        "kill",
+        "ray_exit",
+        "process_exit",
+        "process_exit",
+        "launch",
+    ]
+    assert replica.workers is workers and replica.resource_pool is pool
+    assert replica.servers == [] and replica._server_handle is None and replica._server_address is None
+
+
+def test_restart_refuses_shutdown_failure_without_replacing_server(monkeypatch):
+    replica, server, kill = _make_restart_replica(monkeypatch)
+    failure = RuntimeError("engine processes were not released")
+    server.shutdown.remote.side_effect = failure
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(replica.restart())
+    assert caught.value is failure
+    kill.assert_not_called()
+    replica.launch_servers.assert_not_awaited()
+    assert replica.servers == [server] and replica._server_handle is server
+
+
+def test_restart_bounds_process_exit_wait_without_replacing_server(monkeypatch):
+    replica, server, kill = _make_restart_replica(monkeypatch)
+
+    async def hung_probe(*args):
+        await asyncio.Event().wait()
+
+    replica.workers[0].__ray_call__.remote.side_effect = hung_probe
+    with pytest.raises(TimeoutError, match="cleanup timed out"):
+        asyncio.run(replica.restart(timeout=0.03))
+    kill.assert_called_once_with(server, no_restart=True)
+    replica.launch_servers.assert_not_awaited()
+    assert replica.servers == [server] and replica._server_handle is server
+
+
 class _SelectedTokenServer(vllm_async_server.vLLMHttpServer):
     """Scores fixed token IDs at every response position without overriding generate()."""
 
@@ -378,6 +506,37 @@ def test_output_hook_runs_for_requests_aborted_with_empty_outputs(monkeypatch):
 
         assert output.stop_reason == "aborted" and output.token_ids == []
         assert output.extra_fields["selected_logprobs"] == []
+        assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    "tokens,recover,routing", [([5, 9], True, False), ([], True, False), ([5, 9], False, False), ([5, 9], True, True)]
+)
+def test_engine_failure_preserves_available_progress_only_when_requested(monkeypatch, tokens, recover, routing):
+    async def main():
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [])
+        server.config = replace(server.config, enable_rollout_routing_replay=routing)
+        rows = [{token: Logprob(logprob=-0.1, rank=1)} for token in tokens]
+
+        async def fail(**kwargs):
+            if tokens:
+                yield _request_output(tokens, rows)
+            raise EngineDeadError()
+
+        server.engine.generate = fail
+        if not recover:
+            with pytest.raises(EngineDeadError):
+                await server.generate([1, 2, 3], {"logprobs": True}, "r")
+        else:
+            output = await server.generate([1, 2, 3], {"logprobs": True}, "r", recover_engine_failure=True)
+            assert output.token_ids == ([] if routing else tokens) and output.stop_reason == "aborted"
+            assert output.log_probs == ([-0.1] * len(tokens) if tokens and not routing else None)
+            assert output.extra_fields["engine_failed"] and output.extra_fields["global_steps"] == 7
+            assert server._submission_paused and server._rejecting
+            late = await server.generate([1, 2, 3], {}, "late", recover_engine_failure=True)
+            assert late.token_ids == [] and late.extra_fields["engine_failed"]
         assert server._admitting == 0
 
     asyncio.run(main())

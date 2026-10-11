@@ -63,7 +63,7 @@ class RequestLoadBalancer(Protocol):
         only ``"request_id"``); ``[]`` if counting by ``server_id`` alone."""
         ...
 
-    def release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def release_server(self, server_id: str, request_id: str | None = None, expected_handle: Any = None) -> None:
         """Release a server after a request completes.
 
         Args:
@@ -72,6 +72,7 @@ class RequestLoadBalancer(Protocol):
                 the prompt length at release time look it up by this id from
                 their own acquire-time bookkeeping, so the full token list is
                 not re-serialized over RPC.
+            expected_handle: When supplied, ignore a late release from a replaced actor.
         """
         ...
 
@@ -88,6 +89,13 @@ class RequestLoadBalancer(Protocol):
 
         Args:
             server_ids: List of server identifiers to remove.
+        """
+        ...
+
+    def remove_server_if_current(self, server_id: str, expected_handle: Any) -> bool:
+        """Remove a failed actor only if its handle is still registered for this ID.
+
+        Required when clients opt into engine-failure replay.
         """
         ...
 
@@ -203,7 +211,9 @@ class GlobalRequestLoadBalancer:
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
 
-    def release_server(self, server_id: str, request_id: str | None = None) -> None:
+    def release_server(
+        self, server_id: str, request_id: str | None = None, expected_handle: ray.actor.ActorHandle = None
+    ) -> None:
         """Release a server after a request completes.
 
         ``request_id`` is accepted for signature parity with content-aware
@@ -212,6 +222,8 @@ class GlobalRequestLoadBalancer:
         and ignores it.
         """
         if server_id not in self._inflight_requests:
+            return
+        if expected_handle is not None and self._servers[server_id] != expected_handle:
             return
         if self._inflight_requests[server_id] > 0:
             self._inflight_requests[server_id] -= 1
@@ -251,6 +263,13 @@ class GlobalRequestLoadBalancer:
             self._inflight_requests.pop(sid, None)
             self._servers.pop(sid, None)
         logger.info(f"[GlobalLoadBalancer] removed {len(server_ids)} servers")
+
+    def remove_server_if_current(self, server_id: str, expected_handle: ray.actor.ActorHandle) -> bool:
+        """Fence one failed actor without removing a same-address replacement."""
+        if server_id not in self._servers or self._servers[server_id] != expected_handle:
+            return False
+        self.remove_servers([server_id])
+        return True
 
     def get_inflight_count(self, server_id: str) -> int:
         """Get number of in-flight requests for a server."""

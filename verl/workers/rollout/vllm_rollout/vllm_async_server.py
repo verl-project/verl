@@ -21,9 +21,11 @@ import time
 import uuid
 import zlib
 from collections.abc import Mapping
+from contextlib import suppress
 from pprint import pprint
 from typing import Any, Callable, Optional
 
+import psutil
 import ray
 import vllm.entrypoints.cli.serve
 from packaging import version
@@ -39,6 +41,7 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
@@ -78,6 +81,69 @@ _VLLM_VERSION = version.parse(vllm.__version__)
 
 # Max wait for admissions already past the submission gate to reach the engine.
 _GATE_BARRIER_TIMEOUT_S = 60.0
+
+
+def _server_process_is_alive(_worker, pid: int, create_time: float) -> bool:
+    """Check an old server's exact process identity on its retained worker node."""
+    try:
+        process = psutil.Process(pid)
+        return process.create_time() == create_time and process.is_running()
+    except psutil.NoSuchProcess:
+        return False
+
+
+# TODO: Once vLLM #55846 and #59984 are merged and available in supported
+# versions, verify native shutdown exits all owned children after core failure.
+# Then delegate this fallback to native shutdown or remove it; retain the
+# separate Ray actor and HTTP-listener exit confirmation in replica restart.
+class _LegacyMPEngineCleanup:
+    """Keep MP engine ownership and fallback cleanup behind one replacement point.
+
+    Related vLLM work addresses parent death and force-kill races:
+    https://github.com/vllm-project/vllm/pull/55846
+    https://github.com/vllm-project/vllm/pull/59984
+    """
+
+    def __init__(self) -> None:
+        # Exclude pre-existing actor children and their later descendants.
+        self._initial_processes = set(psutil.Process().children(recursive=True))
+        self._owned_processes: set[psutil.Process] = set()
+
+    def record(self) -> list[psutil.Process]:
+        """Retain owned process identities before a failed core can orphan them."""
+        excluded = self._initial_processes.copy()
+        for process in self._initial_processes:
+            with suppress(psutil.NoSuchProcess):
+                excluded.update(process.children(recursive=True))
+        self._owned_processes.update(set(psutil.Process().children(recursive=True)) - excluded)
+        return list(self._owned_processes)
+
+    async def shutdown(self, engine: AsyncLLM) -> None:
+        """Run vLLM shutdown, reap recorded descendants, and fail closed on errors."""
+        children = self.record()
+        shutdown_error = None
+        try:
+            await asyncio.to_thread(engine.shutdown)
+        except Exception as exc:
+            # A broken core may prevent normal cleanup. Reap our recorded
+            # descendants before propagating the original shutdown failure.
+            shutdown_error = exc
+        _, alive = await asyncio.to_thread(psutil.wait_procs, children, timeout=5)
+        for signal in ("terminate", "kill"):
+            if not alive:
+                break
+            for process in alive:
+                with suppress(psutil.NoSuchProcess):
+                    # psutil checks the recorded creation time against PID reuse.
+                    getattr(process, signal)()
+            _, alive = await asyncio.to_thread(psutil.wait_procs, alive, timeout=5)
+        if alive:
+            raise RuntimeError(
+                "vLLM shutdown left owned engine processes alive; refusing to restart"
+            ) from shutdown_error
+        if shutdown_error is not None:
+            raise shutdown_error
+
 
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
@@ -494,6 +560,8 @@ class vLLMHttpServer:
         if "disable_log_stats" in fn_args:
             kwargs["disable_log_stats"] = engine_args.disable_log_stats
 
+        # Capture exclusions before creating the engine's subprocesses.
+        self._engine_cleanup = _LegacyMPEngineCleanup()
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
         # Don't keep the dummy data in memory
@@ -533,7 +601,29 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         self.engine = engine_client
+        self._engine_cleanup.record()
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+
+    async def shutdown(self) -> tuple[int, float]:
+        """Release a single-node standalone MP engine; the owner then kills this actor.
+
+        The HTTP listener stays owned by the actor. Return its exact process
+        identity after the recorded engine descendants have exited, so the
+        owner can confirm actor process exit on the same node after ray.kill.
+        """
+        if self.rollout_mode != RolloutMode.STANDALONE or self.nnodes != 1 or self.node_rank != 0:
+            raise NotImplementedError("engine shutdown requires a single-node standalone replica")
+        if self._disaggregation_role != "null":
+            raise NotImplementedError("engine shutdown does not support PD")
+        if self.engine.vllm_config.parallel_config.distributed_executor_backend != "mp":
+            raise NotImplementedError("engine shutdown requires the multiprocessing executor")
+
+        self._rejecting = True
+        self._submission_paused = True
+        self._resume_event.set()
+        await self._engine_cleanup.shutdown(self.engine)
+        actor = psutil.Process()
+        return actor.pid, actor.create_time()
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
@@ -570,6 +660,7 @@ class vLLMHttpServer:
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
         session_id: Optional[str] = None,
+        recover_engine_failure: bool = False,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
@@ -681,7 +772,11 @@ class vLLMHttpServer:
 
         rejected = await self._park_until_admitted(request_id)
         if rejected is not None:
+            if recover_engine_failure and getattr(self, "_engine_failed", False):
+                rejected.extra_fields["engine_failed"] = True
             return rejected
+        generation_version = self.global_steps
+        engine_failed = False
 
         with RLInsightLogger.trace_state(
             "vllm_generate",
@@ -705,12 +800,41 @@ class vLLMHttpServer:
                         admitted = True
                         self._admitting -= 1
                     final_res = output
+            except EngineDeadError:
+                if not recover_engine_failure:
+                    raise
+                # The server actor survives an EngineCore failure. Its last cumulative
+                # output can rebuild the prefix on a replacement engine; no KV is reused.
+                engine_failed = True
+                self._engine_failed = True
+                self._submission_paused = True
+                self._rejecting = True
+                self._resume_event.clear()
             finally:
                 if not admitted:
                     self._admitting -= 1
-            assert final_res is not None
+            if final_res is None:
+                if not engine_failed:
+                    raise RuntimeError("generation ended without an output")
+                return TokenOutput(
+                    token_ids=[],
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": generation_version, "engine_failed": True},
+                )
 
-        extra_fields = {"global_steps": self.global_steps}
+        extra_fields = {"global_steps": generation_version}
+        if engine_failed:
+            extra_fields["engine_failed"] = True
+            if final_res.outputs:
+                completion = final_res.outputs[0]
+                missing_logprobs = sampling_params.logprobs is not None and (
+                    completion.logprobs is None or len(completion.logprobs) != len(completion.token_ids)
+                )
+                # vLLM may publish MoE routing only when a request finishes. Recompute
+                # this attempt rather than retaining tokens without their original routes.
+                missing_routing = self.config.enable_rollout_routing_replay and completion.routed_experts is None
+                if missing_logprobs or missing_routing:
+                    return TokenOutput(token_ids=[], stop_reason="aborted", extra_fields=extra_fields)
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -748,7 +872,7 @@ class vLLMHttpServer:
 
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason
-        if finish_reason == "abort":
+        if engine_failed or finish_reason == "abort":
             stop_reason = "aborted"
         elif finish_reason in ("stop", "length"):
             stop_reason = "completed"
@@ -932,6 +1056,11 @@ class vLLMHttpServer:
         await self.engine.wake_up(tags=["kv_cache"])
         await self.engine.reset_prefix_cache(reset_connector=True)
 
+    async def check_health(self) -> None:
+        """Check the serving engine independently of optional metrics logging."""
+        await self.engine.check_health()
+        self._engine_cleanup.record()
+
     async def snapshot(self) -> dict[str, Any]:
         """Return live KV-cache and scheduler queue observations.
 
@@ -954,6 +1083,7 @@ class vLLMHttpServer:
                 "vLLMHttpServer.snapshot() requires the node-rank-0 AsyncLLM; "
                 f"node_rank={self.node_rank} actors run headless and have no engine."
             )
+        await self.check_health()
         prometheus_logger = self._prometheus_logger
         kv_cache_usage = self._prometheus_values(
             prometheus_logger.gauge_kv_cache_usage,
@@ -1492,6 +1622,77 @@ class vLLMReplica(RolloutReplica):
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
         self.server_class = ray.remote(vLLMHttpServer)
+
+    async def restart(self, timeout: float = 60.0) -> None:
+        """Replace a standalone engine server after proving its release.
+
+        Keep the existing workers and resource pool. The caller owns routing
+        and weight restoration. ``timeout`` bounds old-server shutdown and
+        actor-exit confirmation, not replacement engine initialization.
+        """
+        if self.rollout_mode != RolloutMode.STANDALONE or self.nnodes != 1:
+            raise NotImplementedError("engine restart requires a single-node standalone replica")
+        if self.config.disaggregation.enabled:
+            raise NotImplementedError("engine restart does not support PD")
+        if not 0 < timeout < float("inf"):
+            raise ValueError("engine restart timeout must be positive and finite")
+        if len(self.servers) != 1:
+            raise RuntimeError("engine restart requires exactly one initialized server actor")
+        if not self.workers:
+            raise RuntimeError("engine restart requires retained rollout workers")
+
+        if getattr(self, "_restart_in_progress", False):
+            raise RuntimeError("vLLM server restart is already in progress")
+        self._restart_in_progress = True
+        try:
+            try:
+                await asyncio.wait_for(self._stop_server_actor(self.servers[0]), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError("vLLM server cleanup timed out; refusing to restart") from exc
+
+            self.servers = []
+            self._server_handle = None
+            self._server_address = None
+            await self.launch_servers()
+        finally:
+            self._restart_in_progress = False
+
+    async def _stop_server_actor(self, server: ActorHandle) -> None:
+        """Release the engine, kill the actor, and confirm its Ray and OS exit."""
+        identity = await server.shutdown.remote()
+        if not isinstance(identity, tuple) or len(identity) != 2:
+            raise RuntimeError("vLLM shutdown returned an invalid process identity; refusing to restart")
+        pid, create_time = identity
+        if (
+            type(pid) is not int
+            or pid <= 0
+            or isinstance(create_time, bool)
+            or not isinstance(create_time, int | float)
+            or not 0 < create_time < float("inf")
+        ):
+            raise RuntimeError("vLLM shutdown returned an invalid process identity; refusing to restart")
+        ray.kill(server, no_restart=True)
+        # ray.kill only forwards a request to GCS. A transient unavailable
+        # actor is not proof that the old listener/process has exited.
+        while True:
+            try:
+                await server.get_server_address.remote()
+            except ray.exceptions.ActorDiedError:
+                break
+            except ray.exceptions.ActorUnavailableError:
+                pass
+            await asyncio.sleep(0.1)
+
+        # GCS can publish DEAD before the asynchronous kill reaches the actor.
+        # A reserved worker on this single node verifies OS exit, including the
+        # old HTTP listener, without signaling a reused PID or dropping GPUs.
+        while True:
+            alive = await self.workers[0].__ray_call__.remote(_server_process_is_alive, pid, create_time)
+            if not isinstance(alive, bool):
+                raise RuntimeError("vLLM server process probe returned an invalid result; refusing to restart")
+            if not alive:
+                break
+            await asyncio.sleep(0.1)
 
     async def launch_servers(self):
         """Launch http server in each node."""
