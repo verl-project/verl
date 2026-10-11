@@ -13,6 +13,7 @@
 # limitations under the License.
 """Utils for tokenization."""
 
+import os
 import types
 import warnings
 
@@ -173,10 +174,39 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         )
         kwargs["eos_token"] = "<end_of_turn>"
         kwargs["eos_token_id"] = 107
-    tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    tokenizer = _honor_tokenizer_json(AutoTokenizer.from_pretrained(name_or_path, **kwargs), name_or_path, kwargs)
     if correct_pad_token:
         set_pad_token_id(tokenizer)
     return tokenizer
+
+
+_PROBE = "Solve it  step by step.\n\n\tx = 3"
+
+
+def _honor_tokenizer_json(tokenizer, name_or_path, kwargs):
+    """Keep ``tokenizer`` only if it encodes like the ``tokenizer.json`` it was loaded from.
+
+    transformers 5 rebuilds some classes (e.g. ``LlamaTokenizer``) from the class recipe and ignores the
+    pre-tokenizer stored in ``tokenizer.json``. On a byte-level BPE vocabulary this drops every space and
+    newline without any error, so prompts reach the model as run-together text.
+    """
+    path = os.path.join(str(name_or_path), "tokenizer.json")
+    if not os.path.isfile(path):
+        return tokenizer
+    from tokenizers import Tokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    def encode(candidate):
+        return candidate(_PROBE, add_special_tokens=False)["input_ids"]
+
+    expected = Tokenizer.from_file(path).encode(_PROBE, add_special_tokens=False).ids
+    if encode(tokenizer) == expected:
+        return tokenizer
+    faithful = PreTrainedTokenizerFast.from_pretrained(name_or_path, **kwargs)
+    if encode(faithful) != expected:
+        raise ValueError(f"Cannot load a tokenizer that reproduces {path}")
+    warnings.warn(f"{type(tokenizer).__name__} ignores the pre-tokenizer of {path}; loaded it as stored.", stacklevel=3)
+    return faithful
 
 
 def hf_processor(name_or_path, **kwargs):
