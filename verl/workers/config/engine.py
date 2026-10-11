@@ -248,7 +248,8 @@ class FSDPEngineConfig(EngineConfig):
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
-        dtype (str): Mixed precision training param dtype, default "bfloat16"
+        dtype (str): Mixed precision training param dtype, default "bfloat16". Used when
+            ``mixed_precision.param_dtype`` is not set; an explicit ``param_dtype`` takes precedence.
         use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
             final micro-batch. Disabling this reduces peak memory by synchronizing and resharding gradients after
             every micro-batch. default True
