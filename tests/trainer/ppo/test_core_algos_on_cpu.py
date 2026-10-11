@@ -14,6 +14,8 @@
 
 import random
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -21,6 +23,7 @@ import torch
 
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
+    compute_codapo_outcome_advantage,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
@@ -332,6 +335,60 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert ret1.shape == ret2.shape == (batch_size, seq_len)
     assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+def test_codapo_value_and_weighted_grpo_advantage():
+    token_level_rewards = torch.tensor([[0.7, 0.0], [0.2, 0.0], [0.9, 0.0], [0.8, 0.0]])
+    response_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [1.0, 1.0]])
+    old_log_probs = torch.log(torch.tensor([[0.5, 0.5], [0.25, 1.0], [0.5, 0.5], [0.5, 0.5]]))
+    index = np.array(["learnable", "learnable", "easy", "easy"], dtype=object)
+
+    batch = {}
+    advantages, returns = compute_codapo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        old_log_probs=old_log_probs,
+        index=index,
+        config={"codapo_accuracy_key": "acc", "codapo_weight_offset": 0.1},
+        non_tensor_batch={"acc": np.array([1.0, -0.5, 1.0, 1.0])},
+        batch=batch,
+    )
+    expected_values = torch.tensor([(0.5 * 0.25) ** 0.5] * 2 + [0.0] * 2)
+    grpo_advantages, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    assert torch.allclose(batch["codapo_values"], expected_values)
+    assert torch.allclose(advantages, grpo_advantages * (expected_values + 0.1).unsqueeze(-1))
+    assert torch.equal(returns, advantages)
+
+
+def test_codapo_dispatches_grpo_normalization_setting():
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    data = SimpleNamespace(
+        batch={
+            "token_level_rewards": torch.tensor([[1.0], [0.0]]),
+            "response_mask": torch.ones(2, 1),
+            "old_log_probs": torch.zeros(2, 1),
+        },
+        non_tensor_batch={"uid": np.array(["question"] * 2), "acc": np.array([1.0, 0.0])},
+    )
+
+    with patch(
+        "verl.trainer.ppo.ray_trainer.core_algos.get_adv_estimator_fn",
+        return_value=compute_codapo_outcome_advantage,
+    ):
+        compute_advantage(
+            data,
+            adv_estimator="codapo",
+            norm_adv_by_std_in_grpo=False,
+            config={},
+        )
+
+    assert torch.allclose(data.batch["advantages"], torch.tensor([[0.55], [-0.55]]))
 
 
 @pytest.mark.parametrize(
