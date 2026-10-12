@@ -63,6 +63,10 @@ def response_only_output_projection(model, projection_mask: torch.Tensor) -> Ite
 
     output_layer = _get_output_layer(model)
     sequence_parallel = bool(getattr(output_layer, "sequence_parallel", False))
+    if sequence_parallel and getattr(getattr(output_layer, "config", None), "defer_embedding_wgrad_compute", False):
+        raise NotImplementedError(
+            "response_only_lm_head does not support deferred embedding weight gradients with sequence parallelism"
+        )
     if sequence_parallel and not hasattr(output_layer, "disable_grad_reduce"):
         raise RuntimeError(
             "response_only_lm_head requires an output layer that supports disable_grad_reduce "

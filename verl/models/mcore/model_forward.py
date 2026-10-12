@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from contextlib import nullcontext
+from typing import Optional
 
 import torch
 from torch.nested._internal.nested_tensor import NestedTensor
@@ -127,9 +128,9 @@ def gptmodel_forward_model_engine(
     data_format: str = "thd",
     mtp_enable_train: bool = False,
     response_only_lm_head: bool = False,
-    local_cp_size: int | None = None,
-    forced_max_seqlen: int | None = None,
-    pad_to_length_bucket: int | None = None,
+    local_cp_size: Optional[int] = None,
+    forced_max_seqlen: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
     cp_layout: str = "zigzag",
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
@@ -190,10 +191,7 @@ def gptmodel_forward_model_engine(
                 full_loss_mask,
                 pre_process=True,
                 need_roll=True,
-                quant_align_size=quant_align_size,
-                local_cp_size=local_cp_size,
-                pad_to_length_bucket=pad_to_length_bucket,
-                cp_layout=cp_layout,
+                **thd_kwargs,
             )[0].to(torch.bool)
 
         args = {}

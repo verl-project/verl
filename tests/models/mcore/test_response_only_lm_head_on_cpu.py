@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -50,21 +52,31 @@ class _Model(torch.nn.Module):
         return logits.transpose(0, 1).contiguous()
 
 
-def test_response_mask_is_next_token_aligned():
-    response_mask = torch.nested.as_nested_tensor(
-        [torch.tensor([1, 1, 0, 1, 0]), torch.tensor([1, 0, 1, 1])], layout=torch.jagged
-    )
-    full_mask = _build_full_loss_mask_nested(response_mask, [8, 8], None)
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize(
+    "cp_size, cp_rank, indices", [(1, 0, list(range(8))), (2, 0, [0, 1, 6, 7]), (2, 1, [2, 3, 4, 5])]
+)
+def test_response_mask_is_next_token_aligned(padded, cp_size, cp_rank, indices):
+    responses = [torch.tensor([1, 1, 0, 1, 0]), torch.tensor([1, 0, 1, 1])]
+    if padded:
+        response_mask = torch.nn.utils.rnn.pad_sequence(responses, batch_first=True)
+        response_attention_mask = torch.nn.utils.rnn.pad_sequence(
+            [torch.ones_like(response) for response in responses], batch_first=True
+        )
+    else:
+        response_mask = torch.nested.as_nested_tensor(responses, layout=torch.jagged)
+        response_attention_mask = None
+    full_mask = _build_full_loss_mask_nested(response_mask, [8, 8], response_attention_mask)
 
     with (
-        patch("verl.models.mcore.util.mpu.get_context_parallel_world_size", return_value=1),
-        patch("verl.models.mcore.util.mpu.get_context_parallel_rank", return_value=0),
+        patch("verl.models.mcore.util.mpu.get_context_parallel_world_size", return_value=cp_size),
+        patch("verl.models.mcore.util.mpu.get_context_parallel_rank", return_value=cp_rank),
         patch("verl.models.mcore.util.mpu.get_tensor_model_parallel_world_size", return_value=1),
     ):
         projection_mask = preprocess_thd_engine(full_mask, need_roll=True)[0].to(torch.bool)
 
-    expected = torch.tensor([[0, 0, 1, 1, 0, 1, 0, 0], [0, 0, 0, 1, 0, 1, 1, 0]], dtype=torch.bool).reshape(1, -1)
-    torch.testing.assert_close(projection_mask, expected)
+    expected = torch.tensor([[0, 0, 1, 1, 0, 1, 0, 0], [0, 0, 0, 1, 0, 1, 1, 0]], dtype=torch.bool)
+    torch.testing.assert_close(projection_mask, expected[:, indices].reshape(1, -1))
 
 
 @pytest.mark.parametrize("empty", [False, True])
@@ -87,7 +99,8 @@ def test_unfused_projection_preserves_values_and_gradients(empty):
     with response_only_output_projection(sparse_model, mask):
         sparse_logits = sparse_model(sparse_hidden)
     labels = torch.arange(mask.numel()).reshape_as(mask)
-    sparse_labels, _, num_selected = select_response_only_inputs(labels, torch.ones_like(labels), mask)
+    temperatures = labels.float() + 1
+    sparse_labels, sparse_temperatures, num_selected = select_response_only_inputs(labels, temperatures, mask)
     restored = restore_response_only_outputs({"values": sparse_logits.square().sum(-1)}, mask, num_selected)["values"]
     restored.sum().backward()
 
@@ -95,32 +108,54 @@ def test_unfused_projection_preserves_values_and_gradients(empty):
     if num_selected:
         torch.testing.assert_close(sparse_logits[0], dense_logits[mask])
         torch.testing.assert_close(sparse_labels[0], labels[mask])
+        torch.testing.assert_close(sparse_temperatures[0], temperatures[mask])
+    else:
+        assert sparse_logits.shape[:2] == (1, 1)
+        assert sparse_labels.item() == 0
+        assert sparse_temperatures.item() == 1
+    assert torch.count_nonzero(restored[~mask]) == 0
     torch.testing.assert_close(sparse_hidden.grad, dense_hidden.grad)
     torch.testing.assert_close(sparse_layer.weight.grad, dense_layer.weight.grad)
 
 
-def test_unfused_sequence_parallel_gathers_before_selection():
+@pytest.mark.parametrize("misaligned", [False, True])
+def test_unfused_sequence_parallel_gathers_before_selection(misaligned):
     output_layer = _OutputLayer(sequence_parallel=True)
     model = _Model(output_layer)
     hidden = torch.arange(4, dtype=torch.float32).reshape(2, 1, 2)
     gathered = torch.cat((hidden, hidden + 10))
     mask = torch.tensor([[False, True, True, False]])
+    context = pytest.raises(RuntimeError, match="misaligned") if misaligned else nullcontext()
 
     with (
         patch(
             "megatron.core.tensor_parallel.gather_from_sequence_parallel_region",
             return_value=gathered,
         ) as gather,
-        response_only_output_projection(model, mask),
+        context,
+        response_only_output_projection(model, mask[:, :-1] if misaligned else mask),
     ):
         selected, _ = output_layer(hidden)
         assert not output_layer.sequence_parallel
         assert output_layer.disable_grad_reduce
 
     gather.assert_called_once_with(hidden, tensor_parallel_output_grad=True, group=output_layer.tp_group)
-    torch.testing.assert_close(selected[:, 0], gathered[[1, 2], 0])
+    if not misaligned:
+        torch.testing.assert_close(selected[:, 0], gathered[[1, 2], 0])
     assert output_layer.sequence_parallel
     assert not output_layer.disable_grad_reduce
+    torch.testing.assert_close(output_layer(hidden)[0], hidden)
+
+
+def test_unfused_sequence_parallel_rejects_deferred_weight_gradients():
+    output_layer = _OutputLayer(sequence_parallel=True)
+    output_layer.config = SimpleNamespace(defer_embedding_wgrad_compute=True)
+    with pytest.raises(NotImplementedError, match="deferred embedding weight gradients"):
+        with response_only_output_projection(_Model(output_layer), torch.ones(1, 4, dtype=torch.bool)):
+            pytest.fail("Deferred weight gradients must be rejected before installing the hook")
+    assert output_layer.sequence_parallel
+    assert not output_layer.disable_grad_reduce
+    assert not output_layer._forward_pre_hooks
 
 
 @pytest.mark.parametrize("sequence_parallel", [False, True])
