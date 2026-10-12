@@ -55,41 +55,46 @@ already-shuffled layer would shuffle twice; supporting it needs per-layer
 tracking of which parameters a sync touched.
 
 MoE experts. With an fp8-serialized MXFP8 checkpoint (what a verl sync delivers),
-SGLang's ``Fp8MoEMethod`` rewrites expert tensors *in place* at load on every
-Blackwell MoE runner: Triton and CUTLASS swizzle the expert scales
-``w13_weight_scale_inv`` / ``w2_weight_scale_inv`` (sglang <= 0.5.15 keeps their
-canonical ``[E, N, K/32]`` shape, >= 0.5.16 rebinds them to the swizzled tensor's
-own shape), DeepGEMM packs them (dtype changes), and TRT-LLM shuffles both the
-expert weights and their scales (shapes kept unless padded for alignment). None
-leaves the canonical bytes in place. A sync must therefore write canonical
-weights and scales and re-run the processing once the whole sync is written:
-run before the sync has rewritten a layer, it re-derives that layer from bytes
-the runner already rewrote (or, for a staged scale, from an unwritten buffer).
-Where the processing changed a scale's shape or dtype, ``stage_mxfp8_moe_scales``
-points the parameter at a canonical-shaped buffer before the first
-``load_weights`` of a sync and ``reprocess_mxfp8_moe_layers`` folds the re-derived
-layout back into the storage the CUDA graph captured; where it kept them, the
-sync writes the canonical data over the live buffer and the processing rewrites
-it there. This is the SGLang analogue of verl's vLLM pristine-layout cycle,
-without a record step because the canonical layout is derivable from the expert
-weight shape.
+SGLang's ``Fp8MoEMethod`` rewrites expert tensors *in place* at load on every MoE
+runner sglang allows for MXFP8 on Blackwell: FlashInfer TRT-LLM (the default)
+reorders and shuffles both the expert weights and their scales (shapes kept unless
+padded for alignment), CUTLASS swizzles the expert scales ``w13_weight_scale_inv``
+/ ``w2_weight_scale_inv`` (sglang <= 0.5.15 keeps their canonical ``[E, N, K/32]``
+shape, >= 0.5.16 rebinds them to the swizzled tensor's own shape), and DeepGEMM
+packs them (dtype changes). None leaves the canonical bytes in place. A sync must
+therefore write canonical weights and scales and re-run the processing once the
+whole sync is written: run before the sync has rewritten a layer, it re-derives
+that layer from bytes the runner already rewrote (or, for a staged scale, from an
+unwritten buffer). Where the processing changed a scale's shape or dtype,
+``stage_mxfp8_moe_scales`` points the parameter at a canonical-shaped buffer
+before the first ``load_weights`` of a sync and ``reprocess_mxfp8_moe_layers``
+folds the re-derived layout back into the storage the CUDA graph captured; where
+it kept them, the sync writes the canonical data over the live buffer and the
+processing rewrites it there. This is the SGLang analogue of verl's vLLM
+pristine-layout cycle, without a record step because the canonical layout is
+derivable from the expert weight shape.
 
 Self-check. After re-processing, one dense MXFP8 layer's own ``apply`` is compared
 against a dequantized reference (``verl.utils.mxfp8_refit_check``); a stale or
-mis-laid-out scale shows up as O(1) relative error and raises. One local expert
-of the smallest MXFP8 MoE layer is probed the same way: its canonical ``w13`` /
+mis-laid-out scale shows up as O(1) relative error and raises. One local expert of
+the smallest MXFP8 MoE layer is probed the same way: its canonical ``w13`` /
 ``w2`` weights and scales are snapshotted after ``load_weights`` (before the
 runner rewrites the scales), then every probe row is routed to that expert via a
 ``StandardTopKOutput`` and the layer's forward is compared against the gated-MLP
 reference. Skipped when expert parallelism is on (routing to a global expert id
-would need the EP dispatch) or when TP>1 without ``reduce_results``. For staged
-MoE scales the loader also verifies, before re-processing, that the sync wrote every
-entry: the staging buffer is pre-filled with ``0xFF`` (the UE8M0 NaN code), so an
-expert whose HF name misses the sync-side quantization rule — shipped as bf16,
-which the engine's weight loader silently casts into the fp8 buffer with no scale —
-is reported by name instead of being swizzled into the live buffer. Scales the
-runner rewrites without changing their shape or dtype are not staged, so this
-check does not cover them. Both checks are disabled by ``VERL_MXFP8_REFIT_CHECK=0``.
+would need the EP dispatch) or when TP>1 without ``reduce_results``, and on the
+FlashInfer TRT-LLM MoE runner — sglang's default for MXFP8 — which routes inside
+the kernel and asserts router logits instead of a precomputed top-k: with default
+settings the MoE probe therefore does not run, and every sync logs "MoE refit
+check skipped" with an empty reason (the AssertionError carries no message). For
+staged MoE scales the loader also verifies, before re-processing, that the sync
+wrote every entry: the staging buffer is pre-filled with ``0xFF`` (the UE8M0 NaN
+code), so an expert whose HF name misses the sync-side quantization rule — shipped
+as bf16, which the engine's weight loader silently casts into the fp8 buffer with
+no scale — is reported by name instead of being swizzled into the live buffer.
+Scales the runner rewrites without changing their shape or dtype are not staged,
+so this check does not cover them. Both checks are disabled by
+``VERL_MXFP8_REFIT_CHECK=0``.
 
 Register at server launch (verl does this when ``rollout.quantization=mxfp8``)::
 
@@ -222,7 +227,7 @@ def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module
     Returns ``(module, scale_name, live_data)`` for every expert scale whose live
     buffer no longer has the checkpoint shape or dtype; ``reprocess_mxfp8_moe_layers``
     folds the re-derived layout back into ``live_data``. Scales the runner rewrote
-    without changing shape or dtype (TRT-LLM; Triton / CUTLASS on sglang <= 0.5.15)
+    without changing shape or dtype (FlashInfer TRT-LLM; CUTLASS on sglang <= 0.5.15)
     are not staged: ``load_weights`` writes the canonical data over the live buffer
     and the re-processing rewrites it in place.
     """

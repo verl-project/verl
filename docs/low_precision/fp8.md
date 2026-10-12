@@ -416,18 +416,25 @@ Two constraints on this path:
   allocator mode, killing the server in `load_model`. The vLLM path tolerates the variable.
 
 **MoE experts on SGLang.** With the fp8-serialized checkpoint a verl sync delivers, SGLang's MXFP8 MoE
-method rewrites expert tensors in place at load on every Blackwell MoE runner: Triton and CUTLASS
-swizzle the expert scales (SGLang ≤ 0.5.15 keeps their `[E, N, K/32]` shape, ≥ 0.5.16 rebinds them to
-the swizzled tensor's own shape), DeepGEMM packs them, and TRT-LLM shuffles both the expert weights
-and their scales. Where a scale's shape or dtype changed, the refit loader stages it back to the
-canonical layout for `load_weights`; where it did not, `load_weights` writes the canonical data over
-the live buffer. Either way the kernel layout is re-derived once per sync, on the closing request,
-into the storage the CUDA graph captured. Until 10/12/2026 staging and re-deriving ran on every
-bucket, so a MoE sync spanning more than one bucket did not work: layers a later bucket had not
-written yet were re-derived from the `0xFF` staging fill (rejected by the unwritten-scale check below,
-or folded into the live buffers with the check off), and on runners that keep the shape every layer
-outside the bucket had its rewrite applied once more, silently, since nothing was staged for the
-check to inspect. This path is covered by CPU tests and has not been validated on hardware.
+method rewrites expert tensors in place at load on every MoE runner SGLang allows for MXFP8 on
+Blackwell: FlashInfer TRT-LLM (the default) reorders and shuffles both the expert weights and their
+scales, CUTLASS swizzles the expert scales (SGLang ≤ 0.5.15 keeps their `[E, N, K/32]` shape, ≥ 0.5.16
+rebinds them to the swizzled tensor's own shape), and DeepGEMM packs them. Where a scale's shape or
+dtype changed, the refit loader stages it back to the canonical layout for `load_weights`; where it
+did not, `load_weights` writes the canonical data over the live buffer. Either way the kernel layout
+is re-derived once per sync, on the closing request, into the storage the CUDA graph captured. Until
+10/12/2026 staging and re-deriving ran on every bucket, so a MoE sync spanning more than one bucket
+did not work: layers a later bucket had not written yet were re-derived from the `0xFF` staging fill
+(rejected by the unwritten-scale check below, or folded into the live buffers with the check off), and
+on runners that keep the shape every layer outside the bucket had its rewrite applied once more,
+silently, since nothing was staged for the check to inspect. Measured on 1×B200 (SGLang 0.5.12 with
+its default FlashInfer TRT-LLM MoE runner; a 2-layer, 8-expert Qwen3-MoE at TP1; 4 steps): with 1 MB
+buckets (12 requests per sync) the code before the fix re-derived every MoE layer on each of the 12
+requests, and after every sync the `w2` scales of 14 of the 16 experts held the scales the sync had
+sent rewritten once for each re-derivation that ran after they arrived. Nothing was reported, and
+`rollout_corr/kl` was 0.018–0.046 against 0.0001–0.0005 with a single bucket. With the fix the same
+sync re-derived once, on the closing request, every expert's scales matched, and the KL was back at
+the single-bucket level.
 
 ### Post-sync self-check
 
@@ -444,8 +451,11 @@ error and raises. Healthy layers read about 0.03 (the error of the kernel's acti
   dequantized `w13` / `w2` (tolerance `VERL_MXFP8_REFIT_CHECK_MOE_TOL`, default the linear one; healthy
   experts read about 0.05). On vLLM the probe calls the `ModelOptMxFp8FusedMoE` weight holder's
   `forward_modular` / `forward_monolithic` directly and is skipped under expert or data parallelism and
-  for non-SiLU gates; on SGLang it is skipped under expert parallelism and under TP without
-  `reduce_results`. The log states every skip. On 1×B200 (vLLM 0.24, TRT-LLM MXFP8 MoE) the expert probe
+  for non-SiLU gates; on SGLang it is skipped under expert parallelism, under TP without
+  `reduce_results`, and on the FlashInfer TRT-LLM MoE runner, which is SGLang's default for MXFP8 and
+  routes inside the kernel, rejecting the probe's precomputed top-k. With default settings the SGLang
+  expert probe therefore does not run: on SGLang 0.5.12 every sync logged `MoE refit check skipped` with
+  an empty reason. The log states every skip. On 1×B200 (vLLM 0.24, TRT-LLM MXFP8 MoE) the expert probe
   read 1.739 at the first sync when the kernel layout was not re-derived, against 0.052 after the fix
   (verl-project/verl#7986).
 - **Unwritten expert scales (SGLang).** Before re-deriving the kernel layout on the closing request of a
@@ -453,8 +463,8 @@ error and raises. Healthy layers read about 0.03 (the error of the kernel's acti
   with the UE8M0 NaN code
   `0xFF`): experts whose HF names miss the sync-side quantization rule would otherwise arrive as a
   scale-less bf16 cast into the fp8 buffer, and are reported by name instead. Scales the MoE runner
-  rewrites without changing their shape or dtype (TRT-LLM, and Triton / CUTLASS on SGLang ≤ 0.5.15) are
-  not staged, so this check does not cover them.
+  rewrites without changing their shape or dtype (FlashInfer TRT-LLM, the default, and CUTLASS on
+  SGLang ≤ 0.5.15) are not staged, so this check does not cover them.
 
 The probe verifies the kernel's *layout*, not that the sync delivered the right weights. Disable both
 checks with `VERL_MXFP8_REFIT_CHECK=0`; the linear tolerance (default 0.25) is

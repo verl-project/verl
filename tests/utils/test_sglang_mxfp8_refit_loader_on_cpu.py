@@ -96,7 +96,7 @@ class _Linear(torch.nn.Module):
 
 
 class _MoEQuantMethod:
-    """sglang ``Fp8MoEMethod`` with an fp8-serialized MXFP8 checkpoint on the Triton MoE runner:
+    """sglang ``Fp8MoEMethod`` with an fp8-serialized MXFP8 checkpoint on the CUTLASS MoE runner of sglang >= 0.5.16:
     post-load processing swizzles the expert scales *in place* into a different shape."""
 
     use_mxfp8 = True
@@ -256,7 +256,7 @@ def test_moe_expert_scales_are_staged_reprocessed_and_folded_into_live_storage()
 
 def test_moe_scales_whose_shape_the_runner_keeps_are_not_staged():
     class _CanonicalMoEQuantMethod(_MoEQuantMethod):
-        # keeps the scales' shape and dtype, as the in-place runners do (TRT-LLM; Triton / CUTLASS on
+        # keeps the scales' shape and dtype, as the in-place runners do (FlashInfer TRT-LLM; CUTLASS on
         # sglang <= 0.5.15); staging is decided by shape and dtype, so the bytes left here do not matter
         def process_weights_after_loading(self, layer):
             self.calls += 1
