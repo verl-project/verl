@@ -55,7 +55,7 @@ from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, wait_rollout_servers_scheduled
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs,
     get_max_position_embeddings,
@@ -1554,6 +1554,9 @@ class vLLMReplica(RolloutReplica):
                 cuda_visible_devices=node_cuda_visible_devices,
             )
             self.servers.append(server)
+
+        # Fail fast if a server actor cannot be placed, instead of blocking on the next .remote().
+        await wait_rollout_servers_scheduled(self.servers)
 
         # launch http server in each node
         master_address, master_port, dp_rpc_port = await self.servers[0].get_master_address.remote()
