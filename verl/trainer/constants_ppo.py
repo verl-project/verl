@@ -82,6 +82,25 @@ NVTX_INJECTION_ENV = "NVTX_INJECTION64_PATH"
 _NVTX_INJECTION_DISABLED = "/nonexistent/verl-disabled-nvtx-injection.so"
 
 
+# The process-level part of vLLM's batch invariance that the actor forward needs: the cuBLAS workspace
+# pair enable_batch_invariant_mode() sets on SM90/SM100, where cuBLAS is the only matmul path, plus the
+# vLLM switches. cuBLAS reads its workspace config when it initializes, so this is exported before the
+# workers start. vLLM's NCCL profile is not forwarded: the rollout process writes it itself from
+# VLLM_BATCH_INVARIANT, and it would throttle the training collectives.
+BATCH_INVARIANT_ENV = {
+    "VLLM_BATCH_INVARIANT": "1",
+    "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
+    "VLLM_USE_AOT_COMPILE": "0",
+    "CUBLAS_WORKSPACE_CONFIG": ":16:8",
+    "CUBLASLT_WORKSPACE_SIZE": "1",
+}
+
+
+def export_batch_invariant_env():
+    """Export BATCH_INVARIANT_ENV into this process so get_ppo_ray_runtime_env() forwards it."""
+    os.environ.update(BATCH_INVARIANT_ENV)
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -145,6 +164,7 @@ def get_ppo_ray_runtime_env(config=None):
         "FLASH_ATTENTION_DETERMINISTIC",
         "NCCL_DETERMINISTIC",
         "NCCL_ALGO",
+        *BATCH_INVARIANT_ENV,
     ):
         val = os.environ.get(key)
         if val is not None:

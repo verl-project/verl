@@ -63,6 +63,20 @@ def enable_full_determinism(seed: int):
     torch.backends.cudnn.enabled = False
 
 
+def enable_batch_invariance():
+    """Install vLLM's batch-invariant kernel overrides in this process.
+
+    The overrides replace the CUDA implementations of softmax, mean, bmm (and matmul on SM80) with the
+    batch-invariant ones a rollout under ``VLLM_BATCH_INVARIANT=1`` uses, and pin TF32 and cuBLASLt the
+    same way. The NCCL and cuBLAS env it also writes only takes effect when exported before the
+    process starts, which main_ppo does.
+    """
+    from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
+
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    init_batch_invariance()
+
+
 def pad_packed_inputs(
     input_ids_rmpad: torch.Tensor,
     position_ids_rmpad: torch.Tensor | None,
