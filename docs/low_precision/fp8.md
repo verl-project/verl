@@ -315,7 +315,9 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   refit so the kernel layout is re-derived from the synced scales. On SGLang MoE layers the loader additionally checks,
   before re-deriving the kernel layout on the closing request of a sync, that the sync wrote every staged expert scale (the staging
   buffer is pre-filled with the UE8M0 NaN code `0xFF`): experts whose HF names miss the sync-side
-  rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. The kernel-vs-reference
+  rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. Scales the MoE runner
+  rewrites without changing their shape or dtype (TRT-LLM, and Triton / CUTLASS on SGLang ≤ 0.5.15)
+  are not staged, so this check does not cover them. The kernel-vs-reference
   probe verifies the kernel's *layout*, not that the sync delivered the right scales — the audit
   below covers that. Disable both with `VERL_MXFP8_REFIT_CHECK=0`; the probe tolerance (default
   0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
@@ -351,15 +353,20 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   data headed for a bf16 one, is refused by name instead of being cast silently by `load_weights` —
   e.g. Mixtral's `experts.N.w1/w2/w3`, which the sync rule does not match while the engine built them as
   fp8. Disabled with `VERL_MXFP8_REFIT_CHECK=0`.
-- **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
-  load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
-  back to the canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout
-  afterwards into the storage the CUDA graph captured. Staging happens on the first bucket of a
-  sync and re-deriving on the closing request: until 10/12/2026 both ran on every bucket, which
-  re-derived MoE layers whose scales a later bucket had not written yet (rejected by the
-  written-scale check, or folded into the live buffer with the check off), so a MoE sync spanning
-  more than one bucket did not work. This path is covered by CPU tests and has not yet been
-  validated on hardware; see the PR description for the MoE validation status.
+- **MoE experts on SGLang.** With the fp8-serialized checkpoint a verl sync delivers, SGLang's MXFP8
+  MoE method rewrites expert tensors in place at load on every Blackwell MoE runner: Triton and
+  CUTLASS swizzle the expert scales (SGLang ≤ 0.5.15 keeps their `[E, N, K/32]` shape, ≥ 0.5.16
+  rebinds them to the swizzled tensor's own shape), DeepGEMM packs them, and TRT-LLM shuffles both
+  the expert weights and their scales. Where a scale's shape or dtype changed, the refit loader
+  stages it back to the canonical layout for `load_weights`; where it did not, `load_weights`
+  writes the canonical data over the live buffer. Either way the kernel layout is re-derived once
+  per sync, on the closing request, into the storage the CUDA graph captured. Until 10/12/2026
+  staging and re-deriving ran on every bucket, so a MoE sync spanning more than one bucket did not
+  work: layers a later bucket had not written yet were re-derived from the `0xFF` staging fill
+  (rejected by the written-scale check, or folded into the live buffer with the check off), and on
+  runners that keep the shape every layer outside the bucket had its rewrite applied once more,
+  silently, since nothing was staged for the check to inspect. This path is covered by CPU tests
+  and has not yet been validated on hardware; see the PR description for the MoE validation status.
 
 ### MXFP8 Rollout and Train-Inference Consistency
 

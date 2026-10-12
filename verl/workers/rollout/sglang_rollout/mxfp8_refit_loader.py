@@ -32,9 +32,11 @@ just written canonical scales.
 
 One sync, many requests. A weight sync arrives as one ``update_weights_from_tensor``
 request per bucket, and SGLang calls the loader once per request, so the loader
-cannot re-derive anything per call: a MoE layer whose scales sit in a later
-bucket would be re-derived from an unwritten staging buffer and folded into the
-live one. As in verl's vLLM refit cycle, staging and re-processing bracket the
+cannot re-derive anything per call: a MoE layer whose expert tensors sit in a
+later bucket would be re-derived from an unwritten staging buffer and folded
+into the live one (runners that change the scale's shape), or have the runner's
+in-place rewrite applied once more on top of the last one (runners that keep
+it). As in verl's vLLM refit cycle, staging and re-processing bracket the
 whole sync instead: the first request of a sync stages, every request only
 loads, and the closing request — the caller sends ``finalize_tensors()`` after
 the last bucket — checks, re-derives, folds back and self-checks.
@@ -52,16 +54,25 @@ tensor itself in place at load, so re-running the processing on an
 already-shuffled layer would shuffle twice; supporting it needs per-layer
 tracking of which parameters a sync touched.
 
-MoE experts. SGLang's ``Fp8MoEMethod`` (fp8-serialized MXFP8 checkpoint) rewrites
-the expert scales ``w13_weight_scale_inv`` / ``w2_weight_scale_inv`` *in place*
-at load: the default Triton MoE runner swizzles them (shape may change), DeepGEMM
-packs them (dtype changes), CUTLASS and TRT-LLM keep them canonical. A sync must
-therefore write canonical ``[E, N, K/32]`` uint8 scales into a canonical-shaped
-buffer and then re-run the processing, folding the result back into the storage
-the CUDA graph captured. That is ``stage_mxfp8_moe_scales`` before the first
-``load_weights`` of a sync and ``reprocess_mxfp8_moe_layers`` after the last — the
-SGLang analogue of verl's vLLM pristine-layout cycle, without a record step
-because the canonical layout is derivable from the expert weight shape.
+MoE experts. With an fp8-serialized MXFP8 checkpoint (what a verl sync delivers),
+SGLang's ``Fp8MoEMethod`` rewrites expert tensors *in place* at load on every
+Blackwell MoE runner: Triton and CUTLASS swizzle the expert scales
+``w13_weight_scale_inv`` / ``w2_weight_scale_inv`` (sglang <= 0.5.15 keeps their
+canonical ``[E, N, K/32]`` shape, >= 0.5.16 rebinds them to the swizzled tensor's
+own shape), DeepGEMM packs them (dtype changes), and TRT-LLM shuffles both the
+expert weights and their scales (shapes kept unless padded for alignment). None
+leaves the canonical bytes in place. A sync must therefore write canonical
+weights and scales and re-run the processing once the whole sync is written:
+run before the sync has rewritten a layer, it re-derives that layer from bytes
+the runner already rewrote (or, for a staged scale, from an unwritten buffer).
+Where the processing changed a scale's shape or dtype, ``stage_mxfp8_moe_scales``
+points the parameter at a canonical-shaped buffer before the first
+``load_weights`` of a sync and ``reprocess_mxfp8_moe_layers`` folds the re-derived
+layout back into the storage the CUDA graph captured; where it kept them, the
+sync writes the canonical data over the live buffer and the processing rewrites
+it there. This is the SGLang analogue of verl's vLLM pristine-layout cycle,
+without a record step because the canonical layout is derivable from the expert
+weight shape.
 
 Sync-vs-engine check. Before anything is written, every incoming linear weight's
 dtype is compared with the dtype of the engine parameter that will receive it
@@ -83,8 +94,9 @@ MoE scales the loader also verifies, before re-processing, that the sync wrote e
 entry: the staging buffer is pre-filled with ``0xFF`` (the UE8M0 NaN code), so an
 expert whose HF name misses the sync-side quantization rule — shipped as bf16,
 which the engine's weight loader silently casts into the fp8 buffer with no scale —
-is reported by name instead of being swizzled into the live buffer. Both checks
-are disabled by ``VERL_MXFP8_REFIT_CHECK=0``.
+is reported by name instead of being swizzled into the live buffer. Scales the
+runner rewrites without changing their shape or dtype are not staged, so this
+check does not cover them. Both checks are disabled by ``VERL_MXFP8_REFIT_CHECK=0``.
 
 Register at server launch (verl does this when ``rollout.quantization=mxfp8``)::
 
@@ -219,9 +231,11 @@ def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module
     """Expose canonical-layout expert scale buffers so ``load_weights`` can write into them.
 
     Returns ``(module, scale_name, live_data)`` for every expert scale whose live
-    buffer is no longer in checkpoint layout; ``reprocess_mxfp8_moe_layers`` folds
-    the re-derived layout back into ``live_data``. Scales still in canonical layout
-    (CUTLASS / TRT-LLM MoE runners) load in place and are not staged.
+    buffer no longer has the checkpoint shape or dtype; ``reprocess_mxfp8_moe_layers``
+    folds the re-derived layout back into ``live_data``. Scales the runner rewrote
+    without changing shape or dtype (TRT-LLM; Triton / CUTLASS on sglang <= 0.5.15)
+    are not staged: ``load_weights`` writes the canonical data over the live buffer
+    and the re-processing rewrites it in place.
     """
     staged = []
     for module in model.modules():
