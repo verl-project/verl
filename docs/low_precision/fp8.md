@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 10/10/2026
+Last updated: 10/12/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -315,6 +315,8 @@ Two constraints on this path:
   SGLang's weight-update path does not rebuild it. verl therefore registers an MXFP8 refit loader
   (`mxfp8_refit_loader.py`) that re-runs the post-load processing after every weight sync; it reads
   the backend each layer actually resolved to, so it covers the version-dependent defaults above.
+  A sync reaches SGLang as one update request per bucket, so the loader only loads on those
+  requests and re-derives once, on a closing request verl sends after the last bucket.
   Without it the engine keeps serving load-time scales against freshly synced weights and generates
   garbage from step 0. `flashinfer_trtllm` shuffles the weight tensor itself in place at load and is
   rejected by the loader.
@@ -325,7 +327,10 @@ Two constraints on this path:
 **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at load
 (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them back to the
 canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout afterwards into the
-storage the CUDA graph captured. This path is covered by CPU tests and has not been validated on
+storage the CUDA graph captured. Staging happens on the first bucket of a sync and re-deriving on the
+closing request: until 10/12/2026 both ran on every bucket, which re-derived MoE layers whose scales a
+later bucket had not written yet and folded the result into their live buffers, so a MoE sync spanning
+more than one bucket did not work. This path is covered by CPU tests and has not been validated on
 hardware.
 
 ---

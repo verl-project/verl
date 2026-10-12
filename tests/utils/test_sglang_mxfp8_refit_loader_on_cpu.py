@@ -160,7 +160,9 @@ def test_cutlass_backend_reprocesses_every_mxfp8_layer_after_load():
     _install_stub("flashinfer_cutlass")
     m = _Model()
     new_scale = torch.full((4, 2), 7, dtype=torch.uint8)
-    refit.load_and_reprocess(m, [("a.weight_scale_inv", new_scale), ("b.weight_scale_inv", new_scale)])
+    refit.load_and_reprocess(
+        m, [("a.weight_scale_inv", new_scale), ("b.weight_scale_inv", new_scale)] + refit.finalize_tensors()
+    )
     assert m.loaded == ["a.weight_scale_inv", "b.weight_scale_inv"]
     assert m.a.quant_method.calls == 1 and m.b.quant_method.calls == 1
     # swizzled copy derived from the *new* canonical scales
@@ -192,7 +194,7 @@ def test_resolved_backend_on_layer_wins_over_launch_flag():
     _install_stub("auto")
     m = _Model(resolved_backend="flashinfer_cutedsl")
     new_scale = torch.full((4, 2), 3, dtype=torch.uint8)
-    refit.load_and_reprocess(m, [("a.weight_scale_inv", new_scale)])
+    refit.load_and_reprocess(m, [("a.weight_scale_inv", new_scale)] + refit.finalize_tensors())
     assert m.a.quant_method.calls == 1 and m.b.quant_method.calls == 1
     assert torch.equal(m.a.weight_scale_inv_swizzled, new_scale + 1)
 
@@ -224,7 +226,9 @@ def test_moe_expert_scales_are_staged_reprocessed_and_folded_into_live_storage()
 
     new_w13 = torch.full((2, 128, 2), 7, dtype=torch.uint8)  # canonical [E, N, K/32] as the sync sends it
     new_w2 = torch.full((2, 64, 2), 5, dtype=torch.uint8)
-    refit.load_and_reprocess(m, [("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+    refit.load_and_reprocess(
+        m, [("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)] + refit.finalize_tensors()
+    )
 
     # load_weights could only write canonical tensors because the scales were staged back to that layout
     assert m.moe.quant_method.calls == 2
@@ -261,6 +265,70 @@ def _canonical_moe_model():
     m.moe.quant_method = _CanonicalRunner()
     m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load
     return m
+
+
+def _two_moe_model():
+    """Two MoE layers on the swizzling runner after their initial load, next to the two dense layers."""
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe1, m.moe2 = _MoE(), _MoE()
+    for moe in (m.moe1, m.moe2):
+        moe.quant_method.process_weights_after_loading(moe)  # initial load: scales swizzled in place
+    return m
+
+
+def _moe_scales(name, w13=7, w2=5):
+    return [
+        (f"{name}.w13_weight_scale_inv", torch.full((2, 128, 2), w13, dtype=torch.uint8)),
+        (f"{name}.w2_weight_scale_inv", torch.full((2, 64, 2), w2, dtype=torch.uint8)),
+    ]
+
+
+def test_a_sync_split_across_requests_re_derives_every_layer_once_after_the_last_bucket():
+    # One sync arrives as one request per bucket. Re-deriving per request rebuilt moe2 from its still-0xFF
+    # staging buffer during request 1 and folded that into its live buffer.
+    m = _two_moe_model()
+    live = {name: getattr(m, name).w13_weight_scale_inv.data for name in ("moe1", "moe2")}
+    dense = [("a.weight_scale_inv", torch.full((4, 2), 7, dtype=torch.uint8))]
+    refit.load_and_reprocess(m, _moe_scales("moe1") + dense)
+    refit.load_and_reprocess(m, _moe_scales("moe2"))
+    # nothing is re-derived before the closing request, dense layers included
+    assert m.moe1.quant_method.calls == m.moe2.quant_method.calls == 1 and m.a.quant_method.calls == 0
+
+    refit.load_and_reprocess(m, refit.finalize_tensors())
+    for name in ("moe1", "moe2"):
+        moe = getattr(m, name)
+        assert moe.quant_method.calls == 2
+        assert moe.w13_weight_scale_inv.data_ptr() == live[name].data_ptr()  # CUDA-graph storage kept
+        assert torch.equal(moe.w13_weight_scale_inv.data, torch.full((2, 256), 8, dtype=torch.uint8))
+        assert torch.equal(moe.w2_weight_scale_inv.data, torch.full((2, 128), 6, dtype=torch.uint8))
+    assert m.a.quant_method.calls == 1
+    assert torch.equal(m.a.weight_scale_inv_swizzled, torch.full((4, 2), 8, dtype=torch.uint8))
+
+
+def test_a_moe_layer_whose_scales_span_two_requests_is_re_derived_from_both():
+    m = _two_moe_model()
+    w13, w2 = _moe_scales("moe1")
+    refit.load_and_reprocess(m, [w13] + _moe_scales("moe2"))
+    refit.load_and_reprocess(m, [w2] + refit.finalize_tensors())
+    assert torch.equal(m.moe1.w13_weight_scale_inv.data, torch.full((2, 256), 8, dtype=torch.uint8))
+    assert torch.equal(m.moe1.w2_weight_scale_inv.data, torch.full((2, 128), 6, dtype=torch.uint8))
+
+
+def test_closing_request_without_a_loaded_bucket_re_derives_nothing():
+    m = _two_moe_model()
+    refit.load_and_reprocess(m, refit.finalize_tensors())
+    # re-running the processing on already-derived layouts would apply it twice
+    assert m.moe1.quant_method.calls == 1 and m.a.quant_method.calls == 0
+
+
+def test_each_sync_stages_once_and_re_derives_once():
+    m = _two_moe_model()
+    for sync, value in enumerate((7, 9), start=1):
+        refit.load_and_reprocess(m, _moe_scales("moe1", w13=value) + _moe_scales("moe2", w13=value))
+        refit.load_and_reprocess(m, refit.finalize_tensors())
+        assert m.moe1.quant_method.calls == 1 + sync
+        assert torch.equal(m.moe1.w13_weight_scale_inv.data, torch.full((2, 256), value + 1, dtype=torch.uint8))
 
 
 def test_reprocess_reports_a_staged_scale_that_was_not_folded_back():
