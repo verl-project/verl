@@ -324,14 +324,18 @@ Two constraints on this path:
   launches SGLang with `enable_memory_saver=True`, and `torch_memory_saver` refuses that
   allocator mode, killing the server in `load_model`. The vLLM path tolerates the variable.
 
-**MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at load
-(swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them back to the
-canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout afterwards into the
-storage the CUDA graph captured. Staging happens on the first bucket of a sync and re-deriving on the
-closing request: until 10/12/2026 both ran on every bucket, which re-derived MoE layers whose scales a
-later bucket had not written yet and folded the result into their live buffers, so a MoE sync spanning
-more than one bucket did not work. This path is covered by CPU tests and has not been validated on
-hardware.
+**MoE experts on SGLang.** With the fp8-serialized checkpoint a verl sync delivers, SGLang's MXFP8 MoE
+method rewrites expert tensors in place at load on every Blackwell MoE runner: Triton and CUTLASS
+swizzle the expert scales (SGLang ≤ 0.5.15 keeps their `[E, N, K/32]` shape, ≥ 0.5.16 rebinds them to
+the swizzled tensor's own shape), DeepGEMM packs them, and TRT-LLM shuffles both the expert weights
+and their scales. Where a scale's shape or dtype changed, the refit loader stages it back to the
+canonical layout for `load_weights`; where it did not, `load_weights` writes the canonical data over
+the live buffer. Either way the kernel layout is re-derived once per sync, on the closing request,
+into the storage the CUDA graph captured. Until 10/12/2026 staging and re-deriving ran on every
+bucket, so a MoE sync spanning more than one bucket did not work: layers a later bucket had not
+written yet were re-derived from the `0xFF` staging fill and folded into their live buffers, and on
+runners that keep the shape every layer outside the bucket had its rewrite applied once more. This
+path is covered by CPU tests and has not been validated on hardware.
 
 ---
 

@@ -238,9 +238,11 @@ def test_moe_expert_scales_are_staged_reprocessed_and_folded_into_live_storage()
     assert torch.equal(m.moe.w2_weight_scale_inv.data, torch.full((2, 128), 6, dtype=torch.uint8))
 
 
-def test_moe_scales_kept_canonical_by_the_runner_are_not_staged():
+def test_moe_scales_whose_shape_the_runner_keeps_are_not_staged():
     class _CanonicalMoEQuantMethod(_MoEQuantMethod):
-        def process_weights_after_loading(self, layer):  # CUTLASS / TRT-LLM MoE runners: scales stay canonical
+        # keeps the scales' shape and dtype, as the in-place runners do (TRT-LLM; Triton / CUTLASS on
+        # sglang <= 0.5.15); staging is decided by shape and dtype, so the bytes left here do not matter
+        def process_weights_after_loading(self, layer):
             self.calls += 1
 
     moe = _MoE()
