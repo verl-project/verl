@@ -458,7 +458,10 @@ name, with the rollout side. The audit wraps the training engine's weight export
 and the server-replica path), and produces its verdict when the weight stream ends.
 
 - **vLLM.** The engine is asked directly: a `collective_rpc` into the worker resolves each HF name onto
-  its live parameter and reports whether it is held in fp8. On B200 this exposed the router exclusion
+  the module that receives it and reports whether it is held in fp8. It answers with the sync's own
+  `is_fp8_weight` check, which only recognizes `LinearBase` and fused-MoE modules, so a quantized module
+  of another class, such as `ParallelLMHead`, reads as not fp8 there; a quantized `lm_head` is reported
+  only by the comparison with the configured rule. On B200 the engine query exposed the router exclusion
   that also excluded `gate_up_proj` (56 of 311 parameters on Qwen3-1.7B) while the configured rule
   reported 28 of 28 layers in agreement.
 - **SGLang.** There is no return channel, so the trainer compares with the sync-time include/exclude
