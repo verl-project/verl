@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 10/10/2026
+Last updated: 10/12/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -364,6 +364,36 @@ path, and vLLM's Marlin/emulation fallbacks allow serving MXFP8 weights on pre-B
 GPUs (SM80+) — the served weight grid is still produced by TE's quantizer, so
 train-inference weight consistency is preserved regardless of the serving kernel.
 
+**Where the sync quantizes.** On vLLM the trainer sends bf16 tensors and the vLLM worker quantizes
+them on receipt (`quant_weights` in `verl/utils/vllm/vllm_quant_utils.py`). This reuses verl's existing
+vLLM FP8 refit path and is not required by MXFP8; SGLang quantizes on the trainer before sending, as its
+FP8 path already did. Two consequences:
+
+- The vLLM sync moves bf16 bytes: about 16.4 GB per sync for Qwen3-8B, against 9.7 GB if MXFP8 weights
+  plus scales were sent (the embedding and `lm_head` stay bf16 either way), and 61 GB against 32 GB for
+  Qwen3-30B-A3B. In the colocated B200 runs this did not dominate: MXFP8 added about 1 s per step to the
+  sync on Qwen3-8B (3.2 → 4.2 s), of which TE's quantization was about 11 ms of GPU time; most went to
+  restoring loadable layouts (0.57 s) and re-deriving kernel layouts (0.49 s), which the receiver does
+  wherever the quantization runs. Disaggregated deployments (the NCCL, Mooncake and other
+  checkpoint-engine backends) pay the full bf16 traffic. TODO: send MXFP8 weights plus scales from the
+  trainer — quantize the post-update bf16 weights with TE's `MXFP8Quantizer` as the SGLang path does, ask
+  the engine which parameters it holds in fp8 instead of re-deriving a name rule, and load E4M3 +
+  `weight_scale` through the same staged buffers. TE's cached FP8 weights are not a shortcut: TE
+  refreshes them on the next forward pass and verl drops them on offload, so at sync time they can still
+  hold the weights from before the last optimizer step.
+- The worker decides from the live engine which tensors to quantize: `is_fp8_weight(name, model)`
+  resolves each name onto the module that will receive it and checks whether its weight is fp8, so no
+  separate name rule has to agree with the engine (the sender-side SGLang path needs its sync-vs-engine
+  dtype check for that). Known gap: `is_fp8_weight` only recognizes `LinearBase` and fused-MoE modules,
+  while vLLM's ModelOpt config (0.24 and 0.29) also quantizes `ParallelLMHead` unless it is excluded. A
+  quantized `lm_head` therefore reads as not fp8: the sync sends it as bf16, the loader casts it into the
+  E4M3 parameter without a scale, and its `weight_scale` is never written. When refit staging allocates
+  a fresh buffer for that scale, as it does at TP=2, the buffer keeps its `0xFF` fill (the UE8M0 NaN
+  code) and every logit is NaN. Reading the code, this is how the `lm_head` NaN logits in the B200
+  validation arose; it has not been re-run on hardware. `lm_head` and the token embedding stay excluded
+  (`MXFP8_KEEP_HIGH_PRECISION_LAYERS`); TODO: judge the receiving parameter's dtype instead of the module
+  class.
+
 The staging cycle decides per layer whether a refit must go through stage → load → reprocess
 by comparing the live parameters with the checkpoint layout recorded at load. A kernel that
 hands back a *rewritten copy with the checkpoint's shape and dtype* is invisible to that
@@ -412,6 +442,23 @@ last layer in bf16:
   }
 }
 ```
+
+**Learning dynamics (cause unresolved).** In the B200 runs (Qwen3-8B on gsm8k with vLLM and with
+SGLang, Qwen3-8B on DAPO-Math-17k with vLLM, Qwen3-30B-A3B on DAPO-Math-17k with vLLM; one seed each,
+10 to 60 steps), the policy's entropy under MXFP8 training with an MXFP8 rollout stayed flat or rose
+slightly (−4% to +6% from the first steps to the end of the run), while it decayed under bf16 (−7% to
+−49%) and FP8 tensorwise (−19% to −74%); the one FP8 blockwise run (Qwen3-30B-A3B, 10 steps) also rose
+(+9%). An MXFP8 learner with a bf16 rollout landed in between (−23% on gsm8k with vLLM), so the
+difference is carried by the trained weights, not only by the rollout's quantization. Training reward
+and held-out accuracy ended close to bf16. Compared at matched training reward, the MXFP8 runs on gsm8k
+and DAPO-Math-17k reached each reward level at the same step as bf16, with higher entropy. Compared at
+matched change from the initial policy (`actor/kl_loss` against the bf16 reference, minus each run's
+value at steps 1–3, which is mostly the precision offset), they moved as far as bf16 on gsm8k with vLLM,
+about a third less with SGLang, and about 5× less on DAPO-Math-17k. So the logs rule out slower reward
+learning over these horizons, but they do not tell whether the retained entropy is useful exploration or
+a smaller policy change; separating the two needs saved checkpoints evaluated on fixed contexts with a
+bf16 forward, which these runs did not keep. Until then, do not treat step-matched checkpoints from
+different recipes as the same point of training, and watch `actor/entropy` when switching recipes.
 
 ---
 

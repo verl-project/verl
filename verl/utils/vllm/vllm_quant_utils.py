@@ -218,6 +218,12 @@ def get_module_from_param_name(model, name: str):
 _FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_proj"})
 
 
+# TODO(mxfp8): decide from the dtype of the parameter that receives ``name`` instead of the module
+# class. Only ``LinearBase`` and fused-MoE expert modules are recognized below, but vLLM's ModelOpt
+# config also quantizes ``ParallelLMHead`` unless it is excluded. Such a layer reads as not fp8, so
+# ``quant_weights`` passes its bf16 weight through (the loader casts it into the E4M3 parameter) and
+# never sends its ``weight_scale``; a freshly staged scale buffer keeps its 0xFF fill, the UE8M0 NaN
+# code. This is why ``lm_head`` stays out of MXFP8 (``MXFP8_KEEP_HIGH_PRECISION_LAYERS``).
 def is_fp8_weight(name, model):
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
@@ -358,6 +364,13 @@ def _classify_quant_weight(name, model, is_ascend_mx):
     return None
 
 
+# TODO(mxfp8): for a disaggregated trainer and rollout, quantize on the trainer and send MXFP8 weights
+# plus scales. This path receives bf16 and quantizes here (verl's existing vLLM FP8 refit design), so a
+# sync moves bf16 bytes. Sender side: quantize the post-update bf16 weights with TE's MXFP8Quantizer as
+# the SGLang path does, ask the engine which parameters it holds in fp8 rather than re-deriving a name
+# rule, and load E4M3 + weight_scale through the same staged buffers. TE's cached fp8 weights are not a
+# substitute: they are refreshed on the next forward pass (and dropped on offload), so at sync time they
+# can still hold the weights from before the last optimizer step.
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """Quantize weights to FP8 format using a memory-efficient generator.
 
