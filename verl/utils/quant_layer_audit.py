@@ -381,6 +381,10 @@ class QuantLayerAuditor:
         The rule-based verdict is what the audit can always produce; this says whether the engine
         actually agrees with the rule. Only a disagreement is reported - the rule verdict already
         covered the train-vs-rule half.
+
+        On vLLM the engine answers with the sync's own ``is_fp8_weight``, which only recognizes
+        linear and fused-MoE modules (see the TODO there): a quantized module of another class, such
+        as ``ParallelLMHead``, reads as not fp8 here, so only the rule-based verdict can report it.
         """
         if not engine_truth or self._verdict is None or self._rechecked:
             return None

@@ -326,8 +326,11 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   colocated worker, the checkpoint engine and the server-replica path - and produces its verdict when
   the weight stream ends. What "the rollout
   side" is depends on the engine and every message says which: on vLLM the engine is asked directly
-  (`collective_rpc` into the worker, which resolves each HF name onto its live parameter and reports
-  its dtype); on SGLang there is no return channel, so the trainer compares against the weight-sync
+  (`collective_rpc` into the worker, which resolves each HF name onto its live module with the sync's
+  own `is_fp8_weight` check and reports whether it is held in fp8; that check only recognizes
+  `LinearBase` and fused-MoE modules, so a quantized `ParallelLMHead` reads as not fp8 there, and a
+  quantized `lm_head` is reported only by the comparison with the configured rule); on SGLang there is
+  no return channel, so the trainer compares against the weight-sync
   rule and the loader's sync-vs-engine dtype check (next bullet) covers the sync-to-engine half. It logs
   each disagreement (e.g. `first_last_layers_bf16` without the matching rollout regex, a router the
   name patterns miss, `lm_head` left in the quantized set, Mixtral's `w1/w2/w3` experts that the
