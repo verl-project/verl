@@ -30,6 +30,15 @@ standard way, then re-runs ``process_weights_after_loading`` on every module
 whose quant method is MXFP8, which rebuilds the kernel-layout copies from the
 just written canonical scales.
 
+One sync, many requests. A weight sync arrives as one ``update_weights_from_tensor``
+request per bucket, and SGLang calls the loader once per request, so the loader
+cannot re-derive anything per call: a MoE layer whose scales sit in a later
+bucket would be re-derived from an unwritten staging buffer and folded into the
+live one. As in verl's vLLM refit cycle, staging and re-processing bracket the
+whole sync instead: the first request of a sync stages, every request only
+loads, and the closing request — the caller sends ``finalize_tensors()`` after
+the last bucket — checks, re-derives, folds back and self-checks.
+
 Which backend a layer runs on is read from the layer, not from the launch flag.
 sglang >= 0.5.18 (#33208) resolves the MXFP8 dense backend at construction and
 stores it as ``quant_method.mxfp8_dense_backend`` — with no ``--fp8-gemm-backend``
@@ -49,10 +58,10 @@ at load: the default Triton MoE runner swizzles them (shape may change), DeepGEM
 packs them (dtype changes), CUTLASS and TRT-LLM keep them canonical. A sync must
 therefore write canonical ``[E, N, K/32]`` uint8 scales into a canonical-shaped
 buffer and then re-run the processing, folding the result back into the storage
-the CUDA graph captured. That is ``stage_mxfp8_moe_scales`` before ``load_weights``
-and ``reprocess_mxfp8_moe_layers`` after it — the SGLang analogue of verl's vLLM
-pristine-layout cycle, without a record step because the canonical layout is
-derivable from the expert weight shape.
+the CUDA graph captured. That is ``stage_mxfp8_moe_scales`` before the first
+``load_weights`` of a sync and ``reprocess_mxfp8_moe_layers`` after the last — the
+SGLang analogue of verl's vLLM pristine-layout cycle, without a record step
+because the canonical layout is derivable from the expert weight shape.
 
 Self-check. After re-processing, one dense MXFP8 layer's own ``apply`` is compared
 against a dequantized reference (``verl.utils.mxfp8_refit_check``); a stale or
@@ -75,7 +84,8 @@ Register at server launch (verl does this when ``rollout.quantization=mxfp8``)::
     custom_weight_loader=["verl.workers.rollout.sglang_rollout.mxfp8_refit_loader.load_and_reprocess"]
 
 and send every ``update_weights_from_tensor`` request with
-``load_format`` set to the same import path.
+``load_format`` set to the same import path, followed by one closing request
+with the same ``load_format`` carrying ``finalize_tensors()``.
 """
 
 from __future__ import annotations
@@ -91,6 +101,19 @@ MXFP8_BLOCK_SIZE = 32
 
 # Import path callers pass as both --custom-weight-loader and load_format.
 LOADER_FQN = "verl.workers.rollout.sglang_rollout.mxfp8_refit_loader.load_and_reprocess"
+# Name of the tensor that marks the closing request of a sync (see ``finalize_tensors``).
+FINALIZE_MARKER = "__verl_mxfp8_refit_finalize__"
+# Set on the model between the first and the closing request of a sync: the staged MoE scales.
+_SYNC_STAGED_ATTR = "_verl_mxfp8_refit_staged"
+
+
+def finalize_tensors() -> list[tuple[str, torch.Tensor]]:
+    """Payload of the closing request of a sync; send it after the last bucket with ``load_format=LOADER_FQN``.
+
+    One element rather than none: the request travels through the same CUDA IPC serialization as the
+    buckets, and the loader only looks at the name.
+    """
+    return [(FINALIZE_MARKER, torch.zeros(1, dtype=torch.uint8))]
 
 
 def _is_mxfp8_linear(module: torch.nn.Module) -> bool:
@@ -401,9 +424,31 @@ def self_check_mxfp8_moe(snapshot) -> None:
 
 
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
-    """Standard ``load_weights`` bracketed by MXFP8 layout staging / re-processing, then self-checks."""
-    staged = stage_mxfp8_moe_scales(model)
-    model.load_weights(named_tensors)
+    """Load one request of an MXFP8 weight sync; the closing request re-derives the kernel layouts.
+
+    The first request of a sync stages the MoE scales, every request loads its tensors, and the request
+    carrying ``FINALIZE_MARKER`` checks, re-derives, folds back and self-checks once the whole sync has
+    been written (see the module docstring, "One sync, many requests").
+    """
+    named_tensors = list(named_tensors)
+    finalize = any(name == FINALIZE_MARKER for name, _ in named_tensors)
+    named_tensors = [(name, tensor) for name, tensor in named_tensors if name != FINALIZE_MARKER]
+    if named_tensors:
+        if _SYNC_STAGED_ATTR not in model.__dict__:  # first request of this sync
+            model.__dict__[_SYNC_STAGED_ATTR] = stage_mxfp8_moe_scales(model)
+        model.load_weights(named_tensors)
+    if finalize:
+        _finish_sync(model)
+
+
+def _finish_sync(model: torch.nn.Module) -> None:
+    """Re-derive the kernel layouts once every bucket of the sync has been written, then self-check."""
+    if _SYNC_STAGED_ATTR not in model.__dict__:
+        # Nothing was loaded since the last sync; re-running the processing on layouts that are
+        # already derived would apply it twice.
+        logger.warning("mxfp8 refit: closing request without a loaded bucket; nothing to re-derive")
+        return
+    staged = model.__dict__.pop(_SYNC_STAGED_ATTR)
     moe_snapshot = snapshot_mxfp8_moe_for_check(model)
     n = reprocess_mxfp8_layers(model)
     m = reprocess_mxfp8_moe_layers(model, staged)

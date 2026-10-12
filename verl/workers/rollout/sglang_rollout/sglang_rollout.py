@@ -423,6 +423,18 @@ class ServerAdapter(BaseRollout):
                     device_mesh=self.device_mesh,
                     load_format=load_format,
                 )
+            if quantization == "mxfp8":
+                # The refit loader runs once per bucket request and only loads; this closing request
+                # re-derives the kernel scale layouts after every bucket of the sync has been written.
+                from verl.workers.rollout.sglang_rollout.mxfp8_refit_loader import finalize_tensors
+
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                    load_format=load_format,
+                )
 
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
