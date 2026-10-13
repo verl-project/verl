@@ -45,7 +45,7 @@ ARG MEGATRON_BRIDGE_BRANCH="deepseek-v4-rocm-support"
 RUN pip install --no-deps --no-build-isolation --ignore-requires-python \
     git+${MEGATRON_BRIDGE_REPO}@${MEGATRON_BRIDGE_BRANCH}
 
-RUN pip install "transformers==5.12.1"  "TransferQueue==0.1.10"
+RUN pip install "transformers==5.12.1"  "TransferQueue==0.1.11"
 
 # vLLM 0.26.0 fixes needed by DeepSeek-V4 on ROCm (see the header of each patch for the upstream change):
 #   sparse-topk-guard  NaN logits from the FP8 indexer cache break the radix top-k

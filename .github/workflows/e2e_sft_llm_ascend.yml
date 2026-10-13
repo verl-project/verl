@@ -98,6 +98,33 @@ jobs:
           pip install pandas==2.3.3
           # Match the Transformers version used to generate the pinned VeOmni models.
           pip install "transformers==5.16.1"
+          python3 - <<'EOF'
+          path = "/Megatron-Bridge/src/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/__init__.py"
+          src = open(path).read()
+          old = '''AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
+          AutoModel.register(Qwen3ASRConfig, Qwen3ASRForConditionalGeneration)
+          AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)'''
+          new = '''from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+
+          def _register_auto_classes(config_mapping=CONFIG_MAPPING) -> bool:
+              """Register vendored classes only when Transformers has no native Qwen3-ASR."""
+              if Qwen3ASRConfig.model_type in config_mapping:
+                  return False
+
+              AutoConfig.register(Qwen3ASRConfig.model_type, Qwen3ASRConfig)
+              AutoModel.register(Qwen3ASRConfig, Qwen3ASRForConditionalGeneration)
+              AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
+              return True
+
+
+          _register_auto_classes()'''
+          if old in src:
+              open(path, "w").write(src.replace(old, new))
+              print("patched:", path)
+          else:
+              print("may has been fixed")
+          EOF
       - name: Check final pip list
         run: |
           pip list

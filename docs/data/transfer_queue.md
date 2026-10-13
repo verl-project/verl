@@ -1,6 +1,6 @@
 # TransferQueue Data System
 
-Last updated: 07/27/2026.
+Last updated: 10/10/2026.
 
 This doc introduce [TransferQueue](https://github.com/Ascend/TransferQueue), an asynchronous streaming data management system for efficient post-training.
 
@@ -25,6 +25,8 @@ TransferQueue offers **fine-grained, sub-sample-level** data management and **lo
 
 <h2 id="updates"> Updates</h2>
 
+ - **September 8, 2026**: 🔥 TransferQueue has been adopted in [Meshy](https://github.com/OpenBMB/Meshy). Meshy models each role as a dedicated service, and TransferQueue serves as the data flow manager that connects each role.
+ - **August 14, 2026**: 🔥 TransferQueue has been adopted in [Dressage](https://github.com/Accio-Lab/Dressage). By integrating TQ, peak memory usage of the data plane on the master node is reduced by 91% in a 32-node GLM-5.2 setup. Refer to the [report](https://github.com/Accio-Lab/Dressage/blob/main/docs/trajectory-storage-refactor-en.md) for details.
  - **June 18, 2026**: 🔥 TransferQueue has been adopted in [ROLL](https://github.com/alibaba/ROLL/pull/463). This integration introduces a [`RemoteBatch`](https://github.com/alibaba/ROLL/blob/main/docs_roll/docs/User%20Guides/Advanced%20Features/remote_batch_transfer.md) abstraction, enabling seamless compatibility with existing `DataProto` design.
  - **June 9, 2026**: 🔥 TransferQueue has been adopted in [UniRL](https://github.com/Tencent-Hunyuan/UniRL), a unified RL framework for multimodal models developed by Tencent Hunyuan.
  - **April 15, 2026**: 🔥 TransferQueue has been adopted in [Relax](https://github.com/redai-infra/Relax)! By leveraging the `StreamingDataLoader` abstraction, it schedules training data across the cluster at micro-batch granularity, reducing synchronization barriers in a single-controller setup.
@@ -75,7 +77,7 @@ Currently, we support the following storage backends:
 - SimpleStorage: A basic CPU memory storage with minimal data format constraints and ease of use.
 - [Yuanrong](https://gitee.com/openeuler/yuanrong-datasystem) ([usage guide](docs/storage_backends/openyuanrong_datasystem.md), beta, [#PR107](https://github.com/TransferQueue/TransferQueue/pull/107), [#PR96](https://github.com/TransferQueue/TransferQueue/pull/96)): An Ascend native data system that provides hierarchical storage interfaces including HBM/DRAM/SSD.
 - [MooncakeStore](https://github.com/kvcache-ai/Mooncake) (beta, [#PR162](https://github.com/TransferQueue/TransferQueue/pull/162)): A high-performance, KV-based hierarchical storage that supports RDMA transport between GPU and DRAM.
-- [RayRDT](https://docs.ray.io/en/latest/ray-core/direct-transport/direct-transport.html) (alpha, [#PR167](https://github.com/TransferQueue/TransferQueue/pull/167)): Ray's new feature that allows Ray to store and pass objects directly between Ray actors.
+- [RayRDT](https://docs.ray.io/en/master/ray-core/direct-transport.html) (alpha, [#PR167](https://github.com/TransferQueue/TransferQueue/pull/167)): Ray's new feature that allows Ray to store and pass objects directly between Ray actors.
 
 Among them, `SimpleStorageUnit` serves as our default storage backend, coordinated by the `AsyncSimpleStorageManager` class. Each storage unit can be deployed on a separate node, allowing for distributed data management.
 
@@ -279,7 +281,6 @@ batch_meta = client.get_meta(
     batch_size=8,
     partition_id="train_0",
     task_name="generate_sequences",
-    sampling_config={"n_samples_per_prompt": 4}  # Put the required sampling parameters here
 )
 ```
 

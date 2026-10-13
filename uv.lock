@@ -4991,10 +4991,10 @@ wheels = [
 
 [[package]]
 name = "transferqueue"
-version = "0.1.10"
+version = "0.1.11"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/6b/374c1ce1078baa628314d068fe0994a58380a020d57b9b0427cc2560c98f/transferqueue-0.1.10-py3-none-any.whl", hash = "sha256:a8efceb971fe57d52ac7ddd86d9a6ef63f1824819dddc2ea980a96b73ff2f8ea", size = 360774, upload-time = "2026-08-21T21:23:24.561Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/67/52d95539c77597772ba4c3800faf13f5894568e60791fc45a7275f69039b/transferqueue-0.1.11-py3-none-any.whl", hash = "sha256:dfc5adb71e55732bb239f964d8e7fecea6eeaa66d9bdbdcc0b12ffe9a3b0c120", size = 410322, upload-time = "2026-09-24T02:12:06.947Z" },
 ]
 
 [[package]]
@@ -5599,7 +5599,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'megatron'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "megatron" } },
     { name = "torchvision", marker = "extra == 'sglang'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "sglang" } },
     { name = "torchvision", marker = "extra == 'vllm'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "vllm" } },
-    { name = "transferqueue", marker = "extra == 'verl-core'", specifier = ">=0.1.10" },
+    { name = "transferqueue", marker = "extra == 'verl-core'", specifier = ">=0.1.11" },
     { name = "transformer-engine", marker = "extra == 'megatron'", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.13" },
     { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.12.1" },

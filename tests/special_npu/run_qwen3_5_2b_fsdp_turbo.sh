@@ -12,12 +12,12 @@ TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 
 GEN_TP=${GEN_TP:-2}
 SP_SIZE=${SP_SIZE:-2}
-FSDP_SIZE=${FSDP_SIZE:-4}
+FSDP_SIZE=${FSDP_SIZE:-8}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.4}
 ROLLOUT_N=${ROLLOUT_N:-2}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1}
@@ -33,7 +33,7 @@ export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-n_devices_per_node=8
+n_devices_per_node=16
 
 ########################### shared turbo config values ###########################
 ACTOR_TURBO="actor_rollout_ref.actor.fsdp_config.turbo_config"
@@ -180,4 +180,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${ROLLOUT[@]}" \
     "${TRAINER[@]}" \
-    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log
+    "$@"
