@@ -93,6 +93,22 @@ class _TopK(torch.nn.Module):
         return _StandardTopKOutput(weights, top.indices.to(torch.int32), router_logits)
 
 
+# The sglang stubs are installed through the running test's monkeypatch, so they are removed again when the
+# test ends instead of leaking into later tests in the same process.
+_STUB_PATCHES: list = []
+
+
+@pytest.fixture(autouse=True)
+def _undo_sglang_stubs(monkeypatch):
+    _STUB_PATCHES.append(monkeypatch)
+    yield
+    _STUB_PATCHES.pop()
+
+
+def _set_module(name, module):
+    _STUB_PATCHES[-1].setitem(sys.modules, name, module)
+
+
 def _install_stub(backend_name):
     mod = types.ModuleType("sglang.srt.layers.quantization.fp8_utils")
     mod.get_fp8_gemm_runner_backend = lambda: _Backend(backend_name)
@@ -103,16 +119,17 @@ def _install_stub(backend_name):
         "sglang.srt.layers.quantization",
         "sglang.srt.layers.moe",
     ):
-        sys.modules.setdefault(name, types.ModuleType(name))
-    sys.modules["sglang.srt.layers.quantization.fp8_utils"] = mod
+        if name not in sys.modules:
+            _set_module(name, types.ModuleType(name))
+    _set_module("sglang.srt.layers.quantization.fp8_utils", mod)
     topk = types.ModuleType("sglang.srt.layers.moe.topk")
     topk.StandardTopKOutput = _StandardTopKOutput
     topk.BypassedTopKOutput = _BypassedTopKOutput
     topk.TopK = _TopK
-    sys.modules["sglang.srt.layers.moe.topk"] = topk
+    _set_module("sglang.srt.layers.moe.topk", topk)
     utils = types.ModuleType("sglang.srt.layers.moe.utils")
     utils.RoutingMethodType = _RoutingMethodType
-    sys.modules["sglang.srt.layers.moe.utils"] = utils
+    _set_module("sglang.srt.layers.moe.utils", utils)
 
 
 class _QuantMethod:
