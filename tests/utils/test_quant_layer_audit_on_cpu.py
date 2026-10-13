@@ -25,6 +25,7 @@ from verl.utils.quant_layer_audit import (
     audit_layer_sets,
     collect_train_fp8_report,
     remember_fp8_workspaces,
+    vllm_high_precision_layers,
     vllm_rollout_predicate,
 )
 from verl.utils.sglang.sglang_mxfp8_utils import SGLangMXFP8QuantizerHelper, build_sglang_mxfp8_quant_config
@@ -167,6 +168,16 @@ def test_lm_head_left_quantized_on_rollout_is_reported():
     vllm_without_keep = vllm_rollout_predicate(N_LAYERS, ())  # the pre-cf69c645 blacklist
     problems = audit_layer_sets(r, _hf_names(), vllm_without_keep)
     assert [p.split(":")[0] for p in problems] == ["lm_head.weight"]
+
+
+@pytest.mark.parametrize("quantization", ["fp8", "mxfp8"])
+def test_vllm_rule_leaves_lm_head_and_embeddings_unquantized_like_training(quantization):
+    # vLLM's FP8 method quantizes LinearBase modules only, so lm_head (a ParallelLMHead) stays in high precision
+    # there as well; the FP8 rule used to count it as quantized and report it as a disagreement.
+    r = collect_train_fp8_report([_Chunk(quantized_layers=set(range(N_LAYERS)))])
+    pred = vllm_rollout_predicate(N_LAYERS, vllm_high_precision_layers(quantization))
+    assert not pred("lm_head.weight") and not pred("model.embed_tokens.weight")
+    assert audit_layer_sets(r, _hf_names(), pred) == []
 
 
 def test_training_fp8_but_rollout_unquantized_layer_is_reported():
