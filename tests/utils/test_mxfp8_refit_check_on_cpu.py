@@ -187,14 +187,28 @@ def test_a_probe_that_raises_is_skipped_with_the_exception_type_and_where_it_cam
     )
 
 
-def test_a_non_finite_reference_is_skipped_rather_than_passed(caplog):
-    # NaN relative error compares as within tolerance; the probe must not report it as a pass
+def test_a_non_finite_reference_fails_the_check():
+    # a scale the sync never wrote keeps its 0xFF staging fill (the UE8M0 NaN code): fail, neither skip nor pass
     w13, s13, w2, s2 = _fake_expert()
     good = lambda x: mxfp8_moe_expert_reference(x, w13, s13, w2, s2).to(torch.bfloat16)  # noqa: E731
-    s13_inf = s13.clone()
-    s13_inf[0, 0] = 255  # UE8M0 255 is NaN; 2**128 overflows fp32 as well
+    s13_nan = s13.clone()
+    s13_nan[0, 0] = 255
+    with pytest.raises(RuntimeError, match="MoE layer 'moe', expert 0: the dequantized reference is not finite"):
+        assert_mxfp8_moe_expert_matches("moe", 0, good, w13, s13_nan, w2, s2, engine="sglang")
+    q, scale = _fake_layer()
+    scale_nan = scale.clone()
+    scale_nan[0, 0] = 255
+    linear = lambda x: (x.float() @ mxfp8_dequantize(q, scale).t()).to(torch.bfloat16)  # noqa: E731
+    with pytest.raises(RuntimeError, match="layer 'lin': the dequantized reference is not finite"):
+        assert_mxfp8_linear_matches("lin", linear, q, scale_nan, engine="vllm")
 
-    import math
 
-    assert math.isnan(assert_mxfp8_moe_expert_matches("moe", 0, good, w13, s13_inf, w2, s2, engine="sglang"))
-    assert "reference is not finite" in caplog.text
+def test_a_nan_error_fails_the_check(monkeypatch):
+    import verl.utils.mxfp8_refit_check as m
+
+    monkeypatch.setattr(m, "probe_mxfp8_moe_expert", lambda *args, **kwargs: float("nan"))
+    monkeypatch.setattr(m, "probe_mxfp8_linear", lambda *args, **kwargs: float("nan"))
+    with pytest.raises(RuntimeError, match="nan relative error"):
+        m.assert_mxfp8_moe_expert_matches("moe", 0, None, None, None, None, None, engine="sglang")
+    with pytest.raises(RuntimeError, match="nan relative error"):
+        m.assert_mxfp8_linear_matches("lin", None, None, None, engine="vllm")

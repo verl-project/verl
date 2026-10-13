@@ -74,6 +74,17 @@ def _announce(key: tuple[str, str], msg: str, *args) -> None:
         logger.info(msg, *args)
 
 
+class _NonFiniteReference(ValueError):
+    """The dequantized reference holds NaN/Inf: the canonical weight or scale the check reads is not valid."""
+
+
+_NON_FINITE_REFERENCE = (
+    "the dequantized reference is not finite: the canonical weight or scale the check reads holds NaN/Inf codes "
+    "(UE8M0 0xFF is NaN), typically a scale the weight sync never wrote and left at its staging fill, or NaNs in "
+    "the trainer's weights"
+)
+
+
 def _describe_probe_error(err: BaseException) -> str:
     """``Type: message at dir/file.py:line`` of the innermost frame: a bare ``assert`` in an engine stays traceable."""
     msg = str(err)
@@ -133,6 +144,8 @@ def probe_mxfp8_linear(
     gen = torch.Generator(device="cpu").manual_seed(seed)
     x = torch.randn(rows, k, generator=gen, dtype=torch.float32).to(device=qweight.device, dtype=torch.bfloat16)
     ref = x.to(torch.float32) @ mxfp8_dequantize(qweight, scale_u8).reshape(n, k).t()
+    if not torch.isfinite(ref).all():
+        raise _NonFiniteReference(_NON_FINITE_REFERENCE)
     out = apply_fn(x)
     if isinstance(out, tuple):  # some engines return (output, bias)
         out = out[0]
@@ -161,10 +174,15 @@ def assert_mxfp8_linear_matches(
     tol = refit_check_tolerance()
     try:
         rel = probe_mxfp8_linear(apply_fn, qweight, scale_u8)
+    except _NonFiniteReference as err:
+        raise RuntimeError(
+            f"MXFP8 refit self-check failed on {engine} layer '{name}': {err}. Set VERL_MXFP8_REFIT_CHECK=0 to "
+            "bypass (not recommended)."
+        ) from err
     except Exception as err:  # noqa: BLE001 - the probe is best-effort
         logger.warning("mxfp8 refit check skipped on %s (%s): %s", name, engine, _describe_probe_error(err))
         return float("nan")
-    if rel > tol:
+    if not rel <= tol:  # also fails a NaN error, which would compare as within tolerance
         raise RuntimeError(
             f"MXFP8 refit self-check failed on {engine} layer '{name}': the layer's quantized GEMM disagrees "
             f"with the dequantized reference by {rel:.3f} relative error (tolerance {tol}). This is the "
@@ -237,14 +255,14 @@ def probe_mxfp8_moe_expert(
     ref = mxfp8_moe_expert_reference(x, w13_q, w13_scale_u8, w2_q, w2_scale_u8, up_first=up_first)
     if reduce_ref is not None:
         ref = reduce_ref(ref)
+    if not torch.isfinite(ref).all():
+        raise _NonFiniteReference(_NON_FINITE_REFERENCE)
     out = apply_fn(x)
     if isinstance(out, tuple):
         out = out[0]
     out = out.to(torch.float32).reshape(ref.shape)
     if not torch.isfinite(out).all():
         return float("inf")
-    if not torch.isfinite(ref).all():  # a NaN error would compare as within tolerance
-        raise ValueError("the dequantized reference is not finite (NaN/Inf in the snapshotted weights or scales)")
     denom = ref.norm().item()
     return float((out - ref).norm().item() / denom) if denom > 0 else float(out.norm().item())
 
@@ -268,6 +286,11 @@ def assert_mxfp8_moe_expert_matches(
         rel = probe_mxfp8_moe_expert(
             apply_fn, w13_q, w13_scale_u8, w2_q, w2_scale_u8, reduce_ref=reduce_ref, up_first=up_first
         )
+    except _NonFiniteReference as err:
+        raise RuntimeError(
+            f"MXFP8 refit self-check failed on {engine} MoE layer '{name}', expert {expert_id}: {err}. Set "
+            "VERL_MXFP8_REFIT_CHECK=0 to bypass (not recommended)."
+        ) from err
     except Exception as err:  # noqa: BLE001 - the probe is best-effort
         logger.warning(
             "mxfp8 MoE refit check skipped on %s expert %d (%s): %s",
@@ -277,7 +300,7 @@ def assert_mxfp8_moe_expert_matches(
             _describe_probe_error(err),
         )
         return float("nan")
-    if rel > tol:
+    if not rel <= tol:  # also fails a NaN error, which would compare as within tolerance
         raise RuntimeError(
             f"MXFP8 refit self-check failed on {engine} MoE layer '{name}', expert {expert_id}: the layer routed "
             f"to this expert disagrees with the dequantized reference by {rel:.3f} relative error (tolerance "
