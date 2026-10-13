@@ -327,9 +327,11 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. Scales the MoE runner
   rewrites without changing their shape or dtype (FlashInfer TRT-LLM, the default, and CUTLASS on
   SGLang ≤ 0.5.15) or leaves canonical (CUTLASS on ≥ 0.5.20) are not staged, so this check does
-  not cover them. The kernel-vs-reference
-  probe verifies the kernel's *layout*, not that the sync delivered the right scales — the audit
-  below covers that. Disable both with `VERL_MXFP8_REFIT_CHECK=0`; the probe tolerance (default
+  not cover them. The kernel-vs-reference probe compares the kernel's output with a reference
+  dequantized from the canonical weight and scale, so it catches stale or mis-laid-out derived
+  scales but not a sync that delivered wrong scale values. Neither do the sync-vs-engine dtype
+  check and the audit below: they compare dtypes and which layers are quantized, by parameter
+  name, not values. Disable both with `VERL_MXFP8_REFIT_CHECK=0`; the probe tolerance (default
   0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
 - **Quantized-layer audit** (trainer worker, Megatron engine). "Matched" train/rollout quantization
   presumes both sides quantize the same layers, but training decides implicitly (TE linear modules
