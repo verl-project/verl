@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import os
+import traceback
 from collections.abc import Callable
 
 import torch
@@ -71,6 +72,17 @@ def _announce(key: tuple[str, str], msg: str, *args) -> None:
     else:
         _ANNOUNCED.add(key)
         logger.info(msg, *args)
+
+
+def _describe_probe_error(err: BaseException) -> str:
+    """``Type: message at dir/file.py:line`` of the innermost frame: a bare ``assert`` in an engine stays traceable."""
+    msg = str(err)
+    text = f"{type(err).__name__}: {msg}" if msg else type(err).__name__
+    frames = traceback.extract_tb(err.__traceback__)
+    if frames:
+        path = frames[-1].filename.replace(os.sep, "/").split("/")
+        text += f" at {'/'.join(path[-3:])}:{frames[-1].lineno}"
+    return text
 
 
 def refit_check_enabled() -> bool:
@@ -150,7 +162,7 @@ def assert_mxfp8_linear_matches(
     try:
         rel = probe_mxfp8_linear(apply_fn, qweight, scale_u8)
     except Exception as err:  # noqa: BLE001 - the probe is best-effort
-        logger.warning("mxfp8 refit check skipped on %s (%s): %s", name, engine, err)
+        logger.warning("mxfp8 refit check skipped on %s (%s): %s", name, engine, _describe_probe_error(err))
         return float("nan")
     if rel > tol:
         raise RuntimeError(
@@ -179,16 +191,21 @@ def mxfp8_moe_expert_reference(
     w13_scale_u8: torch.Tensor,
     w2_q: torch.Tensor,
     w2_scale_u8: torch.Tensor,
+    *,
+    up_first: bool = False,
 ) -> torch.Tensor:
     """fp32 reference of one gated expert on dequantized weights.
 
     ``w13_q`` is ``[2I, H]`` in the fused-MoE convention (rows ``[:I]`` = w1 /
-    gate, rows ``[I:]`` = w3 / up), ``w2_q`` is ``[H, I]``. ``x`` is ``[rows, H]``.
+    gate, rows ``[I:]`` = w3 / up; ``up_first`` for engines that store
+    ``[up; gate]``), ``w2_q`` is ``[H, I]``. ``x`` is ``[rows, H]``.
     """
     w13 = mxfp8_dequantize(w13_q, w13_scale_u8)
     w2 = mxfp8_dequantize(w2_q, w2_scale_u8)
     h = x.to(torch.float32) @ w13.t()
     gate, up = h.chunk(2, dim=-1)
+    if up_first:
+        gate, up = up, gate
     return (F.silu(gate) * up) @ w2.t()
 
 
@@ -201,6 +218,7 @@ def probe_mxfp8_moe_expert(
     w2_scale_u8: torch.Tensor,
     *,
     reduce_ref: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    up_first: bool = False,
     rows: int = _PROBE_ROWS,
     seed: int = 0,
 ) -> float:
@@ -210,12 +228,13 @@ def probe_mxfp8_moe_expert(
     (``[rows, H]`` bf16) routed to the probed expert with weight 1.0 and return
     ``[rows, H]``. With tensor parallelism the caller passes the local expert
     shards and ``reduce_ref`` (the same all-reduce the layer applies), so the
-    reference is summed the way the kernel output is.
+    reference is summed the way the kernel output is. ``up_first``: the engine
+    stores ``w13`` as ``[up; gate]`` (see ``mxfp8_moe_expert_reference``).
     """
     hidden = w13_q.shape[-1]
     gen = torch.Generator(device="cpu").manual_seed(seed)
     x = torch.randn(rows, hidden, generator=gen, dtype=torch.float32).to(device=w13_q.device, dtype=torch.bfloat16)
-    ref = mxfp8_moe_expert_reference(x, w13_q, w13_scale_u8, w2_q, w2_scale_u8)
+    ref = mxfp8_moe_expert_reference(x, w13_q, w13_scale_u8, w2_q, w2_scale_u8, up_first=up_first)
     if reduce_ref is not None:
         ref = reduce_ref(ref)
     out = apply_fn(x)
@@ -224,6 +243,8 @@ def probe_mxfp8_moe_expert(
     out = out.to(torch.float32).reshape(ref.shape)
     if not torch.isfinite(out).all():
         return float("inf")
+    if not torch.isfinite(ref).all():  # a NaN error would compare as within tolerance
+        raise ValueError("the dequantized reference is not finite (NaN/Inf in the snapshotted weights or scales)")
     denom = ref.norm().item()
     return float((out - ref).norm().item() / denom) if denom > 0 else float(out.norm().item())
 
@@ -239,13 +260,22 @@ def assert_mxfp8_moe_expert_matches(
     *,
     engine: str,
     reduce_ref: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    up_first: bool = False,
 ) -> float:
     """MoE counterpart of ``assert_mxfp8_linear_matches``: raise on a mismatch, skip (warn) on probe errors."""
     tol = refit_check_moe_tolerance()
     try:
-        rel = probe_mxfp8_moe_expert(apply_fn, w13_q, w13_scale_u8, w2_q, w2_scale_u8, reduce_ref=reduce_ref)
+        rel = probe_mxfp8_moe_expert(
+            apply_fn, w13_q, w13_scale_u8, w2_q, w2_scale_u8, reduce_ref=reduce_ref, up_first=up_first
+        )
     except Exception as err:  # noqa: BLE001 - the probe is best-effort
-        logger.warning("mxfp8 MoE refit check skipped on %s expert %d (%s): %s", name, expert_id, engine, err)
+        logger.warning(
+            "mxfp8 MoE refit check skipped on %s expert %d (%s): %s",
+            name,
+            expert_id,
+            engine,
+            _describe_probe_error(err),
+        )
         return float("nan")
     if rel > tol:
         raise RuntimeError(

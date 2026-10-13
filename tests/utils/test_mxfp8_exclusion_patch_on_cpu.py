@@ -228,13 +228,36 @@ def test_globs_respect_fused_shards_including_mixed_exact_glob(patch_module):
     assert cfg.is_layer_excluded("model.layers.0.mlp.gate_up_proj")
 
 
-def test_no_implicit_parent_or_suffix_matching(patch_module):
-    cfg = _MxFp8Config(["model.layers.0.mlp", "lm_head"])
+def test_entries_match_whole_name_components_not_parts_of_one(patch_module):
+    cfg = _MxFp8Config(["model.layers.0.mlp", "lm_head", "model.layers.1.mlp.gate"])
     _opt_in(patch_module, cfg)
-    assert not cfg.is_layer_excluded("model.layers.0.mlp.down_proj")
-    assert not cfg.is_layer_excluded("another.lm_head")
+    # what the legacy substring fallback got right is kept: a wrapper prefix, a parent module
+    assert cfg.is_layer_excluded("another.lm_head")
+    assert cfg.is_layer_excluded("model.layers.0.mlp.down_proj")
+    assert cfg.is_layer_excluded("model.layers.1.mlp.gate.wg")
+    # what it got wrong is dropped: a match that cuts through a component
+    assert not cfg.is_layer_excluded("model.layers.1.mlp.gate_up_proj")
+    assert not cfg.is_layer_excluded("lm_head_extra")
+    assert not cfg.is_layer_excluded("model.layers.11.mlp.gate")
+    assert not cfg.is_layer_excluded("model.layers.1.mlp.gate_proj")
     cfg.exclude_modules = ["model.layers.0.mlp.*"]
     assert cfg.is_layer_excluded("model.layers.0.mlp.down_proj")
+
+
+def test_vlm_wrapped_names_keep_lm_head_and_routers_high_precision(patch_module):
+    # vLLM remaps exclusions with the model's hf_to_vllm_mapper, which maps "lm_head." (with the dot) to
+    # "language_model.lm_head." for 46 VLMs in 0.29; the generated bare "lm_head" is not remapped, so the
+    # engine's language_model.lm_head must still be excluded by name components (CodeRabbit on #8129 / #8132).
+    layers = 4
+    cfg = _MxFp8Config([f"model.layers.{i}.mlp.gate" for i in range(layers)] + ["lm_head", "model.embed_tokens"])
+    _opt_in(patch_module, cfg)
+    for wrap in ("", "language_model."):
+        assert cfg.get_quant_method(f"{wrap}lm_head") == "UnquantizedLinearMethod"
+        assert cfg.is_layer_excluded(f"{wrap}model.embed_tokens")
+        for i in range(layers):
+            assert cfg.get_quant_method(f"{wrap}model.layers.{i}.mlp.gate") == "UnquantizedLinearMethod"
+            assert cfg.get_quant_method(f"{wrap}model.layers.{i}.mlp.gate_up_proj") == "ModelOptMxFp8LinearMethod"
+            assert cfg.get_quant_method(f"{wrap}model.layers.{i}.self_attn.qkv_proj") == "ModelOptMxFp8LinearMethod"
 
 
 def test_explicit_router_names_and_expert_group_behavior(patch_module):

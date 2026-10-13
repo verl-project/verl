@@ -13,10 +13,14 @@
 # limitations under the License.
 """CPU tests for the SGLang MXFP8 refit loader (sglang stubbed)."""
 
+import enum
+import logging
 import sys
 import types
-from typing import NamedTuple
+from dataclasses import dataclass
+from typing import Callable, NamedTuple, Optional
 
+import pytest
 import torch
 
 from verl.utils.mxfp8_refit_check import mxfp8_dequantize
@@ -46,6 +50,49 @@ class _StandardTopKOutput(NamedTuple):  # sglang.srt.layers.moe.topk.StandardTop
     router_logits: torch.Tensor
 
 
+@dataclass
+class _TopKConfig:  # sglang.srt.layers.moe.topk.TopKConfig (the fields the probe reads)
+    top_k: int
+    use_grouped_topk: bool = False
+    renormalize: bool = True
+    num_fused_shared_experts: int = 0
+    custom_routing_function: Optional[Callable] = None
+    correction_bias: Optional[torch.Tensor] = None
+    routed_scaling_factor: Optional[float] = None
+    scoring_func: str = "softmax"
+
+
+class _BypassedTopKOutput(NamedTuple):  # sglang.srt.layers.moe.topk.BypassedTopKOutput
+    hidden_states: torch.Tensor
+    router_logits: torch.Tensor
+    topk_config: _TopKConfig
+
+
+class _RoutingMethodType(enum.IntEnum):  # sglang.srt.layers.moe.utils.RoutingMethodType
+    Default = 0
+    Renormalize = 1
+    DeepSeekV3 = 2
+    Llama4 = 3
+    RenormalizeNaive = 4
+    TopK = 5
+
+
+class _TopK(torch.nn.Module):
+    """sglang ``TopK.forward_cuda``: the router logits themselves for FlashInfer TRT-LLM, a softmax top-k otherwise."""
+
+    def __init__(self, top_k=2, runner="standard", **cfg):
+        super().__init__()
+        self.topk_config = _TopKConfig(top_k=top_k, **cfg)
+        self.runner = runner
+
+    def forward(self, hidden_states, router_logits):
+        if self.runner == "trtllm":
+            return _BypassedTopKOutput(hidden_states, router_logits, self.topk_config)
+        top = torch.softmax(router_logits.float(), dim=-1).topk(self.topk_config.top_k, dim=-1)
+        weights = top.values / top.values.sum(-1, keepdim=True) if self.topk_config.renormalize else top.values
+        return _StandardTopKOutput(weights, top.indices.to(torch.int32), router_logits)
+
+
 def _install_stub(backend_name):
     mod = types.ModuleType("sglang.srt.layers.quantization.fp8_utils")
     mod.get_fp8_gemm_runner_backend = lambda: _Backend(backend_name)
@@ -60,7 +107,12 @@ def _install_stub(backend_name):
     sys.modules["sglang.srt.layers.quantization.fp8_utils"] = mod
     topk = types.ModuleType("sglang.srt.layers.moe.topk")
     topk.StandardTopKOutput = _StandardTopKOutput
+    topk.BypassedTopKOutput = _BypassedTopKOutput
+    topk.TopK = _TopK
     sys.modules["sglang.srt.layers.moe.topk"] = topk
+    utils = types.ModuleType("sglang.srt.layers.moe.utils")
+    utils.RoutingMethodType = _RoutingMethodType
+    sys.modules["sglang.srt.layers.moe.utils"] = utils
 
 
 class _QuantMethod:
@@ -119,8 +171,16 @@ class _MoEQuantMethod:
 
 
 class _MoE(torch.nn.Module):
-    def __init__(self, experts=2, inter=64, hidden=64, random=False):
+    """sglang ``FusedMoE`` stand-in. ``runner="trtllm"`` behaves like the FlashInfer TRT-LLM runner: w13 is stored as
+    ``[up; gate]`` and the layer only accepts the router logits (it routes inside the kernel: top-k, then softmax)."""
+
+    def __init__(self, experts=2, inter=64, hidden=64, random=False, runner="standard"):
         super().__init__()
+        self.runner = runner
+        self.use_flashinfer_trtllm_moe = runner == "trtllm"
+        self.routing_method_type = _RoutingMethodType.Renormalize if runner == "trtllm" else None
+        self.moe_runner_config = types.SimpleNamespace(routed_scaling_factor=None)
+        self.formats_seen = []
         g = torch.Generator().manual_seed(0)
         w13 = (
             torch.randint(-6, 7, (experts, 2 * inter, hidden), generator=g)
@@ -147,14 +207,32 @@ class _MoE(torch.nn.Module):
         self.quant_method = _MoEQuantMethod()
 
     def forward(self, x, topk_output):
-        """sglang FusedMoE.forward stand-in: gated MLP of the routed expert on the scales the kernel reads."""
-        assert isinstance(topk_output, _StandardTopKOutput) and topk_output.topk_ids.shape[1] == 1
-        e = int(topk_output.topk_ids[0, 0])
-        s13, s2 = self._kernel_scales
+        """sglang FusedMoE.forward stand-in: routed sum of gated-MLP experts on the scales the kernel reads."""
         from verl.utils.mxfp8_refit_check import mxfp8_moe_expert_reference
 
-        out = mxfp8_moe_expert_reference(x, self.w13_weight.data[e], s13[e], self.w2_weight.data[e], s2[e])
-        return (out * topk_output.topk_weights).to(torch.bfloat16)
+        if self.runner == "trtllm":
+            assert isinstance(topk_output, _BypassedTopKOutput)  # flashinfer_trtllm.py: a bare assert in sglang
+            top = topk_output.router_logits.float().topk(topk_output.topk_config.top_k, dim=-1)
+            ids, weights = top.indices, torch.softmax(top.values, dim=-1)
+        else:
+            assert isinstance(topk_output, _StandardTopKOutput)
+            ids, weights = topk_output.topk_ids, topk_output.topk_weights
+        self.formats_seen.append(type(topk_output).__name__)
+        s13, s2 = self._kernel_scales
+        out = torch.zeros(x.shape[0], self.w2_weight.shape[1])
+        for j in range(ids.shape[1]):
+            for e in ids[:, j].unique().tolist():
+                rows = ids[:, j] == e
+                y = mxfp8_moe_expert_reference(
+                    x[rows],
+                    self.w13_weight.data[e],
+                    s13[e],
+                    self.w2_weight.data[e],
+                    s2[e],
+                    up_first=self.runner == "trtllm",
+                )
+                out[rows] += weights[rows, j : j + 1].float() * y
+        return out.to(torch.bfloat16)
 
 
 class _Model(torch.nn.Module):
@@ -380,7 +458,7 @@ def test_each_sync_stages_once_and_re_derives_once():
         assert torch.equal(m.moe1.w13_weight_scale_inv.data, torch.full((2, 256), value + 1, dtype=torch.uint8))
 
 
-def _canonical_moe_model():
+def _canonical_moe_model(runner="standard"):
     """A model whose MoE runner keeps scales canonical (no staging) but derives a kernel copy at load."""
 
     class _CanonicalRunner(_MoEQuantMethod):
@@ -390,7 +468,8 @@ def _canonical_moe_model():
 
     _install_stub("auto")
     m = _Model(resolved_backend="flashinfer_cutlass")
-    m.moe = _MoE(random=True)
+    m.moe = _MoE(random=True, runner=runner)
+    m.topk = _TopK(top_k=2, runner=runner)  # the MoE block's router, a sibling of the experts as in sglang
     m.moe.quant_method = _CanonicalRunner()
     m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load
     return m
@@ -400,6 +479,7 @@ def test_moe_self_check_passes_after_a_full_refit_cycle_on_the_swizzling_runner(
     _install_stub("auto")
     m = _Model(resolved_backend="flashinfer_cutlass")
     m.moe = _MoE(random=True)
+    m.topk = _TopK(top_k=2)
     m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load: scales swizzled, kernel copy = 127s
     new_w13 = torch.full((2, 128, 2), 129, dtype=torch.uint8)  # a sync ships 4x scales
     new_w2 = torch.full((2, 64, 2), 129, dtype=torch.uint8)
@@ -408,6 +488,7 @@ def test_moe_self_check_passes_after_a_full_refit_cycle_on_the_swizzling_runner(
         m, [("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)] + refit.finalize_tensors()
     )
     assert torch.equal(m.moe._kernel_scales[0], new_w13)
+    assert m.moe.formats_seen == ["_StandardTopKOutput"]  # the probe ran, through the model's TopK
 
 
 def test_moe_self_check_catches_expert_scales_the_kernel_never_re_derived():
@@ -439,6 +520,63 @@ def test_moe_self_check_is_skipped_under_expert_parallelism_and_when_disabled(mo
     monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK", "0")
     assert refit.snapshot_mxfp8_moe_for_check(m) is None
     monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK")
+    assert refit.snapshot_mxfp8_moe_for_check(m) is not None
+
+
+def test_moe_probe_feeds_the_trtllm_runner_router_logits_and_catches_stale_scales():
+    # FlashInfer TRT-LLM (sglang's default MXFP8 MoE runner) routes inside the kernel and rejects a precomputed
+    # top-k; the probe goes through the model's TopK, so the layer gets logits and the probe still sees stale scales
+    m = _canonical_moe_model("trtllm")
+    new_w13 = torch.full((2, 128, 2), 129, dtype=torch.uint8)
+    new_w2 = torch.full((2, 64, 2), 129, dtype=torch.uint8)
+    m.load_weights([("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+    snap = refit.snapshot_mxfp8_moe_for_check(m)
+    with pytest.raises(RuntimeError, match="MoE layer 'moe', expert 0"):
+        refit.self_check_mxfp8_moe(snap)
+    refit.reprocess_mxfp8_moe_layers(m, [])
+    refit.self_check_mxfp8_moe(snap)
+    assert set(m.moe.formats_seen) == {"_BypassedTopKOutput"}
+
+
+def test_moe_probe_reference_follows_the_engines_gate_up_order():
+    m = _canonical_moe_model("trtllm")  # w13 stored as [up; gate], as sglang loads it for FlashInfer TRT-LLM
+    snap = refit.snapshot_mxfp8_moe_for_check(m)
+    assert snap[-1] is True
+    refit.self_check_mxfp8_moe(snap)
+    with pytest.raises(RuntimeError, match="MoE layer 'moe', expert 0"):
+        refit.self_check_mxfp8_moe(snap[:-1] + (False,))  # reading [up; gate] as [gate; up]
+
+
+@pytest.mark.parametrize(
+    "tweak, reason",
+    [
+        (lambda m: delattr(m, "topk"), "no single sglang TopK module next to the experts"),
+        (lambda m: setattr(m.topk.topk_config, "scoring_func", "sigmoid"), "sigmoid scoring"),
+        (lambda m: setattr(m.topk.topk_config, "use_grouped_topk", True), "grouped, biased or custom top-k routing"),
+        (lambda m: setattr(m.topk.topk_config, "correction_bias", torch.zeros(2)), "grouped, biased or custom"),
+        (lambda m: setattr(m.topk.topk_config, "num_fused_shared_experts", 1), "shared experts fused"),
+        (lambda m: setattr(m.moe.moe_runner_config, "routed_scaling_factor", 2.5), "routed scaling factor 2.5"),
+        (lambda m: setattr(m.moe, "routing_method_type", _RoutingMethodType.Llama4), "routing method Llama4"),
+        # Fp8MoEMethod passes an unset or Default (== 0) routing method to the kernel as DeepSeekV3
+        (lambda m: setattr(m.moe, "routing_method_type", None), "routing method DeepSeekV3"),
+        (lambda m: setattr(m.moe, "routing_method_type", _RoutingMethodType.Default), "routing method DeepSeekV3"),
+    ],
+)
+def test_moe_probe_is_skipped_with_a_reason_where_logits_cannot_pin_one_expert(tweak, reason, caplog):
+    m = _canonical_moe_model("trtllm")
+    tweak(m)
+    refit._WARNED.clear()
+    with caplog.at_level(logging.WARNING, logger=refit.logger.name):
+        assert refit.snapshot_mxfp8_moe_for_check(m) is None
+        assert refit.snapshot_mxfp8_moe_for_check(m) is None
+    msgs = [r.getMessage() for r in caplog.records if "MoE refit check skipped on moe" in r.getMessage()]
+    assert len(msgs) == 1 and reason in msgs[0]  # once, not every sync
+
+
+@pytest.mark.parametrize("method", [_RoutingMethodType.Renormalize, _RoutingMethodType.RenormalizeNaive])
+def test_moe_probe_runs_on_the_softmax_trtllm_routing_methods(method):
+    m = _canonical_moe_model("trtllm")
+    m.moe.routing_method_type = method
     assert refit.snapshot_mxfp8_moe_for_check(m) is not None
 
 

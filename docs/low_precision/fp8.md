@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 10/12/2026
+Last updated: 10/13/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -416,10 +416,11 @@ Two constraints on this path:
   allocator mode, killing the server in `load_model`. The vLLM path tolerates the variable.
 
 **MoE experts on SGLang.** With the fp8-serialized checkpoint a verl sync delivers, SGLang's MXFP8 MoE
-method rewrites expert tensors in place at load on every MoE runner SGLang allows for MXFP8 on
-Blackwell: FlashInfer TRT-LLM (the default) reorders and shuffles both the expert weights and their
-scales, CUTLASS swizzles the expert scales (SGLang ≤ 0.5.15 keeps their `[E, N, K/32]` shape, ≥ 0.5.16
-rebinds them to the swizzled tensor's own shape), and DeepGEMM packs them. Where a scale's shape or
+method rewrites expert tensors in place at load on the MoE runners SGLang allows for MXFP8 on
+Blackwell, CUTLASS on SGLang ≥ 0.5.20 excepted: FlashInfer TRT-LLM (the default) reorders and
+shuffles both the expert weights and their scales, CUTLASS swizzles the expert scales (SGLang ≤ 0.5.15
+keeps their `[E, N, K/32]` shape, 0.5.16 to 0.5.19 rebind them to the swizzled tensor's own shape;
+≥ 0.5.20 hands the canonical scales to the kernel and rewrites nothing), and DeepGEMM packs them. Where a scale's shape or
 dtype changed, the refit loader stages it back to the canonical layout for `load_weights`; where it
 did not, `load_weights` writes the canonical data over the live buffer. Either way the kernel layout
 is re-derived once per sync, on the closing request, into the storage the CUDA graph captured. Until
@@ -434,7 +435,19 @@ requests, and after every sync the `w2` scales of 14 of the 16 experts held the 
 sent rewritten once for each re-derivation that ran after they arrived. Nothing was reported, and
 `rollout_corr/kl` was 0.018–0.046 against 0.0001–0.0005 with a single bucket. With the fix the same
 sync re-derived once, on the closing request, every expert's scales matched, and the KL was back at
-the single-bucket level.
+the single-bucket level. The same comparison on SGLang 0.5.20 (the version verl locks) gave the same
+picture: before the fix 0 or 1 of each layer's 8 experts was served correctly (weights and scales) and
+`rollout_corr/kl` was 0.019–0.046, silently; with it every expert was correct and the KL
+0.0001–0.0005.
+
+**Do not use SGLang's CUTLASS MoE runner for MXFP8 on SGLang 0.5.20**
+(`engine_kwargs.sglang.moe_runner_backend=cutlass`). Its kernel reads the expert scales in the layout
+SGLang's own CUTLASS quantizer writes, while for an fp8-serialized checkpoint — what a verl sync
+delivers — SGLang 0.5.20 hands it the canonical scales unchanged (same FP8 values, the scale bytes in
+a different order). Measured on 1×B200: every expert's output was about 0.8 off (relative) with the
+engine holding exactly the bytes the sync sent, and `rollout_corr/kl` was 0.004–0.013 against
+0.0001–0.0006 on the default FlashInfer TRT-LLM runner. The MoE refit self-check below fails the first
+sync in that configuration.
 
 ### Post-sync self-check
 
@@ -451,11 +464,17 @@ error and raises. Healthy layers read about 0.03 (the error of the kernel's acti
   dequantized `w13` / `w2` (tolerance `VERL_MXFP8_REFIT_CHECK_MOE_TOL`, default the linear one; healthy
   experts read about 0.05). On vLLM the probe calls the `ModelOptMxFp8FusedMoE` weight holder's
   `forward_modular` / `forward_monolithic` directly and is skipped under expert or data parallelism and
-  for non-SiLU gates; on SGLang it is skipped under expert parallelism, under TP without
-  `reduce_results`, and on the FlashInfer TRT-LLM MoE runner, which is SGLang's default for MXFP8 and
-  routes inside the kernel, rejecting the probe's precomputed top-k. With default settings the SGLang
-  expert probe therefore does not run: on SGLang 0.5.12 every sync logged `MoE refit check skipped` with
-  an empty reason. The log states every skip. On 1×B200 (vLLM 0.24, TRT-LLM MXFP8 MoE) the expert probe
+  for non-SiLU gates. On SGLang the probe makes up only the router logits (0 for the probed expert,
+  -1e4 for the others) and runs them through the model's own TopK, so each MoE runner gets the routing
+  input it consumes — the FlashInfer TRT-LLM runner, SGLang's default for MXFP8, routes inside the
+  kernel and rejects a precomputed top-k — and the reference reads `w13` in the order the engine stores
+  it (`[up; gate]` on TRT-LLM). It is skipped, with a warning, where such logits cannot pin one expert
+  at weight 1 (sigmoid, grouped, biased or custom routing, fused shared experts, a routed scaling
+  factor), under expert parallelism, and under TP without `reduce_results`; a probe that raises is
+  logged with the exception type and the file and line it came from. Measured on 1×B200 with SGLang
+  0.5.20 and its default TRT-LLM runner, the expert probe read 0.049–0.054 on every sync and raised
+  (1.756) when the expert layout was deliberately re-derived twice; before 10/13/2026 it was always
+  skipped on TRT-LLM (`MoE refit check skipped`, with an empty reason). The log states every skip. On 1×B200 (vLLM 0.24, TRT-LLM MXFP8 MoE) the expert probe
   read 1.739 at the first sync when the kernel layout was not re-derived, against 0.052 after the fix
   (verl-project/verl#7986).
 - **Unwritten expert scales (SGLang).** Before re-deriving the kernel layout on the closing request of a
@@ -464,7 +483,8 @@ error and raises. Healthy layers read about 0.03 (the error of the kernel's acti
   `0xFF`): experts whose HF names miss the sync-side quantization rule would otherwise arrive as a
   scale-less bf16 cast into the fp8 buffer, and are reported by name instead. Scales the MoE runner
   rewrites without changing their shape or dtype (FlashInfer TRT-LLM, the default, and CUTLASS on
-  SGLang ≤ 0.5.15) are not staged, so this check does not cover them.
+  SGLang ≤ 0.5.15) or leaves canonical (CUTLASS on ≥ 0.5.20) are not staged, so this check does not
+  cover them.
 
 The probe verifies the kernel's *layout*, not that the sync delivered the right weights. Disable both
 checks with `VERL_MXFP8_REFIT_CHECK=0`; the linear tolerance (default 0.25) is

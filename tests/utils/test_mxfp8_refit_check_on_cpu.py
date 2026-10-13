@@ -158,3 +158,43 @@ def test_moe_check_tolerance_env_and_skip_on_incompatible_apply(monkeypatch, cap
     monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK_MOE_TOL", "10")
     off_by_2 = lambda x: (2 * mxfp8_moe_expert_reference(x, w13, s13, w2, s2)).to(torch.bfloat16)  # noqa: E731
     assert assert_mxfp8_moe_expert_matches("moe", 0, off_by_2, w13, s13, w2, s2, engine="sglang") > 0.9
+
+
+def test_moe_reference_reads_w13_as_up_then_gate_when_the_engine_stores_it_so():
+    w13, s13, w2, s2 = _fake_expert()
+    x = torch.randn(4, H)
+    swapped = torch.cat([w13[INTER:], w13[:INTER]]), torch.cat([s13[INTER:], s13[:INTER]])
+    ref = mxfp8_moe_expert_reference(x, w13, s13, w2, s2)
+    assert torch.equal(mxfp8_moe_expert_reference(x, *swapped, w2, s2, up_first=True), ref)
+    assert not torch.allclose(mxfp8_moe_expert_reference(x, *swapped, w2, s2), ref, rtol=0.1)
+
+
+def test_a_probe_that_raises_is_skipped_with_the_exception_type_and_where_it_came_from(caplog):
+    # sglang's FlashInfer TRT-LLM runner rejected the old probe input with a bare assert: the skip line was empty
+    w13, s13, w2, s2 = _fake_expert()
+
+    def bare_assert(x):
+        raise AssertionError()  # what a bare ``assert`` raises outside pytest's assertion rewriting
+
+    import math
+
+    assert math.isnan(assert_mxfp8_moe_expert_matches("moe", 0, bare_assert, w13, s13, w2, s2, engine="sglang"))
+    assert (
+        caplog.records[-1]
+        .getMessage()
+        .split("(sglang): ")[1]
+        .startswith("AssertionError at tests/utils/test_mxfp8_refit_check_on_cpu.py:")
+    )
+
+
+def test_a_non_finite_reference_is_skipped_rather_than_passed(caplog):
+    # NaN relative error compares as within tolerance; the probe must not report it as a pass
+    w13, s13, w2, s2 = _fake_expert()
+    good = lambda x: mxfp8_moe_expert_reference(x, w13, s13, w2, s2).to(torch.bfloat16)  # noqa: E731
+    s13_inf = s13.clone()
+    s13_inf[0, 0] = 255  # UE8M0 255 is NaN; 2**128 overflows fp32 as well
+
+    import math
+
+    assert math.isnan(assert_mxfp8_moe_expert_matches("moe", 0, good, w13, s13_inf, w2, s2, engine="sglang"))
+    assert "reference is not finite" in caplog.text
