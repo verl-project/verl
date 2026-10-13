@@ -39,7 +39,10 @@ in-place rewrite applied once more on top of the last one (runners that keep
 it). As in verl's vLLM refit cycle, staging and re-processing bracket the
 whole sync instead: the first request of a sync stages, every request only
 loads, and the closing request — the caller sends ``finalize_tensors()`` after
-the last bucket — re-derives and folds back.
+the last bucket — re-derives and folds back. A request that raises ends the
+sync without re-deriving anything: every staged scale is pointed back at its
+live storage, so the next sync stages afresh. (sglang 0.5.12 to 0.5.21 also shut
+the scheduler down when a custom loader raises; the cleanup does not rely on that.)
 
 Which backend a layer runs on is read from the layer, not from the launch flag.
 sglang >= 0.5.18 (#33208) resolves the MXFP8 dense backend at construction and
@@ -210,7 +213,7 @@ def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module
     writes the canonical data over the live buffer and the re-processing rewrites it
     in place, if at all.
     """
-    staged = []
+    pending = []
     for module in model.modules():
         if not _is_mxfp8_moe(module):
             continue
@@ -222,13 +225,17 @@ def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module
             canonical = _canonical_scale_shape(weight.data)
             if tuple(param.data.shape) == canonical and param.data.dtype == torch.uint8:
                 continue
-            live = param.data
-            staging = torch.empty(canonical, dtype=torch.uint8, device=live.device)
+            staging = torch.empty(canonical, dtype=torch.uint8, device=param.data.device)
             # 0xFF is NaN-like for UE8M0 (2**128), so a scale the sync fails to write cannot
             # pass for a valid one.
             staging.fill_(0xFF)
-            param.data = staging
-            staged.append((module, sname, live))
+            pending.append((module, sname, param, staging))
+    # Rebind only once every staging buffer is allocated: a failed allocation must not leave a
+    # parameter on a staging buffer that no returned list records.
+    staged = []
+    for module, sname, param, staging in pending:
+        staged.append((module, sname, param.data))
+        param.data = staging
     return staged
 
 
@@ -280,17 +287,32 @@ def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str
 
     The first request of a sync stages the MoE scales, every request loads its tensors, and the request
     carrying ``FINALIZE_MARKER`` re-derives and folds back once the whole sync has been written (see the
-    module docstring, "One sync, many requests").
+    module docstring, "One sync, many requests"). A request that raises ends the sync (``_abandon_sync``).
     """
     named_tensors = list(named_tensors)
     finalize = any(name == FINALIZE_MARKER for name, _ in named_tensors)
     named_tensors = [(name, tensor) for name, tensor in named_tensors if name != FINALIZE_MARKER]
-    if named_tensors:
-        if _SYNC_STAGED_ATTR not in model.__dict__:  # first request of this sync
-            model.__dict__[_SYNC_STAGED_ATTR] = stage_mxfp8_moe_scales(model)
-        model.load_weights(named_tensors)
-    if finalize:
-        _finish_sync(model)
+    try:
+        if named_tensors:
+            if _SYNC_STAGED_ATTR not in model.__dict__:  # first request of this sync
+                model.__dict__[_SYNC_STAGED_ATTR] = stage_mxfp8_moe_scales(model)
+            model.load_weights(named_tensors)
+        if finalize:
+            _finish_sync(model)
+    except BaseException:
+        _abandon_sync(model)
+        raise
+
+
+def _abandon_sync(model: torch.nn.Module) -> None:
+    """End a sync that raised: point every staged scale back at its live storage and re-derive nothing.
+
+    Left as it was, a staged scale parameter would keep pointing at its canonical-shaped staging buffer
+    while the CUDA graph replays the live one, and the next sync would take that shape for a runner that
+    keeps scales canonical: it would not stage the scale, and would re-derive it into storage no graph reads.
+    """
+    for module, sname, live in model.__dict__.pop(_SYNC_STAGED_ATTR, ()):
+        getattr(module, sname).data = live
 
 
 def _finish_sync(model: torch.nn.Module) -> None:
@@ -300,8 +322,9 @@ def _finish_sync(model: torch.nn.Module) -> None:
         # already derived would apply it twice.
         logger.warning("mxfp8 refit: closing request without a loaded bucket; nothing to re-derive")
         return
-    staged = model.__dict__.pop(_SYNC_STAGED_ATTR)
+    staged = model.__dict__[_SYNC_STAGED_ATTR]  # the sync ends once it is folded back
     n = reprocess_mxfp8_layers(model)
     m = reprocess_mxfp8_moe_layers(model, staged)
     if n or m:
         logger.debug("mxfp8 refit: re-derived kernel scale layouts for %d linear and %d MoE modules", n, m)
+    del model.__dict__[_SYNC_STAGED_ATTR]
