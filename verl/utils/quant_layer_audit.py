@@ -243,12 +243,30 @@ ROLLOUT_LABELS = {
 # ---------------------------------------------------------------------------
 
 
-def vllm_rollout_predicate(num_hidden_layers: int, keep_high_precision: Iterable[str]) -> Callable[[str], bool]:
-    """Reconstruct vLLM's decision: everything linear except the blacklist ``_apply_quantization`` sends.
+def vllm_high_precision_layers(quantization: str | None) -> tuple[str, ...]:
+    """Layers outside the MoE routers that vLLM leaves unquantized, by ``rollout.quantization``.
 
-    vLLM decides per module via ``quantization_config.ignored_layers`` (all ``model.layers.N.mlp.gate``
-    plus ``lm_head`` / ``model.embed_tokens``) and quantizes every other linear; its sync side then
-    follows the live dtype, so this predicate is the engine-side rule restated on HF names.
+    MXFP8 (vLLM's ModelOpt config) quantizes ``ParallelLMHead`` unless excluded, so verl lists
+    ``MXFP8_KEEP_HIGH_PRECISION_LAYERS`` in ``ignored_layers``. FP8 (``Fp8Config``) quantizes ``LinearBase``
+    modules only, and ``lm_head`` is a ``ParallelLMHead``, an embedding subclass, so it stays unquantized
+    with no entry. ``model.embed_tokens`` needs none here in either case: ``_NON_LINEAR_RE`` excludes it.
+    """
+    if quantization == "mxfp8":
+        from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
+
+        return tuple(MXFP8_KEEP_HIGH_PRECISION_LAYERS)
+    if quantization == "fp8":
+        return ("lm_head",)
+    return ()
+
+
+def vllm_rollout_predicate(num_hidden_layers: int, keep_high_precision: Iterable[str]) -> Callable[[str], bool]:
+    """Reconstruct vLLM's decision: everything linear except the routers and ``keep_high_precision``.
+
+    vLLM decides per module via ``quantization_config.ignored_layers`` (all ``model.layers.N.mlp.gate``,
+    plus ``lm_head`` / ``model.embed_tokens`` under MXFP8) and the quantization method's own scope (see
+    ``vllm_high_precision_layers``); its sync side then follows the live dtype, so this predicate is the
+    engine-side rule restated on HF names.
     """
     ignored = {f"model.layers.{i}.mlp.gate" for i in range(num_hidden_layers)} | set(keep_high_precision)
 
@@ -330,9 +348,7 @@ class QuantLayerAuditor:
                     helper = SGLangFP8QuantizerHelper(build_sglang_fp8_quant_config(hf_config))
                 pred = helper.should_quantize_param
             else:
-                from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
-
-                keep = MXFP8_KEEP_HIGH_PRECISION_LAYERS if quantization == "mxfp8" else ()
+                keep = vllm_high_precision_layers(quantization)
                 pred = vllm_rollout_predicate(hf_config.num_hidden_layers, keep)
             logger.info(
                 "quantized-layer audit: armed (engine=%s, rollout quantization=%s, mode=%s); runs at the first "
