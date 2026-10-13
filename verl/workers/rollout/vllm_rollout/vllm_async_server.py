@@ -256,7 +256,6 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        # One result per worker, so callers can read state back from the engine (the audit does).
         return await self.engine.collective_rpc(
             method=method,
             timeout=timeout,

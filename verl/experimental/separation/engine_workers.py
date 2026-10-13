@@ -104,6 +104,22 @@ class DetachActorWorker(ActorRolloutRefWorker):
             )
 
             self._strategy_handlers = (copy_megatron_model_to_cpu, restore_megatron_model_from_cpu)
+        elif strategy == "torchtitan":
+            # TorchTitan also shards with FSDP2 (DTensor parameters), but its engine.module is the
+            # list of model parts, so apply the FSDP2 helpers to each part.
+            from verl.utils.fsdp_utils import (
+                fsdp2_sharded_load_from_cpu,
+                fsdp2_sharded_save_to_cpu,
+            )
+
+            def save_model_parts(model_parts):
+                return [fsdp2_sharded_save_to_cpu(part) for part in model_parts]
+
+            def restore_model_parts(model_parts, saved):
+                for part, (cpu_sharded_state, global_spec) in zip(model_parts, saved, strict=True):
+                    fsdp2_sharded_load_from_cpu(part, cpu_sharded_state, global_spec)
+
+            self._strategy_handlers = (save_model_parts, restore_model_parts)
         else:
             raise NotImplementedError(f"Unsupported strategy: {strategy}")
 

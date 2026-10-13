@@ -276,7 +276,13 @@ class Worker(WorkerHelper):
             # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
             # so we need to set local rank when the flag is set.
             device_name = get_resource_name()
-            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
+            if device_name == "TPU":
+                # The TPU platform pins each worker to one chip through TPU_VISIBLE_CHIPS
+                # (get_worker_env_vars in RayWorkerGroup._create_worker). Ray cannot map its
+                # host-level chip id into that one-chip list, so read the chip index directly.
+                local_rank = os.environ.get("TPU_VISIBLE_CHIPS", "0")
+            else:
+                local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
             os.environ["LOCAL_RANK"] = local_rank
             get_torch_device().set_device(int(local_rank))
 
