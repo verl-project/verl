@@ -14,10 +14,14 @@
 
 """Opt-in exclusion matching for verl-generated ModelOpt MXFP8 configs.
 
-vLLM 0.24's ModelOpt matcher retains a legacy substring fallback. A generated
+vLLM's ModelOpt matcher (0.24 to 0.29) retains a legacy substring fallback. A generated
 router exclusion ``mlp.gate`` consequently excludes the SwiGLU ``mlp.gate_up_proj``
-too. This helper removes that fallback only on an explicitly opted-in config
-instance; checkpoint configs and other quantization methods retain their behavior.
+too. On an explicitly opted-in config instance this helper matches at module-name
+component boundaries instead: an entry excludes a module when it equals a run of
+whole dot-separated components of the module's name (``lm_head`` still excludes
+``language_model.lm_head``), so only matches that cut through a component, like
+``gate`` inside ``gate_up_proj``, are dropped. Checkpoint configs and other
+quantization methods retain their behavior.
 
 The patchers are registered by ``build_fp8_method_patchers``. The MXFP8 feature
 branch must still mark its generated configs explicitly. See
@@ -34,6 +38,11 @@ from unittest.mock import patch
 VERL_EXACT_MXFP8_EXCLUSIONS = "_verl_exact_mxfp8_exclusions"
 
 
+def _matches(name: str, pattern: str) -> bool:
+    """``pattern`` is a run of whole dot-separated components of ``name``, or an fnmatch glob matching it."""
+    return f".{pattern}." in f".{name}." or fnmatchcase(name, pattern)
+
+
 def _is_layer_excluded(self, prefix: str) -> bool:
     from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 
@@ -42,12 +51,16 @@ def _is_layer_excluded(self, prefix: str) -> bool:
     if not excluded:
         return False
 
-    # Resolve glob patterns against both the engine's fused name and its HF
-    # shards. Feed literal matches into vLLM's helper so its all-or-none fusion
-    # check remains authoritative, including mixed exact/glob exclusions.
+    # Resolve component-run and glob matches against both the engine's fused name
+    # and its HF shards. Feed literal matches into vLLM's helper so its all-or-none
+    # fusion check remains authoritative, including mixed exact/glob exclusions.
+    # Component runs keep what the legacy substring fallback got right: wrapped
+    # names (vLLM remaps "lm_head." but not a bare "lm_head", so a VLM's
+    # language_model.lm_head is only reached this way) and descendants of an
+    # excluded parent module.
     parent, separator, leaf = prefix.rpartition(".")
     candidates = [prefix] + [parent + separator + shard for shard in mapping.get(leaf, ())]
-    matched = [name for name in candidates if any(fnmatchcase(name, pattern) for pattern in excluded)]
+    matched = [name for name in candidates if any(_matches(name, pattern) for pattern in excluded)]
     # Retain original entries as well: vLLM also understands per-expert names
     # when deciding whether a fused expert group is excluded.
     return is_layer_skipped(prefix, [*excluded, *matched], mapping)
