@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 10/12/2026
+Last updated: 10/13/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -325,10 +325,11 @@ Two constraints on this path:
   allocator mode, killing the server in `load_model`. The vLLM path tolerates the variable.
 
 **MoE experts on SGLang.** With the fp8-serialized checkpoint a verl sync delivers, SGLang's MXFP8 MoE
-method rewrites expert tensors in place at load on every MoE runner SGLang allows for MXFP8 on
-Blackwell: FlashInfer TRT-LLM (the default) reorders and shuffles both the expert weights and their
-scales, CUTLASS swizzles the expert scales (SGLang ≤ 0.5.15 keeps their `[E, N, K/32]` shape,
-≥ 0.5.16 rebinds them to the swizzled tensor's own shape), and DeepGEMM packs them. Where a scale's shape or dtype changed, the refit loader stages it back to the
+method rewrites expert tensors in place at load on the MoE runners SGLang allows for MXFP8 on
+Blackwell, CUTLASS on SGLang ≥ 0.5.20 excepted: FlashInfer TRT-LLM (the default) reorders and
+shuffles both the expert weights and their scales, CUTLASS swizzles the expert scales (SGLang ≤ 0.5.15
+keeps their `[E, N, K/32]` shape, 0.5.16 to 0.5.19 rebind them to the swizzled tensor's own shape;
+≥ 0.5.20 hands the canonical scales to the kernel and rewrites nothing), and DeepGEMM packs them. Where a scale's shape or dtype changed, the refit loader stages it back to the
 canonical layout for `load_weights`; where it did not, `load_weights` writes the canonical data over
 the live buffer. Either way the kernel layout is re-derived once per sync, on the closing request,
 into the storage the CUDA graph captured. Until 10/12/2026 staging and re-deriving ran on every
@@ -341,7 +342,18 @@ fix re-derived every MoE layer on each of the 12 requests, and after every sync 
 14 of the 16 experts held the scales the sync had sent rewritten once for each re-derivation that
 ran after they arrived. Nothing was reported, and `rollout_corr/kl` was 0.018–0.046 against
 0.0001–0.0005 with a single bucket. With the fix the same sync re-derived once, on the closing
-request, every expert's scales matched, and the KL was back at the single-bucket level.
+request, every expert's scales matched, and the KL was back at the single-bucket level. The same
+comparison on SGLang 0.5.20 (the version verl locks) gave the same picture: before the fix 0 or 1 of
+each layer's 8 experts was served correctly (weights and scales) and `rollout_corr/kl` was
+0.019–0.046, silently; with it every expert was correct and the KL 0.0001–0.0005.
+
+**Do not use SGLang's CUTLASS MoE runner for MXFP8 on SGLang 0.5.20**
+(`engine_kwargs.sglang.moe_runner_backend=cutlass`). Its kernel reads the expert scales in the layout
+SGLang's own CUTLASS quantizer writes, while for an fp8-serialized checkpoint — what a verl sync
+delivers — SGLang 0.5.20 hands it the canonical scales unchanged (same FP8 values, the scale bytes in
+a different order). Measured on 1×B200: every expert's output was about 0.8 off (relative) with the
+engine holding exactly the bytes the sync sent, and `rollout_corr/kl` was 0.004–0.013 against
+0.0001–0.0006 on the default FlashInfer TRT-LLM runner.
 
 ---
 

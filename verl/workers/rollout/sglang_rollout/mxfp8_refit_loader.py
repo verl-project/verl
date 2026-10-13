@@ -55,24 +55,24 @@ already-shuffled layer would shuffle twice; supporting it needs per-layer
 tracking of which parameters a sync touched.
 
 MoE experts. With an fp8-serialized MXFP8 checkpoint (what a verl sync delivers),
-SGLang's ``Fp8MoEMethod`` rewrites expert tensors *in place* at load on every MoE
-runner sglang allows for MXFP8 on Blackwell: FlashInfer TRT-LLM (the default)
-reorders and shuffles both the expert weights and their scales (shapes kept unless
-padded for alignment), CUTLASS swizzles the expert scales ``w13_weight_scale_inv``
-/ ``w2_weight_scale_inv`` (sglang <= 0.5.15 keeps their canonical ``[E, N, K/32]``
-shape, >= 0.5.16 rebinds them to the swizzled tensor's own shape), and DeepGEMM
-packs them (dtype changes). None leaves the canonical bytes in place. A sync must
-therefore write canonical weights and scales and re-run the processing once the
-whole sync is written: run before the sync has rewritten a layer, it re-derives
-that layer from bytes the runner already rewrote (or, for a staged scale, from an
-unwritten buffer). Where the processing changed a scale's shape or dtype,
-``stage_mxfp8_moe_scales`` points the parameter at a canonical-shaped buffer
-before the first ``load_weights`` of a sync and ``reprocess_mxfp8_moe_layers``
-folds the re-derived layout back into the storage the CUDA graph captured; where
-it kept them, the sync writes the canonical data over the live buffer and the
-processing rewrites it there. This is the SGLang analogue of verl's vLLM
-pristine-layout cycle, without a record step because the canonical layout is
-derivable from the expert weight shape.
+SGLang's ``Fp8MoEMethod`` rewrites expert tensors *in place* at load on the MoE
+runners sglang allows for MXFP8 on Blackwell, CUTLASS on sglang >= 0.5.20 excepted:
+FlashInfer TRT-LLM (the default) reorders and shuffles both the expert weights and
+their scales (shapes kept unless padded for alignment), CUTLASS swizzles the expert
+scales ``w13_weight_scale_inv`` / ``w2_weight_scale_inv`` (sglang <= 0.5.15 keeps
+their canonical ``[E, N, K/32]`` shape, 0.5.16 to 0.5.19 rebind them to the swizzled
+tensor's own shape; >= 0.5.20 hands the canonical scales to the kernel and rewrites
+nothing), and DeepGEMM packs them (dtype changes). A sync must therefore write
+canonical weights and scales and re-run the processing once the whole sync is
+written: run before the sync has rewritten a layer, it re-derives that layer from
+bytes the runner already rewrote (or, for a staged scale, from an unwritten buffer).
+Where the processing changed a scale's shape or dtype, ``stage_mxfp8_moe_scales``
+points the parameter at a canonical-shaped buffer before the first ``load_weights``
+of a sync and ``reprocess_mxfp8_moe_layers`` folds the re-derived layout back into
+the storage the CUDA graph captured; where it kept them, the sync writes the
+canonical data over the live buffer and the processing rewrites it there. This is
+the SGLang analogue of verl's vLLM pristine-layout cycle, without a record step
+because the canonical layout is derivable from the expert weight shape.
 
 Register at server launch (verl does this when ``rollout.quantization=mxfp8``)::
 
@@ -206,8 +206,9 @@ def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module
     buffer no longer has the checkpoint shape or dtype; ``reprocess_mxfp8_moe_layers``
     folds the re-derived layout back into ``live_data``. Scales the runner rewrote
     without changing shape or dtype (FlashInfer TRT-LLM; CUTLASS on sglang <= 0.5.15)
-    are not staged: ``load_weights`` writes the canonical data over the live buffer
-    and the re-processing rewrites it in place.
+    or left canonical (CUTLASS on sglang >= 0.5.20) are not staged: ``load_weights``
+    writes the canonical data over the live buffer and the re-processing rewrites it
+    in place, if at all.
     """
     staged = []
     for module in model.modules():
