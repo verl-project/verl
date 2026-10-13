@@ -476,6 +476,80 @@ def test_each_sync_stages_once_and_re_derives_once():
         assert torch.equal(m.moe1.w13_weight_scale_inv.data, torch.full((2, 256), value + 1, dtype=torch.uint8))
 
 
+def _live_scales(m):
+    """The storage each expert scale had after the initial load: what the CUDA graph captured."""
+    return {
+        (name, sname): getattr(getattr(m, name), sname).data
+        for name in ("moe1", "moe2")
+        for sname in ("w13_weight_scale_inv", "w2_weight_scale_inv")
+    }
+
+
+def _assert_scales_on(m, live):
+    for (name, sname), storage in live.items():
+        assert getattr(getattr(m, name), sname).data_ptr() == storage.data_ptr(), f"{name}.{sname}"
+
+
+def _assert_next_sync_folds_into(m, live, value=9):
+    refit.load_and_reprocess(m, _moe_scales("moe1", w13=value) + _moe_scales("moe2", w13=value))
+    refit.load_and_reprocess(m, refit.finalize_tensors())
+    _assert_scales_on(m, live)
+    for name in ("moe1", "moe2"):
+        expected = torch.full((2, 256), value + 1, dtype=torch.uint8)
+        assert torch.equal(getattr(m, name).w13_weight_scale_inv.data, expected)
+
+
+def test_a_bucket_that_fails_to_load_ends_the_sync_with_every_scale_on_its_live_storage():
+    m = _two_moe_model()
+    live = _live_scales(m)
+    refit.load_and_reprocess(m, _moe_scales("moe1"))  # the first request stages every expert scale
+    with pytest.raises(RuntimeError):  # load_weights cannot copy a [3, 3] tensor into the scale
+        refit.load_and_reprocess(m, [("moe2.w13_weight_scale_inv", torch.zeros(3, 3, dtype=torch.uint8))])
+    _assert_scales_on(m, live)
+    assert refit._SYNC_STAGED_ATTR not in m.__dict__
+    _assert_next_sync_folds_into(m, live)
+
+
+def test_a_closing_request_that_fails_leaves_no_scale_on_its_staging_buffer():
+    # The closing request used to drop the sync marker first. When the re-derivation then raised, moe2 stayed
+    # on its staging buffer, whose canonical shape made the next sync skip staging it and re-derive it into a
+    # new tensor, while the CUDA graph kept reading the live one.
+    m = _two_moe_model()
+    live = _live_scales(m)
+    refit.load_and_reprocess(m, _moe_scales("moe1") + _moe_scales("moe2"))
+
+    def fail(layer):
+        raise RuntimeError("post-load processing failed")
+
+    m.moe2.quant_method.process_weights_after_loading = fail
+    with pytest.raises(RuntimeError, match="post-load processing failed"):
+        refit.load_and_reprocess(m, refit.finalize_tensors())
+    del m.moe2.quant_method.process_weights_after_loading
+    _assert_scales_on(m, live)
+    assert refit._SYNC_STAGED_ATTR not in m.__dict__
+    _assert_next_sync_folds_into(m, live)
+
+
+def test_staging_rebinds_nothing_when_a_staging_buffer_cannot_be_allocated(monkeypatch):
+    m = _two_moe_model()
+    live = _live_scales(m)
+    empty, allocated = torch.empty, []
+
+    def empty_or_oom(*args, **kwargs):
+        if len(allocated) == 2:  # the third staging buffer, moe2's w13 scale
+            raise RuntimeError("CUDA out of memory")
+        allocated.append(args)
+        return empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", empty_or_oom)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        refit.load_and_reprocess(m, _moe_scales("moe1"))
+    monkeypatch.setattr(torch, "empty", empty)
+    _assert_scales_on(m, live)  # moe1's two scales were not left on buffers no list records
+    assert refit._SYNC_STAGED_ATTR not in m.__dict__
+    _assert_next_sync_folds_into(m, live)
+
+
 def _canonical_moe_model(runner="standard"):
     """A model whose MoE runner keeps scales canonical (no staging) but derives a kernel copy at load."""
 
