@@ -372,7 +372,8 @@ def test_moe_scales_the_sync_never_wrote_are_reported_instead_of_swizzled():
     m = _Model(resolved_backend="flashinfer_cutlass")
     m.moe = _MoE()
     m.moe.quant_method.process_weights_after_loading(m.moe)
-    live = m.moe.w13_weight_scale_inv.data.clone()
+    live_storage = m.moe.w13_weight_scale_inv.data  # what the CUDA graph reads
+    live = live_storage.clone()
     try:
         refit.load_and_reprocess(
             m, [("moe.w13_weight", torch.zeros(2, 128, 64, dtype=torch.bfloat16))] + refit.finalize_tensors()
@@ -383,7 +384,7 @@ def test_moe_scales_the_sync_never_wrote_are_reported_instead_of_swizzled():
     else:
         raise AssertionError("expected the loader to report expert scales the sync never wrote")
     assert m.moe.quant_method.calls == 1  # nothing was re-processed on top of sentinel scales
-    assert torch.equal(m.moe.w13_weight_scale_inv.data, live) or m.moe.w13_weight_scale_inv.data.dtype == torch.uint8
+    assert torch.equal(live_storage, live)  # the storage the CUDA graph reads still holds the pre-sync scales
 
     # a sync that writes every scale is untouched by the check (covered end-to-end by the staging test)
     m2 = _Model(resolved_backend="flashinfer_cutlass")
