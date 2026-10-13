@@ -1,6 +1,6 @@
 # Opt-in MXFP8 exclusion patch
 
-Last updated: 09/18/2026
+Last updated: 10/13/2026
 
 ## Status and scope
 
@@ -11,7 +11,7 @@ the mxfp8 `quantization_config` it generates for online rollout with
 strict matcher is active for that config. Unmarked configs (checkpoints, other
 quantization methods) keep vLLM's original matching unchanged.
 
-vLLM 0.24's `ModelOptQuantConfigBase.is_layer_excluded()` includes a legacy
+vLLM's `ModelOptQuantConfigBase.is_layer_excluded()` (0.24 to 0.29) includes a legacy
 substring fallback. A router exclusion such as `model.layers.0.mlp.gate` also
 matches the dense SwiGLU `model.layers.0.mlp.gate_up_proj`. Both HF projections
 (`gate_proj` and `up_proj`) can consequently remain unquantized in rollout.
@@ -66,8 +66,17 @@ is replaced by these registered wrappers; no per-instance installation is needed
 
 ## Matching contract
 
-- Ordinary module names match exactly, not by substring or implicit descendants.
-  Use an explicit glob such as `model.layers.0.mlp.*` to exclude descendants.
+- An ordinary entry matches a module when it equals a run of whole dot-separated
+  components of the module's name: `lm_head` matches `lm_head` and
+  `language_model.lm_head`, `model.layers.0.mlp` matches its descendants such as
+  `model.layers.0.mlp.down_proj`, but `model.layers.0.mlp.gate` does not match
+  `model.layers.0.mlp.gate_up_proj` and `lm_head` does not match `lm_head_extra`.
+  This keeps what the legacy substring fallback got right and drops only matches
+  that cut through a component. Wrapped names matter in practice: vLLM remaps
+  exclusions with the model's `hf_to_vllm_mapper`, whose rule `"lm_head."` →
+  `"language_model.lm_head."` (46 multimodal models in 0.29) does not apply to a
+  bare `lm_head`, so a VLM's `language_model.lm_head` is reached only by component
+  matching; an exact-only matcher would quantize it.
 - Case-sensitive `fnmatch`-style globs are supported, not `re:` expressions.
 - Patterns are evaluated against the fused runtime name and its HF shard names.
   Literal matches are passed to vLLM's `is_layer_skipped()` so all-or-none shard
