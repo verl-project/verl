@@ -15,8 +15,10 @@
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
+
+import torch
 
 
 def _load_npu_vllm_patch_module():
@@ -49,3 +51,54 @@ def test_apply_npu_vllm_patches_accepts_modular_fused_moe(monkeypatch):
     npu_vllm_patch.apply_npu_vllm_patches()
 
     rotary_patch.assert_called_once_with()
+
+
+def test_legacy_fused_moe_weight_loader_transposes_non_square_w13_once():
+    npu_vllm_patch = _load_npu_vllm_patch_module()
+    observed_shapes = []
+
+    def weight_loader(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
+        observed_shapes.append(tuple(param.shape))
+
+    wrapped_loader = npu_vllm_patch.vllm_v013_weight_loader_method_wrapper(weight_loader)
+    fused_moe = SimpleNamespace(hidden_size=4)
+    param = torch.nn.Parameter(torch.empty(2, 4, 6), requires_grad=False)
+
+    wrapped_loader(fused_moe, param, None, "w13", "w1", 0)
+    wrapped_loader(fused_moe, param, None, "w13", "w3", 0)
+
+    assert observed_shapes == [(2, 6, 4), (2, 6, 4)]
+
+
+def test_legacy_fused_moe_weight_loader_does_not_infer_square_w13_layout():
+    npu_vllm_patch = _load_npu_vllm_patch_module()
+
+    def weight_loader(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
+        return None
+
+    wrapped_loader = npu_vllm_patch.vllm_v013_weight_loader_method_wrapper(weight_loader)
+    fused_moe = SimpleNamespace(hidden_size=4)
+    param = torch.nn.Parameter(torch.empty(2, 4, 4), requires_grad=False)
+    original_stride = param.stride()
+
+    wrapped_loader(fused_moe, param, None, "w13", "w1", 0)
+    wrapped_loader(fused_moe, param, None, "w13", "w3", 0)
+
+    assert param.stride() == original_stride
+
+
+def test_patch_legacy_fused_moe_weight_loader_installs_guarded_wrapper():
+    npu_vllm_patch = _load_npu_vllm_patch_module()
+
+    class LegacyFusedMoE:
+        hidden_size = 4
+
+        def weight_loader(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
+            return tuple(param.shape)
+
+    assert npu_vllm_patch._patch_legacy_fused_moe_weight_loader(LegacyFusedMoE)
+    assert LegacyFusedMoE.weight_loader._verl_npu_weight_loader_patched
+
+    fused_moe = LegacyFusedMoE()
+    square_param = torch.nn.Parameter(torch.empty(2, 4, 4), requires_grad=False)
+    assert fused_moe.weight_loader(square_param, None, "w13", "w1", 0) == (2, 4, 4)
