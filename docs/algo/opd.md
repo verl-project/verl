@@ -112,12 +112,6 @@ as column K of the existing `teacher_ids` / `teacher_logprobs` tensors, retainin
 the first K columns as the top-k support, even when the observed token is in it.
 vLLM already returns this score; no additional teacher query is needed.
 
-The unbiased-gradient identity assumes samples from the current full student
-distribution. Use one optimizer update per fresh rollout batch, full-support
-sampling, and no sampling-altering logits processors or repetition penalty.
-Truncated sampling, stale rollouts, or repeated updates require separate treatment;
-variance reduction is not guaranteed for every pair of distributions.
-
 #### GKD OPD
 
 GKD OPD [1] directly minimizes a KL divergence between the teacher and student distributions at student-induced states. For forward KL,
