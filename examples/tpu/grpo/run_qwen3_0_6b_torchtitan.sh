@@ -8,7 +8,6 @@
 
 set -xeuo pipefail
 
-export RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
 export VERL_PLATFORM=tpu
 export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1

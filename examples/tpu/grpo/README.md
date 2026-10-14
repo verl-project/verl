@@ -15,7 +15,7 @@ You need `gcloud`, `kubectl`, Docker with Buildx, the Ray CLI (`pip install "ray
 
 ```bash
 git clone https://github.com/verl-project/verl.git
-git clone https://github.com/verl-project/verl-hardware-plugin.git
+git clone https://github.com/verl-project/verl-hardware-plugin.git  # only to run a local plugin checkout (step 5)
 cd verl
 ```
 
@@ -23,9 +23,15 @@ Run all the commands below from the root of `verl`.
 
 ## 2. Build the image
 
+The build pulls the private `vllm-project/vllm-torchtpu` repository and `torch-tpu` from an authenticated Python index, so pass a GitHub token with access to the repository and a Google Cloud access token as BuildKit secrets (they are not stored in the image):
+
 ```bash
-docker buildx build -t <IMAGE> --push examples/tpu/grpo
+export GITHUB_TOKEN=<GITHUB_TOKEN> TPU_INDEX_TOKEN=$(gcloud auth print-access-token)
+docker buildx build --secret id=GIT_AUTH_TOKEN.github.com,env=GITHUB_TOKEN \
+  --secret id=tpu_index_token,env=TPU_INDEX_TOKEN -t <IMAGE> --push examples/tpu/grpo
 ```
+
+The image has Ray 2.59, which `verl-hardware-plugin` needs: it relies on Ray assigning `TPU_VISIBLE_CHIPS` to each TPU actor.
 
 ## 3. Upload the models and the data
 
@@ -74,18 +80,28 @@ kubectl port-forward svc/ray-tpu-v6e4-cluster-head-svc 23333:8265 &
 
 ## 5. Run
 
-Ray ships `verl` and `verl-hardware-plugin` (from `../verl-hardware-plugin`) to the cluster with every job:
+Ray ships `verl` to the cluster with every job and installs `verl-hardware-plugin` into the job's environment on every node. The plugin must be installed (not just put on `sys.path`, e.g. with `py_modules`): vLLM's EngineCore and worker processes load its TPU patches through a `vllm.general_plugins` entry point, which only an installed package registers. `--no-deps` keeps pip from replacing the image's `torch`, `verl` and other pinned packages.
 
 ```bash
 export RAY_ADDRESS=http://localhost:23333
-RUNTIME_ENV='{"py_modules": ["../verl-hardware-plugin/verl_hardware_plugin"], "excludes": [".git", ".venv"],
+RUNTIME_ENV='{"pip": {"packages": ["verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin@main"],
+    "pip_install_options": ["--no-deps"]},
+  "excludes": [".git", ".venv"],
   "env_vars": {"PYTHONPATH": ".", "PYTHONUNBUFFERED": "1", "VERL_PLATFORM": "tpu",
-    "VERL_USE_EXTERNAL_MODULES": "verl_hardware_plugin", "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS": "1",
-    "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1"}}'
+    "VERL_USE_EXTERNAL_MODULES": "verl_hardware_plugin", "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1"}}'
 
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_0_6b_torchtitan.sh
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh
 ```
+
+To run a local checkout of the plugin instead (e.g. to test changes), build it as a wheel inside the `verl` checkout, which Ray uploads with the job, and install that wheel:
+
+```bash
+pip wheel --no-deps -w plugin_whl ../verl-hardware-plugin
+RUNTIME_ENV=$(echo "$RUNTIME_ENV" | sed 's#"verl-hardware-plugin @ git+[^"]*"#"${RAY_RUNTIME_ENV_CREATE_WORKING_DIR}/plugin_whl/verl_hardware_plugin-0.1.0-py3-none-any.whl"#')
+```
+
+Do not set `RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS`: it stops Ray from assigning `TPU_VISIBLE_CHIPS`, which the plugin relies on (step 2).
 
 The smoke test takes about 10 minutes. The 4B run needs about 10 minutes to start, then about 30-40 s per step. Follow a job with `ray job logs -f <JOB_ID>`.
 
