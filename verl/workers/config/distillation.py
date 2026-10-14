@@ -103,6 +103,16 @@ class DistillationLossConfig(BaseConfig):
 
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
 
+        if self.loss_mode == "resopd":
+            if self.use_policy_gradient:
+                raise ValueError("ResOPD requires use_policy_gradient=False; its score gradient is already constructed")
+            if self.loss_max_clamp is not None or self.log_prob_min_clamp is not None:
+                raise ValueError("ResOPD requires loss_max_clamp=null and log_prob_min_clamp=null")
+            if self.use_chunked_topk:
+                raise ValueError("ResOPD requires use_chunked_topk=False and eager student logits")
+            if not isinstance(self.topk, int) or self.topk <= 0:
+                raise ValueError("ResOPD requires a positive integer topk")
+
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(
                 f"Only vanilla policy loss is currently supported when use_policy_gradient is True, "

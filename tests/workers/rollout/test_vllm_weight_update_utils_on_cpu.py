@@ -17,7 +17,9 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -168,6 +170,43 @@ def _load_vllm_rollout_utils():
 
 _vllm_rollout_utils = _load_vllm_rollout_utils()
 vLLMColocateWorkerExtension = _vllm_rollout_utils.vLLMColocateWorkerExtension
+
+
+@pytest.mark.parametrize("key_type", [str, int])
+@pytest.mark.parametrize("include_prompt_token", [False, True])
+def test_prompt_logprobs_preserve_topk_and_optional_observed_token(key_type, include_prompt_token):
+    output = SimpleNamespace(
+        prompt_token_ids=[7, 20, 30],
+        prompt_logprobs=[
+            None,
+            {
+                key_type(20): SimpleNamespace(logprob=-4.2, rank=7),
+                key_type(12): SimpleNamespace(logprob=-0.3, rank=2),
+                key_type(10): SimpleNamespace(logprob=-0.1, rank=1),
+            },
+            {key_type(31): SimpleNamespace(logprob=-0.4, rank=2), key_type(30): SimpleNamespace(logprob=-0.2, rank=1)},
+        ],
+    )
+    result = {}
+    _vllm_rollout_utils.extract_prompt_logprobs(output, 2, result, include_prompt_token)
+    expected_ids = [[10, 12], [30, 31], [0, 0]]
+    expected_scores = [[-0.1, -0.3], [-0.2, -0.4], [0.0, 0.0]]
+    if include_prompt_token:
+        for ids, scores, token, score in zip(
+            expected_ids, expected_scores, [20, 30, 0], [-4.2, -0.2, 0.0], strict=False
+        ):
+            ids.append(token)
+            scores.append(score)
+    assert result == {"prompt_ids": expected_ids, "prompt_logprobs": expected_scores}
+
+
+def test_prompt_logprobs_sampled_only_and_disabled():
+    output = SimpleNamespace(prompt_logprobs=[None, {20: SimpleNamespace(logprob=-4.2, rank=7)}])
+    result = {}
+    _vllm_rollout_utils.extract_prompt_logprobs(output, None, result)
+    assert not result
+    _vllm_rollout_utils.extract_prompt_logprobs(output, 0, result)
+    assert result == {"prompt_ids": [[20], [0]], "prompt_logprobs": [[-4.2], [0.0]]}
 
 
 class _ToyBlock(torch.nn.Module):
