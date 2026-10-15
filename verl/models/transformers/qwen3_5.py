@@ -22,7 +22,6 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5CausalLMOutputWithPast,
     Qwen3_5ForConditionalGeneration,
@@ -563,7 +562,7 @@ def forward_with_torch_backend(
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
-    from verl.utils.experimental.torch_functional import FusedLinearForPPO
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     if cu_seqlens is not None:
         kwargs["cu_seqlens"] = cu_seqlens
@@ -583,22 +582,19 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    vocab_weights = self.lm_head.weight
-    if isinstance(vocab_weights, DTensor):
-        vocab_weights = vocab_weights.full_tensor()
-
     ulysses_sequence_parallel_size = get_ulysses_sequence_parallel_world_size()
     if shift_labels is None and ulysses_sequence_parallel_size > 1:
         rolled_labels, _, _ = ulysses_pad_and_slice_inputs(
             rolled_labels, position_ids_rmpad=None, sp_size=ulysses_sequence_parallel_size
         )
-    hidden_states = hidden_states.to(vocab_weights.dtype)  # bf16 to float
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=vocab_weights,
-        input_ids=rolled_labels,
-        temperature=temperature,
+    log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
+        hidden_states,
+        rolled_labels,
+        temperature,
+        getattr(self, "_verl_fused_kernels_backend", "torch"),
+        gather_weights=True,
+        cast_hidden_states=True,
     )
     return Qwen3_5CausalLMOutputForPPO(
         log_probs=log_probs,
@@ -617,7 +613,7 @@ def forward_with_triton_backend(
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> "Qwen3_5CausalLMOutputForPPO":
-    from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     if cu_seqlens is not None:
         kwargs["cu_seqlens"] = cu_seqlens
@@ -642,17 +638,14 @@ def forward_with_triton_backend(
             rolled_labels, position_ids_rmpad=None, sp_size=ulysses_sequence_parallel_size
         )
 
-    vocab_weights = self.lm_head.weight
-    hidden_states = hidden_states.to(vocab_weights.dtype)
-    if isinstance(vocab_weights, DTensor):
-        vocab_weights = vocab_weights.full_tensor()
-
-    log_probs, entropy = linear_cross_entropy(
+    log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
         hidden_states,
-        vocab_weights,
         rolled_labels,
         temperature,
-        "none",
+        "triton",
+        gather_weights=True,
+        cast_hidden_states=True,
     )
     return Qwen3_5CausalLMOutputForPPO(
         log_probs=log_probs,
