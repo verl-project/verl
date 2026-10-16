@@ -108,3 +108,34 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+def test_prompt_dispatch_restores_each_session_and_releases_live_states(monkeypatch):
+    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
+
+    async def fake_put(**kwargs):
+        pass
+
+    monkeypatch.setattr("verl.trainer.ppo.v1.agent_loop_tq.tq.async_kv_put", fake_put)
+    worker_cls = AgentLoopWorkerTQ.__ray_actor_class__
+    worker = worker_cls.__new__(worker_cls)
+    worker.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"n": 2}}})
+    worker.llm_client = FullyAsyncLLMServerClient(config=worker.config)
+    worker.partial_rollout_states = {}
+    received = {}
+
+    async def run_session(params, *, session_id, **kwargs):
+        received[session_id] = kwargs["partial_rollout_state"]
+        kwargs["partial_rollout_checkpoint_callback"]({"session": session_id})
+        assert worker.partial_rollout_states["prompt"][str(session_id)] == {"session": session_id}
+
+    worker._run_agent_loop = run_session
+    asyncio.run(
+        worker._run_prompt(
+            {"uid": "prompt", "agent_name": "single_turn_agent", "partial_rollout_states": {"0": {"prefix": [7]}}},
+            {},
+            {"validate": False},
+        )
+    )
+    assert received == {0: {"prefix": [7]}, 1: None}
+    assert worker.partial_rollout_states == {}

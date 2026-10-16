@@ -908,7 +908,7 @@ class PPOTrainer(ABC):
                 logger.info(f"Restored {self._restored_tq_prompt_count} training prompt groups from TransferQueue")
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
-        """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
+        """Resume saved single-turn prefixes; restart legacy in-flight groups from their prompts."""
         if self.trainer_mode == "sync":
             return 0
         data = tq.kv_list(partition_id)
@@ -924,6 +924,17 @@ class PPOTrainer(ABC):
             return 0
 
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
+        # TQ batch reads return only columns shared by every requested row. Older/pending
+        # prompts may have no partial state column, so recover it per tagged prompt.
+        partial_states = []
+        for uid in inflight_uids:
+            state = {}
+            if items[uid].get("has_partial_rollout", False):
+                row = tq.kv_batch_get(keys=[uid], partition_id=partition_id)
+                state = tu.unwrap_non_tensor_data(row["partial_rollout_states"][0])
+            partial_states.append(state)
+        if any(partial_states):
+            tu.assign_non_tensor_stack(batch, "partial_rollout_states", partial_states)
         inflight_uid_set = set(inflight_uids)
         old_trajectory_keys = [
             key
@@ -1002,6 +1013,7 @@ class PPOTrainer(ABC):
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
         if self.trainer_mode != "sync":
+            self.agent_loop_manager.save_partial_rollout_states()
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},

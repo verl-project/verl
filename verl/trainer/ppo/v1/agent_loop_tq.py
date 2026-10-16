@@ -16,6 +16,7 @@
 """TransferQueue adapter for AgentLoopManager and AgentLoopWorker"""
 
 import asyncio
+import copy
 import logging
 import os
 from typing import Any
@@ -33,6 +34,7 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -55,6 +57,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        self.partial_rollout_states = {}
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
@@ -112,6 +115,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = []
+        restored_states = prompt.pop("partial_rollout_states", None) or {}
+        states = self.partial_rollout_states.setdefault(uid, {})
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
             config = self.config.actor_rollout_ref.rollout
@@ -123,10 +128,22 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 apply_greedy_sampling_params(run_sampling_params)
 
             tasks = []
+            if restored_states and prompt["agent_name"] != "single_turn_agent":
+                raise ValueError("Partial rollout checkpoint requires single_turn_agent")
             for i in range(n):
+                session_prompt = dict(prompt)
+                if (
+                    partition_id == "train"
+                    and prompt["agent_name"] == "single_turn_agent"
+                    and isinstance(self.llm_client, FullyAsyncLLMServerClient)
+                ):
+                    session_prompt["partial_rollout_state"] = restored_states.get(str(i))
+                    session_prompt["partial_rollout_checkpoint_callback"] = lambda state, session=i: states.__setitem__(
+                        str(session), state
+                    )
                 task = asyncio.create_task(
                     self._run_agent_loop(
-                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
+                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **session_prompt
                     )
                 )
                 tasks.append(task)
@@ -150,10 +167,35 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 await _settle_session_tasks(tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
+        finally:
+            self.partial_rollout_states.pop(uid, None)
+
+    async def save_partial_rollout_states(self) -> None:
+        """Flush client-visible prefixes into prompt fields before the TQ checkpoint.
+
+        A prompt owns all of its sessions on one worker, so there are no cross-worker
+        updates to this column. Finished groups retain their existing trajectory rows.
+        """
+        snapshots = copy.deepcopy(self.partial_rollout_states)
+        for uid, states in snapshots.items():
+            serialized = {}
+            for session, state in states.items():
+                state["output"] = state["output"].model_dump()
+                serialized[session] = state
+            if serialized:
+                await tq.async_kv_put(
+                    key=uid,
+                    partition_id="train",
+                    fields={"partial_rollout_states": serialized},
+                    tag={"has_partial_rollout": True},
+                )
+
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
     ) -> None:
         """Put agent loop outputs into TransferQueue."""
+        kwargs.pop("partial_rollout_state", None)
+        kwargs.pop("partial_rollout_checkpoint_callback", None)
         uid, session_id = kwargs["uid"], kwargs["session_id"]
         outputs = output if isinstance(output, list) else [output]
         if not outputs:
@@ -242,6 +284,9 @@ class AgentLoopManagerTQ(AgentLoopManager):
         instance = cls(*args, **kwargs)
         await instance._init_agent_loop_workers()
         return instance
+
+    def save_partial_rollout_states(self) -> None:
+        ray.get([worker.save_partial_rollout_states.remote() for worker in self.agent_loop_workers])
 
     def generate_sequences(self, prompts: TensorDict) -> None:
         """
