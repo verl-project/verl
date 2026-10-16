@@ -189,6 +189,50 @@ def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
     ]
 
 
+def test_maybe_filter_out_long_prompts_reraises_import_error(monkeypatch):
+    class FakeDataFrame(list):
+        def filter(self, fn, num_proc=None, desc=None):
+            return FakeDataFrame([doc for doc in self if fn(doc)])
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False, **kwargs):
+            return "formatted prompt"
+
+    def fake_process_multi_modal_info(cls, messages, image_patch_size, config):
+        raise ModuleNotFoundError("No module named 'qwen_vl_utils'")
+
+    monkeypatch.setattr(
+        RLHFDataset,
+        "_process_multi_modal_info",
+        classmethod(fake_process_multi_modal_info),
+    )
+
+    dataset = _mock_rlhf_dataset()
+    dataset.processor = FakeProcessor()
+    dataset.tokenizer = None
+    dataset.filter_overlong_prompts = True
+    dataset.apply_chat_template_kwargs = {}
+    dataset.tool_schemas = None
+    dataset.image_patch_size = 14
+    dataset.config = OmegaConf.create({})
+    dataset.max_prompt_length = 10
+    dataset.mm_processor_kwargs = {}
+    dataset.num_workers = None
+
+    image_path = "file:///tmp/image.jpg"
+    dataframe = FakeDataFrame(
+        [
+            {
+                "prompt": [{"role": "user", "content": "Describe <image>"}],
+                "images": [image_path],
+            }
+        ]
+    )
+
+    with pytest.raises(ImportError, match="qwen_vl_utils"):
+        dataset.maybe_filter_out_long_prompts(dataframe)
+
+
 def test_process_multi_modal_info_keeps_event_loop_responsive(monkeypatch):
     processing_started = threading.Event()
     observer_ran = threading.Event()
