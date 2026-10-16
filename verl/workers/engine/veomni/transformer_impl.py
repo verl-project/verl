@@ -43,6 +43,7 @@ from verl.utils.ulysses import (
     set_ulysses_sequence_parallel_group,
     slice_input_tensor,
 )
+from verl.utils.veomni.mask_compat import install_qwen_uncached_mask_compat
 from verl.utils.veomni.router_replay import RouterReplayAction, VeOmniRouterReplay
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
@@ -353,6 +354,9 @@ class VeOmniEngine(FSDPEngine):
         ops_implementation = _build_ops_implementation_config(self.engine_config)
 
         veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+
+        if get_device_name() == "cuda":
+            install_qwen_uncached_mask_compat(getattr(self.model_config.hf_config, "model_type", None))
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(

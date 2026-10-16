@@ -119,8 +119,14 @@ def test_full_shard_uses_veomni_reshard_option(monkeypatch, enable_full_shard):
     engine = object.__new__(transformer_impl.VeOmniEngine)
     engine.engine_config = VeOmniEngineConfig(forward_only=True, enable_full_shard=enable_full_shard)
     engine.model_config = SimpleNamespace(
-        local_hf_config_path="/model", local_path="/model", enable_gradient_checkpointing=True
+        local_hf_config_path="/model",
+        local_path="/model",
+        enable_gradient_checkpointing=True,
+        hf_config=SimpleNamespace(model_type="qwen3_moe"),
     )
+    install_mask_compat = MagicMock()
+    monkeypatch.setattr(transformer_impl, "get_device_name", lambda: "cuda")
+    monkeypatch.setattr(transformer_impl, "install_qwen_uncached_mask_compat", install_mask_compat)
     monkeypatch.setattr(transformer_impl, "_build_ops_implementation_config", MagicMock())
     monkeypatch.setattr(transformer_impl, "MixedPrecisionConfig", MagicMock(return_value=SimpleNamespace(enable=False)))
     monkeypatch.setattr(transformer_impl, "build_foundation_model", MagicMock(return_value=module))
@@ -131,6 +137,7 @@ def test_full_shard_uses_veomni_reshard_option(monkeypatch, enable_full_shard):
 
     engine._build_model_optimizer()
 
+    install_mask_compat.assert_called_once_with("qwen3_moe")
     assert parallelize.call_args.kwargs["enable_reshard_after_forward"] is enable_full_shard
     assert "enable_full_shard" not in parallelize.call_args.kwargs
     assert engine.module is module
