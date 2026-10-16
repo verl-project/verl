@@ -86,6 +86,7 @@ class TraceConfig(BaseConfig):
     backend: Optional[str] = None
     token2text: bool = False
     max_samples_per_step_per_worker: Optional[int] = None
+    enable_otel: bool = False
 
     def __post_init__(self):
         if self.max_samples_per_step_per_worker is not None and self.max_samples_per_step_per_worker < 0:

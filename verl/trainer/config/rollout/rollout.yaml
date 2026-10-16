@@ -339,6 +339,9 @@ trace:
   # Total traces per step = max_samples_per_step_per_worker * num_workers * n_rollouts_per_sample
   max_samples_per_step_per_worker: null
 
+  # Export rollout-engine request spans to the RL-Insight OTLP endpoint.
+  enable_otel: false
+
 
 # Whether to skip tokenizer initialization for rollout engine
 # When enabled (True), the rollout assume token in token out for generation
