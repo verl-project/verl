@@ -253,3 +253,37 @@ def test_distributed_accumulation_matches_per_micro_batch_sync(tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def _scale_gradients_worker(rank, world_size, rendezvous_file):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        mesh = init_device_mesh("cpu", (world_size,))
+        inputs = (torch.arange(16, dtype=torch.float32).view(4, 4) + rank) / 10
+        for strategy in ("fsdp", "fsdp2"):
+            gradients = []
+            for loss_scale, gradient_scale in ((1.0, 0.25), (0.25, None)):
+                model = _build_distributed_model(strategy, mesh)
+                (model(inputs).square().sum() * loss_scale).backward()
+                if gradient_scale is not None:
+                    _make_engine(model).scale_gradients(gradient_scale)
+                gradients.append([p.grad.to_local() if strategy == "fsdp2" else p.grad for p in model.parameters()])
+
+            for scaled, expected in zip(*gradients, strict=True):
+                torch.testing.assert_close(scaled, expected)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_scale_gradients_matches_scaled_loss_on_shards(tmp_path):
+    mp.spawn(
+        _scale_gradients_worker,
+        args=(2, str(tmp_path / "fsdp_rdzv")),
+        nprocs=2,
+        join=True,
+    )
