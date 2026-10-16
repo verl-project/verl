@@ -719,12 +719,24 @@ class MegatronEngine(BaseEngine):
     def get_context_parallel_group(self):
         return mpu.get_context_parallel_group()
 
+    def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
+        """Train a batch and optionally advance pending SFT checkpoint publication."""
+        output = super().train_batch(data, loss_function)
+        # SFT has one batch per step and opts in on every rank. RL coordinates
+        # publication across actor/critic separately, so it must not opt in here.
+        if self.checkpoint_config.async_save and tu.get_non_tensor_data(
+            data, key="finalize_async_checkpoint", default=False
+        ):
+            self.checkpoint_mananager._maybe_finalize_async_save(blocking=False)
+        return output
+
     def save_checkpoint(
         self,
         local_path: str,
         hdfs_path: str | None = None,
         global_step: int = 0,
         max_ckpt_to_keep: int | None = None,
+        blocking: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -735,12 +747,17 @@ class MegatronEngine(BaseEngine):
             hdfs_path: Optional HDFS path to copy checkpoint.
             global_step: Integer training step number for naming.
             max_ckpt_to_keep: Maximum number of recent checkpoints to retain.
+            blocking: Wait for pending async writes and their completion callbacks before returning.
         """
         origin_module_device = get_megatron_module_device(self.module)
         if self._is_offload_param or origin_module_device == "cpu":
             load_megatron_model_to_gpu(self.module, load_grad=True)
         self.checkpoint_mananager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            blocking=blocking,
         )
         torch.distributed.barrier()
         if self._is_offload_param:

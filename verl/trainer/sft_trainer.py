@@ -95,6 +95,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             lora_train_meta=lora_train_meta,
+            async_save=self.checkpoint_config.async_save,
         )
 
     def _get_lora_train_meta(self):
@@ -349,6 +350,8 @@ class SFTTrainer:
             "global_batch_size": self.global_batch_size,
             "pad_mode": self.config.data.pad_mode,
             "pad_token_id": self.model_config.tokenizer.pad_token_id,
+            # Let Megatron advance completed writes inside each training batch.
+            "finalize_async_checkpoint": self.checkpoint_config.async_save,
         }
 
         train_time = 0
@@ -440,7 +443,7 @@ class SFTTrainer:
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
                     aggressive_empty_cache(force_sync=True)
-                    self.ckpt_handler.save_checkpoint(step=global_step)
+                    self.ckpt_handler.save_checkpoint(step=global_step, blocking=is_last_step)
 
                 if is_last_step:
                     if is_logging:
