@@ -511,6 +511,72 @@ class RayPPOTrainer:
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
 
+    @staticmethod
+    def _build_join_keys(uid=None, data_source=None, index=None, n: int = 0) -> dict:
+        """Build identity columns (uid / data_source / index) for JSONL dump.
+
+        Inputs are 1-D sequences (ndarray or list) of length ``n``, or ``None``
+        if the caller does not have that column. Returned dict contains only
+        the columns that are both provided AND pass the shape/length checks.
+
+        Column policy:
+        - ``uid`` is canonicalized via ``str()`` because training/validation
+          uids are already ``str(uuid.uuid4())``; keeping str downstream
+          guarantees a stable grouping key.
+        - ``data_source`` and ``index`` keep their native dtype so that
+          offline left-join against the source parquet does not require
+          either side to pre-cast types.
+
+        Validation policy: dump is an observability path and must not kill
+        training/validation on malformed identity metadata. For each column,
+        if normalization or transformation raises, the input collapses to a
+        0-D scalar (e.g. ``np.asarray("foo")``), or its length disagrees with
+        ``n``, this helper prints a yellow warning and skips that column.
+        ``_write_generations`` will then simply not see that key.
+        """
+        out = {}
+
+        def _try_add(key: str, raw, transform):
+            """Validate ``raw`` and insert ``transform(seq)`` into ``out`` under
+            ``key``. Prints a warning and does nothing if normalization,
+            shape validation, or transformation fails."""
+            try:
+                arr = np.asarray(raw)
+                if arr.ndim == 0:
+                    print(f"\033[93m[dump] {key} input is a 0-D scalar; skipping column\033[0m")
+                    return
+                seq = arr.tolist()
+                if len(seq) != n:
+                    print(f"\033[93m[dump] {key} length {len(seq)} != n {n}; skipping column\033[0m")
+                    return
+                out[key] = transform(seq)
+            except Exception as exc:
+                # Join keys are observational metadata. A malformed column
+                # must not terminate rollout generation or validation.
+                print(f"\033[93m[dump] failed to normalize {key} ({type(exc).__name__}: {exc}); skipping column\033[0m")
+
+        if uid is not None:
+            _try_add("uid", uid, lambda seq: [str(x) for x in seq])
+        if data_source is not None:
+            _try_add("data_source", data_source, lambda seq: seq)
+        if index is not None:
+            _try_add("index", index, lambda seq: seq)
+        return out
+
+    @staticmethod
+    def _merge_join_keys_warn_on_collision(target: dict, join_keys: dict) -> None:
+        """Merge ``join_keys`` into ``target``. On collision, warn and keep
+        ``target``'s value (reward-manager output wins; dump is observational
+        and must not override reward semantics)."""
+        for k, v in join_keys.items():
+            if k in target:
+                print(
+                    f"\033[93m[dump] reward_extra_info already contains join key "
+                    f"'{k}'; keeping reward value and skipping injection\033[0m"
+                )
+                continue
+            target[k] = v
+
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
     ):
@@ -535,6 +601,14 @@ class RayPPOTrainer:
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+
+            join_keys = self._build_join_keys(
+                uid=batch.non_tensor_batch.get("uid"),
+                data_source=batch.non_tensor_batch.get("data_source"),
+                index=batch.non_tensor_batch.get("index"),
+                n=len(inputs),
+            )
+            self._merge_join_keys_warn_on_collision(reward_extra_infos_to_dump, join_keys)
 
             self._dump_generations(
                 inputs=inputs,
@@ -604,6 +678,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        sample_indices = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -668,6 +743,15 @@ class RayPPOTrainer:
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
+            # Defensive collect: a custom validation dataset bypassing RLHFDataset may
+            # not emit "index". Fall back to None placeholders so validation itself
+            # does not crash when JSONL dumping is disabled; the dump branch below
+            # decides whether to actually inject the column.
+            batch_n = len(test_batch.non_tensor_batch["uid"])
+            if "index" in test_batch.non_tensor_batch:
+                sample_indices.extend(test_batch.non_tensor_batch["index"].tolist())
+            else:
+                sample_indices.extend([None] * batch_n)
 
             # evaluate using reward_function
             reward_tensor, reward_extra_info = extract_reward(test_batch)
@@ -695,12 +779,36 @@ class RayPPOTrainer:
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            # Local copy — must NOT contaminate reward_extra_infos_dict, which
+            # feeds _val_metrics_update → process_validation_metrics and the
+            # merged return path below.
+            reward_extra_infos_to_dump = dict(reward_extra_infos_dict)
+
+            # Flatten data_source_lst (list[ndarray|list]) into one 1-D sequence,
+            # preserving native dtype.
+            flat_data_sources = []
+            for arr in data_source_lst:
+                flat_data_sources.extend(np.asarray(arr).tolist())
+
+            # Only inject `index` when every validation sample contributed a real
+            # value. If any batch lacked it, the collected list contains None
+            # placeholders and the whole column is dropped from the dump.
+            has_full_index = bool(sample_indices) and all(i is not None for i in sample_indices)
+
+            join_keys = self._build_join_keys(
+                uid=sample_uids,
+                data_source=flat_data_sources,
+                index=sample_indices if has_full_index else None,
+                n=len(sample_inputs),
+            )
+            self._merge_join_keys_warn_on_collision(reward_extra_infos_to_dump, join_keys)
+
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
                 gts=sample_gts,
                 scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
+                reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=val_data_dir,
             )
 
