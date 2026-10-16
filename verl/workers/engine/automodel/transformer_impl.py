@@ -609,7 +609,9 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits_rmpad, DTensor):
                     logits_rmpad = logits_rmpad.full_tensor()
-                logits_rmpad = logits_rmpad / temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype)
+                # No downstream consumer needs the unscaled model output. Reuse
+                # its storage instead of peaking at two full vocabulary tensors.
+                verl_F.scale_logits_by_temperature_(logits_rmpad, temperature_rmpad.unsqueeze(-1))
 
                 inplace_backward = True
                 if calculate_entropy:
@@ -654,7 +656,9 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                     logits = logits.full_tensor()
                 temperature = output_args["temperature"]
                 temperature = temperature.unsqueeze(-1).unsqueeze(-1)
-                logits = logits / temperature.clamp(min=1e-8).to(logits.dtype)
+                # No downstream consumer needs the unscaled model output. Reuse
+                # its storage instead of peaking at two full vocabulary tensors.
+                verl_F.scale_logits_by_temperature_(logits, temperature)
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
