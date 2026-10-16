@@ -892,8 +892,17 @@ class PPOTrainer(ABC):
         # 4. load dataloader checkpoint
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state_dict)
+            at_epoch_boundary = self.steps_per_epoch > 0 and self.global_steps % self.steps_per_epoch == 0
+            if at_epoch_boundary:
+                logger.info(
+                    f"Skipping dataloader state restore: global_steps={self.global_steps} "
+                    f"is at an epoch boundary (steps_per_epoch={self.steps_per_epoch}). "
+                    f"The saved state marks the dataloader as exhausted. "
+                    f"Next epoch will iterate from scratch."
+                )
+            else:
+                dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+                self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
