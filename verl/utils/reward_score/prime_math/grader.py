@@ -321,12 +321,19 @@ def math_equal(
     return symbolic_equal(prediction, reference, tolerance, timeout)
 
 
+def _simplify_equal(a, b):
+    return simplify(a - b) == 0
+
+
+def _numerically_equal(a, b, tolerance):
+    return isclose(N(a), N(b), rel_tol=tolerance)
+
+
 def symbolic_equal(a, b, tolerance, timeout=10.0):
     def _parse(s):
         for f in [parse_expr, parse_latex]:
             try:
-                with timeout_limit(seconds=timeout):
-                    return f(s)
+                return timeout_limit(seconds=timeout)(f)(s)
             except TimeoutError:
                 print(f"Parsing timed out for {s}")
                 continue
@@ -338,9 +345,8 @@ def symbolic_equal(a, b, tolerance, timeout=10.0):
     b = _parse(b)
 
     try:
-        with timeout_limit(seconds=timeout):
-            if simplify(a - b) == 0:
-                return True
+        if timeout_limit(seconds=timeout)(_simplify_equal)(a, b):
+            return True
     except TimeoutError:
         print(f"Simplification timed out for {a} - {b}")
         pass
@@ -348,9 +354,8 @@ def symbolic_equal(a, b, tolerance, timeout=10.0):
         pass
 
     try:
-        with timeout_limit(seconds=timeout):
-            if isclose(N(a), N(b), rel_tol=tolerance):
-                return True
+        if timeout_limit(seconds=timeout)(_numerically_equal)(a, b, tolerance):
+            return True
     except TimeoutError:
         print(f"Numerical evaluation timed out for {a}, {b}")
         pass
