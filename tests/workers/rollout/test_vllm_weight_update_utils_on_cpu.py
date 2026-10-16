@@ -99,7 +99,8 @@ def _load_vllm_rollout_utils():
     fake_vllm_utils = types.ModuleType("verl.utils.vllm")
 
     class _FakeTensorLoRARequest:
-        pass
+        def __init__(self, **kwargs):
+            self.lora_tensors = kwargs["lora_tensors"]
 
     class _FakeVLLMHijack:
         @staticmethod
@@ -267,6 +268,49 @@ def test_vllm_update_weights_loads_params_and_buffers():
     torch.testing.assert_close(
         model.model.layers[0].e_score_correction_bias, torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     )
+
+
+def test_lora_receiver_copies_each_bucket_once_and_retains_owned_tensors(monkeypatch):
+    source = torch.arange(4, dtype=torch.float32)
+    requests = []
+
+    class FakeReceiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("first", source)], is_last=False)
+            source.fill_(10)
+            on_bucket_received([("second", source)], is_last=True)
+            source.fill_(20)
+
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", FakeReceiver)
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: None
+    worker.remove_lora = lambda lora_id: None
+    worker.add_lora = requests.append
+
+    worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
+
+    assert len(requests) == 1
+    torch.testing.assert_close(requests[0].lora_tensors["first"], torch.arange(4, dtype=torch.float32))
+    torch.testing.assert_close(requests[0].lora_tensors["second"], torch.full((4,), 10, dtype=torch.float32))
+    assert requests[0].lora_tensors["first"].data_ptr() != source.data_ptr()
+    assert requests[0].lora_tensors["second"].data_ptr() != source.data_ptr()
+
+
+def test_lora_update_reuses_receiver_owned_tensor():
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    requests = []
+    worker.add_lora = requests.append
+    owned_tensor = torch.ones(4)
+
+    worker._update_weights([("lora_A", owned_tensor)], peft_config={"r": 1}, base_sync_done=True)
+
+    assert requests[0].lora_tensors["lora_A"] is owned_tensor
 
 
 def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
