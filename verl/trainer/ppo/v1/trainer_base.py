@@ -1836,6 +1836,11 @@ class PPOTrainer(ABC):
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_loss_mode = (
+            self.distillation_config.distillation_loss.loss_mode
+            if is_distillation_enabled(self.config.get("distillation"))
+            else None
+        )
         distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
         if is_distillation_enabled(self.config.get("distillation")):
             distillation_loss_cfg = self.distillation_config.distillation_loss
@@ -1850,6 +1855,7 @@ class PPOTrainer(ABC):
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
+            "distillation_loss_mode": distillation_loss_mode,
             "distillation_only": distillation_only,
             "score_centering": score_centering,
             "global_batch_size": ppo_mini_batch_size,
