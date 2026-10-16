@@ -206,13 +206,13 @@ TRAINER=(
 )
 
 EXTRA=(
-    --config-name='ppo_megatron_trainer'
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'"
     actor_rollout_ref.nccl_timeout=7200
 )
 
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
+    --config-name='ppo_megatron_trainer' \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
