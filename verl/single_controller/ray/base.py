@@ -67,6 +67,23 @@ def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, block
     return type(method_name, (Functor,), {})()
 
 
+def _ip_sort_key(ip: str):
+    """Sort key that orders dotted-quad IPs numerically.
+
+    Lexicographic string order breaks whenever an allocation spans an octet-width
+    boundary (e.g. ``.9`` vs ``.66``), which lands ring-adjacent ranks on
+    physically distant nodes. Non-IPv4 addresses keep plain string order and sort
+    after all IPv4 addresses, so mixed deployments stay deterministic.
+    """
+    parts = ip.split(".")
+    if len(parts) == 4:
+        try:
+            return (0, tuple(int(p) for p in parts), "")
+        except ValueError:
+            pass
+    return (1, (), ip)
+
+
 def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[PlacementGroup]:
     """
     Sort the placement groups by node ip, all bundles in a single placement group should be on the same node.
@@ -84,7 +101,7 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
         # all bunles should be on the same node
         node_id = specs["bundles_to_node_id"][0]
         pg_ip[pg.id] = node_ip[node_id]
-    return sorted(pgs, key=lambda pg: pg_ip[pg.id])
+    return sorted(pgs, key=lambda pg: _ip_sort_key(pg_ip[pg.id]))
 
 
 @ray.remote
