@@ -31,6 +31,7 @@ from verl.experimental.agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from verl.trainer.ppo.v1 import tq_schema
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -107,10 +108,52 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
 
+    async def _run_session(
+        self,
+        *,
+        uid: str,
+        session_id: int,
+        partition_id: str,
+        sampling_params: dict,
+        trajectory: dict,
+        trace: bool,
+        prompt: dict,
+    ) -> None:
+        key = tq_schema.session_key(uid, session_id)
+        await tq.async_kv_put(
+            key=key,
+            partition_id=partition_id,
+            tag=tq_schema.session_tag(tq_schema.SESSION_RUNNING, session_id),
+        )
+        try:
+            await self._run_agent_loop(
+                sampling_params,
+                trajectory=trajectory,
+                trace=trace,
+                session_id=session_id,
+                **prompt,
+            )
+        except Exception:
+            await tq.async_kv_put(
+                key=key,
+                partition_id=partition_id,
+                tag=tq_schema.session_tag(tq_schema.SESSION_FAILURE, session_id),
+            )
+            raise
+        else:
+            # Publish session completion only after all of its trajectory writes have finished.
+            await tq.async_kv_put(
+                key=key,
+                partition_id=partition_id,
+                tag=tq_schema.session_tag(tq_schema.SESSION_FINISHED, session_id),
+            )
+
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        await tq.async_kv_put(
+            key=uid, partition_id=partition_id, tag=tq_schema.prompt_status_tag(tq_schema.PROMPT_RUNNING)
+        )
         tasks = []
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
@@ -125,14 +168,20 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             tasks = []
             for i in range(n):
                 task = asyncio.create_task(
-                    self._run_agent_loop(
-                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
+                    self._run_session(
+                        uid=uid,
+                        session_id=i,
+                        partition_id=partition_id,
+                        sampling_params=run_sampling_params,
+                        trajectory=trajectory,
+                        trace=trace,
+                        prompt=prompt,
                     )
                 )
                 tasks.append(task)
 
             # Publish a terminal status only after every session settles, so no sibling can write after
-            # ReplayBuffer clears a failed group.
+            # the dataloader clears a failed group.
             session_errors = await _settle_session_tasks(tasks)
             if session_errors:
                 for error in session_errors:
@@ -140,15 +189,17 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                         f"Error in _run_prompt for uid={uid}",
                         exc_info=(type(error), error, error.__traceback__),
                     )
-                status = "failure"
+                status = tq_schema.PROMPT_FAILURE
             else:
-                status = "finished"
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
+                status = tq_schema.PROMPT_FINISHED
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag=tq_schema.prompt_status_tag(status))
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
             if tasks:
                 await _settle_session_tasks(tasks)
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            await tq.async_kv_put(
+                key=uid, partition_id=partition_id, tag=tq_schema.prompt_status_tag(tq_schema.PROMPT_FAILURE)
+            )
 
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
@@ -178,10 +229,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
 
         # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
-        # key format: {uid}_{session_id}_{index}
-        # - uid: raw prompt uid from dataset
-        # - session_id: session id for rollout.n sampling
-        # - index: index of agent loop output
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
@@ -193,7 +240,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
             ).squeeze(0)
 
-            keys.append(f"{uid}_{session_id}_{i}")
+            keys.append(tq_schema.trajectory_key(uid, session_id, i))
             field = output.as_dict()
             field.update(kwargs)
             # do not store raw image/video
@@ -233,6 +280,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 class AgentLoopManagerTQ(AgentLoopManager):
     def __init__(self, *args, **kwargs):
         self.agent_loop_workers_class = AgentLoopWorkerTQ
+        # Streaming refills dispatch a few prompts at a time, so rotate the first worker across calls.
+        self._next_worker = 0
         super().__init__(*args, **kwargs)
 
     @classmethod
@@ -251,10 +300,13 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        num_workers = len(self.agent_loop_workers)
+        chunks = prompts.chunk(num_workers)
+        start = self._next_worker
+        self._next_worker = (start + len(chunks)) % num_workers
         ray.get(
             [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
+                self.agent_loop_workers[(start + i) % num_workers].generate_sequences.remote(chunk)
+                for i, chunk in enumerate(chunks)
             ]
         )

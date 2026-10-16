@@ -31,9 +31,6 @@ class PPOTrainerColocateAsync(PPOTrainer):
         # update weights after loading checkpoint
         self.checkpoint_manager.update_weights(self.global_steps)
 
-    def on_train_begin(self):
-        self._add_async_warmup_batches(self.config.trainer.v1.colocate_async.num_warmup_batches)
-
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights

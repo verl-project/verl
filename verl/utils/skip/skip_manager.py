@@ -129,7 +129,7 @@ class SkipManager:
         """V1 TransferQueue-based skip decorator, unified across both phases.
 
         V1's split architecture separates "submit prompts" (``_add_batch_to_generate``)
-        from "sample trajectories" (``ReplayBuffer.sample``).  This decorator handles
+        from "sample trajectories" (V1 dataloader sampling).  This decorator handles
         both, selected by *phase*:
 
         - ``phase="submit"``: decorate ``_add_batch_to_generate``.  The method must be
@@ -139,7 +139,7 @@ class SkipManager:
           steps), then checks ``meet_precondition``.  On cache-hit it injects cached data
           into the TQ and returns; on cache-miss it calls ``_submit_batch_to_rollout``.
 
-        - ``phase="sample"``: decorate ``ReplayBuffer.sample``.  After the original
+        - ``phase="sample"``: decorate a sampling method returning ``(KVBatchMeta, metrics)``.  After the original
           ``sample`` runs, if the skip instance says to save, persist the result to disk
           (phase one / cache-miss).  When ``parameter_sync_step > 1`` (separate async),
           ``sample`` is called multiple times per step; each call saves its mini-batch to
@@ -166,7 +166,7 @@ class SkipManager:
 
                 # phase == "sample": post-save after original sample runs
                 result = func(self, *args, **kwargs)
-                # ReplayBuffer.sample returns (batch, off_policy_metrics)
+                # Sampling returns (batch, off_policy_metrics)
                 batch = result[0] if isinstance(result, tuple) else result
                 if skip_instance.should_save(step, batch.partition_id):
                     skip_instance.prepare_data(step=step, batch=batch, global_steps=step)

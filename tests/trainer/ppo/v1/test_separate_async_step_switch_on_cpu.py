@@ -62,7 +62,7 @@ class _RecordingCheckpointManager:
         self.sleep_calls += 1
 
 
-class _RecordingReplayBuffer:
+class _RecordingSampleSource:
     poll_interval = 1.0
 
     def __init__(self, eviction_metrics: dict | None = None, sampleable_count: int = 0):
@@ -71,15 +71,15 @@ class _RecordingReplayBuffer:
         self.eviction_metrics = eviction_metrics or {}
         self.sampleable_count = sampleable_count
 
-    def wait_for_sampleable(self, global_steps: int, partition_id: str, target_count: int) -> tuple[set[str], dict]:
-        del global_steps, partition_id
-        self.wait_calls.append(target_count)
-        return set(), dict(self.eviction_metrics)
-
-    def get_sampleable_count(self, global_steps: int, partition_id: str) -> int:
-        del global_steps, partition_id
+    def count_sampleable(self, global_steps):
+        del global_steps
         self.count_calls += 1
         return self.sampleable_count
+
+    def wait_sampleable(self, global_steps, target_count):
+        del global_steps
+        self.wait_calls.append(target_count)
+        return dict(self.eviction_metrics)
 
 
 def _trainer(
@@ -116,7 +116,10 @@ def _trainer(
     trainer.next_step_profile = False
     trainer.timing_raw = {}
     trainer.current_mode = HybridEngineMode.ROLLOUT
-    trainer.replay_buffer = _RecordingReplayBuffer(eviction_metrics, sampleable_count)
+    trainer.sample_source = _RecordingSampleSource(eviction_metrics, sampleable_count)
+    trainer.replay_poll_interval = trainer.sample_source.poll_interval
+    trainer._get_sampleable_count = trainer.sample_source.count_sampleable
+    trainer._wait_for_sampleable = trainer.sample_source.wait_sampleable
     trainer.events: list[str] = []
     trainer.checkpoint_manager = _RecordingCheckpointManager("hybrid", trainer.events)
     trainer.standalone_checkpoint_manager = _RecordingCheckpointManager("standalone", trainer.events)
@@ -155,26 +158,21 @@ def _trainer(
 def _construct_trainer(
     monkeypatch,
     *,
-    replay_buffer,
     enable_switch: bool = True,
     disaggregation: bool = False,
-    hybrid_engine: bool | None = True,
 ):
-    actor_rollout_ref = {
-        "actor": {"ppo_mini_batch_size": 16},
-        "rollout": {
-            "nnodes": 1,
-            "n_gpus_per_node": 8,
-            "checkpoint_engine": {"backend": "nccl"},
-            "disaggregation": {"enabled": disaggregation},
-        },
-    }
-    if hybrid_engine is not None:
-        actor_rollout_ref["hybrid_engine"] = hybrid_engine
     config = OmegaConf.create(
         {
             "data": {"train_batch_size": 64},
-            "actor_rollout_ref": actor_rollout_ref,
+            "actor_rollout_ref": {
+                "actor": {"ppo_mini_batch_size": 16},
+                "rollout": {
+                    "nnodes": 1,
+                    "n_gpus_per_node": 8,
+                    "checkpoint_engine": {"backend": "nccl"},
+                    "disaggregation": {"enabled": disaggregation},
+                },
+            },
             "trainer": {
                 "nnodes": 1,
                 "n_gpus_per_node": 8,
@@ -194,7 +192,6 @@ def _construct_trainer(
 
     def mock_base_init(trainer, trainer_config):
         trainer.config = trainer_config
-        trainer.replay_buffer = replay_buffer
 
     monkeypatch.setattr(trainer_module.PPOTrainer, "__init__", mock_base_init)
     return PPOTrainerSeparateAsync(config)
@@ -250,7 +247,7 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     trainer.on_step_begin()
     trainer._wait_for_sampleable_and_switch()
     assert trainer.current_mode == HybridEngineMode.TRAINER
-    assert trainer.replay_buffer.wait_calls == [16]
+    assert trainer.sample_source.wait_calls == [16]
     assert trainer.checkpoint_manager.abort_calls == 1
     assert trainer.checkpoint_manager.abort_reject_requests == [True], (
         "leaving rotation must reject late arrivals rather than park them until the replica returns"
@@ -290,8 +287,8 @@ def test_step_begin_reclaims_hybrid_before_submission_when_inventory_is_ready():
     trainer.on_step_begin()
 
     assert trainer.current_mode == HybridEngineMode.TRAINER
-    assert trainer.replay_buffer.count_calls == 1
-    assert trainer.replay_buffer.wait_calls == []
+    assert trainer.sample_source.count_calls == 1
+    assert trainer.sample_source.wait_calls == []
     assert trainer.checkpoint_manager.abort_calls == 1
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.timing_raw["switch_wait"] == 0.0
@@ -304,7 +301,7 @@ def test_wait_for_sampleable_is_a_noop_once_the_engine_is_training():
     trainer.current_mode = HybridEngineMode.TRAINER
 
     assert trainer._wait_for_sampleable_and_switch() == {}
-    assert trainer.replay_buffer.wait_calls == []
+    assert trainer.sample_source.wait_calls == []
     assert trainer.balancer_calls == []
 
 
@@ -323,7 +320,7 @@ def test_disabled_switching_reclaims_the_engine_without_waiting():
     trainer.on_step_begin()
     assert trainer._wait_for_sampleable_and_switch() == {}
     assert trainer.current_mode == HybridEngineMode.TRAINER
-    assert trainer.replay_buffer.wait_calls == []
+    assert trainer.sample_source.wait_calls == []
     assert trainer.checkpoint_manager.sleep_calls == 1
 
     trainer.on_step_end()
@@ -421,18 +418,19 @@ def test_switching_rejects_a_ratio_outside_the_unit_interval(ratio):
         _trainer(switch_threshold_ratio=ratio)
 
 
-def test_switching_rejects_a_replay_buffer_that_cannot_report_depth(monkeypatch):
-    with pytest.raises(TypeError, match="wait_for_sampleable"):
-        _construct_trainer(monkeypatch, replay_buffer=SimpleNamespace())
+def test_switching_does_not_require_a_local_replay_buffer(monkeypatch):
+    trainer = _construct_trainer(monkeypatch)
+
+    assert trainer.hybrid_rollout_config.enable_switch is True
 
 
 def test_switching_rejects_rollout_disaggregation(monkeypatch):
     with pytest.raises(ValueError, match="does not support rollout disaggregation"):
-        _construct_trainer(monkeypatch, replay_buffer=_RecordingReplayBuffer(), disaggregation=True)
+        _construct_trainer(monkeypatch, disaggregation=True)
 
 
-def test_disabled_switching_skips_custom_replay_buffer_validation(monkeypatch):
-    trainer = _construct_trainer(monkeypatch, replay_buffer=SimpleNamespace(), enable_switch=False)
+def test_disabled_switching_does_not_create_hybrid_replicas(monkeypatch):
+    trainer = _construct_trainer(monkeypatch, enable_switch=False)
 
     assert trainer.hybrid_rollout_config.enable_switch is False
     # No colocated replicas are created on the training GPUs without switching:
@@ -440,33 +438,10 @@ def test_disabled_switching_skips_custom_replay_buffer_validation(monkeypatch):
     assert trainer._enable_hybrid_replicas is False
 
 
-@pytest.mark.parametrize("hybrid_engine", [True, None], ids=["explicit_true", "legacy_config_without_key"])
-def test_enable_switch_creates_hybrid_replicas(monkeypatch, hybrid_engine):
-    trainer = _construct_trainer(
-        monkeypatch,
-        replay_buffer=_RecordingReplayBuffer(),
-        enable_switch=True,
-        hybrid_engine=hybrid_engine,
-    )
+def test_enable_switch_creates_hybrid_replicas(monkeypatch):
+    trainer = _construct_trainer(monkeypatch, enable_switch=True)
 
     assert trainer._enable_hybrid_replicas is True
-
-
-def test_hybrid_engine_false_wins_over_enable_switch(monkeypatch, caplog):
-    # hybrid_engine=False (the v0 fully-async convention) keeps its "no colocated
-    # replicas on the training GPUs" meaning and wins over a conflicting
-    # enable_switch=True, which is ignored with a warning instead of failing startup.
-    with caplog.at_level("WARNING", logger=trainer_module.__name__):
-        trainer = _construct_trainer(
-            monkeypatch,
-            replay_buffer=_RecordingReplayBuffer(),
-            enable_switch=True,
-            hybrid_engine=False,
-        )
-
-    assert trainer._enable_hybrid_replicas is False
-    assert trainer.hybrid_rollout_config.enable_switch is False
-    assert "hybrid_engine" in caplog.text
 
 
 def test_adaptive_threshold_increases_after_trainer_idle():
@@ -614,7 +589,6 @@ def test_setup_standalone_memory_from_hydra_override(monkeypatch, model_engine, 
     trainer, created_configs, _ = _memory_budget_setup(monkeypatch, hybrid_enabled, None)
     overrides = [
         f"model_engine={model_engine}",
-        f"actor_rollout_ref.hybrid_engine={hybrid_enabled}",
         "actor_rollout_ref.rollout.gpu_memory_utilization=0.45",
     ]
     if standalone_memory != "default":

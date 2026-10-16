@@ -168,7 +168,7 @@ class RolloutTqSkip(RolloutSkip):
 
     Unlike V0's decorator pattern, V1's split architecture (submit prompts to TQ,
     then sample trajectories) requires direct method calls from the trainer:
-    - Phase one (no cache): trainer calls ``prepare_data`` after ``replay_buffer.sample``
+    - Phase one (no cache): trainer calls ``prepare_data`` after the V1 dataloader samples a batch
     - Phase two (cache exists): trainer calls ``load_dump_data`` in ``_add_batch_to_generate``
 
     When ``parameter_sync_step > 1`` (separate async), one global step performs multiple
@@ -305,7 +305,7 @@ class RolloutTqSkip(RolloutSkip):
 
         Args:
             step: Current training step (used as dump directory name).
-            batch: :class:`transfer_queue.KVBatchMeta` from ``ReplayBuffer.sample()``.
+            batch: :class:`transfer_queue.KVBatchMeta` sampled by the V1 dataloader.
             global_steps: Current ``global_steps`` for metadata.
         """
         import transfer_queue as tq
@@ -359,6 +359,8 @@ class RolloutTqSkip(RolloutSkip):
         """
         import transfer_queue as tq
 
+        from verl.trainer.ppo.v1 import tq_schema
+
         load_step = self._resolve_load_step_v1(step)
         if load_step == -1:
             raise FileNotFoundError(
@@ -384,13 +386,11 @@ class RolloutTqSkip(RolloutSkip):
             data = data_list[0]
 
         # Group saved trajectories by parent uid.
-        # Key format: {uid}_{session_id}_{index}, uid is UUID4 (no underscores).
-        # ReplayBuffer.sample() does NOT guarantee keys are sorted by uid prefix,
+        # V1 sampling does NOT guarantee keys are sorted by uid prefix,
         # so we use a dict to group regardless of key ordering.
         uid_to_indices: dict[str, list[int]] = {}
         for idx, key in enumerate(old_keys):
-            parent_uid = key.split("_")[0]
-            uid_to_indices.setdefault(parent_uid, []).append(idx)
+            uid_to_indices.setdefault(tq_schema.uid_of(key), []).append(idx)
         groups = list(uid_to_indices.values())
 
         if not groups:
@@ -425,7 +425,7 @@ class RolloutTqSkip(RolloutSkip):
             for session_id in range(n):
                 traj_idx = group[session_id % len(group)]
                 traj_indices.append(traj_idx)
-                new_keys.append(f"{new_uid}_{session_id}_0")
+                new_keys.append(tq_schema.trajectory_key(new_uid, session_id, 0))
                 tag = dict(old_tags[traj_idx])
                 tag["global_steps"] = global_steps
                 tag["min_global_steps"] = global_steps
@@ -447,8 +447,8 @@ class RolloutTqSkip(RolloutSkip):
             partition_id=partition_id,
         )
 
-        # Mark prompt-level keys as finished so ReplayBuffer can pick them up immediately
-        prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
+        # Mark prompt-level keys as finished so the V1 dataloader can sample them immediately
+        prompt_tags = [tq_schema.prompt_tag(tq_schema.PROMPT_FINISHED, global_steps)] * len(new_prompt_uids)
         tq.kv_batch_put(
             keys=new_prompt_uids,
             partition_id=partition_id,

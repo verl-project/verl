@@ -25,7 +25,7 @@ import math
 import pytest
 import torch
 
-from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
+from verl.trainer.ppo.v1.streaming_dataloader import DAPO_FILTERED_REWARD_COUNTS_KEY
 from verl.trainer.ppo.v1.utils import MetricsAggregator
 
 
@@ -182,7 +182,7 @@ def test_missing_key_in_some_iterations_uses_present_values():
 def test_dapo_filtered_reward_counts_survive_aggregation():
     """The {reward_value: count} breakdown must reach the logger via the aggregator.
 
-    ``ReplayBuffer.sample`` emits ``DAPO_FILTERED_REWARD_COUNTS_KEY`` as a dict; the trainer pops it
+    Sampling emits ``DAPO_FILTERED_REWARD_COUNTS_KEY`` as a dict; the trainer pops it
     from the aggregated metrics and feeds the wandb table. If the aggregator drops it (only scalars
     kept), the table is never populated in the real training loop.
     """

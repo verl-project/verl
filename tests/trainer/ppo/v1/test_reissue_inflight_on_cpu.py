@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for :meth:`PPOTrainer._reissue_inflight_prompts` (checkpoint recovery).
+"""Unit tests for StreamingDataloader inflight-prompt checkpoint recovery.
 
 These run against a real (CPU-only) TransferQueue, mirroring
-``test_replay_buffer_on_cpu.py``. They exercise checkpoint resume for async
+``test_streaming_dataloader_sampling_on_cpu.py``. They exercise checkpoint resume for async
 trainers: after ``tq.load_checkpoint`` restores the queue, prompts that were
 still generating (``pending``/``running``) must be re-submitted from the prompt
 data persisted at submit time, while finished trajectories are left untouched.
@@ -23,13 +23,13 @@ Because half-generated tokens are not durable, a re-issued prompt restarts
 generation from scratch. Existing session trajectories under an in-flight prompt
 are removed, and the prompt is re-stamped with the resumed training step.
 
-The method is bound to a lightweight stub ``self`` exposing
-``agent_loop_manager``, ``trainer_mode``, and ``global_steps``, avoiding the need
-to build a full trainer.
+The method is bound to a lightweight stub ``self`` exposing a fake
+``agent_loop_manager`` and ``global_steps``, avoiding the need to build a full
+trainer.
 
 A second group of tests covers the ``tq.save_checkpoint``/``tq.load_checkpoint``
-round-trip that backs checkpoint consistency (matching ``_save_checkpoint``/
-``_load_checkpoint``), calling the real checkpoint APIs.
+round-trip that backs checkpoint consistency (matching ``save_checkpoint``/
+``load_checkpoint``), calling the real checkpoint APIs.
 """
 
 import uuid
@@ -37,11 +37,10 @@ import uuid
 import pytest
 import torch
 import transfer_queue as tq
-from omegaconf import OmegaConf
 from tensordict import TensorDict
 
-from verl.trainer.ppo.v1 import trainer_base
-from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+import verl.trainer.ppo.v1.streaming_dataloader as streaming_module
+from verl.trainer.ppo.v1.streaming_dataloader import StreamingDataloaderAsync
 from verl.utils import tensordict_utils as tu
 
 
@@ -73,14 +72,13 @@ class FakeAgentLoopManager:
         self.batches.append(batch)
 
 
-def _make_trainer_stub(trainer_mode: str = "separate_async", global_steps: int = 8):
-    """Bind the real ``_reissue_inflight_prompts`` to a stub exposing only what it uses
-    (``agent_loop_manager``, ``trainer_mode``, and ``global_steps``)."""
-    stub = type("Stub", (), {})()
-    stub.trainer_mode = trainer_mode
+def _make_dataloader_stub(global_steps: int = 8):
+    """Build an actor implementation stub with the real reissue method."""
+    stub = object.__new__(StreamingDataloaderAsync)
     stub.global_steps = global_steps
+    stub.default_rollout_n = 1
+    stub._default_rollout_n = lambda _partition_id: 1
     stub.agent_loop_manager = FakeAgentLoopManager()
-    stub._reissue_inflight_prompts = PPOTrainer._reissue_inflight_prompts.__get__(stub)
     return stub
 
 
@@ -109,7 +107,7 @@ def _add_trajectory(partition_id: str, uid: str, session_id: int, global_steps: 
         key=key,
         partition_id=partition_id,
         fields={"input_ids": torch.tensor([1, 2, 3])},
-        tag={"is_prompt": False, "seq_len": 3, "global_steps": global_steps},
+        tag={"is_prompt": False, "status": "success", "seq_len": 3, "global_steps": global_steps},
     )
     return key
 
@@ -125,25 +123,9 @@ def _clear_partition(partition_id: str) -> None:
         tq.kv_clear(keys=keys, partition_id=partition_id)
 
 
-def test_count_tq_prompt_groups_includes_every_prompt_status(tq_init, partition_id):
-    """Prompt groups occupy the prefetch window whatever their status; trajectories are not prompts."""
-    uids = {status: _uid() for status in ("pending", "running", "finished", "failure")}
-    for status, uid in uids.items():
-        _submit_prompt(partition_id, uid, status, global_steps=2)
-    _add_trajectory(partition_id, uids["finished"], session_id=0, global_steps=2)
-
-    try:
-        assert trainer_base._count_tq_prompt_groups(partition_id) == 4
-    finally:
-        _clear_partition(partition_id)
-
-
 def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
-    stub = type("Stub", (), {})()
-    stub.trainer_mode = "separate_async"
+    stub = _make_dataloader_stub(global_steps=4)
     stub.global_steps = 4
-    stub.agent_loop_manager = FakeAgentLoopManager()
-    stub._submit_batch_to_rollout = PPOTrainer._submit_batch_to_rollout.__get__(stub)
     batch = tu.get_tensordict(
         {
             "uid": [_uid(), _uid()],
@@ -153,16 +135,31 @@ def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     )
     tu.assign_non_tensor_data(batch, "global_steps", stub.global_steps)
     puts = []
-    monkeypatch.setattr(trainer_base.tq, "kv_batch_put", lambda **kwargs: puts.append(kwargs))
+    monkeypatch.setattr(streaming_module.tq, "kv_batch_put", lambda **kwargs: puts.append(kwargs))
 
-    assert stub._submit_batch_to_rollout(batch) == 2
+    assert stub._submit_batch_to_rollout(batch, "train") == 2
     assert len(puts) == 1
     assert set(puts[0]["fields"].keys()) == {"uid", "raw_prompt", "index"}
     assert stub.agent_loop_manager.batches == [batch]
 
 
-def test_add_prompts_to_generate_uses_exact_count():
-    stub = type("Stub", (), {})()
+def test_async_submission_rejects_dynamic_rollout_n():
+    stub = _make_dataloader_stub(global_steps=4)
+    batch = tu.get_tensordict(
+        {
+            "uid": [_uid(), _uid()],
+            "raw_prompt": ["prompt-a", "prompt-b"],
+            "index": torch.tensor([0, 1]),
+            "__rollout_n__": torch.tensor([1, 2]),
+        }
+    )
+
+    with pytest.raises(ValueError, match="fixed train rollout_n"):
+        stub._submit_batch_to_rollout(batch, "train")
+
+
+def test_refill_exact_uses_requested_count():
+    stub = _make_dataloader_stub()
     batch = tu.get_tensordict(
         {
             "uid": [_uid(), _uid(), _uid()],
@@ -172,18 +169,18 @@ def test_add_prompts_to_generate_uses_exact_count():
     )
     requested = []
     submitted = []
+    stub.gen_batch_size = 1
     stub._next_train_batch = lambda num_prompts: requested.append(num_prompts) or batch
-    stub._submit_batch_to_rollout = lambda value: submitted.append(value) or len(value)
-    stub._add_prompts_to_generate = PPOTrainer._add_prompts_to_generate.__get__(stub)
+    stub._submit_batch_to_rollout = lambda value, partition: submitted.append((value, partition)) or len(value)
 
-    assert stub._add_prompts_to_generate(3) == 3
+    assert stub._refill_exact(3) == 3
     assert requested == [3]
-    assert submitted == [batch]
+    assert submitted == [(batch, "train")]
 
 
 def test_next_train_batch_coalesces_gen_batches():
-    stub = type("Stub", (), {})()
-    stub.config = OmegaConf.create({"data": {"train_batch_size": 4, "gen_batch_size": 2}})
+    stub = _make_dataloader_stub(global_steps=5)
+    stub.gen_batch_size = 2
     stub.global_steps = 5
     chunks = iter(
         [
@@ -192,9 +189,8 @@ def test_next_train_batch_coalesces_gen_batches():
         ]
     )
     stub._fetch_one_gen_batch = lambda: next(chunks)
-    stub._next_train_batch = PPOTrainer._next_train_batch.__get__(stub)
 
-    batch = stub._next_train_batch()
+    batch = stub._next_train_batch(4)
 
     assert list(batch["uid"]) == ["a", "b", "c", "d"]
     assert list(batch["index"]) == [0, 1, 2, 3]
@@ -217,8 +213,14 @@ def test_reissue_resubmits_only_inflight_prompts(tq_init, partition_id):
     pending_trajectory = _add_trajectory(partition_id, pending, session_id=0, global_steps=2)
     running_trajectory = _add_trajectory(partition_id, running, session_id=0, global_steps=2)
     finished_trajectory = _add_trajectory(partition_id, finished, session_id=0, global_steps=2)
+    running_failure = f"{running}_1"
+    tq.kv_put(
+        key=running_failure,
+        partition_id=partition_id,
+        tag={"is_session": True, "status": "failure", "session_id": 1},
+    )
 
-    stub = _make_trainer_stub(global_steps=3)
+    stub = _make_dataloader_stub(global_steps=3)
     try:
         reissued = stub._reissue_inflight_prompts(partition_id)
 
@@ -236,6 +238,7 @@ def test_reissue_resubmits_only_inflight_prompts(tq_init, partition_id):
         remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
         assert pending_trajectory not in remaining
         assert running_trajectory not in remaining
+        assert running_failure not in remaining
         assert finished_trajectory in remaining
     finally:
         _clear_partition(partition_id)
@@ -246,7 +249,7 @@ def test_reissue_preserves_prompt_data_and_resets_global_steps(tq_init, partitio
     uid = _uid()
     _submit_prompt(partition_id, uid, "running", global_steps=7)
 
-    stub = _make_trainer_stub(global_steps=8)
+    stub = _make_dataloader_stub(global_steps=8)
     try:
         stub._reissue_inflight_prompts(partition_id)
 
@@ -270,7 +273,7 @@ def test_reissue_combines_original_steps_under_resumed_step(tq_init, partition_i
     for uid in step5:
         _submit_prompt(partition_id, uid, "running", global_steps=5)
 
-    stub = _make_trainer_stub(global_steps=6)
+    stub = _make_dataloader_stub(global_steps=6)
     try:
         reissued = stub._reissue_inflight_prompts(partition_id)
         assert reissued == 3
@@ -290,7 +293,7 @@ def test_reissue_noop_without_inflight(tq_init, partition_id):
     _submit_prompt(partition_id, finished, "finished", global_steps=1)
     _submit_prompt(partition_id, failure, "failure", global_steps=1)
 
-    stub = _make_trainer_stub()
+    stub = _make_dataloader_stub()
     try:
         assert stub._reissue_inflight_prompts(partition_id) == 0
         assert stub.agent_loop_manager.batches == []
@@ -300,27 +303,15 @@ def test_reissue_noop_without_inflight(tq_init, partition_id):
 
 def test_reissue_noop_on_empty_partition(tq_init, partition_id):
     """An empty (never-written) partition re-issues nothing and does not raise."""
-    stub = _make_trainer_stub()
+    stub = _make_dataloader_stub()
     assert stub._reissue_inflight_prompts(partition_id) == 0
     assert stub.agent_loop_manager.batches == []
-
-
-def test_reissue_noop_for_sync_mode(tq_init, partition_id):
-    """Sync mode never persists prompts, so re-issue is a guarded no-op even with in-flight prompts."""
-    _submit_prompt(partition_id, _uid(), "pending", global_steps=1)
-
-    stub = _make_trainer_stub(trainer_mode="sync")
-    try:
-        assert stub._reissue_inflight_prompts(partition_id) == 0
-        assert stub.agent_loop_manager.batches == []
-    finally:
-        _clear_partition(partition_id)
 
 
 # --------------------------------------------------------------------------- #
 # tq.save_checkpoint / tq.load_checkpoint round-trip
 #
-# These call the real TransferQueue checkpoint APIs (matching _save_checkpoint/_load_checkpoint).
+# These call the real TransferQueue checkpoint APIs (matching save_checkpoint/load_checkpoint).
 # --------------------------------------------------------------------------- #
 
 
@@ -375,7 +366,7 @@ def test_save_load_then_reissue_only_inflight(tq_init, partition_id, tmp_path):
     _clear_partition(partition_id)
     tq.load_checkpoint(ckpt_dir)
 
-    stub = _make_trainer_stub(global_steps=5)
+    stub = _make_dataloader_stub(global_steps=5)
     try:
         reissued = stub._reissue_inflight_prompts(partition_id)
         assert reissued == 1
@@ -386,9 +377,8 @@ def test_save_load_then_reissue_only_inflight(tq_init, partition_id, tmp_path):
         _clear_partition(partition_id)
 
 
-def test_save_load_terminal_only_counts_prompts_without_reissue(tq_init, partition_id, tmp_path):
-    """A terminal-only checkpoint re-issues nothing, yet its groups still fill the prefetch window,
-    so warmup must be gated on the prompt count rather than on the re-issue count."""
+def test_save_load_terminal_only_reissues_nothing(tq_init, partition_id, tmp_path):
+    """A terminal-only checkpoint restores its groups for sampling without re-issuing any of them."""
     finished = _uid()
     failure = _uid()
     _submit_prompt(partition_id, finished, "finished", global_steps=6)
@@ -400,10 +390,11 @@ def test_save_load_terminal_only_counts_prompts_without_reissue(tq_init, partiti
     _clear_partition(partition_id)
     tq.load_checkpoint(ckpt_dir)
 
-    stub = _make_trainer_stub(global_steps=7)
+    stub = _make_dataloader_stub(global_steps=7)
     try:
-        assert trainer_base._count_tq_prompt_groups(partition_id) == 2
         assert stub._reissue_inflight_prompts(partition_id) == 0
         assert stub.agent_loop_manager.batches == []
+        assert _prompt_status(partition_id, finished) == "finished"
+        assert _prompt_status(partition_id, failure) == "failure"
     finally:
         _clear_partition(partition_id)
