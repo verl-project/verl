@@ -83,6 +83,8 @@ async def parallel_compute_score_async(
             scores.append(0.0)
         elif isinstance(result, int | float | bool):
             scores.append(float(result))
+        elif isinstance(result, dict):
+            scores.append(float(result["score"]))
         else:
             scores.append(float(result[0]))
     return scores
