@@ -162,17 +162,23 @@ class CheckpointHandler:
 
         # Use checkpoint manager to load model state
         self.engine.load_checkpoint(checkpoint_path)
-        # Always load dataloader state for StatefulDataLoader
-        self._load_dataloader_state(checkpoint_path)
+        # Restore the dataloader position unless the trainer starts a new epoch.
+        self._load_dataloader_state(checkpoint_path, resume_step)
 
         return resume_step
 
-    def _load_dataloader_state(self, checkpoint_path: str):
+    def _load_dataloader_state(self, checkpoint_path: str, resume_step: int):
         """Load dataloader state from checkpoint"""
         dp_rank = self.dp_rank
         dataloader_path = os.path.join(checkpoint_path, f"data_{dp_rank}.pt")
 
         if os.path.exists(dataloader_path):
+            steps_per_epoch = len(self.train_dataloader)
+            if resume_step > 0 and steps_per_epoch > 0 and resume_step % steps_per_epoch == 0:
+                # The trainer starts the next epoch; restoring an exhausted
+                # iterator would skip that epoch without running any updates.
+                return
+
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = torch.load(dataloader_path, map_location="cpu", weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
