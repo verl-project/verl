@@ -1,0 +1,54 @@
+evaluation:
+  data_dirs: null                # List of Paths
+  output_dir: null               # output filename is output_dir / experiment_name
+  experiment_name: null
+  split_groups: false            # {True, False, [param.a, param.b, ...]} create additional plots where the data is grouped by the given parameter; True to detect all params with multiple unique values
+  aggregate_groups:              # groups over which to aggregate values and compute mean/std. Default: [engine.seed]
+    - engine.seed
+  depth: 1                       # the depth of the trial dirs relative to the given data_dirs
+  checkpoints: [best, last]      # which model checkpoint to use
+  output_types: [pdf, png, csv]  # choose all you want from {csv, pdf, png} and put it in brackets
+  verbose: False                 # debug prints
+  column_split_key: optimizer.name  # if set, will split the dataframe and plot it in columns. Default: optimizer.name
+  column_split_order: null        # sets the order in which the columns are plotted.
+
+  # keeping the values on null -> automatically figure it out if possible, or let matplotlib decide
+  plot:
+    x_axis:                      # indices on x axis (same order as order of subigures given in data_dirs)
+      - optimizer.weight_decay
+    y_axis:                      # indices on y axis (same order as order of subigures given in data_dirs)
+      - optimizer.learning_rate
+    metric: null                 # is automatically chosen from task name, this will overwrite it
+    limits: null                 # sets the limits for the colormap, 2 ints, order does not matter, leave empty for automatic
+    std: True                    # show std over aggregated values
+    aggfunc: std                 # for example {std, var, sem} which function to use to aggregate over the seeds; will only be used when 'std' is set to true
+    # format:
+    #  string, how many digits to display, expects two values seperated by a dot (e.g. "2.3")
+    #  to make accuracy -> percent use a '2' in front of the dot
+    #  to display 3 digits after the decimal point, write a '3' behind the dot
+    format: null                 # for example {"2.0", "2.1", "2.3", "0.2", ...}
+    single_file: true            # if true, save all heatmaps in one file. 'split_groups' are represented as rows.
+
+  plotstyle:
+    tight_layout: True
+    text:
+      usetex: True               # you can give latex code in the yaml: $\sqrt{\pi \cdot \sigma}$ but some cluster dont have it installed# the font in the tiles of the matrix
+
+    # general font
+    font:
+      family: "serif"            # matplotlib {serif, sans-serif, cursive, fantasy, monospace}
+      size: 14
+
+    # the font in the tiles of the matrix
+    matrix_font:
+      size: 12
+
+    scale: 1.0                   # scales *figsize* argument by this value, useful for ".png"
+    color_palette: "rocket"
+    dpi: 300
+
+  # the name of the files storing the hyperparameters of the experiments and the scores
+  experiment_files:
+    best_model: results_best_model.json
+    last_model: results_final_model.json
+    config: config.yaml
