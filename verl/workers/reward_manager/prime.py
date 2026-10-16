@@ -83,6 +83,10 @@ async def parallel_compute_score_async(
             scores.append(0.0)
         elif isinstance(result, int | float | bool):
             scores.append(float(result))
+        elif isinstance(result, dict):
+            # Reward functions like math_dapo / rlla return {"score": ...}; float(result[0])
+            # would raise KeyError, which verify() silently turns into 0.0 for the whole batch.
+            scores.append(float(result["score"]))
         else:
             scores.append(float(result[0]))
     return scores
