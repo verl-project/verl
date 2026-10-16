@@ -86,10 +86,25 @@ def is_quantized_model(vllm_config):
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
+        elif is_vllm_modelopt_mxfp8_quant(vllm_config.quant_config):
+            return True
         elif is_vllm_ascend_mx_quant(vllm_config.quant_config):
             return True
 
     return False
+
+
+def is_vllm_modelopt_mxfp8_quant(quant_config):
+    """Whether quant_config is vLLM's ModelOpt MXFP8 config (``modelopt_mxfp8``).
+
+    The stock-vLLM MXFP8 path; vllm-ascend's MX configs are matched by ``is_vllm_ascend_mx_quant``.
+    """
+    try:
+        from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+    except ImportError:
+        # Older vLLM without MXFP8 support
+        return False
+    return isinstance(quant_config, ModelOptMxFp8Config)
 
 
 # vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
@@ -203,6 +218,12 @@ def get_module_from_param_name(model, name: str):
 _FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_proj"})
 
 
+# TODO(mxfp8): decide from the dtype of the parameter that receives ``name`` instead of the module
+# class. Only ``LinearBase`` and fused-MoE expert modules are recognized below, but vLLM's ModelOpt
+# config also quantizes ``ParallelLMHead`` unless it is excluded. Such a layer reads as not fp8, so
+# ``quant_weights`` passes its bf16 weight through (the loader casts it into the E4M3 parameter) and
+# never sends its ``weight_scale``; a freshly staged scale buffer keeps its 0xFF fill, the UE8M0 NaN
+# code. This is why ``lm_head`` stays out of MXFP8 (``MXFP8_KEEP_HIGH_PRECISION_LAYERS``).
 def is_fp8_weight(name, model):
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
@@ -343,6 +364,13 @@ def _classify_quant_weight(name, model, is_ascend_mx):
     return None
 
 
+# TODO(mxfp8): for a disaggregated trainer and rollout, quantize on the trainer and send MXFP8 weights
+# plus scales. This path receives bf16 and quantizes here (verl's existing vLLM FP8 refit design), so a
+# sync moves bf16 bytes. Sender side: quantize the post-update bf16 weights with TE's MXFP8Quantizer as
+# the SGLang path does, ask the engine which parameters it holds in fp8 rather than re-deriving a name
+# rule, and load E4M3 + weight_scale through the same staged buffers. TE's cached fp8 weights are not a
+# substitute: they are refreshed on the next forward pass (and dropped on offload), so at sync time they
+# can still hold the weights from before the last optimizer step.
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """Quantize weights to FP8 format using a memory-efficient generator.
 
@@ -364,8 +392,11 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
     is_ascend_mx = is_vllm_ascend_mx_quant(quant_config)
+    is_modelopt_mxfp8 = is_vllm_modelopt_mxfp8_quant(quant_config)
     if is_ascend_mx:
         import torch_npu
+    if is_modelopt_mxfp8:
+        from verl.utils.mxfp8_quant import mxfp8_quantize
     for k, v in weights:
         quant_type = _classify_quant_weight(k, model, is_ascend_mx)
         if quant_type is None:
@@ -374,7 +405,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
         # Cast the weight into quantized format and its scale factor
         if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to {quant_type} blockwise: {k}")
+            logger.debug(f"Quantizing to {'mxfp8' if is_modelopt_mxfp8 else quant_type + ' blockwise'}: {k}")
         if quant_type in ("mx_fp8", "mx_fp4"):
             dst_type = torch_npu.float4_e2m1fn_x2 if quant_type == "mx_fp4" else torch_npu.float8_e4m3fn
             param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
@@ -383,22 +414,28 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
                 dst_type=dst_type,
             )
             param_scale = param_scale.flatten(-2, -1)
+            param_scale = param_scale.squeeze(-1)
             if quant_type == "mx_fp4":
                 # W4A8 params are uint8 holding packed FP4 pairs; the mx quant
                 # op returns those bytes as float4_e2m1fn_x2, so reinterpret
                 # them as uint8 to match the parameter dtype.
                 param_lp = param_lp.view(torch.uint8)
+        elif is_modelopt_mxfp8:
+            # TE MXFP8Quantizer: the same quantizer the trainer's FP8 GEMMs use
+            # under fp8_recipe="mxfp8", so rollout serves the training weight
+            # grid. Scale is already compact 2D [n, k // 32] uint8 UE8M0.
+            param_lp, param_scale = mxfp8_quantize(v.to(dtype))
         else:
             param_lp, param_scale = scaled_fp8_blockwise(
                 v.to(dtype),
                 weight_block_size=quant_config.weight_block_size,
             )
-        param_scale = param_scale.squeeze(-1)
+            param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
         yield (k, param_lp)
 
-        if is_ascend_mx:
+        if is_ascend_mx or is_modelopt_mxfp8:
             yield (k + "_scale", param_scale)
         else:
             yield (k + "_scale_inv", param_scale)
@@ -483,8 +520,11 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
 
 
 def apply_vllm_quant_patches():
-    """Install the vLLM patches the refit path depends on. Must run pre-engine.
+    """Install vLLM refit patches before engine setup and quant config parsing.
 
+    The opt-in ModelOpt MXFP8 parser wrapper must run when the HF quant config
+    is parsed, so do not defer installation until after parsing. Each model-
+    building worker also needs the patches before constructing layers.
     These have to be in place before the engine builds, because recording each
     layer's checkpoint layout happens inside the patched hook during the
     initial load. The mxfp4 path needs no startup patch -- it derives the
