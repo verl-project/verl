@@ -25,7 +25,8 @@ import re
 from typing import Generator, Iterable, Optional
 
 import torch
-from compressed_tensors.compressors.quantized_compressors.fp4_quantized import NVFP4PackedCompressor
+from compressed_tensors.compressors import NVFP4PackedCompressor
+from compressed_tensors.quantization import QuantizationScheme
 from compressed_tensors.quantization.quant_args import (
     FP4_E2M1_DATA,
     FP8_E4M3_DATA,
@@ -145,6 +146,7 @@ class QATQuantizer:
             group_size=group_size,
             scale_dtype=FP8_E4M3_DATA.dtype,
         )
+        self._quant_scheme = QuantizationScheme(targets=["Linear"], weights=self._quant_args)
 
     def _should_quantize(self, name: str, tensor: torch.Tensor) -> bool:
         """Check if parameter should be quantized."""
@@ -227,11 +229,13 @@ class QATQuantizer:
         for layer_name, weight_gpu in weights_on_gpu.items():
             fused_global_scale = fused_global_scales[layer_name]
             weight_scale = compute_blockwise_scale(weight_gpu, fused_global_scale, self.group_size)
-            weight_packed = self._compressor.compress_weight(
-                weight=weight_gpu,
-                scale=weight_scale.float(),
-                global_scale=fused_global_scale,
-                quantization_args=self._quant_args,
+            weight_packed = self._compressor.compress(
+                {
+                    "weight": weight_gpu,
+                    "weight_scale": weight_scale.float(),
+                    "weight_global_scale": fused_global_scale,
+                },
+                self._quant_scheme,
             )["weight_packed"]
 
             results.append((f"{layer_name}.weight_packed", weight_packed.to(output_device)))
