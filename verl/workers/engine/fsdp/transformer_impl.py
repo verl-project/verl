@@ -1064,8 +1064,11 @@ class FSDPEngine(BaseEngine):
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
-    def _merged_lora_per_tensor_param(self):
-        """Stream merged (base + LoRA) weights for rollout weight sync.
+    def _merged_lora_per_tensor_param(self, dtype: Optional[torch.dtype] = torch.bfloat16):
+        """Stream merged (base + LoRA) weights for rollout weight sync or HF export.
+
+        ``dtype=None`` preserves stored precision so the HF exporter can apply
+        its own dtype policy, including mixed-precision exclusions.
 
         ``state_dict()`` returns tensors that alias the live FSDP parameter
         storage, and ``merged_lora_context`` restores the un-merged base
@@ -1083,7 +1086,8 @@ class FSDPEngine(BaseEngine):
                 for name, param in params.items():
                     yield (
                         name,
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        # Finish staging CPU shards before the context can restore their storage.
+                        param.to(device).full_tensor().to(dtype=dtype, non_blocking=True)
                         if isinstance(param, DTensor)
                         # clone: plain tensors also alias module storage, and bucketed
                         # senders may flush after the restore has already run
@@ -1098,7 +1102,7 @@ class FSDPEngine(BaseEngine):
     def _get_hf_export_per_tensor_param(self):
         """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
         if self._is_lora:
-            return self._merged_lora_per_tensor_param(), None
+            return self._merged_lora_per_tensor_param(dtype=None), None
         return self.get_per_tensor_param()
 
     def disable_adapter(self) -> ContextManager:
