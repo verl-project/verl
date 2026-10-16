@@ -15,6 +15,7 @@
 import copy
 import heapq
 from itertools import chain
+from numbers import Real
 
 import torch
 from torch import distributed as dist
@@ -44,6 +45,17 @@ def calculate_workload(seqlen_list: torch.Tensor) -> torch.Tensor:
         Useful for balancing computation across data parallel ranks.
     """
     return 24576 * seqlen_list + seqlen_list**2
+
+
+def calculate_workload_as_list(seqlen_list: torch.Tensor) -> list[Real]:
+    """Calculate workloads as host scalars for Python-native partitioning."""
+    workloads = calculate_workload(seqlen_list)
+    if workloads.is_floating_point():
+        # Keep floating-point accumulation in the source dtype. Converting to
+        # Python float would silently promote float32 sums to float64 and can
+        # change Karmarkar-Karp tie-breaking for nearly balanced partitions.
+        return list(workloads.detach().cpu().numpy())
+    return workloads.tolist()
 
 
 def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool) -> list[list[int]]:
@@ -77,12 +89,22 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool) 
 
         def add(self, idx: int, val: int):
             self.items.append((idx, val))
-            self.sum += val
+            # NumPy 1.x promotes ``0 + np.float32`` to float64, while NumPy 2.x
+            # preserves float32. Seed NumPy floating sums from their first
+            # scalar so partition tie-breaking is version-independent.
+            if len(self.items) == 1 and getattr(getattr(val, "dtype", None), "kind", None) == "f":
+                self.sum = val
+            else:
+                self.sum += val
 
         def merge(self, other):
             for idx, val in other.items:
+                # Keep the same first-scalar rule inline in this hot loop.
+                if not self.items and getattr(getattr(val, "dtype", None), "kind", None) == "f":
+                    self.sum = val
+                else:
+                    self.sum += val
                 self.items.append((idx, val))
-                self.sum += val
 
         def __lt__(self, other):
             if self.sum != other.sum:
