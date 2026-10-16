@@ -140,7 +140,11 @@ def compute_topk_loss(
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            if distillation_config.distillation_loss.loss_mode == "resopd":
+                distillation_loss_fn = fsdp_losses.compute_resopd
         case "megatron":
+            if distillation_config.distillation_loss.loss_mode == "resopd":
+                raise NotImplementedError("ResOPD supports eager FSDP/FSDP2/VeOmni student logits")
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
             distillation_loss_fn = megatron_losses.compute_forward_kl_topk
@@ -160,6 +164,40 @@ def compute_topk_loss(
         assert v.shape == expected_shape, f"Expected shape {expected_shape}, but got {v.shape} for {k=}."
 
     return outputs
+
+
+@register_distillation_loss(DistillationLossSettings(names="resopd", use_topk=True))
+def collect_resopd(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Restore response alignment and collect masked ResOPD diagnostics."""
+    names = (
+        "distillation_losses",
+        "student_mass",
+        "teacher_mass",
+        "resopd_head_hit",
+        "resopd_centered_event",
+        "resopd_tail_log_ratio",
+    )
+    missing = set(names) - model_output.keys()
+    if missing:
+        raise ValueError(f"Missing ResOPD logits-processor outputs {sorted(missing)}; disable fused kernels")
+    padded = {name: no_padding_2_padding(model_output[name], data) for name in names}
+    mask = data["response_mask"].bool()
+    if mask.is_nested:
+        mask = mask.to_padded_tensor(False)
+    metrics = {}
+    for name, value in padded.items():
+        if value.shape != mask.shape:
+            raise ValueError(f"ResOPD output {name} has shape {value.shape}, expected {mask.shape}")
+        if name != "distillation_losses":
+            valid = value[mask].detach().float()
+            mean = valid.mean() if valid.numel() else value.new_tensor(0.0)
+            metrics[f"distillation/{name}"] = Metric(AggregationType.MEAN, mean)
+    return padded["distillation_losses"], metrics
 
 
 def distillation_ppo_loss(

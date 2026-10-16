@@ -49,12 +49,17 @@ def _get_teacher_sampling_params(
             teacher_model_config.inference.temperature,
         )
     num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
-    return {
+    sampling_params = {
         "max_tokens": 1,
         "temperature": 1.0,
         "prompt_logprobs": num_logprobs,
         "detokenize": False,
     }
+    if distillation_loss_config.loss_mode == "resopd":
+        if teacher_model_config.inference.name != "vllm":
+            raise NotImplementedError("ResOPD requires a vLLM teacher")
+        sampling_params["include_prompt_token"] = True
+    return sampling_params
 
 
 def _pad_teacher_outputs(
@@ -136,8 +141,8 @@ class AsyncTeacherLLMServerManager:
             mm_processor_output=mm_processor_output,
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
-        # the distillation loss settings.
+        # Shape [S, K] (or [S, 1] for sampled-only losses). ResOPD appends the
+        # observed token in column K, retaining the same two-tensor transport.
         teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)

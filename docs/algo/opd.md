@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 05/26/2026.
+Last updated: 10/14/2026.
 
 ## Background
 
@@ -55,7 +55,62 @@ In practice, the sampled rollout is treated as fixed during the student update. 
 
 ### Loss Variants
 
-We implement two OPD variants.
+Supported variants are described below.
+
+#### ResOPD
+
+[ResOPD: Tail Residualization for Sparse On-Policy Distillation](https://arxiv.org/abs/2610.04882)
+estimates the full-vocabulary reverse-KL gradient using teacher top-k probabilities
+and the teacher score of the actual student-sampled token. It integrates the head
+and aggregate tail contributions exactly and samples only the within-tail residual.
+The implementation is adapted from the [authors' release](https://github.com/InternLM/ResOPD).
+
+For student probabilities $p$, teacher probabilities $q$, teacher top-k support $S$,
+and action $A\sim p$, let $r_i=\log(p_i/q_i)$, $s_i=\nabla\log p_i$,
+$\tau_p=1-\sum_{i\in S}p_i$, and $\tau_q=1-\sum_{i\in S}q_i$. The estimator is
+
+$$
+\widehat g=\sum_{i\in S}p_i r_i s_i+\tau_p\mu_B
++\mathbf{1}[A\notin S](r_A s_A-\mu_B),\qquad
+\mu_B=\log(\tau_p/\tau_q)\nabla\log\tau_p.
+$$
+
+`loss_mode=resopd` uses a stopped-coefficient surrogate with this backward gradient.
+Its logged forward value can be negative and must not be clipped. FP16/BF16 logits
+are promoted to FP32; tail masses are clamped at machine epsilon for numerical stability.
+
+Add these overrides to an existing synchronous FSDP/FSDP2 OPD configuration:
+
+```yaml
+distillation:
+  enabled: true
+  distillation_loss:
+    loss_mode: resopd
+    topk: 4
+    use_task_rewards: false
+    use_policy_gradient: false
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+actor_rollout_ref:
+  model:
+    use_fused_kernels: false
+  actor:
+    use_torch_compile: false
+    ppo_epochs: 1
+    ppo_mini_batch_size: ${data.train_batch_size}
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+```
+
+Use a vLLM teacher with the same token-ID vocabulary as the student, and keep
+`use_chunked_topk=false`. Eager FSDP/FSDP2/VeOmni logits are supported; Megatron
+and fused loss kernels are not supported. The teacher appends the observed token
+as column K of the existing `teacher_ids` / `teacher_logprobs` tensors, retaining
+the first K columns as the top-k support, even when the observed token is in it.
+vLLM already returns this score; no additional teacher query is needed.
 
 #### GKD OPD
 

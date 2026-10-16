@@ -23,6 +23,28 @@ from verl.utils.ulysses import (
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
+def compute_resopd(
+    student_logits: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    teacher_topk_ids: torch.Tensor,
+    config: DistillationConfig,
+    data_format: str = "thd",
+) -> dict[str, torch.Tensor]:
+    """Unpack top-k plus observed-token scores and align with the student's SP shard."""
+    from verl.trainer.distillation.resopd import resopd_loss
+
+    if not teacher_topk_ids.is_nested or not teacher_topk_log_probs.is_nested:
+        raise ValueError("ResOPD expects nested teacher tensors")
+    ids = teacher_topk_ids.values().unsqueeze(0)
+    log_probs = teacher_topk_log_probs.values().unsqueeze(0)
+    if ids.shape[-1] != config.distillation_loss.topk + 1:
+        raise ValueError("ResOPD requires teacher top-k followed by the observed token")
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        ids = slice_input_tensor(ids, dim=1, padding=True)
+        log_probs = slice_input_tensor(log_probs, dim=1, padding=True)
+    return resopd_loss(student_logits, log_probs[..., :-1], ids[..., :-1], log_probs[..., -1:], ids[..., -1:])
+
+
 def _chunked_topk_log_probs(
     logits: torch.Tensor,
     topk_ids: torch.Tensor,
