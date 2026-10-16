@@ -504,6 +504,48 @@ def rearrange_micro_batches(
     return micro_batches, micro_bsz_idx
 
 
+def rearrange_micro_batches_padded(batch, max_token_len, dp_group=None, same_micro_num_in_dp=True):
+    """Like ``rearrange_micro_batches``, but bounds the padded size (B x longest sample) of each micro-batch."""
+    input_ids = batch["input_ids"]
+    if input_ids.is_nested:
+        lens = input_ids.offsets().diff().cpu().tolist()
+    else:
+        lens = batch["attention_mask"].sum(dim=1).cpu().tolist()
+    order = sorted(range(len(lens)), key=lambda i: lens[i])
+    sl = [lens[i] for i in order]
+    assert max_token_len >= sl[-1], f"max_token_len must be >= the longest sample: {max_token_len=} {sl[-1]=}"
+
+    # contiguous groups of the sorted lengths; a group costs its size x its longest length
+    def cut(bound):
+        groups, start = [], 0
+        for j in range(len(sl)):
+            if j > start and (j - start + 1) * sl[j] > bound:
+                groups.append((start, j))
+                start = j
+        return groups + [(start, len(sl))]
+
+    num = len(cut(max_token_len))
+    if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
+        t = torch.tensor([num], device=get_device_name())
+        dist.all_reduce(t, op=dist.ReduceOp.MAX, group=dp_group)
+        num = int(t.item())
+    assert num <= len(sl), f"{num} micro-batches requested for {len(sl)} samples"
+    lo, hi = sl[-1], max_token_len  # smallest bound that needs at most num groups
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if len(cut(mid)) <= num else (mid + 1, hi)
+    groups = cut(lo)
+    while len(groups) < num:  # DP sync asked for more groups: split the costliest one
+        k = max(
+            (g for g in range(len(groups)) if groups[g][1] - groups[g][0] > 1),
+            key=lambda g: (groups[g][1] - groups[g][0]) * sl[groups[g][1] - 1],
+        )
+        s, e = groups[k]
+        groups[k : k + 1] = [(s, (s + e) // 2), ((s + e) // 2, e)]
+    micro_bsz_idx = [[order[j] for j in range(s, e)] for s, e in groups]
+    return [tu.index_select_tensor_dict(batch, p) for p in micro_bsz_idx], micro_bsz_idx
+
+
 def get_reverse_idx(idx_map):
     """
     Build the inverse of an index mapping.

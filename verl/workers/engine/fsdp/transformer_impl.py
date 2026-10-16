@@ -15,6 +15,7 @@
 The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
+import inspect
 import logging
 import os
 import warnings
@@ -33,6 +34,7 @@ from torch.distributed.tensor import DTensor
 import verl.utils.torch_functional as verl_F
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
+from verl.utils import fsdp_sharded_init
 from verl.utils import tensordict_utils as tu
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -109,6 +111,9 @@ class FSDPEngine(BaseEngine):
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
+
+    # VeOmni replays routing through its own hook.
+    routed_experts_as_model_input: bool = True
 
     def __init__(
         self,
@@ -270,6 +275,8 @@ class FSDPEngine(BaseEngine):
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
         )
+        if fsdp_sharded_init.ENABLED:
+            init_context = lambda: torch.device("meta")  # noqa: E731
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -277,12 +284,19 @@ class FSDPEngine(BaseEngine):
             if self.model_config.model_type == "language_model":
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
-                module = auto_class.from_pretrained(
-                    pretrained_model_name_or_path=self.model_config.local_path,
-                    torch_dtype=torch_dtype,
-                    config=self.model_config.hf_config,
-                    trust_remote_code=self.model_config.trust_remote_code,
-                )
+                if fsdp_sharded_init.ENABLED:
+                    module = auto_class.from_config(
+                        self.model_config.hf_config,
+                        torch_dtype=torch_dtype,
+                        trust_remote_code=self.model_config.trust_remote_code,
+                    )
+                else:
+                    module = auto_class.from_pretrained(
+                        pretrained_model_name_or_path=self.model_config.local_path,
+                        torch_dtype=torch_dtype,
+                        config=self.model_config.hf_config,
+                        trust_remote_code=self.model_config.trust_remote_code,
+                    )
 
                 # Strip sub-modules listed in _verl_strip_modules (e.g.
                 # talker / code2wav for Qwen3-Omni Thinker-only training).
@@ -383,6 +397,8 @@ class FSDPEngine(BaseEngine):
                     )
                     for param in mismatched:
                         param.data = param.data.to(base_dtype)
+            if fsdp_sharded_init.ENABLED:
+                self._sharded_init_lora = fsdp_sharded_init.init_lora_on_cpu(module, base_dtype)
 
         return module
 
@@ -472,9 +488,15 @@ class FSDPEngine(BaseEngine):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.engine_config)
-            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            if fsdp_sharded_init.ENABLED:
+                apply_fsdp2(module, fsdp_kwargs, self.engine_config)
+                fsdp_sharded_init.load_sharded(
+                    module, self.model_config.local_path, self.__dict__.pop("_sharded_init_lora", {}), get_device_id()
+                )
+            else:
+                full_state = module.state_dict()
+                apply_fsdp2(module, fsdp_kwargs, self.engine_config)
+                fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 
@@ -1003,6 +1025,8 @@ class FSDPEngine(BaseEngine):
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
                 peft_config = peft_model.peft_config.get("default", None)
+                if base_sync_done and hasattr(peft_model.get_base_model(), "export_serving_lora"):
+                    return self._stream_serving_lora(peft_model, peft_config), peft_config.to_dict()
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,
@@ -1063,6 +1087,31 @@ class FSDPEngine(BaseEngine):
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
+
+    def _stream_serving_lora(self, peft_model, peft_config):
+        """Adapter-only sync of a model-native LoRA (``export_serving_lora``), gathered one LoRA module at a time."""
+        assert fsdp_version(self.module) == 2, "model-native LoRA export needs FSDP2"
+        from peft.utils.save_and_load import get_peft_model_state_dict
+
+        from verl.utils.torch_dtypes import PrecisionType
+
+        base_model = peft_model.get_base_model()
+        scaling = peft_config.lora_alpha / peft_config.r
+        dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
+        wrapped = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        groups = {}
+        for name, param in get_peft_model_state_dict(peft_model).items():
+            groups.setdefault(name.split(".lora_")[0], []).append((name, param))
+        for items in groups.values():
+            full = {
+                name: (param.full_tensor() if isinstance(param, DTensor) else param).detach().float()
+                for name, param in items
+            }
+            out = convert_weight_keys(base_model.export_serving_lora(full, scaling), wrapped)
+            del full
+            for name, tensor in out.items():
+                yield name, tensor.to(dtype).contiguous()
+            del out
 
     def _merged_lora_per_tensor_param(self):
         """Stream merged (base + LoRA) weights for rollout weight sync.
@@ -1336,10 +1385,38 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # mirrors what the veomni engine already does for fused kernels.
                 extra_args["shift_labels"] = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
 
+        if self.routed_experts_as_model_input and tu.get_non_tensor_data(
+            data=micro_batch, key="enable_routing_replay", default=False
+        ):
+            model_inputs["routed_experts"] = self._pack_routed_experts(micro_batch, output_args, use_remove_padding)
+
         model_inputs.update(multi_modal_inputs)
         model_inputs.update(extra_args)
 
         return model_inputs, output_args
+
+    def _pack_routed_experts(self, micro_batch: TensorDict, output_args: dict, use_remove_padding: bool):
+        """R3: the rollout's top-k expert ids laid out like ``input_ids``; all-zero rows are routed natively."""
+        model = getattr(self.module, "module", self.module)
+        model = model.get_base_model() if hasattr(model, "get_base_model") else model
+        routed = micro_batch.get("routed_experts", None)
+        if (
+            self.use_ulysses_sp
+            or routed is None
+            or routed.size(-1) < 2
+            or "routed_experts" not in inspect.signature(model.forward).parameters
+        ):
+            raise NotImplementedError(
+                "FSDP router replay (R3) needs ulysses_sequence_parallel_size=1, "
+                "rollout.enable_rollout_routing_replay=True, topk > 1 and a model whose forward takes `routed_experts`."
+            )
+        if not use_remove_padding:
+            max_seq_len = int(micro_batch["input_ids"].offsets().diff().max().item())
+            shape = (micro_batch.batch_size[0], max_seq_len, *routed.values().shape[1:])
+            return torch.nested.to_padded_tensor(routed.to(torch.int64), padding=0, output_size=shape)
+        routed = routed.values().to(torch.int64)
+        pad = routed.new_zeros((int(output_args["pad_size"]), *routed.shape[1:]))
+        return torch.cat([routed, pad]).unsqueeze(0)
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)

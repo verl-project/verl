@@ -123,3 +123,12 @@ turbo_config:
       fsdp_implementation: native
       num_to_forward_prefetch: 1
       num_to_backward_prefetch: 1
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.EngineRouterReplayConfig
+
+  # Router replay mode: disabled, R3 (the model takes `routed_experts` as a forward argument)
+  mode: disabled

@@ -25,7 +25,7 @@ from verl.utils.device import is_npu_available
 from verl.utils.device import manual_seed as device_manual_seed
 from verl.utils.device import manual_seed_all as device_manual_seed_all
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import rearrange_micro_batches, restore_dynamic_batch
+from verl.utils.seqlen_balancing import rearrange_micro_batches, rearrange_micro_batches_padded, restore_dynamic_batch
 
 
 def enable_full_determinism(seed: int):
@@ -109,6 +109,15 @@ def prepare_micro_batches(
         assert "max_token_len_per_gpu" in data.keys(), "max_token_len_per_gpu must be set when use_dynamic_bsz is True"
         max_token_len_per_gpu = data["max_token_len_per_gpu"]
         max_token_len = max_token_len_per_gpu * sp_size
+        if (
+            not tu.get_non_tensor_data(data=data, key="use_remove_padding", default=True)
+            and force_group_size == 1
+            and num_batches_divided_by is None
+            and min_num_micro_batch is None
+        ):
+            return rearrange_micro_batches_padded(
+                data, max_token_len=max_token_len, dp_group=dp_group, same_micro_num_in_dp=same_micro_num_in_dp
+            )
         micro_batches, batch_idx_list = rearrange_micro_batches(
             data,
             max_token_len=max_token_len,

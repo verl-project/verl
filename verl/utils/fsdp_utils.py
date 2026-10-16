@@ -579,6 +579,15 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
 
+    # HF `_keep_in_fp32_modules` (e.g. an fp32 MoE router) become their own FSDP units without the param dtype cast.
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    keep_fp32 = getattr(base, "_keep_in_fp32_modules", None) or []
+    if keep_fp32 and fsdp_kwargs.get("mp_policy") is not None:
+        fp32_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        for name, module in model.named_modules():
+            if any(name.endswith("." + pattern) for pattern in keep_fp32):
+                fully_shard(module, **{**fsdp_kwargs, "mp_policy": fp32_policy})
+
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
         #     print(f"wrap module {module.__class__.__name__}")

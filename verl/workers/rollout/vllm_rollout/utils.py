@@ -191,9 +191,11 @@ class vLLMColocateWorkerExtension:
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_quantized_model(vllm_config):
             apply_vllm_quant_patches()
         # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
+        # an unmerged LoRA adapter keeps the quantized base frozen: not QAT
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
-        _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
-        _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
+        lora_adapter = getattr(vllm_config, "lora_config", None) is not None
+        _is_qat_model = not lora_adapter and getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        _is_modelopt_qat = not lora_adapter and type(quant_config).__name__ == "ModelOptNvFp4Config"
         if _is_qat_model:
             from verl.utils.qat import apply_qat_patches
 
@@ -319,8 +321,11 @@ class vLLMColocateWorkerExtension:
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
             if lora_weights is not None:
-                # Clone: add_lora keeps these past the callback (reused IPC buffer, #6454).
-                lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                # copy out of the reused IPC bucket (#6454) to pinned host memory: a MoE adapter does not fit on the GPU
+                for name, tensor in weights:
+                    host = torch.empty_like(tensor, device="cpu", pin_memory=True)
+                    lora_weights[name] = host.copy_(tensor, non_blocking=True)
+                torch.cuda.current_stream().synchronize()
                 if not is_last:
                     return
                 self._update_weights(
@@ -329,6 +334,7 @@ class vLLMColocateWorkerExtension:
                     base_sync_done=base_sync_done,
                 )
                 lora_weights.clear()
+                torch._C._host_emptyCache()
                 return
             self._update_weights(
                 weights,
@@ -364,6 +370,13 @@ class vLLMColocateWorkerExtension:
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
 
+    def _release_host_lora_copy(self, lora_int_id: int) -> None:
+        """Drop vLLM's host copy of the active adapter; with one slot it is never re-activated."""
+        lora_model = self.model_runner.lora_manager._adapter_manager._registered_adapters[lora_int_id]
+        torch.cuda.synchronize()  # set_lora copies from these host tensors asynchronously
+        for lora in lora_model.loras.values():
+            lora.lora_a = lora.lora_b = None
+
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
 
@@ -383,9 +396,7 @@ class vLLMColocateWorkerExtension:
         base_sync_done: bool,
     ):
         if peft_config and base_sync_done:
-            # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
-            # past this callback, so views into the freed/overwritten buffer crash later (#6454).
-            weights = {name: tensor.clone() for name, tensor in weights}
+            weights = dict(weights)
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
@@ -394,6 +405,7 @@ class vLLMColocateWorkerExtension:
                 lora_tensors=weights,
             )
             self.add_lora(lora_request)
+            self._release_host_lora_copy(VLLM_LORA_INT_ID)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
