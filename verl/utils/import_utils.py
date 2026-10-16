@@ -19,6 +19,7 @@ We assume package availability won't change during runtime.
 import importlib
 import importlib.util
 import os
+import sys
 import warnings
 from functools import cache, wraps
 from typing import Optional
@@ -161,8 +162,8 @@ def load_module(module_path: str, module_name: Optional[str] = None) -> object:
                     - "file://verl/utils/dataset/rl_dataset.py"
                     - "/path/to/verl/utils/dataset/rl_dataset.py"
         module_name (str, optional):
-            The name of the module to added to ``sys.modules``. If not provided, the module will not be added,
-                thus will not be cached and directly ``import``able.
+            The name under which to cache the module in ``sys.modules``. If not provided, the module is registered
+            only while it executes and is not cached or directly importable afterward.
     """
     if not module_path:
         return None
@@ -184,21 +185,36 @@ def load_module(module_path: str, module_name: Optional[str] = None) -> object:
         if spec is None or spec.loader is None:
             raise ImportError(f"Could not load module from {module_path=}")
 
+        # Match Python's import semantics by making the module visible while its
+        # code executes. Some decorators (notably dataclasses with postponed
+        # annotations) look up the module namespace through sys.modules.
+        missing = object()
+        previous_module = sys.modules.get(spec_name, missing)
+        if module_name is not None and previous_module is not missing:
+            raise RuntimeError(f"Module name '{module_name}' already exists in `sys.modules`.")
+
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec_name] = module
+        execution_succeeded = False
         try:
             spec.loader.exec_module(module)
+            execution_succeeded = True
         except Exception as e:
             raise RuntimeError(f"Error loading module from {module_path=}") from e
+        finally:
+            if module_name is None:
+                if previous_module is missing:
+                    sys.modules.pop(spec_name, None)
+                else:
+                    sys.modules[spec_name] = previous_module
+            elif not execution_succeeded:
+                # Match importlib by removing partially initialized modules.
+                sys.modules.pop(spec_name, None)
 
         if module_name is not None:
-            import sys
-
-            # Avoid overwriting an existing module with a different object.
-            if module_name in sys.modules and sys.modules[module_name] is not module:
-                raise RuntimeError(
-                    f"Module name '{module_name}' already in `sys.modules` and points to a different module."
-                )
-            sys.modules[module_name] = module
+            # Keep the returned module and the importable module in sync even if
+            # module initialization replaced its own sys.modules entry.
+            sys.modules[spec_name] = module
 
     return module
 
