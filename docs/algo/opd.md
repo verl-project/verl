@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 05/26/2026.
+Last updated: 09/22/2026.
 
 ## Background
 
@@ -446,6 +446,47 @@ distillation:
 ```
 
 Currently, only `policy_loss_mode=vanilla` is supported. Other policy-loss modes, such as `dppo_tv`, require additional parameters and are not implemented for OPD.
+
+### Comparison with the standalone GKD recipe
+
+The GKD OPD configuration above uses mainline verl. The separate
+[`verl-recipe/gkd`](https://github.com/verl-project/verl-recipe/tree/5451026758c3f1dc3ebc2a46a0e52b14406f0f72/gkd)
+implementation has a different loss interface. Mainline selects losses with
+`distillation.distillation_loss.loss_mode`; the recipe uses
+`actor_rollout_ref.actor.distill_loss.name`, with `rkl_ratio` and `beta` under
+the same `distill_loss` namespace. Its teacher server sets the top-$k$ size
+with `--n-logprobs`.
+
+The following compares the forward objectives in the
+[mainline registry](../../verl/trainer/distillation/losses.py) and the
+[recipe losses](https://github.com/verl-project/verl-recipe/blob/5451026758c3f1dc3ebc2a46a0e52b14406f0f72/gkd/megatron/megatron_distill_losses.py).
+Here, forward KL means teacher-to-student KL; reverse KL means student-to-teacher KL.
+
+| Implementation / mode | Token support and normalization | Forward objective |
+| --- | --- | --- |
+| Mainline `kl`, `k1` | One student-sampled token per state. | Sampled log-ratio $\log \pi_\theta(y_t)-\log \nu(y_t)$, estimating reverse KL. |
+| Mainline `abs`, `mse` / `k2`, `low_var_kl` / `k3` | The same sampled-token log-probabilities. | Alternative penalties/estimators from that log-ratio, rather than a vocabulary sum. |
+| Mainline `forward_kl_topk` | Teacher top-$k$ tokens; both models retain their full-vocabulary probabilities without renormalizing over top-$k$. | Truncated forward-KL sum shown above; the mainline loss wrapper clamps negative per-token values to zero. |
+| Recipe `kl` | Teacher top-$k$ tokens, without renormalization. | The same truncated forward-KL expression before mainline's clamping. |
+| Recipe `rkl` | Both models are renormalized over the **teacher's** top-$k$ tokens. | Reverse KL between these two normalized distributions. |
+| Recipe `kl_rkl` | Uses the respective supports/normalization of recipe `kl` and `rkl`. | `(1 - rkl_ratio) * kl + rkl_ratio * rkl`, with `rkl_ratio` clamped to `[0, 1]`. |
+| Recipe `jsd` | Original teacher top-$k$ probabilities, zero outside that set; full-vocabulary student probabilities, including an analytic term outside teacher top-$k$. No top-$k$ renormalization. | Generalized JSD with mixture $M=\beta\nu_{\mathrm{top}k}+(1-\beta)\pi_\theta$: teacher-to-mixture and student-to-mixture terms weighted by $\beta$ and $1-\beta$. |
+
+For mainline forward-KL distillation, use the GKD OPD example above
+(`forward_kl_topk`, `topk`, `use_policy_gradient=false`). For sampled reverse-KL
+policy-gradient distillation, use the PG OPD example (`k1`,
+`use_policy_gradient=true`). In particular, mainline `kl` is an alias of `k1`,
+not the recipe's forward-KL mode. Mainline has no directly equivalent mode for
+the recipe's `rkl`, `kl_rkl`, or `jsd`, and does not expose their mixture parameters.
+Shared forward expressions do not imply identical backward implementations or
+training updates; also check loss clamps, aggregation, and coefficients when migrating.
+
+The recipe's `jsd` clamps `beta` to `[1e-6, 1-1e-6]`, including when configured
+as `0` or `1`. These endpoints do not select its separate `kl` or `rkl` modes;
+choose those modes explicitly when needed. Changing `beta` changes both the
+divergence shape and raw loss/gradient scale. Near-zero raw JSD at an endpoint
+does not establish teacher/student agreement or absence of learning, and a
+smaller raw gradient does not by itself imply a proportionally smaller optimizer update.
 
 ### Task rewards
 
