@@ -14,13 +14,16 @@
 
 import asyncio
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
 
 import verl.trainer.ppo.v1.agent_loop_tq as agent_loop_tq_module
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
+from verl.protocol import DataProto
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session_tasks
+from verl.trainer.ppo.v1.utils import compute_advantage, compute_advantage_for_multi_trajectories
 
 
 def test_settle_session_tasks_waits_for_siblings_after_failure():
@@ -72,7 +75,13 @@ def _output(extra_fields: dict) -> AgentLoopOutput:
     )
 
 
-async def _postprocess(monkeypatch, worker: _DummyWorker, output: AgentLoopOutput, validate: bool):
+async def _postprocess(
+    monkeypatch,
+    worker: _DummyWorker,
+    output: AgentLoopOutput | list[AgentLoopOutput],
+    validate: bool,
+    session_id: int = 0,
+):
     captured = {}
 
     async def async_kv_batch_put(*, keys, fields, tags, partition_id):
@@ -80,9 +89,68 @@ async def _postprocess(monkeypatch, worker: _DummyWorker, output: AgentLoopOutpu
 
     monkeypatch.setattr(agent_loop_tq_module.tq, "async_kv_batch_put", async_kv_batch_put)
     await _WorkerTQ._agent_loop_postprocess(
-        worker, output, validate, uid="u0", session_id=0, global_steps=1, raw_prompt=[{"role": "user", "content": "hi"}]
+        worker,
+        output,
+        validate,
+        uid="u0",
+        session_id=session_id,
+        global_steps=1,
+        raw_prompt=[{"role": "user", "content": "hi"}],
     )
     return captured["fields"]
+
+
+def test_grpo_vectorized_with_copied_session_rewards(monkeypatch):
+    # 1. Three sessions. Only the final output of each session has a reward.
+    session_0 = [_output({"reward_extra_info": {}})]
+    session_1 = [_output({"reward_extra_info": {}})]
+    session_2 = [
+        _output({"reward_extra_info": {}}),
+        _output({"reward_extra_info": {}}),
+        _output({"reward_extra_info": {}}),
+        _output({"reward_extra_info": {}}),
+    ]
+    session_0[-1].reward_score = 1.0
+    session_1[-1].reward_score = 4.0
+    session_2[-1].reward_score = 5.0
+    rewards_before_copy = [output.reward_score for output in session_2]
+    print("\n1. Session 2 before copying:", rewards_before_copy)
+    assert rewards_before_copy == [None, None, None, 5.0]
+
+    # 2. Run real postprocessing. The existing helper only intercepts storage writes.
+    worker = _DummyWorker(topk_log_probs=0)
+    stored_0 = asyncio.run(_postprocess(monkeypatch, worker, session_0, False, session_id=0))
+    stored_1 = asyncio.run(_postprocess(monkeypatch, worker, session_1, False, session_id=1))
+    stored_2 = asyncio.run(_postprocess(monkeypatch, worker, session_2, False, session_id=2))
+    rewards_after_copy = [output.reward_score for output in session_2]
+    print("2. Session 2 after copying: ", rewards_after_copy)
+    assert rewards_after_copy == [5.0, 5.0, 5.0, 5.0]
+
+    # 3. Read the actual reward tensors emitted by postprocessing.
+    token_rewards = torch.cat([stored_0["rm_scores"], stored_1["rm_scores"], stored_2["rm_scores"]])
+    response_mask = torch.cat([stored_0["response_mask"], stored_1["response_mask"], stored_2["response_mask"]])
+    print("3. Stored rewards:", token_rewards.sum(dim=1).tolist())
+    data = DataProto.from_dict(
+        tensors={"token_level_rewards": token_rewards, "response_mask": response_mask},
+        non_tensors={"uid": np.array(["u0"] * 6, dtype=object)},
+    )
+    batch_keys = ["u0_0_0", "u0_1_0", "u0_2_0", "u0_2_1", "u0_2_2", "u0_2_3"]
+
+    # 4. This direct call is what the old early-return branch did: count all six rows.
+    row_result = compute_advantage(data, adv_estimator="grpo_vectorized")
+    row_advantages = row_result.batch["advantages"][:, 0].clone()
+    print("4. Per-row advantages (old path):", row_advantages.tolist())
+
+    # 5. The fixed wrapper selects one final output per session before computing advantages.
+    result = compute_advantage_for_multi_trajectories(data, batch_keys, "grpo_vectorized")
+    session_advantages = result.batch["advantages"][:, 0]
+    print("5. Per-session advantages:      ", session_advantages.tolist())
+
+    # For rewards [1, 4, 5], the mean is 10/3 and the sample std is sqrt(13/3).
+    expected_per_output = torch.tensor([-1.120897, 0.320256, 0.800640, 0.800640, 0.800640, 0.800640])
+    expected = expected_per_output.unsqueeze(-1) * response_mask
+    torch.testing.assert_close(result.batch["advantages"], expected)
+    torch.testing.assert_close(result.batch["returns"], expected)
 
 
 @pytest.mark.asyncio
