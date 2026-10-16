@@ -20,8 +20,14 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import logging
+import math
+import numbers
+import os
+import tempfile
 from collections import defaultdict
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -33,6 +39,8 @@ from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
+
+logger = logging.getLogger(__name__)
 
 PolicyLossFn = Callable[
     [
@@ -156,6 +164,9 @@ class AdaptiveKLController:
     https://arxiv.org/pdf/1909.08593.pdf
     """
 
+    _STATE_FILENAME = "kl_ctrl.pt"
+    _STATE_VERSION = 1
+
     def __init__(self, init_kl_coef, target_kl, horizon):
         self.value = init_kl_coef
         self.target = target_kl
@@ -172,6 +183,71 @@ class AdaptiveKLController:
         proportional_error = np.clip(current_kl / target - 1, -0.2, 0.2)
         mult = 1 + proportional_error * n_steps / self.horizon
         self.value *= mult
+
+    def save(self, checkpoint_dir: str | os.PathLike) -> None:
+        """Atomically save the evolving KL coefficient.
+
+        The payload contains tensors only, so it can be loaded with
+        ``weights_only=True`` without executing checkpoint-provided Python code.
+        """
+        value = float(self.value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Adaptive KL controller value must be finite and non-negative, got {value}")
+
+        target = Path(checkpoint_dir) / self._STATE_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        os.close(fd)
+        try:
+            torch.save(
+                {
+                    "version": torch.tensor(self._STATE_VERSION, dtype=torch.int64),
+                    "value": torch.tensor(value, dtype=torch.float64),
+                },
+                temporary,
+            )
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def load(self, checkpoint_dir: str | os.PathLike) -> bool:
+        """Restore the evolving KL coefficient, returning ``False`` for old checkpoints.
+
+        Missing state keeps the configured initial coefficient. Present but
+        malformed state fails loudly so corruption cannot silently alter training.
+        """
+        path = Path(checkpoint_dir) / self._STATE_FILENAME
+        if not path.exists():
+            logger.warning("No adaptive KL controller state found at %s; using initial value", path)
+            return False
+
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict):
+            raise ValueError(f"Adaptive KL controller state must be a dict, got {type(state).__name__}")
+
+        version = state.get("version", torch.tensor(0))
+        if not isinstance(version, torch.Tensor) or version.numel() != 1:
+            raise ValueError(f"Unsupported adaptive KL controller state version: {version!r}")
+        if version.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8):
+            raise ValueError(f"Unsupported adaptive KL controller state version: {version!r}")
+        version_value = int(version.item())
+        if version_value not in (0, self._STATE_VERSION):
+            raise ValueError(f"Unsupported adaptive KL controller state version: {version!r}")
+
+        value = state.get("value")
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("Adaptive KL controller state value must be a scalar tensor")
+            value = value.item()
+        elif version_value != 0 or not isinstance(value, numbers.Real) or isinstance(value, bool):
+            raise ValueError("Adaptive KL controller state value must be a scalar tensor")
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Adaptive KL controller state value must be finite and non-negative, got {value}")
+
+        self.value = value
+        return True
 
 
 class FixedKLController:
