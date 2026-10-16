@@ -121,6 +121,8 @@ def test_full_shard_uses_veomni_reshard_option(monkeypatch, enable_full_shard):
     engine.model_config = SimpleNamespace(
         local_hf_config_path="/model", local_path="/model", enable_gradient_checkpointing=True
     )
+    install_chunk_compat = MagicMock()
+    monkeypatch.setattr(transformer_impl, "install_chunk_logprobs_compat", install_chunk_compat)
     monkeypatch.setattr(transformer_impl, "_build_ops_implementation_config", MagicMock())
     monkeypatch.setattr(transformer_impl, "MixedPrecisionConfig", MagicMock(return_value=SimpleNamespace(enable=False)))
     monkeypatch.setattr(transformer_impl, "build_foundation_model", MagicMock(return_value=module))
@@ -131,6 +133,7 @@ def test_full_shard_uses_veomni_reshard_option(monkeypatch, enable_full_shard):
 
     engine._build_model_optimizer()
 
+    install_chunk_compat.assert_called_once_with()
     assert parallelize.call_args.kwargs["enable_reshard_after_forward"] is enable_full_shard
     assert "enable_full_shard" not in parallelize.call_args.kwargs
     assert engine.module is module
