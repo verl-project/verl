@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 05/26/2026.
+Last updated: 10/15/2026.
 
 ## Background
 
@@ -663,19 +663,24 @@ rollouts on other samples.
 
 7. **Sampling params for logprob computation.** The manager builds
    sampling params with `max_tokens=1` plus `prompt_logprobs=topk` (or `0`),
-   so the teacher computes logprobs for the (prompt + response) sequence rather than
-   generating new tokens. `topk` is set to `distillation.distillation_loss.topk`
+   to score the (prompt + response) sequence. The one generated token is unused.
+   `topk` is set to `distillation.distillation_loss.topk`
    when the loss mode requires top-$k$ (e.g. `forward_kl_topk`); otherwise `0`
    (single-sample logprob only).
 
-   **Temperature is always forced to `1.0`** regardless of the configured value.
-   `prompt_logprobs` is computed via a forward pass over the existing (prompt + response)
-   tokens — no sampling occurs — so temperature has no effect on the result.
-   The default distillation config copies the student rollout temperature via Hydra
-   interpolation (`temperature: ${oc.select:actor_rollout_ref.rollout.temperature}`),
-   which would silently set a non-1.0 value when rollout temperature differs from 1.0
-   (e.g. 0.7). The manager ignores the configured value and always uses `temperature=1.0`,
-   logging a warning if the configured value is not 1.0.
+   **vLLM teacher scores use `inference.temperature`.** The teacher worker divides
+   logits by this temperature before vLLM computes prompt logprobs, producing
+   `log_softmax(teacher_logits / T)` for both sampled-token and top-$k$ scores.
+   The default configuration inherits `actor_rollout_ref.rollout.temperature`, so
+   teacher scores and student training probabilities use the same temperature.
+   For example, setting `actor_rollout_ref.rollout.temperature=0.7` applies `T=0.7`
+   to both. To retain unscaled teacher scores, explicitly set
+   `distillation.teacher_models.teacher_model.inference.temperature=1.0`.
+   The teacher temperature must be finite and greater than zero.
+
+   The request's sampling temperature remains `1.0`: it does not control prompt
+   scores and only affects the unused generated token. Other teacher backends
+   retain unscaled prompt logprobs and warn when a non-1.0 temperature is configured.
 
 8. **Server-side load balancing.** The manager calls `client.generate(...)`,
    which acquires a backing server through the shared `GlobalRequestLoadBalancer`

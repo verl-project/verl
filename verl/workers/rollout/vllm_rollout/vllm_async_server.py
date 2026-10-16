@@ -107,6 +107,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        logits_temperature: float = 1.0,
     ):
         """
         Args:
@@ -120,6 +121,7 @@ class vLLMHttpServer:
             cuda_visible_devices (str): cuda visible devices.
             disaggregation_role: PD role, or ``"null"`` for normal rollout.
             disaggregation_kv_transfer_config: vLLM KVTransferConfig dict for PD.
+            logits_temperature: Teacher scoring temperature; ordinary rollouts leave this at 1.0.
         """
         if disaggregation_role not in ("null", "prefill", "decode"):
             raise ValueError(f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}")
@@ -129,6 +131,7 @@ class vLLMHttpServer:
             )
         self._disaggregation_role = disaggregation_role
         self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
+        self.logits_temperature = logits_temperature
         # Filled by vLLMPDReplica.set_pd_peer for prefill-side routing.
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_prefill_side_channel_port: Optional[int] = None
@@ -505,6 +508,7 @@ class vLLMHttpServer:
             kwargs={
                 "vocab_size": len(self.model_config.tokenizer),
                 "banned_token_ids": get_vision_placeholder_token_ids(self.model_config.processor),
+                "logits_temperature": self.logits_temperature,
             },
         )
 
@@ -1552,6 +1556,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                logits_temperature=self.config.temperature if self.is_teacher_model else 1.0,
             )
             self.servers.append(server)
 

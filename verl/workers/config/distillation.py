@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -170,6 +171,10 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+        if self.inference.name == "vllm":
+            temperature = self.inference.temperature
+            if not math.isfinite(temperature) or temperature <= 0:
+                raise ValueError(f"vLLM teacher temperature must be finite and positive, got {temperature}.")
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length

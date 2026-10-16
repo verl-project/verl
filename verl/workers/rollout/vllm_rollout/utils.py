@@ -116,12 +116,15 @@ def get_vllm_max_lora_rank(lora_rank: int):
 
 
 # https://github.com/vllm-project/vllm/issues/13175
-def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
-    """Mask the tokens the sampler must never pick.
+def monkey_patch_compute_logits(
+    model, vocab_size: int, banned_token_ids: Optional[list[int]] = None, logits_temperature: float = 1.0
+):
+    """Mask invalid tokens and optionally scale teacher logits before logprob computation.
 
     Beyond the out-of-vocabulary tail, `banned_token_ids` covers tokens that live *inside* the
     vocabulary yet are still illegal to generate: the vision placeholders, which are meaningless
     unless a real image or video sits behind them. See `get_vision_placeholder_token_ids`.
+    Teacher temperature is applied here because vLLM's prompt logprobs bypass sampling temperature.
     """
     original_compute_logits = model.compute_logits
     # Built once and cached on the device: compute_logits runs on every decode step, and
@@ -141,6 +144,9 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
             if banned_index.device != logits.device:
                 banned_index = banned_index.to(logits.device)
             logits.index_fill_(-1, banned_index, float("-inf"))
+        if logits_temperature != 1.0:
+            # Promote before division; vLLM's later float32 log-softmax cannot undo overflow.
+            logits = logits.float().div_(logits_temperature)
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
@@ -251,10 +257,11 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
-    def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
+    def monkey_patch_model(
+        self, vocab_size: int, banned_token_ids: Optional[list[int]] = None, logits_temperature: float = 1.0
+    ):
         for model in self._iter_all_models():
-            # patch compute_logits to avoid sampling OOV and other illegal tokens
-            monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
+            monkey_patch_compute_logits(model, vocab_size, banned_token_ids, logits_temperature)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
