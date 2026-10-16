@@ -260,6 +260,27 @@ def test_rloo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+def test_rloo_and_vectorized_equivalence_with_singleton_groups():
+    r"""Singleton groups (e.g. after filtering drops all but one sample) must keep
+    the raw score in both implementations (#7793)."""
+    token_level_rewards = torch.tensor([[0.7], [0.3], [-0.5], [0.9], [0.1]], dtype=torch.float32)
+    response_mask = torch.ones_like(token_level_rewards)
+    # two multi-sample groups and one singleton group
+    index = np.array(["p1", "p1", "p2", "p2", "p3"], dtype=object)
+
+    adv1, ret1 = compute_rloo_outcome_advantage(
+        token_level_rewards=token_level_rewards, response_mask=response_mask, index=index
+    )
+    adv2, ret2 = compute_rloo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards, response_mask=response_mask, index=index
+    )
+
+    assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+    # the singleton sample keeps its raw score instead of being zeroed out
+    assert torch.allclose(adv1[4], token_level_rewards[4], rtol=1e-5, atol=1e-6)
+
+
 def test_grpo_vectorized_matches_original_for_low_variance_rewards():
     token_level_rewards = torch.tensor([[1.0], [1.00001], [2.0], [2.00001]], dtype=torch.float32)
     response_mask = torch.ones_like(token_level_rewards)
