@@ -30,9 +30,11 @@ block-FP8 layer:
 ``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
 """
 
+import contextlib
 import inspect
 import logging
 import math
+import sys
 from unittest.mock import patch
 
 import torch
@@ -313,13 +315,38 @@ def process_fp8_weights_after_loading(layers):
             delattr(layer, _FP8_LIVE_ATTR)
 
 
+# vLLM 0.24 ``ModelOptMxFp8FusedMoE.process_weights_after_loading`` sets this on the layer and
+# returns early on every later call. A refit is exactly such a later call: without clearing the
+# flag the kernel layout would never be re-derived from the scales the sync just wrote.
+_VLLM_PROCESS_ONCE_FLAG = "_already_called_process_weights_after_loading"
+
+
+# Each quant module binds its own ``replace_parameter`` name at import, so the stand-in has to be
+# installed per module. ModelOpt's MXFP8 MoE rebuilds ``moe_quant_config`` / ``moe_kernel`` from the
+# layer right after its replace calls; only a fold at replace time leaves those pointing at the live params.
+_REPLACE_PARAMETER_TARGETS = (
+    "vllm.model_executor.layers.quantization.fp8.replace_parameter",
+    "vllm.model_executor.layers.quantization.modelopt.replace_parameter",
+)
+
+
+def _replace_parameter_patches():
+    stack = contextlib.ExitStack()
+    for target in _REPLACE_PARAMETER_TARGETS:
+        module_name, _, attr = target.rpartition(".")
+        module = sys.modules.get(module_name)
+        if module is None or not hasattr(module, attr):
+            continue  # not imported (older vLLM without ModelOpt MXFP8): nothing to intercept
+        stack.enter_context(patch(target, replace_parameter_preserve_subclass))
+    return stack
+
+
 def _make_process_weights_after_loading_for_vllm20(original_fn):
     def _patched_process_weights_after_loading(self, layer) -> None:
         old_params = dict(layer.named_parameters(recurse=False))
         _record_pristine_fp8_layout(layer, old_params)
-        with patch(
-            "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
-        ):
+        layer.__dict__.pop(_VLLM_PROCESS_ONCE_FLAG, None)
+        with _replace_parameter_patches():
             original_fn(self, layer)
         _restore_layer_param_subclass_attrs(layer, old_params)
 
@@ -447,10 +474,11 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 
 def build_fp8_method_patchers(vllm_version):
-    """Patchers that make the FP8 quant methods survive a refit, not yet started.
+    """Unstarted FP8 refit and opt-in ModelOpt MXFP8 exclusion patchers.
 
     The caller owns starting and tracking them so all patch lifetime lives in
-    one place.
+    one place. Install before quant config parsing to retain the MXFP8 opt-in,
+    and in each worker before it constructs model layers.
     """
     linear_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
     moe_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
@@ -465,10 +493,53 @@ def build_fp8_method_patchers(vllm_version):
         )
 
         wrap = _make_process_weights_after_loading_for_vllm20
-        return [
+        patchers = [
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
         ]
+        # ModelOpt's legacy substring exclusion can mistake a router's "gate"
+        # for the dense "gate_up_proj". Only explicitly marked, verl-generated
+        # MXFP8 configs use strict matching; checkpoint configs keep the original.
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config  # noqa: F401
+        except ImportError:
+            pass  # Older vLLM without ModelOpt MXFP8: no exclusion matcher to patch.
+        else:
+            # Imported only here: the ``verl.utils.vllm`` package init pulls in vLLM,
+            # and CPU tests load this module standalone against a stubbed vLLM.
+            from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
+
+            patchers.extend(build_mxfp8_exclusion_patchers())
+
+        # ModelOpt MXFP8 (CUDA): kernel post-processing swizzles weight_scale
+        # (or dequantizes the weight to bf16 on the emulation backend), so a
+        # refit needs the same pristine-layout record/stage/reprocess cycle.
+        # The params it rewrites (weight / weight_scale, w13_* / w2_*) are
+        # already covered by _FP8_REFIT_PARAM_NAMES.
+        modelopt_prefix = "vllm.model_executor.layers.quantization.modelopt"
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptMxFp8FusedMoE,
+                ModelOptMxFp8LinearMethod,
+            )
+
+            patchers.append(
+                patch(
+                    f"{modelopt_prefix}.ModelOptMxFp8LinearMethod.process_weights_after_loading",
+                    wrap(ModelOptMxFp8LinearMethod.process_weights_after_loading),
+                )
+            )
+            patchers.append(
+                patch(
+                    f"{modelopt_prefix}.ModelOptMxFp8FusedMoE.process_weights_after_loading",
+                    wrap(ModelOptMxFp8FusedMoE.process_weights_after_loading),
+                )
+            )
+        except ImportError:
+            # Older vLLM without MXFP8 support; the fp8 patchers alone suffice.
+            pass
+
+        return patchers
 
     return [
         patch(linear_path, process_weights_after_loading_for_vllm14),
