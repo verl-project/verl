@@ -71,6 +71,10 @@ class CustomAsyncServerConfig(BaseConfig):
 @dataclass
 class AgentLoopConfig(BaseConfig):
     num_workers: int = 8
+    # CPU reserved per agent-loop worker actor. These are lightweight I/O-bound
+    # actors, so a fractional default lets many co-exist on a node instead of the
+    # Ray default of 1 CPU each, which can exhaust CPU and stall placement.
+    num_cpus_per_worker: float = 0.25
     default_agent_loop: str = "single_turn_agent"
     agent_loop_config_path: Optional[str] = None
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
