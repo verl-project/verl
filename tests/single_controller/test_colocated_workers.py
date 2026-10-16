@@ -22,6 +22,7 @@ from verl.single_controller.ray.base import (
     RayResourcePool,
     RayWorkerGroup,
     create_colocated_worker_cls,
+    create_colocated_worker_cls_fused,
 )
 from verl.utils.device import get_device_name
 
@@ -79,6 +80,41 @@ def test_colocated_workers():
 
     actor_output = colocated_actor_wg.add(data)
     critic_output = colocated_critic_wg.sub(data)
+
+    torch.testing.assert_close(expected_actor_output.batch, actor_output.batch, atol=0, rtol=0)
+    torch.testing.assert_close(expected_critic_output.batch, critic_output.batch, atol=0, rtol=0)
+
+    ray.shutdown()
+
+
+def test_fused_workers():
+    # FusedWorker container: sub-workers are real Worker instances placed in one Ray
+    # actor. The async Critic.sub must be awaited inside ``_fuw_execute`` rather than
+    # returned as a bare coroutine (which Ray cannot serialize).
+    ray.init()
+
+    import torch
+
+    data = DataProto.from_dict({"a": torch.zeros(10)})
+    actor_cls = RayClassWithInitArgs(cls=Actor)
+    critic_cls = RayClassWithInitArgs(cls=Critic, config={"b": 10})
+    resource_pool = RayResourcePool(process_on_nodes=[2])
+
+    actor_wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=actor_cls, device_name=get_device_name())
+    critic_wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=critic_cls, device_name=get_device_name())
+    expected_actor_output = actor_wg.add(data)
+    expected_critic_output = critic_wg.sub(data)
+
+    cls_dict = {"actor": actor_cls, "critic": critic_cls}
+    ray_cls_with_init = create_colocated_worker_cls_fused(cls_dict)
+    assert ray_cls_with_init.fused_worker_used
+    wg_dict = RayWorkerGroup(
+        resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name()
+    )
+    spawn_wg = wg_dict.spawn(prefix_set=cls_dict.keys())
+
+    actor_output = spawn_wg["actor"].add(data)
+    critic_output = spawn_wg["critic"].sub(data)
 
     torch.testing.assert_close(expected_actor_output.batch, actor_output.batch, atol=0, rtol=0)
     torch.testing.assert_close(expected_critic_output.batch, critic_output.batch, atol=0, rtol=0)

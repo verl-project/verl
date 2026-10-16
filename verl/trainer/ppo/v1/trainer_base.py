@@ -44,7 +44,7 @@ from verl.single_controller.ray import (
     RayClassWithInitArgs,
     RayWorkerGroup,
     ResourcePoolManager,
-    create_colocated_worker_cls,
+    create_colocated_worker_cls_fused,
 )
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
@@ -306,7 +306,7 @@ class PPOTrainer(ABC):
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            worker_dict_cls = create_colocated_worker_cls_fused(class_dict=class_dict)
             wg_dict = RayWorkerGroup(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
