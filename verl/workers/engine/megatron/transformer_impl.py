@@ -447,6 +447,11 @@ class MegatronEngine(BaseEngine):
             peft_config=self.model_config.get("lora", None),
         )
         self.tf_config = updated_tf_config
+        if self.tf_config.overlap_moe_expert_parallel_comm:
+            from .model_forward_1f1b_overlap import expose_schedule_plan
+
+            for model_chunk in module:
+                expose_schedule_plan(model_chunk)
         print(f"module: {len(module)}")
 
         if self.engine_config.use_dist_checkpointing:
@@ -1143,12 +1148,19 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        inplace_temperature_scale: bool = True,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
         temperature[temperature <= 0] = 1e-8
         assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
-        logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
+        scale = temperature.unsqueeze(dim=-1).to(logits.dtype)
+        # MCore's combined 1F1B plan returns a detached leaf to its loss node.
+        # Keep temperature scaling differentiable without mutating that leaf.
+        if inplace_temperature_scale:
+            logits.div_(scale)
+        else:
+            logits = logits / scale
         ret = {}
         # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
         if calculate_sum_pi_squared:
@@ -1183,7 +1195,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
         return ret
 
     def forward_step(
-        self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
+        self,
+        batch_iter: Iterator[TensorDict],
+        model,
+        logits_processor_func,
+        postprocess_micro_batch_func,
+        return_schedule_plan: bool = False,
     ):
         batch: TensorDict = next(batch_iter)
 
@@ -1273,10 +1290,22 @@ class MegatronEngineWithLMHead(MegatronEngine):
         else:
             raise NotImplementedError(f"Pad mode {pad_mode} is not supported for megatron engine")
 
+        if return_schedule_plan:
+            if not self.tf_config.overlap_moe_expert_parallel_comm:
+                raise RuntimeError("Megatron requested a schedule plan without EP all-to-all overlap enabled")
+            if self.enable_routing_replay or tu.get_non_tensor_data(batch, key="record_r2_routes", default=False):
+                raise NotImplementedError("EP all-to-all overlap does not support router replay")
+            if self.model_config.mtp.enable and self.model_config.mtp.enable_train:
+                raise NotImplementedError("EP all-to-all overlap does not support MTP training")
+            if calculate_sum_pi_squared or distillation_use_topk or distillation_only:
+                raise NotImplementedError("EP all-to-all overlap does not support Σπ² or distillation")
+            if local_cp_size is not None:
+                raise NotImplementedError("EP all-to-all overlap does not support dynamic context parallelism")
+
         if use_fused_kernels:
             temperature_value = _resolve_fused_temperature(temperature)
 
-        if use_fused_kernels:
+        if use_fused_kernels and not return_schedule_plan:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
@@ -1315,6 +1344,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                inplace_temperature_scale=not return_schedule_plan,
             )
 
             response_attention_mask = None
@@ -1338,24 +1368,54 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 if batch_num_tokens > 0:
                     mtp_loss_normalization_factor = routed_num_tokens / batch_num_tokens
 
-            output = forward_fn(
-                model,
-                input_ids,
-                multi_modal_inputs,
-                logits_processor=logits_processor,
-                logits_processor_args=logits_processor_args,
-                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-                pad_token_id=self.model_config.tokenizer.pad_token_id,
-                data_format=data_format,
-                mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
-                local_cp_size=local_cp_size,
-                router_padding_mask=router_padding_mask,
-                mtp_loss_normalization_factor=mtp_loss_normalization_factor,
-                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-                pad_to_length_bucket=pad_to_length_bucket,
-                cp_layout=cp_layout,
-                position_ids=batch.get("position_ids", None),
-            )
+            if return_schedule_plan:
+                from .model_forward_1f1b_overlap import build_schedule_plan
+
+                output, adapt_schedule_output = build_schedule_plan(
+                    model,
+                    input_ids,
+                    data_format=data_format,
+                    multi_modal_inputs=multi_modal_inputs,
+                    logits_processor=logits_processor,
+                    label=label,
+                    temperature=temperature,
+                    position_ids=batch.get("position_ids", None),
+                    forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                    router_padding_mask=router_padding_mask,
+                    pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    calculate_entropy=calculate_entropy,
+                    use_fused_kernels=use_fused_kernels,
+                )
+            else:
+                output = forward_fn(
+                    model,
+                    input_ids,
+                    multi_modal_inputs,
+                    logits_processor=logits_processor,
+                    logits_processor_args=logits_processor_args,
+                    vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                    pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    data_format=data_format,
+                    mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                    local_cp_size=local_cp_size,
+                    router_padding_mask=router_padding_mask,
+                    mtp_loss_normalization_factor=mtp_loss_normalization_factor,
+                    forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                    position_ids=batch.get("position_ids", None),
+                )
+
+        if return_schedule_plan:
+
+            def scheduled_loss_func(logits):
+                return postprocess_micro_batch_func(
+                    adapt_schedule_output(logits), data=batch, local_cp_size=local_cp_size
+                )
+
+            return output, scheduled_loss_func
 
         # Router replay: record routing decisions for R2 mode
         if tu.get_non_tensor_data(batch, key="record_r2_routes", default=False):
