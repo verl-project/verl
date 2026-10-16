@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 10/13/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -188,6 +188,139 @@ vLLM
 
 For vLLM, the Async LLM Engine is running in same process as the server, and ModelRunner is running in same process as FSDP/Megatron-LM workers.
 Async LLM Engine communicate with ModelRunner through ZeroMQ. When server receive a request, it directly call engine to generate response_ids.
+
+Explicit replica recovery
+"""""""""""""""""""""""""
+
+``vLLMHttpServer.snapshot()`` checks the engine's health before returning scheduler metrics.
+An engine failure propagates to the caller, so retained metrics from a dead engine cannot be mistaken for a healthy idle server.
+
+An external lifecycle owner can call ``await replica.restart()`` on a ``vLLMReplica``
+using single-node ``STANDALONE`` mode, the ``mp`` executor, and no prefill/decode disaggregation.
+Restart closes admission, shuts down the old engine and verifies that its owned subprocesses have exited.
+It then kills the old server actor and confirms its Ray terminal state.
+A retained worker on the same node checks the actor's PID and creation time to verify
+that the old process, including its HTTP listener, exited before launching a replacement.
+Cleanup failure or an actor-exit timeout prevents replacement startup.
+``restart(timeout=60.0)`` bounds the old engine's cleanup RPC and actor-exit wait;
+replacement launch uses the existing startup behavior.
+The existing worker and resource-pool reservations are retained.
+
+Engine-process cleanup is isolated behind a compatibility helper that calls vLLM's native
+shutdown, retains owned process identities and confirms their exit before replacement.
+Related upstream work includes `vLLM #55846 <https://github.com/vllm-project/vllm/pull/55846>`_
+for parent-death cleanup and `vLLM #59984 <https://github.com/vllm-project/vllm/pull/59984>`_
+for process-tree cleanup races. These changes address parts of the cleanup lifecycle;
+removing the fallback requires validating that the selected vLLM implementation confirms
+all owned engine processes have exited, including after an EngineCore failure.
+The helper can then delegate entirely to native shutdown without changing the replica
+restart flow. Server-actor and HTTP-listener exit confirmation remain owned by verl.
+
+The caller must fence traffic before restarting, reload the intended weights into the new engine,
+replace cached actor handles and HTTP addresses, and check health before reopening traffic.
+Restart does not restore requests, KV cache, weights, or application queues, and does not retry failed generations.
+For example, with a load balancer and an application-provided weight reload callback:
+
+.. code:: python
+
+   old_address, old_handle = replica.server_address, replica.server_handle
+   await load_balancer.remove_server_if_current.remote(old_address, old_handle)
+   await replica.restart()
+   await owner.reload_weights(replica)
+   await replica.server_handle.check_health.remote()
+   await load_balancer.add_servers.remote({replica.server_address: replica.server_handle})
+
+``owner.reload_weights()`` is an application-provided callback, not a verl API;
+it must restore weights and resume generation before publication. The load balancer
+checks the old actor handle before removal so a delayed failure cannot remove a
+same-address replacement.
+
+next_weight_sync recovery
+"""""""""""""""""""""""""
+
+An existing ``CheckpointEngineManager`` can prepare a registered standalone replica
+for ``next_weight_sync`` recovery without a Relay or a separate weight cache:
+
+.. code:: python
+
+   old_address, old_handle = replica.server_address, replica.server_handle
+   await load_balancer.remove_server_if_current.remote(old_address, old_handle)
+   await checkpoint_manager.restart_replica(replica)
+   # Reuse the trainer's next normal synchronization at a safe GPU/optimizer boundary.
+   await checkpoint_manager.update_weights(global_steps)
+   await load_balancer.add_servers.remote({replica.server_address: replica.server_handle})
+
+``restart_replica()`` rebuilds only that server, retains its workers/resource pool,
+and explicitly binds the existing weight receivers to the new actor handle.
+The replacement stays paused. The next versioned ``update_weights(global_steps)``
+uses the existing full-group topology, trainer export, transport and receiver loading.
+Rebuilt servers must pass their ``check_health()`` calls before generation resumes;
+these checks do not require metrics logging to be enabled. A failed
+load or health check leaves recovery pending; the caller keeps request routing fenced
+until synchronization succeeds and it publishes the new handles and HTTP addresses.
+If weight transfer, finalization and KV restoration complete but a replacement fails
+its health check or generation resume, ``update_weights()`` raises
+``verl.checkpoint_engine.base.ReplicaRecoveryError``. Its ``sync_metrics``,
+``global_steps`` and ``failures`` (replica/exception pairs) expose the completed
+synchronization and every failed replacement. Other healthy replicas resume;
+failed replacements remain pending and must stay outside routing. Transfer failures
+and cancellation continue to propagate directly.
+
+This integration requires single-node standalone vLLM, full model weights or merged
+LoRA, a full-tensor synchronization backend, and no PD. Incremental-only/delta and
+colocated restart are unsupported; colocated synchronization keeps its existing
+offload/GPU handoff. Restart and weight synchronization cannot run concurrently;
+the lifecycle owner also serializes recovery with trainer GPU/optimizer phases.
+If no healthy rollout or queued training data can advance the trainer, invoke the
+existing weight synchronization at that safe boundary before waiting for another
+batch. Recovery does not require another optimizer update or add a transfer channel.
+
+See ``examples/fault_tolerance/restart_vllm_replica.py`` and its README for a
+self-contained three-GPU example that creates a tiny model, injects an owned
+EngineCore failure during generation, and recovers through these APIs. It fences
+the load balancer, restores the current committed weights and republishes the
+replacement before pending requests finish. Final cleanup releases only its own
+actors and placement group.
+
+Request replay
+""""""""""""""
+
+Applications owning replica recovery can opt their native client into bounded
+engine-failure replay:
+
+.. code:: python
+
+   client = server_manager.get_client(engine_recovery_timeout=300, max_engine_retries=3)
+   # For existing partial-rollout continuation, use FullyAsyncLLMServerClient.
+
+The client fences only the failed actor handle, then reacquires a healthy or
+republished server. ``LLMServerClient`` replays the current generation from its
+original prompt and token budget; its owner must restore the same committed
+weight version. ``FullyAsyncLLMServerClient`` retains partial progress when
+partial rollout is enabled, including token logprobs, routing records and weight
+version ranges, and subtracts generated tokens from the remaining budget.
+
+When the EngineCore fails but its server actor survives, the server returns its
+latest cumulative output marked ``engine_failed``. If the actor itself dies,
+only segments already returned to the client survive. Continuation prefills
+the saved token prefix to rebuild KV; it does not preserve the old engine's KV
+or sampling RNG. If required logprobs or MoE routing records are unavailable,
+that attempt is replayed without its prefix. Validation errors and cancellation
+are not replayed.
+
+The client does not restart replicas or schedule trainer synchronization.
+The lifecycle owner must restore weights and publish the new handle/address;
+waiting for the next optimizer update while the trainer is waiting for this
+rollout would deadlock. Reuse ``update_weights(current_version)`` at a safe
+boundary instead. Replay is opt-in, and waiting after a fault is bounded by the
+configured timeout and per-generation failure budget.
+
+Custom load balancers used with replay must implement
+``remove_server_if_current(server_id, expected_handle)`` and accept
+``expected_handle`` in ``release_server()``. Both calls must compare the
+registered handle before changing state, so a late failure or release from an
+old actor cannot remove a replacement or decrement its in-flight count.
+Clients with replay disabled keep the existing acquire/release interface.
 
 SGLang
 ^^^^^^
