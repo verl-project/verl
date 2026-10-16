@@ -108,6 +108,7 @@ class AdvantageEstimator(str, Enum):
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
     GDPO = "gdpo"
+    CODAPO = "codapo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -329,6 +330,87 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_adv_est(AdvantageEstimator.CODAPO)
+def compute_codapo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    index: np.ndarray,
+    accuracy_scores: Optional[torch.Tensor] = None,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    weight_offset: float = 0.1,
+    config: Optional[AlgoConfig] = None,
+    non_tensor_batch: Optional[dict] = None,
+    batch: Optional[dict] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reweight GRPO advantages with CoDaPO confidence and difficulty.
+
+    An accuracy score of one counts as correct for difficulty; all other values
+    count as incorrect. GRPO independently uses ``token_level_rewards``.
+    """
+    with torch.no_grad():
+        scores = token_level_rewards.sum(dim=-1)
+        if accuracy_scores is None:
+            accuracy_key = config.get("codapo_accuracy_key", "acc") if config is not None else "acc"
+            if non_tensor_batch is None or accuracy_key not in non_tensor_batch:
+                raise ValueError(f"CoDaPO accuracy key '{accuracy_key}' was not returned by the reward function")
+            accuracy_scores = torch.as_tensor(
+                np.asarray(non_tensor_batch[accuracy_key], dtype=np.float32),
+                device=scores.device,
+                dtype=scores.dtype,
+            )
+        else:
+            accuracy_scores = accuracy_scores.to(device=scores.device, dtype=scores.dtype)
+        if accuracy_scores.shape != scores.shape:
+            raise ValueError(
+                f"CoDaPO accuracy scores must have shape {tuple(scores.shape)}, got {tuple(accuracy_scores.shape)}"
+            )
+        response_lengths = response_mask.sum(dim=-1)
+        valid = response_lengths > 0
+        valid_accuracy_scores = accuracy_scores[valid]
+        is_correct = torch.isclose(
+            valid_accuracy_scores,
+            torch.ones_like(valid_accuracy_scores),
+            atol=1e-6,
+            rtol=0,
+        )
+
+        group_index = as_torch_index(index, device=scores.device)
+        num_groups = int(group_index.max().item()) + 1 if group_index.numel() else 0
+        counts = torch.zeros(num_groups, dtype=scores.dtype, device=scores.device)
+        counts.index_add_(0, group_index[valid], torch.ones_like(valid_accuracy_scores))
+
+        accuracy = torch.zeros_like(counts)
+        accuracy.index_add_(0, group_index[valid], is_correct.to(scores.dtype))
+        accuracy /= counts.clamp_min(1)
+
+        response_log_probs = (old_log_probs * response_mask).sum(dim=-1) / response_lengths.clamp_min(1)
+        confidence = torch.zeros_like(counts)
+        confidence.index_add_(0, group_index[valid], response_log_probs[valid])
+        confidence = (confidence / counts.clamp_min(1)).exp()
+
+        question_values = (confidence * 4 * accuracy * (1 - accuracy))[group_index]
+
+    if config is not None:
+        weight_offset = config.get("codapo_weight_offset", weight_offset)
+    if not weight_offset >= 0:
+        raise ValueError(f"algorithm.codapo_weight_offset must be non-negative, got {weight_offset}")
+
+    advantages, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+    )
+    advantages = advantages * (question_values + weight_offset).unsqueeze(-1)
+    if batch is not None:
+        batch["codapo_values"] = question_values
+    return advantages, advantages
 
 
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)

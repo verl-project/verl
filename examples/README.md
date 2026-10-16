@@ -110,6 +110,7 @@ under `recipe/` instead.
 | `remax_trainer/`                   | ReMax                          | `adv_estimator=remax`                               |
 | `reinforce_plus_plus_trainer/`     | REINFORCE++ / baseline         | `adv_estimator=reinforce_plus_plus[_baseline]`      |
 | `cispo_trainer/`                   | CISPO                          | `loss_mode=cispo`                                   |
+| `codapo_trainer/`                  | CoDaPO                         | `adv_estimator=codapo`                              |
 | `dppo_trainer/`                    | DPPO (TV / KL variants)        | `loss_mode=dppo_tv \| dppo_kl`                      |
 | `gdpo_trainer/`                    | GDPO                           | `adv_estimator=gdpo`                                |
 | `gmpo_trainer/`                    | GMPO                           | `loss_mode=geo_mean`                                |

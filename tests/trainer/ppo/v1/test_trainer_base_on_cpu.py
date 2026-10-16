@@ -15,11 +15,15 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.utils import tensordict_utils as tu
 
 
 class _StubTrainer(PPOTrainer):
@@ -193,3 +197,54 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_codapo_builds_focused_batch_with_fresh_independent_uids():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"algorithm": {"codapo_top_k": 2}})
+    prompt_batch = tu.get_tensordict(
+        {
+            "uid": np.array(["q0", "q1", "q2", "q3"], dtype=object),
+            "row": torch.arange(4),
+        }
+    )
+    rollout_data = tu.get_tensordict(
+        {
+            "uid": np.repeat(np.array(["q0", "q1", "q2", "q3"], dtype=object), 2),
+            "codapo_values": torch.tensor([0.1, 0.1, 0.9, 0.9, 0.8, 0.8, 0.2, 0.2]),
+        }
+    )
+    rollout_batch = KVBatchMeta(partition_id="train", keys=[f"key-{row}" for row in range(8)], tags=[{}] * 8)
+    with patch("verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get", return_value=rollout_data):
+        focused_batch = trainer._build_codapo_resampled_batch(prompt_batch, rollout_batch, {})
+
+    focused_uids = [tu.unwrap_non_tensor_data(uid) for uid in focused_batch["uid"]]
+    assert focused_batch["row"].tolist() == [1, 2, 1, 2]
+    assert len(set(focused_uids)) == 4
+    assert set(focused_uids).isdisjoint({"q0", "q1", "q2", "q3"})
+
+
+def test_codapo_step_uses_pending_focused_batch_before_fetching_new_prompts():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 2}})
+    trainer.parameter_sync_step = 1
+    trainer._codapo_enabled = True
+    trainer._codapo_resampled_batch = None
+    trainer.global_steps = 8  # Phase is state-driven, not tied to step parity.
+    original_batch = tu.get_tensordict({"uid": np.array(["q0", "q1"], dtype=object)})
+    focused_batch = tu.get_tensordict({"uid": np.array(["f0", "f1"], dtype=object)})
+    rollout_batch = KVBatchMeta(partition_id="train", keys=["k0", "k1"], tags=[{}, {}])
+
+    with (
+        patch.object(trainer, "_next_train_batch", return_value=original_batch) as fetch,
+        patch.object(trainer, "_submit_batch_to_rollout") as submit,
+        patch.object(trainer, "_step_once", return_value=rollout_batch),
+        patch.object(trainer, "_build_codapo_resampled_batch", return_value=focused_batch),
+    ):
+        trainer.step({}, {})
+        trainer.global_steps += 1
+        trainer.step({}, {})
+
+    fetch.assert_called_once_with()
+    assert [call.args[0] for call in submit.call_args_list] == [original_batch, focused_batch]
+    assert trainer._codapo_resampled_batch is None
