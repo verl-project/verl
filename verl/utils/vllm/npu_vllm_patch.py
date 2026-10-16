@@ -262,9 +262,13 @@ def patch_vllm_glm52_partial_wake_up() -> None:
 def vllm_v013_weight_loader_method_wrapper(fn):
     @wraps(fn)
     def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
-        if (shard_id in ("w1", "w3") and param.shape[1] == self.hidden_size) or (
-            shard_id == "w2" and param.shape[2] == self.hidden_size
-        ):
+        if shard_id in ("w1", "w3"):
+            hidden_size_axes = (param.shape[1] == self.hidden_size, param.shape[2] == self.hidden_size)
+            should_transpose = hidden_size_axes == (True, False)
+        else:
+            should_transpose = shard_id == "w2" and param.shape[2] == self.hidden_size
+
+        if should_transpose:
             param.data = param.data.transpose(1, 2)
         return fn(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success)
 
