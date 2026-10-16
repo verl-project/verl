@@ -133,12 +133,27 @@ class CheckpointHandler:
             print(f"Updated checkpoint tracker: {tracker_file}")
 
         # Copy to HDFS if configured
+        remote_copy_succeeded = True
         if self.rank == 0 and self.default_hdfs_dir:
             hdfs_io.makedirs(self.default_hdfs_dir, exist_ok=True)
-            hdfs_io.copy(src=local_global_step_folder, dst=self.default_hdfs_dir, dirs_exist_ok=True)
+            remote_copy_succeeded = (
+                hdfs_io.copy(src=local_global_step_folder, dst=self.default_hdfs_dir, dirs_exist_ok=True) is not False
+            )
+            if not remote_copy_succeeded:
+                logger.warning(
+                    "Checkpoint copy to %s failed; preserving the loaded local checkpoint",
+                    self.default_hdfs_dir,
+                )
 
+        # Reuse the existing save barrier so rank 0 cannot remove the loaded
+        # checkpoint while another rank is still writing dataloader state.
         if self.mode == OrchestrationMode.SPMD:
             torch.distributed.barrier()
+
+        # Only rank 0 mutates retention state. Other SPMD ranks still call the
+        # hook so engines can keep a uniform interface without another collective.
+        if self.rank != 0 or remote_copy_succeeded:
+            self.engine.finalize_checkpoint_retention(local_global_step_folder, max_ckpt_to_keep)
 
     def load_checkpoint(self):
         # Determine resume path based on configuration
@@ -164,6 +179,7 @@ class CheckpointHandler:
         self.engine.load_checkpoint(checkpoint_path)
         # Always load dataloader state for StatefulDataLoader
         self._load_dataloader_state(checkpoint_path)
+        self.engine.prepare_checkpoint_retention(checkpoint_path)
 
         return resume_step
 
