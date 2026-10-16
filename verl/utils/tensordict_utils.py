@@ -612,6 +612,58 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
     return iter(get_data())
 
 
+def make_grouped_iterator(
+    tensordict: TensorDict, num_mini_batch: int, epochs: int, seed=None, shuffle=True, group_key: str = "uid"
+):
+    """Create an iterator that yields mini-batches grouped by group_key.
+
+    All sequences sharing the same group_key are kept in the same mini-batch.
+    Unique group_keys are split into num_mini_batch groups, so mini-batch tensor
+    sizes may vary.
+    """
+    from collections import defaultdict
+
+    uids = get(tensordict, group_key)
+    uid_to_indices = defaultdict(list)
+    for idx, uid in enumerate(uids):
+        uid_to_indices[uid].append(idx)
+    unique_uids = list(uid_to_indices.keys())
+
+    assert num_mini_batch <= len(unique_uids), (
+        f"num_mini_batch ({num_mini_batch}) > number of unique group keys ({len(unique_uids)})"
+    )
+
+    def get_data():
+        for epoch in range(epochs):
+            if shuffle:
+                epoch_seed = seed + epoch if seed is not None else None
+                if epoch_seed is not None:
+                    g = torch.Generator()
+                    g.manual_seed(epoch_seed)
+                    perm = torch.randperm(len(unique_uids), generator=g).tolist()
+                else:
+                    perm = torch.randperm(len(unique_uids)).tolist()
+                shuffled_uids = [unique_uids[i] for i in perm]
+            else:
+                shuffled_uids = unique_uids
+
+            chunk_size = len(shuffled_uids) // num_mini_batch
+            remainder = len(shuffled_uids) % num_mini_batch
+
+            start = 0
+            for i in range(num_mini_batch):
+                end = start + chunk_size + (1 if i < remainder else 0)
+                batch_uids = shuffled_uids[start:end]
+                start = end
+
+                indices = []
+                for uid in batch_uids:
+                    indices.extend(uid_to_indices[uid])
+                yield index_select_tensor_dict(tensordict, torch.tensor(indices))
+
+    return iter(get_data())
+
+
 def assert_tensordict_eq(tensordict1: TensorDict, tensordict2: TensorDict):
     """Assert that two TensorDicts are equal.
 

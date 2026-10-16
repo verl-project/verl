@@ -168,7 +168,8 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
 
 
 @pytest.mark.parametrize("score_centering", [True, False])
-def test_update_actor_passes_score_centering_flag(score_centering):
+@pytest.mark.parametrize("outputs_per_rollout", [1, 3])
+def test_update_actor_passes_score_centering_flag(score_centering, outputs_per_rollout):
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.config = OmegaConf.create(
         {
@@ -188,8 +189,18 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     )
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
-    batch = SimpleNamespace(extra_info={})
+    batch = SimpleNamespace(
+        keys=[
+            f"prompt{prompt}_session{session}_{output}"
+            for prompt in range(4)
+            for session in range(4)
+            for output in range(outputs_per_rollout)
+        ],
+        extra_info={},
+    )
 
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+    assert batch.extra_info["num_mini_batch"] == 2
+    assert "mini_batch_size" not in batch.extra_info
