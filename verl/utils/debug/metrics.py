@@ -55,8 +55,8 @@ def pearson_correlation_coefficient(tensor1: torch.Tensor, tensor2: torch.Tensor
     return result[0][1].detach().item()
 
 
-def calculate_log_prob_diff(log_probs1: torch.Tensor, log_probs2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    full_diff = torch.abs(log_probs1 - log_probs2)
+def calculate_diff(probs1: torch.Tensor, probs2: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    full_diff = torch.abs(probs1 - probs2)
     return torch.masked_select(full_diff, mask)
 
 
@@ -74,10 +74,10 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     Returns:
         dict: metrics
             "training/rollout_probs_diff_valid": 1->input is valid, 0->input is invalid
-            "training/rollout_probs_diff_max": max value of logprob diff of rollout vs. actor
-            "training/rollout_probs_diff_mean": mean value of logprob diff of rollout vs. actor
-            "training/rollout_probs_diff_std": std value of logprob diff of rollout vs. actor
-            "training/rollout_actor_probs_pearson_corr": logprob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
+            "training/rollout_probs_diff_max": max value of prob diff of rollout vs. actor
+            "training/rollout_probs_diff_mean": mean value of prob diff of rollout vs. actor
+            "training/rollout_probs_diff_std": std value of prob diff of rollout vs. actor
+            "training/rollout_actor_probs_pearson_corr": prob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
     """
 
     rollout_old_log_probs = data.batch["rollout_log_probs"]
@@ -111,7 +111,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
         }
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
-    rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+    rollout_probs_diff = calculate_diff(actor_probs, rollout_probs, response_mask_bool)
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
