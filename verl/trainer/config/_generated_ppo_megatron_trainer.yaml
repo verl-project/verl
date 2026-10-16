@@ -487,6 +487,7 @@ actor_rollout_ref:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -747,6 +748,7 @@ critic:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0

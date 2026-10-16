@@ -26,13 +26,7 @@ import sglang.srt.entrypoints.engine
 import torch
 from packaging import version
 from ray.actor import ActorHandle
-from sglang.srt.entrypoints.http_server import (
-    Engine,
-    ServerArgs,
-    _GlobalState,
-    app,
-    set_global_state,
-)
+from sglang.srt.entrypoints.http_server import Engine, ServerArgs, _GlobalState, app, set_global_state
 from sglang.srt.managers.io_struct import (
     ContinueGenerationReqInput,
     GenerateReqInput,
@@ -59,6 +53,7 @@ from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_con
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     default_moe_runner_backend,
+    lora_base_kept_on_sleep,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
@@ -456,6 +451,12 @@ class SGLangHttpServer:
         self.tokenizer_manager.server_status = ServerStatus.Up
 
     async def wake_up(self):
+        """Resume released memory and flush the cache on the first node.
+
+        Colocated mode restores the tags released by sleep; standalone mode
+        restores only the KV cache. Hybrid mode wakes during weight updates
+        and rejects this call on the first node.
+        """
         if self.node_rank != 0:
             return
 
@@ -463,8 +464,9 @@ class SGLangHttpServer:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            # Resume exactly what sleep() released; adapter mode keeps the base weights resident.
-            tags = ["kv_cache"] if self.lora_as_adapter else ["kv_cache", "weights"]
+            # Resume exactly what sleep() released; adapter mode keeps the base weights resident
+            # unless lora.resync_base is set.
+            tags = ["kv_cache"] if lora_base_kept_on_sleep(self.model_config) else ["kv_cache", "weights"]
             obj = ResumeMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
@@ -480,13 +482,19 @@ class SGLangHttpServer:
         return lora_served_as_adapter(self.model_config)
 
     async def sleep(self):
+        """Release rollout memory on the first node when cache freeing is enabled.
+
+        Hybrid and colocated modes retain adapter base weights unless
+        ``lora.resync_base`` is enabled. Standalone mode releases only the KV cache.
+        """
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
         # When using LoRA as adapter (merge=False), only release kv_cache —
         # keep base weights in GPU so we only need to sync adapter deltas.
+        # With lora.resync_base, the base is re-synced on every update, so release it too.
         # Mirrors the vLLM sleep() pattern in vllm_async_server.py.
-        if self.lora_as_adapter:
+        if lora_base_kept_on_sleep(self.model_config):
             tags = ["kv_cache"]
         else:
             tags = ["kv_cache", "weights"]
