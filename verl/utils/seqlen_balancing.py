@@ -580,7 +580,12 @@ def restore_dynamic_batch(data: torch.Tensor, batch_idx_list: list[list[int]]) -
     if data.is_nested:
         data_lst = data.unbind()
         tensors = [data_lst[i] for i in revert_indices]
-        reverted_data = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+        # rebuild with explicit ragged_idx semantics. as_nested_tensor's uniform-input
+        # quirk yields ragged@1 for equal-length samples; keeping the source layout
+        # metadata here preserves ragged@2 (canonical for 3D position_ids) and avoids
+        # introducing new quirk layouts.
+        ragged_idx = getattr(data, "_ragged_idx", data.dim() - 1)
+        reverted_data = tu.nested_tensor_from_tensor_list(tensors, ragged_idx=ragged_idx)
     else:
         reverted_data = data[revert_indices]
 
