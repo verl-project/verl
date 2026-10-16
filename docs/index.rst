@@ -139,6 +139,7 @@ verl is fast with:
 
    low_precision/fp8.md
    low_precision/nvfp4_qat.md
+   advance/rollout_weight_dtype
 
 .. toctree::
    :maxdepth: 1
