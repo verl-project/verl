@@ -24,15 +24,22 @@ Run all the commands below from the root of `verl`.
 
 ## 2. Build the image
 
+Create a Docker repository in Artifact Registry for the image and let Docker push to it, then build:
+
 ```bash
-docker buildx build -t <IMAGE> --push examples/tpu/grpo
+gcloud artifacts repositories create <REPO> --repository-format=docker --location=<REGION>
+gcloud auth configure-docker <REGION>-docker.pkg.dev
+docker buildx build -t <REGION>-docker.pkg.dev/<PROJECT>/<REPO>/verl-tpu:<TAG> --push examples/tpu/grpo
 ```
+
+`<IMAGE>` below is the full name given to `-t`.
 
 ## 3. Upload the models and the data
 
-The Ray pods mount a GCS bucket `<BUCKET>` at `/data`. The scripts read the models from `/data/assets/hf/` and GSM8K from `/data/data/gsm8k/`. Download and preprocess them outside the `verl` checkout (Ray uploads the checkout with every job), then copy them to the bucket:
+The Ray pods mount a GCS bucket `<BUCKET>` at `/data`. The scripts read the models from `/data/assets/hf/` and GSM8K from `/data/data/gsm8k/`. Create the bucket in the region of the cluster (step 4): the model weights are read through the mount at start-up, and a bucket in another region makes the 4B run take more than an hour to reach its first step. Download and preprocess the inputs outside the `verl` checkout (Ray uploads the checkout with every job), then copy them to the bucket:
 
 ```bash
+gcloud storage buckets create gs://<BUCKET> --location=<REGION> --uniform-bucket-level-access
 hf download Qwen/Qwen3-0.6B --local-dir /tmp/Qwen3-0.6B
 hf download Qwen/Qwen3-4B --local-dir /tmp/Qwen3-4B
 PYTHONPATH=. python examples/data_preprocess/gsm8k.py --local_save_dir /tmp/gsm8k
@@ -88,7 +95,7 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash example
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh
 ```
 
-The smoke test takes about 10 minutes. The 4B run needs about 10 minutes to start, then about 20-30 s per step (~25 s average over 100 steps). Follow a job with `ray job logs -f <JOB_ID>`.
+The smoke test takes about 30 minutes end to end, most of it compilation and warm-up. The 4B run needs about 15 minutes to start, then 20-45 s per step (~26 s average over 100 steps on 2 x v6e-4). Follow a job with `ray job logs -f <JOB_ID>`.
 
 The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HOME=/data/<DIR> TOTAL_TRAINING_STEPS=5 bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh`, and pass extra arguments to `verl.trainer.main_ppo` as Hydra overrides.
 
