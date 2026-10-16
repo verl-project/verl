@@ -346,10 +346,10 @@ class vLLMHttpServer:
             "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
-            "hf_overrides": hf_overrides,
             "scheduling_policy": self.config.scheduling_policy,
             "compilation_config": compilation_config,
             **engine_kwargs,
+            "hf_overrides": hf_overrides,
         }
 
         # update profiler args, only on the replica that will actually be profiled: configuring
@@ -652,6 +652,7 @@ class vLLMHttpServer:
 
         self._preprocess_sampling_params(sampling_params)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+        actor_prompt_ids = list(prompt_ids)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
@@ -744,6 +745,28 @@ class vLLMHttpServer:
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
+            rollout_prompt_ids = final_res.prompt_token_ids or []
+            if (
+                getattr(getattr(self.model_config, "hf_config", None), "model_type", None) == "deepseek_v41"
+                and image_data is not None
+            ):
+                # Collapsing image runs can hide differences in routing positions.
+                if rollout_prompt_ids != actor_prompt_ids:
+                    raise ValueError(
+                        "Rollout routing replay requires identical actor and rollout prompt tokens "
+                        "before image-token normalization"
+                    )
+                image_token_id = self.model_config.hf_config.image_token_id
+                rollout_prompt_ids, actor_prompt_ids = (
+                    [
+                        token_id
+                        for index, token_id in enumerate(prompt_token_ids)
+                        if token_id != image_token_id or index == 0 or prompt_token_ids[index - 1] != image_token_id
+                    ]
+                    for prompt_token_ids in (rollout_prompt_ids, actor_prompt_ids)
+                )
+            if rollout_prompt_ids != actor_prompt_ids:
+                raise ValueError("Rollout routing replay requires identical actor and rollout prompt tokens")
             routed_experts = final_res.outputs[0].routed_experts
 
         # Determine stop reason from finish_reason
@@ -892,9 +915,12 @@ class vLLMHttpServer:
             logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
+        """Release rollout resources on the leading node according to the configured rollout and sleep modes."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # Routing replay's AuxOutput connector requires PAUSED_ALL for cache reset.
+        # vLLM's default abort mode only pauses new requests.
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
@@ -1122,7 +1148,8 @@ class vLLMHttpServer:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
-            # pause_generation with wait_for_inflight_requests=False will:
+            # The legacy wait_for_inflight_requests=False and new
+            # pause_generation(mode="abort") APIs both:
             # 1. Set engine to paused state (new requests are accepted but not scheduled)
             # 2. Abort all in-flight requests
             # 3. Wait for requests to drain
@@ -1132,10 +1159,17 @@ class vLLMHttpServer:
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
-            await self.engine.pause_generation(
-                wait_for_inflight_requests=False,
-                clear_cache=reset_prefix_cache,
-            )
+            pause_generation = self.engine.pause_generation
+            try:
+                pause_parameters = inspect.signature(pause_generation).parameters
+            except (TypeError, ValueError):
+                pause_parameters = {}
+            pause_kwargs: dict[str, Any] = {"clear_cache": reset_prefix_cache}
+            if "wait_for_inflight_requests" in pause_parameters:
+                pause_kwargs["wait_for_inflight_requests"] = False
+            else:
+                pause_kwargs["mode"] = "abort"
+            await pause_generation(**pause_kwargs)
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -1345,14 +1379,15 @@ class vLLMHttpServer:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
-            repetition_penalty=1.0,
+            repetition_penalty=self.config.repetition_penalty,
             max_new_tokens=self.config.response_length,
         )
 
     def _apply_quantization(self) -> tuple[Optional[str], dict]:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
-        hf_overrides = {}
+        vllm_engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
+        hf_overrides = dict(vllm_engine_kwargs.get("hf_overrides", {}) or {})
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
@@ -1385,17 +1420,34 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+                # Ignore MoE router layers for FP8 quantization.
+                ignored_layers = []
+                hf_cfg = self.model_config.hf_config
+                text_cfg = hf_cfg.get_text_config()
+                num_layers = text_cfg.num_hidden_layers
+                model_type = getattr(hf_cfg, "model_type", "")
+
+                ckpt_quant = getattr(hf_cfg, "quantization_config", {}) or {}
+                ckpt_ignored_layers = ckpt_quant.get("modules_to_not_convert")
+                if model_type == "glm5_next" and ckpt_ignored_layers is not None:
+                    # Reuse the checkpoint's own modules_to_not_convert list so the
+                    # rollout FP8 scope matches native vLLM exactly.
+                    ignored_layers = list(ckpt_ignored_layers)
+                else:
+                    layer_pfx = "language_model.model.layers" if model_type == "glm5_next" else "model.layers"
+                    for layer in range(num_layers):
+                        ignored_layers.append(f"{layer_pfx}.{layer}.mlp.gate")
+                    if model_type == "glm_moe_dsa":
+                        # GLM5.2 DSA: keep rollout kv_b_proj BF16.
+                        for layer in range(num_layers):
+                            ignored_layers.append(f"{layer_pfx}.{layer}.self_attn.kv_b_proj")
 
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
+                    "ignored_layers": ignored_layers,
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
@@ -1404,7 +1456,11 @@ class vLLMHttpServer:
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
-        if quantization is None and model_quantization_config.get("quant_method") == "fp8":
+        if (
+            quantization is None
+            and "quantization_config" not in hf_overrides
+            and model_quantization_config.get("quant_method") == "fp8"
+        ):
             apply_vllm_quant_patches()
             os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 

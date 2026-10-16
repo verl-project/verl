@@ -306,6 +306,7 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        """Run supervised training from the resumed step with profiling, validation, logging, and checkpoints."""
         is_logging = self.engine.is_mp_src_rank_with_outputs() and self.engine.get_data_parallel_rank() == 0
 
         # TODO: add a unified tracking
@@ -438,7 +439,7 @@ class SFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if self.save_freq > 0 and (is_last_step or is_save_step):
                     aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 

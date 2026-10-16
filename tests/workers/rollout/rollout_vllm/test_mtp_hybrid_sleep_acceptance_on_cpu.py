@@ -29,10 +29,12 @@ class _FakeMtpEngine:
     """Minimal model of the MTP failure mode seen in hybrid sleep."""
 
     def __init__(self):
+        """Initialize an available drafter and the sleep levels that discard it."""
         self.mtp_drafter_available = True
         self.sleep_levels_that_discard_mtp_drafter = {2}
 
     async def sleep(self, level: int):
+        """Record the sleep mode and discard the fake drafter at configured destructive levels."""
         if level in self.sleep_levels_that_discard_mtp_drafter:
             self.mtp_drafter_available = False
 
@@ -50,6 +52,7 @@ class _FakeMtpEngine:
 
 
 def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeypatch):
+    """Verify hybrid sleep preserves the drafter and allows speculative decoding to accept draft tokens."""
     monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
 
     server = object.__new__(vllm_async_server.vLLMHttpServer)

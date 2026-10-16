@@ -29,6 +29,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -151,6 +152,31 @@ PACKED_MODULES_MAPPING = {
 }
 
 
+def test_vlm_checkpoint_names_resolve_to_live_module():
+    """Verify the checkpoint mapper resolves VLM parameter names to the live projection module."""
+    mod, ns = _load_quant_utils(fused_moe_is_function=False)
+    model = torch.nn.Module()
+    model.packed_modules_mapping = {}
+    model.language_model = torch.nn.Module()
+    model.language_model.model = torch.nn.Module()
+    projection = ns["LinearBase"](dtype=torch.bfloat16)
+    model.language_model.model.proj = projection
+    model.hf_to_vllm_mapper = types.SimpleNamespace(
+        apply_list=lambda names: [name.replace("model.language_model.", "language_model.model.", 1) for name in names]
+    )
+    assert mod.get_module_from_param_name(model, "model.language_model.proj.weight") is projection
+
+
+def test_mtp_filter_reads_multimodal_text_config():
+    """MTP weights in a multimodal config must not be traversed during refit."""
+    mod, _ = _load_quant_utils(fused_moe_is_function=False)
+    model = torch.nn.Module()
+    model.config = types.SimpleNamespace(text_config=types.SimpleNamespace(num_hidden_layers=45))
+
+    assert mod._is_absent_mtp_layer_weight("language_model.model.layers.44.norm.weight", model) is False
+    assert mod._is_absent_mtp_layer_weight("language_model.model.layers.45.norm.weight", model) is True
+
+
 def _build_model(ns: dict, moe_dtype=torch.float8_e4m3fn):
     """Build ``model.layers.0`` with an attention linear and a fused-MoE block."""
     linear_cls = ns["LinearBase"]
@@ -174,6 +200,85 @@ def _build_model(ns: dict, moe_dtype=torch.float8_e4m3fn):
     model.model = inner
     model.packed_modules_mapping = PACKED_MODULES_MAPPING
     return model
+
+
+@pytest.mark.parametrize("fused_moe_is_function", [False, True])
+@pytest.mark.parametrize("mapped_names", [False, True])
+@pytest.mark.parametrize("layer_container", ["dict", "list"])
+def test_mtp_refit_quantizes_only_live_target_layers(
+    monkeypatch, capsys, fused_moe_is_function, mapped_names, layer_container
+):
+    """Main-model refit skips absent MTP layers; drafter refit emits FP8 weights and scales."""
+    mod, ns = _load_quant_utils(fused_moe_is_function)
+    main_model = _build_model(ns)
+    drafter = _build_model(ns)
+    predictors = []
+    for _ in range(2):
+        predictor = torch.nn.Module()
+        predictor.mtp_block = _build_model(ns).model.layers[0]
+        predictors.append(predictor)
+    if layer_container == "dict":
+        drafter.model.layers = torch.nn.ModuleDict({"1": predictors[0], "2": predictors[1]})
+    else:
+        drafter.model.layers = torch.nn.ModuleList([torch.nn.Module(), *predictors])
+
+    prefix = "model."
+    for model in (main_model, drafter):
+        model.config = types.SimpleNamespace(text_config=types.SimpleNamespace(num_hidden_layers=1))
+        if mapped_names:
+            inner = model.model
+            del model.model
+            model.language_model = torch.nn.Module()
+            model.language_model.model = inner
+            model.hf_to_vllm_mapper = types.SimpleNamespace(
+                apply_list=lambda names: [
+                    name.replace("model.language_model.", "language_model.model.", 1) for name in names
+                ]
+            )
+            prefix = "model.language_model."
+        model.load_weights = lambda weights: dict(weights)
+
+    quant_utils = _make_module("vllm.model_executor.layers.quantization.utils.quant_utils")
+    quant_utils._normalize_quant_group_shape = lambda weight, block: block
+    quant_utils.scaled_quantize = lambda weight, *args, **kwargs: (
+        (weight / 2).to(torch.float8_e4m3fn),
+        torch.full((1, 1), 2.0),
+    )
+    monkeypatch.setitem(sys.modules, quant_utils.__name__, quant_utils)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    runner = types.SimpleNamespace(
+        model=main_model,
+        drafter=types.SimpleNamespace(model=drafter),
+        vllm_config=types.SimpleNamespace(
+            quant_config=types.SimpleNamespace(weight_block_size=[2, 2]),
+            model_config=types.SimpleNamespace(dtype=torch.bfloat16),
+        ),
+    )
+    quantized_names = [
+        f"{prefix}layers.1.mtp_block.self_attn.q_proj.weight",
+        f"{prefix}layers.1.mtp_block.mlp.experts.0.gate_proj.weight",
+        f"{prefix}layers.2.mtp_block.mlp.experts.0.down_proj.weight",
+    ]
+    unquantized_names = [
+        f"{prefix}layers.1.mtp_block.mlp.gate.weight",
+        f"{prefix}layers.3.mtp_block.self_attn.q_proj.weight",
+    ]
+    weight = torch.arange(4, dtype=torch.bfloat16).reshape(2, 2)
+    weights = [(name, weight) for name in quantized_names + unquantized_names]
+
+    # Load the same checkpoint into both targets, as the rollout worker does.
+    main_loaded = mod.load_quanted_weights(weights, runner)
+    assert main_loaded.keys() == dict(weights).keys()
+    assert all(value is weight for value in main_loaded.values())
+
+    draft_loaded = mod.load_quanted_weights(weights, runner, is_drafter=True)
+    assert set(draft_loaded) == set(main_loaded) | {name + "_scale_inv" for name in quantized_names}
+    for name in quantized_names:
+        assert draft_loaded[name].dtype == torch.float8_e4m3fn
+        torch.testing.assert_close(draft_loaded[name].float(), weight.float() / 2)
+        torch.testing.assert_close(draft_loaded[name + "_scale_inv"], torch.tensor([2.0]))
+    assert all(draft_loaded[name] is weight for name in unquantized_names)
+    assert "Could not find module" not in capsys.readouterr().out
 
 
 def test_new_vllm_resolves_routed_experts_and_does_not_crash():

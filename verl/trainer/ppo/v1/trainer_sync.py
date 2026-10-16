@@ -38,6 +38,8 @@ class PPOTrainerSync(PPOTrainer):
             self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_sample_end(self):
+        """Abort and sleep rollout replicas, then stop profiling when enabled for this step."""
+        self.checkpoint_manager.abort_replicas()
         # sleep all replicas to discard weights and kv cache
         self.checkpoint_manager.sleep_replicas()
         if self.curr_step_profile:

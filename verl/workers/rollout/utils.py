@@ -91,8 +91,9 @@ async def ensure_async_iterator(iterable):
 
 
 def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
+    """Collapse expanded Qwen2-VL/GLM image placeholders before backend processing.
+
+    vLLM expands each placeholder again using the supplied image/video data.
     For example,
     ```
     <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
@@ -103,12 +104,15 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     if (
         processor is not None
         and hasattr(processor, "image_processor")
-        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
+        and any(
+            name in processor.image_processor.__class__.__name__
+            for name in ("Qwen2VLImageProcessor", "Glm5NextImageProcessor")
+        )
     ):
         prompt_ids = np.array(prompt_ids)
         mask = np.ones(len(prompt_ids), dtype=bool)
         is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
+        mask[1:] &= ~(is_value[1:] & (prompt_ids[1:] == prompt_ids[:-1]))
         return prompt_ids[mask].tolist()
     else:
         return prompt_ids
