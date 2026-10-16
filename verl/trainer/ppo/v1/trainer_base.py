@@ -849,6 +849,10 @@ class PPOTrainer(ABC):
 
     def _load_checkpoint(self):
         self.global_steps = 0
+        self._restored_tq_prompt_count = 0
+        discard_rollout = self.config.trainer.v1.get("resume_discard_rollout", False)
+        if type(discard_rollout) is not bool:
+            raise ValueError("trainer.v1.resume_discard_rollout must be a boolean")
 
         # 1. find latest checkpoint folder
         if self.config.trainer.resume_mode == "disable":
@@ -900,6 +904,9 @@ class PPOTrainer(ABC):
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
         if self.trainer_mode != "sync":
+            if discard_rollout:
+                logger.info("Discarding checkpointed rollout data; skipping TransferQueue restoration")
+                return
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
