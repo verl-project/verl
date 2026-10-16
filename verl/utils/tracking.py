@@ -211,7 +211,7 @@ class Tracking:
         if "clearml" in loggers:
             loggers["clearml"].finish()
         if "mlflow" in loggers:
-            loggers["mlflow"].finish()
+            loggers["mlflow"].finish(exit_code=exit_code)
         if "trackio" in loggers:
             loggers["trackio"].finish()
         if "file" in loggers:
@@ -618,11 +618,11 @@ class _MlflowLoggingAdapter:
                 else:
                     self.logger.warning(msg, *args)
 
-    def finish(self):
+    def finish(self, exit_code: int = 0):
         import mlflow
 
         if mlflow.active_run() is not None:
-            mlflow.end_run()
+            mlflow.end_run(status="FINISHED" if exit_code == 0 else "FAILED")
 
 
 def _compute_mlflow_params_from_objects(params) -> dict[str, Any]:
