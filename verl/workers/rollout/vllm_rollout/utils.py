@@ -93,12 +93,13 @@ def set_death_signal():
         os.kill(os.getpid(), signal.SIGKILL)
 
 
-def get_vllm_max_lora_rank(lora_rank: int):
+def get_vllm_max_lora_rank(lora_rank: int, configured_max_rank: int | None = None):
     """
     For vLLM, automatically adjusts the `max_lora_rank` to the nearest allowed value.
     The allowed values are retrieved from vLLM's MaxLoRARanks type definition.
     """
     assert lora_rank > 0, f"lora_rank must be greater than 0, get {lora_rank}"
+    lora_rank = max(lora_rank, configured_max_rank or 0)
 
     try:
         from vllm.config.lora import MaxLoRARanks
