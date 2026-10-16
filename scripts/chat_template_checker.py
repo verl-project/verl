@@ -44,14 +44,18 @@ The checker runs the mock trajectories in
    mismatch instead of an error. Trajectories with no non-assistant run after the
    assistant turn (single-turn chat) have no boundary and are covered by Check 1.
 
-TODO(@gxlvera (Xiaole Guo)): add coverage for trajectories carrying
-reasoning_content.
+Text trajectories cover separate reasoning_content in single-turn answers,
+tool calls and user follow-ups. An absent reasoning field remains absent;
+an explicitly empty string is preserved for templates that distinguish them.
+Templates that discard earlier assistant reasoning after a user follow-up can
+fail the corresponding Continuous Token check, even when tool boundaries pass.
 
 Examples:
 
     python scripts/chat_template_checker.py --model Qwen/Qwen3-0.6B
     python scripts/chat_template_checker.py --model zai-org/GLM-4.7-Flash --allow-download
     python scripts/chat_template_checker.py --model Qwen/Qwen3-0.6B --template /path/to/chat_template.jinja
+    python -m pytest tests/utils/test_chat_template_checker_on_cpu.py
 """
 
 from __future__ import annotations
@@ -140,7 +144,10 @@ def _initial_messages(trajectory: MockTrajectory) -> list[dict[str, Any]]:
 
 
 def _assistant_message_for_single_turn(trajectory: SingleTurnTrajectory) -> dict[str, Any]:
-    return {"role": "assistant", "content": trajectory.assistant_response}
+    message = {"role": "assistant", "content": trajectory.assistant_response}
+    if trajectory.assistant_reasoning_content is not None:
+        message["reasoning_content"] = trajectory.assistant_reasoning_content
+    return message
 
 
 def _render_tokens(
