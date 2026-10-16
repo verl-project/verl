@@ -36,6 +36,7 @@ from transformers import PretrainedConfig
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
+from verl.utils.megatron.param_sync import register_ddp_param_ready_callbacks
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
 logger = logging.getLogger(__file__)
@@ -382,6 +383,9 @@ def make_megatron_module(
         from verl.models.mcore.patch import apply_patch
 
         apply_patch()
+    # Fused LM-head consumers access weights without invoking output_layer's
+    # forward pre-hook. Register readiness after the final DDP wrapping.
+    register_ddp_param_ready_callbacks(model)
     return model, tf_config
 
 
