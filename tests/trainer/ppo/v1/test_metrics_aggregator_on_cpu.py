@@ -50,6 +50,65 @@ def test_default_metric_is_weighted_by_sample_count():
     assert agg.get_aggregated_metrics()["actor/kl"] == pytest.approx(3.5)
 
 
+def test_trajectory_metrics_are_not_captured_by_substring_matching():
+    """``mini_batches`` contains ``min``, which the substring fallback would match.
+
+    The trajectory/optimizer-update metrics are per-iteration quantities, so reducing
+    them with ``min()`` would silently under-report. Pin the explicit rules instead.
+    """
+    agg = MetricsAggregator()
+    agg.add_step_metrics(
+        {
+            "training/actor/mini_batches_per_epoch": 4.0,
+            "training/actor/optimizer_updates": 4.0,
+            "training/trajectory/stored_rows": 8.0,
+            "training/trajectory/expanded_rows": 8.0,
+            "training/trajectory/logical_sessions": 4.0,
+            "training/trajectory/segments_per_session/mean": 2.0,
+        },
+        sample_count=1,
+    )
+    agg.add_step_metrics(
+        {
+            "training/actor/mini_batches_per_epoch": 8.0,
+            "training/actor/optimizer_updates": 8.0,
+            "training/trajectory/stored_rows": 16.0,
+            "training/trajectory/expanded_rows": 16.0,
+            "training/trajectory/logical_sessions": 4.0,
+            "training/trajectory/segments_per_session/mean": 4.0,
+        },
+        sample_count=1,
+    )
+    out = agg.get_aggregated_metrics()
+
+    # Averaged, not min()-reduced.
+    assert out["training/actor/mini_batches_per_epoch"] == pytest.approx(6.0)
+    assert out["training/trajectory/segments_per_session/mean"] == pytest.approx(3.0)
+    # Per-iteration counts sum over the parameter_sync_step cycle.
+    assert out["training/actor/optimizer_updates"] == pytest.approx(12.0)
+    assert out["training/trajectory/stored_rows"] == pytest.approx(24.0)
+    assert out["training/trajectory/expanded_rows"] == pytest.approx(24.0)
+    assert out["training/trajectory/logical_sessions"] == pytest.approx(8.0)
+
+
+def test_loss_weight_range_metrics_keep_min_max_semantics():
+    agg = MetricsAggregator()
+    for mean, low, high in ((0.5, 0.25, 1.0), (0.25, 0.125, 2.0)):
+        agg.add_step_metrics(
+            {
+                "training/trajectory/loss_weight/mean": mean,
+                "training/trajectory/loss_weight/min": low,
+                "training/trajectory/loss_weight/max": high,
+            },
+            sample_count=1,
+        )
+    out = agg.get_aggregated_metrics()
+
+    assert out["training/trajectory/loss_weight/mean"] == pytest.approx(0.375)
+    assert out["training/trajectory/loss_weight/min"] == pytest.approx(0.125)
+    assert out["training/trajectory/loss_weight/max"] == pytest.approx(2.0)
+
+
 def test_max_and_min_are_reduced():
     agg = MetricsAggregator()
     for v in (1.0, 5.0, 3.0):

@@ -137,6 +137,15 @@ def test_agent_loop_output_as_dict_handles_default_extra_fields():
     assert fields["extra_fields"] == {}
 
 
+def test_agent_loop_output_as_dict_preserves_loss_weight():
+    output = _make_agent_loop_output()
+    output.loss_weight = 0.25
+
+    fields = output.as_dict()
+
+    assert fields["loss_weight"] == pytest.approx(0.25)
+
+
 def test_agent_loop_output_as_dict_preserves_mutated_default_extra_fields():
     output = _make_agent_loop_output()
     output.extra_fields["raw_prompt"] = [{"role": "user", "content": "hello"}]
