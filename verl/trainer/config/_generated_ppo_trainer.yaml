@@ -74,6 +74,9 @@ actor_rollout_ref:
             fsdp_implementation: native
             num_to_forward_prefetch: 1
             num_to_backward_prefetch: 1
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.FSDPActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
@@ -282,6 +285,9 @@ actor_rollout_ref:
             fsdp_implementation: native
             num_to_forward_prefetch: 1
             num_to_backward_prefetch: 1
+      router_replay:
+        _target_: verl.workers.config.EngineRouterReplayConfig
+        mode: disabled
     _target_: verl.workers.config.FSDPActorConfig
     ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequence_parallel_size,1}
     entropy_from_logits_with_chunking: false
@@ -604,6 +610,9 @@ critic:
           fsdp_implementation: native
           num_to_forward_prefetch: 1
           num_to_backward_prefetch: 1
+    router_replay:
+      _target_: verl.workers.config.EngineRouterReplayConfig
+      mode: disabled
   _target_: verl.workers.config.FSDPCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: fsdp
