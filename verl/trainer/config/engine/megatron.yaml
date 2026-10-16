@@ -152,3 +152,18 @@ qat:
   activation_observer: null
   # Path to quantization config JSON for vLLM weight export
   quantization_config_path: null
+
+# Real W4A4 training and rollout. This is independent of the legacy ModelOpt
+# fake-QAT path above: routed-expert MLP GEMMs execute Transformer Engine's
+# NVFP4 recipe with BF16 parameters, and the vLLM worker quantizes the BF16
+# refit. Attention stays BF16.
+real_nvfp4:
+  _target_: verl.workers.config.RealNVFP4EngineConfig
+  enable: false
+  # Backward GEMMs use the dequantized forward operands ("dequantized") or the
+  # original high-precision operands ("high_precision"). Must match the
+  # NVTE_BACKWARD_OVERRIDE environment variable of the workers.
+  backward_override: "dequantized"
+  # Decoder layers kept fully BF16 at the start/end, in training and rollout.
+  num_layers_at_start_in_bf16: 0
+  num_layers_at_end_in_bf16: 0

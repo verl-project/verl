@@ -342,10 +342,10 @@ RUN printf 'verl\n' > README.md
 # syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
 # sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
 # (/root/.cache/uv) with every wheel & built artifact those backends need from
-# uv.lock. Nothing native is compiled here beyond git-sourced megatron-core:
-# apex / TransformerEngine / flash-attn and megatron-bridge come prebuilt
-# from the verl wheelhouse index, and vllm / sglang / sglang-kernel come prebuilt
-# from PyPI.
+# uv.lock. Megatron-Core builds from source; Transformer Engine uses its
+# official release wheel when available and otherwise builds its Torch extension.
+# Apex, flash-attn and Megatron-Bridge use the verl wheelhouse;
+# vllm / sglang / sglang-kernel use PyPI wheels.
 # The `cu130 dev` scope keeps this image to its torch-2.13 world. (The deferred
 # cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
 # --no-install-project, so only deps are cached and this
@@ -400,7 +400,7 @@ FROM prefetch AS final
 #
 # `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
 # is fine for the prefetch git-source build (megatron-core compiles
-# with it; every native backend ships prebuilt). But sglang
+# with it; TE may also build its extension). But sglang
 # JIT-compiles its custom kernels (e.g. custom_all_reduce_push) at RUNTIME in
 # C++20, which uses std::bit_cast — a libstdc++ feature that only exists in
 # GCC >= 11. With gcc-10 as nvcc's host compiler that JIT dies with `namespace
@@ -452,3 +452,13 @@ RUN NSIGHT_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo arm64; else echo a
     && ln -sf "${NSYS_BIN}" /usr/local/cuda/bin/nsys \
     && ln -sf "${NSYS_UI}" /usr/local/cuda/bin/nsys-ui \
     && nsys --version
+
+# Optional NVFP4 runtime: materialize the standard locked extras and apply the
+# vLLM NVFP4 compatibility patch once, at image build time. The default image
+# retains its backend-selection flow; this opt-in image carries the audited
+# vLLM+Megatron environment and must be rebuilt after changing these extras.
+ARG NVFP4_RUNTIME=0
+RUN if [ "${NVFP4_RUNTIME}" = "1" ]; then \
+        uv sync --frozen --extra megatron --extra vllm && \
+        /workspace/verl/.venv/bin/python examples/real_nvfp4/runtime_backports/apply_vllm_nvfp4.py; \
+    fi

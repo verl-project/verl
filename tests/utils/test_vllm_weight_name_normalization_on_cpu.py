@@ -956,3 +956,85 @@ def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
     worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
 
     assert events == ["add_lora"]
+
+
+class _FakeNVFP4BucketReceiver:
+    """Delivers each bucket through the regular per-bucket callback, like BucketedWeightReceiver."""
+
+    def __init__(self, buckets, events):
+        self.buckets = buckets
+        self.events = events
+
+    def receive_weights(self, on_bucket_received):
+        for index, bucket in enumerate(self.buckets):
+            on_bucket_received(bucket, index == len(self.buckets) - 1)
+            self.events.append(f"ack{index}")
+
+
+def _real_nvfp4_worker(monkeypatch, events, load_weights):
+    pytest.importorskip("vllm")
+    import vllm.model_executor.model_loader.reload as vllm_reload
+
+    import verl.utils.real_nvfp4 as real_nvfp4
+
+    monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")
+    monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")
+    monkeypatch.setattr(vllm_reload, "initialize_layerwise_reload", lambda model: events.append("initialize"))
+    monkeypatch.setattr(vllm_reload, "finalize_layerwise_reload", lambda model, config: events.append("finalize"))
+    monkeypatch.setattr(
+        real_nvfp4, "attest_vllm_native_nvfp4_runtime", lambda model, **partition: events.append(("attest", partition))
+    )
+    names = [
+        f"model.layers.0.mlp.experts.0.{projection}.weight" for projection in ("gate_proj", "up_proj", "down_proj")
+    ]
+    buckets = [[(name, torch.ones(1, dtype=torch.bfloat16))] for name in names]
+    monkeypatch.setattr(
+        _vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeNVFP4BucketReceiver(buckets, events)
+    )
+
+    model = _FakeModel({"q.weight": torch.empty(0)})
+    model.load_weights = load_weights
+    worker = _make_worker(model)
+    worker.model_runner.get_model = lambda: model
+    worker.device = torch.device("cpu")
+    worker._is_qat_model = False
+    worker._is_real_nvfp4 = True
+    worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1, num_experts=1)
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-native-nvfp4-reload.sock"
+    return worker, names
+
+
+def test_real_nvfp4_update_uses_layerwise_reload_per_bucket(monkeypatch):
+    events = []
+    worker, names = _real_nvfp4_worker(
+        monkeypatch, events, lambda weights: events.append(("load", [name for name, _ in weights]))
+    )
+
+    worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
+
+    assert events == [
+        "initialize",
+        ("load", names[:1]),
+        "ack0",
+        ("load", names[1:2]),
+        "ack1",
+        ("load", names[2:]),
+        "ack2",
+        "finalize",
+        ("attest", {"quantized_layer_indices": [0], "bf16_layer_indices": []}),
+    ]
+
+
+def test_real_nvfp4_load_error_still_drains_the_round(monkeypatch):
+    events = []
+
+    def failing_load(weights):
+        events.append("load")
+        raise ValueError("load failed")
+
+    worker, _ = _real_nvfp4_worker(monkeypatch, events, failing_load)
+
+    with pytest.raises(ValueError, match="load failed"):
+        worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
+    # Every bucket is still acknowledged; nothing is loaded or finalized after the error.
+    assert events == ["initialize", "load", "ack0", "ack1", "ack2"]
