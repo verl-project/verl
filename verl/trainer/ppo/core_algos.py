@@ -1121,22 +1121,6 @@ def compute_multi_turn_optimal_token_baseline_advantage(
     return advantages, token_returns
 
 
-def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
-    """Compute token-level rewards with KL penalty.
-
-    Args:
-        token_level_scores (torch.Tensor): Token-level reward scores.
-        old_log_prob (torch.Tensor): Log probabilities from current policy.
-        ref_log_prob (torch.Tensor): Log probabilities from reference policy.
-        kl_ratio (float): KL penalty coefficient.
-
-    Returns:
-        torch.Tensor: Token-level rewards with KL penalty applied.
-    """
-    kl = old_log_prob - ref_log_prob
-    return token_level_scores - kl * kl_ratio
-
-
 def agg_loss(
     loss_mat: torch.Tensor,
     loss_mask: torch.Tensor,
