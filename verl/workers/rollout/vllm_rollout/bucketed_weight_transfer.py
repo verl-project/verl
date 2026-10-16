@@ -224,16 +224,26 @@ class BucketedWeightSender:
         """Send a weight larger than the bucket size via cuda ipc or share memory."""
         logger.debug(f"Direct sending large weight {name}({weight.shape}, {weight.dtype})")
         # TODO: support fallback to shared memory
-        handle = reduce_tensor(weight)
+        # The direct-send path bypasses the communication buffer copy used by
+        # regular buckets. Ensure CPU/off-device weights are moved to the IPC
+        # device before reducing them into a CUDA IPC handle.
+        send_weight = weight
+        if send_weight.device != self.buffer.device:
+            send_weight = send_weight.to(self.buffer.device, non_blocking=True)
+            get_torch_device().synchronize()
+
+        handle = reduce_tensor(send_weight)
         bucket_meta: dict[str, TensorMetadata] = {}
         bucket_meta[name] = {
             "name": name,
-            "shape": weight.shape,
-            "dtype": weight.dtype,
+            "shape": send_weight.shape,
+            "dtype": send_weight.dtype,
             "offset": 0,
             "handle": handle,
         }
         self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+        # Keep send_weight alive until the receiver has rebuilt and consumed the
+        # IPC tensor. The ACK is the lifetime boundary for this allocation.
         self.socket.recv()
 
 
