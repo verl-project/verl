@@ -1,0 +1,580 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""MXFP8 weight-sync loader for SGLang, loaded via ``--custom-weight-loader``.
+
+Why this exists. SGLang's FlashInfer MXFP8 GEMM backends do not consume the
+canonical ``weight_scale_inv`` (UE8M0, ``[n, k/32]``) directly: at load time
+``Fp8LinearMethod._process_mxfp8_linear_weight_scale`` derives a kernel layout
+from it — ``flashinfer_cutlass`` stores an interleaved copy in
+``weight_scale_inv_swizzled`` and ``apply()`` reads only that copy. A weight
+sync overwrites ``weight`` / ``weight_scale_inv`` through ``model.load_weights``
+and nothing re-derives the copy, so after the first sync the kernel pairs fresh
+weights with stale scales and generation is garbage (observed on 2xB200,
+SGLang 0.5.12: held-out acc 0.0, kl 7.2, entropy ~ log(vocab), from step 0).
+
+What it does. ``load_and_reprocess`` is registered as a custom loader and named
+as the request ``load_format``; SGLang ``dynamic_import``s it inside every TP
+worker and calls it with ``(model, named_tensors)``. It loads the tensors the
+standard way, then re-runs ``process_weights_after_loading`` on every module
+whose quant method is MXFP8, which rebuilds the kernel-layout copies from the
+just written canonical scales.
+
+One sync, many requests. A weight sync arrives as one ``update_weights_from_tensor``
+request per bucket, and SGLang calls the loader once per request, so the loader
+cannot re-derive anything per call: a MoE layer whose expert tensors sit in a
+later bucket would be re-derived from an unwritten staging buffer and folded
+into the live one (runners that change the scale's shape), or have the runner's
+in-place rewrite applied once more on top of the last one (runners that keep
+it). As in verl's vLLM refit cycle, staging and re-processing bracket the
+whole sync instead: the first request of a sync stages, every request only
+loads, and the closing request — the caller sends ``finalize_tensors()`` after
+the last bucket — checks, re-derives, folds back and self-checks. A request that
+raises ends the sync without re-deriving anything: every staged scale is pointed
+back at its live storage, so the next sync stages afresh. (sglang 0.5.12 to 0.5.21
+also shut the scheduler down when a custom loader raises; the cleanup does not
+rely on that.)
+
+Which backend a layer runs on is read from the layer, not from the launch flag.
+sglang >= 0.5.18 (#33208) resolves the MXFP8 dense backend at construction and
+stores it as ``quant_method.mxfp8_dense_backend`` — with no ``--fp8-gemm-backend``
+that is FlashInfer CuTe-DSL or CUTLASS on Blackwell and DeepGEMM on Hopper, all
+of which keep derived copies (``weight_scale_inv_swizzled`` /
+``weight_scale_inv_deepgemm``) that a sync must rebuild. sglang <= 0.5.17 has no
+such attribute and dispatches on the requested backend, where ``auto`` means
+Triton, which reads the canonical scale directly and needs no re-processing.
+The ``flashinfer_trtllm`` backend is rejected on both: it shuffles the *weight*
+tensor itself in place at load, so re-running the processing on an
+already-shuffled layer would shuffle twice; supporting it needs per-layer
+tracking of which parameters a sync touched.
+
+MoE experts. With an fp8-serialized MXFP8 checkpoint (what a verl sync delivers),
+SGLang's ``Fp8MoEMethod`` rewrites expert tensors *in place* at load on the MoE
+runners sglang allows for MXFP8 on Blackwell, CUTLASS on sglang >= 0.5.20 excepted:
+FlashInfer TRT-LLM (the default) reorders and shuffles both the expert weights and
+their scales (shapes kept unless padded for alignment), CUTLASS swizzles the expert
+scales ``w13_weight_scale_inv`` / ``w2_weight_scale_inv`` (sglang <= 0.5.15 keeps
+their canonical ``[E, N, K/32]`` shape, 0.5.16 to 0.5.19 rebind them to the swizzled
+tensor's own shape; >= 0.5.20 hands the canonical scales to the kernel and rewrites
+nothing), and DeepGEMM packs them (dtype changes). A sync must therefore write
+canonical weights and scales and re-run the processing once the whole sync is
+written: run before the sync has rewritten a layer, it re-derives that layer from
+bytes the runner already rewrote (or, for a staged scale, from an unwritten buffer).
+Where the processing changed a scale's shape or dtype, ``stage_mxfp8_moe_scales``
+points the parameter at a canonical-shaped buffer before the first ``load_weights``
+of a sync and ``reprocess_mxfp8_moe_layers`` folds the re-derived layout back into
+the storage the CUDA graph captured; where it kept them, the sync writes the
+canonical data over the live buffer and the processing rewrites it there. This is
+the SGLang analogue of verl's vLLM pristine-layout cycle, without a record step
+because the canonical layout is derivable from the expert weight shape.
+
+Self-check. After re-processing, one dense MXFP8 layer's own ``apply`` is compared
+against a dequantized reference (``verl.utils.mxfp8_refit_check``); a stale or
+mis-laid-out scale shows up as O(1) relative error and raises. One local expert of
+the smallest MXFP8 MoE layer is probed the same way: its canonical ``w13`` / ``w2``
+weights and scales are snapshotted after ``load_weights`` (before the runner
+rewrites them), the layer then runs through the model's own ``TopK`` on router
+logits that give that expert weight 1 and every other expert weight 0, and its
+output is compared against the gated-MLP reference, with gate and up in the order
+the engine stores them (``[up; gate]`` on the FlashInfer TRT-LLM runners). ``TopK``
+hands each runner the routing input it consumes: FlashInfer TRT-LLM — sglang's
+default for MXFP8 — routes inside the kernel from the logits and asserts against a
+precomputed top-k. The probe is skipped, with a warning, where such logits cannot
+pin one expert at weight 1 (sigmoid, grouped, biased or custom routing, fused shared
+experts, a routed scaling factor, or a TRT-LLM routing method other than the softmax
+ones), when expert parallelism is on (routing to a global expert id would need the
+EP dispatch), and when TP>1 without ``reduce_results``; a probe that raises is
+logged as skipped with the exception type and the file:line it came from. For staged
+MoE scales the loader also verifies, before re-processing, that the sync wrote every
+entry: the staging buffer is pre-filled with ``0xFF`` (the UE8M0 NaN code), so an
+expert whose HF name misses the sync-side quantization rule — shipped as bf16, which
+the engine's weight loader silently casts into the fp8 buffer with no scale — is
+reported by name instead of being swizzled into the live buffer. Scales the runner
+rewrites without changing their shape or dtype are not staged, so this check does
+not cover them. Both checks are disabled by ``VERL_MXFP8_REFIT_CHECK=0``.
+
+Register at server launch (verl does this when ``rollout.quantization=mxfp8``)::
+
+    custom_weight_loader=["verl.workers.rollout.sglang_rollout.mxfp8_refit_loader.load_and_reprocess"]
+
+and send every ``update_weights_from_tensor`` request with
+``load_format`` set to the same import path, followed by one closing request
+with the same ``load_format`` carrying ``finalize_tensors()``.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterable
+
+import torch
+
+logger = logging.getLogger(__name__)
+
+MXFP8_BLOCK_SIZE = 32
+
+# Import path callers pass as both --custom-weight-loader and load_format.
+LOADER_FQN = "verl.workers.rollout.sglang_rollout.mxfp8_refit_loader.load_and_reprocess"
+# Name of the tensor that marks the closing request of a sync (see ``finalize_tensors``).
+FINALIZE_MARKER = "__verl_mxfp8_refit_finalize__"
+# Set on the model between the first and the closing request of a sync: the staged MoE scales.
+_SYNC_STAGED_ATTR = "_verl_mxfp8_refit_staged"
+
+
+def finalize_tensors() -> list[tuple[str, torch.Tensor]]:
+    """Payload of the closing request of a sync; send it after the last bucket with ``load_format=LOADER_FQN``.
+
+    One element rather than none: the request travels through the same CUDA IPC serialization as the
+    buckets, and the loader only looks at the name.
+    """
+    return [(FINALIZE_MARKER, torch.zeros(1, dtype=torch.uint8))]
+
+
+def _is_mxfp8_linear(module: torch.nn.Module) -> bool:
+    qm = getattr(module, "quant_method", None)
+    return (
+        qm is not None
+        and getattr(qm, "use_mxfp8", False)
+        and hasattr(qm, "process_weights_after_loading")
+        and hasattr(module, "weight_scale_inv")
+    )
+
+
+def _layer_backend(qm) -> tuple[object, bool]:
+    """Return ``(backend, resolved)`` for one MXFP8 quant method.
+
+    ``resolved`` is True when sglang itself resolved the MXFP8 dense backend
+    (>= 0.5.18, ``quant_method.mxfp8_dense_backend``); otherwise the requested
+    ``--fp8-gemm-backend`` is returned, where ``auto`` means Triton for MXFP8.
+    """
+    backend = getattr(qm, "mxfp8_dense_backend", None)
+    if backend is not None:
+        return backend, True
+    from sglang.srt.layers.quantization.fp8_utils import get_fp8_gemm_runner_backend
+
+    return get_fp8_gemm_runner_backend(), False
+
+
+def _needs_reprocess(backend, resolved: bool) -> bool:
+    if backend.is_flashinfer_trtllm():
+        raise NotImplementedError(
+            "MXFP8 weight sync with the flashinfer_trtllm GEMM backend is not supported: that backend "
+            "shuffles the weight tensor in place at load time, so post-load processing cannot be re-run "
+            "after a sync. Use flashinfer_cutlass / flashinfer_cutedsl, or leave the backend unset."
+        )
+    if resolved:
+        # CUTLASS, CuTe-DSL and DeepGEMM all derive their kernel layout from the canonical
+        # weight_scale_inv the sync just rewrote; re-running the processing is idempotent for
+        # them and a no-op for backends that read the canonical scale directly.
+        return True
+    # sglang <= 0.5.17: only flashinfer_cutlass keeps a derived copy; Triton (auto) reads
+    # weight_scale_inv directly.
+    return backend.is_flashinfer_cutlass()
+
+
+def reprocess_mxfp8_layers(model: torch.nn.Module) -> int:
+    """Re-derive backend-specific MXFP8 scale layouts from the canonical scales.
+
+    Returns the number of modules reprocessed. Raises for backends whose
+    post-load processing is not idempotent (``flashinfer_trtllm``).
+    """
+    count = 0
+    for name, module in model.named_modules():
+        if not _is_mxfp8_linear(module):
+            continue
+        qm = module.quant_method
+        backend, resolved = _layer_backend(qm)
+        if not _needs_reprocess(backend, resolved):
+            continue
+        if not getattr(qm, "is_checkpoint_fp8_serialized", True):
+            # Would re-quantize from a bf16 master weight that a sync just replaced with fp8 data.
+            raise RuntimeError(
+                f"{name}: MXFP8 quant method expects a non-fp8-serialized checkpoint; refusing to "
+                "re-quantize after a weight sync."
+            )
+        qm.process_weights_after_loading(module)
+        count += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
+# MoE experts
+# ---------------------------------------------------------------------------
+
+_MOE_SCALE_PAIRS = (("w13_weight", "w13_weight_scale_inv"), ("w2_weight", "w2_weight_scale_inv"))
+
+
+def _is_mxfp8_moe(module: torch.nn.Module) -> bool:
+    qm = getattr(module, "quant_method", None)
+    return (
+        qm is not None
+        and getattr(qm, "use_mxfp8", False)
+        and hasattr(qm, "process_weights_after_loading")
+        and hasattr(module, "w13_weight_scale_inv")
+    )
+
+
+def _canonical_scale_shape(weight: torch.Tensor) -> tuple[int, ...]:
+    return (*tuple(weight.shape[:-1]), weight.shape[-1] // MXFP8_BLOCK_SIZE)
+
+
+def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module, str, torch.Tensor]]:
+    """Expose canonical-layout expert scale buffers so ``load_weights`` can write into them.
+
+    Returns ``(module, scale_name, live_data)`` for every expert scale whose live
+    buffer no longer has the checkpoint shape or dtype; ``reprocess_mxfp8_moe_layers``
+    folds the re-derived layout back into ``live_data``. Scales the runner rewrote
+    without changing shape or dtype (FlashInfer TRT-LLM; CUTLASS on sglang <= 0.5.15)
+    or left canonical (CUTLASS on sglang >= 0.5.20) are not staged: ``load_weights``
+    writes the canonical data over the live buffer and the re-processing rewrites it
+    in place, if at all.
+    """
+    pending = []
+    for module in model.modules():
+        if not _is_mxfp8_moe(module):
+            continue
+        for wname, sname in _MOE_SCALE_PAIRS:
+            weight = getattr(module, wname, None)
+            param = getattr(module, sname, None)
+            if weight is None or not isinstance(param, torch.nn.Parameter):
+                continue
+            canonical = _canonical_scale_shape(weight.data)
+            if tuple(param.data.shape) == canonical and param.data.dtype == torch.uint8:
+                continue
+            staging = torch.empty(canonical, dtype=torch.uint8, device=param.data.device)
+            # 0xFF is NaN-like for UE8M0 (2**128): a scale the sync fails to write blows
+            # up in the self-check instead of being swizzled into the live buffer.
+            staging.fill_(0xFF)
+            pending.append((module, sname, param, staging))
+    # Rebind only once every staging buffer is allocated: a failed allocation must not leave a
+    # parameter on a staging buffer that no returned list records.
+    staged = []
+    for module, sname, param, staging in pending:
+        staged.append((module, sname, param.data))
+        param.data = staging
+    return staged
+
+
+_UNWRITTEN_SCALE = 0xFF
+
+
+def _check_moe_scales_written(name: str, module: torch.nn.Module, staged_names: Iterable[str]) -> None:
+    """Raise if a staged expert scale still holds the staging sentinel after ``load_weights``."""
+    for sname in staged_names:
+        data = getattr(module, sname).data
+        unwritten = int((data == _UNWRITTEN_SCALE).sum().item())
+        if unwritten == 0:
+            continue
+        raise RuntimeError(
+            f"{name}.{sname}: the weight sync did not write {unwritten} of {data.numel()} expert scale entries "
+            "(they still hold the 0xFF staging sentinel). The sync shipped these experts without MXFP8 scales - "
+            "typically their HF names miss the sync-side quantization rule (verl/utils/fp8_utils.py, e.g. "
+            "Mixtral's block_sparse_moe.experts.N.w1/w2/w3) while the engine built them as fp8, so the engine "
+            "cast bf16 weights into the fp8 buffer and would pair them with NaN scales. Fix the sync rule or "
+            "quantization_config.ignored_layers so both sides agree; VERL_MXFP8_REFIT_CHECK=0 bypasses this check."
+        )
+
+
+def reprocess_mxfp8_moe_layers(model: torch.nn.Module, staged: list[tuple[torch.nn.Module, str, torch.Tensor]]) -> int:
+    """Re-run the MoE post-load processing and fold results into the captured storage."""
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    live_by_key = {(id(m), n): live for m, n, live in staged}
+    check = refit_check_enabled()
+    count = 0
+    for name, module in model.named_modules():
+        if not _is_mxfp8_moe(module):
+            continue
+        qm = module.quant_method
+        if not getattr(qm, "is_checkpoint_fp8_serialized", True):
+            raise RuntimeError(
+                f"{name}: MXFP8 MoE quant method expects a non-fp8-serialized checkpoint; refusing to "
+                "re-quantize experts after a weight sync."
+            )
+        if check:
+            _check_moe_scales_written(name, module, [n for _, n in _MOE_SCALE_PAIRS if (id(module), n) in live_by_key])
+        qm.process_weights_after_loading(module)
+        for _, sname in _MOE_SCALE_PAIRS:
+            live = live_by_key.get((id(module), sname))
+            if live is None:
+                continue
+            param = getattr(module, sname)
+            new = param.data
+            if tuple(new.shape) != tuple(live.shape) or new.dtype != live.dtype:
+                raise RuntimeError(
+                    f"{name}.{sname}: post-load processing produced {tuple(new.shape)}/{new.dtype} but the live "
+                    f"buffer is {tuple(live.shape)}/{live.dtype}; the MoE runner's scale layout changed between "
+                    "load and refit and cannot be updated in place."
+                )
+            if new.data_ptr() != live.data_ptr():
+                live.copy_(new)
+            param.data = live
+        count += 1
+    # Post-condition: every staged scale is back on the storage the CUDA graph captured. A module
+    # that was staged but not visited above (predicate changed between stage and reprocess) would
+    # otherwise keep serving the staging buffer while the graph replays the stale live one.
+    for module, sname, live in staged:
+        param = getattr(module, sname)
+        if param.data.data_ptr() != live.data_ptr():
+            raise RuntimeError(
+                f"{type(module).__name__}.{sname}: staged for the sync but not folded back into its live "
+                "storage by reprocess_mxfp8_moe_layers; the CUDA graph would keep reading stale scales."
+            )
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Self-check
+# ---------------------------------------------------------------------------
+
+
+def self_check_mxfp8_linear(model: torch.nn.Module) -> None:
+    """Probe the smallest dense MXFP8 layer after re-processing (see ``mxfp8_refit_check``)."""
+    from verl.utils.mxfp8_refit_check import assert_mxfp8_linear_matches, refit_check_enabled
+
+    if not refit_check_enabled():
+        return
+    candidate = None
+    for name, module in model.named_modules():
+        if not _is_mxfp8_linear(module) or not hasattr(module, "weight"):
+            continue
+        if candidate is None or module.weight.numel() < candidate[1].weight.numel():
+            candidate = (name, module)
+    if candidate is None:
+        return
+    name, module = candidate
+    qm = module.quant_method
+    assert_mxfp8_linear_matches(
+        name,
+        lambda x: qm.apply(module, x),
+        module.weight.data,
+        module.weight_scale_inv.data,
+        engine="sglang",
+    )
+
+
+def snapshot_mxfp8_moe_for_check(model: torch.nn.Module):
+    """Pick the smallest MXFP8 MoE layer and copy one local expert's canonical weights / scales.
+
+    Must run after ``load_weights`` and before ``reprocess_mxfp8_moe_layers``: the
+    scales are canonical ``[E, N, K/32]`` uint8 at that point (staging buffers for
+    runners that rewrite them, the live buffers for runners that keep them). Returns
+    ``None`` when the check is disabled, no MoE layer qualifies, or the layer's
+    parallelism or routing is one the probe cannot reproduce.
+    """
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    if not refit_check_enabled():
+        return None
+    best = None
+    for name, module in model.named_modules():
+        if not _is_mxfp8_moe(module) or not hasattr(module, "w13_weight") or not hasattr(module, "w2_weight"):
+            continue
+        if best is None or module.w13_weight.numel() < best[1].w13_weight.numel():
+            best = (name, module)
+    if best is None:
+        return None
+    name, module = best
+    if getattr(module, "moe_ep_size", 1) > 1:
+        logger.debug("mxfp8 MoE refit check skipped on %s: expert parallelism %d", name, module.moe_ep_size)
+        return None
+    if getattr(module, "moe_tp_size", 1) > 1 and not getattr(module, "reduce_results", False):
+        logger.debug("mxfp8 MoE refit check skipped on %s: TP without reduce_results", name)
+        return None
+    topk = _find_topk_module(model, name)
+    problem = _probe_routing_problem(module, topk)
+    if problem is not None:
+        if (name, problem) not in _WARNED:
+            _WARNED.add((name, problem))
+            logger.warning(
+                "mxfp8 MoE refit check skipped on %s (sglang): %s; the probe needs softmax routing it can send to "
+                "one expert at weight 1",
+                name,
+                problem,
+            )
+        return None
+    w13, w2 = module.w13_weight.data, module.w2_weight.data
+    s13, s2 = module.w13_weight_scale_inv.data, module.w2_weight_scale_inv.data
+    if (
+        s13.dtype != torch.uint8
+        or s2.dtype != torch.uint8
+        or tuple(s13.shape) != _canonical_scale_shape(w13)
+        or tuple(s2.shape) != _canonical_scale_shape(w2)
+    ):
+        logger.debug("mxfp8 MoE refit check skipped on %s: scales not in canonical layout after load", name)
+        return None
+    expert = 0  # local expert 0 == global expert 0 when EP is off
+    return (
+        name,
+        module,
+        expert,
+        w13[expert].detach().clone(),
+        s13[expert].detach().clone(),
+        w2[expert].detach().clone(),
+        s2[expert].detach().clone(),
+        topk,
+        _w13_up_first(module),
+    )
+
+
+# (layer, reason) pairs already reported, so a probe that cannot run on a layer warns once, not every sync.
+_WARNED: set[tuple[str, str]] = set()
+# Routing the probe's logits steer exactly: softmax over experts, then (Renormalize) or before (Default /
+# RenormalizeNaive) the top-k. With logit 0 for the probed expert and _PROBE_OTHER_LOGIT for every other one, the
+# probed expert gets weight 1.0 and the others exactly 0 in every case.
+_PROBE_ROUTING_METHODS = ("Default", "Renormalize", "RenormalizeNaive")
+_PROBE_OTHER_LOGIT = -1.0e4
+
+
+def _find_topk_module(model: torch.nn.Module, name: str):
+    """The sglang ``TopK`` that routes for the fused-MoE layer ``name``: its one sibling of that type (``mlp.topk``)."""
+    from sglang.srt.layers.moe.topk import TopK
+
+    parent = model.get_submodule(name.rpartition(".")[0])
+    found = [m for m in parent.children() if isinstance(m, TopK)]
+    return found[0] if len(found) == 1 else None
+
+
+def _probe_routing_problem(module: torch.nn.Module, topk) -> str | None:
+    """Why the probe's logits cannot route every row to one expert at weight 1 on this layer, or None if they can."""
+    if topk is None:
+        return "no single sglang TopK module next to the experts"
+    cfg = topk.topk_config
+    if getattr(cfg, "scoring_func", "softmax") != "softmax":
+        return f"{cfg.scoring_func} scoring"
+    if cfg.use_grouped_topk or cfg.correction_bias is not None or cfg.custom_routing_function is not None:
+        return "grouped, biased or custom top-k routing"
+    if cfg.num_fused_shared_experts:
+        return "shared experts fused into the routed ones"
+    runner_cfg = getattr(module, "moe_runner_config", None)
+    for factor in (cfg.routed_scaling_factor, getattr(runner_cfg, "routed_scaling_factor", None)):
+        if factor not in (None, 1.0):
+            return f"routed scaling factor {factor}"
+    if getattr(module, "use_flashinfer_trtllm_moe", False):
+        # FlashInfer TRT-LLM routes inside the kernel by the layer's routing method; Fp8MoEMethod passes an unset
+        # (or Default == 0) method as DeepSeekV3.
+        from sglang.srt.layers.moe.utils import RoutingMethodType
+
+        method = getattr(module, "routing_method_type", None)
+        method = RoutingMethodType(int(method)).name if method else "DeepSeekV3"
+        if method not in _PROBE_ROUTING_METHODS:
+            return f"FlashInfer TRT-LLM routing method {method}"
+    return None
+
+
+def _w13_up_first(module: torch.nn.Module) -> bool:
+    """Whether sglang stores this layer's ``w13`` as ``[up; gate]`` rather than ``[gate; up]``.
+
+    ``FusedMoE`` swaps the w1 / w3 shard ids at load on the FlashInfer TRT-LLM runners ("Flashinfer assumes w31
+    format", sglang 0.5.12 to 0.5.20) for ``Fp8MoEMethod``, and ``_load_w13`` puts up first for quant methods with
+    ``load_up_proj_weight_first``; both together cancel.
+    """
+    return bool(getattr(module, "use_flashinfer_trtllm_moe", False)) != bool(
+        getattr(module.quant_method, "load_up_proj_weight_first", False)
+    )
+
+
+def _route_everything_to(module: torch.nn.Module, expert: int, topk: torch.nn.Module):
+    """Return ``apply_fn(x)`` running the MoE layer as the model does, with every row routed to ``expert`` at weight 1.
+
+    Only the router logits are made up (0 for ``expert``, ``_PROBE_OTHER_LOGIT`` for every other one): the model's
+    own ``TopK`` turns them into what the layer's runner consumes — the logits themselves for FlashInfer TRT-LLM,
+    which routes inside the kernel, a precomputed top-k for the others — so the probe takes the routing path of
+    generation. With ``top_k > 1`` other experts are selected too, at weight exactly 0.
+    """
+
+    def _apply(x: torch.Tensor) -> torch.Tensor:
+        num_experts = getattr(module, "num_experts", None) or module.w13_weight.shape[0]
+        logits = torch.full((x.shape[0], num_experts), _PROBE_OTHER_LOGIT, dtype=x.dtype, device=x.device)
+        logits[:, expert] = 0.0
+        return module.forward(x, topk(x, logits))
+
+    return _apply
+
+
+def self_check_mxfp8_moe(snapshot) -> None:
+    """Probe the expert captured by ``snapshot_mxfp8_moe_for_check`` after re-processing."""
+    from verl.utils.mxfp8_refit_check import assert_mxfp8_moe_expert_matches
+
+    if snapshot is None:
+        return
+    name, module, expert, w13_q, s13, w2_q, s2, topk, up_first = snapshot
+    reduce_ref = None
+    if getattr(module, "moe_tp_size", 1) > 1:
+        from sglang.srt.distributed import tensor_model_parallel_all_reduce
+
+        reduce_ref = tensor_model_parallel_all_reduce  # the layer applies the same reduction to its output
+    assert_mxfp8_moe_expert_matches(
+        name,
+        expert,
+        _route_everything_to(module, expert, topk),
+        w13_q,
+        s13,
+        w2_q,
+        s2,
+        engine="sglang",
+        reduce_ref=reduce_ref,
+        up_first=up_first,
+    )
+
+
+def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
+    """Load one request of an MXFP8 weight sync; the closing request re-derives the kernel layouts.
+
+    The first request of a sync stages the MoE scales, every request loads its tensors, and the request
+    carrying ``FINALIZE_MARKER`` checks, re-derives, folds back and self-checks once the whole sync has
+    been written (see the module docstring, "One sync, many requests"). A request that raises ends the
+    sync (``_abandon_sync``).
+    """
+    named_tensors = list(named_tensors)
+    finalize = any(name == FINALIZE_MARKER for name, _ in named_tensors)
+    named_tensors = [(name, tensor) for name, tensor in named_tensors if name != FINALIZE_MARKER]
+    try:
+        if named_tensors:
+            if _SYNC_STAGED_ATTR not in model.__dict__:  # first request of this sync
+                model.__dict__[_SYNC_STAGED_ATTR] = stage_mxfp8_moe_scales(model)
+            model.load_weights(named_tensors)
+        if finalize:
+            _finish_sync(model)
+    except BaseException:
+        _abandon_sync(model)
+        raise
+
+
+def _abandon_sync(model: torch.nn.Module) -> None:
+    """End a sync that raised: point every staged scale back at its live storage and re-derive nothing.
+
+    Left as it was, a staged scale parameter would keep pointing at its canonical-shaped staging buffer
+    while the CUDA graph replays the live one, and the next sync would take that shape for a runner that
+    keeps scales canonical: it would not stage the scale, and would re-derive it into storage no graph reads.
+    """
+    for module, sname, live in model.__dict__.pop(_SYNC_STAGED_ATTR, ()):
+        getattr(module, sname).data = live
+
+
+def _finish_sync(model: torch.nn.Module) -> None:
+    """Re-derive the kernel layouts once every bucket of the sync has been written, then self-check."""
+    if _SYNC_STAGED_ATTR not in model.__dict__:
+        # Nothing was loaded since the last sync; re-running the processing on layouts that are
+        # already derived would apply it twice.
+        logger.warning("mxfp8 refit: closing request without a loaded bucket; nothing to re-derive")
+        return
+    staged = model.__dict__[_SYNC_STAGED_ATTR]  # the sync ends once it is folded back and self-checked
+    moe_snapshot = snapshot_mxfp8_moe_for_check(model)
+    n = reprocess_mxfp8_layers(model)
+    m = reprocess_mxfp8_moe_layers(model, staged)
+    if n or m:
+        logger.debug("mxfp8 refit: re-derived kernel scale layouts for %d linear and %d MoE modules", n, m)
+    self_check_mxfp8_linear(model)
+    self_check_mxfp8_moe(moe_snapshot)
+    del model.__dict__[_SYNC_STAGED_ATTR]
