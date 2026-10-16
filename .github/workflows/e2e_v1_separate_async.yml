@@ -98,17 +98,28 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      # Diagnostic: show whether this runner can reach the outside world at all
-      # before uv needs it. Never fails the job.
-      - name: Keep the uv cache on the runner's persistent ${HOME}
+      # TEMP DIAGNOSTIC: locate the baked uv cache and verify it works offline.
+      - name: Diagnose uv cache
         run: |
-          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
-          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
+          echo "HOME=${HOME} USER=$(whoami)"
+          echo "uv cache dir -> $(uv cache dir)"
+          echo "--- /root/.cache/uv ---"
+          ls -al /root/.cache/uv 2>/dev/null || echo "MISSING: /root/.cache/uv"
+          du -sh /root/.cache/uv 2>/dev/null || true
+          echo "--- ${HOME}/.cache/uv ---"
+          ls -al "${HOME}/.cache/uv" 2>/dev/null || echo "MISSING: ${HOME}/.cache/uv"
+          echo "--- mounts touching /root or / ---"
+          cat /proc/mounts | awk '$2=="/root" || $2=="/" {print}'
+      - name: Probe baked cache offline
+        run: |
+          uv sync --frozen --all-packages --extra vllm --extra fsdp --offline
       - name: Check final pip list
         run: |
           $UV_RUN uv pip list
       - name: Prepare GSM8K dataset
-        run: $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+        run: |
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          echo "$UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k"
       - name: Run V1 separate_async with FSDP2
         run: |
           $UV_RUN ray stop --force
