@@ -57,11 +57,13 @@ from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
-    extract_response_topk_logprobs,
+    extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
+    validate_topk_logprob_request,
+    warn_topk_logprob_budget,
 )
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -652,6 +654,10 @@ class vLLMHttpServer:
 
         self._preprocess_sampling_params(sampling_params)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+        validate_topk_logprob_request(sampling_params)
+        budget_warnings = getattr(self, "_topk_budget_warnings", set())
+        warn_topk_logprob_budget(sampling_params, budget_warnings)
+        self._topk_budget_warnings = budget_warnings
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
@@ -736,9 +742,37 @@ class vLLMHttpServer:
         log_probs = None
         if sampling_params.logprobs:
             # indexing FlatLogprobs per position would rebuild a k+1 dict per token
-            log_probs, extra_fields["response_topk_ids"], extra_fields["response_topk_log_probs"] = (
-                extract_response_topk_logprobs(final_res.outputs[0].logprobs, sampling_params.logprobs)
+            (
+                log_probs,
+                extra_fields["response_topk_ids"],
+                extra_fields["response_topk_log_probs"],
+                extra_fields["response_support_complete"],
+            ) = extract_response_topk_logprobs_with_coverage(
+                final_res.outputs[0].logprobs,
+                sampling_params.logprobs,
+                vocab_size=self.engine.model_config.get_vocab_size(),
             )
+            truncated = sampling_params.top_p < 1 or sampling_params.top_k > 0 or sampling_params.min_p > 0
+            if truncated and not extra_fields["response_support_complete"].all():
+                # Use the effective request after defaults, hooks and vLLM canonicalization.
+                # Repeated requests with the same settings need only one diagnostic.
+                signature = (
+                    sampling_params.temperature,
+                    sampling_params.top_p,
+                    sampling_params.top_k,
+                    sampling_params.min_p,
+                    sampling_params.logprobs,
+                )
+                warned = getattr(self, "_topk_coverage_warnings", set())
+                if signature not in warned:
+                    logger.info(
+                        "The recorded top-k head does not prove complete sampling support for every token; "
+                        "score centering retains its head-plus-tail approximation for unknown rows. "
+                        "Effective request: temperature=%s, top_p=%s, top_k=%s, min_p=%s, logprobs=%s.",
+                        *signature,
+                    )
+                    warned.add(signature)
+                    self._topk_coverage_warnings = warned
         elif sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
 

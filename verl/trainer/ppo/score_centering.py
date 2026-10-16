@@ -15,6 +15,9 @@
 
 The sampler's top-k head is exact; its tail is modeled as the trainer's tail rescaled to the
 sampler's tail mass, so the centering term only needs the k head log-probs of the trainer.
+When the recorded head is verified to cover the whole sampling support, the trainer is
+renormalized over that support. Otherwise the recorded head and trainer tail supply the
+predefined approximation; an incomplete head is never treated as the whole support.
 """
 
 import math
@@ -188,8 +191,9 @@ def score_centering_correction(
     Args:
         train_head_log_probs: Trainer's full-vocab-normalized log-probs at the head ids,
             shape (N, k), any float dtype, with gradient to the trainer logits.
-        sampler_head_log_probs: Sampler's full-vocab-normalized log-probs at the same head ids,
-            shape (N, k), any float dtype.
+        sampler_head_log_probs: Actual sampler log-probs at the same head ids, shape (N, k).
+            For incomplete truncated-support records, the trainer's full-vocabulary tail is
+            the proxy: its mass may include tokens outside the unknown sampler support.
         weight_fn: IS weight rule applied to the ratio p/q on the head, as returned by
             ``score_centering_weight_fn``.
         eps: Numerical floor for the tail masses in ``rho``. Default: 1e-6.
@@ -214,6 +218,91 @@ def score_centering_correction(
     return correction, q_mass, p_mass
 
 
+def score_centering_support_correction(
+    train_head_log_probs: torch.Tensor,
+    sampler_head_log_probs: torch.Tensor,
+    weight_fn: Callable[[torch.Tensor], torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the centering term over the sampler's support held in the head.
+
+    Slots with ``-inf`` sampler log-prob lie outside the support S. The trainer is renormalized
+    over S, ``p^S = p / p(S)``, and the term is ``sum_S sg[q w - (sum_S q w) p^S] log p^S``, whose
+    gradient is the exact centering term of the policy restricted to S.
+
+    Args:
+        train_head_log_probs: Trainer's full-vocab-normalized log-probs at the head ids,
+            shape (N, k), any float dtype, with gradient to the trainer logits.
+        sampler_head_log_probs: Sampler's support-normalized log-probs at the same head ids,
+            ``-inf`` outside the support, shape (N, k), any float dtype.
+        weight_fn: IS weight rule applied to the ratio p^S/q on the support, as returned by
+            ``score_centering_weight_fn``.
+
+    Returns:
+        Tuple containing:
+            correction: Centering term to subtract from the policy-gradient loss, shape (N,),
+                dtype float32, with gradient to the trainer logits.
+            log_support_mass: ``log p(S)``, shape (N,), dtype float32, with gradient to the
+                trainer logits; subtracted from the sampled token's log-prob to score it under p^S.
+            sampler_head_mass: Sampler's head probability mass, shape (N,), dtype float32.
+    """
+    sampler_head_log_probs = sampler_head_log_probs.float()
+    in_support = sampler_head_log_probs.isfinite()
+    train_head_log_probs = train_head_log_probs.float().masked_fill(~in_support, float("-inf"))
+    log_support_mass = train_head_log_probs.logsumexp(-1)
+    train_support_log_probs = (train_head_log_probs - log_support_mass.unsqueeze(-1)).masked_fill(~in_support, 0.0)
+    with torch.no_grad():
+        q = sampler_head_log_probs.exp()
+        ratio = torch.where(in_support, (train_support_log_probs - sampler_head_log_probs).exp(), torch.ones_like(q))
+        weighted = q * weight_fn(ratio)
+        residual = weighted - weighted.sum(-1, keepdim=True) * train_support_log_probs.exp() * in_support
+    correction = (residual * train_support_log_probs).sum(-1)
+    return correction, log_support_mass, q.sum(-1)
+
+
+def score_centering_auto_correction(
+    train_head_log_probs: torch.Tensor,
+    sampler_head_log_probs: torch.Tensor,
+    weight_fn: Callable[[torch.Tensor], torch.Tensor],
+    support_complete: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Align to verified support per token, otherwise use the trainer-tail approximation.
+
+    Coverage comes from the probability-record provider, not a configured top-k inequality
+    or a head mass close to one. The recording head is the current support budget. Missing
+    complete-support evidence selects the existing full-vocabulary trainer-tail proxy,
+    with full-vocabulary trainer normalization for both centering and sampled scoring.
+
+    Args:
+        train_head_log_probs: Full-vocabulary-normalized trainer head, shape (N, k).
+        sampler_head_log_probs: Actual processed sampler head, shape (N, k).
+        weight_fn: Token-level IS weighting rule.
+        support_complete: Verified complete-support receipts, bool tensor of shape (N,).
+
+    Returns:
+        Correction, sampled-score log-normalizer shift (zero for approximate rows), sampler
+        head mass, and trainer's full-vocabulary probability mass on the recorded support/head.
+    """
+    correction, sampler_mass, train_mass = score_centering_correction(
+        train_head_log_probs, sampler_head_log_probs, weight_fn
+    )
+    # Unselected support calculations must also be finite: a malformed/empty support may
+    # otherwise propagate NaN gradients through torch.where's unselected branch.
+    safe_sampler = torch.where(
+        support_complete.unsqueeze(-1),
+        sampler_head_log_probs,
+        torch.full_like(sampler_head_log_probs, -math.log(sampler_head_log_probs.shape[-1])),
+    )
+    support_correction, log_support_mass, _ = score_centering_support_correction(
+        train_head_log_probs, safe_sampler, weight_fn
+    )
+    return (
+        torch.where(support_complete, support_correction, correction),
+        torch.where(support_complete, log_support_mass, torch.zeros_like(log_support_mass)),
+        sampler_mass,
+        torch.where(support_complete, log_support_mass.detach().exp(), train_mass),
+    )
+
+
 def score_centering_logits_processor(
     student_logits: torch.Tensor, data: TensorDict, config: ActorConfig, data_format: str = "thd"
 ) -> dict[str, torch.Tensor]:
@@ -231,26 +320,43 @@ def score_centering_logits_processor(
             sc_correction: Centering term, with gradient to ``student_logits``.
             sc_sampler_head_mass: Sampler's head probability mass, detached.
             sc_train_head_mass: Trainer's head probability mass, detached.
+            sc_log_support_mass: Trainer's log support mass for aligned rows, zero otherwise.
+            sc_support_aligned: Fraction indicator for verified support alignment.
+            sc_sampler_tail_mass: Sampler probability mass outside the recorded head.
+            sc_support_unknown: Approximate rows with near-unit head mass but no coverage proof.
     """
     if data_format != "thd":
         raise NotImplementedError("score centering supports the thd (remove padding) format only.")
     topk_ids = data["rollout_topk_ids"].values().unsqueeze(0)
     topk_log_probs = data["rollout_topk_log_probs"].values().unsqueeze(0)
+    receipt = data.get("rollout_support_complete", None)
+    support_complete = (
+        receipt.values().unsqueeze(0)
+        if receipt is not None
+        else torch.zeros(topk_ids.shape[:2], device=topk_ids.device, dtype=torch.bool)
+    )
     if get_ulysses_sequence_parallel_world_size() > 1:
         topk_ids = slice_input_tensor(topk_ids, dim=1)
         topk_log_probs = slice_input_tensor(topk_log_probs, dim=1)
+        support_complete = slice_input_tensor(support_complete, dim=1)
     rollout_correction = config.policy_loss.rollout_correction
     weight_fn = score_centering_weight_fn(
         rollout_correction.get("rollout_is", None), rollout_correction.get("rollout_is_threshold", 2.0)
     )
     train_head_log_probs = topk_log_probs_from_logits(student_logits.squeeze(0), topk_ids.squeeze(0))
-    correction, sampler_head_mass, train_head_mass = score_centering_correction(
-        train_head_log_probs, topk_log_probs.squeeze(0), weight_fn
+    complete = support_complete.squeeze(0)
+    correction, log_support_mass, sampler_head_mass, train_head_mass = score_centering_auto_correction(
+        train_head_log_probs, topk_log_probs.squeeze(0), weight_fn, complete
     )
+    tail_mass = (1 - sampler_head_mass).clamp(min=0)
     return {
         "sc_correction": correction.unsqueeze(0),
         "sc_sampler_head_mass": sampler_head_mass.unsqueeze(0),
         "sc_train_head_mass": train_head_mass.unsqueeze(0),
+        "sc_log_support_mass": log_support_mass.unsqueeze(0),
+        "sc_support_aligned": complete.float().unsqueeze(0),
+        "sc_sampler_tail_mass": tail_mass.unsqueeze(0),
+        "sc_support_unknown": ((~complete) & (tail_mass <= 1e-6)).float().unsqueeze(0),
     }
 
 
@@ -287,4 +393,8 @@ def score_centering_ppo_loss(
             "score centering is enabled but the logits processor did not run: the trainer must set the "
             "score_centering micro-batch flag (supported by the v1 trainer only)."
         )
+    if "sc_log_support_mass" in model_output:
+        # score the sampled token under the trainer renormalized over the sampler's support
+        model_output = dict(model_output)
+        model_output["log_probs"] = model_output["log_probs"] - model_output.pop("sc_log_support_mass")
     return ppo_loss(config, model_output, data, dp_group)

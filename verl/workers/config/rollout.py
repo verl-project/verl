@@ -222,7 +222,7 @@ class RolloutConfig(BaseConfig):
 
     calculate_log_probs: bool = False
 
-    # Sampler top-k log-probs per generated token for score centering; 0 disables.
+    # Sampler top-k log-probs per generated token and support-recording budget for score centering; 0 disables.
     topk_log_probs: int = 0
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -353,15 +353,18 @@ class RolloutConfig(BaseConfig):
         if self.topk_log_probs:
             if self.name != "vllm":
                 raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
-            if (
-                not self.calculate_log_probs
-                or self.top_p != 1.0
-                or self.top_k != -1
-                or self.logprobs_mode != "processed_logprobs"
-            ):
+            if not self.calculate_log_probs or self.logprobs_mode != "processed_logprobs":
                 raise ValueError(
-                    "rollout.topk_log_probs needs calculate_log_probs=True, top_p=1.0, top_k=-1 and "
-                    "logprobs_mode='processed_logprobs' so the returned head is the sampling distribution."
+                    "rollout.topk_log_probs needs calculate_log_probs=True, logprobs_mode='processed_logprobs' and "
+                    "the vLLM rollout so the returned head uses the sampling distribution."
+                )
+            if 0 < self.topk_log_probs < self.top_k:
+                warnings.warn(
+                    f"rollout.topk_log_probs={self.topk_log_probs} is smaller than the sampling top_k={self.top_k}. "
+                    "Increasing topk_log_probs can allow score centering to align the full sampling support. "
+                    "Actual coverage determines whether the trainer-tail approximation is used.",
+                    UserWarning,
+                    stacklevel=2,
                 )
             vllm_kwargs = self.engine_kwargs.setdefault("vllm", {})
             vllm_kwargs["max_logprobs"] = max(vllm_kwargs.get("max_logprobs", 0), self.topk_log_probs)

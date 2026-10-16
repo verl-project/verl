@@ -93,6 +93,7 @@ from verl.workers.utils.padding import response_from_nested, response_to_nested
 
 
 def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+    params.pop("topk_log_probs", None)
     params["top_p"] = 1.0
     params["top_k"] = -1
     params["temperature"] = 0

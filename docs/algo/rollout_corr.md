@@ -294,11 +294,30 @@ Threshold specification for rejection sampling.
 Subtract the expected score under the sampler from every token's score
 ([Marek & Ryabinin, 2026](https://arxiv.org/abs/2609.20807)). Default: `False`
 
-- `True`: Removes the training-inference drift term exactly; a no-op on-policy
+- `True`: Centers the score using the sampler's recorded probabilities; a no-op on-policy
+  when the represented sampler and trainer distributions agree
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
 - FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
+
+Score centering automatically tries to align with the actual sampling support. When the
+rollout provider verifies that the recorded head covers it, the trainer is normalized over
+that support for centering, sampled scoring, and applicable importance weights. Otherwise,
+the preset approximation uses the recorded sampler head and trainer log-probs. The recording
+head size is the current support budget; sampling parameters are never changed to fit it.
+
+The approximation retains the sampler's head probabilities and sampled-token probability.
+It models unrecorded probability using the full-vocabulary trainer tail, with the existing
+epsilon floors for near-zero tail masses. This also approximates an unknown sampling support:
+the modeled tail can include tokens outside that support. Its trainer score and importance
+weights consistently use full-vocabulary normalization. An incomplete head is never normalized
+as if it were the entire sampling support.
+
+When recorded `topk_log_probs` is smaller than an enabled finite sampling `top_k`, a warning
+recommends increasing the recording budget, because aligning a bounded head is usually cheap.
+This warning does not select the estimator: actual coverage determines alignment per token.
+Configured top-k values or head mass close to one alone do not prove complete coverage.
 
 ## Understanding the Framework: Components and Combinations
 
@@ -613,20 +632,30 @@ algorithm:
 
 **Properties:**
 
-- Removes the policy-gradient drift term `E_q[R] * E_q[∇log p]` introduced by training-inference
-  mismatch exactly, with no extra hyperparameters
-- A no-op on-policy (π_θ = π_rollout)
+- Centers the policy-gradient score to address the drift term `E_q[R] * E_q[∇log p]`
+  introduced by training-inference mismatch. Evaluation is exact for a verified complete
+  support and uses the preset trainer-tail approximation otherwise
+- A no-op when the sampler and trainer distributions represented by the estimator agree
 - Composes with token-level TIS / IcePop by centering the already-weighted score
 - Reported by the paper to be stable under sampler quantization
-- The trainer only evaluates the sampler's top-`k` head log-probs per token; the tail is modeled as
-  the trainer's tail rescaled to the sampler's tail mass
+- The sampler records a top-`k` head per token. Score centering attempts to align with its
+  actual support and otherwise uses the head plus a modeled trainer tail. Trainer head
+  log-probs still require vocabulary normalization; a small recorded head does not imply
+  computation proportional only to `k`
+- Alignment requires a provider receipt proving complete actual support coverage. The vLLM
+  global top-k provider can prove this when its head contains zero-probability entries or
+  covers the vocabulary. A saturated finite head without such proof uses the approximation,
+  even if its probability mass is close to one; older records without receipts do likewise
+- When combining top-k and top-p, vLLM applies top-k first, then top-p within the remaining
+  normalized distribution. Cutoff ties can enlarge actual support beyond configured top-k
 
 **Theory:** See [Marek & Ryabinin, 2026](https://arxiv.org/abs/2609.20807).
 
 **Additional requirements:**
 
 - Set `actor_rollout_ref.rollout.calculate_log_probs: true` and `actor_rollout_ref.rollout.topk_log_probs: 128` (vLLM rollout only; `k=128` matches the paper, `k=32` also matches)
-- Set `actor_rollout_ref.rollout.temperature` > 0, `actor_rollout_ref.rollout.top_p: 1.0`, `actor_rollout_ref.rollout.top_k: -1`
+- Set `actor_rollout_ref.rollout.temperature` > 0 and choose sampling parameters independently
+  of the recording budget. Validation and greedy reward-baseline requests do not record heads
 - Set `actor_rollout_ref.actor.policy_loss.loss_mode: bypass_mode` and mirror `bypass_mode`, `loss_type`, `rollout_is`, `rollout_is_threshold`, `score_centering` from `algorithm.rollout_correction` into `actor_rollout_ref.actor.policy_loss.rollout_correction`:
 
   ```yaml
@@ -644,9 +673,16 @@ algorithm:
 
 - Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
 - v1 trainer (`trainer.use_v1: true`) with an FSDP actor only; single-turn agent loop only
-- Memory: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB per position)
+- Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
+  per position), plus one boolean completeness receipt per position
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
-- Metrics: `actor/sc_correction`, `actor/sc_sampler_head_mass`, `actor/sc_train_head_mass`
+- Metrics: `actor/sc_correction`, `actor/sc_sampler_head_mass`, `actor/sc_train_head_mass`,
+  `actor/sc_support_aligned`, `actor/sc_sampler_tail_mass`, `actor/sc_support_unknown`.
+  `sc_support_aligned` reports the fraction of response tokens with verified support alignment;
+  `sc_sampler_tail_mass` measures probability outside the recorded head. `sc_support_unknown`
+  reports approximate rows with near-unit head mass but no coverage proof. Trainer head mass
+  is the full-vocabulary mass of the actual support for aligned rows and the recorded head for
+  approximate rows. Head mass close to one alone is not a completeness test
 
 ---
 
