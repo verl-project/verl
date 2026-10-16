@@ -572,6 +572,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        """Initialize models and engines for this worker's reference, actor, and rollout roles.
+
+        Configure training and dispatch, propagate vLLM's shared MoE LoRA setting
+        to the actor engine, and create the actor's checkpoint engine as needed.
+        """
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
         liger_capacity = _plan_liger_flsce_capacity(self.config, self.role)
 
@@ -686,6 +691,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            vllm_engine_kwargs = (self.config.rollout.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+            self.actor.engine.vllm_enable_moe_shared_loras = bool(
+                vllm_engine_kwargs.get("enable_moe_shared_loras", False)
+            )
+            self.actor.engine.vllm_enable_mixed_moe_lora_format = bool(
+                vllm_engine_kwargs.get("enable_mixed_moe_lora_format", False)
+            )
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine

@@ -485,6 +485,7 @@ class MegatronEngine(BaseEngine):
             patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
 
     def _build_optimizer(self):
+        """Build the optimizer with the configured LoRA+ ratio and register training hooks."""
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
 
         optim_config_megatron = init_megatron_optim_config(
@@ -493,7 +494,14 @@ class MegatronEngine(BaseEngine):
             fp16=self.param_dtype == torch.float16,
             bf16=self.param_dtype == torch.bfloat16,
         )
-        optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
+        # LoRA+: lr_B = lora_plus_ratio * lr_A (read from the lora config dict).
+        lora_cfg = getattr(self.model_config, "lora", {})
+        lora_plus_ratio = float(lora_cfg.get("lora_plus_ratio", 1.0))
+        optimizer = get_megatron_optimizer(
+            model=self.module,
+            config=optim_config_megatron,
+            lora_plus_ratio=lora_plus_ratio,
+        )
         register_megatron_training_hooks(self.module, optimizer)
         return optimizer
 
@@ -979,6 +987,13 @@ class MegatronEngine(BaseEngine):
         return self._hf_export_tasks
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
+        """Return exported named weights and the optional rollout PEFT configuration.
+
+        With unmerged LoRA, export only adapters after ``base_sync_done``;
+        otherwise export the full model weights. Shared expert adapters use the
+        target rollout's MoE layout. Load the required parameters onto the GPU
+        and apply quantization-aware export when enabled.
+        """
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
         adapter_only = base_sync_done and non_merge_lora_sync
@@ -987,7 +1002,22 @@ class MegatronEngine(BaseEngine):
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if adapter_only:
-            per_tensor_param = self.bridge.export_adapter_weights(self.module)
+            export_kwargs = {}
+            if self.model_config.lora.get("experts_shared_outer_loras", False):
+                from verl.workers.rollout.vllm_rollout.utils import is_3d_moe_vllm_model
+
+                # Mixed-format LoRA uses vLLM's 2D wrapper even for 3D model weights.
+                is_3d_moe = not getattr(self, "vllm_enable_mixed_moe_lora_format", False) and is_3d_moe_vllm_model(
+                    self.model_config.hf_config
+                )
+                vllm_shared = getattr(self, "vllm_enable_moe_shared_loras", False)
+                if is_3d_moe:
+                    export_kwargs["stack_3d_moe"] = True
+                elif vllm_shared:
+                    export_kwargs["moe_shared_loras"] = True
+                else:
+                    export_kwargs["expand_shared_outer"] = True
+            per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
         else:
             conversion_tasks = self._mbridge_export_tasks()
             per_tensor_param = (
