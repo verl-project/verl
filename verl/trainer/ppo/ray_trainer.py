@@ -54,7 +54,9 @@ from verl.trainer.ppo.utils import (
     WorkerType,
     create_rl_dataset,
     create_rl_sampler,
+    get_balance_mini_batch_size,
     need_critic,
+    need_minibatch_shuffle,
     need_reference_policy,
     need_reward_model,
     need_teacher_policy,
@@ -66,7 +68,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import deprecated, load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import calculate_workload, get_minibatch_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip.skip_manager import SkipManager
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -1179,8 +1181,12 @@ class RayPPOTrainer:
             dp_rank_mapping = worker_group._dispatch_info[role]
         return max(dp_rank_mapping) + 1
 
-    def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
-        """Reorder the data on single controller such that each dp rank gets similar total tokens.
+    def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
+        """Shuffle samples into PPO mini-batches if enabled, then balance each mini-batch across DP ranks.
+
+        Falls back to balancing the whole batch when mini-batches can't be kept, see
+        get_balance_mini_batch_size. Enabling worker-side shuffle with ppo_epochs > 1 disables
+        per-mini-batch balancing because workers remix the balanced chunks inside each DP rank.
 
         When use_prefix_grouper is enabled, uses group-level balancing to keep samples with
         the same uid together on the same rank for prefix sharing optimization.
@@ -1218,28 +1224,33 @@ class RayPPOTrainer:
                 k_partitions=dp_size,
             )
 
-        elif keep_minibatch:
-            # Decouple the DP balancing and mini-batching.
-            minibatch_size = self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size")
-            minibatch_num = len(workload_lst) // minibatch_size
-            global_partition_lst = [[] for _ in range(dp_size)]
-            for i in range(minibatch_num):
-                rearrange_minibatch_lst = get_seqlen_balanced_partitions(
-                    workload_lst[i * minibatch_size : (i + 1) * minibatch_size],
-                    k_partitions=dp_size,
-                    equal_size=True,
-                )
-                for j, part in enumerate(rearrange_minibatch_lst):
-                    global_partition_lst[j].extend([x + minibatch_size * i for x in part])
         else:
-            global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
-        # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
-        # Skip reordering within partitions for PrefixGrouper to maintain uid grouping
-        if not getattr(self, "use_prefix_grouper", False):
+            mini_batch_size = get_balance_mini_batch_size(
+                self.config,
+                use_critic=self.use_critic,
+                update_actor=self.config.trainer.critic_warmup <= self.global_steps,
+            )
+            balanced = mini_batch_size > 0 and batch_size % mini_batch_size == 0
+            if not balanced:
+                mini_batch_size = batch_size
+            global_partition_lst = get_minibatch_balanced_partitions(
+                workload_lst,
+                k_partitions=dp_size,
+                mini_batch_size=mini_batch_size,
+                shuffle=balanced and need_minibatch_shuffle(self.config, self.use_critic),
+                seed=[self.config.actor_rollout_ref.actor.data_loader_seed, self.global_steps],
+            )
+            # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
+            # Order within each rank's share of a mini-batch so that mini-batch boundaries are kept.
+            share_size = mini_batch_size // dp_size
             for idx, partition in enumerate(global_partition_lst):
-                partition.sort(key=lambda x: (workload_lst[x], x))
-                ordered_partition = partition[::2] + partition[1::2][::-1]
+                ordered_partition = []
+                for start in range(0, len(partition), share_size):
+                    share = sorted(partition[start : start + share_size], key=lambda x: (workload_lst[x], x))
+                    ordered_partition.extend(share[::2] + share[1::2][::-1])
                 global_partition_lst[idx] = ordered_partition
+            # Already shuffled if enabled; a worker-side shuffle would break the per-mini-batch balance.
+            batch.meta_info["minibatch_balanced"] = balanced
 
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
         global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
@@ -1354,6 +1365,7 @@ class RayPPOTrainer:
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
+        balanced = batch.meta_info.get("minibatch_balanced", False)
         tu.assign_non_tensor(
             batch_td,
             calculate_entropy=calculate_entropy,
@@ -1363,7 +1375,7 @@ class RayPPOTrainer:
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
             seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
+            dataloader_kwargs={"shuffle": shuffle and not balanced},
             compute_loss=True,
         )
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
@@ -1384,13 +1396,14 @@ class RayPPOTrainer:
         ppo_epochs = self.config.critic.ppo_epochs
         seed = self.config.critic.data_loader_seed
         shuffle = self.config.critic.shuffle
+        balanced = batch.meta_info.get("minibatch_balanced", False)
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
             seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
+            dataloader_kwargs={"shuffle": shuffle and not balanced},
         )
 
         output = self.critic_wg.train_mini_batch(batch_td)

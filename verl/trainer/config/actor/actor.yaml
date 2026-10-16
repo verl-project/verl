@@ -118,7 +118,10 @@ kl_loss_type: low_var_kl
 # Number of PPO epochs per batch
 ppo_epochs: 1
 
-# Shuffle training data across PPO epochs
+# Shuffle training data before every PPO epoch.
+# When enabled with ppo_epochs > 1, shuffle runs inside each DP rank and
+# the whole train batch is balanced across DP ranks instead of each mini-batch.
+# With ppo_epochs = 1, trainer-side shuffle preserves mini-batch balancing.
 shuffle: false
 
 # The seed used to construct mini-batch

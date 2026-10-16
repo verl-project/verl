@@ -67,7 +67,9 @@ from verl.trainer.ppo.utils import (
     Role,
     create_rl_dataset,
     create_rl_sampler,
+    get_balance_mini_batch_size,
     need_critic,
+    need_minibatch_shuffle,
     need_reference_policy,
     need_teacher_policy,
 )
@@ -82,7 +84,7 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import calculate_workload, get_minibatch_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
@@ -1605,8 +1607,22 @@ class PPOTrainer(ABC):
         # Notice lcm(a, b, c) == lcm(lcm(a, b), c), so it is optimal.
         return required_multiple
 
-    def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
-        """Reorder the data on single controller such that each dp rank gets similar total tokens."""
+    def _get_balance_mini_batch_size(self) -> int:
+        """Global sample count balanced across DP ranks at a time; 0 means the whole batch."""
+        return get_balance_mini_batch_size(
+            self.config,
+            use_critic=self.use_critic,
+            update_actor=self.config.trainer.critic_warmup <= self.global_steps,
+        )
+
+    def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen"):
+        """Shuffle samples into PPO mini-batches if enabled, then balance each mini-batch across DP ranks.
+
+        Falls back to balancing the whole batch when mini-batches can't be kept, see
+        get_balance_mini_batch_size. In particular, enabling worker-side shuffle disables
+        per-mini-batch balancing because workers would remix the balanced chunks inside
+        each DP rank.
+        """
         # get actor dp size
         role, worker_group = "actor", self.actor_rollout_wg
         if role not in worker_group._dispatch_info:
@@ -1621,9 +1637,28 @@ class PPOTrainer(ABC):
         batch = upsample_batch_to_divisible_size(batch, batch_multiple, self.tokenizer.eos_token_id)
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
+        # The upsampled batch is a multiple of every mini-batch size, so any non-zero size divides it.
+        mini_batch_size = self._get_balance_mini_batch_size()
+        balanced = mini_batch_size > 0
 
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
-        global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
+        global_partition_lst = get_minibatch_balanced_partitions(
+            workload_lst,
+            k_partitions=dp_size,
+            mini_batch_size=mini_batch_size if balanced else len(workload_lst),
+            shuffle=balanced and need_minibatch_shuffle(self.config, self.use_critic),
+            seed=[self.config.actor_rollout_ref.actor.data_loader_seed, self.global_steps, self.local_trigger_step],
+        )
+        # Match V0: place smaller micro-batches at both ends to reduce pipeline bubbles.
+        # This mainly benefits fixed-size micro-batches; dynamic batching rebuilds and orders them.
+        # Sort only within each balancing unit to preserve actor and critic mini-batch boundaries.
+        share_size = (mini_batch_size if balanced else len(workload_lst)) // dp_size
+        for idx, partition in enumerate(global_partition_lst):
+            ordered_partition = []
+            for start in range(0, len(partition), share_size):
+                share = sorted(partition[start : start + share_size], key=lambda x: (workload_lst[x], x))
+                ordered_partition.extend(share[::2] + share[1::2][::-1])
+            global_partition_lst[idx] = ordered_partition
         batch.reorder([j for partition in global_partition_lst for j in partition])
         global_balance_stats = log_seqlen_unbalance(
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
@@ -1810,7 +1845,8 @@ class PPOTrainer(ABC):
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
-            "dataloader_kwargs": {"shuffle": self.config.critic.shuffle},
+            # Samples are already shuffled into balanced mini-batches unless the whole batch was balanced.
+            "dataloader_kwargs": {"shuffle": self.config.critic.shuffle and self._get_balance_mini_batch_size() == 0},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
@@ -1856,7 +1892,10 @@ class PPOTrainer(ABC):
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
-            "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            # Samples are already shuffled into balanced mini-batches unless the whole batch was balanced.
+            "dataloader_kwargs": {
+                "shuffle": self.config.actor_rollout_ref.actor.shuffle and self._get_balance_mini_batch_size() == 0
+            },
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)

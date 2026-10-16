@@ -16,6 +16,7 @@ import copy
 import heapq
 from itertools import chain
 
+import numpy as np
 import torch
 from torch import distributed as dist
 
@@ -42,6 +43,8 @@ def calculate_workload(seqlen_list: torch.Tensor) -> torch.Tensor:
     Note:
         The returned values are relative workloads, not actual FLOP counts.
         Useful for balancing computation across data parallel ranks.
+        The constants are currently hard-coded for a 7B model; using model-specific
+        hidden sizes would improve the estimate for other model scales.
     """
     return 24576 * seqlen_list + seqlen_list**2
 
@@ -252,6 +255,51 @@ def get_seqlen_balanced_partitions(seqlen_list: list[int], k_partitions: int, eq
 
     partitions = karmarkar_karp(seqlen_list=seqlen_list, k_partitions=k_partitions, equal_size=equal_size)
     return _check_and_sort_partitions(partitions)
+
+
+def get_minibatch_balanced_partitions(
+    workload_list: list[int],
+    k_partitions: int,
+    mini_batch_size: int,
+    shuffle: bool = False,
+    seed: int | list[int] | None = None,
+) -> list[list[int]]:
+    """Assign samples to mini-batches, then balance every mini-batch across ``k_partitions`` DP ranks.
+
+    Workers split their shard into mini-batches sequentially and synchronize gradients after each one, so
+    balancing only the per-rank totals of the whole batch still leaves stragglers inside each mini-batch.
+    Here partition ``r`` is the concatenation of rank ``r``'s share of mini-batch 0, 1, ..., so the ``i``-th
+    sequential mini-batch on every rank comes from the same balanced global mini-batch. The consumer must
+    not shuffle samples again.
+
+    Args:
+        workload_list (List[int]): Workload of each sample, e.g. from ``calculate_workload``.
+        k_partitions (int): Number of DP ranks.
+        mini_batch_size (int): Global mini-batch size in samples. Must divide ``len(workload_list)`` and be
+            divisible by ``k_partitions``.
+        shuffle (bool): Randomly assign samples to mini-batches before balancing. Otherwise mini-batch ``i``
+            holds samples ``[i * mini_batch_size, (i + 1) * mini_batch_size)``.
+        seed: Seed for the shuffle, anything accepted by ``numpy.random.default_rng``.
+
+    Returns:
+        List[List[int]]: ``k_partitions`` lists of sample indices, each laid out mini-batch by mini-batch.
+    """
+    if isinstance(workload_list, torch.Tensor):
+        workload_list = workload_list.tolist()
+    num_samples = len(workload_list)
+    assert num_samples % mini_batch_size == 0, f"{num_samples=} is not divisible by {mini_batch_size=}"
+    assert mini_batch_size % k_partitions == 0, f"{mini_batch_size=} is not divisible by {k_partitions=}"
+
+    order = np.random.default_rng(seed).permutation(num_samples).tolist() if shuffle else list(range(num_samples))
+    partitions = [[] for _ in range(k_partitions)]
+    for start in range(0, num_samples, mini_batch_size):
+        indices = order[start : start + mini_batch_size]
+        mini_batch_partitions = get_seqlen_balanced_partitions(
+            [workload_list[i] for i in indices], k_partitions=k_partitions, equal_size=True
+        )
+        for rank, partition in enumerate(mini_batch_partitions):
+            partitions[rank].extend(indices[i] for i in partition)
+    return partitions
 
 
 def log_seqlen_unbalance(seqlen_list: list[int], partitions: list[list[int]], prefix):

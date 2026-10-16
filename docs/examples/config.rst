@@ -309,8 +309,12 @@ Actor/Rollout/Reference Policy
   between cp ranks and cause misalignment between data on these ranks, so we shall manually set the seed to avoid hanging
   issue. if ``actor_rollout_ref.actor.shuffle`` is not null, this must be set.
 
-- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle data when
-  there are multiple epochs
+- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle training data
+  before constructing PPO mini-batches in every epoch. When enabled with
+  ``actor_rollout_ref.actor.ppo_epochs > 1``, mini-batch-level DP balancing
+  is disabled and the whole train batch is balanced across DP ranks;
+  each rank then shuffles its local shard independently. With a single
+  PPO epoch, trainer-side shuffle preserves mini-batch-level DP balancing.
 
 - ``actor_rollout_ref.actor.optim``: Actor's optimizer parameters
 

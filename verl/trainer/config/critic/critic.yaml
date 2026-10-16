@@ -51,7 +51,10 @@ forward_max_token_len_per_gpu: ${.ppo_max_token_len_per_gpu}
 # Number of PPO epochs per batch
 ppo_epochs: ${oc.select:actor_rollout_ref.actor.ppo_epochs,1}
 
-# Shuffle training data across PPO epochs
+# Shuffle training data before every PPO epoch.
+# When enabled with ppo_epochs > 1, shuffle runs inside each DP rank and
+# the whole train batch is balanced across DP ranks instead of each mini-batch.
+# With ppo_epochs = 1, trainer-side shuffle preserves mini-batch balancing.
 shuffle: ${oc.select:actor_rollout_ref.actor.shuffle,false}
 
 # The seed used to construct mini-batch

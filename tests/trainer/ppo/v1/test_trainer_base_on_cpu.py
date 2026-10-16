@@ -16,10 +16,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.utils.seqlen_balancing import calculate_workload, get_minibatch_balanced_partitions
 
 
 class _StubTrainer(PPOTrainer):
@@ -33,6 +35,54 @@ class _StubTrainer(PPOTrainer):
 class _CustomSampler:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_balance_batch_orders_within_balancing_units(shuffle):
+    """Ordering preserves every balanced share and places light samples at both ends."""
+    from transfer_queue import KVBatchMeta
+
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {"n": 2},
+                "actor": {
+                    "ppo_mini_batch_size": 5,
+                    "shuffle": shuffle,
+                    "ppo_epochs": 2,
+                    "data_loader_seed": 42,
+                },
+            },
+            "trainer": {"critic_warmup": 0},
+        }
+    )
+    trainer.use_critic = False
+    trainer.global_steps, trainer.local_trigger_step = 1, 0
+    trainer.tokenizer = SimpleNamespace(eos_token_id=0)
+    trainer.actor_rollout_wg = SimpleNamespace(_dispatch_info={"actor": [0, 1]})
+    lengths = list(range(20, 0, -1))
+    keys = [str(i) for i in range(len(lengths))]
+    batch = KVBatchMeta(partition_id="test", keys=keys, tags=[{"seq_len": length} for length in lengths])
+    workloads = calculate_workload(torch.tensor(lengths)).tolist()
+    # Five samples per balanced share; whole-shard fallback has ten samples.
+    unit_size = trainer._get_balance_mini_batch_size() or len(lengths)
+    expected = get_minibatch_balanced_partitions(workloads, k_partitions=2, mini_batch_size=unit_size)
+
+    result = trainer._balance_batch(batch, metrics={})
+
+    order = [int(key) for key in result.keys]
+    share_size = unit_size // 2
+    for rank, partition in enumerate(expected):
+        shard = order[rank * 10 : (rank + 1) * 10]
+        for start in range(0, len(shard), share_size):
+            actual_share = shard[start : start + share_size]
+            assert sorted(actual_share) == sorted(partition[start : start + share_size])
+            weights = [workloads[i] for i in actual_share]
+            peak = share_size // 2
+            assert weights[: peak + 1] == sorted(weights[: peak + 1])
+            assert weights[peak:] == sorted(weights[peak:], reverse=True)
+            assert [weights[0], weights[-1]] == sorted(weights)[:2]
 
 
 def _trainer_with_filter_groups(filter_groups: dict, trainer_mode: str = "sync") -> _StubTrainer:
