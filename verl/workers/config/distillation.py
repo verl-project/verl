@@ -140,6 +140,14 @@ class DistillationTeacherModelConfig(BaseConfig):
         inference.tensor_model_parallel_size * inference.pipeline_model_parallel_size),
         so the teacher's total GPU footprint is
         `num_replicas * per_replica_world_size`.
+    system_prompt (str, optional):
+        Teacher-only system prompt text. When set, the teacher scores the student's
+        response tokens under a re-templated prompt that injects this system turn,
+        while the student rollout stays unchanged (asymmetric / privileged-context OPD).
+        Takes precedence over ``system_prompt_path``.
+    system_prompt_path (str, optional):
+        Path to a UTF-8 text file containing the teacher-only system prompt. Used when
+        ``system_prompt`` is unset. Prefer this for long prompts (Hydra-friendly).
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {"num_replicas", "key"}
@@ -148,6 +156,8 @@ class DistillationTeacherModelConfig(BaseConfig):
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
     num_replicas: Optional[int] = 0
+    system_prompt: Optional[str] = None
+    system_prompt_path: Optional[str] = None
 
     @property
     def per_replica_world_size(self) -> int:
@@ -170,18 +180,35 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
-        # Prompt + Response from student are fed into teacher as context
+        # Prompt + Response from student are fed into teacher as context. When a
+        # teacher-only system prompt is configured, the teacher prefix can be longer
+        # than the student prompt; reserve headroom via a conservative char estimate
+        # (exact length is checked when scoring each sample).
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
         student_response_length = self.inference.response_length
-        required_context_len = student_prompt_length + student_response_length + 1
+        system_token_budget = 0
+        if self.system_prompt and str(self.system_prompt).strip():
+            system_token_budget = max(256, len(str(self.system_prompt)) // 2)
+        elif self.system_prompt_path and str(self.system_prompt_path).strip():
+            path = os.path.expanduser(str(self.system_prompt_path))
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    system_token_budget = max(256, len(f.read()) // 2)
+            else:
+                # Path may be resolved later relative to the job cwd; keep a floor.
+                system_token_budget = 2048
+        required_context_len = student_prompt_length + student_response_length + 1 + system_token_budget
         if max_model_len is not None and required_context_len > max_model_len:
             raise ValueError(
-                "Distillation teacher inference requires room for the student prompt, the full student "
-                f"response, and one generated token, but got {student_prompt_length=}, "
-                f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
+                "Distillation teacher inference requires room for the (possibly system-augmented) "
+                "prompt, the full student response, and one generated token, but got "
+                f"{student_prompt_length=}, {student_response_length=}, {system_token_budget=}, "
+                f"{required_context_len=}, {max_model_len=}."
             )
-        self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
+        self.inference.prompt_length = student_prompt_length + student_response_length + system_token_budget
+        if max_model_len is not None:
+            self.inference.prompt_length = min(self.inference.prompt_length, max_model_len - 1)
         self.inference.response_length = 1
         self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
 
