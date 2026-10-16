@@ -78,3 +78,22 @@ class PrecisionType:
             return "bf16"
         else:
             raise RuntimeError(f"unexpected precision: {precision}")
+
+
+def cast_module_params_to_dtype(module: torch.nn.Module, dtype: torch.dtype) -> None:
+    """Cast the floating-point parameters of ``module`` to ``dtype`` in place.
+
+    ``nn.Module.to(dtype)`` converts registered buffers as well as parameters.
+    Some buffers are constructed in FP32 by the model implementation and lose
+    precision irreversibly when rounded to a lower precision -- most notably
+    ``RotaryEmbedding.inv_freq``, whose values are baked into the positional
+    encodings of every attention layer. Casting the parameters only keeps
+    buffers at their construction precision, so a later
+    ``buffer_dtype=torch.float32`` policy does not merely upcast values that
+    were already rounded.
+
+    See https://github.com/verl-project/verl/issues/8154.
+    """
+    for param in module.parameters():
+        if (param.is_floating_point() or param.is_complex()) and param.dtype != dtype:
+            param.data = param.data.to(dtype)
