@@ -1,6 +1,9 @@
 # Target class for this configuration
 _target_: verl.workers.config.FSDPEngineConfig
 
+# Synchronize phase boundaries to report forward/backward and optimizer wall time.
+enable_update_phase_timing: false
+
 # policy for wrapping the model
 wrap_policy:
 

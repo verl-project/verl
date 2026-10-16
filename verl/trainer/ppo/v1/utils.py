@@ -39,6 +39,8 @@ class MetricsAggregator:
     def _init_aggregation_rules(self) -> dict[str, list[str]]:
         return {
             "sum": [
+                "actor/mini_batches_executed",
+                "critic/mini_batches_executed",
                 "training/off_policy/evicted_samples",
                 "validation/off_policy/evicted_samples",
                 "training/filter_groups/evicted_samples",
@@ -47,6 +49,12 @@ class MetricsAggregator:
                 "validation/filter_groups/discarded_surplus_samples",
                 "training/rollout_failure/evicted_samples",
                 "validation/rollout_failure/evicted_samples",
+            ],
+            "weighted_avg": [
+                "timing_s/actor_forward_backward_mean",
+                "timing_s/actor_optimizer_mean",
+                "timing_s/critic_forward_backward_mean",
+                "timing_s/critic_optimizer_mean",
             ],
             "last": [
                 "training/global_step",
@@ -79,6 +87,10 @@ class MetricsAggregator:
                 return int(evicted_samples.item()) if evicted_samples.numel() == 1 else sample_count
             if isinstance(evicted_samples, int | float | np.number):
                 return int(evicted_samples)
+        if metric_name in self.aggregation_rules["weighted_avg"]:
+            role = metric_name.split("/")[1].split("_")[0]
+            updates = metrics.get(f"{role}/mini_batches_executed", 1)
+            return int(updates)
         return sample_count
 
     def _get_aggregation_type(self, metric_name: str) -> str:

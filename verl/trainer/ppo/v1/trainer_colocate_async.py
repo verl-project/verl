@@ -37,14 +37,18 @@ class PPOTrainerColocateAsync(PPOTrainer):
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
-            self.checkpoint_manager.update_weights(self.global_steps)
+            with marked_timer("weight_sync", self.timing_raw, color="red"):
+                self.checkpoint_manager.update_weights(self.global_steps)
             # resume generation
-            self.checkpoint_manager.resume_generation_replicas()
+            with marked_timer("rollout_resume", self.timing_raw, color="red"):
+                self.checkpoint_manager.resume_generation_replicas()
 
     def on_sample_end(self):
         # abort all unfinished requests and pause generation
-        self.checkpoint_manager.abort_replicas()
+        with marked_timer("rollout_abort", self.timing_raw, color="red"):
+            self.checkpoint_manager.abort_replicas()
         # sleep all replicas to discard weights and kv cache
-        self.checkpoint_manager.sleep_replicas()
+        with marked_timer("rollout_sleep", self.timing_raw, color="red"):
+            self.checkpoint_manager.sleep_replicas()
         if self.curr_step_profile:
             self._stop_rollout_profiling()

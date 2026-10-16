@@ -24,6 +24,7 @@ actor_rollout_ref:
       override_optimizer_config: {}
     veomni:
       _target_: verl.workers.config.VeOmniEngineConfig
+      enable_update_phase_timing: false
       param_offload: false
       optimizer_offload: false
       fsdp_size: -1
@@ -223,6 +224,7 @@ actor_rollout_ref:
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     veomni:
       _target_: verl.workers.config.VeOmniEngineConfig
+      enable_update_phase_timing: false
       param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
       optimizer_offload: false
       fsdp_size: ${oc.select:actor_rollout_ref.actor.veomni.fsdp_size,-1}
@@ -535,6 +537,7 @@ critic:
     override_optimizer_config: {}
   veomni:
     _target_: verl.workers.config.VeOmniEngineConfig
+    enable_update_phase_timing: false
     param_offload: false
     optimizer_offload: false
     fsdp_size: -1

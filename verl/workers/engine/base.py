@@ -16,6 +16,7 @@ The abstract base class defining the interface for model training engines.
 """
 
 import os
+import time
 from abc import abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, ContextManager, Generator, Optional
@@ -23,8 +24,17 @@ from typing import Any, Callable, ContextManager, Generator, Optional
 import torch
 from tensordict import TensorDict
 
-from verl.utils.device import get_device_name, get_vendor
+from verl.utils.device import get_device_name, get_torch_device, get_vendor
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
+
+
+def _synchronize_for_phase_timing() -> None:
+    """Drain queued kernels so a phase boundary is not charged to the next timer."""
+    module = get_torch_device()
+    synchronize = getattr(module, "synchronize", None)
+    if synchronize is None or (module is torch.cuda and not torch.cuda.is_available()):
+        return
+    synchronize()
 
 
 class BaseEngine:
@@ -123,12 +133,37 @@ class BaseEngine:
         """
         maybe_fix_3d_position_ids(data)
 
+        if not getattr(getattr(self, "engine_config", None), "enable_update_phase_timing", False):
+            self.optimizer_zero_grad()
+            outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+            grad_norm = self.optimizer_step()
+            if self.is_mp_src_rank_with_outputs():
+                assert "grad_norm" not in outputs["metrics"]
+                outputs["metrics"]["grad_norm"] = grad_norm
+            return outputs
+
+        # zero_grad belongs with the optimizer: the model-FLOP MFU uses only forward-backward time.
+        # Synchronize at each boundary so the backward tail is not attributed to optimizer.step.
+        _synchronize_for_phase_timing()
+        optimizer_start = time.perf_counter()
         self.optimizer_zero_grad()
+        _synchronize_for_phase_timing()
+        zero_grad_seconds = time.perf_counter() - optimizer_start
+
+        forward_start = time.perf_counter()
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+        _synchronize_for_phase_timing()
+        forward_backward_seconds = time.perf_counter() - forward_start
+
+        optimizer_start = time.perf_counter()
         grad_norm = self.optimizer_step()
+        _synchronize_for_phase_timing()
+        optimizer_seconds = zero_grad_seconds + (time.perf_counter() - optimizer_start)
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
             outputs["metrics"]["grad_norm"] = grad_norm
+            outputs["metrics"]["timing_s/forward_backward"] = forward_backward_seconds
+            outputs["metrics"]["timing_s/optimizer"] = optimizer_seconds
         return outputs
 
     def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None) -> Any:
