@@ -780,6 +780,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  run_max_concurrent: null
   custom_reward_function:
     path: null
     name: compute_score

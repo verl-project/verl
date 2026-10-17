@@ -20,6 +20,11 @@ from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
 from verl import DataProto
+from verl.experimental.reward_loop.reward_budget import (
+    await_budgeted_reward,
+    run_concurrency_limit,
+    shared_reward_slot,
+)
 from verl.experimental.reward_loop.reward_manager import register as register_manager
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.ray_utils import get_event_loop
@@ -192,9 +197,9 @@ class RateLimitedRewardManager(RewardManagerBase):
            tokens. Essential for APIs that bill or limit based on token usage
            (e.g., GPT-4 API).
 
-    All rate limiters are **global class-level resources**, meaning they are
-    shared across all instances of this manager. This ensures that rate limits
-    are enforced consistently across multiple workers in distributed training.
+    Class-level limiters are shared only within one process. Set
+    ``reward.run_max_concurrent`` to additionally bound active async scorers
+    across the workers owned by one RewardLoopManager. RPM/TPM remain local.
 
     Rate Limiting Flow:
         When processing a reward request, the manager:
@@ -333,7 +338,7 @@ class RateLimitedRewardManager(RewardManagerBase):
             log_msg += f"  - Estimated tokens per request: {cls._estimated_tokens_per_request}\n"
         else:
             log_msg += "  - Token rate limit: unlimited\n"
-        log_msg += "All limiters are shared globally across all workers."
+        log_msg += "These limiters are shared across manager instances in this process."
         logger.info(log_msg)
 
         cls._class_initialized = True
@@ -348,6 +353,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         # Legacy (AbstractRewardManager) kwargs for compatibility. Not used.
         num_examine: int | None = None,
         reward_fn_key: str | None = None,
+        reward_budget=None,
         **kwargs,
     ):
         # When called via the legacy AbstractRewardManager signature, `config` may be absent.
@@ -357,12 +363,19 @@ class RateLimitedRewardManager(RewardManagerBase):
         if tokenizer is None:
             raise TypeError("RateLimitedRewardManager requires `tokenizer`.")
 
+        if run_concurrency_limit(config.reward) is not None:
+            if reward_budget is None:
+                raise ValueError("reward.run_max_concurrent requires a RewardLoopManager-owned budget")
+            if not inspect.iscoroutinefunction(compute_score or default_compute_score):
+                raise ValueError("reward.run_max_concurrent requires a custom async reward function")
+
         super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
         self.timeout = config.reward.get("timeout", 300.0)
+        self.reward_budget = reward_budget
 
     async def _compute_reward(
         self, data_source: str, solution_str: str, ground_truth: str, extra_info: dict
@@ -425,9 +438,12 @@ class RateLimitedRewardManager(RewardManagerBase):
             estimated_tokens = self._estimated_tokens_per_request
             await self._tpm_limiter.acquire(estimated_tokens)
 
-        async with self._semaphore:
+        # Coordinator failures occur outside the scorer's error-to-zero handler.
+        # Budgeted scorers drain cleanup even if the caller is cancelled repeatedly.
+        async with self._semaphore, shared_reward_slot(self.reward_budget, timeout=self.timeout):
             try:
-                result = await asyncio.wait_for(
+                wait_for = await_budgeted_reward if self.reward_budget is not None else asyncio.wait_for
+                result = await wait_for(
                     self._compute_reward(
                         data_source=data_source,
                         solution_str=response_str,

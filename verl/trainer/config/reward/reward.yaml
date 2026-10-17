@@ -4,6 +4,11 @@ _target_: verl.workers.config.RewardConfig
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
+# Optional concurrency budget shared by this RewardLoopManager's workers.
+# Requires rate_limited and a cooperative async custom reward function.
+# null keeps process-local behavior; RPM and TPM are always process-local.
+run_max_concurrent: null
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.

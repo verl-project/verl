@@ -106,7 +106,7 @@ class RewardLoopWorker:
         -> rm is genrm: raise error (user-costomized reward func must be provided)
     """
 
-    def __init__(self, config: DictConfig, reward_router_address: str = None):
+    def __init__(self, config: DictConfig, reward_router_address: str = None, reward_budget=None):
         """
         Args:
             config: DictConfig, the config for reward loop worker.
@@ -114,6 +114,7 @@ class RewardLoopWorker:
         """
         self.config = config
         self.reward_router_address = reward_router_address
+        self.reward_budget = reward_budget
         self._init_reward_fn()
         self.loop = get_event_loop()
 
@@ -133,6 +134,7 @@ class RewardLoopWorker:
             self.input_tokenizer,
             reward_router_address=self.reward_router_address,
             reward_model_tokenizer=self.reward_model_tokenizer,
+            **({"reward_budget": self.reward_budget} if self.reward_budget is not None else {}),
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
@@ -278,6 +280,9 @@ class RewardLoopManager:
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
+        from verl.experimental.reward_loop.reward_budget import create_reward_budget
+
+        self.reward_budget = create_reward_budget(config)
         if self.config.reward.reward_model.enable:
             rm_rollout = self.config.reward.reward_model.rollout
             # The discriminative /classify (pooling) path is not covered by
@@ -337,7 +342,11 @@ class RewardLoopManager:
                         node_id=node_id,
                         soft=True,
                     ),
-                ).remote(self.config, self.reward_router_address)
+                ).remote(
+                    self.config,
+                    self.reward_router_address,
+                    **({"reward_budget": self.reward_budget} if self.reward_budget is not None else {}),
+                )
             )
 
     def compute_rm_score(self, data: DataProto) -> DataProto:

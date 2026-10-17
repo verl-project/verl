@@ -96,6 +96,7 @@ class RewardConfig(BaseConfig):
 
     # reward manager args
     num_workers: int = 8
+    run_max_concurrent: int | None = None
     reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
     # reward model args

@@ -5,7 +5,7 @@ Reward Loop
 
 Author: `Yuyang Ding <https://yyding1.github.io>`_
 
-Last updated: 2/10/2026.
+Last updated: 10/17/2026.
 
 Introduction
 ------------
@@ -20,6 +20,65 @@ Key features include:
 1. **Distributed reward manager**, enabling scalable and efficient reward computation.
 2. **Support for hybrid reward settings**, including both generative and discriminative reward models, as well as more complex reward scenarios.
 3. **Simple and extensible interface**, for easily defining customized reward functions.
+
+Sharing an Async Scorer Concurrency Budget
+-----------------------------------------
+
+``rate_limited`` uses process-local semaphores and token buckets. With two
+workers and ``max_concurrent=2``, up to four scorers can be active at once.
+An optional ``reward.run_max_concurrent`` adds one shared concurrency budget
+for all workers owned by the same ``RewardLoopManager``:
+
+.. code-block:: bash
+
+    reward.reward_manager.name=rate_limited \
+    reward.custom_reward_function.path=/path/to/async_judge.py \
+    reward.custom_reward_function.name=compute_score \
+    reward.run_max_concurrent=4 \
+    +reward.max_concurrent=4
+
+The function must be an ``async def`` custom scorer that cooperatively awaits
+and cleans up its work. The default ``run_max_concurrent=null`` preserves
+existing behavior. A positive integer enables a manager-owned Ray coordinator;
+zero, negative, boolean, and non-integer values are rejected. Other reward
+manager implementations and synchronous scorers are not supported by this
+option. A timed-out synchronous executor thread can continue running after
+its caller returns, so treating it as completed would free capacity too early.
+
+The shared budget is acquired after the local RPM/TPM/concurrency limiters.
+A grant remains occupied until the scorer and its cancellation cleanup finish.
+Waiting for shared capacity has its own ``reward.timeout`` deadline. An
+admission timeout propagates to the caller instead of becoming a zero reward;
+the scorer's separate timeout begins only after admission. RPM and TPM are
+still process-local; this setting does not provide account-wide API quotas,
+FIFO fairness, or coordination between separate RewardLoopManager instances.
+This is not a hard end-to-end deadline: cancellation still waits for in-flight
+coordinator RPCs and scorer cleanup, so an unresponsive coordinator need not
+recover within a bounded time. ``reward.timeout=null`` retains unlimited waits.
+
+The coordinator is unnamed, owned by the current run, and cannot restart with
+an empty grant set. Coordinator errors propagate to the caller rather than
+being converted into a zero reward. If a worker dies while holding a grant,
+the grant is retained and later admission may time out; check outstanding
+scorer requests and restart the job to recover. There is deliberately no lease expiry that could admit new work
+while an old external request is still running. A dead coordinator also
+requires restarting the job.
+
+The guarantee concerns active scorer coroutines. The scorer owns cancellation
+of its external calls: detached tasks, multiple simultaneous requests inside
+one scorer, or a server continuing work after client cancellation cannot be
+counted automatically. These require a service-level admission policy.
+
+The CPU suite uses two real Ray RewardLoopWorkers, a locally saved tokenizer,
+and an instrumented async judge. It observes four simultaneous scorers under
+the legacy per-process limit and two under a shared limit of two. Separate
+tests exercise cancellation during acquisition/release, scorer timeout and
+cleanup, admission timeout, worker death, and coordinator failure. It needs no model download or paid API:
+
+.. code-block:: bash
+
+    uv run --frozen --all-packages --extra cpu pytest -q \
+      tests/experimental/reward_loop/test_run_reward_budget_on_cpu.py
 
 Distributed Reward manager
 --------------------------
