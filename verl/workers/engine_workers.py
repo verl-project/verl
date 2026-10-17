@@ -838,9 +838,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     f"model.lora.resync_base needs the naive weight sync, got {effective_mode!r}: other modes never "
                     "re-send the LoRA adapter, so discarding the rollout weights on sleep would lose it."
                 )
-            if effective_mode == "delta_sharded":
-                # the delta engine owns the sync state machine (seed vs steady,
-                # snapshot prime), so it drives the training engine itself.
+            if getattr(self.checkpoint_engine, "send_weights_takes_engine", False):
+                # engine-driven backends (delta_sharded, sharded_nixl) export from the
+                # training engine themselves.
                 metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
             else:
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
