@@ -1,6 +1,6 @@
 # Delta Weight Sync
 
-Last updated: 08/23/2026.
+Last updated: 10/15/2026.
 
 ## Motivation
 
@@ -199,7 +199,8 @@ the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
 
 Current scope is disaggregated (``hybrid_engine=False``) BF16 rollout. The
 producer side supports FSDP1, FSDP2, and TorchTitan training engines; the
-rollout consumer may be SGLang or vLLM. The vLLM path requires CUDA IPC,
+rollout consumer may be SGLang or vLLM. The vLLM path requires CUDA IPC (the
+Ascend NPU path rides the trainer's HCCL broadcast group instead — see below),
 ``data_parallel_size=1``, ``pipeline_parallel_size=1``, a non-quantized model,
 and vLLM's checkpoint patch API. For sparse updates, the model loader's final
 runtime write must be a floating-point ``copy_`` whose source and destination
@@ -207,6 +208,101 @@ have the same shape. The vLLM path does not support ``verify_every > 0``, PD
 disaggregation, speculative decoding, or EPLB. vLLM MoE delta updates require
 the Triton backend. Selecting any other rollout engine raises
 ``NotImplementedError`` at worker startup.
+
+On Ascend NPU the vLLM path rides the trainer's HCCL broadcast group instead
+of CUDA IPC — see [Ascend NPU (HCCL transport)](#ascend-npu-hccl-transport)
+below.
+
+## Ascend NPU (HCCL transport)
+
+The same ``delta_sharded`` backend ships an HCCL transport for Ascend NPU
+hosts. The checkpoint engine, wire schema, seed/steady state machine and flush
+manifests are shared with the NCCL variant — only the transport and the
+rollout-side receiver differ. No extra configuration: on NPU hosts the
+registry auto-selects the HCCL engine for the ``delta_sharded`` name (the NCCL
+delta module fails to import there — it needs cupy), and on CUDA hosts the
+NCCL engine keeps the name. Likewise the vLLM weight-transfer backend defaults
+to ``verl_delta_hccl`` on NPU and ``verl_delta_ipc`` elsewhere, so the same
+``backend=delta_sharded`` config drives both platforms.
+
+### How the transport differs
+
+- **Direct broadcast into the vLLM workers**: CUDA IPC
+  does not exist on NPU, so flushes are not forwarded through the rollout
+  adapter. Instead the trainer's rank 0 broadcasts each flush (positions +
+  values) into a **PyHccl broadcast group whose members are the vLLM worker
+  processes themselves** — one manifest subscription plus two broadcasts per
+  flush, no payload forwarding hop, no IPC handle negotiation. Group ranks:
+  trainer rank 0 at slot 0, rollout workers 1..N (replica-major /
+  tp-minor).
+- **Manifests over zmq PUB/SUB**: every flush is preceded by a manifest
+  published on a zmq PUB socket (topic ``bucket_metadata``). Receivers connect
+  their SUB *before* joining the broadcast group and raise a per-rank
+  ``delta_wire_ready`` flag in the group's TCPStore after joining; the trainer
+  polls those flags before publishing the first manifest. The flags are
+  required because ``zmq.Socket.connect()`` is asynchronous — a "connected"
+  SUB can still miss the first published manifest (a zmq PUB socket drops
+  messages published before any subscriber connected), and zmq offers no
+  subscription acknowledgment — the process-level wire-ready flag is the only
+  ordering signal available.
+- **Persistent group**: HCCL group setup is expensive, so the communicator is
+  built once at the first sync and kept across rounds (the vLLM worker
+  engines cache theirs too). ``rebuild_group=True`` raises
+  ``NotImplementedError``. A failed session destroys the communicator from
+  whichever side failed, so the whole group fails fast instead of hanging in
+  the next collective — a full job restart is required.
+- **Device-neutral checksum**: the per-flush wire checksum is a device-side
+  order-sensitive 64-bit fold rather than ``torch.hash_tensor`` (whose kernels
+  are CPU/CUDA only), so sender and receiver agree on NPU as well.
+- **Rollout adapter**: on NPU the flush stream the vLLM rollout adapter sees
+  is a single ``__delta_rendezvous__`` control item (the zmq + group
+  endpoints); the adapter only drives the worker engines' weight-transfer
+  lifecycle RPCs, and the per-worker update entries carry each worker's group
+  rank. The update RPC returns only after the session's last flush is
+  applied, so no extra synchronization is needed.
+
+### Requirements and scope
+
+- An Ascend NPU host with CANN + ``torch_npu``, and vllm-ascend providing
+  vLLM's engine-owned weight-transfer and checkpoint patch APIs.
+- vLLM rollout only (the SGLang receiver rides the CUDA IPC path). BF16,
+  non-quantized, no speculative decoding, ``data_parallel_size=1``,
+  ``pipeline_parallel_size=1``, ``verify_every=0`` — the same constraints as
+  the CUDA vLLM path — plus ``tensor_parallel_size`` ∈ {1, 2} in this first
+  revision.
+- **MoE models are not supported on NPU yet** (NPU has no Triton; the
+  vllm-ascend MoE kernel path is in development and will land in a follow-up
+  PR) — startup raises with a pointer to dense models.
+- Trainer side unchanged: the same shard export contract (``Shard(0)``
+  DTensor parameters from FSDP2/FSDP1/TorchTitan) feeds the delta pipeline.
+
+### Observability
+
+``CheckpointEngineManager.update_weights`` returns per-sync metrics
+(``checkpoint_engine/changed_ratio``, ``changed_elems``, ``payload_mbytes``,
+``flushes`` and ``elapsed_seconds``). The seed round additionally logs a
+warning with its one-off full-model cost (the number to check when sizing a
+run), and every steady round logs its elapsed time, changed ratio and wire
+size at info level — visible with ``VERL_LOGGING_LEVEL=INFO`` (the worker
+default log level is WARN).
+
+### Testing on an NPU host
+
+```shell
+# end-to-end correctness: 2 trainer x 6 rollout workers over the real HCCL
+# wire (mock apply), seed + sparse-steady + zero-change rounds, bucket
+# chunking (3072MB and 128MB buckets), received weights compared exactly
+pytest tests/checkpoint_engine/test_correctness_on_npu.py -k delta_hccl -v
+```
+
+The decode, checksum and wire units are device-agnostic and run anywhere
+(the wire units skip where vLLM is not installed):
+
+```shell
+pytest tests/checkpoint_engine/test_delta_decode_on_cpu.py \
+       tests/checkpoint_engine/test_delta_checksum_on_cpu.py \
+       tests/checkpoint_engine/test_delta_wire_fail_loud_on_cpu.py -v
+```
 
 ## Roadmap
 
@@ -220,3 +316,5 @@ Planned extensions, in design order:
   TP column splits are already expressible as a ``BlockPlacement`` dim-1 offset (see #7060).
 - **Quantized rollout (fp8 etc.)**: diff the quantized bytes (quantize-then-diff) so a low-precision
   rollout engine can consume deltas without a bf16 intermediate.
+- **NPU MoE delta updates**: the vllm-ascend kernel path for MoE delta loads (Triton-only on CUDA
+  today), which lifts the NPU dense-model restriction of the HCCL transport.
