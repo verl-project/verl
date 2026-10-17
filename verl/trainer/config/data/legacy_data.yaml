@@ -70,6 +70,11 @@ shuffle: True
 # Seed to use when shuffling the data
 seed: null
 
+# v1 trainer: compare local text dataset identity before checkpoint restore.
+# off preserves legacy behavior; warn reports unverifiable/changed input; error stops.
+# Enabled modes hash input files and loaded rows once per dataset construction.
+resume_check: "off"
+
 # num dataloader workers
 dataloader_num_workers: 8
 

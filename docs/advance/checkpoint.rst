@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 10/17/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -37,6 +37,70 @@ Megatron:
 
     For FSDP, ``checkpoint.save_contents`` other than ``hf_model`` are binded together to save and
     load. We recommend to include ``model``, ``optimizer`` and ``extra`` all.
+
+Checking Data Identity Before Resume
+------------------------------------
+
+The v1 trainer (``trainer.use_v1=true``) can compare the current training
+dataset with the dataset used to save a checkpoint. Enable this from the
+initial run with ``data.resume_check=error``. The default, ``"off"``, performs
+no identity hashing or manifest checks and preserves existing behavior.
+``"warn"`` records available identity information and logs mismatches or
+unavailable information while allowing training to proceed. ``"error"``
+stops when identity is unavailable or differs, before restoring actor, critic,
+or dataloader state. This does not avoid worker initialization before resume.
+
+The built-in implementation supports local Parquet/JSON/JSONL files with
+JSON-serializable, plain-text chat rows and a fast tokenizer, without a
+processor or custom ``chat_template_func``. It hashes source bytes in file
+order, the actual rows after selection and length filtering, tokenizer state,
+chat template, tool schemas, and relevant preprocessing settings. Paths and
+modification times do not define identity: relocating identical files is
+allowed. Changing the contents without changing the row count is detected.
+Operational settings such as cache location and dataloader worker count are
+not part of dataset identity.
+
+The trainer writes ``data_manifest.json`` next to ``data.pt``. The sidecar is
+replaced atomically after saving the dataloader and, in asynchronous trainer
+modes, the TransferQueue state, before publishing the checkpoint tracker or
+calling the checkpoint callback. Preserve both files when moving a checkpoint.
+Before overwriting an existing step directory, the trainer removes its old
+sidecar, even with checking disabled. A disabled or failed save must not leave
+an older identity certifying newly written or partially replaced checkpoint files.
+With asynchronous model saves, a present sidecar is not a model-durability
+signal: model shards may still be in flight and the existing asynchronous
+checkpoint publication rules continue to apply. The check also runs before
+TransferQueue restoration in asynchronous v1 trainer modes. It does not
+change worker checkpoint finalization, retention, or remote uploads.
+The manifest stores hashes and settings, not raw rows, tokenizer vocabulary,
+or absolute input paths. This opt-in check adds a full source-file scan and
+a processed-row scan at dataset construction, including validation datasets
+constructed with the same data config; checkpoint saves reuse the signature.
+
+Old checkpoints without a sidecar are unverifiable: ``"warn"`` can continue
+with a warning, while ``"error"`` rejects them. Unsupported remote/multimodal
+datasets, slow tokenizers, and split datasets follow the same policy. Custom
+datasets must explicitly implement ``get_resume_signature()`` returning a
+nonempty, JSON-serializable dictionary whose version, content, ordering, and
+preprocessing identity they own. Subclassing ``RLHFDataset`` alone does not
+opt a custom dataset into this contract.
+
+This is a construction-time input guard, not a replay or determinism system.
+It does not restore sampled indices, repair changed data, fingerprint arbitrary
+user code, validate batch/sampler configuration, or guarantee training
+convergence or bitwise reproducibility. An unseeded selection can legitimately
+produce a different identity on restart. Do not mutate a built-in dataset or
+tokenizer after constructing it when relying on its cached signature.
+
+The CPU tests exercise actual JSON/Parquet loading, sampling/filtering,
+a fresh-process StatefulDataLoader restart, and v1 save/load ordering with
+worker RPCs stubbed:
+
+.. code-block:: bash
+
+    uv run --frozen --all-packages --extra cpu pytest -q \
+      tests/utils/dataset/test_resume_identity_on_cpu.py \
+      tests/trainer/ppo/v1/test_checkpoint_data_identity_on_cpu.py
 
 Checkpoint Callback
 -------------------

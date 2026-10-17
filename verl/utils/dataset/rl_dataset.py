@@ -93,6 +93,8 @@ class RLHFDataset(Dataset):
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
         max_samples: int = -1,
+        *,
+        _skip_resume_identity: bool = False,
     ):
         if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
@@ -155,6 +157,7 @@ class RLHFDataset(Dataset):
         self.return_multi_modal_inputs = config.get("return_multi_modal_inputs", True)
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
+        self._skip_resume_identity = _skip_resume_identity
 
         self._download()
         self._read_files_and_tokenize()
@@ -167,6 +170,22 @@ class RLHFDataset(Dataset):
             self.data_files[i] = copy_to_local(src=parquet_file, cache_dir=self.cache_dir, use_shm=self.use_shm)
 
     def _read_files_and_tokenize(self):
+        from verl.utils.dataset.resume_identity import build_rlhf_signature, resume_data_check, snapshot_sources
+
+        policy = resume_data_check(self.config)
+        self._resume_signature = None
+        self._resume_signature_error = None
+        sources = None
+        if not getattr(self, "_skip_resume_identity", False) and policy != "off" and type(self) is RLHFDataset:
+            try:
+                # Hash the original local sources, not a cache location or a remote URL.
+                sources = snapshot_sources(self.original_data_files)
+            except (OSError, ValueError) as error:
+                self._resume_signature_error = str(error)
+                if policy == "error":
+                    raise
+                logger.warning("Data resume identity is unavailable: %s", error)
+
         dataframes = []
         for parquet_file in self.data_files:
             # read files and cache
@@ -193,6 +212,27 @@ class RLHFDataset(Dataset):
             print(f"selected {self.max_samples} random samples out of {total}")
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
+
+        if sources is not None:
+            try:
+                self._resume_signature = build_rlhf_signature(self, sources)
+            except (OSError, TypeError, ValueError) as error:
+                self._resume_signature_error = str(error)
+                if policy == "error":
+                    raise
+                logger.warning("Data resume identity is unavailable: %s", error)
+
+    def get_resume_signature(self) -> dict:
+        """Return the construction-time identity for the supported built-in dataset.
+
+        Custom or mutable datasets must define their own identity contract instead
+        of inheriting a signature for rows they may subsequently modify.
+        """
+        if type(self) is not RLHFDataset:
+            raise NotImplementedError("Custom datasets must implement get_resume_signature explicitly")
+        if self._resume_signature is None:
+            raise ValueError(self._resume_signature_error or "Construct the dataset with data.resume_check enabled")
+        return copy.deepcopy(self._resume_signature)
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
@@ -557,8 +597,11 @@ class RLHFDataset(Dataset):
                 config=self.config,
                 processor=self.processor,
                 max_samples=self.max_samples,
+                _skip_resume_identity=True,
             )
             split_dataset.dataframe = split_dataframe
+            split_dataset._resume_signature = None
+            split_dataset._resume_signature_error = "Split datasets must provide their own resume identity"
             split_dataset.serialize_dataset = self.serialize_dataset
             split_dataset.original_data_files = self.original_data_files
 

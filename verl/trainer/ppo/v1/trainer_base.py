@@ -76,6 +76,12 @@ from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_m
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataset.resume_identity import (
+    check_data_manifest,
+    get_data_manifest,
+    resume_data_check,
+    write_data_manifest,
+)
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -872,6 +878,8 @@ class PPOTrainer(ABC):
         else:
             logger.exception(f"Unknown resume mode {self.config.trainer.resume_mode}")
 
+        check_data_manifest(global_step_folder, self.train_dataloader, resume_data_check(self.config.get("data", {})))
+
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
         logger.info(f"Resuming from {global_step_folder}, setting global step to {self.global_steps}")
@@ -949,6 +957,8 @@ class PPOTrainer(ABC):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
         from verl.utils.fs import local_mkdir_safe
 
+        data_manifest = get_data_manifest(self.train_dataloader, resume_data_check(self.config.get("data", {})))
+
         local_global_step_folder = os.path.join(
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
         )
@@ -975,6 +985,9 @@ class PPOTrainer(ABC):
             if self.config.trainer.default_hdfs_dir is None
             else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
         )
+        # A reused step directory must not certify new or partially overwritten
+        # checkpoint files with its old identity, including when checking is off.
+        write_data_manifest(local_global_step_folder, None)
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
         )
@@ -1006,6 +1019,9 @@ class PPOTrainer(ABC):
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
             )
+
+        # Do not certify a replacement dataset while an old prompt queue remains.
+        write_data_manifest(local_global_step_folder, data_manifest)
 
         # write latest checkpointed iteration tracker for atomic resume
         actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})

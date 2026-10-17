@@ -499,6 +499,7 @@ data:
   return_full_prompt: false
   shuffle: true
   seed: null
+  resume_check: 'off'
   dataloader_num_workers: 8
   image_patch_size: 14
   validation_shuffle: false
