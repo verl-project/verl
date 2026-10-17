@@ -88,6 +88,9 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
         def __init__(self, **kwargs):
             calls.append("create_rollout_group")
 
+        def fetch_rollout_layout(self):
+            calls.append("fetch_rollout_layout")
+
     class FakeActorWorkerGroup:
         world_size = 1
 
@@ -130,6 +133,7 @@ async def test_strong_sync_quiesces_rollout_before_build_and_publish(monkeypatch
         "abort",
         "release_kv_cache",
         "build_process_group",
+        "fetch_rollout_layout",
         "publish",
         "schedule_commit",
     ]
