@@ -64,6 +64,7 @@ async def _run(
     rollout_tp: int = 1,
     rank_local: bool = False,
     model_path: str | None = None,
+    trainer_kwargs: dict | None = None,
     retry: bool = False,
 ):
     """Run ``num_syncs`` weight syncs, checking the received weights after each one, and return
@@ -95,7 +96,7 @@ async def _run(
         spare = gpus_per_node * _num_nodes - total
         sizes = [num_trainer, num_rollout] + ([spare] if spare else [])
         trainer_pool, rollout_pool = split_resource_pool(resource_pool, sizes)[:2]
-        actor_wg = create_trainer_worker_group(trainer_pool, model_config, ce_config)
+        actor_wg = create_trainer_worker_group(trainer_pool, model_config, ce_config, **(trainer_kwargs or {}))
         actor_wg.reset()
         rollout, replicas = await create_rollout_worker_group(
             rollout_pool,
@@ -178,12 +179,20 @@ async def test_sharded_nixl_version_mismatch():
     )
 
 
-@pytest.mark.skipif(_ngpus < 3, reason="needs >= 3 GPUs")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["fsdp", "megatron"])
 @auto_await
-async def test_sharded_nixl_fake_ep_ownership():
+async def test_sharded_nixl_fake_ep_ownership(strategy):
     """Two mock generators own disjoint halves of every layer's experts of a real MoE checkpoint
-    (fake EP=2) and must receive exactly those, bit-exact."""
+    (fake EP=2) and must receive exactly those, bit-exact. The Megatron trainer runs TP=2, EP=2
+    and sends through the HF-shard export."""
+    num_trainer, trainer_kwargs = 1, {}
+    if strategy == "megatron":
+        pytest.importorskip("megatron.bridge")
+        num_trainer = 2
+        trainer_kwargs = {"strategy": "megatron", "tensor_model_parallel_size": 2, "expert_model_parallel_size": 2}
+    if num_trainer + 2 > _ngpus * _num_nodes:
+        pytest.skip("not enough GPUs")
     model_path = os.path.expanduser(_moe_model)
     if not os.path.exists(model_path):
         pytest.skip(f"MoE checkpoint not found: {model_path}")
@@ -203,7 +212,14 @@ async def test_sharded_nixl_fake_ep_ownership():
         }
         for rank in range(2)
     ]
-    metrics = await _run({"ownership": "adapter"}, 1, 2, rollout_layouts=layouts, model_path=model_path)
+    metrics = await _run(
+        {"ownership": "adapter"},
+        num_trainer,
+        2,
+        rollout_layouts=layouts,
+        model_path=model_path,
+        trainer_kwargs=trainer_kwargs,
+    )
     steady = metrics[-1]
     model_mb = steady["checkpoint_engine/model_mbytes"]
     payload_mb = steady["checkpoint_engine/payload_mbytes"]

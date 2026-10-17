@@ -31,6 +31,8 @@ _MUON_ALGORITHMS = ("muon",)
 
 def is_muon_layer_wise_config(optim_config) -> bool:
     """True when verl will build Megatron's LayerWiseDistributedOptimizer path."""
+    if optim_config is None:
+        return False
     algo = str(getattr(optim_config, "optimizer", optim_config.get("optimizer", ""))).lower()
     if algo not in _MUON_ALGORITHMS:
         return False
