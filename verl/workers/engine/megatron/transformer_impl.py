@@ -910,6 +910,11 @@ class MegatronEngine(BaseEngine):
 
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
+        if os.environ.get("VERL_P2P_SHAPE_TRACE") == "1":
+            from verl.utils.megatron.p2p_shape_trace import install_p2p_shape_trace
+
+            install_p2p_shape_trace()
+
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=batch_generator,

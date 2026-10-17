@@ -33,16 +33,7 @@
 name: reward_model_sglang_ascend
 
 on:
-  # Trigger on pull requests targeting main or v0.* branches.
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "verl/**/*.py"
-      # Entrypoints
-      - ".github/workflows/reward_model_sglang_ascend.yml"
-      - "tests/experimental/reward_loop/**"
+  workflow_dispatch:
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

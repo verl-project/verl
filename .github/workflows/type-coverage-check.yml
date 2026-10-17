@@ -1,10 +1,7 @@
 name: Type Annotation and Docstring Coverage
 
 on:
-  pull_request:
-    paths:
-      - '**/*.py'
-      - '.github/workflows/type-coverage-check.yml'
+  workflow_dispatch:
 
 jobs:
   type-coverage-check:

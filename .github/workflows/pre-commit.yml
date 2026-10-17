@@ -5,7 +5,7 @@ name: pre-commit
 on:
   schedule:
     - cron: "0 0 * * 0"
-  pull_request:
+
   push:
     branches:
       - main

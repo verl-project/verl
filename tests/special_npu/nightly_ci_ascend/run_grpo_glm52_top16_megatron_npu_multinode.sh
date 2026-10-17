@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -x
 
+# Set before the training driver imports Ray; worker runtime_env alone is too late for that driver.
+export RAY_DEDUP_LOGS=0
+
 # ---- user-adjustable ----
 # # 0. download HF checkpoint
-hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/glm52_top16_dapo_17k_tuned_weights}
+hf_weights=${HF_WEIGHTS:-${HOME}/.cache/modelscope/hub/models/lxb007981/GLM-5.2-top16-DAPO-17k-Tuned}
 
 echo "[info] hf_weights=${hf_weights}"
 
@@ -206,9 +209,16 @@ TRAINER=(
 )
 
 EXTRA=(
-    --config-name='ppo_megatron_trainer'
     "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_VLLM_ASCEND_GLM52_PATCH='1'"
+    # Temporary diagnostics for the cross-node pipeline receive allocation failure.
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_P2P_SHAPE_TRACE='1'"
+    "++ray_kwargs.ray_init.runtime_env.env_vars.RAY_DEDUP_LOGS='0'"
+    # CI explicitly selects sentinel_p2p through the RayJob submission environment.
+    # Direct runs default to the batched baseline; original restores tracing only.
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_P2P_SHAPE_MODE='${VERL_P2P_SHAPE_MODE:-sentinel_batch}'"
     actor_rollout_ref.nccl_timeout=7200
+    +transfer_queue.backend.SimpleStorage.required_node_resource=CPU
+    --config-name='ppo_megatron_trainer' # need to be the last one, as it will split the positional overrides list
 )
 
 ########################### launch ###########################
