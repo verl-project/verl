@@ -480,6 +480,12 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+        # set while a sync is writing rollout weights; a failed sync leaves it set, so generation stays
+        # blocked until a later sync completes. It lives in this manager, so a replica resumed through
+        # another handle (fully_async rollouter rebalance) bypasses it; move it onto the server actors
+        # if those paths need it
+        self._weights_dirty = False
+        self._applied_global_steps = None
 
         self._update_ticket = None
         self._background_loop = asyncio.new_event_loop()
@@ -579,6 +585,11 @@ class CheckpointEngineManager:
     @auto_await
     async def resume_generation_replicas(self):
         """Resume generation on all replicas after abort_all_requests."""
+        if self._weights_dirty:
+            raise RuntimeError(
+                "rollout weights are mixed after a failed weight sync (last complete sync: global step "
+                f"{self._applied_global_steps}); run update_weights again before resuming generation"
+            )
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])
 
     @auto_await
@@ -640,7 +651,12 @@ class CheckpointEngineManager:
             published = await self._update_ticket.wait_published()
             return self._merge_sync_metrics(published)
         else:
-            return await self._update_ticket.wait_committed()
+            try:
+                return await self._update_ticket.wait_committed()
+            except Exception:
+                # raised to this caller already, so a retry must not raise it again from the wait above
+                self._update_ticket = None
+                raise
 
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
         # 1. create a temporay worker group for all replicas
@@ -690,8 +706,11 @@ class CheckpointEngineManager:
             await self.abort_replicas()
             await self.release_kv_cache_replicas()
 
+        self._weights_dirty = True
         rollout_committed = rollout.update_weights(global_steps=global_steps)
         results = await asyncio.gather(*trainer_published, *rollout_committed)
+        self._weights_dirty = False
+        self._applied_global_steps = global_steps
 
         await asyncio.gather(
             *self.actor_wg.execute_checkpoint_engine(["finalize"] * self.actor_wg.world_size),
