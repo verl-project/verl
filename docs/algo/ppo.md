@@ -1,6 +1,6 @@
 # Proximal Policy Optimization (PPO)
 
-Last updated: 06/19/2025.
+Last updated: 10/17/2026.
 
 Proximal Policy Optimization (PPO) is a family of policy gradient methods for reinforcement learning, proposed by OpenAI in 2017. PPO strikes a balance between simplicity, stability, and performance, making it one of the most widely used algorithms in modern RL applications, including large-scale language model fine-tuning.
 
@@ -79,6 +79,37 @@ The Dual-Clip PPO introduces a approach by applying a lower bound to the policy 
 ![image](https://github.com/user-attachments/assets/fc232181-d8b0-4307-8dd2-4dc0a4c1c139)
 
 - `actor_rollout_ref.actor.clip_ratio_c`: lower bound of the value for Dual-clip PPO, defaults to 3.0
+
+## CPU contract for the GSPO policy-loss option
+
+`policy_loss.loss_mode=gspo` uses a sequence importance ratio in the forward
+pass while stopping its gradient. Each token's own current log probability
+provides the backward path. For an unclipped, valid token, the policy-loss
+derivative with respect to that log probability is
+`-advantage * sequence_ratio * rollout_weight`, followed by the selected global normalization. A clipped
+token contributes zero policy gradient. Padding contributes neither objective
+nor gradient; entropy and reference KL have their own derivative terms.
+
+`tests/trainer/ppo/test_gspo_wrapper_contract_on_cpu.py` checks this derivative
+using independent scalar arithmetic through the real `ppo_loss` wrapper and
+registered GSPO implementation. The fixtures include unequal prompt/response
+lengths, padded and nested layouts, both clipping directions, token-dependent
+rollout weights, and optional entropy/reference KL terms. They compare full and
+uneven microbatches with fixed global counts for `token-mean` and
+`seq-mean-token-mean`. Data-parallel averaging is simulated algebraically;
+these are not distributed-backend or training-convergence tests.
+
+Run without model downloads or a GPU:
+
+```bash
+uv run --frozen --all-packages --extra cpu pytest -q \
+  tests/trainer/ppo/test_gspo_wrapper_contract_on_cpu.py
+```
+
+Ordinary finite differences of the forward sequence ratio are not an oracle
+for this stop-gradient implementation: recomputing the ratio after every
+perturbation changes a quantity that backpropagation intentionally holds fixed.
+Use the analytic derivative or a surrogate with the stopped quantities frozen.
 
 ## Reference Example
 
