@@ -25,7 +25,13 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.device import get_device_name
 from verl.utils.fs import copy_to_local
-from verl.workers.config import CheckpointEngineConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
+from verl.workers.config import (
+    CheckpointEngineConfig,
+    FSDPEngineConfig,
+    HFModelConfig,
+    McoreEngineConfig,
+    RolloutConfig,
+)
 from verl.workers.engine.fsdp.utils import unfuse_moe_params
 from verl.workers.engine_workers import TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica
@@ -247,9 +253,22 @@ class CheckpointEngineWorkerTest(CheckpointEngineWorker):
 
 
 def create_trainer_worker_group(
-    resource_pool: RayResourcePool, model_config: HFModelConfig, checkpoint_engine_config: CheckpointEngineConfig
+    resource_pool: RayResourcePool,
+    model_config: HFModelConfig,
+    checkpoint_engine_config: CheckpointEngineConfig,
+    strategy: str = "fsdp",
+    tensor_model_parallel_size: int = 1,
+    expert_model_parallel_size: int = 1,
 ) -> RayWorkerGroup:
-    engine_config = FSDPEngineConfig(forward_only=True, fsdp_size=resource_pool.world_size, strategy="fsdp")
+    if strategy == "megatron":
+        engine_config = McoreEngineConfig(
+            forward_only=True,
+            tensor_model_parallel_size=tensor_model_parallel_size,
+            expert_model_parallel_size=expert_model_parallel_size,
+            expert_tensor_parallel_size=1,
+        )
+    else:
+        engine_config = FSDPEngineConfig(forward_only=True, fsdp_size=resource_pool.world_size, strategy=strategy)
     trainer_config = TrainingWorkerConfig(
         model_type="language_model",
         model_config=model_config,
