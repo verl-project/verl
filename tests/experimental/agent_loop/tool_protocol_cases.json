@@ -1,0 +1,165 @@
+{
+  "description": "Synthetic, offline protocol examples based on the production formats below. These are not model generations or tokenizer fixtures.",
+  "sources": {
+    "hermes": "verl/experimental/agent_loop/tool_parser.py::HermesToolParser",
+    "kimi": "verl/experimental/agent_loop/tool_parser.py::KimiToolParser; tests/experimental/agent_loop/test_tool_call_id_on_cpu.py"
+  },
+  "cases": [
+    {
+      "id": "hermes-text",
+      "parser": "hermes",
+      "text": "No tool is needed.",
+      "content": "No tool is needed.",
+      "calls": []
+    },
+    {
+      "id": "hermes-nested-unicode",
+      "parser": "hermes",
+      "text": "Checking.<tool_call>{\"name\":\"echo\",\"arguments\":{\"value\":{\"city\":\"深圳\",\"enabled\":false,\"items\":[0,null,\"\"]}}}</tool_call>",
+      "content": "Checking.",
+      "calls": [
+        {
+          "name": "echo",
+          "arguments": {
+            "value": {
+              "city": "深圳",
+              "enabled": false,
+              "items": [
+                0,
+                null,
+                ""
+              ]
+            }
+          },
+          "tool_call_id": null
+        }
+      ]
+    },
+    {
+      "id": "hermes-bad-sibling",
+      "parser": "hermes",
+      "text": "Checking.<tool_call>{broken}</tool_call><tool_call>{\"name\":\"echo\",\"arguments\":{\"value\":\"valid\"}}</tool_call>",
+      "content": "Checking.",
+      "calls": [
+        {
+          "name": "echo",
+          "arguments": {
+            "value": "valid"
+          },
+          "tool_call_id": null
+        }
+      ]
+    },
+    {
+      "id": "hermes-unknown",
+      "parser": "hermes",
+      "text": "<tool_call>{\"name\":\"missing\",\"arguments\":{\"value\":1}}</tool_call>",
+      "content": "",
+      "calls": [
+        {
+          "name": "missing",
+          "arguments": {
+            "value": 1
+          },
+          "tool_call_id": null
+        }
+      ]
+    },
+    {
+      "id": "hermes-parallel-limit",
+      "parser": "hermes",
+      "text": "<tool_call>{\"name\":\"echo\",\"arguments\":{\"value\":1}}</tool_call><tool_call>{\"name\":\"echo\",\"arguments\":{\"value\":2}}</tool_call>",
+      "content": "",
+      "calls": [
+        {
+          "name": "echo",
+          "arguments": {
+            "value": 1
+          },
+          "tool_call_id": null
+        },
+        {
+          "name": "echo",
+          "arguments": {
+            "value": 2
+          },
+          "tool_call_id": null
+        }
+      ],
+      "max_parallel_calls": 1
+    },
+    {
+      "id": "kimi-text",
+      "parser": "kimi",
+      "text": "No tool is needed.",
+      "content": "No tool is needed.",
+      "calls": []
+    },
+    {
+      "id": "kimi-parallel-ids",
+      "parser": "kimi",
+      "text": "Checking.<|tool_calls_section_begin|><|tool_call_begin|>call-echo-0<|tool_call_argument_begin|>{\"value\":\"first\"}<|tool_call_end|><|tool_call_begin|>call-echo-1<|tool_call_argument_begin|>{\"value\":\"second\"}<|tool_call_end|><|tool_calls_section_end|><|im_end|>",
+      "content": "Checking.",
+      "calls": [
+        {
+          "name": "echo",
+          "arguments": {
+            "value": "first"
+          },
+          "tool_call_id": "call-echo-0"
+        },
+        {
+          "name": "echo",
+          "arguments": {
+            "value": "second"
+          },
+          "tool_call_id": "call-echo-1"
+        }
+      ]
+    },
+    {
+      "id": "kimi-malformed-object",
+      "parser": "kimi",
+      "text": "Checking.<|tool_calls_section_begin|><|tool_call_begin|>call-echo-0<|tool_call_argument_begin|>{broken}<|tool_call_end|><|tool_calls_section_end|><|im_end|>",
+      "content": "Checking.",
+      "calls": [
+        {
+          "name": "echo",
+          "arguments": {},
+          "tool_call_id": "call-echo-0"
+        }
+      ]
+    },
+    {
+      "id": "kimi-nonobject-json",
+      "parser": "kimi",
+      "text": "Checking.<|tool_calls_section_begin|><|tool_call_begin|>call-echo-0<|tool_call_argument_begin|>[1,2]<|tool_call_end|><|tool_calls_section_end|><|im_end|>",
+      "content": "Checking.",
+      "calls": [
+        {
+          "name": "echo",
+          "arguments": {},
+          "tool_call_id": "call-echo-0"
+        }
+      ]
+    },
+    {
+      "id": "kimi-inactive-tool",
+      "parser": "kimi",
+      "text": "Checking.<|tool_calls_section_begin|><|tool_call_begin|>secret<|tool_call_argument_begin|>{\"value\":\"must not run\"}<|tool_call_end|><|tool_calls_section_end|><|im_end|>",
+      "content": "Checking.",
+      "calls": [
+        {
+          "name": "secret",
+          "arguments": {
+            "value": "must not run"
+          },
+          "tool_call_id": "secret"
+        }
+      ],
+      "active_tools": [
+        "echo"
+      ]
+    }
+  ]
+}

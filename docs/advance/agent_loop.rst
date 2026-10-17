@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 10/17/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -26,6 +26,56 @@ and return the final output. The final output is then calculated reward and used
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/agent_loop_overview.svg?raw=true
 
+
+CPU tool protocol contracts
+---------------------------
+
+``tests/experimental/agent_loop/test_tool_protocol_contract_on_cpu.py`` replays
+the shared ``tool_protocol_cases.json`` corpus through the production parser,
+assistant-message builder, tool dispatcher and tool-reply builder. Each case
+runs with both a stateful native tool and a stateless ``FunctionTool``. This
+checks agreement between these stages, in addition to their focused unit tests.
+
+.. list-table:: Initial offline protocol coverage
+   :header-rows: 1
+
+   * - Contract
+     - Hermes
+     - Kimi
+   * - Text without tool calls
+     - Preserved
+     - Preserved
+   * - Arguments reaching the tool
+     - Nested values and Unicode preserved
+     - Objects preserved; invalid/non-object JSON falls back to an empty object
+   * - Malformed sibling call
+     - Skipped without dropping the valid sibling
+     - Uses the Kimi argument fallback above
+   * - Call IDs
+     - No model ID is invented
+     - Model ID preserved in assistant and tool messages
+   * - Dispatch boundaries
+     - Unknown tools rejected; parallel-call cap respected
+     - Tools outside the active selection are not executed
+
+Run the corpus on CPU using the repository's CPU environment::
+
+    uv run --frozen --all-packages --extra cpu pytest -q \
+        tests/experimental/agent_loop/test_tool_protocol_contract_on_cpu.py
+
+To extend a protocol, add a named case with its decoded text, expected content,
+arguments and optional model-emitted IDs. Record the format source in the
+corpus, and use that parser's error-recovery contract rather than making every
+parser reject the same inputs. New tool side effects should be represented by
+deterministic local test doubles.
+
+These are synthetic format fixtures, not recorded model generations. Decoding
+and Continuous Token context merging are explicit test doubles; the tests do
+not validate chat-template round trips, actual special-token IDs, backend stop
+conditions, generated-token masks or training convergence. Add separate tests
+with a fixed tokenizer revision and backend integration when claiming support
+for a new model. The parser must not replace the original response token IDs
+with a re-encoding of its reconstructed assistant message.
 
 API Design
 ----------
