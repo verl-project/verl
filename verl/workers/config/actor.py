@@ -27,6 +27,7 @@ from .engine import (
     McoreEngineConfig,
     TorchtitanEngineConfig,
     VeOmniEngineConfig,
+    plumb_freeze_vision_tower,
 )
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
@@ -117,6 +118,9 @@ class ActorConfig(BaseConfig):
         clip_ratio (float): PPO clipping ratio for policy loss.
         clip_ratio_low (float): Lower bound for PPO clipping ratio.
         clip_ratio_high (float): Upper bound for PPO clipping ratio.
+        freeze_vision_tower (bool): Freeze the vision tower of a multimodal model and skip
+            the dummy visual forward on text-only batches. Implemented for the FSDP/FSDP2
+            engines; other engines ignore it with a warning. default False
         policy_loss (PolicyLossConfig): Configuration for policy loss computation.
         clip_ratio_c (float): Clipping ratio for critic loss.
         loss_agg_mode (str): Loss aggregation mode, including 'token-mean', 'token-sum', and sequence modes.
@@ -280,6 +284,7 @@ class McoreActorConfig(ActorConfig):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.megatron
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="actor")
 
 
 @dataclass
@@ -320,6 +325,10 @@ class FSDPActorConfig(ActorConfig):
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
         # falls back to FSDP1 even when actor.strategy="fsdp2".
         object.__setattr__(self.engine, "strategy", self.strategy)
+        # Forward freeze_vision_tower next to the strategy sync: __post_init__ is
+        # the choke point every actor construction path goes through (both
+        # trainers and engine_workers), so a future path cannot forget it.
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="actor")
 
         # backward compatibility
         if self.ulysses_sequence_parallel_size > 1:
@@ -362,6 +371,7 @@ class VeOmniActorConfig(ActorConfig):
         """Validate VeOmni actor configuration parameters."""
         super().__post_init__()
         self.engine = self.veomni
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="actor")
         if self.veomni.router_replay.mode != "disabled" and not self.use_remove_padding:
             raise RuntimeError(
                 "router_replay requires use_remove_padding=True. In VeOmni engine, "
@@ -394,3 +404,4 @@ class TorchTitanActorConfig(ActorConfig):
         """Validate TorchTitan actor configuration parameters."""
         super().__post_init__()
         self.engine = self.torchtitan
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="actor")

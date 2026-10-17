@@ -28,6 +28,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
 )
 
+from verl.utils.model import may_skip_dummy_visual_forward
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_group,
     get_ulysses_sequence_parallel_world_size,
@@ -492,12 +493,21 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
     if pixel_values is None and pixel_values_videos is None:
-        config = model.config.vision_config
-        patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
-        pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
-        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+        # The dummy visual forward keeps vision params in the autograd graph (FSDP
+        # grad completeness) and equalizes cross-rank vision-tower entry counts
+        # (FSDP2 per-module all-gather alignment, #3496). Both concerns vanish
+        # once the visual path is fully frozen and out of per-module FSDP
+        # wrapping. may_skip_dummy_visual_forward (shared with the other VLM
+        # adapters) holds the full rule: the engine's frozen-and-excluded marker
+        # plus no trainable params anywhere in the visual path, re-checked per
+        # forward as defense in depth (PEFT/QAT attach after marking).
+        if not may_skip_dummy_visual_forward(model):
+            config = model.config.vision_config
+            patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
+            pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
+            image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
+            inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)

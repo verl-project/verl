@@ -16,7 +16,7 @@ import logging
 import math
 import os
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Literal, Optional
 
 from verl.base_config import BaseConfig
@@ -268,10 +268,23 @@ class FSDPEngineConfig(EngineConfig):
             within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
             default 1024
         qat (QATEngineConfig): QAT configuration, default disabled
+        freeze_vision_tower (bool): Freeze the vision tower of a vision-language model:
+            ``requires_grad_(False)`` on its params, keep it out of per-module FSDP wrapping
+            (its params join the root FSDP unit), and skip the dummy visual forward on
+            text-only batches. The skip itself additionally requires the exclusion to be
+            guaranteed (``fsdp_turbo`` and the size-based FSDP1 wrap policy keep the dummy
+            forward) and no trainable params inside the tower (vision LoRA / QAT keep it,
+            so every rank still enters the tower once). Plumbed from the worker-level flag
+            in the config ``__post_init__``s (``FSDPActorConfig`` / ``FSDPCriticConfig`` and
+            the other engine-bearing worker configs — the choke point every construction
+            path goes through); the ref worker (``engine_workers.py``) and the separation
+            trainer's critic plumb explicitly (their engine objects differ).
+            default False
     """
 
     # ulysses_sequence_parallel_size is mutable for backward compatibility
-    _mutable_fields = EngineConfig._mutable_fields | {"ulysses_sequence_parallel_size"}
+    # freeze_vision_tower is plumbed post-init from the worker-level configs
+    _mutable_fields = EngineConfig._mutable_fields | {"ulysses_sequence_parallel_size", "freeze_vision_tower"}
 
     # fsdp specific flags
     wrap_policy: dict[str, Any] = field(default_factory=dict)
@@ -291,6 +304,7 @@ class FSDPEngineConfig(EngineConfig):
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    freeze_vision_tower: bool = False
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
@@ -698,3 +712,28 @@ class TrainingWorkerConfig(BaseConfig):
     # Users can pass in a higher-order function to take more parameters
     auto_select_engine_optim_fn: Callable[["HFModelConfig", str], tuple["EngineConfig", "OptimizerConfig"]] = None
     extra_context: dict = field(default_factory=dict)
+
+
+def plumb_freeze_vision_tower(engine_config, value: bool, role: str):
+    """Forward a worker-level ``freeze_vision_tower`` into the engine config.
+
+    Lives next to the configs (not in engine_workers) so the worker-level
+    configs can call it from their ``__post_init__`` — the choke point every
+    construction path (both trainers, engine_workers) goes through, where a
+    future path cannot forget it. The remaining explicit call sites are the ref
+    worker (engine_workers) and the separation trainer's critic, whose engine
+    config object is not the CriticConfig engine.
+
+    Only the FSDP engine declares the field; other engines keep ignoring the
+    flag (with a warning when it is set), as they did before 0.8. The flag is
+    forwarded, never cleared: a worker-level ``true`` engages the freeze, and a
+    worker-level ``false`` must not silently turn off an engine-level
+    ``freeze_vision_tower=true`` set directly in the yaml (the SFT-style knob).
+    """
+    if "freeze_vision_tower" in {f.name for f in fields(engine_config)}:
+        if value:
+            engine_config.freeze_vision_tower = True
+    elif value:
+        logging.getLogger(__name__).warning(
+            f"freeze_vision_tower is only implemented for the FSDP engine; ignoring on {role}."
+        )
