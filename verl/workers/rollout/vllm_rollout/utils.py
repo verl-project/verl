@@ -410,6 +410,11 @@ class vLLMColocateWorkerExtension:
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
                 )
             else:
+                plan = getattr(self, "_rank_local_plan", None)
+                if plan is not None and param_updates:
+                    from verl.workers.rollout.vllm_rollout import rank_local_bake
+
+                    param_updates = rank_local_bake.apply(self.model_runner.model, plan, param_updates)
                 if param_updates:
                     for model in self._iter_all_models():
                         model_updates = drop_tied_alias_updates(model, param_updates)
@@ -485,7 +490,35 @@ class vLLMColocateWorkerExtension:
                 ep_rank = getattr(mod, "ep_rank", None) or getattr(mgr, "ep_rank", None)
                 if ep_size is not None:
                     out["ep_size"], out["ep_rank"] = int(ep_size), int(ep_rank or 0)
+        plan = self._get_rank_local_plan()
+        if plan is not None and plan.slices:
+            out["wire_formats"] = ["named_tensors", "rank_local_named_tensors"]
+            out["slices"] = plan.slices
         return out
+
+    def _get_rank_local_plan(self):
+        """The rank-local plan, baked on the first call; ``None`` where boxes cannot be used.
+
+        Plain bf16 TP only: quantized weights are converted on load, LoRA syncs adapters, an MTP
+        drafter loads the same names again, and the bake does not handle PP. Under EP each resident
+        expert is loaded whole, so experts get no box.
+        """
+        if not hasattr(self, "_rank_local_plan"):
+            self._rank_local_plan = None
+            cfg = self.model_runner.vllm_config
+            pc = cfg.parallel_config
+            if (
+                pc.tensor_parallel_size > 1
+                and pc.pipeline_parallel_size == 1
+                and cfg.quant_config is None
+                and cfg.lora_config is None
+                and cfg.speculative_config is None
+                and os.path.isdir(cfg.model_config.model)  # hub ids are not resolved: full tensors
+            ):
+                from verl.workers.rollout.vllm_rollout import rank_local_bake
+
+                self._rank_local_plan = rank_local_bake.bake(self.model_runner.model, cfg.model_config.model)
+        return self._rank_local_plan
 
     def update_verl_delta_weights(self, update_info: dict) -> None:
         """Add this worker's IPC endpoint and forward the delta update to vLLM."""
