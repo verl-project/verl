@@ -3,8 +3,8 @@
 This directory contains examples and scripts for running **Multi-Turn / Instruction SFT (Supervised Fine-Tuning)** on Google Cloud TPU v6e clusters using `verl`, `verl-hardware-plugin`, and the **TorchTitan** engine (`engine=torchtitan`).
 
 Both `verl` SFT entrypoints are supported on TPU:
-- **Single-Controller (Ray)**: `python3 -m verl.trainer.sft_trainer_ray` (`SFT_TRAINER_MODE=ray`, default for KubeRay `ray job submit`)
-- **Multi-Controller (`torchrun` SPMD)**: `torchrun ... -m verl.trainer.sft_trainer` (`SFT_TRAINER_MODE=torchrun`, for single-host TPU VMs or GKE JobSet)
+- **Multi-Controller (`torchrun` SPMD, default)**: `torchrun ... -m verl.trainer.sft_trainer` (`SFT_TRAINER_MODE=torchrun`, for single-host TPU VMs or GKE JobSet)
+- **Single-Controller (Ray)**: `python3 -m verl.trainer.sft_trainer_ray` (`SFT_TRAINER_MODE=ray`, for KubeRay `ray job submit`)
 
 The training setup uses:
 - **Training Engine**: TorchTitan (`engine=torchtitan`, PyTorch FSDP2 on `torch_tpu`)
@@ -45,19 +45,21 @@ kubectl port-forward svc/ray-tpu-v6e-cluster-head-svc 23333:8265 > /dev/null 2>&
 
 ### 3. Submit an SFT Training Job
 
-#### Option A: Ray Single-Controller (`verl.trainer.sft_trainer_ray`, Default)
+#### Option A: Ray Single-Controller (`verl.trainer.sft_trainer_ray`, `SFT_TRAINER_MODE=ray`)
 
-Submit the SFT job from the root of the `verl` repository using `ray job submit`:
+Submit the SFT job from the root of the `verl` repository using `ray job submit` (with `verl-hardware-plugin` checked out at `../verl-hardware-plugin`, see [`examples/tpu/grpo/README.md`](../grpo/README.md#1-get-the-code)):
 
 ```bash
 export RAY_ADDRESS="http://localhost:23333"
+RUNTIME_ENV='{"py_modules": ["../verl-hardware-plugin/verl_hardware_plugin"], "excludes": [".git", ".venv", "logs", "*.log", "*.pt", "*.bin"],
+  "env_vars": {"PYTHONPATH": ".", "PYTHONUNBUFFERED": "1", "VERL_PLATFORM": "tpu",
+    "VERL_USE_EXTERNAL_MODULES": "verl_hardware_plugin",
+    "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1"}}'
 
 ray job submit --address "${RAY_ADDRESS}" \
   --working-dir . \
-  --runtime-env-json '{
-    "excludes": [".git", "logs", "*.log", "*.pt", "*.bin"]
-  }' \
-  -- bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
+  --runtime-env-json "${RUNTIME_ENV}" \
+  -- env SFT_TRAINER_MODE=ray bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
 ```
 
 For a quick 8-step smoke test with validation at Step 4 and Step 8, pass `SMOKE_TEST=1`:
@@ -65,19 +67,17 @@ For a quick 8-step smoke test with validation at Step 4 and Step 8, pass `SMOKE_
 ```bash
 ray job submit --address "${RAY_ADDRESS}" \
   --working-dir . \
-  --runtime-env-json '{
-    "excludes": [".git", "logs", "*.log", "*.pt", "*.bin"]
-  }' \
-  -- bash -c 'SMOKE_TEST=1 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh'
+  --runtime-env-json "${RUNTIME_ENV}" \
+  -- env SFT_TRAINER_MODE=ray SMOKE_TEST=1 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
 ```
 
-#### Option B: Multi-Controller SPMD via `torchrun` (`verl.trainer.sft_trainer`)
+#### Option B: Multi-Controller SPMD via `torchrun` (`verl.trainer.sft_trainer`, Default)
 
-To run directly with `torchrun` (for example on a single-host TPU v6e-4 VM or inside a multi-host JobSet container), set `SFT_TRAINER_MODE=torchrun`:
+To run directly with `torchrun` (the script's default `SFT_TRAINER_MODE=torchrun`, for example on a single-host TPU v6e-4 VM or inside a multi-host JobSet container):
 
 ```bash
 # Single-host TPU v6e-4 (1 host x 4 TPU chips)
-SFT_TRAINER_MODE=torchrun NNODES_TRAINER=1 N_CHIPS_TRAINER=4 DATA_PARALLEL_SHARD_SIZE=4 \
+NNODES_TRAINER=1 N_CHIPS_TRAINER=4 DATA_PARALLEL_SHARD_SIZE=4 \
   bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
 ```
 
