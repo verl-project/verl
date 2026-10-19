@@ -234,6 +234,7 @@ def _custom_flash_attention_forward(
     """
     attn_implementation = None
     flash_varlen_fn = flash_attn_varlen_func if _flash_attn_backend_available else None
+    flash_supports_deterministic = _flash_supports_deterministic
     if flash_varlen_fn is None:
         # No CUDA flash_attn package or NPU flash-attn. Delegate kernel resolution to
         # transformers' own `lazy_import_flash_attention`, the same lazy hub-kernels fallback
@@ -245,6 +246,11 @@ def _custom_flash_attention_forward(
 
             (_, flash_varlen_fn, _, _, _), _ = lazy_import_flash_attention("flash_attention_2")
             attn_implementation = "flash_attention_2"
+            # The module-level _flash_supports_deterministic flag reflects only the native (pip
+            # flash_attn / NPU) backends, which aren't in use here - derive it from the kernel
+            # actually resolved above, or a requested deterministic mode would be silently
+            # dropped even though the loaded kernel supports it.
+            flash_supports_deterministic = "deterministic" in inspect.signature(flash_varlen_fn).parameters
         except Exception as e:  # noqa: BLE001
             flash_varlen_fn = None
             logger.warning(f"Could not load a flash-attn backend via HF Hub kernels either: {e}")
@@ -260,7 +266,7 @@ def _custom_flash_attention_forward(
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     flash_kwargs = {}
 
-    if _flash_supports_deterministic:
+    if flash_supports_deterministic:
         flash_kwargs["deterministic"] = deterministic if deterministic is not None else _flash_deterministic_enabled
 
     if kwargs.get("softcap") is not None:
