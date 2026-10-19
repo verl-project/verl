@@ -63,42 +63,14 @@ if is_npu_available:
     _flash_attn_backend_available = True
 
 if not _flash_attn_backend_available:
-    # a fallback for did not install flash_attn and npu
-    # will utilize huggingface kernel to handle the non cpu/gpu attention_util problem
-    #
-    # On verl's current transformers/kernels pin, this block is a no-op in practice:
-    # `get_attn_kernel_version` isn't exported yet by this transformers version, so the
-    # import below raises and we fall through to the clear RuntimeError at the call site
-    # instead of actually loading a kernel. Bumping `kernels` alone doesn't fix it either —
-    # kernels>=0.15 can resolve the "stable-abi" build variant this fallback requests, but
-    # transformers' own `integrations/hub_kernels.py` (imported unconditionally by
-    # `transformers.modeling_utils`) calls the pre-0.15 `kernels.LayerRepository` API, which
-    # raises on import under kernels>=0.15. The two packages need to be bumped together
-    # (confirmed working pair: transformers==5.19.0, kernels>=0.15) before this fallback can
-    # actually resolve a kernel. Until then, this still improves things for CUDA users
-    # without flash_attn installed: a clear, actionable RuntimeError instead of a bare
-    # NameError deep inside tensor ops. It will start working automatically, with no further
-    # code changes here, once the pin bump lands.
-    try:
-        from kernels import get_kernel
-        from transformers.integrations.hub_kernels import get_attn_kernel_version
-        from transformers.modeling_flash_attention_utils import FLASH_ATTN_KERNEL_FALLBACK
-
-        _fa2_repo_id = FLASH_ATTN_KERNEL_FALLBACK["flash_attention_2"]
-        _fa2_kernel = get_kernel(_fa2_repo_id, version=get_attn_kernel_version(_fa2_repo_id))
-        flash_attn_func = _fa2_kernel.flash_attn_func
-        flash_attn_varlen_func = _fa2_kernel.flash_attn_varlen_func
-
-        _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
-        _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
-        _flash_use_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
-        _flash_attn_backend_available = True
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not load a flash-attn backend via HF Hub kernels either: {e}")
-
-if not _flash_attn_backend_available:
-    # Still nothing - fail clearly at the call site below instead of a bare
-    # NameError deep inside tensor ops.
+    # Neither the `flash_attn` package nor NPU flash-attn is available (e.g. XPU, or CUDA
+    # without `flash_attn` installed). Loading a flash-attn kernel via HF Hub kernels is still
+    # possible, but is deferred to call time in `_custom_flash_attention_forward` instead of
+    # attempted here, by delegating to transformers' own `lazy_import_flash_attention`
+    # (the same mechanism transformers itself uses to resolve `attn_implementation`). That way
+    # this keeps working as transformers adds kernels/hardware support, rather than this module
+    # tracking the HF Hub kernels API itself, and importing this module doesn't warn for callers
+    # who never reach the patched attention path (use_remove_padding=False, ulysses_sp_size=1).
     _flash_supports_window_size = False
     _flash_supports_deterministic = False
     _flash_use_top_left_mask = False
@@ -240,12 +212,30 @@ def _custom_flash_attention_forward(
     """
     Patches flash attention forward to handle 3D position ids in mrope. (3, batch_size, seq_length)
     """
-    if not _flash_attn_backend_available:
+    attn_implementation = None
+    flash_varlen_fn = flash_attn_varlen_func if _flash_attn_backend_available else None
+    if flash_varlen_fn is None:
+        # No CUDA flash_attn package or NPU flash-attn. Delegate kernel resolution to
+        # transformers' own `lazy_import_flash_attention`, the same lazy hub-kernels fallback
+        # transformers uses internally for `attn_implementation="flash_attention_2"` - this
+        # keeps working as transformers adds kernels/hardware support instead of this module
+        # tracking the HF Hub kernels API itself.
+        try:
+            from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
+
+            (_, flash_varlen_fn, _, _, _), _ = lazy_import_flash_attention("flash_attention_2")
+            attn_implementation = "flash_attention_2"
+        except Exception as e:  # noqa: BLE001
+            flash_varlen_fn = None
+            logger.warning(f"Could not load a flash-attn backend via HF Hub kernels either: {e}")
+
+    if flash_varlen_fn is None:
         raise RuntimeError(
             "Qwen2-VL attention was monkeypatched to the flash-attn forward (triggered by "
             "use_remove_padding=True or ulysses_sp_size>1) but no flash-attn backend is available "
-            "on this device (checked: CUDA flash_attn, NPU flash_attn). Set use_remove_padding=False "
-            "and ulysses_sp_size=1 to use the model's native attention implementation instead."
+            "on this device (checked: CUDA flash_attn, NPU flash_attn, HF Hub kernels fallback). "
+            "Set use_remove_padding=False and ulysses_sp_size=1 to use the model's native "
+            "attention implementation instead."
         )
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     use_sliding_windows = (
@@ -282,7 +272,7 @@ def _custom_flash_attention_forward(
         q, k, v, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k) = prepare_fa2_from_position_ids(
             query_states, key_states, value_states, position_ids
         )
-        attn_output = flash_attn_varlen_func(
+        attn_output = flash_varlen_fn(
             q=q,
             k=k,
             v=v,
@@ -307,6 +297,7 @@ def _custom_flash_attention_forward(
             sliding_window=sliding_window,
             use_top_left_mask=use_top_left_mask,
             deterministic=deterministic,
+            attn_implementation=attn_implementation,
             **kwargs,
         )  # do not pass position_ids to old flash_attention_forward
 
