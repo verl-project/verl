@@ -131,7 +131,7 @@ class TestPlatformDetection:
 
     def test_empty_triggers_auto_detection(self):
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": ""}):
-            assert _detect_platform_name() in ("nvidia", "huawei", "amd")
+            assert _detect_platform_name() in ("nvidia", "huawei", "amd", "intel")
 
 
 class TestPlatformCreation:

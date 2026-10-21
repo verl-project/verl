@@ -1,3 +1,7 @@
+# DISABLED for the mint self-hosted fork: this workflow needs GPU runners
+# (L20x8 / ascend / rocm) that do not exist on the mint host. Re-enable by
+# restoring the trigger below and pointing the jobs at a GPU runner.
+
 # # Tests layout
 
 # Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
@@ -30,24 +34,20 @@
 #     - new tests are added to workflow mentioned in 2.
 # name: Check PR Title
 
-name: reward_model_sglang_ascend
+name: reward_model_sglang_ascend (disabled)
 
-on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "verl/**/*.py"
-      # Entrypoints
-      - ".github/workflows/reward_model_sglang_ascend.yml"
-      - "tests/experimental/reward_loop/**"
+# on:
+#   # Trigger on pull requests targeting main or v0.* branches.
+#   pull_request:
+#     branches:
+#       - main
+#       - v0.*
+#     paths:
+#       - "verl/**/*.py"
+#       # Entrypoints
+#       - ".github/workflows/reward_model_sglang_ascend.yml"
+#       - "tests/experimental/reward_loop/**"
+on: workflow_dispatch  # kept callable manually; never runs automatically
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -61,7 +61,7 @@ permissions:
 jobs:
   reward_model_sglang_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
@@ -109,7 +109,7 @@ jobs:
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force

@@ -28,7 +28,7 @@ In this section, we will discuss how to tune the performance of all the stages i
 Rollout Generation Tuning
 --------------------------
 
-verl currently supports two rollout backends: vLLM and TGI (with SGLang support coming soon). 
+verl supports rollout backends including vLLM, SGLang, and TensorRT-LLM.
 
 Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend setting ``actor_rollout_ref.rollout.disable_log_stats=False`` so that rollout statistics are logged.
 
@@ -67,21 +67,23 @@ For optimal performance, we recommend using vLLM v0.8.3 or later. See https://gi
 Enable remove padding (sequence packing)
 -----------------------------------------
 
-Currently, for llama, mistral, gemma1 and qwen based models, users can enable `use_remove_padding=True` to utilize the 
-sequence packing implementation provided by transformers library.
+For FSDP training, set ``actor_rollout_ref.model.use_remove_padding=True`` to
+remove padding tokens before the model forward pass. If the run uses a critic,
+set ``critic.model.use_remove_padding=True`` as well. The benefit depends on
+how much padding is present in the training batches.
 
-For other models, transformers library may also support it but we haven't tested it yet.
-Users can add the desired model config to the  `test_transformer.py <https://github.com/verl-project/verl/blob/main/tests/models/test_transformer.py#L24>`_ file.
-And test its functionality by running the following command:
+For an architecture not covered by
+`tests/models/test_transformer.py <https://github.com/verl-project/verl/blob/main/tests/models/test_transformer.py>`_,
+add a small configuration to its ``test_configs`` list and run the padded versus
+unpadded forward-output comparison on a CUDA or NPU device:
 
 .. code-block:: bash
 
-  pytest -s tests/models/test_transformer.py
+   pytest -s tests/models/test_transformer.py
 
-If the test passes, you can add your desired model into the model `registry.py <https://github.com/verl-project/verl/blob/main/verl/models/registry.py#L24>`_ file.
-Then, you can enjoy the performance boost of sequence packing
-and welcome to PR your tested model to verl!
-
+This test provides an initial numerical comparison. Before adopting the
+setting, run a short training job with the intended configuration and compare
+throughput and peak memory against the padded path.
 
 Batch Size Tuning
 -----------------

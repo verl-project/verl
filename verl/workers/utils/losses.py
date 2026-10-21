@@ -40,8 +40,82 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         log_prob_flatten = log_prob.values()
         loss_mask_flatten = loss_mask.values()
 
-        # left-shift the loss mask by one token to align with log_prob
+        # The loss_mask arrives TOKEN-level with full length N (mask[i] marks
+        # target token i, built per-turn by the dataset), while model log_probs
+        # are POSITION-level with N entries (entry i = p(tokens[i+1]); the last
+        # entry is a phantom whose target is out of range). Pairing them
+        # directly supervises {content[1:], EOS, phantom} and never the first
+        # completion token. roll(-1) pairs mask[i] with entry[i-1] — i.e.
+        # supervises exactly p(target i) at position i-1 — and the wrapped
+        # mask[0] (=0, BOS is never supervised) excludes the phantom last
+        # entry. This roll is load-bearing; do not remove it.
         loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
+
+        # --- ALIGNMENT DEBUG (remove after diagnosis) ---
+        import os as _os
+        if _os.environ.get("ALIGN_DEBUG"):
+            _orig_mask = loss_mask.values()
+            _shifted_sup = loss_mask_flatten.nonzero(as_tuple=True)[0].tolist()
+            _orig_sup = _orig_mask.nonzero(as_tuple=True)[0].tolist()
+            print(f"[ALIGN_DEBUG] rank_local: batch_num_tokens={batch_num_tokens} "
+                  f"num_micro_batch={data.get('num_micro_batch', '?')} "
+                  f"dp_size={dp_size} "
+                  f"local_tokens={log_prob_flatten.shape[0]} "
+                  f"orig_sup_count={int(_orig_mask.sum())} "
+                  f"shifted_sup_count={int(loss_mask_flatten.sum())} "
+                  f"orig_sup_pos={_orig_sup} "
+                  f"shifted_sup_pos={_shifted_sup}", flush=True)
+            for _p in _shifted_sup[:4]:
+                print(f"[ALIGN_DEBUG] log_prob[{_p}] = {log_prob_flatten[_p].item():.6f}", flush=True)
+            _dump_dir = _os.environ.get("ALIGN_DUMP_DIR")
+            if _dump_dir:
+                import json as _json
+                global _ALIGN_DUMP_N
+                try:
+                    _ALIGN_DUMP_N
+                except NameError:
+                    _ALIGN_DUMP_N = 0
+                if _ALIGN_DUMP_N < 4:
+                    _ALIGN_DUMP_N += 1
+                    _os.makedirs(_dump_dir, exist_ok=True)
+                    try:
+                        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    except Exception:
+                        _rank = 0
+                    _lp_rows = log_prob.unbind() if hasattr(log_prob, "unbind") else None
+                    _m_rows = loss_mask.unbind() if hasattr(loss_mask, "unbind") else None
+                    _idt = None
+                    try:
+                        _idt = data.get("input_ids", None)
+                    except Exception:
+                        _idt = None
+                    _id_rows = (
+                        _idt.unbind() if _idt is not None and hasattr(_idt, "unbind")
+                        else [None] * (len(_lp_rows) if _lp_rows else 1)
+                    )
+                    _rows = []
+                    if _lp_rows is not None and _m_rows is not None:
+                        for _lp_r, _m_r, _id_r in zip(_lp_rows, _m_rows, _id_rows):
+                            _rows.append({
+                                "input_ids": _id_r.tolist() if _id_r is not None else None,
+                                "log_prob": [float(_x) for _x in _lp_r.tolist()],
+                                "loss_mask": [float(_x) for _x in _m_r.tolist()],
+                            })
+                    _rec = {
+                        "rank": _rank,
+                        "call": _ALIGN_DUMP_N,
+                        "batch_num_tokens": batch_num_tokens,
+                        "dp_size": dp_size,
+                        "rows": _rows,
+                    }
+                    _path = f"{_dump_dir}/rank{_rank}_pid{_os.getpid()}_c{_ALIGN_DUMP_N}.json"
+                    with open(_path, "w") as _f:
+                        _json.dump(_rec, _f)
+                    print(f"[ALIGN_DEBUG] wrote {_path} rows={len(_rows)}", flush=True)
+            _local_sum = -masked_sum(log_prob_flatten, loss_mask_flatten)
+            print(f"[ALIGN_DEBUG] local_loss_sum={_local_sum.item():.6f} "
+                  f"per_token={_local_sum.item() / max(int(loss_mask_flatten.sum()), 1):.6f}", flush=True)
+        # --- END ALIGNMENT DEBUG ---
 
         # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
         # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
@@ -60,6 +134,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
+    sc_outputs = {
+        key: no_padding_2_padding(model_output[key], data)
+        for key in ("sc_correction", "sc_sampler_head_mass", "sc_train_head_mass")
+        if key in model_output
+    }
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -101,6 +180,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+    policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -109,6 +189,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss_agg_mode=loss_agg_mode,
         config=config,
         rollout_is_weights=rollout_is_weights,
+        **policy_loss_kwargs,
     )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
@@ -117,6 +198,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics.update(pg_metrics)
     metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
+    if sc_outputs:
+        for key in ("sc_sampler_head_mass", "sc_train_head_mass"):
+            value = masked_mean(sc_outputs[key], response_mask)
+            metrics[f"actor/{key}"] = Metric(value=value, aggregation=AggregationType.MEAN)
     policy_loss = pg_loss
 
     # add entropy loss

@@ -110,18 +110,22 @@ instead of hard-coding one combo at build time. Do **not** use ``prefetch`` as a
 runtime sync.
 
 This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
-the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron) and the
+the cu13.0 / torch-2.13 backends (vllm, sglang, fsdp, megatron) and the
 GPU-free ``cpu`` slice. They never mix in one ``.venv`` (see the conflict
 sets). On top of whichever one you pick sit the conflict-free *add-ons*
-(``math``, ``ci``, ``veomni-sft``) — extras that carry no torch of their own,
+(``math``, ``ci``, ``veomni-sft``, ``torchtitan``) — extras that carry no torch of their own,
 so CI composes them freely, e.g.::
 
     python manage_envs.py sync sglang megatron ci
 
 ``prefetch`` scopes the cache warm via the ``cu130`` shortcut so the
 Docker image bakes only its backends. DEFERRED (commented out in
-pyproject.toml until they support torch-2.11 / cu130): the cu12.9 /
-torch-2.9.1 world (veomni, nemoautomodel) and trtllm (a CUDA-13 RC sdist).
+pyproject.toml until they support torch-2.13 / cu130): the cu12.9 /
+torch-2.9.1 world (nemoautomodel) and trtllm (a CUDA-13 RC sdist).
+VeOmni composes ``fsdp`` with the ``veomni-sft`` add-on on the cu130 stack;
+its current generated models need ``uv run --with transformers==5.16.1``.
+TorchTitan likewise composes a cu130 training backend with the ``torchtitan``
+add-on.
 
 CPU architecture
 ----------------
@@ -158,27 +162,27 @@ import tempfile
 from pathlib import Path
 
 # Active extras in the universal lock. One GPU torch "world" + a CPU slice:
-#   * cu13.0 / torch 2.11  : vllm, sglang (inference) + fsdp, megatron (training)
-#   * cpu   / torch 2.11   : GPU-free CI / unit-test / dev-sanity slice
+#   * cu13.0 / torch 2.13  : vllm, sglang (inference) + fsdp, megatron (training)
+#   * cpu   / torch 2.13   : GPU-free CI / unit-test / dev-sanity slice
 # DEFERRED and absent from the active lock: the cu12.9 / torch-2.9.1 world
 # (veomni, nemoautomodel) and trtllm (a CUDA-13 RC). Both stay commented out in
-# pyproject.toml until those packages support torch-2.11 / cu130.
+# pyproject.toml until those packages support torch-2.13 / cu130.
 INFERENCE_BACKENDS: list[str] = ["vllm", "sglang"]
 TRAINING_BACKENDS: list[str] = ["fsdp", "megatron"]
 # DEFERRED — cu12.9 / torch 2.9.1 training backends (["veomni", "nemoautomodel"]).
 # Re-add the names here and re-enable their extras in pyproject.toml when they
-# support torch-2.11 / cu130.
+# support torch-2.13 / cu130.
 CU129_BACKENDS: list[str] = []
 # `cpu` is the GPU-free CI / unit-test / dev-sanity slice.
 DEV_BACKENDS: list[str] = ["cpu"]
 # Conflict-free add-ons layered ON TOP of a backend combo, never synced alone:
-# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers) and
-# `veomni-sft` (the deps-free veomni wheel the SFT tests import — NOT the
-# DEFERRED cu12.9 `veomni` training backend above; this one carries no torch, so
-# it rides on whichever cu130 backend the job synced). They ride along with every
-# `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
+# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers),
+# `veomni-sft` (the deps-free VeOmni package the PPO/SFT tests import; it carries
+# no torch, so it rides on whichever cu130 backend the job synced) and
+# `torchtitan` (the deps-free TorchTitan engine package, same idea). They ride
+# along with every `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
 # offline just like a plain backend sync does.
-ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft"]
+ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft", "torchtitan"]
 ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
 
 # Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
@@ -214,7 +218,7 @@ GROUPS: dict[str, list[str]] = {
     "addons": ADDON_EXTRAS,
     # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
     # image bakes only the backends it can actually run on its CUDA base.
-    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.11 GPU backends
+    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.13 GPU backends
     # DEFERRED (cu12.9): "cu129": CU129_BACKENDS,  # torch 2.9.1 GPU backends
 }
 
@@ -657,10 +661,10 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
 def cmd_list(args: argparse.Namespace) -> int:
     """Show available extras, conflict rules, venv state, and prefetch plan."""
-    print("extras (one universal uv.lock; cu130/torch-2.11 + cpu):")
-    print(f"  inference (cu130/torch-2.11) : {', '.join(INFERENCE_BACKENDS)}")
-    print(f"  training  (cu130/torch-2.11) : {', '.join(TRAINING_BACKENDS)}")
-    print(f"  dev       (cpu/torch-2.11)   : {', '.join(DEV_BACKENDS)}")
+    print("extras (one universal uv.lock; cu130/torch-2.13 + cpu):")
+    print(f"  inference (cu130/torch-2.13) : {', '.join(INFERENCE_BACKENDS)}")
+    print(f"  training  (cu130/torch-2.13) : {', '.join(TRAINING_BACKENDS)}")
+    print(f"  dev       (cpu/torch-2.13)   : {', '.join(DEV_BACKENDS)}")
     print(f"  addons    (any combo)        : {', '.join(ADDON_EXTRAS)}")
     print("  cu129     (torch-2.9.1)      : DEFERRED (veomni, nemoautomodel)")
 
@@ -739,7 +743,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
 
     ``uv lock`` reads only ``pyproject.toml`` + the declared
     ``[tool.uv.dependency-metadata]``, so it triggers NO source build — the
-    git-sourced megatron-core / mbridge are compiled in step 2, not here (apex /
+    git-sourced megatron-core is compiled in step 2, not here (apex /
     TE / flash-attn ship prebuilt from the wheelhouse, vllm / sglang /
     sglang-kernel prebuilt from PyPI).
 
@@ -790,7 +794,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     # what that combo needs and never removes anything — which also mirrors
     # exactly what a real runtime `uv sync <combo>` does. Only the shared uv
     # cache (UV_CACHE_DIR) is durable: wheels download once and the git-source
-    # builds (megatron-core / mbridge) build once, then later combos hardlink
+    # build (megatron-core) runs once, then later combos hardlink
     # them from the cache instead of rebuilding. Peak disk is one env at a time
     # (each tempdir is torn down before the next).
     for combo in combos:
@@ -837,7 +841,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     extras_help = (
         "extra name(s); shortcuts: all, inference (vllm sglang), "
-        "training (fsdp megatron), dev (cpu), addons (math ci veomni-sft). "
+        "training (fsdp megatron), dev (cpu), addons (math ci veomni-sft torchtitan). "
         "Linux + Python 3.12, x86_64 or aarch64 (same extras on both). "
         "Add-ons are conflict-free and layer "
         "on top of a backend combo. Mutually exclusive sets (at most one each per sync): "

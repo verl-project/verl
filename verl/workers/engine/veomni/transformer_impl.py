@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
+from veomni.arguments import AcceleratorConfig, FSDPConfig, MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
@@ -164,14 +164,23 @@ class VeOmniEngine(FSDPEngine):
             data_parallel_replicate_size = dp_size // fsdp_size
             data_parallel_shard_size = fsdp_size
 
-        parallel_state.init_parallel_state(
-            dp_size=dp_size,
+        accelerator = AcceleratorConfig(
             dp_replicate_size=data_parallel_replicate_size,
             dp_shard_size=data_parallel_shard_size,
-            extra_parallel_sizes=(self.engine_config.expert_parallel_size,),
+            ep_size=self.engine_config.expert_parallel_size,
             ulysses_size=self.engine_config.ulysses_parallel_size,
-            dp_mode=self.data_parallel_mode,
+            init_device=self.engine_config.init_device,
+            fsdp_config=FSDPConfig(fsdp_mode=self.data_parallel_mode),
         )
+        if accelerator.dp_size != dp_size:
+            raise ValueError(
+                f"VeOmni derived dp_size={accelerator.dp_size} from WORLD_SIZE, "
+                f"but the distributed process group requires dp_size={dp_size}."
+            )
+        # Actor and reference engines may initialize in the same process.
+        # Keep their meshes unnamed so the trainer's 'base' registry entry
+        # cannot cause a later engine's topology to be silently ignored.
+        parallel_state.init_parallel_state_from_config(accelerator, name=None)
 
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
@@ -250,6 +259,13 @@ class VeOmniEngine(FSDPEngine):
             # or disabling router_replay).
             self._router_replay.install(self.module)
 
+        mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
+        converter = get_checkpoint_tensor_converter(self.module)
+        # A converter's export_weights picks its own output dtypes (e.g. FP8 weights with FP32 scales).
+        if mixed_precision_config.enable and not hasattr(converter, "export_weights"):
+            hf_export_dtype = getattr(torch, mixed_precision_config.param_dtype)
+        else:
+            hf_export_dtype = None
         self.checkpoint_manager = FSDPCheckpointManager(
             model=self.module,
             optimizer=self.optimizer,
@@ -257,6 +273,8 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
+            per_tensor_param_fn=self.get_per_tensor_param,
+            hf_export_dtype=hf_export_dtype,
         )
 
         self.to(
@@ -355,7 +373,7 @@ class VeOmniEngine(FSDPEngine):
             module,
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
-            enable_full_shard=self.engine_config.enable_full_shard,
+            enable_reshard_after_forward=self.engine_config.enable_full_shard,
             mixed_precision=veomni_mixed_precision_config,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,

@@ -474,9 +474,14 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.wake_up() for r in self.replicas])
 
     @auto_await
-    async def abort_replicas(self):
-        """Abort all in-flight requests on every replica."""
-        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
+    async def abort_replicas(self, reject_request: bool = False):
+        """Abort all in-flight requests on every replica.
+
+        Args:
+            reject_request: Fail requests arriving behind the closed gate instead of
+                parking them, for replicas that will not resume generation soon.
+        """
+        await asyncio.gather(*[r.abort_all_requests(reject_request=reject_request) for r in self.replicas])
 
     @auto_await
     async def resume_generation_replicas(self):
@@ -512,6 +517,7 @@ class CheckpointEngineManager:
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            await self.resume_generation_replicas()
             return {}
 
         # 1. abort and save all unfinished requests for partial rollout

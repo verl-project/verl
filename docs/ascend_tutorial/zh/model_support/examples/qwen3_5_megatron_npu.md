@@ -1,26 +1,26 @@
 # Qwen3.5 Megatron NPU 使用指南
 
-Last updated: 09/07/2026.
+Last updated: 09/29/2026.
 
 本文用于指导在 Ascend NPU 上使用 verl + Megatron + vLLM 跑通 Qwen3.5-35B-A3B 和 Qwen3.5-122B-A10B GRPO 示例。
 
 ## 版本要求
 
-| software | version                                                       |
-| --- |---------------------------------------------------------------|
-| Docker image | `quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm` |
-| verl | 0.8.0                                                         |
-| Python | 3.11                                                          |
-| CANN | 9.0.0                                                         |
-| Megatron-LM | 0.16.0                                                        |
-| MindSpeed | 0.16.0                                                        |
-| Megatron-Bridge | `de93536e`                                                    |
+使用 [vLLM NPU 安装脚本](../../../../../scripts/install_vllm_mcore_npu.sh) 中的依赖组合：
 
-建议直接使用上表中的镜像：
+| 组件 | 版本 |
+| --- | --- |
+| Python | 3.12 |
+| CANN | 9.1.0 |
+| torch / torch_npu | 2.10.0 / 2.10.0.post4 |
+| vLLM / vLLM-Ascend | 0.23.0 / 0.23.0 |
+| transformers | 5.10.4 |
+| Megatron-LM / MindSpeed / MegatronAdaptor | `core_r0.18.0` |
+| Megatron-Bridge | `v0.5.0` |
+| MindSpeed-Bridge | 仓库默认分支（未固定 tag/commit） |
 
-```bash
-docker pull quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm
-```
+安装脚本同时安装 TransformerEngineNPU 和 MindSpeed-Ops。可以按照
+[昇腾安装指南](../../get_start/install_guidance.rst) 安装，或使用与该组合一致的 A3 vLLM 镜像。
 
 ## 模型和脚本
 
@@ -145,4 +145,4 @@ bash examples/grpo_trainer/run_qwen3_5_397b_megatron.sh
 
 - 脚本会通过 `torch_npu` 自动识别 NPU 环境；如需手动指定，设置 `DEVICE=npu`。
 - Qwen3.5 的 Gated Delta Net 当前不使用 packed sequence，因此脚本中保持 `use_remove_padding=False` 和 `use_dynamic_bsz=False`。
-- NPU 分支会设置 `vanilla_mbridge=False`、`use_flash_attn=True`、`moe_token_dispatcher_type=alltoall` 等 Ascend 适配参数。
+- NPU 分支会设置 `use_flash_attn=True`、`moe_token_dispatcher_type=alltoall` 等 Ascend 适配参数。

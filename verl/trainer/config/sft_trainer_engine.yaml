@@ -18,6 +18,15 @@ data:
   micro_batch_size_per_gpu: 4  # this is also val batch size
   max_token_len_per_gpu: 8192
   use_dynamic_bsz: True
+  # Gradient accumulation. Left null, it is derived from
+  #     gradient_accumulation_steps = train_batch_size / data_parallel_size
+  #                                    / micro_batch_size_per_gpu,
+  # and an explicitly set value must agree with that, so the effective batch is
+  # never silently different from the one requested. Values above 1 require
+  # use_dynamic_bsz: False -- the token-budget packer forms micro-batches from
+  # max_token_len_per_gpu and ignores micro_batch_size_per_gpu, which is not
+  # accumulation.
+  gradient_accumulation_steps: null
   train_files: ~/data/gsm8k/train.parquet
   val_files: null
   train_max_samples: -1  # set to -1 to use full dataset
@@ -26,7 +35,7 @@ data:
   messages_key: messages  # Key for messages list in multi-turn mode
   tools_key: tools  # Key for tools list in multi-turn mode
   enable_thinking_key: enable_thinking  # Whether to enable thinking in multi-turn mode
-  enable_thinking_default: none         # The default value when enable_thinking_key is not present in the dataset
+  enable_thinking_default: null         # The default value when enable_thinking_key is not present in the dataset
   pad_mode: no_padding
   # for right padding
   max_length: 1024

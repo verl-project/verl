@@ -74,6 +74,18 @@ class MultiTurnSFTDataset(Dataset):
     """
     Dataset for multi-turn conversations where each assistant response should be trained
 
+    The conversation is assembled by rendering each turn separately and
+    concatenating. That contract requires a CONCATENABLE chat template: one
+    whose per-turn renders compose to the whole-conversation render, which in
+    practice means the role markers must be emitted by each turn's own render
+    (not by inter-turn transition logic that only fires on
+    ``add_generation_prompt`` or loop conditions). The DeepSeek-V4.1
+    checkpoint ships no template at all (and the one the current upstream repo
+    carries is transition-based, not concatenable) - inject a custom template
+    via ``model.custom_chat_template``; ``sanity_check`` enforces the
+    concat-equivalence on the first item and raises under the default
+    ``ignore_input_ids_mismatch=False``.
+
     Args:
         data_files (str or list): Path(s) to Parquet file(s).
         tokenizer (PreTrainedTokenizer): For the tokenization of text to token IDs.
@@ -184,6 +196,30 @@ class MultiTurnSFTDataset(Dataset):
     def __len__(self):
         return len(self.messages)
 
+    def _select_render_processor(self, messages: list[dict[str, Any]]):
+        """Pick the renderer for chat-template application over these messages.
+
+        Text-only messages render via the tokenizer, which honors the injected
+        custom chat template. The multimodal processor IGNORES chat_template
+        and renders assistant turns with its own internal format ([BOS,
+        content, EOS] - no role marker; asserted for DeepseekV41Processor on
+        the DSV4.1 alignment work, not pinned by an in-repo test), so routing
+        text-only turns through it silently drops the marker from the
+        training stream; it is only required when a turn carries image/video
+        parts that need processor-side expansion. Note this routing also
+        means multi-part TEXT content is joined by the template (no
+        separator), not by the processor's "\\n\\n" join.
+        """
+        if self.processor is None:
+            return self.tokenizer
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") in ("image", "video") for part in content
+            ):
+                return self.processor
+        return self.tokenizer
+
     def _process_single_message(
         self,
         index: int,
@@ -206,7 +242,7 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             Tuple of (input_ids, loss_mask, attention_mask, dict[str, torch.Tensor])
         """
-        processor = self.processor if self.processor is not None else self.tokenizer
+        processor = self._select_render_processor([message])
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
@@ -226,15 +262,67 @@ class MultiTurnSFTDataset(Dataset):
         input_ids = inputs.pop("input_ids")[0]
         attention_mask = inputs.pop("attention_mask")[0]
 
-        # remove system prompt if exists
-        if index != 0 and message["role"] != "system":
+        # DeepSeek V4.1 returns one vision-token-type row for every token after
+        # image expansion.  Keep it aligned with this turn while removing the
+        # per-turn system prefix below; the rows are concatenated after all
+        # turns have been tokenized.
+        vision_token_types = inputs.get("vision_token_types")
+        if vision_token_types is not None:
+            vision_token_types = vision_token_types[0]
+
+        # head-match: does this turn's render actually start with the system
+        # prompt tokens? Decides the strip below.
+        _head_matches = False
+        if len(self.system_prompt) > 0:
+            _head = input_ids[: len(self.system_prompt)]
+            _head = _head.tolist() if hasattr(_head, "tolist") else list(_head)
+            _sp = self.system_prompt
+            _sp = _sp.tolist() if hasattr(_sp, "tolist") else list(_sp)
+            _head_matches = _head == _sp
+
+        # remove system prompt if exists - guarded by the head-match check and
+        # only for non-first turns: the first turn's render carries the
+        # conversation's opening system block, which stays in the stream (the
+        # model conditions on it; the whole-conversation render includes it).
+        # Templates whose non-first turns carry a different prefix (e.g. the
+        # DSV4.1 marker template: the assistant turn starts with
+        # <｜Assistant｜>, not BOS) must not be stripped - stripping would
+        # delete the marker instead of the block.
+        if index != 0 and message["role"] != "system" and _head_matches:
             input_ids = input_ids[len(self.system_prompt) :]
             attention_mask = attention_mask[len(self.system_prompt) :]
+            if vision_token_types is not None:
+                vision_token_types = vision_token_types[len(self.system_prompt) :]
 
+        if vision_token_types is not None:
+            if vision_token_types.shape != input_ids.shape:
+                raise ValueError(
+                    "vision_token_types must stay aligned with input_ids after per-turn system-prefix removal: "
+                    f"{vision_token_types.shape=} {input_ids.shape=}"
+                )
+            inputs["vision_token_types"] = vision_token_types
+
+        # Build the loss mask AFTER the (possibly skipped) strip, zeroing the
+        # scaffolding by VALUE: the sequence's leading system-prompt block
+        # (when the strip was skipped) and the generation-prompt tokens that
+        # actually follow it. Verifying each part's presence instead of
+        # assuming lengths keeps this correct when the renderer's shape does
+        # not match the tokenizer-derived lengths (e.g. an image-bearing turn
+        # rendered by the processor has no generation-prompt header after the
+        # block) - zeroing by assumption would mask content tokens there.
         if message["role"] == "assistant":
             loss_mask = torch.ones_like(attention_mask)
-            # mask out generation prompt if assistant message
-            loss_mask[: len(self.generation_prompt)] = 0
+            _ids = input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
+            _sp = self.system_prompt
+            _sp = _sp.tolist() if hasattr(_sp, "tolist") else list(_sp)
+            _gp = self.generation_prompt
+            _gp = _gp.tolist() if hasattr(_gp, "tolist") else list(_gp)
+            _zero_width = 0
+            if _sp and _ids[: len(_sp)] == _sp:
+                _zero_width = len(_sp)
+            if _gp and _ids[_zero_width : _zero_width + len(_gp)] == _gp:
+                _zero_width += len(_gp)
+            loss_mask[:_zero_width] = 0
         else:
             loss_mask = torch.zeros_like(attention_mask)
 
@@ -300,6 +388,8 @@ class MultiTurnSFTDataset(Dataset):
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
+        input_id_lengths = []
+        vision_token_type_rows = []
         for i, message in enumerate(messages):
             _input_ids, _loss_mask, _attention_mask, _inputs = self._process_single_message(
                 index=i,
@@ -309,8 +399,10 @@ class MultiTurnSFTDataset(Dataset):
                 enable_thinking=enable_thinking,
             )
             input_ids.append(_input_ids)
+            input_id_lengths.append(_input_ids.shape[0])
             loss_mask.append(_loss_mask)
             attention_mask.append(_attention_mask)
+            vision_token_type_rows.append(_inputs.pop("vision_token_types", None))
             for k, v in _inputs.items():
                 multi_modal_inputs.setdefault(k, []).append(v)
 
@@ -320,6 +412,22 @@ class MultiTurnSFTDataset(Dataset):
         assert input_ids.shape == loss_mask.shape == attention_mask.shape, (
             f"Shape mismatch: {input_ids.shape}, {loss_mask.shape}, {attention_mask.shape}"
         )
+
+        # Unlike image patches and image grids, vision_token_types has one
+        # value per input token.  It therefore must be concatenated along the
+        # sequence dimension across turns instead of being filtered as a
+        # fixed-shape image tensor.
+        if any(row is not None for row in vision_token_type_rows):
+            text_type = -1
+            aligned_rows = [
+                row if row is not None else torch.full((length,), text_type, dtype=torch.long)
+                for row, length in zip(vision_token_type_rows, input_id_lengths, strict=False)
+            ]
+            if any(row.shape != (length,) for row, length in zip(aligned_rows, input_id_lengths, strict=False)):
+                raise ValueError("vision_token_types rows must match their tokenized message lengths")
+            vision_token_types = torch.cat(aligned_rows, dim=0).unsqueeze(0)
+        else:
+            vision_token_types = None
 
         print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
         self.sanity_check(input_ids, messages, tools, enable_thinking)
@@ -341,6 +449,9 @@ class MultiTurnSFTDataset(Dataset):
 
         for k, v in multi_modal_inputs.items():
             multi_modal_inputs[k] = torch.concat(v, dim=0)
+
+        if vision_token_types is not None:
+            multi_modal_inputs["vision_token_types"] = vision_token_types
 
         # 2. handle position_ids for Qwen-VL series models
         if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
@@ -376,17 +487,31 @@ class MultiTurnSFTDataset(Dataset):
                 attention_mask = torch.cat((attention_mask, padded_attention_mask))
                 loss_mask = torch.cat((loss_mask, padded_loss_mask))
                 position_ids = F.pad(position_ids, (0, self.max_length - sequence_length), value=0)
+                if "vision_token_types" in multi_modal_inputs:
+                    multi_modal_inputs["vision_token_types"] = F.pad(
+                        multi_modal_inputs["vision_token_types"],
+                        (0, self.max_length - sequence_length),
+                        value=-1,
+                    )
             elif sequence_length > self.max_length:
                 if self.truncation == "left":
                     input_ids = input_ids[-self.max_length :]
                     attention_mask = attention_mask[-self.max_length :]
                     loss_mask = loss_mask[-self.max_length :]
                     position_ids = position_ids[..., -self.max_length :]
+                    if "vision_token_types" in multi_modal_inputs:
+                        multi_modal_inputs["vision_token_types"] = multi_modal_inputs["vision_token_types"][
+                            ..., -self.max_length :
+                        ]
                 elif self.truncation == "right":
                     input_ids = input_ids[: self.max_length]
                     attention_mask = attention_mask[: self.max_length]
                     loss_mask = loss_mask[: self.max_length]
                     position_ids = position_ids[..., : self.max_length]
+                    if "vision_token_types" in multi_modal_inputs:
+                        multi_modal_inputs["vision_token_types"] = multi_modal_inputs["vision_token_types"][
+                            ..., : self.max_length
+                        ]
                 elif self.truncation == "error":
                     raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
                 else:
@@ -409,6 +534,10 @@ class MultiTurnSFTDataset(Dataset):
                 input_ids = input_ids[: self.max_length]
                 loss_mask = loss_mask[: self.max_length]
                 position_ids = position_ids[..., : self.max_length]
+                if "vision_token_types" in multi_modal_inputs:
+                    multi_modal_inputs["vision_token_types"] = multi_modal_inputs["vision_token_types"][
+                        ..., : self.max_length
+                    ]
 
             # return nested tensor with out padding
             res = {
@@ -426,7 +555,19 @@ class MultiTurnSFTDataset(Dataset):
         """Check concatenated input_ids of apply_chat_template to each turn equals
         apply_chat_template to whole messages.
         """
-        processor = self.processor if self.processor is not None else self.tokenizer
+        renderers = [self._select_render_processor([m]) for m in messages]
+        if any(r is not renderers[0] for r in renderers):
+            # Mixed renderers within one conversation (an image/video turn goes
+            # through the processor, text-only turns through the tokenizer):
+            # there is no single whole-conversation render to compare against,
+            # so the per-turn-vs-whole check is meaningless here.
+            logger.warning_once(
+                "MultiTurnSFTDataset assembles this conversation from mixed renderers "
+                "(image/video turns via the processor, text-only turns via the tokenizer), "
+                "so the per-turn-vs-whole input_ids check is skipped for it."
+            )
+            return
+        processor = renderers[0]
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
@@ -443,6 +584,11 @@ class MultiTurnSFTDataset(Dataset):
         error_message = (
             "MultiTurnSFTDataset apply_chat_template to each turn separately and concat `input_ids` "
             "as a whole sequence, which may not equal to apply_chat_template to whole messages at once.\n"
+            "Per-turn assembly requires a CONCATENABLE chat template: one whose role markers are "
+            "emitted by each turn's own render, not by inter-turn transition logic that only fires "
+            "on add_generation_prompt or loop conditions (e.g. the DeepSeek-V4.1 "
+            "chat_template.jinja on the current upstream revision is transition-based and cannot "
+            "be used here - inject a custom template via model.custom_chat_template).\n"
             "For example, Qwen Thinking series models add <think></think> tags to last turn, please check "
             "your tokenizer chat template settings.\n"
             "Set `ignore_input_ids_mismatch=True` to ignore input_ids mismatch and use the concatenated "

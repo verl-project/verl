@@ -24,55 +24,32 @@ os.environ["NCCL_DEBUG"] = "WARN"
 import ray
 import torch
 from megatron.core import parallel_state as mpu
-from megatron.core import tensor_parallel
-from megatron.core.models.gpt.gpt_model import ModelType
-from omegaconf import OmegaConf
+from megatron.core.distributed import finalize_model_grads
 from tensordict import TensorDict
-from torch import nn
 from transformers import LlamaConfig
 
 from verl import DataProto
-from verl.models.llama.megatron import ParallelLlamaForCausalLMRmPadPP
+from verl.models.mcore.bridge import AutoBridge
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
-from verl.utils.megatron_utils import get_model, mcore_model_parallel_config
+from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+from verl.workers.config.optimizer import McoreOptimizerConfig
 
 
 @ray.remote
 class Trainer(Worker):
     def __init__(self):
         super().__init__()
-
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
         if not torch.distributed.is_initialized():
-            rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend="nccl")
-            torch.cuda.set_device(rank)
-
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=2,
-                pipeline_model_parallel_size=1,
-                virtual_pipeline_model_parallel_size=None,
-                use_sharp=False,
-                context_parallel_size=1,
-                expert_model_parallel_size=1,
-                nccl_communicator_config_path=None,
-            )
-            tensor_parallel.model_parallel_cuda_manual_seed(10)
-
-            is_collect = (
-                mpu.get_tensor_model_parallel_rank() == 0
-                and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
-                and mpu.get_context_parallel_rank() == 0
-            )
-            self._register_dispatch_collect_info(
-                mesh_name="train", dp_rank=mpu.get_data_parallel_rank(), is_collect=is_collect
-            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        actor_model_config = LlamaConfig(
+        hf_config = LlamaConfig(
+            architectures=["LlamaForCausalLM"],
             vocab_size=256,
             hidden_size=2048,
             intermediate_size=5504,
@@ -80,58 +57,69 @@ class Trainer(Worker):
             num_attention_heads=16,
             num_key_value_heads=16,
         )
+        # Build a randomly initialized model without downloading HF weights.
+        bridge = AutoBridge.from_hf_config(hf_config)
+        provider = bridge.to_megatron_provider(load_weights=False)
+        provider.tensor_model_parallel_size = 2
+        provider.pipeline_model_parallel_size = 1
+        provider.virtual_pipeline_model_parallel_size = None
+        provider.context_parallel_size = 1
+        provider.expert_model_parallel_size = 1
+        provider.expert_tensor_parallel_size = 1
+        provider.sequence_parallel = True
+        provider.params_dtype = torch.bfloat16
+        provider.pipeline_dtype = torch.bfloat16
+        provider.bf16 = True
+        provider.fp16 = False
+        provider.finalize()
+        provider.initialize_model_parallel(seed=10)
 
-        megatron_config = mcore_model_parallel_config(sequence_parallel=True, params_dtype=torch.bfloat16)
-        self.megatron_config = megatron_config
-
-        def megatron_actor_model_provider(pre_process, post_process):
-            # vpp is not supported yet because it will hang for some reason. Need debugging
-            # this_megatron_config = copy.deepcopy(megatron_config)
-            # this_megatron_config.virtual_pipeline_model_parallel_rank = vpp_rank
-            parallel_model = ParallelLlamaForCausalLMRmPadPP(
-                config=actor_model_config,
-                megatron_config=megatron_config,
-                pre_process=pre_process,
-                post_process=post_process,
-            )
-            parallel_model.cuda()
-            return parallel_model
-
-        actor_module = get_model(
-            model_provider_func=megatron_actor_model_provider,
-            model_type=ModelType.encoder_or_decoder,
-            wrap_with_ddp=True,
+        self._register_dispatch_collect_info(
+            mesh_name="train",
+            dp_rank=mpu.get_data_parallel_rank(),
+            is_collect=mpu.get_tensor_model_parallel_rank() == 0,
         )
-        actor_module = nn.ModuleList(actor_module)
-
-        optim_config = OmegaConf.create({"lr": 1e-6, "clip_grad": 1.0})
-
-        optim_config = init_megatron_optim_config(optim_config)
-        self.optimizer_config = optim_config
-        actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_config)
-
-        self.model = actor_module[0]
-        self.optimizer = actor_optimizer
+        self.module, _ = make_megatron_module(
+            wrap_config=McoreModuleWrapperConfig(wrap_with_ddp=True, use_distributed_optimizer=True),
+            hf_config=hf_config,
+            bridge=bridge,
+            provider=provider,
+            override_ddp_config={"overlap_grad_reduce": False, "overlap_param_gather": False},
+        )
+        self.model = self.module[0]
+        self.model.train()
+        optim_config = init_megatron_optim_config(
+            McoreOptimizerConfig(lr=1e-6, clip_grad=1.0), use_distributed_optimizer=True, bf16=True
+        )
+        self.optimizer = get_megatron_optimizer(model=self.module, config=optim_config)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"))
     def train_model(self, data: DataProto) -> DataProto:
+        data = data.to(torch.device("cuda", torch.cuda.current_device()))
         input_ids = data.batch["input_ids"]
-        attention_mask = data.batch["attention_mask"]
-        position_ids = data.batch["position_ids"]
+        if not data.batch["attention_mask"].bool().all():
+            raise ValueError("This example expects unpadded sequences.")
 
         self.optimizer.zero_grad()
-        self.model.zero_grad_buffer(
-            zero_buffer=(not self.optimizer_config.use_distributed_optimizer)
-        )  # use use_contiguous_buffers_in_local_ddp and no overlap_dp_param_comm
-        # update for 1 iteration
-        output = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids).logits
-        output.mean().backward()
-
-        update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step(
-            self.megatron_config, self.megatron_config.timers
+        self.model.zero_grad_buffer()
+        # MCore returns per-token losses when labels are supplied. Its attention
+        # layer applies the causal mask; this example has no padding.
+        token_losses = self.model(
+            input_ids=input_ids,
+            position_ids=data.batch["position_ids"],
+            attention_mask=None,
+            labels=torch.roll(input_ids, shifts=-1, dims=-1),
         )
+        # Exclude the final token, whose rolled label belongs to the sequence start.
+        loss = token_losses[:, :-1].mean()
+        self.optimizer.scale_loss(loss).backward()
+        finalize_model_grads(self.module)
+        update_successful, _, _ = self.optimizer.step()
+        if not update_successful:
+            raise RuntimeError("Megatron optimizer step failed.")
 
-        return DataProto(batch=TensorDict({"loss": output.detach()}, batch_size=output.shape[0]))
+        losses = token_losses[:, :-1].detach().mean(dim=-1).cpu()
+        return DataProto(batch=TensorDict({"loss": losses}, batch_size=[input_ids.shape[0]]))
 
 
 if __name__ == "__main__":
@@ -147,6 +135,4 @@ if __name__ == "__main__":
     )
 
     worker_group.init_model()
-
-    worker_names = worker_group.worker_names
-    print(worker_names)
+    print(worker_group.worker_names)

@@ -165,6 +165,61 @@ def test_agent_loop_output_as_dict_promotes_teacher_fields_without_mutating_mode
     assert output.extra_fields["teacher_logprobs"] == [-0.1, -0.2]
 
 
+def test_agent_loop_output_as_dict_promotes_rollout_topk_fields():
+    output = AgentLoopOutput(
+        prompt_ids=[1, 2, 3],
+        response_ids=[4, 5],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[4, 9], [5, 8]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+        },
+    )
+
+    fields = output.as_dict()
+
+    # Unpadded full-sequence layout: row P-1+r holds response token r's head, other rows the dummy head.
+    assert fields["rollout_topk_ids"].shape == (5, 2) and fields["rollout_topk_ids"].dtype == torch.int32
+    assert fields["rollout_topk_log_probs"].shape == (5, 2) and fields["rollout_topk_log_probs"].dtype == torch.float32
+    assert fields["rollout_topk_ids"][2].tolist() == [4, 9] and fields["rollout_topk_ids"][3].tolist() == [5, 8]
+    assert fields["rollout_topk_ids"][0].tolist() == [0, 1]
+    assert fields["extra_fields"] == {}
+    assert output.extra_fields["response_topk_ids"] == [[4, 9], [5, 8]]
+
+
+def test_agent_loop_output_as_dict_rejects_multi_turn_rollout_topk():
+    output = AgentLoopOutput(
+        prompt_ids=[1],
+        response_ids=[2, 3],
+        response_mask=[1, 1],
+        num_turns=4,
+        metrics=AgentLoopMetrics(),
+        extra_fields={"response_topk_ids": [[2, 9], [3, 8]], "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]]},
+    )
+
+    with pytest.raises(ValueError, match="single-turn"):
+        output.as_dict()
+
+
+def test_agent_loop_output_as_dict_rejects_misaligned_rollout_topk():
+    output = AgentLoopOutput(
+        prompt_ids=[1, 2],
+        response_ids=[3, 4],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": np.array([[3, 9], [4, 8], [5, 7]], dtype=np.int32),
+            "response_topk_log_probs": np.full((3, 2), -0.5, dtype=np.float32),
+        },
+    )
+
+    with pytest.raises(ValueError, match="cover 3 tokens"):
+        output.as_dict()
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
     captured_kwargs: dict[str, Any] = {}

@@ -1,3 +1,7 @@
+# DISABLED for the mint self-hosted fork: this workflow needs GPU runners
+# (L20x8 / ascend / rocm) that do not exist on the mint host. Re-enable by
+# restoring the trigger below and pointing the jobs at a GPU runner.
+
 # # Tests layout
 
 # Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
@@ -29,31 +33,36 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-name: e2e_ascend
+name: e2e_ascend (disabled)
 
-on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - ".github/workflows/e2e_ascend.yml"
-      - "examples/data_preprocess/**"
-      - "examples/grpo_trainer/**"
-      - "examples/ppo_trainer/**"
-      - "examples/sft/**"
-      - "tests/special_npu/**"
-      - "tests/special_sanity/check_device_api_usage.py"
-      - "verl/**"
-      - "pyproject.toml"
-      - "requirements-npu.txt"
-      - "setup.py"
+# on:
+#   # Trigger on pull requests targeting main or v0.* branches.
+#   pull_request:
+#     branches:
+#       - main
+#       - v0.*
+#     paths:
+#       - "verl/**/*.py"
+#       - "verl/trainer/config/**"
+#       # Entrypoints and fixtures used by the jobs below.
+#       - ".github/workflows/e2e_ascend.yml"
+#       - "examples/data_preprocess/gsm8k.py"
+#       - "examples/data_preprocess/geo3k.py"
+#       - "scripts/converter_hf_to_mcore.py"
+#       - "scripts/init_random_model.py"
+#       - "tests/special_npu/run_qwen3_06b_ppo.sh"
+#       - "tests/special_npu/run_qwen3_8b_grpo_profiling.sh"
+#       - "tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh"
+#       - "tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh"
+#       - "tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh"
+#       - "tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh"
+#       - "tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json"
+#       - "tests/utils/test_check_profiler_output.py"
+#       - "tests/special_sanity/check_device_api_usage.py"
+#       - "pyproject.toml"
+#       - "requirements-npu.txt"
+#       - "setup.py"
+on: workflow_dispatch  # kept callable manually; never runs automatically
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -67,7 +76,7 @@ jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 120
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -104,7 +113,8 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
-          uv pip install --no-deps TransferQueue==0.1.8
+          uv pip install --no-deps TransferQueue==0.1.11
+          pip uninstall -y nvidia-resiliency-ext
       - name: Check final pip list
         run: |
           uv pip list
@@ -127,23 +137,23 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
-          rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
+          USE_DIST_CKPT=False bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
-          USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
+          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
+    needs: llm_rl_job
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a2b3-8
-    timeout-minutes: 120
+    runs-on: linux-aarch64-a3-800i-16
+    timeout-minutes: 160
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 80g
+        --shm-size 160g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -164,7 +174,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.8
+          pip install --no-deps TransferQueue==0.1.11
       - name: Check final pip list
         run: |
           pip list

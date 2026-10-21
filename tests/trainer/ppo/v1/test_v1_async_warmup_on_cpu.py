@@ -123,7 +123,6 @@ def test_loaded_prompt_count_drives_on_train_begin_top_up(monkeypatch, tmp_path)
     stub.on_train_begin = PPOTrainerColocateAsync.on_train_begin.__get__(stub)
 
     load_tq_checkpoint = MagicMock()
-    monkeypatch.setattr(trainer_base, "_tq_supports_checkpoint", lambda: True)
     monkeypatch.setattr(trainer_base, "_count_tq_prompt_groups", lambda: 6)
     monkeypatch.setattr(trainer_base.tq, "load_checkpoint", load_tq_checkpoint, raising=False)
 

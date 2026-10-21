@@ -6,7 +6,7 @@
 #   - verl==release/0.7.1
 #   - vllm==v0.13.0
 #   - Megatron-LM==0.16.0
-#   - mbridge==0.15.1
+#   - Megatron-Bridge: r0.5.0
 #
 # Requirements on Ascend:
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
@@ -15,7 +15,8 @@
 #   - vllm-ascend==releases/v0.13.0
 #   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
-#   - mbridge==0.15.1
+#   - Megatron-Bridge: v0.5.0
+#   - MindSpeed-Bridge: repository default branch
 #
 # Tested parallelism config (8 GPUs / 1 node):
 #   TP=4 PP=1 CP=1 EP=8 ETP=1 GEN_TP=4

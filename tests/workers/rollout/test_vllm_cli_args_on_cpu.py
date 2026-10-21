@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from dataclasses import make_dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ import pytest
 pytest.importorskip("vllm")
 
 from verl.workers.rollout.vllm_rollout.utils import (
+    _optional_bool_vllm_args,
     _resolve_vllm_weight_sync_local_rank,
     build_cli_args_from_config,
     vLLMColocateWorkerExtension,
@@ -84,6 +86,29 @@ class TestBuildCliArgsFromConfig:
         config = {"disable-log-requests": False}
         result = build_cli_args_from_config(config)
         assert result == []
+
+    def test_delayed_and_true_plain_bool_defaults(self, monkeypatch):
+        import vllm.engine.arg_utils as arg_utils
+
+        args_class = make_dataclass(
+            "Args",
+            [
+                ("delayed", bool, None),
+                ("enabled", bool, True),
+                ("disabled", bool, False),
+                ("optional", bool | None, None),
+                ("token", bool | str | None, None),
+            ],
+        )
+        _optional_bool_vllm_args.cache_clear()
+        try:
+            monkeypatch.setattr(arg_utils, "AsyncEngineArgs", args_class)
+            result = build_cli_args_from_config(
+                dict.fromkeys(["delayed", "enabled", "disabled", "optional", "token", "unknown"], False)
+            )
+            assert result == ["--no-delayed", "--no-enabled", "--no-optional"]
+        finally:
+            _optional_bool_vllm_args.cache_clear()
 
     def test_none_value(self):
         """None values are skipped."""
@@ -198,6 +223,19 @@ class TestCliArgsVllmParserRoundTrip:
         assert engine_args.skip_tokenizer_init is False
         assert engine_args.enforce_eager is False
         assert engine_args.disable_log_stats is False
+
+    @pytest.mark.parametrize("spelling", ["enable_flashinfer_autotune", "enable-flashinfer-autotune"])
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_autotune_explicit_value_survives_parser(self, spelling, enabled):
+        from vllm.engine.arg_utils import AsyncEngineArgs
+
+        if "enable_flashinfer_autotune" not in AsyncEngineArgs.__dataclass_fields__:
+            pytest.skip("installed vLLM predates the autotune engine flag")
+        parser = self._build_parser()
+        argv = ["serve", "dummy-model"] + build_cli_args_from_config({spelling: enabled})
+        namespace = parser.parse_args(args=argv)
+        engine_args = AsyncEngineArgs.from_cli_args(namespace)
+        assert engine_args.enable_flashinfer_autotune is enabled
 
 
 class TestVllmColocateZmqHandle:

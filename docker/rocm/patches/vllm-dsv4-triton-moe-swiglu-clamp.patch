@@ -1,0 +1,40 @@
+# vLLM 0.26.0: keep the SwiGLU clamp on the FP8 Triton fused-MoE path.
+#
+# TritonExperts fuses SiLU+mul with the FP8 block quantization
+# (ops.silu_and_mul_per_block_quant) whenever the experts are FP8 with 128x128
+# blocks. That kernel has no clamp argument, so a model that defines a SwiGLU
+# clamp (DeepSeek-V4: gemm1_clamp_limit = 10) runs its routed experts without
+# it. The BF16 path of the same class does apply the clamp.
+#
+# With this patch such a model takes the unfused path: activation with clamp,
+# then the regular per-group FP8 quantization of the BF16 result. The training
+# side (Megatron, FP8 QAT) also quantizes the BF16 activation.
+#
+# Effect on the train/rollout log-prob mismatch. DeepSeek-V4-Flash FP8, BF16
+# training + FP8 QAT in Megatron, rollout TP=8 with moe_backend=triton, gfx950,
+# first training step:
+#
+#                               without      with
+#   rollout_corr/kl             0.0047       0.0021
+#   rollout_probs_diff_mean     0.0098       0.0096
+#
+# A 7-layer cut of the model does not show the difference (kl 0.0068 both ways).
+# The clamp itself rarely triggers on this model (about 1e-8 of the elements
+# exceed the limit), so the gain most likely comes from both sides quantizing
+# the same quantity, not from the clamp value.
+#
+# Not covered: the AITER fused-MoE backend. vLLM does not pass the clamp limit
+# to it.
+#
+--- a/vllm/model_executor/layers/fused_moe/experts/triton_moe.py
++++ b/vllm/model_executor/layers/fused_moe/experts/triton_moe.py
+@@ -436,6 +436,9 @@
+             and self.block_shape == [128, 128]
+             and lora_context is None
+             and not is_deep_gemm_e8m0_used()
++            # The fused kernel has no SwiGLU clamp. A model that defines one
++            # takes the unfused path below, which clamps before it quantizes.
++            and self.quant_config.gemm1_clamp_limit is None
+         ):
+             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
+                 intermediate_cache1.view(-1, N),

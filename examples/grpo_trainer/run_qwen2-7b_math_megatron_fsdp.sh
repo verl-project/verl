@@ -54,7 +54,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.use_megatron_fsdp=True
     ++actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=False
 )
@@ -73,7 +72,6 @@ REF=(
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.ref.megatron.use_mbridge=True
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=False
     actor_rollout_ref.ref.megatron.use_megatron_fsdp=True
     ++actor_rollout_ref.ref.megatron.override_transformer_config.gradient_accumulation_fusion=False
 )

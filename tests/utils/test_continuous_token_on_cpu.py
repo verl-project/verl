@@ -39,7 +39,7 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
-from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
+from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder, DeepSeekV41ContinuousTokenBuilder
 
 
 class _DummyTokenizer:
@@ -490,6 +490,9 @@ def test_builtin_family_surface():
         "glm4v",
         "deepseekvl2",
         "deepseekv4",
+        "deepseekv4vl",
+        "deepseekv41",
+        "deepseekv41vl",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -518,6 +521,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEKV4, DeepSeekV4ContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEKV41, DeepSeekV41ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -541,6 +545,7 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("deepseek_v2", ContinuousTokenModelFamily.DEEPSEEK),
         ("deepseek_v3", ContinuousTokenModelFamily.DEEPSEEK),
         ("deepseek_v4", ContinuousTokenModelFamily.DEEPSEEKV4),
+        ("deepseek_v41", ContinuousTokenModelFamily.DEEPSEEKV41),
         # VL families.
         ("qwen2_5_vl", ContinuousTokenModelFamily.QWEN25_VL),
         ("qwen3_vl", ContinuousTokenModelFamily.QWEN3_VL),
@@ -1728,6 +1733,33 @@ def test_deepseek_v4_does_not_duplicate_existing_assistant_eos():
     assert result.inserted_token_ids == []
 
 
+def test_deepseek_v41_thinking_adds_numeric_reasoning_effort_prefix():
+    tokenizer = _DeepSeekBoundaryTokenizer()
+    builder = DeepSeekV41ContinuousTokenBuilder(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    token_ids = builder.build_initial_tokens([{"role": "user", "content": "question"}])
+    rendered = (
+        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the "
+        + "higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>"
+    )
+    assert token_ids == [ord(char) for char in rendered]
+
+
+def test_deepseek_v4_thinking_does_not_add_v41_reasoning_prefix():
+    tokenizer = _DeepSeekBoundaryTokenizer()
+    builder = DeepSeekV4ContinuousTokenBuilder(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    token_ids = builder.build_initial_tokens([{"role": "user", "content": "question"}])
+    rendered = "<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜><think>"
+    assert token_ids == [ord(char) for char in rendered]
+
+
 def test_unknown_family_fails_during_resolution():
     with pytest.raises(ValueError, match="Unknown Continuous Token model_family"):
         create_continuous_token_builder(_DummyTokenizer(), model_family="missing_custom_family")
@@ -2302,6 +2334,83 @@ class TestQwenVLMergeContextTokens:
         runtime_ids = [151644, 1000, 1001, 1002, 151645, 151644]
         with pytest.raises(ValueError, match="suffix diff failed"):
             builder.merge_context_tokens(previous, updated, runtime_ids)
+
+    def test_merge_uses_resolved_media_for_url_messages(self):
+        """Incremental rendering uses extracted media without changing message URLs."""
+        from verl.utils.tokenizer.continuous_token import VLContinuousTokenBuilder
+
+        class NonBooleanImage:
+            def __bool__(self):
+                raise AssertionError("resolved images must not be checked for truthiness")
+
+        resolved_image = NonBooleanImage()
+        old_video, new_video = object(), object()
+        old_audio, new_audio = object(), object()
+        metadata = {"fps": 2}
+        calls = []
+
+        class RecordingProcessor(_MockQwenVLProcessor):
+            def __call__(self, *, images=None, videos=None, audio=None, video_metadata=None, **kwargs):
+                calls.append((images, videos, audio, video_metadata))
+                return super().__call__(images=images, **kwargs)
+
+        builder = VLContinuousTokenBuilder(self.tokenizer, RecordingProcessor())
+        previous = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "https://example.test/old.png"},
+                    {"type": "video", "video": "https://example.test/old.mp4"},
+                    {"type": "audio", "audio": "https://example.test/old.wav"},
+                    {"type": "text", "text": "Earlier image"},
+                ],
+            }
+        ]
+        updated = previous + [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": "https://example.test/image.png"},
+                    {"type": "video", "video": "https://example.test/new.mp4"},
+                    {"type": "audio", "audio": "https://example.test/new.wav"},
+                    {"type": "text", "text": "Look at this"},
+                ],
+            }
+        ]
+
+        result = builder.merge_context_tokens(
+            previous,
+            updated,
+            [151644, 1000],
+            images=[object(), resolved_image],
+            videos=[(old_video, metadata), (new_video, metadata)],
+            audios=[old_audio, new_audio],
+        )
+
+        assert calls[-1] == ([resolved_image], [new_video], [new_audio], [metadata])
+        assert 151655 in result.token_ids
+        assert updated[-1]["content"][0]["image"] == "https://example.test/image.png"
+        assert updated[-1]["content"][1]["video"] == "https://example.test/new.mp4"
+        assert updated[-1]["content"][2]["audio"] == "https://example.test/new.wav"
+
+    @pytest.mark.parametrize(
+        ("block_type", "media_name"), [("image", "images"), ("video", "videos"), ("audio", "audios")]
+    )
+    def test_merge_rejects_mismatched_resolved_media(self, block_type, media_name):
+        """Each resolved media list must cover its matching blocks exactly once."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": block_type, block_type: "https://example.test/one"},
+                    {"type": block_type, block_type: "https://example.test/two"},
+                ],
+            }
+        ]
+        builder = QwenVLContinuousTokenBuilder(self.tokenizer, self.processor)
+
+        with pytest.raises(ValueError, match="must align with message blocks"):
+            builder.merge_context_tokens([], messages, [151644], **{media_name: [object()]})
 
 
 @pytest.mark.parametrize(

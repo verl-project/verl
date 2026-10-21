@@ -284,6 +284,7 @@ actor_rollout_ref:
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
     ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
@@ -295,6 +296,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 256
+    ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -337,6 +339,7 @@ actor_rollout_ref:
       format: hermes
       num_repeat_rollouts: null
     calculate_log_probs: true
+    topk_log_probs: 0
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -453,6 +456,7 @@ actor_rollout_ref:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -465,12 +469,17 @@ actor_rollout_ref:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -684,6 +693,7 @@ critic:
     lora:
       type: lora
       merge: false
+      resync_base: false
       rank: 0
       alpha: 32
       dropout: 0.0
@@ -696,12 +706,17 @@ critic:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
 custom_reward_function:
   path: null
   name: null
@@ -826,6 +841,7 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
+    score_centering: false
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0
@@ -900,23 +916,22 @@ distillation:
   teacher_key: data_source
 transfer_queue:
   enable: false
-  metrics:
-    enabled: false
-    port: 0
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
-      total_storage_size: 100000
+      total_storage_size: null
       num_data_storage_units: 8
+      ssd_offload:
+        enabled: false
+        path: null
+        threshold_bytes: 1048576
     MooncakeStore:
       auto_init: false
-      metadata_server: localhost:50123
+      metadata_server: P2PHANDSHAKE
       master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
       global_segment_size: 4294967296
       local_buffer_size: 1073741824
-      device_name: ''
+      hard_pin: true
 trainer:
   balance_batch: true
   total_epochs: 30

@@ -47,6 +47,11 @@ on:
       - "**/*.py"
       - .github/workflows/sanity.yml
       - "tests/special_sanity/**"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -59,7 +64,7 @@ permissions:
 
 jobs:
   sanity:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     timeout-minutes: 5 # Increase this timeout value as needed
     strategy:
       matrix:
@@ -69,8 +74,9 @@ jobs:
         python-version: ["3.12"]
     env:
       # No install step: `uv run` syncs the cpu venv from the committed uv.lock on
-      # first use. Unlike the GPU jobs this runs on a stock runner, so uv resolves
-      # against its own action cache rather than a baked image cache.
+      # first use. Unlike the GPU jobs this runs on the self-hosted mint runner
+      # (not the CI GPU image), so uv resolves against its own action cache
+      # rather than a baked image cache.
       UV_RUN: "uv run --frozen --all-packages --extra cpu"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

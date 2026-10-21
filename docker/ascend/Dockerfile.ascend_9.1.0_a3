@@ -66,6 +66,8 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     pip install -e MindSpeed-Bridge --no-deps && \
     # Install Megatron-Bridge
     pip install -e Megatron-Bridge --no-build-isolation --no-deps && \
+    # Fix transformers
+    pip install transformers==5.10.4 && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
@@ -79,9 +81,6 @@ RUN git clone --recursive https://github.com/verl-project/verl.git && \
 
 # Show install results
 RUN pip list
-
-# Patch megatron-lm unconditionally
-ENV VERL_USE_EXTERNAL_MODULES=megatron_adaptor
 
 # Setting Default Commands
 CMD ["/bin/bash"]

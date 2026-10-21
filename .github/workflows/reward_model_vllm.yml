@@ -1,3 +1,7 @@
+# DISABLED for the mint self-hosted fork: this workflow needs GPU runners
+# (L20x8 / ascend / rocm) that do not exist on the mint host. Re-enable by
+# restoring the trigger below and pointing the jobs at a GPU runner.
+
 # # Tests layout
 
 # Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
@@ -30,25 +34,31 @@
 #     - new tests are added to workflow mentioned in 2.
 # name: Check PR Title
 
-name: reward_model_vllm
+name: reward_model_vllm (disabled)
 
-on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "verl/**/*.py"
-      # Entrypoints
-      - ".github/workflows/reward_model_vllm.yml"
-      - "tests/experimental/reward_loop/**"
-      - "tests/special_e2e/run_v1_colocate_async_disrm.sh"
+# on:
+#   # Trigger the workflow on push or pull request,
+#   # but only for the main branch
+#   push:
+#     branches:
+#       - main
+#       - v0.*
+#   pull_request:
+#     branches:
+#       - main
+#       - v0.*
+#     paths:
+#       - "verl/**/*.py"
+#       # Entrypoints
+#       - ".github/workflows/reward_model_vllm.yml"
+#       - "tests/experimental/reward_loop/**"
+#       - "tests/special_e2e/run_v1_colocate_async_disrm.sh"
+#       # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+#       # the environment under test - a resolution change must be validated
+#       # even when it touches no .py file.
+#       - "pyproject.toml"
+#       - "uv.lock"
+on: workflow_dispatch  # kept callable manually; never runs automatically
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

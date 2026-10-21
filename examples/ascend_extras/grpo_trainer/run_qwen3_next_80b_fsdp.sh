@@ -4,6 +4,9 @@ set -xeuo pipefail
 project_name="verl_grpo_qwen3-next-80b"
 experiment_name="Qwen3_Next_80B_Instruct"
 
+# Enable the NPU state-allocation workaround from #8033 (requires Transformers 5.10.4).
+export VERL_QWEN3_NEXT_NPU_SYNC_BEFORE_STATE=1
+
 # Paths
 WORK_DIR=${WORK_DIR:-"${HOME}/verl"}
 MODEL_PATH=${WORK_DIR}/Qwen3-Next-80B-A3B-Instruct

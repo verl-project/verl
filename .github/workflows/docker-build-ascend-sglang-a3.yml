@@ -1,15 +1,21 @@
-name: docker-build-ascend-sglang-a3
+# DISABLED for the mint self-hosted fork: this workflow builds and pushes the
+# Ascend GPU docker images (quay.io/ascend), needs GitHub-hosted arm64 runners,
+# and is not part of the mint CI. Re-enable by restoring the trigger below and
+# pointing the jobs at runners that can build the images.
 
-on:
-  workflow_dispatch:
-  push:
-    branches: ["main"]
-    paths:
-      - "docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3"
-      - ".github/workflows/docker-build-ascend-sglang-a3.yml"
+name: docker-build-ascend-sglang-a3 (disabled)
 
-  schedule:
-    - cron: "0 16 * * *"
+# on:
+#   workflow_dispatch:
+#   push:
+#     branches: ["main"]
+#     paths:
+#       - "docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3"
+#       - ".github/workflows/docker-build-ascend-sglang-a3.yml"
+#
+#   schedule:
+#     - cron: "0 16 * * *"
+on: workflow_dispatch  # kept callable manually; never runs automatically
 
 jobs:
   build-ascend-sglang-image-a3:

@@ -19,11 +19,18 @@ calls are written in DSML markup. :func:`encode_messages` is a port of the encod
 model, which vLLM reimplements in ``vllm/tokenizers/deepseek_v4_encoding.py``. The matching decoder
 lives in :class:`verl.experimental.agent_loop.tool_parser.DeepSeekV4ToolParser`.
 
-The checkpoint ships no usable jinja template, so :class:`DeepSeekV4ContinuousTokenBuilder` renders
-through :func:`encode_messages` rather than ``apply_chat_template``. Its root ``model_type`` selects
-this builder automatically, removing the need to configure a chat template for rollout and keeping
-the prompt byte-exact with the reference encoder -- ``tests/utils/test_deepseek_on_cpu.py`` replays
-its golden fixtures.
+The pinned checkpoint snapshot ships no jinja template at all, and the one the
+current upstream repo carries (added after that snapshot) is transition-based -
+its role markers fire only on ``add_generation_prompt``/loop conditions, so its
+per-turn renders do not compose to the whole-conversation render and
+:class:`verl.utils.dataset.multiturn_sft_dataset.MultiTurnSFTDataset` cannot use
+it. :class:`DeepSeekV4ContinuousTokenBuilder` renders through
+:func:`encode_messages` rather than ``apply_chat_template``; SFT must inject a
+custom concatenable template via ``model.custom_chat_template`` (one whose
+assistant turns carry the role marker in their own render). The root
+``model_type`` selects this builder automatically, removing the need to configure
+a chat template for rollout and keeping the prompt byte-exact with the reference
+encoder -- ``tests/utils/test_deepseek_on_cpu.py`` replays its golden fixtures.
 
 Length filtering (``data.filter_overlong_prompts=True``) is the one rollout-side path that still
 calls ``tokenizer.apply_chat_template`` directly, so leave it off for DeepSeek-V4.
@@ -61,6 +68,32 @@ TASK_TOKENS = {
 
 # Roles that collapse into a single user turn when they appear back to back.
 _USER_RUN_ROLES = ("user", "tool")
+
+# vLLM expands one placeholder per image into its image-token span.
+IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
+
+def expand_image_tokens(input_ids, image_grid_hws, image_token_id, downsample_ratio):
+    """Expand [sequence] image placeholders, returning [1, sequence] IDs and types."""
+    raw_ids = input_ids.reshape(-1).tolist()
+    grids = image_grid_hws.tolist()
+    if raw_ids.count(image_token_id) != len(grids):
+        raise ValueError("DeepSeek-V4.1 requires one unexpanded placeholder per image")
+    grids = iter(grids)
+    ids, types = [], []
+    for token in raw_ids:
+        if token != image_token_id:
+            ids.append(token)
+            types.append(-1)
+            continue
+        height, width = next(grids)
+        height = (height + downsample_ratio - 1) // downsample_ratio
+        width = (width + downsample_ratio - 1) // downsample_ratio
+        span = [0] + ([1] * width + [2]) * height + [3]
+        ids.extend([image_token_id] * len(span))
+        types.extend(span)
+    return input_ids.new_tensor([ids]), input_ids.new_tensor([types])
+
 
 REASONING_EFFORT_MAX = (
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
@@ -284,8 +317,9 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
-        del images, videos, audios
+        del images, videos, audios, mm_inputs_out
         return self._encode(messages, tools=tools, add_bos_token=True)
 
     def tokenize_context_incremental_messages(
@@ -374,3 +408,42 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             kind="context",
             inserted_token_ids=inserted_token_ids,
         )
+
+
+class DeepSeekV4VLContinuousTokenBuilder(DeepSeekV4ContinuousTokenBuilder):
+    """Use DeepSeek text formatting with one placeholder per image."""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        processor: Any,
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
+        super().__init__(tokenizer, **kwargs)
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        return True
+
+    def _encode(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        add_bos_token: bool,
+        drop_thinking: bool | None = None,
+    ) -> list[int]:
+        messages = [dict(message) for message in messages]
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            message["content"] = [
+                {"type": "text", "text": IMAGE_PLACEHOLDER}
+                if isinstance(block, dict) and block.get("type") in ("image", "image_url")
+                else block
+                for block in content
+            ]
+        return super()._encode(messages, tools=tools, add_bos_token=add_bos_token, drop_thinking=drop_thinking)

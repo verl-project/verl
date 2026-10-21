@@ -54,7 +54,7 @@ permissions:
 
 jobs:
   pre_commit_for_ppo:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     strategy:
       matrix:
         python-version: ["3.12"]

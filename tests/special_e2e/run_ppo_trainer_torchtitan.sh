@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    UV_EXTRAS=(--extra vllm --extra fsdp --extra torchtitan --extra math)
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=("ray_kwargs.ray_init.runtime_env.py_executable=\"uv -v run --frozen --all-packages ${UV_EXTRAS[*]}\"")
+fi
+
 NUM_GPUS=${NUM_GPUS:-1}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
@@ -30,10 +38,10 @@ ATTN_TYPE=${ATTN_TYPE:-flex}
 # recompute runs off the SPMD mesh context and crashes in spmd.assert_type).
 AC_MODE=${AC_MODE:-selective}
 # torchtitan SPMD backend:
-#   "default"      - legacy per-parallelism sharding (no full-DTensor mesh)
-#   "full_dtensor" - all params/buffers/inputs are DTensors on a dense multi-axis mesh
-#   "spmd_types"   - spmd_types typed collectives on a dense mesh
-SPMD_BACKEND=${SPMD_BACKEND:-spmd_types}
+#   "partial_dtensor" - legacy per-parallelism sharding (no full-DTensor mesh)
+#   "full_dtensor"    - all params/buffers/inputs are DTensors on a dense multi-axis mesh
+#   "spmd_types"      - spmd_types typed collectives on a dense mesh; requires torch>=2.14
+SPMD_BACKEND=${SPMD_BACKEND:-partial_dtensor}
 
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-100}
 VERL_EXP_NAME=${VERL_EXP_NAME:-qwen3-0.6b-torchtitan}
@@ -87,4 +95,4 @@ common_params=(
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS}
 )
 
-python3 -m verl.trainer.main_ppo "${common_params[@]}" $@
+"${LAUNCH[@]}" -m verl.trainer.main_ppo "${RAY[@]}" "${common_params[@]}" "$@"

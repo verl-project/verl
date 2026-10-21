@@ -61,7 +61,7 @@ permissions:
 
 jobs:
   doc_test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     timeout-minutes: 5 # Increase this timeout value as needed
     strategy:
       matrix:

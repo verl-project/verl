@@ -13,7 +13,7 @@ permissions:
 jobs:
   precommit:
     if: github.repository_owner == 'verl-project'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
 
     steps:
       - name: Checkout repository

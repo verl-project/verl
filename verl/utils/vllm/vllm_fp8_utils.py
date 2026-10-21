@@ -36,9 +36,265 @@ import math
 from unittest.mock import patch
 
 import torch
+import torch.nn.functional as F
 from packaging import version
 
 logger = logging.getLogger(__name__)
+
+
+# DSV4 checkpoint-FP8 re-quantization (bf16 -> fp8_e4m3 + e8m0 scale).
+# Inlined from Megatron-Bridge quantization_utils (no megatron import here).
+
+_DSV4_FP8_LINEAR_LEAVES = frozenset(
+    {
+        "wq_a",
+        "wkv",
+        "wq_b",
+        "wo_a",
+        "wo_b",
+        "w1",
+        "w2",
+        "w3",
+    }
+)
+
+# w1/w2/w3 are shared-expert leaves; routed experts use the same names but are
+# matched by the ``.experts.`` branch in ``iter_deepseek_v4_weights`` (MXFP4).
+_DSV4_FP8_LINEAR_PARENTS = frozenset({"shared_experts", "indexer", "attn"})
+
+_FP8_BLOCK_SIZE = 128
+_FP8_E4M3_MAX = 448.0
+
+
+def _is_float8_e8m0_dtype(dtype: torch.dtype) -> bool:
+    e8m0 = getattr(torch, "float8_e8m0fnu", None)
+    return e8m0 is not None and dtype == e8m0
+
+
+def _scale_from_amax(amax: torch.Tensor, max_quantized_value: float, scale_dtype: torch.dtype) -> torch.Tensor:
+    """Per-block amax -> quantization scale (shared with the MXFP4 path)."""
+    scale = torch.where(amax > 0, amax / max_quantized_value, torch.ones_like(amax))
+    if _is_float8_e8m0_dtype(scale_dtype):
+        scale = scale.clamp(min=2.0**-127, max=2.0**127)
+        return torch.exp2(torch.ceil(torch.log2(scale)))
+    return scale
+
+
+def _quantize_fp8_2d_blocks(weight, source_scale, *, name="", block_size=_FP8_BLOCK_SIZE):
+    rows, cols = weight.shape
+    scale_rows, scale_cols = source_scale.shape
+    expected_shape = (
+        (rows + block_size - 1) // block_size,
+        (cols + block_size - 1) // block_size,
+    )
+    if (scale_rows, scale_cols) != expected_shape:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(
+            f"Unsupported FP8 scale geometry{label}: "
+            f"weight={tuple(weight.shape)} scale={tuple(source_scale.shape)} expected={expected_shape}"
+        )
+    weight_f32 = weight.to(torch.float32)
+    pad_rows = scale_rows * block_size - rows
+    pad_cols = scale_cols * block_size - cols
+    if pad_rows or pad_cols:
+        weight_f32 = F.pad(weight_f32, (0, pad_cols, 0, pad_rows))
+    blocks = weight_f32.view(scale_rows, block_size, scale_cols, block_size).transpose(1, 2)
+    scale_f32 = _scale_from_amax(blocks.abs().amax(dim=(-1, -2)), _FP8_E4M3_MAX, source_scale.dtype)
+    q_blocks = (blocks / scale_f32[:, :, None, None]).to(torch.float8_e4m3fn)
+    q_weight = q_blocks.transpose(1, 2).reshape(scale_rows * block_size, scale_cols * block_size)[:rows, :cols]
+    return q_weight.contiguous(), scale_f32.to(dtype=source_scale.dtype)
+
+
+def _quantize_fp8_per_row_tiles(weight, source_scale, *, name=""):
+    rows, cols = weight.shape
+    scale_rows, scale_cols = source_scale.shape
+    if scale_rows != rows or scale_cols <= 0 or cols % scale_cols != 0:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(
+            f"Unsupported per-row FP8 scale geometry{label}: "
+            f"weight={tuple(weight.shape)} scale={tuple(source_scale.shape)}"
+        )
+    tile_cols = cols // scale_cols
+    grouped = weight.to(torch.float32).reshape(rows, scale_cols, tile_cols)
+    scale_f32 = _scale_from_amax(grouped.abs().amax(dim=-1), _FP8_E4M3_MAX, source_scale.dtype)
+    q_weight = (grouped / scale_f32[:, :, None]).to(torch.float8_e4m3fn).reshape(rows, cols)
+    return q_weight.contiguous(), scale_f32.to(dtype=source_scale.dtype)
+
+
+def _quantize_fp8_1d_scale(weight, source_scale, *, name="", block_size=_FP8_BLOCK_SIZE):
+    rows, _ = weight.shape
+    scale_len = source_scale.numel()
+    weight_f32 = weight.to(torch.float32)
+    if scale_len == rows:
+        scale_f32 = _scale_from_amax(weight_f32.abs().amax(dim=1), _FP8_E4M3_MAX, source_scale.dtype)
+        q_weight = (weight_f32 / scale_f32[:, None]).to(torch.float8_e4m3fn)
+        return q_weight.contiguous(), scale_f32.to(dtype=source_scale.dtype)
+    expected_len = (rows + block_size - 1) // block_size
+    if scale_len != expected_len:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(
+            f"Unsupported 1-D FP8 scale geometry{label}: "
+            f"weight={tuple(weight.shape)} scale={tuple(source_scale.shape)} expected_len={expected_len}"
+        )
+    q_weight = torch.empty_like(weight_f32, dtype=torch.float8_e4m3fn)
+    scale_f32 = torch.empty(scale_len, dtype=torch.float32, device=weight.device)
+    for block_idx in range(scale_len):
+        row_start = block_idx * block_size
+        row_end = min(row_start + block_size, rows)
+        block = weight_f32[row_start:row_end]
+        block_scale = _scale_from_amax(block.abs().amax().reshape(()), _FP8_E4M3_MAX, source_scale.dtype)
+        q_weight[row_start:row_end] = (block / block_scale).to(torch.float8_e4m3fn)
+        scale_f32[block_idx] = block_scale
+    return q_weight.contiguous(), scale_f32.to(dtype=source_scale.dtype)
+
+
+def _quantize_fp8_e4m3fn_like_scale(weight, source_scale, *, name="", block_size=_FP8_BLOCK_SIZE):
+    """Quantize a 2-D weight to FP8 E4M3 using ``source_scale`` geometry and dtype."""
+    if weight.ndim != 2:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(f"FP8 quantized export expects a 2-D weight{label}, got {weight.ndim}D")
+    if source_scale.ndim == 1:
+        return _quantize_fp8_1d_scale(weight, source_scale, name=name, block_size=block_size)
+    if source_scale.ndim != 2:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(f"Unsupported FP8 scale rank{label}: scale={tuple(source_scale.shape)}")
+    if source_scale.shape[0] == weight.shape[0]:
+        return _quantize_fp8_per_row_tiles(weight, source_scale, name=name)
+    return _quantize_fp8_2d_blocks(weight, source_scale, name=name, block_size=block_size)
+
+
+def dsv4_fp8_linear_leaf(name: str) -> str | None:
+    """Return the FP8 linear leaf of a checkpoint-layout stream key, or None."""
+    if not name.endswith(".weight"):
+        return None
+    base = name[: -len(".weight")]
+    if ".experts." in base:  # routed experts are MXFP4, handled separately
+        return None
+    if base.endswith(".base_layer"):  # strip LoRA wrapper segment
+        base = base[: -len(".base_layer")]
+    parts = base.split(".")
+    if len(parts) < 2:
+        return None
+    leaf = parts[-1]
+    parent = parts[-2]
+    if parent == "engram" and leaf == "wkv":
+        return leaf
+    # ``indexer.wq_b`` -> parent ``indexer``; ``attn.wq_a`` -> parent ``attn``;
+    # ``shared_experts.w1`` -> parent ``shared_experts``.
+    if leaf in _DSV4_FP8_LINEAR_LEAVES and parent in _DSV4_FP8_LINEAR_PARENTS:
+        return leaf
+    return None
+
+
+def quantize_dsv4_fp8_linear(weight, leaf: str, block_size=_FP8_BLOCK_SIZE):
+    """Re-quantize a bf16 non-expert FP8 linear weight to fp8_e4m3 + e8m0 scale.
+
+    ``block_size`` is the checkpoint's FP8 weight block size (e.g. 128 for
+    DeepSeek-V4-Flash, 32 for DeepSeek-V4.1-Flash). It must match the scale
+    geometry vLLM's quant method expects, otherwise the staged scale tensor is
+    mis-shaped and the refit silently corrupts the linear.
+    """
+    rows, cols = weight.shape
+    src_scale = torch.empty(
+        (rows + block_size - 1) // block_size,
+        (cols + block_size - 1) // block_size,
+        dtype=torch.float8_e8m0fnu,
+        device=weight.device,
+    )
+    fp8_weight, scale = _quantize_fp8_e4m3fn_like_scale(
+        weight, src_scale, name=f"dsv4_fp8_{leaf}", block_size=block_size
+    )
+    return fp8_weight, scale
+
+
+def iter_dsv41_engram_rows(name, table, device, chunk_bytes=64 << 20, *, module=None, ep_group=None):
+    """Stream logical Engram rows from either DTensor or MCore EP ownership."""
+    if chunk_bytes <= 0:
+        raise ValueError("Engram chunk_bytes must be positive")
+
+    if module is None:
+        from torch.distributed.tensor import DTensor, Shard
+
+        if not isinstance(table, DTensor) or table.device_mesh.ndim != 1 or table.placements != (Shard(0),):
+            raise ValueError("Engram refit requires a one-dimensional row-owner DTensor")
+        mesh = table.device_mesh
+        group = mesh.get_group()
+        owner_rank = mesh.get_local_rank()
+        global_rows = int(table.shape[0])
+        width = int(table.shape[1])
+        local = table.to_local()
+        owner_rows = math.ceil(global_rows / mesh.size())
+        owner_ranges = [
+            (owner * owner_rows, min((owner + 1) * owner_rows, global_rows)) for owner in range(mesh.size())
+        ]
+    else:
+        if ep_group is None:
+            raise ValueError("MCore Engram streaming requires an expert-parallel process group")
+        group = ep_group
+        owner_rank = torch.distributed.get_rank(group)
+        ep_size = torch.distributed.get_world_size(group)
+        global_rows = int(module.global_num_embeddings)
+        width = int(table.shape[1])
+        local_start, local_end = int(module.row_start), int(module.row_end)
+        if tuple(table.shape) != (local_end - local_start, width):
+            raise ValueError(
+                f"Engram shard {name} has shape {tuple(table.shape)} but owns rows [{local_start}, {local_end})"
+            )
+        base, remainder = divmod(global_rows, ep_size)
+        owner_ranges = []
+        for owner in range(ep_size):
+            start = owner * base + min(owner, remainder)
+            owner_ranges.append((start, start + base + int(owner < remainder)))
+        if (local_start, local_end) != owner_ranges[owner_rank]:
+            raise ValueError(
+                f"Engram shard {name} reports rows [{local_start}, {local_end}); "
+                f"EP rank {owner_rank} should own {owner_ranges[owner_rank]}"
+            )
+
+    chunk_rows = max(1, chunk_bytes // (width * table.element_size()))
+    for owner, (begin, end) in enumerate(owner_ranges):
+        for start in range(begin, end, chunk_rows):
+            rows = min(chunk_rows, end - start)
+            if owner == owner_rank:
+                if module is None:
+                    chunk = local[start - begin : start - begin + rows].to(device=device).contiguous()
+                else:
+                    chunk = table[start - begin : start - begin + rows].to(device=device).contiguous()
+            else:
+                chunk = torch.empty((rows, width), device=device, dtype=table.dtype)
+            torch.distributed.broadcast(chunk, src=torch.distributed.get_global_rank(group, owner), group=group)
+            yield f"{name}.__rows_{start}", chunk
+
+
+def load_dsv41_engram_rows(weights, model):
+    """Refit each vLLM Engram head shard in place from bounded BF16 row chunks."""
+    remaining, loaded = [], set()
+    for name, weight in weights:
+        if ".engram.embed.weight.__rows_" not in name:
+            remaining.append((name, weight))
+            continue
+        base, row_start = name.rsplit(".__rows_", 1)
+        row_start = int(row_start)
+        mapped = model.hf_to_vllm_mapper.apply_list([base])[0]
+        module = model.get_submodule(mapped.removesuffix(".weight"))
+        start = module.weight.engram_vocab_start
+        end = start + module.weight.shape[0]
+        left, right = max(start, row_start), min(end, row_start + weight.shape[0])
+        if left < right:
+            value = weight[left - row_start : right - row_start]
+            scales = torch.empty(
+                (value.shape[0], value.shape[1] // 32), device=value.device, dtype=torch.float8_e8m0fnu
+            )
+            fp8, scales = _quantize_fp8_per_row_tiles(value, scales)
+            module.weight.data[left - start : right - start].copy_(fp8)
+            module.weight_scale_inv.data[left - start : right - start].copy_(scales.view(torch.uint8))
+        loaded.update((mapped, mapped.removesuffix(".weight") + ".weight_scale_inv"))
+    return remaining, loaded
+
+
+# ---------------------------------------------------------------------------
+# vLLM-native FP8 refit (Fp8LinearMethod / Fp8MoEMethod) — original contents.
+# ---------------------------------------------------------------------------
 
 
 def _iter_transferable_param_attrs(src_param):
@@ -94,6 +350,8 @@ def _copy_param_subclass_attrs(dst_param, src_param):
 
 _FP8_PRISTINE_ATTR = "_verl_fp8_pristine"
 _FP8_LIVE_ATTR = "_verl_fp8_live_params"
+# Names of the params a kernel handed back as a rewritten copy with the checkpoint's shape and dtype.
+_FP8_REPACKED_ATTR = "_verl_fp8_repacked"
 
 # ``Fp8LinearMethod`` owns the first group, ``Fp8MoEMethod`` the second. The MoE
 # scale is named ``w13_weight_scale_inv`` under block quant and
@@ -155,6 +413,23 @@ def replace_parameter_preserve_subclass(
         new_data = new_data.data
 
     old_param = getattr(layer, param_name, None)
+    # Some kernel preps return tensors with the checkpoint's shape and dtype -- FlashInfer CUTLASS swaps
+    # the gate/up halves of w13 (weights and block scales), FlashInfer TRT-LLM's MXFP8 path interleaves
+    # and tile-shuffles them -- so the comparison in _layer_needs_fp8_staging cannot tell the live buffer
+    # left checkpoint layout. This call is the one place the rewrite is visible: a same-shaped,
+    # same-typed tensor that is not the old storage.
+    if (
+        param_name in _FP8_REFIT_PARAM_NAMES
+        and isinstance(old_param, torch.nn.Parameter)
+        and tuple(old_param.shape) == tuple(new_data.shape)
+        and old_param.dtype == new_data.dtype
+        and old_param.data_ptr() != new_data.data_ptr()
+    ):
+        repacked = getattr(layer, _FP8_REPACKED_ATTR, None)
+        if repacked is None:
+            repacked = set()
+            setattr(layer, _FP8_REPACKED_ATTR, repacked)
+        repacked.add(param_name)
     param = torch.nn.Parameter(new_data, requires_grad=False)
     _copy_param_subclass_attrs(param, old_param)
     setattr(layer, param_name, param)
@@ -196,18 +471,20 @@ def _record_pristine_fp8_layout(layer, params):
 
 
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
+    repacked = getattr(layer, _FP8_REPACKED_ATTR, None) or ()
     for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
         if not isinstance(param, torch.nn.Parameter):
             continue
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
-        # ROCm's AITER MoE backend permutes the expert weights into its MFMA
-        # layout while leaving shape and dtype untouched, so the comparison
-        # above cannot see it. ``is_shuffled``, which that backend sets on the
-        # repacked parameter, is the only signal that the live buffer is no
-        # longer in checkpoint layout.
-        if getattr(param, "is_shuffled", False):
+        # Some backends permute the expert weights while leaving shape and
+        # dtype untouched, so the comparison above cannot see it. ROCm's AITER
+        # MoE sets ``is_shuffled`` on the repacked parameter; the FlashInfer
+        # preps set nothing, so the patched ``replace_parameter`` records the
+        # rewrite itself (``_FP8_REPACKED_ATTR``). Either is the only signal
+        # that the live buffer is no longer in checkpoint layout.
+        if getattr(param, "is_shuffled", False) or name in repacked:
             return True
     return False
 
@@ -271,6 +548,24 @@ def stage_fp8_params_for_loading(model):
     return staged_layers
 
 
+def _resolve_fp8_moe_quant_method(module):
+    """Return the Fp8MoEMethod backing ``module``, unwrapping the LoRA shell.
+
+    merge=False swaps quant_method to FusedMoEModularMethod (no
+    process_weights_after_loading). Unwrap to call the real repack so
+    staging buffers become inference layout instead of being folded verbatim.
+    """
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    qm = getattr(module, "quant_method", None)
+    if isinstance(qm, Fp8MoEMethod):
+        return qm
+    inner = getattr(qm, "old_quant_method", None)
+    if isinstance(inner, Fp8MoEMethod):
+        return inner
+    return None
+
+
 def process_fp8_weights_after_loading(layers):
     """Re-derive the inference layout in place and reinstate the live params."""
     for layer in layers:
@@ -279,7 +574,19 @@ def process_fp8_weights_after_loading(layers):
         quant_method = getattr(layer, "quant_method", None)
         process = getattr(quant_method, "process_weights_after_loading", None)
         if process is not None:
-            process(layer)
+            # Patch replace_parameter so the repack folds into the live storage
+            # the CUDA graph captured, not a fresh Parameter (which leaves the
+            # captured storage zero).
+            from vllm.model_executor.layers.quantization import fp8 as _vllm_fp8
+
+            with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
+                process(layer)
+        else:
+            # merge=False no-op wrapper: unwrap to Fp8MoEMethod and repack.
+            resolved = _resolve_fp8_moe_quant_method(layer)
+            if resolved is not None:
+                with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
+                    resolved.process_weights_after_loading(layer)
 
         # Anything routed through the patched ``replace_parameter`` has already
         # been folded and dropped from ``live``; what remains was rewritten by a
@@ -316,10 +623,7 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         maybe_post_process_fp8_weight_block,
         process_fp8_weight_block_strategy,
     )
-    from vllm.model_executor.parameter import (
-        BlockQuantScaleParameter,
-        ModelWeightParameter,
-    )
+    from vllm.model_executor.parameter import BlockQuantScaleParameter, ModelWeightParameter
 
     assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
@@ -359,10 +663,7 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
 
 def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
     # removed the reentrancy guard here for refit
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        convert_to_fp8_moe_kernel_format,
-        make_fp8_moe_kernel,
-    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import convert_to_fp8_moe_kernel_format, make_fp8_moe_kernel
 
     # Allow for accessing weights and scales in standard way.
     w13 = layer.w13_weight
@@ -438,16 +739,34 @@ def build_fp8_method_patchers(vllm_version):
     # maybe_post_process_fp8_weight_block. Keep its native transformation logic,
     # but preserve parameter subclass metadata for RL weight reloads.
     if vllm_version >= version.parse("0.20.0"):
-        from vllm.model_executor.layers.quantization.fp8 import (
-            Fp8LinearMethod,
-            Fp8MoEMethod,
-        )
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
 
         wrap = _make_process_weights_after_loading_for_vllm20
-        return [
+        patchers = [
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
         ]
+        # DeepSeek-V4.1 Flash (weight_block_size=[32,32] + expert_dtype=fp4)
+        # routes every FP8 linear through ModelOptLinearMethod (MXFP8 / ue8m0)
+        # instead of Fp8LinearMethod. Its post-load rebuilds ``weight`` /
+        # ``weight_scale`` as plain nn.Parameters, so the same subclass-restore
+        # + pristine-layout recording is required for a refit to land. The
+        # patch is harmless for models that don't use ModelOptLinearMethod.
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+        except ImportError:
+            ModelOptLinearMethod = None
+        if ModelOptLinearMethod is not None:
+            modelopt_linear_path = (
+                "vllm.model_executor.layers.quantization.modelopt.ModelOptLinearMethod.process_weights_after_loading"
+            )
+            patchers.append(
+                patch(
+                    modelopt_linear_path,
+                    wrap(ModelOptLinearMethod.process_weights_after_loading),
+                )
+            )
+        return patchers
 
     return [
         patch(linear_path, process_weights_after_loading_for_vllm14),

@@ -1,3 +1,7 @@
+# DISABLED for the mint self-hosted fork: this workflow needs GPU runners
+# (L20x8 / ascend / rocm) that do not exist on the mint host. Re-enable by
+# restoring the trigger below and pointing the jobs at a GPU runner.
+
 # # Tests layout
 
 # Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
@@ -29,41 +33,47 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-name: vllm
+name: vllm (disabled)
 
-on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      # Other entrypoints
-      - "!examples/**"
-      - "!tests/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
-      # FSDP
-      - "!verl/workers/**/*dp_*.py"
-      # Megatron
-      - "!verl/workers/**/megatron_*.py"
-      # SGLang
-      - "!**/*sglang*"
-      # Entrypoints
-      - ".github/workflows/vllm.yml"
-      - "tests/special_e2e/generation"
-      - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
-      - "tests/workers/rollout"
-      - "verl/trainer/main_generation.py"
-      - "verl/trainer/config/generation.yaml"
-      - "verl/trainer/main_ppo.py"
-      - "verl/trainer/config/ppo_trainer.yaml"
+# on:
+#   # Trigger the workflow on push or pull request,
+#   # but only for the main branch
+#   push:
+#     branches:
+#       - main
+#       - v0.*
+#   pull_request:
+#     branches:
+#       - main
+#       - v0.*
+#     paths:
+#       - "**/*.py"
+#       # Other entrypoints
+#       - "!examples/**"
+#       - "!tests/**"
+#       - "!verl/trainer/main_*.py"
+#       - "!verl/trainer/fsdp_sft_trainer.py"
+#       # FSDP
+#       - "!verl/workers/**/*dp_*.py"
+#       # Megatron
+#       - "!verl/workers/**/megatron_*.py"
+#       # SGLang
+#       - "!**/*sglang*"
+#       # Entrypoints
+#       - ".github/workflows/vllm.yml"
+#       - "tests/special_e2e/generation"
+#       - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
+#       - "tests/workers/rollout"
+#       - "verl/trainer/main_generation.py"
+#       - "verl/trainer/config/generation.yaml"
+#       - "verl/trainer/main_ppo.py"
+#       - "verl/trainer/config/ppo_trainer.yaml"
+#       # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+#       # the environment under test - a resolution change must be validated
+#       # even when it touches no .py file.
+#       - "pyproject.toml"
+#       - "uv.lock"
+on: workflow_dispatch  # kept callable manually; never runs automatically
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -127,8 +137,8 @@ jobs:
             tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
             tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
             tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \
-            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_accumulates_lora_across_buckets \
-            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket
+            tests/workers/rollout/rollout_vllm/test_submitter_gate_on_cpu.py \
+            tests/utils/test_vllm_weight_name_normalization_on_cpu.py
       - name: Prepare gsm8k dataset
         run: |
           $UV_RUN ray stop --force

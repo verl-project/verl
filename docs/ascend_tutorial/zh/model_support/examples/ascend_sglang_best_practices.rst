@@ -64,7 +64,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
       --hf_model_path Qwen/Qwen3-30B-A3B \
       --output_path Qwen/Qwen3-30B-A3B-mcore \
       --use_cpu_initialization    # Only work for MoE models
-*注:verl当前已支持mbridge进行灵活的hf和mcore之间的权重转换,可以修改以下相关参数直接加载hf权重*
+*注:verl通过Megatron-Bridge与MindSpeed-Bridge进行hf和mcore之间的权重转换,可以修改以下相关参数直接加载hf权重*
 
 .. code-block:: bash
 

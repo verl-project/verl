@@ -36,10 +36,67 @@ from unittest.mock import patch
 
 import torch
 
+from verl.utils.vllm.vllm_fp8_utils import _scale_from_amax, dsv4_fp8_linear_leaf, quantize_dsv4_fp8_linear
+
 logger = logging.getLogger(__name__)
+
+# Default FP8 weight block size for DeepSeek-V4-Flash (128x128). DeepSeek-V4.1-Flash
+# uses 32x32; pass the correct value via iter_deepseek_v4_weights(block_size=...).
+_DSV4_DEFAULT_BLOCK_SIZE = 128
 
 _MXFP4_SF_BLOCK = 32
 _MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
+
+# MXFP4 quantization — inlined from Megatron-Bridge quantization_utils (no megatron import here).
+_FP4_E2M1_MAX = 6.0
+
+
+def _quantize_mxfp4_e2m1_like_scale(weight, source_scale, *, name="", block_size=_MXFP4_SF_BLOCK):
+    """Quantize a 2-D weight to packed MXFP4 E2M1 using source scale geometry."""
+    if weight.ndim != 2:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(f"MXFP4 quantized export expects a 2-D weight{label}, got {weight.ndim}D")
+    rows, cols = weight.shape
+    if cols % 2 != 0 or cols % block_size != 0 or source_scale.shape != (rows, cols // block_size):
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(
+            f"Unsupported MXFP4 geometry{label}: weight={tuple(weight.shape)} scale={tuple(source_scale.shape)}"
+        )
+    weight_f32 = weight.to(torch.float32)
+    packed = torch.empty((rows, cols // 2), dtype=torch.uint8, device=weight.device)
+    scale_f32 = torch.empty(tuple(source_scale.shape), dtype=torch.float32, device=weight.device)
+    boundaries = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=torch.float32, device=weight.device)
+    max_chunk_elements = 16_000_000
+    rows_per_chunk = max(1, min(rows, max_chunk_elements // max(cols, 1)))
+    scale_cols = source_scale.shape[1]
+    for row_start in range(0, rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, rows)
+        chunk = weight_f32[row_start:row_end].reshape(-1, scale_cols, block_size)
+        chunk_amax = chunk.abs().amax(dim=-1)
+        if source_scale.dtype == torch.uint8:
+            unrounded_scale = torch.where(
+                chunk_amax > 0,
+                chunk_amax / _FP4_E2M1_MAX,
+                torch.ones_like(chunk_amax),
+            )
+            chunk_scale = torch.exp2(torch.ceil(torch.log2(unrounded_scale)).clamp(min=-127, max=127))
+        else:
+            chunk_scale = _scale_from_amax(chunk_amax, _FP4_E2M1_MAX, source_scale.dtype)
+        scale_f32[row_start:row_end] = chunk_scale
+        normalized = chunk / chunk_scale[:, :, None]
+        codes = torch.bucketize(normalized.abs(), boundaries).to(torch.uint8)
+        codes = (codes | ((normalized < 0).to(torch.uint8) * 8)).reshape(row_end - row_start, cols)
+        lo = codes[:, 0::2].to(torch.int16)
+        hi = codes[:, 1::2].to(torch.int16)
+        packed[row_start:row_end] = (lo | (hi << 4)).to(torch.uint8)
+    if source_scale.dtype == torch.uint8:
+        output_scale = (torch.log2(scale_f32).round() + 127).clamp(min=0, max=254).to(torch.uint8)
+    else:
+        output_scale = scale_f32.to(dtype=source_scale.dtype)
+    return packed.contiguous().view(torch.int8), output_scale
+
+
+_DEEPSEEK_V4_MODEL_TYPES = ("deepseek_v4", "deepseek_v41")
 
 
 def is_deepseek_v4_model(model):
@@ -48,13 +105,22 @@ def is_deepseek_v4_model(model):
 
     for obj in (model, getattr(model, "config", None), getattr(model, "hf_config", None)):
         if obj is not None and getattr(obj, "model_type", None) is not None:
-            return obj.model_type == "deepseek_v4"
+            return obj.model_type in _DEEPSEEK_V4_MODEL_TYPES
 
     text_config = getattr(getattr(model, "config", None), "text_config", None)
-    return getattr(text_config, "model_type", None) == "deepseek_v4"
+    return getattr(text_config, "model_type", None) in _DEEPSEEK_V4_MODEL_TYPES
 
 
-def iter_deepseek_v4_weights(weights):
+def _quantize_expert_to_mxfp4(weight):
+    """Quantize a 2-D bf16 expert weight to packed MXFP4 E2M1 + e8m0 scale
+    (geometry [out, in] -> scale [out, in//32])."""
+    rows, cols = weight.shape
+    scale_geom = torch.empty(rows, cols // _MXFP4_SF_BLOCK, dtype=torch.uint8, device=weight.device)
+    packed, scale = _quantize_mxfp4_e2m1_like_scale(weight, scale_geom, name="dsv4_expert")
+    return packed, scale
+
+
+def iter_deepseek_v4_weights(weights, block_size=_DSV4_DEFAULT_BLOCK_SIZE):
     """Pass the refit stream through untouched apart from a dtype reinterpret.
 
     A DSv4 checkpoint already ships quantized experts, so unlike the BF16 path
@@ -62,16 +128,48 @@ def iter_deepseek_v4_weights(weights):
     as the raw ``uint8`` byte layout that ``Mxfp4MoEMethod`` allocated.
     """
     for name, weight in weights:
+        if ".experts." in name and name.endswith(".weight") and weight.dtype == torch.bfloat16:
+            packed, scale = _quantize_expert_to_mxfp4(weight)
+            yield name, packed
+            yield name[: -len(".weight")] + ".scale", scale
+            continue
         if ".experts." in name and weight.dtype in (torch.int8, torch.float8_e8m0fnu):
             weight = weight.view(torch.uint8)
+            yield name, weight
+            continue
+        fp8_leaf = dsv4_fp8_linear_leaf(name)
+        if fp8_leaf is not None and weight.dtype == torch.bfloat16:
+            fp8_weight, scale = quantize_dsv4_fp8_linear(weight, fp8_leaf, block_size=block_size)
+            yield name, fp8_weight
+            yield name[: -len(".weight")] + ".scale", scale
+            continue
         yield name, weight
+
+
+def _resolve_mxfp4_quant_method(module):
+    """Return the ``Mxfp4MoEMethod`` backing ``module``, unwrapping LoRA.
+
+    Under verl merge=False, vLLM's ``FusedMoEWithLoRA`` swaps the layer's
+    ``quant_method`` to ``FusedMoEModularMethod`` (a forward-only wrapper that
+    stores the original as ``old_quant_method`` and hides the mxfp4 layout attrs
+    + repack). Resolve to the original method so staging, layout derivation and
+    post-load repack work like the non-LoRA path.
+    """
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    qm = module.quant_method
+    if isinstance(qm, Mxfp4MoEMethod):
+        return qm
+    inner = getattr(qm, "old_quant_method", None)
+    if isinstance(inner, Mxfp4MoEMethod):
+        return inner
+    return None
 
 
 def _is_mxfp4_fused_moe_module(module):
     from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 
-    return isinstance(module, RoutedExperts) and isinstance(module.quant_method, Mxfp4MoEMethod)
+    return isinstance(module, RoutedExperts) and _resolve_mxfp4_quant_method(module) is not None
 
 
 def _refittable_mxfp4_backends():
@@ -106,7 +204,7 @@ def _mxfp4_checkpoint_layout(module):
     ``quant_method`` tag ``RoutedExperts.weight_loader`` dispatches on, which
     ``replace_parameter`` does not carry over and must be reattached.
     """
-    quant_method = module.quant_method
+    quant_method = _resolve_mxfp4_quant_method(module)
     num_experts = quant_method.num_experts
     intermediate = quant_method.intermediate_size
     hidden = quant_method.hidden_size
@@ -208,8 +306,13 @@ def _replace_parameter_in_place(layer, param_name, new_data, prefer_copy=False):
 def _process_mxfp4_moe_params(module):
     from vllm.model_executor.layers.quantization import mxfp4 as vllm_mxfp4
 
+    # Use the legacy Mxfp4MoEMethod for the repack: the modular wrapper that
+    # LoRA installs (FusedMoEModularMethod) inherits a no-op
+    # process_weights_after_loading, so calling it would skip the repack and
+    # leave live storage in the checkpoint layout. See _resolve_mxfp4_quant_method.
+    quant_method = _resolve_mxfp4_quant_method(module)
     with patch.object(vllm_mxfp4, "replace_parameter", _replace_parameter_in_place):
-        module.quant_method.process_weights_after_loading(module)
+        quant_method.process_weights_after_loading(module)
 
     # Every staged param is consumed through the patched replace_parameter, so
     # a leftover means post-processing took a path that assigns weights some
@@ -238,7 +341,7 @@ def stage_mxfp4_moe_params_for_loading(model):
         if not _is_mxfp4_fused_moe_module(module):
             continue
 
-        backend = getattr(module.quant_method, "mxfp4_backend", None)
+        backend = getattr(_resolve_mxfp4_quant_method(module), "mxfp4_backend", None)
         if backend not in supported:
             # Refusing beats skipping: an unsupported backend would quietly load
             # checkpoint-layout data into rewritten parameters, and the rollout

@@ -78,6 +78,9 @@ class AgentData:
 
         # State variables
         self.prompt_ids: list[int] = []
+        # SGLang video payload for the initial prompt (see AgentLoopBase.build_sglang_video_payload);
+        # None for text/image-only inputs or when the vLLM backend is used.
+        self.mm_processor_output: Optional[list[dict[str, Any]]] = None
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
@@ -193,6 +196,7 @@ class ToolAgentLoop(AgentLoopBase):
             response_mask=agent_data.response_mask[: self.response_length],
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=agent_data.mm_processor_kwargs,
+            mm_processor_output=agent_data.mm_processor_output,
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
@@ -214,14 +218,17 @@ class ToolAgentLoop(AgentLoopBase):
         # Continuous Token is the only tokenization path; multimodal prompts require a
         # VL builder + processor, so validate before building any tokens.
         self._assert_mm_supported(bool(agent_data.image_data or agent_data.video_data or agent_data.audio_data))
+        mm_inputs = {}
         prompt_ids = await self.ct_build_initial_tokens(
             agent_data.messages,
             tools=schemas,
             images=agent_data.image_data,
             videos=agent_data.video_data,
             audios=agent_data.audio_data,
+            mm_inputs_out=mm_inputs,
         )
         agent_data.prompt_ids = prompt_ids
+        agent_data.mm_processor_output = self.build_sglang_video_payload(agent_data.video_data, mm_inputs)
         return AgentState.GENERATING
 
     async def _handle_generating_state(
@@ -240,6 +247,7 @@ class ToolAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
+                mm_processor_output=agent_data.mm_processor_output,
                 audio_data=agent_data.audio_data,
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
             )

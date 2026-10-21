@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import functools
 import logging
 import os
@@ -31,6 +32,7 @@ from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
+from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name, get_torch_device, set_expandable_segments
@@ -221,6 +223,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if dp_group is not None:
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
         loss = loss.item()
+
+        # --- ALIGN DEBUG 2 ---
+        import os as _os
+        if _os.environ.get("ALIGN_DEBUG"):
+            _raw = output.get("loss") if isinstance(output.get("loss"), list) else None
+            print(f"[ALIGN_DEBUG2] final loss={loss:.6f} raw_output_type={type(output.get('loss', 'gone'))}", flush=True)
+        # --- END ALIGN DEBUG 2 ---
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
@@ -644,7 +653,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             omega_profiler_config = config.ref.get("profiler", {})
 
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
+        # Any configured tool gets its tool_config converted, not just verl's built-in ones:
+        # omega_conf_to_dataclass returns None for a missing/empty config, so a tool without a
+        # tool_config entry still works, and a plugin-supplied tool can name its own dataclass
+        # through `_target_`.
+        if omega_profiler_config.get("tool", None) is not None:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
@@ -798,11 +811,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
+            elif (actor_config.policy_loss.get("rollout_correction", None) or {}).get("score_centering", False):
+                self.loss_fn = partial(score_centering_ppo_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            vllm_engine_kwargs = (self.config.rollout.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+            self.actor.engine.vllm_enable_moe_shared_loras = bool(
+                vllm_engine_kwargs.get("enable_moe_shared_loras", False)
+            )
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine
@@ -832,6 +851,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
+            self.lora_resync_base: bool = bool(model_config.lora.get("resync_base", False))
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -919,13 +939,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # the delta engine owns the sync state machine (seed vs steady,
                 # snapshot prime), so it drives the training engine itself.
                 metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
-                return metrics or {}
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-            metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+            else:
+                per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+                metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+            if self.actor.engine.is_param_offload_enabled:
+                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
             return metrics or {}
 
         set_expandable_segments(False)
-        aggressive_empty_cache(force_sync=True)
+        get_torch_device().empty_cache()
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
@@ -948,8 +970,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
-            self.rollout.sleep_level = 1
-            do_lora_base_sync = not self.base_sync_done
+            resync_base = self.lora_resync_base
+            self.rollout.sleep_level = 2 if resync_base else 1
+            do_lora_base_sync = resync_base or not self.base_sync_done
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
@@ -969,10 +992,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. offload model to cpu
         if self.actor.engine.is_param_offload_enabled:
             self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
-        aggressive_empty_cache(force_sync=True)
+        get_torch_device().synchronize()
+        get_torch_device().empty_cache()
+        log_gpu_memory_usage("After offload model to cpu", logger=logger)
 
         # 4. resume kv_cache
         if self.config.rollout.free_cache_engine:
+            # All trainer ranks enter this naive sync path via ONE_TO_ALL. Wait for
+            # their offload and device cleanup before a leader wakes the rollout
+            # workers; local device synchronization alone cannot prevent OOM on peers.
+            await asyncio.to_thread(torch.distributed.barrier)
             await self.rollout.resume(tags=["kv_cache"])
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 

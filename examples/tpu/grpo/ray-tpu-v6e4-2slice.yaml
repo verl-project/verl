@@ -1,0 +1,98 @@
+# KubeRay RayCluster for the GRPO examples (see README.md): 1 CPU head pod and 2 single-host TPU v6e-4 slices.
+# Replace <IMAGE>, <BUCKET> and <GSA_EMAIL> before applying (see README.md, step 3).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-ksa
+  annotations:
+    iam.gke.io/gcp-service-account: "<GSA_EMAIL>"
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-tpu-v6e4-cluster
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: ray-ksa
+        containers:
+          - name: ray-head
+            image: "<IMAGE>"
+            imagePullPolicy: Always
+            ports:
+              - containerPort: 8265  # Dashboard and job submission
+              - containerPort: 10001  # Ray client
+            resources:
+              limits:
+                cpu: "12"
+                memory: 48Gi
+              requests:
+                cpu: "12"
+                memory: 48Gi
+            volumeMounts:
+              - name: gcs-volume
+                mountPath: /data
+              - name: host-tmp
+                mountPath: /tmp
+        volumes:
+          - name: gcs-volume
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: "<BUCKET>"
+                mountOptions: implicit-dirs
+          - name: host-tmp
+            hostPath:
+              path: /tmp
+  workerGroupSpecs:
+    - groupName: tpu-group
+      replicas: 2  # 2 slices: trainer and rollout
+      numOfHosts: 1  # v6e-4: 1 host with 4 chips
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+        spec:
+          serviceAccountName: ray-ksa
+          containers:
+            - name: ray-worker
+              image: "<IMAGE>"
+              imagePullPolicy: Always
+              env:
+                - name: RAY_memory_monitor_refresh_ms
+                  value: "0"
+                - name: RAY_memory_usage_threshold
+                  value: "0.99"
+              resources:
+                limits:
+                  memory: 400Gi
+                  google.com/tpu: "4"
+                requests:
+                  cpu: "48"
+                  memory: 400Gi
+                  google.com/tpu: "4"
+              volumeMounts:
+                - name: gcs-volume
+                  mountPath: /data
+                - name: host-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: gcs-volume
+              csi:
+                driver: gcsfuse.csi.storage.gke.io
+                volumeAttributes:
+                  bucketName: "<BUCKET>"
+                  mountOptions: implicit-dirs
+            - name: host-tmp
+              hostPath:
+                path: /tmp
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 2x2

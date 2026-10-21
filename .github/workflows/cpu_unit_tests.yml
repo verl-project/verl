@@ -1,3 +1,10 @@
+# DISABLED for the mint self-hosted fork: this workflow is MIXED CPU+GPU -- its
+# CPU unit-test job runs on a volcengine-provisioned dynamic runner (fallback
+# label L20x8) and its setup/cleanup jobs drive the volcengine runner API.
+# Neither exists on the mint host, and splitting the job graph is out of scope
+# here. Re-enable by restoring the trigger below and running the tests on a
+# local CPU runner.
+
 # # Tests layout
 
 # Each folder under tests/ corresponds to a test category for a sub-namespace in verl. For instance:
@@ -29,23 +36,29 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-name: cpu_unit_tests
+name: cpu_unit_tests (disabled)
 
-on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - "!tests/special_sanity/**"
-      - .github/workflows/cpu_unit_tests.yml
+# on:
+#   # Trigger the workflow on push or pull request,
+#   # but only for the main branch
+#   push:
+#     branches:
+#       - main
+#       - v0.*
+#   pull_request:
+#     branches:
+#       - main
+#       - v0.*
+#     paths:
+#       - "**/*.py"
+#       - "!tests/special_sanity/**"
+#       - .github/workflows/cpu_unit_tests.yml
+#       # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+#       # the environment under test - a resolution change must be validated
+#       # even when it touches no .py file.
+#       - "pyproject.toml"
+#       - "uv.lock"
+on: workflow_dispatch  # kept callable manually; never runs automatically
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

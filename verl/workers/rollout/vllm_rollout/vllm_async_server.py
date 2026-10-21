@@ -19,6 +19,7 @@ import logging
 import os
 import time
 import uuid
+import zlib
 from collections.abc import Mapping
 from pprint import pprint
 from typing import Any, Callable, Optional
@@ -38,6 +39,7 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
@@ -55,6 +57,7 @@ from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
+    extract_response_topk_logprobs,
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
@@ -172,6 +175,8 @@ class vLLMHttpServer:
         self._admitting = 0
         self._resume_event = asyncio.Event()
         self._resume_event.set()
+        # Set by abort_all_requests(reject_request=True) when no resume is coming soon.
+        self._rejecting = False
 
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
@@ -428,6 +433,8 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
+            if self.model_config.lora.get("enable_tower_connector_lora", False):
+                lora_args["enable_tower_connector_lora"] = True
             if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
@@ -564,11 +571,13 @@ class vLLMHttpServer:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
+        session_id: Optional[str] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
+            session_id: Sticky caller id; turns of one session go to the same DP engine.
         """
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
@@ -580,6 +589,7 @@ class vLLMHttpServer:
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
+                session_id=session_id,
             )
 
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -617,7 +627,11 @@ class vLLMHttpServer:
         assert 1 <= max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        topk_log_probs = sampling_params.pop("topk_log_probs", 0)
+        sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
+        if sampling_params["logprobs"]:
+            # the top-k head is read from flat lists, see extract_response_topk_logprobs
+            sampling_params["flat_logprobs"] = True
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
@@ -629,6 +643,16 @@ class vLLMHttpServer:
             extra_args["kv_transfer_params"] = kv_transfer_params
             sampling_params["extra_args"] = extra_args
 
+        # verl rollout is token-in-token-out: the output path below only reads token_ids
+        # and numeric logprobs (never .text), so detokenizing every generated token into a
+        # string is pure overhead. Skip it. Guard: string-based `stop` / `bad_words` need
+        # detokenized text to match, so only skip when neither is used (`stop_token_ids`
+        # is unaffected). Teacher requests already set detokenize=False upstream, so this
+        # setdefault leaves them untouched.
+        if not sampling_params.get("stop") and not sampling_params.get("bad_words"):
+            sampling_params.setdefault("detokenize", False)
+
+        self._preprocess_sampling_params(sampling_params)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
@@ -657,20 +681,21 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # No await between the final gate check and the bump: on the actor's single event loop
-        # that keeps "gate closed and _admitting == 0" from being observed mid-admission.
-        while self._submission_paused:
-            logger.debug("parking request %s until weight sync completes", request_id)
-            await self._resume_event.wait()
-        self._admitting += 1
+        rejected = await self._park_until_admitted(request_id)
+        if rejected is not None:
+            return rejected
 
-        with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.trace_state(
+            "vllm_generate",
+            state_lane_id=ray.get_runtime_context().get_actor_name(),
+        ):
             generator = self.engine.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
                 lora_request=lora_request,
                 priority=priority,
+                data_parallel_rank=self._dp_rank_for_session(session_id),
             )
 
             # Get final response
@@ -692,13 +717,14 @@ class vLLMHttpServer:
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
         if not final_res.outputs:
-            return TokenOutput(
+            aborted = TokenOutput(
                 token_ids=[],
                 log_probs=None,
                 routed_experts=None,
                 stop_reason="aborted",
                 extra_fields=extra_fields,
             )
+            return self._postprocess_output(aborted, final_res, sampling_params)
 
         # Prefix-cache hit count for this request; consumers surface it as
         # OpenAI usage.prompt_tokens_details.cached_tokens.
@@ -710,7 +736,12 @@ class vLLMHttpServer:
         )
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
-        if sampling_params.logprobs is not None:
+        if sampling_params.logprobs:
+            # indexing FlatLogprobs per position would rebuild a k+1 dict per token
+            log_probs, extra_fields["response_topk_ids"], extra_fields["response_topk_log_probs"] = (
+                extract_response_topk_logprobs(final_res.outputs[0].logprobs, sampling_params.logprobs)
+            )
+        elif sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
 
         routed_experts = None
@@ -749,7 +780,7 @@ class vLLMHttpServer:
                 extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
                 extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
                 extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
-        return TokenOutput(
+        output = TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
@@ -757,12 +788,20 @@ class vLLMHttpServer:
             num_preempted=num_preempted,
             extra_fields=extra_fields,
         )
+        return self._postprocess_output(output, final_res, sampling_params)
 
     def _select_decode_peer(self) -> ActorHandle:
         """Round-robin across decode peers."""
         peer = self._pd_decode_peers[self._pd_peer_idx % len(self._pd_decode_peers)]
         self._pd_peer_idx += 1
         return peer
+
+    def _dp_rank_for_session(self, session_id: Optional[str]) -> Optional[int]:
+        """Pin a session to one DP engine for prefix-cache reuse; hash-based, so it ignores engine load."""
+        dp_size = self.config.data_parallel_size
+        if session_id is None or dp_size <= 1:
+            return None
+        return zlib.crc32(str(session_id).encode()) % dp_size
 
     async def _pd_dispatch(
         self,
@@ -774,6 +813,7 @@ class vLLMHttpServer:
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
+        session_id: Optional[str] = None,
     ) -> TokenOutput:
         """Run prefill locally, then decode on a selected peer."""
         decode_peer = self._select_decode_peer()
@@ -802,6 +842,7 @@ class vLLMHttpServer:
             mm_processor_kwargs=mm_processor_kwargs,
             priority=priority,
             kv_transfer_params=prefill_kv_params,
+            session_id=session_id,
         )
         if is_mooncake:
             # Mooncake does not return decode params from the prefill leg.
@@ -828,6 +869,7 @@ class vLLMHttpServer:
             mm_processor_kwargs=mm_processor_kwargs,
             priority=priority,
             kv_transfer_params=decode_kv_params,
+            session_id=session_id,
         )
 
     async def wake_up(self, tags: list[str] | None = None):
@@ -855,10 +897,12 @@ class vLLMHttpServer:
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # Routing replay's AuxOutput connector requires PAUSED_ALL for cache reset.
+        # vLLM's default abort mode only pauses new requests.
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -880,7 +924,7 @@ class vLLMHttpServer:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         await self.engine.wake_up(tags=["weights"])
 
     async def resume_kv_cache(self):
@@ -891,6 +935,82 @@ class vLLMHttpServer:
             return
         await self.engine.wake_up(tags=["kv_cache"])
         await self.engine.reset_prefix_cache(reset_connector=True)
+
+    async def snapshot(self) -> dict[str, Any]:
+        """Return live KV-cache and scheduler queue observations.
+
+        Values come from vLLM's PrometheusStatLogger gauges so callers can
+        route or admit traffic without scraping the HTTP metrics endpoint.
+
+        PD disaggregation is not supported: prefill and decode engines keep
+        independent KV pools and schedulers, so one engine's gauges are not a
+        replica snapshot.
+
+        Only node rank 0 owns AsyncLLM. Other actors in a multi-node replica
+        run vLLM headless and have no engine to observe.
+        """
+        # TODO: aggregate prefill + decode KV/scheduler stats for PD replicas.
+        if self._disaggregation_role != "null":
+            raise NotImplementedError("vLLMHttpServer.snapshot() does not support PD disaggregation")
+        # Match abort_all_requests: headless actors must fail before touching self.engine.
+        if self.node_rank != 0 or not hasattr(self, "engine"):
+            raise RuntimeError(
+                "vLLMHttpServer.snapshot() requires the node-rank-0 AsyncLLM; "
+                f"node_rank={self.node_rank} actors run headless and have no engine."
+            )
+        prometheus_logger = self._prometheus_logger
+        kv_cache_usage = self._prometheus_values(
+            prometheus_logger.gauge_kv_cache_usage,
+            "vllm:kv_cache_usage_perc",
+        )
+        if not kv_cache_usage:
+            raise RuntimeError("vLLM KV-cache gauges are unavailable")
+        return {
+            "kv_cache_usage": max(kv_cache_usage),
+            "num_waiting_requests": int(
+                sum(
+                    self._prometheus_values(
+                        prometheus_logger.gauge_scheduler_waiting,
+                        "vllm:num_requests_waiting",
+                    )
+                )
+            ),
+            "num_running_requests": int(
+                sum(
+                    self._prometheus_values(
+                        prometheus_logger.gauge_scheduler_running,
+                        "vllm:num_requests_running",
+                    )
+                )
+            ),
+        }
+
+    @staticmethod
+    def _prometheus_values(metrics_by_engine: dict[int, Any], sample_name: str) -> list[float]:
+        return [
+            float(sample.value)
+            for metric in metrics_by_engine.values()
+            for family in metric.collect()
+            for sample in family.samples
+            if sample.name == sample_name
+        ]
+
+    @property
+    def _prometheus_logger(self) -> PrometheusStatLogger:
+        # vLLM has moved PrometheusStatLogger between logger_manager attributes.
+        logger_manager = self.engine.logger_manager
+        if logger_manager is None:
+            raise RuntimeError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
+
+        prometheus_logger = getattr(logger_manager, "prometheus_logger", None)
+        if isinstance(prometheus_logger, PrometheusStatLogger):
+            return prometheus_logger
+
+        for stat_logger in getattr(logger_manager, "stat_loggers", []):
+            if isinstance(stat_logger, PrometheusStatLogger):
+                return stat_logger
+
+        raise RuntimeError("Unable to locate vLLM PrometheusStatLogger on logger_manager.")
 
     def _should_profile(self) -> bool:
         """Whether this replica drives the engine profiler."""
@@ -929,20 +1049,41 @@ class vLLMHttpServer:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort all ongoing generation requests.
+    async def abort_all_requests(
+        self,
+        reset_prefix_cache: bool = True,
+        reject_request: bool = False,
+        abort_only: bool = False,
+    ) -> dict[str, Any]:
+        """Abort in-flight requests, optionally pausing the replica.
 
-        On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
-        requests, drain, and clear caches. The engine remains paused after this
-        call — use resume_generation() to accept new requests (e.g. before
-        validation).
+        The default closes admission, aborts in-flight work, and optionally
+        clears caches. The engine remains paused after this call — use
+        resume_generation() to accept new requests (e.g. before validation).
 
-        On vLLM < 0.12.0, manually aborts each request and resets prefix cache.
+        abort_only=True only cancels current engine requests. Admission stays
+        open and caches are left untouched. reset_prefix_cache and
+        reject_request apply only when abort_only is False. Use abort_request()
+        for a single id.
+
+        Args:
+            reset_prefix_cache: Clear the prefix/mm caches along with the pause.
+            reject_request: Fail requests that arrive while the gate is closed
+                instead of parking them. Pass True when this server is leaving
+                the load balancer with no resume_generation coming soon (a hybrid
+                replica handed back to training); parked requests would otherwise
+                wait until the replica returns to rotation. The flag is re-declared
+                by every pause and cleared by the matching resume, so a subsequent
+                plain pause (e.g. the one inside a weight sync) restores parking.
+            abort_only: Cancel in-flight requests and leave admission open.
+                reset_prefix_cache and reject_request are ignored.
 
         Returns:
             dict[str, Any]: Dictionary containing:
                 - aborted_count: Number of requests aborted
-                - request_ids: List of aborted request IDs
+                - request_ids: List of aborted request IDs. Parallel-sampling
+                  parent ids are aborted so their bookkeeping is released, and
+                  are not included in the count.
         """
         # Only node rank 0 owns AsyncLLM/self.engine. The remaining actors in a
         # multi-node replica run vLLM's headless entry point, so there is no
@@ -950,10 +1091,27 @@ class vLLMHttpServer:
         if self.node_rank != 0:
             return {"aborted_count": 0, "request_ids": []}
 
+        if abort_only:
+            processor = self.engine.output_processor
+            # request_states holds in-flight requests. For sampling n>1 those are
+            # child ids; the ParentRequest lives in parent_requests under the parent
+            # id and is not a request_states key. engine.abort pops that entry only
+            # when the parent id is passed. Children come first: aborting the parent
+            # id first recursively aborts children, and this call has already
+            # detached them from external_req_ids, so the recursive remove throws.
+            request_ids = list(processor.request_states)
+            parent_ids = [
+                parent_id for parent_id in processor.parent_requests if parent_id not in processor.request_states
+            ]
+            await self.engine.abort([*request_ids, *parent_ids], internal=True)
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
+
         try:
             # Close the gate first, then let admissions already past it land, so the pause
-            # below actually covers them.
+            # below actually covers them. Closing the gate and declaring how late arrivals
+            # are handled happen together, so no request can observe one without the other.
             self._submission_paused = True
+            self._rejecting = reject_request
             self._resume_event.clear()
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
@@ -979,6 +1137,7 @@ class vLLMHttpServer:
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
             await self.engine.pause_generation(
+                mode="keep",
                 wait_for_inflight_requests=False,
                 clear_cache=reset_prefix_cache,
             )
@@ -992,15 +1151,45 @@ class vLLMHttpServer:
             logger.exception("Error aborting requests")
             raise
 
-    async def resume_generation(self):
-        """Resume generation after abort_all_requests (pause_generation)."""
-        # Before the node_rank guard: every server in the replica closed the gate, so every
-        # server must reopen it.
+    async def resume_engine_generation(self):
+        """Resume the DP engines while request admission remains closed."""
+        if self.node_rank == 0:
+            await self.engine.resume_generation()
+
+    async def open_submission_gate(self):
+        """Admit requests after the replica has finished resuming its engines."""
+        self._rejecting = False
         self._submission_paused = False
         self._resume_event.set()
-        if self.node_rank != 0:
-            return
-        await self.engine.resume_generation()
+
+    async def resume_generation(self):
+        """Resume generation after abort_all_requests (pause_generation)."""
+        await self.resume_engine_generation()
+        await self.open_submission_gate()
+
+    async def _park_until_admitted(self, request_id: str) -> Optional[TokenOutput]:
+        """Wait out a closed gate, or fail the request when the gate rejects late arrivals.
+
+        Returns None once the request is admitted, or an aborted TokenOutput that tells the
+        client to re-route. Rejection is checked before waiting, so a rejecting gate never
+        parks anyone and the request never reaches the engine.
+        """
+        while self._submission_paused:
+            if self._rejecting:
+                logger.debug("rejecting request %s: server left rotation behind a closed gate", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    routed_experts=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            logger.debug("parking request %s until weight sync completes", request_id)
+            await self._resume_event.wait()
+        # No await between the final gate check and the bump: on the actor's single event loop
+        # that keeps "gate closed and _admitting == 0" from being observed mid-admission.
+        self._admitting += 1
+        return None
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -1161,14 +1350,15 @@ class vLLMHttpServer:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
-            repetition_penalty=1.0,
+            repetition_penalty=self.config.repetition_penalty,
             max_new_tokens=self.config.response_length,
         )
 
     def _apply_quantization(self) -> tuple[Optional[str], dict]:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
-        hf_overrides = {}
+        vllm_engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
+        hf_overrides = dict(vllm_engine_kwargs.get("hf_overrides", {}) or {})
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
@@ -1201,17 +1391,38 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+                # Ignore MoE router layers for FP8 quantization.
+                ignored_layers = []
+                hf_cfg = self.model_config.hf_config
+                text_cfg = hf_cfg.get_text_config()
+                num_layers = text_cfg.num_hidden_layers
+                model_type = getattr(hf_cfg, "model_type", "")
+
+                if model_type == "glm5_next":
+                    # Reuse the checkpoint's own modules_to_not_convert list so the
+                    # rollout FP8 scope matches native vLLM exactly.
+                    ckpt_quant = getattr(hf_cfg, "quantization_config", {}) or {}
+                    ignored_layers = list(ckpt_quant.get("modules_to_not_convert", []) or [])
+                    if not ignored_layers:
+                        raise ValueError(
+                            "glm5_next FP8 rollout needs modules_to_not_convert "
+                            "in the checkpoint quantization_config, but it is empty."
+                        )
+                else:
+                    layer_pfx = "language_model.model.layers" if model_type == "glm5_next" else "model.layers"
+                    for layer in range(num_layers):
+                        ignored_layers.append(f"{layer_pfx}.{layer}.mlp.gate")
+                    if model_type == "glm_moe_dsa":
+                        # GLM5.2 DSA: keep rollout kv_b_proj BF16.
+                        for layer in range(num_layers):
+                            ignored_layers.append(f"{layer_pfx}.{layer}.self_attn.kv_b_proj")
 
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
+                    "ignored_layers": ignored_layers,
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
@@ -1220,7 +1431,11 @@ class vLLMHttpServer:
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
-        if quantization is None and model_quantization_config.get("quant_method") == "fp8":
+        if (
+            quantization is None
+            and "quantization_config" not in hf_overrides
+            and model_quantization_config.get("quant_method") == "fp8"
+        ):
             apply_vllm_quant_patches()
             os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
@@ -1252,6 +1467,9 @@ class vLLMHttpServer:
         to be restored by actor weight sync after level 2 sleep discards them.
         lora only update adapter weights, so set sleep level to 1.
         vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+
+        With resync_base, adapter mode restores the discarded base weights on
+        every update, so it can also use level 2.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1259,9 +1477,28 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        if mtp_rollout_enabled or is_torch_npu_available(check_device=False):
             return 1
+        if self.lora_as_adapter:
+            return 2 if self.model_config.lora.get("resync_base", False) else 1
         return 2
+
+    def _preprocess_sampling_params(self, sampling_params: dict[str, Any]) -> None:
+        """Mutate a request's sampling_params in-place after defaults are filled.
+
+        Runs before SamplingParams is built and before the request is admitted, so an
+        exception fails the request without touching the admission gate.
+        """
+
+    def _postprocess_output(
+        self, output: TokenOutput, final_res: RequestOutput, sampling_params: SamplingParams
+    ) -> TokenOutput:
+        """Return the output of a request that reached the engine, including aborted ones.
+
+        Runs after the admission counter is released, so an exception fails only this
+        request. Requests rejected at the admission gate never reach this hook.
+        """
+        return output
 
     async def _sleep_hybrid(self):
         """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
@@ -1272,7 +1509,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), mode="keep")
         await self.engine.reset_encoder_cache()
 
 
@@ -1340,7 +1577,7 @@ class vLLMReplica(RolloutReplica):
                 ),
                 runtime_env={"env_vars": env_vars},
                 name=name,
-                max_concurrency=self.max_concurrency,
+                max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -1380,13 +1617,28 @@ class vLLMReplica(RolloutReplica):
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
-    async def abort_all_requests(self) -> dict[str, Any]:
-        """Abort all ongoing generation requests across all servers.
+    async def abort_all_requests(
+        self,
+        reject_request: bool = False,
+        reset_prefix_cache: bool = True,
+        abort_only: bool = False,
+    ) -> dict[str, Any]:
+        """Abort in-flight requests on every server.
 
-        Returns:
-            dict[str, Any]: Combined abort results from all servers.
+        abort_only=False (default) also closes admission. See
+        vLLMHttpServer.abort_all_requests(). reset_prefix_cache and
+        reject_request apply only when abort_only is False.
         """
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(
+            *[
+                server.abort_all_requests.remote(
+                    reject_request=reject_request,
+                    reset_prefix_cache=reset_prefix_cache,
+                    abort_only=abort_only,
+                )
+                for server in self.servers
+            ]
+        )
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []
@@ -1400,8 +1652,12 @@ class vLLMReplica(RolloutReplica):
         }
 
     async def resume_generation(self):
-        """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+        """Resume the DP engines before admitting requests on any server."""
+        # KV-cache wake-up may already have resumed scheduling. Keep admission
+        # closed during this resume too: new requests could otherwise start a
+        # DP wave while only some ranks are still in the resume collective.
+        await self.servers[0].resume_engine_generation.remote()
+        await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.
@@ -1420,6 +1676,17 @@ class vLLMReplica(RolloutReplica):
                 return r
 
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
+
+    async def snapshot(self) -> dict[str, Any]:
+        """Return live KV-cache and scheduler observations from the head server.
+
+        Colocated / non-PD replicas report the head HTTP server. PD is out of
+        scope: prefill and decode engines have independent KV pools.
+        """
+        # TODO: aggregate prefill + decode snapshots for PD replicas.
+        if self.config.disaggregation.enabled:
+            raise NotImplementedError("vLLMReplica.snapshot() does not support PD disaggregation")
+        return await self.servers[0].snapshot.remote()
 
     async def release_kv_cache(self):
         # Drain all in-flight requests so that vLLM worker threads go idle

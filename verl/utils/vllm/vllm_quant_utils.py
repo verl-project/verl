@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -56,6 +57,7 @@ from verl.utils.vllm.vllm_fp4_utils import (
 )
 from verl.utils.vllm.vllm_fp8_utils import (
     build_fp8_method_patchers,
+    load_dsv41_engram_rows,
     process_fp8_weights_after_loading,
     stage_fp8_params_for_loading,
 )
@@ -80,13 +82,13 @@ class FP8State:
 fp8_state: FP8State = FP8State()
 
 
-def is_fp8_model(vllm_config):
+def is_quantized_model(vllm_config):
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
-        elif is_mxfp8_vllm_ascend(vllm_config.quant_config):
+        elif is_vllm_ascend_mx_quant(vllm_config.quant_config):
             return True
 
     return False
@@ -161,11 +163,58 @@ def _resolve_expert_weight_module(module):
     return module
 
 
+def _get_hf_config(model):
+    """Return the HF config on ``model`` (descending ``.config``/``.model``)."""
+    seen: set[int] = set()
+    obj = model
+    while obj is not None and id(obj) not in seen:
+        seen.add(id(obj))
+        cfg = getattr(obj, "config", None)
+        if cfg is not None and hasattr(cfg, "num_hidden_layers"):
+            return cfg
+        obj = getattr(obj, "model", None)
+    return None
+
+
+def _is_mtp_layer_weight(name, model) -> bool:
+    """True when ``name`` belongs to a next-token-prediction (MTP) layer.
+
+    The actor exports MTP layers while the vLLM runtime omits them when MTP is
+    disabled, so such weights must be skipped during FP8 re-quantization.
+    Determined generically from the HF config: any ``layers.{i}.`` whose index
+    is ``>= num_hidden_layers`` is an MTP layer. No model-specific hardcoding.
+    """
+    cfg = _get_hf_config(model)
+    if cfg is None:
+        return False
+    num_hidden_layers = getattr(cfg, "num_hidden_layers", None)
+    if not num_hidden_layers:
+        return False
+    # ``layers.{i}.`` may appear at any depth (e.g. ``model.layers.45.`` /
+    # ``language_model.model.layers.45.``); match the first ``layers.N.`` token.
+    m = re.search(r"\blayers\.(\d+)\.", name)
+    if m is None:
+        return False
+    return int(m.group(1)) >= num_hidden_layers
+
+
 def get_module_from_param_name(model, name: str):
+    # Translate the checkpoint namespace to the live VLM module hierarchy.
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is not None:
+        mapped = mapper.apply_list([name])
+        if mapped:
+            name = mapped[0]
     # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
     # The module path is all but the last part (the parameter's own name)
     path_parts = name.split(".")
     module_path = path_parts[:-1]
+    # merge=False LoRA base sync: strip trailing ``.base_layer`` so the shard
+    # name (e.g. ``q_a_proj``) becomes the last path segment for fusion lookup.
+    had_base_layer = False
+    if len(module_path) >= 2 and module_path[-1] == "base_layer":
+        had_base_layer = True
+        module_path = module_path[:-1]
     # Replace with the fused model name
     packed_modules_mapping = model.packed_modules_mapping
     reversed_mapping = {
@@ -175,6 +224,9 @@ def get_module_from_param_name(model, name: str):
     }
     if module_path[-1] in reversed_mapping.keys():
         module_path[-1] = reversed_mapping[module_path[-1]]
+    if had_base_layer:
+        # Re-insert base_layer so traversal lands on the FP8 weight, not the LoRA root.
+        module_path.append("base_layer")
 
     current_module = model
     try:
@@ -204,6 +256,11 @@ _FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_pr
 
 
 def is_fp8_weight(name, model):
+    # The actor exports the optional next-token-prediction (MTP) layer, while
+    # the vLLM runtime omits it when MTP is disabled. Skip those weights so
+    # verl does not re-quantize BF16->FP8 for a layer rollout never loads.
+    if _is_mtp_layer_weight(name, model):
+        return False
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
         leaf = name.rsplit(".", 1)[-1]
@@ -221,23 +278,41 @@ def is_fp8_weight(name, model):
     return name in fp8_state.fp8_param_names
 
 
-def is_mxfp8_vllm_ascend(quant_config):
-    try:
-        from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
+def is_w4a8_weight(module) -> bool:
+    """Check if a module holds W4A8 (FP4) quantized weights.
 
-        if isinstance(quant_config, AscendModelSlimConfig):
-            quant_method = quant_config.quant_description.get("quant_method")
-            return quant_method in ["ascend"]
-        return False
+    W4A8 stores weights as packed FP4 in uint8 tensors, unlike W8A8 which
+    uses float8_e4m3fn. This function detects those uint8 weight holders so
+    that ``quant_weights`` can select the correct destination dtype for the
+    incoming BF16 weights.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+
+    is_w4a8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.uint8
+    is_w4a8_moe = (
+        _is_expert_weight_module(module)
+        and module.w13_weight.dtype == torch.uint8
+        and module.w2_weight.dtype == torch.uint8
+    )
+    return is_w4a8_linear or is_w4a8_moe
+
+
+def is_vllm_ascend_mx_quant(quant_config):
+    try:
+        from vllm_ascend.quantization import AscendModelSlimConfig
     except ImportError:
-        # vllm_ascend not installed, so this can't be an Ascend MXFP8 config
+        # vllm_ascend not installed, so this can't be an Ascend MX config
         return False
+    if not isinstance(quant_config, AscendModelSlimConfig):
+        return False
+    mx_quant_types = ("W8A8_MXFP8", "W4A8_MXFP")
+    return any(quant_type in mx_quant_types for quant_type in quant_config.quant_description.values())
 
 
 def restore_mxfp8_weights_for_loading(model):
     for name, module in model.named_modules():
         if (
-            hasattr(module, "_mxfp8_transformed")
+            (hasattr(module, "_mxfp8_transformed") or hasattr(module, "_mxfp4_transformed"))
             and hasattr(module, "quant_method")
             and hasattr(module.quant_method, "quant_method")
             and hasattr(module.quant_method.quant_method, "restore_weights_for_rl_loading")
@@ -261,8 +336,8 @@ def apply_mxfp8_transformation_after_loading(model):
         return
 
     for name, module in model.named_modules():
-        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and hasattr(
-            module, "_mxfp8_original_shapes"
+        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and (
+            hasattr(module, "_mxfp8_original_shapes") or hasattr(module, "_mxfp4_original_shapes")
         ):
             if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
                 logger.debug(f"Applying MXFP8 transformation for module: {name}")
@@ -307,6 +382,24 @@ def refresh_rocm_attention_weight_caches(model):
             module._dsv4_wo_a_bf16 = live
 
 
+def _classify_quant_weight(name, model, is_ascend_mx):
+    """Determine what kind of quantization a weight parameter needs.
+
+    Returns
+        ``"mx_fp8"``   Ascend W8A8_MXFP8 or standard FP8 weight on Ascend NPU,
+        ``"mx_fp4"``   Ascend W4A8_MXFP weight (packed FP4 in uint8),
+        ``"fp8"``      standard blockwise FP8 weight (non-Ascend),
+        ``None``       parameter should pass through unquantized.
+    """
+    if is_fp8_weight(name, model):
+        return "mx_fp8" if is_ascend_mx else "fp8"
+    if is_ascend_mx and name.endswith("weight"):
+        module = get_module_from_param_name(model, name)
+        if is_w4a8_weight(module):
+            return "mx_fp4"
+    return None
+
+
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """Quantize weights to FP8 format using a memory-efficient generator.
 
@@ -322,40 +415,101 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """
 
     if is_deepseek_v4_model(model):
-        yield from iter_deepseek_v4_weights(weights)
+        block_size = 128
+        wbs = getattr(quant_config, "weight_block_size", None)
+        if wbs is None and isinstance(quant_config, dict):
+            wbs = quant_config.get("weight_block_size")
+        if isinstance(wbs, list | tuple) and len(wbs) == 2 and wbs[0] == wbs[1]:
+            block_size = int(wbs[0])
+        yield from iter_deepseek_v4_weights(weights, block_size=block_size)
         return
 
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
-    if is_mxfp8_npu:
+    is_ascend_mx = is_vllm_ascend_mx_quant(quant_config)
+    if is_ascend_mx:
         import torch_npu
     for k, v in weights:
-        if not is_fp8_weight(k, model):
+        quant_type = _classify_quant_weight(k, model, is_ascend_mx)
+        if quant_type is None:
             yield (k, v)
             continue
 
-        # Cast the weight into fp8 and its scale factor
+        # Preserve already-FP8 weights (e.g. Megatron-Bridge exports) — requantizing
+        # already-quantized bytes corrupts the scale.
+        if v.dtype == torch.float8_e4m3fn:
+            yield (k, v)
+            continue
+
+        # Cast the weight into quantized format and its scale factor
         if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to FP8 blockwise: {k}")
-        if is_mxfp8_npu:
+            logger.debug(f"Quantizing to {quant_type} blockwise: {k}")
+        if quant_type in ("mx_fp8", "mx_fp4"):
+            dst_type = torch_npu.float4_e2m1fn_x2 if quant_type == "mx_fp4" else torch_npu.float8_e4m3fn
             param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
                 v.to(dtype),
                 axis=-1,
-                dst_type=torch_npu.float8_e4m3fn,
+                dst_type=dst_type,
             )
             param_scale = param_scale.flatten(-2, -1)
+            if quant_type == "mx_fp4":
+                # W4A8 params are uint8 holding packed FP4 pairs; the mx quant
+                # op returns those bytes as float4_e2m1fn_x2, so reinterpret
+                # them as uint8 to match the parameter dtype.
+                param_lp = param_lp.view(torch.uint8)
         else:
-            param_lp, param_scale = scaled_fp8_blockwise(
-                v.to(dtype),
-                weight_block_size=quant_config.weight_block_size,
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                _normalize_quant_group_shape,
+                scaled_quantize,
             )
+
+            w = v.to(dtype)
+            block = tuple(quant_config.weight_block_size)
+            group = _normalize_quant_group_shape(w, block)
+            # scaled_quantize asserts shape % group == 0; TP-sharded weights may
+            # not be block-aligned. Pad, quantize, then trim back.
+            pad = [0] * (2 * w.ndim)
+            need_pad = False
+            for i in range(w.ndim):
+                if group[i] > 1 and w.shape[i] % group[i] != 0:
+                    pad[2 * (w.ndim - 1 - i) + 1] = group[i] - (w.shape[i] % group[i])
+                    need_pad = True
+            if need_pad:
+                w = torch.nn.functional.pad(w, pad)
+            try:
+                param_lp, param_scale = scaled_quantize(
+                    w,
+                    block,
+                    torch.float8_e4m3fn,
+                    compute_dtype=torch.float32,
+                )
+            except (ImportError, AttributeError):
+                param_lp, param_scale = scaled_fp8_blockwise(
+                    w,
+                    weight_block_size=quant_config.weight_block_size,
+                )
+            if need_pad:
+                w_slices = []
+                for i in range(w.ndim):
+                    if group[i] > 1 and pad[2 * (w.ndim - 1 - i) + 1] > 0:
+                        w_slices.append(slice(0, w.shape[i] - pad[2 * (w.ndim - 1 - i) + 1]))
+                    else:
+                        w_slices.append(slice(None))
+                param_lp = param_lp[tuple(w_slices)]
+                # Scale keeps ceil(orig/block) blocks (vLLM shards scales by ceil);
+                # trim only the fully-padded trailing blocks.
+                s_slices = [slice(None)] * param_scale.ndim
+                for i in range(w.ndim):
+                    if group[i] > 1 and pad[2 * (w.ndim - 1 - i) + 1] > 0 and i < param_scale.ndim:
+                        orig = w.shape[i] - pad[2 * (w.ndim - 1 - i) + 1]
+                        s_slices[i] = slice(0, (orig + group[i] - 1) // group[i])
+                param_scale = param_scale[tuple(s_slices)]
         param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
         yield (k, param_lp)
 
-        if is_mxfp8_npu:
+        if is_ascend_mx:
             yield (k + "_scale", param_scale)
         else:
             yield (k + "_scale_inv", param_scale)
@@ -391,9 +545,12 @@ def process_quanted_weights_after_loading(model, reload_state):
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
+    process_model_weights = getattr(model, "process_weights_after_loading", None)
+    if process_model_weights is not None:
+        process_model_weights()
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
+def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -407,7 +564,20 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
     weights = list(weights)
+    weights, engram_loaded = load_dsv41_engram_rows(weights, model)
+    if engram_loaded and not weights:
+        return engram_loaded
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
+    # Reconcile LoRA ``.base_layer.`` names on the FP8/mxfp4 path too, so a
+    # merge=False base sync doesn't orphan the suffix on an unwrappable fused
+    # target (e.g. DSV4 ``compressor.fused_wkv_wgate``). Scoped to LoRA via
+    # ``peft_config``: only a LoRA base sync exports ``.base_layer.`` names.
+    if peft_config is not None:
+        from verl.utils.vllm.utils import resolve_weight_name
+
+        live_names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+        live_names.update(n for n, _ in model.named_buffers())
+        weights_quantized = [(resolve_weight_name(model, n, live_names), t) for n, t in weights_quantized]
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader
@@ -436,7 +606,7 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
                 param.__class__ = param.orig_type
                 del param.orig_type
 
-    return loaded_params
+    return loaded_params | engram_loaded if engram_loaded else loaded_params
 
 
 def apply_vllm_quant_patches():

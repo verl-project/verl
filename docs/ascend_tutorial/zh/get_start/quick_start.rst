@@ -15,85 +15,85 @@
 --------
 
 - `硬件支持 <#硬件支持>`_
-- `Qwen3-0.6B GSM8K GRPO Quick Start <#qwen3-06b-gsm8k-grpo-quick-start>`_
+- `快速开始 <#快速开始>`_
+   - `环境准备 <#环境准备>`_ 
    - `权重准备 <#权重准备>`_
    - `数据准备 <#数据准备>`_
    - `运行方式 <#运行方式>`_
-- `SGLang 后端使能说明 <#sglang-后端使能说明>`_
-   - `vLLM 后端脚本转换为 SGLang <#vllm-后端脚本转换为-sglang>`_
+- `附录 <#附录>`_
+   - `SGLang 后端使能说明 <#SGLang-后端使能说明>`_
+   - `vLLM 后端脚本转换为 SGLang <#vLLM-后端脚本转换为-SGLang>`_
 
 硬件支持
 --------
 
 - Atlas 200T A2 Box16
-- Atlas 900 A2 PODc
+- Atlas 900 A2 PoD
 - Atlas 800T A3
 
 
 
-Qwen3-0.6B GSM8K GRPO Quick Start
+快速开始
 ---------------------------------
 
-本文面向 Ascend NPU 环境，提供基于 GSM8K 和 Qwen3-0.6B 的最小 GRPO 训练验证流程。
+本文面向 Ascend NPU 环境，提供基于 GSM8K 和 Qwen3-0.6B 的最小化 GRPO 训练验证流程，涵盖四种训推后端组合，帮助用户快速上手。
 
-文档覆盖四种常用训推后端组合，便于用户在 quickstart 阶段快速选择合适的启动脚本。
+验证范围：
 
-运行本文脚本前，请确认已完成 verl Ascend 环境安装。
-环境安装详见 `昇腾安装指南 <./install_guidance.rst>`_ 。
+- 环境入口：verl 入口是否可用；
+- 数据读取：GSM8K数据集是否正确解析；
+- 组件初始化：actor、rollout、reference worker 是否能初始化；
+- 模型推理：vLLM-Ascend/sglang rollout 是否能生成；
+- 端到端链路：训练流程是否能完成首个 step。
+  
+配置提示：
 
-A3 每卡含 2 die，A2 每卡 1 die，如果在 A3 机器上跑示例，需要将 ``n_gpus_per_node`` 设置成 16。
+- 默认配置：示例脚本均使用 Qwen3-0.6B 模型和 GSM8K 数据集。
+- 硬件适配：由于 A3 每卡含 2 Die，运行示例需将 ``n_gpus_per_node`` 参数设置为16（A2 每卡含 1 die）
 
-四个脚本均默认使用 ``Qwen/Qwen3-0.6B`` 和 GSM8K 数据集进行基础链路验证。
+环境准备
+~~~~~~~~~~~~~~~
 
-主要用于检查：
-
-- verl 入口是否可用；
-- 数据是否可读取；
-- actor、rollout、reference worker 是否能初始化；
-- vLLM-Ascend/sglang rollout 是否能生成；
-- 训练链路是否能完成首个 step。
+运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 `昇腾安装指南 <./install_guidance.rst>`_ 。
 
 权重准备
-~~~~~~
+~~~~~~~~~~~~~~~
 
-权重需自行从huggingface上下载
+1. 请自行从Hugging Face上下载 Qwen3-0.6B 模型权重。
 
-脚本中的默认读取权重路径为 ``~/models/Qwen/Qwen3-0.6B``
-
-建议将权重放在该路径下，或者修改脚本中MODEL_PATH指向本地路径
-
+2. 脚本中的默认读取权重路径为 ``~/models/Qwen/Qwen3-0.6B``，建议将权重放在该路径下。若路径不同请修改脚本中的MODEL_PATH指向本地路径。
 
 数据准备
-~~~~~~
+~~~~~~~~~~~~~~~
 
-.. code-block:: bash
+1. 请自行从Hugging Face上下载 GSM8K 原始数据集。
 
-   python3 examples/data_preprocess/gsm8k.py --local_dataset_path /download/path/hf_data/gsm8k/
+2. 执行以下命令（请根据实际数据集路径调整命令）
 
-gsm8k原始数据集需自行从huggingface上下载
+   .. code-block:: bash
 
-生成文件：
+      python3 examples/data_preprocess/gsm8k.py --local_dataset_path /download/path/hf_data/gsm8k/
 
-.. code-block:: text
+   生成如下文件：
 
-   ~/data/gsm8k/train.parquet
-   ~/data/gsm8k/test.parquet
+      .. code-block:: text
+
+         ~/data/gsm8k/train.parquet
+         ~/data/gsm8k/test.parquet
 
 运行方式
-~~~~~~
+~~~~~~~~~~~~~~~
 
-相关脚本均已放置于 ``tests/special_npu/quick_start/`` 路径下
+1. 进入项目目录： ``cd /your/path/verl``。
 
-首先进入verl路径： ``cd /your/path/verl``
+2. 使能CANN环境：执行以下命令。（若您自定义了 CANN 的路径，请根据实际路径调整命令。）
 
-使能CANN环境：如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
+   .. code-block:: bash
 
-.. code-block:: bash
+      source /usr/local/Ascend/ascend-toolkit/set_env.sh
+      source /usr/local/Ascend/nnal/atb/set_env.sh
 
-   source /usr/local/Ascend/ascend-toolkit/set_env.sh
-   source /usr/local/Ascend/nnal/atb/set_env.sh
-
-Quick Start 当前提供四种常用训推后端组合。用户可根据训练后端和 rollout 后端选择对应脚本
+3. 运行脚本：当前提供四种常用训推后端组合，请参考以下表格选择对应脚本：
 
 .. list-table::
    :header-rows: 1
@@ -120,19 +120,23 @@ Quick Start 当前提供四种常用训推后端组合。用户可根据训练�
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-脚本内具体参数说明详见 `训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics.md>`_
+脚本内具体参数说明详见 `训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics.md>`_。
 
-多节点任务拉起详见 `多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice.rst>`_
+多节点任务拉起详见 `多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice.rst>`_。
+
+附录
+-------------------------------------------
 
 SGLang 后端使能说明
--------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <../../../../verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
 
 其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/v0.5.10/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
 
+
 vLLM 后端脚本转换为 SGLang
-~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 如需自行将 vLLM 后端推理脚本转换为 SGLang，需要添加或修改以下参数。
 
@@ -148,9 +152,5 @@ vLLM 后端脚本转换为 SGLang
    ++actor_rollout_ref.rollout.engine_kwargs.sglang.deepep_mode="auto" \
    ++actor_rollout_ref.rollout.engine_kwargs.sglang.moe_a2a_backend="deepep" \
 
-   # MoE 模型多 DP 时必须设置为 True
-   +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False \
-
-   # chunked_prefill 默认关闭
-   +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
-
+   # MoE 模型多 DP 时必须设置为 True（默认为False）
+   +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False \   

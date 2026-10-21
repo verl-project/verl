@@ -203,7 +203,7 @@ case "${DEVICE}" in
     npu)
         ROLLOUT+=(
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
-            actor_rollout_ref.rollout.max_num_batched_tokens=2048
+            actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=2048
         )
         ;;
     *)

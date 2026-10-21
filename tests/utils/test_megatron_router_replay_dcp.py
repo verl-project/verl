@@ -106,6 +106,58 @@ def test_r3_alignment_mask_and_dcp_collection():
     assert [part.shape[0] for part in losses[1]["model_output"]["routed_experts"].unbind()] == [3]
 
 
+def test_r3_alignment_expands_deepseek_v41_compact_image_routes():
+    input_ids = _nested([torch.arange(9)])
+    routes = _nested(
+        [
+            torch.arange(10, 15, dtype=torch.int16).reshape(5, 1, 1),
+        ]
+    )
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, -1, 0, 1, 2, 3, -1, -1, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    aligned_part = aligned.unbind()[0].squeeze(-1).squeeze(-1).tolist()
+    assert aligned_part == [10, 11, 0, 0, 0, 0, 13, 14, 0]
+
+    mask = router_utils.build_r3_replay_mask(
+        input_ids,
+        torch.tensor([[1, 1, 1]], dtype=torch.bool),
+        multimodal,
+    )
+    assert mask.unbind()[0].tolist() == [True, True, False, False, False, False, True, True, False]
+
+
+def test_r3_alignment_keeps_full_deepseek_v41_routes_but_uses_native_image_mask():
+    input_ids = _nested([torch.arange(6)])
+    routes = _nested(
+        [
+            torch.arange(20, 26, dtype=torch.int16).reshape(6, 1, 1),
+        ]
+    )
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, 0, 1, 2, 3, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    torch.testing.assert_close(aligned.unbind()[0], routes.unbind()[0])
+
+
+def test_r3_alignment_accepts_partial_deepseek_v41_image_expansion():
+    input_ids = _nested([torch.arange(10)])
+    # The rollout has six text rows and two visual rows, while the actor
+    # expands the image span to four visual positions.
+    routes = _nested([torch.arange(30, 38, dtype=torch.int16).reshape(8, 1, 1)])
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, -1, 0, 1, 2, 3, -1, -1, -1, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    aligned_part = aligned.unbind()[0].squeeze(-1).squeeze(-1).tolist()
+    assert aligned_part == [30, 31, 32, 33, 0, 0, 34, 35, 36, 37]
+
+
 def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     # The nested branch rides all_gather_object, which pickles the tensor, so int16
     # needs no uint8 reinterpretation here.
@@ -125,3 +177,42 @@ def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     assert routes.device.type == "cpu"
     assert routes.dtype == torch.int16
     assert [part.tolist() for part in routes.unbind()] == [[[[1], [3]], [[2], [4]]]]
+
+
+def test_pp_gather_supports_zero_layer_bshd_stage(monkeypatch):
+    local = torch.empty((1, 3, 0, 2), dtype=torch.int16)
+    remote = torch.arange(12, dtype=torch.int16).reshape(1, 3, 2, 2)
+    collective_calls = []
+
+    monkeypatch.setattr(router_utils, "device_name", "cpu")
+    monkeypatch.setattr(router_utils.mpu, "get_pipeline_model_parallel_group", lambda: object())
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 2)
+
+    def fake_all_gather(tensor_list, tensor, group, async_op=False):
+        collective_calls.append((tuple(tensor.shape), async_op))
+        if tensor.numel() == 1:
+            tensor_list[0].fill_(0)
+            tensor_list[1].fill_(2)
+            return
+        tensor_list[0].zero_()
+        tensor_list[1].copy_(remote.contiguous().view(torch.uint8))
+
+    monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
+    config = SimpleNamespace(pipeline_model_parallel_size=2, virtual_pipeline_model_parallel_size=None)
+
+    routes = router_utils.pp_gather(local, config)
+
+    assert collective_calls == [((1,), False), ((1, 3, 2, 4), False)]
+    assert routes.shape == remote.shape
+    torch.testing.assert_close(routes, remote)
+
+
+def test_reorder_and_merge_vpp_layers_keeps_dense_chunk_placeholder(monkeypatch):
+    empty_chunk = torch.empty((1, 3, 0, 2), dtype=torch.int16)
+    moe_chunk = torch.arange(6, dtype=torch.int16).reshape(1, 3, 1, 2)
+    monkeypatch.setattr(router_utils, "get_schedule_table", lambda *_args: [(0, 0), (0, 1)])
+
+    routes = router_utils.reorder_and_merge_vpp_layers([empty_chunk, moe_chunk], 1, 2, 1)
+
+    assert routes.shape == moe_chunk.shape
+    torch.testing.assert_close(routes, moe_chunk)

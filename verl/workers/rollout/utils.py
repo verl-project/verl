@@ -91,8 +91,9 @@ async def ensure_async_iterator(iterable):
 
 
 def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
+    """Collapse expanded Qwen2-VL/GLM image placeholders before backend processing.
+
+    vLLM expands each placeholder again using the supplied image/video data.
     For example,
     ```
     <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
@@ -103,12 +104,15 @@ def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     if (
         processor is not None
         and hasattr(processor, "image_processor")
-        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
+        and any(
+            name in processor.image_processor.__class__.__name__
+            for name in ("Qwen2VLImageProcessor", "Glm5NextImageProcessor")
+        )
     ):
         prompt_ids = np.array(prompt_ids)
         mask = np.ones(len(prompt_ids), dtype=bool)
         is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
+        mask[1:] &= ~(is_value[1:] & (prompt_ids[1:] == prompt_ids[:-1]))
         return prompt_ids[mask].tolist()
     else:
         return prompt_ids
@@ -138,9 +142,52 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
+def extract_response_topk_logprobs(logprobs, k: int) -> tuple[list[float], np.ndarray, np.ndarray]:
+    """Sampled-token log-probs and the sampler top-k head per generated token.
+
+    ``logprobs`` is a vLLM ``FlatLogprobs`` (``SamplingParams(flat_logprobs=True)``), which stores
+    ``[sampled, top-1, ..., top-k]`` for every position in flat lists. Reshaping them avoids
+    rebuilding one Logprob dict per position on the server event loop, and numpy arrays avoid
+    shipping millions of Python scalars through Ray.
+
+    Returns:
+        Tuple containing:
+            sampled_log_probs: Sampled-token log-probs, length T.
+            ids: Top-k token ids ordered by rank, shape (T, k), dtype int32.
+            log_probs: Top-k log-probs matching ``ids``, shape (T, k), dtype float32.
+    """
+    num_tokens, width = len(logprobs), k + 1
+    if len(logprobs.token_ids) != num_tokens * width:
+        raise ValueError(f"expected {width} logprob entries per generated token, got {len(logprobs.token_ids)} total")
+    ids = np.asarray(logprobs.token_ids, dtype=np.int32).reshape(num_tokens, width)
+    log_probs = np.asarray(logprobs.logprobs, dtype=np.float32).reshape(num_tokens, width)
+    return log_probs[:, 0].tolist(), ids[:, 1:].copy(), log_probs[:, 1:].copy()
+
+
+def _get_rollout_targets(config_file: str, server_addresses: list[str]) -> list[str]:
+    """Merge new rollout server addresses into the existing Prometheus rollout targets."""
+    try:
+        with open(config_file) as f:
+            existing_config = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        existing_config = {}
+
+    existing_targets: list[str] = []
+    if isinstance(existing_config, dict):
+        for scrape_config in existing_config.get("scrape_configs", []):
+            if not isinstance(scrape_config, dict) or scrape_config.get("job_name") != "rollout":
+                continue
+            for static_config in scrape_config.get("static_configs", []):
+                if isinstance(static_config, dict):
+                    existing_targets.extend(static_config.get("targets", []))
+
+    return list(dict.fromkeys([*existing_targets, *server_addresses]))
+
+
 def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):
     """
     Update Prometheus configuration file with server addresses and reload on first node.
+    Existing rollout targets in the configuration file are preserved.
 
     server_addresses: vllm or sglang server addresses
 
@@ -153,6 +200,7 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
 
     try:
         # Get Prometheus config file path from environment or use default
+        rollout_targets = _get_rollout_targets(config.file, server_addresses)
         prometheus_config_json = {
             "global": {"scrape_interval": "10s", "evaluation_interval": "10s"},
             "scrape_configs": [
@@ -160,7 +208,7 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
                     "job_name": "ray",
                     "file_sd_configs": [{"files": ["/tmp/ray/prom_metrics_service_discovery.json"]}],
                 },
-                {"job_name": "rollout", "static_configs": [{"targets": server_addresses}]},
+                {"job_name": "rollout", "static_configs": [{"targets": rollout_targets}]},
             ],
         }
 
