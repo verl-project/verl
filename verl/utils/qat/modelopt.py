@@ -262,7 +262,7 @@ def _nvfp4_quantize_config() -> tuple[list[dict], None]:
     return quant_cfg, None
 
 
-def collect_nvfp4_input_global_scales(model: nn.Module | list[nn.Module]) -> dict[str, torch.Tensor]:
+def collect_nvfp4_input_global_scales(model: nn.Module | list[nn.Module], pp_group=None) -> dict[str, torch.Tensor]:
     """Collect observed expert activation scales under HF-style canonical keys."""
     scales = {}
     chunks = model if isinstance(model, list) else [model]
@@ -271,10 +271,26 @@ def collect_nvfp4_input_global_scales(model: nn.Module | list[nn.Module]) -> dic
             scale = getattr(module, "_verl_input_global_scale", None)
             if scale is None or not name.endswith("input_quantizer") or ".mlp.experts" not in name:
                 continue
-            layer = next((part for part in name.split(".") if part.isdigit()), None)
+            # Megatron layer_number is global and one-based; ModuleList indices
+            # restart on each pipeline stage and virtual-pipeline chunk.
+            layer_module = chunk.get_submodule(name.split(".mlp.experts", 1)[0])
+            layer = layer_module.layer_number - 1
             projection = "gate_up" if "linear_fc1" in name else "down" if "linear_fc2" in name else None
-            if layer is not None and projection is not None:
-                scales[f"layers.{layer}.mlp.experts.{projection}"] = scale.detach()
+            if projection is not None:
+                prefix = f"layers.{layer}.mlp.experts"
+                if ".local_experts." in name:
+                    local_expert = int(name.split(".local_experts.", 1)[1].split(".", 1)[0])
+                    expert = layer_module.mlp.local_expert_indices[local_expert]
+                    prefix += f".{expert}"
+                scales[f"{prefix}.{projection}"] = scale.detach()
+    if pp_group is not None and torch.distributed.get_world_size(pp_group) > 1:
+        # Bridge broadcasts exported weights to every pipeline rank. Carry the
+        # owning stage's observed scalar alongside those global weight names.
+        gathered = [None] * torch.distributed.get_world_size(pp_group)
+        torch.distributed.all_gather_object(
+            gathered, {name: scale.item() for name, scale in scales.items()}, group=pp_group
+        )
+        scales = {name: torch.tensor(value) for stage in gathered for name, value in stage.items()}
     return scales
 
 

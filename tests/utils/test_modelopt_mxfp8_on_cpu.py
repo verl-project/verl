@@ -453,3 +453,150 @@ def test_nvfp4_export_uses_neutral_then_observed_input_scales():
         result[gate_prefix + "weight_global_scale"],
         result[up_prefix + "weight_global_scale"],
     )
+
+
+@pytest.mark.parametrize("layer_numbers", [((1, 2),), ((5, 6),), ((1, 2), (5, 6)), ((5, 6), (9, 10))])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_nvfp4_activation_scales_use_global_pipeline_layer_numbers(layer_numbers, wrapped):
+    from verl.utils.qat.modelopt import collect_nvfp4_input_global_scales
+
+    chunks = []
+    expected = {}
+    for numbers in layer_numbers:
+        chunk = torch.nn.Module()
+        chunk.decoder = torch.nn.Module()
+        chunk.decoder.layers = torch.nn.ModuleList()
+        for number in numbers:
+            layer = torch.nn.Module()
+            layer.layer_number = number
+            layer.mlp = torch.nn.Module()
+            layer.mlp.experts = torch.nn.Module()
+            for projection, key in (("linear_fc1", "gate_up"), ("linear_fc2", "down")):
+                linear = torch.nn.Module()
+                linear.input_quantizer = torch.nn.Module()
+                scale = torch.tensor([float(number * (2 if key == "down" else 1))])
+                linear.input_quantizer._verl_input_global_scale = scale
+                setattr(layer.mlp.experts, projection, linear)
+                expected[f"layers.{number - 1}.mlp.experts.{key}"] = scale
+            chunk.decoder.layers.append(layer)
+        if wrapped:
+            wrapper = torch.nn.Sequential(chunk)
+            chunk = wrapper
+        chunks.append(chunk)
+
+    actual = collect_nvfp4_input_global_scales(chunks)
+    assert actual.keys() == expected.keys()
+    for key, scale in expected.items():
+        torch.testing.assert_close(actual[key], scale, rtol=0, atol=0)
+
+    config = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
+    quantizer = CompressedTensorsWeightQuantizer(config)
+    quantizer.refresh_input_global_scales(chunks)
+    for numbers in layer_numbers:
+        for number in numbers:
+            prefix = f"model.layers.{number - 1}.mlp.experts"
+            weights = torch.ones(2, 64, 32, dtype=torch.bfloat16)
+            result = dict(quantizer([(f"{prefix}.gate_up_proj", weights), (f"{prefix}.down_proj", weights)]))
+            for expert in range(2):
+                for projection, key in (("gate_proj", "gate_up"), ("up_proj", "gate_up"), ("down_proj", "down")):
+                    torch.testing.assert_close(
+                        result[f"{prefix}.{expert}.{projection}.input_global_scale"],
+                        expected[f"layers.{number - 1}.mlp.experts.{key}"],
+                        rtol=0,
+                        atol=0,
+                    )
+
+
+def _nvfp4_pipeline_scale_worker(rank, init_file, virtual_chunks):
+    import torch.distributed as dist
+
+    from verl.utils.qat.modelopt import collect_nvfp4_input_global_scales
+
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
+    try:
+        chunks = []
+        observers = []
+        for vp in range(virtual_chunks):
+            chunk = torch.nn.Module()
+            chunk.decoder = torch.nn.Module()
+            layer = torch.nn.Module()
+            layer.layer_number = vp * 2 + rank + 1
+            layer.mlp = torch.nn.Module()
+            layer.mlp.experts = torch.nn.Module()
+            layer.mlp.experts.linear_fc1 = torch.nn.Module()
+            observer = torch.nn.Module()
+            layer.mlp.experts.linear_fc1.input_quantizer = observer
+            chunk.decoder.layers = torch.nn.ModuleList([layer])
+            chunks.append(chunk)
+            observers.append((layer.layer_number, observer))
+
+        assert collect_nvfp4_input_global_scales(chunks, pp_group=dist.group.WORLD) == {}
+        config = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
+        quantizer = CompressedTensorsWeightQuantizer(config)
+        for step in (1, 2):
+            for number, observer in observers:
+                observer._verl_input_global_scale = torch.tensor([float(number * step)])
+            quantizer.refresh_input_global_scales(chunks, pp_group=dist.group.WORLD)
+            for layer in range(virtual_chunks * 2):
+                prefix = f"model.layers.{layer}.mlp.experts"
+                output = dict(quantizer([(f"{prefix}.gate_up_proj", torch.ones(2, 64, 32))]))
+                for expert in range(2):
+                    for projection in ("gate_proj", "up_proj"):
+                        torch.testing.assert_close(
+                            output[f"{prefix}.{expert}.{projection}.input_global_scale"],
+                            torch.tensor([float((layer + 1) * step)]),
+                            rtol=0,
+                            atol=0,
+                        )
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("virtual_chunks", [1, 2])
+def test_nvfp4_pipeline_scales_reach_every_export_rank(tmp_path, virtual_chunks):
+    torch.multiprocessing.spawn(
+        _nvfp4_pipeline_scale_worker,
+        args=(str(tmp_path / "init"), virtual_chunks),
+        nprocs=2,
+        join=True,
+    )
+
+
+@pytest.mark.parametrize("expert_indices", [(0, 1), (4, 5)])
+def test_nvfp4_sequential_experts_keep_individual_scales(expert_indices):
+    from verl.utils.qat.modelopt import collect_nvfp4_input_global_scales
+
+    chunk = torch.nn.Module()
+    chunk.decoder = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.layer_number = 5
+    layer.mlp = torch.nn.Module()
+    layer.mlp.local_expert_indices = expert_indices
+    layer.mlp.experts = torch.nn.Module()
+    layer.mlp.experts.local_experts = torch.nn.ModuleList()
+    expected = {}
+    for expert_index in expert_indices:
+        expert = torch.nn.Module()
+        for projection, key in (("linear_fc1", "gate_up"), ("linear_fc2", "down")):
+            linear = torch.nn.Module()
+            linear.input_quantizer = torch.nn.Module()
+            scale = torch.tensor(float((expert_index + 1) * (2 if key == "down" else 1)))
+            linear.input_quantizer._verl_input_global_scale = scale
+            setattr(expert, projection, linear)
+            expected[f"layers.4.mlp.experts.{expert_index}.{key}"] = scale
+        layer.mlp.experts.local_experts.append(expert)
+    chunk.decoder.layers = torch.nn.ModuleList([layer])
+    scales = collect_nvfp4_input_global_scales([chunk])
+    assert scales.keys() == expected.keys()
+    config = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
+    quantizer = CompressedTensorsWeightQuantizer(config, input_global_scales=scales)
+    for expert_index in expert_indices:
+        for projection, key in (("gate_proj", "gate_up"), ("up_proj", "gate_up"), ("down_proj", "down")):
+            prefix = f"model.layers.4.mlp.experts.{expert_index}.{projection}"
+            result = dict(quantizer([(f"{prefix}.weight", torch.ones(32, 32))]))
+            torch.testing.assert_close(
+                result[f"{prefix}.input_global_scale"],
+                expected[f"layers.4.mlp.experts.{expert_index}.{key}"].reshape(1),
+                rtol=0,
+                atol=0,
+            )

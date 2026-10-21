@@ -330,11 +330,18 @@ class CompressedTensorsWeightQuantizer:
         """Install ModelOpt-observed NVFP4 activation scales keyed by HF module name."""
         self.input_global_scales = dict(scales)
 
-    def refresh_input_global_scales(self, model: torch.nn.Module) -> None:
+    def refresh_input_global_scales(self, model: torch.nn.Module | list[torch.nn.Module], pp_group=None) -> None:
         """Refresh NVFP4 activation scales from ModelOpt before an export."""
+        from compressed_tensors.quantization import QuantizationStrategy
+
+        if not any(
+            s.input_activations is not None and s.input_activations.strategy == QuantizationStrategy.TENSOR_GROUP
+            for s in self.schemes
+        ):
+            return
         from verl.utils.qat.modelopt import collect_nvfp4_input_global_scales
 
-        scales = collect_nvfp4_input_global_scales(model)
+        scales = collect_nvfp4_input_global_scales(model, pp_group=pp_group)
         if scales:
             self.set_input_global_scales(scales)
 
@@ -345,10 +352,13 @@ class CompressedTensorsWeightQuantizer:
             return None
         scale = self.input_global_scales.get(module)
         if scale is None:
-            match = re.search(r"(?:^|\.)layers\.(\d+)\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)$", module)
+            match = re.search(r"(?:^|\.)layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)$", module)
             if match:
-                projection = "gate_up" if match.group(2) in ("gate_proj", "up_proj") else "down"
-                scale = self.input_global_scales.get(f"layers.{match.group(1)}.mlp.experts.{projection}")
+                projection = "gate_up" if match.group(3) in ("gate_proj", "up_proj") else "down"
+                prefix = f"layers.{match.group(1)}.mlp.experts"
+                scale = self.input_global_scales.get(f"{prefix}.{match.group(2)}.{projection}")
+                if scale is None:
+                    scale = self.input_global_scales.get(f"{prefix}.{projection}")
         if scale is None:
             # The first rollout sync precedes any actor forward, so no observer
             # value exists yet.  One is the neutral CT divisor and leaves the
