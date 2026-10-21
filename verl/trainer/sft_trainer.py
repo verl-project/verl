@@ -49,91 +49,78 @@ logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 class SFTTrainer:
     def _configure_gradient_accumulation(self, dp_size: int) -> None:
-        """Derive and validate the gradient-accumulation contract for this DP size.
+        """Resolve the gradient-accumulation contract, if the config asks for one.
 
-        Gradient accumulation is not a free knob: the engine runs N micro-batches
-        of ``micro_batch_size_per_gpu`` samples, accumulates their gradients, and
-        steps the optimizer once, so the effective per-DP batch is
-        ``micro_batch_size_per_gpu * N``. The configured ``train_batch_size`` stays
-        authoritative -- it decides sampling and the step count -- so it is checked
-        for exactness rather than replaced by a floored per-DP value.
+        The knob is opt-in: with ``data.gradient_accumulation_steps`` unset the
+        trainer keeps its historical behaviour untouched (micro-batches follow
+        ``use_dynamic_bsz`` / ``max_token_len_per_gpu`` or
+        ``micro_batch_size_per_gpu``, and nothing is validated), so a config that
+        never asked for accumulation cannot start failing or training a different
+        batch because of this code.
 
-        ``use_dynamic_bsz`` forms micro-batches from ``max_token_len_per_gpu`` and
-        never consults ``micro_batch_size_per_gpu``, so accumulation is undefined
-        there; that combination is rejected instead of silently training on a
-        different batch than the one requested.
+        When it *is* set, ``train_batch_size`` stays authoritative -- it decides
+        sampling and the step count -- and must agree exactly with
+        ``micro_batch_size_per_gpu * gradient_accumulation_steps *
+        data_parallel_size``, so the effective batch is never silently different
+        from the one requested. Dynamic batch sizing forms micro-batches from
+        ``max_token_len_per_gpu`` and never consults ``micro_batch_size_per_gpu``,
+        so accumulation is undefined there and is rejected.
         """
         data_config = self.config.data
         raw_gas = getattr(data_config, "gradient_accumulation_steps", None)
-        if raw_gas is not None:
-            if isinstance(raw_gas, bool) or int(raw_gas) != raw_gas:
-                raise ValueError(
-                    f"data.gradient_accumulation_steps must be a positive integer or null, "
-                    f"got {raw_gas!r}"
-                )
-            raw_gas = int(raw_gas)
-            if raw_gas < 1:
-                raise ValueError(
-                    f"data.gradient_accumulation_steps must be >= 1, got {raw_gas}"
-                )
-        micro = int(data_config.micro_batch_size_per_gpu or 1)
-
-        if data_config.use_dynamic_bsz:
-            if raw_gas is not None and raw_gas > 1:
-                raise ValueError(
-                    "data.gradient_accumulation_steps > 1 requires data.use_dynamic_bsz=False: "
-                    "dynamic batch sizing forms micro-batches from max_token_len_per_gpu and "
-                    "ignores micro_batch_size_per_gpu, so the accumulation contract is undefined."
-                )
-            # With dynamic batch sizing the micro-batch count follows the token
-            # budget, not micro_batch_size_per_gpu; do not claim a value.
-            self.gradient_accumulation_steps = 1
-            if self.rank == 0:
-                logger.info(
-                    "[sft] use_dynamic_bsz=True: micro-batches follow "
-                    "max_token_len_per_gpu=%s, so gradient_accumulation_steps is not "
-                    "constrained (per_dp_batch=%s)",
-                    data_config.max_token_len_per_gpu,
+        if raw_gas is None:
+            # Not opted in: keep the historical behaviour, but a global batch that
+            # the data-parallel degree cannot tile still trains on
+            # dp * floor(global / dp) samples per step -- fewer than configured.
+            # The sampler's drop_last only equalises shard lengths; it cannot make
+            # a non-divisible batch whole, so say so instead of leaving it silent.
+            if dp_size > 1 and self.global_batch_size % dp_size != 0:
+                logger.warning(
+                    "[sft] train_batch_size=%s is not divisible by data_parallel_size=%s: each "
+                    "step will consume %s samples (%s per rank), not the configured %s. Set "
+                    "train_batch_size to a multiple of the data-parallel degree.",
+                    self.global_batch_size,
+                    dp_size,
+                    dp_size * self.train_batch_size_per_dp,
                     self.train_batch_size_per_dp,
+                    self.global_batch_size,
                 )
+            self.gradient_accumulation_steps = None
             return
-
-        if self.global_batch_size % dp_size != 0:
+        if isinstance(raw_gas, bool) or not float(raw_gas).is_integer():
             raise ValueError(
-                f"train_batch_size={self.global_batch_size} is not divisible by "
-                f"data_parallel_size={dp_size}; every DP rank would not receive the same "
-                "number of samples and the step would train on fewer samples than configured."
+                f"data.gradient_accumulation_steps must be a positive integer, got {raw_gas!r}"
             )
-        if self.global_batch_size != micro * dp_size * (raw_gas if raw_gas else 1):
-            derived = self.global_batch_size // (micro * dp_size)
-            if raw_gas is not None and raw_gas != derived:
-                raise ValueError(
-                    f"gradient_accumulation_steps={raw_gas} contradicts the batch sizes: "
-                    f"train_batch_size={self.global_batch_size} / data_parallel_size={dp_size} "
-                    f"/ micro_batch_size_per_gpu={micro} implies {derived}. Leave "
-                    "gradient_accumulation_steps unset to derive it."
-                )
-            if raw_gas is None and self.global_batch_size % (micro * dp_size) != 0:
-                raise ValueError(
-                    f"train_batch_size={self.global_batch_size} is not a multiple of "
-                    f"micro_batch_size_per_gpu * data_parallel_size = {micro} * {dp_size} = "
-                    f"{micro * dp_size}, so no integral gradient_accumulation_steps exists. "
-                    "Set train_batch_size = micro_batch_size_per_gpu * "
-                    "gradient_accumulation_steps * data_parallel_size."
-                )
-
-        self.gradient_accumulation_steps = self.global_batch_size // (micro * dp_size)
+        gas = int(raw_gas)
+        if gas < 1:
+            raise ValueError(f"data.gradient_accumulation_steps must be >= 1, got {gas}")
+        if data_config.use_dynamic_bsz:
+            raise ValueError(
+                "data.gradient_accumulation_steps requires data.use_dynamic_bsz=False: "
+                "dynamic batch sizing forms micro-batches from max_token_len_per_gpu and "
+                "ignores micro_batch_size_per_gpu, so the accumulation contract is undefined."
+            )
+        micro = int(data_config.micro_batch_size_per_gpu or 1)
+        expected = micro * gas * dp_size
+        if self.global_batch_size != expected:
+            raise ValueError(
+                f"train_batch_size={self.global_batch_size} contradicts "
+                f"micro_batch_size_per_gpu({micro}) * gradient_accumulation_steps({gas}) * "
+                f"data_parallel_size({dp_size}) = {expected}. Set "
+                "train_batch_size = micro_batch_size_per_gpu * "
+                "gradient_accumulation_steps * data_parallel_size."
+            )
+        self.gradient_accumulation_steps = gas
         if self.rank == 0:
             logger.info(
                 "[sft] global_batch=%s dp=%s per_dp=%s micro=%s gradient_accumulation_steps=%s "
-                "(per-rank effective batch %s; micro-batches accumulated before each "
-                "optimizer step)",
+                "(per-rank effective batch %s; micro-batches accumulated per optimizer step)",
                 self.global_batch_size,
                 dp_size,
                 self.train_batch_size_per_dp,
                 micro,
-                self.gradient_accumulation_steps,
-                micro * self.gradient_accumulation_steps,
+                gas,
+                micro * gas,
             )
 
     def __init__(
@@ -345,12 +332,16 @@ class SFTTrainer:
             self.val_sampler = DistributedSampler(
                 self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=True
             )
-            # micro_batch_size_per_gpu doubles as the validation batch size (see
-            # sft_trainer_engine.yaml). Using the per-DP training batch here would
-            # exceed the per-rank val shard whenever gradient accumulation makes the
-            # training batch large, yielding zero val batches and a NaN mean.
-            val_batch_size = max(1, min(int(config.data.micro_batch_size_per_gpu or 1),
-                                        self.train_batch_size_per_dp))
+            # With gradient accumulation the per-DP training batch can exceed the
+            # per-rank validation shard; the loader would then yield zero batches and
+            # the trainer would average an empty list (torch.mean(torch.tensor([])) is
+            # NaN). micro_batch_size_per_gpu doubles as the val batch size (see
+            # sft_trainer_engine.yaml), so bound it there. Without accumulation the
+            # historical batch size is kept exactly.
+            val_batch_size = self.train_batch_size_per_dp
+            if self.gradient_accumulation_steps and self.gradient_accumulation_steps > 1:
+                val_batch_size = max(1, min(int(config.data.micro_batch_size_per_gpu or 1),
+                                            self.train_batch_size_per_dp))
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,
                 batch_size=val_batch_size,
@@ -440,7 +431,7 @@ class SFTTrainer:
             "use_dynamic_bsz": self.config.data.use_dynamic_bsz,
             "max_token_len_per_gpu": self.config.data.max_token_len_per_gpu,
             "micro_batch_size_per_gpu": self.config.data.micro_batch_size_per_gpu,
-            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps or 1,
             "temperature": 1.0,
             "global_batch_size": self.global_batch_size,
             "pad_mode": self.config.data.pad_mode,
