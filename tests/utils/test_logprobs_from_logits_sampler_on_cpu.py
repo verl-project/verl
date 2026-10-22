@@ -46,3 +46,20 @@ def test_chunked_rows_match_whole_tensor_bitwise():
     for chunk_size in (1, 7, 50, 2048):
         out = logprobs_from_logits_sampler(logits, labels, chunk_size=chunk_size)
         assert torch.equal(out, ref)
+
+
+def test_backward_matches_reference_without_keeping_fp32_log_softmax():
+    torch.manual_seed(0)
+    logits = (torch.randn(40, 4096, dtype=torch.bfloat16) * 4).requires_grad_()
+    labels = torch.randint(0, 4096, (40,))
+    ref_logits = logits.detach().clone().requires_grad_()
+    grad_out = torch.randn(40)
+    saved = []
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append((t.dtype, tuple(t.shape))) or t, lambda t: t):
+        out = logprobs_from_logits_sampler(logits, labels, chunk_size=16)
+    out.backward(grad_out)
+    ref = torch.log_softmax(ref_logits.float(), dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    ref.backward(grad_out)
+    assert torch.equal(out, ref.detach())
+    assert torch.equal(logits.grad, ref_logits.grad)
+    assert (torch.float32, (16, 4096)) not in saved, saved
