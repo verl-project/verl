@@ -72,7 +72,12 @@ def enable_batch_invariance():
     created after this call and that profile would throttle them, so every env change outside
     ``BATCH_INVARIANT_ENV`` (which main_ppo already exports) is reverted.
     """
-    from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
+    try:
+        from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
+    except ImportError as e:
+        raise ImportError(
+            "batch_invariant needs a vLLM that provides vllm.model_executor.determinism.batch_invariant"
+        ) from e
 
     from verl.trainer.constants_ppo import BATCH_INVARIANT_ENV
 

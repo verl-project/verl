@@ -130,6 +130,22 @@ def export_batch_invariant_env():
     os.environ.update(BATCH_INVARIANT_ENV)
 
 
+def batch_invariant_requested(config) -> bool:
+    """Whether any FSDP engine in the resolved config sets ``batch_invariant``.
+
+    The flag lives on the shared FSDP engine schema, so the critic and the ref expose it too; every
+    worker that installs the overrides needs the cuBLAS env exported before it starts.
+    """
+    engine_configs = (
+        config.actor_rollout_ref.actor.get("fsdp_config"),
+        config.actor_rollout_ref.ref.get("fsdp_config"),
+        config.critic.get("fsdp"),
+    )
+    return any(
+        engine_config is not None and engine_config.get("batch_invariant", False) for engine_config in engine_configs
+    )
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
