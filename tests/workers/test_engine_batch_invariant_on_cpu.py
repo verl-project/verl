@@ -40,14 +40,25 @@ def test_batch_invariant_rejects_fused_kernels(monkeypatch):
         FSDPEngine(model_config, FSDPEngineConfig(batch_invariant=True), None, None)
 
 
-def test_enable_batch_invariance_installs_vllm_overrides(monkeypatch):
+def test_enable_batch_invariance_installs_vllm_overrides_and_reverts_its_nccl_profile(monkeypatch):
     calls = []
+
+    def init_batch_invariance():
+        calls.append(os.environ["VLLM_BATCH_INVARIANT"])
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+        os.environ["NCCL_MAX_NCHANNELS"] = "1"
+        os.environ["NCCL_PROTO"] = "Simple"
+
     fake = types.ModuleType("vllm.model_executor.determinism.batch_invariant")
-    fake.init_batch_invariance = lambda: calls.append(True)
+    fake.init_batch_invariance = init_batch_invariance
     monkeypatch.setitem(sys.modules, "vllm.model_executor.determinism.batch_invariant", fake)
     monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
+    monkeypatch.delenv("NCCL_MAX_NCHANNELS", raising=False)
+    monkeypatch.setenv("NCCL_PROTO", "LL128")
 
     enable_batch_invariance()
 
-    assert calls == [True]
-    assert os.environ["VLLM_BATCH_INVARIANT"] == "1"
+    assert calls == ["1"]
+    assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    assert "NCCL_MAX_NCHANNELS" not in os.environ
+    assert os.environ["NCCL_PROTO"] == "LL128"
