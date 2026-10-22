@@ -515,9 +515,16 @@ class CheckpointEngineManager:
         """
 
         # 0. update weights for sync training with colocated actor and rollout
+        # No global_steps check here: the only caller without one wakes replicas back up on unchanged
+        # weights, so the current salt still matches what the external KV store holds.
         if self.backend == "naive":
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
+
+        # Salted external KV caches tell weights apart only by global_steps, and the shared KV store
+        # is no longer wiped, so a weight change without a new version would serve stale KV.
+        if global_steps is None and any(r.config.external_kv_cache_invalidation == "salt" for r in self.replicas):
+            raise ValueError("external_kv_cache_invalidation='salt' requires global_steps on every weight update")
 
         # 1. abort and save all unfinished requests for partial rollout
         await self.abort_replicas()
