@@ -75,6 +75,11 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
+# On-policy self-distillation (OPSD) reads the teacher under a privileged context
+# (the verified solution), carried per sample as token ids in the dataset. The key
+# is a data-column name, not a tunable, so it lives here rather than in a config.
+TEACHER_PREFIX_KEY = "teacher_prompt_ids"
+
 
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
@@ -1061,13 +1066,43 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
-                multi_modal_data=output.multi_modal_data,
-                mm_processor_kwargs=output.mm_processor_kwargs,
-                mm_processor_output=getattr(output, "mm_processor_output", None),
-                routing_key=routing_key,
-            )
+            # On-policy self-distillation reads the teacher under a privileged
+            # context (the verified solution) instead of the student's prompt.
+            # The dataset carries it per sample as token ids, so it arrives here
+            # through the non-tensor batch like any other extra_info field.
+            teacher_prefix_ids = None
+            if sample_kwargs is not None:
+                raw_prefix = sample_kwargs.get(TEACHER_PREFIX_KEY)
+                if raw_prefix is not None:
+                    teacher_prefix_ids = [int(t) for t in raw_prefix]
+
+            if teacher_prefix_ids:
+                from verl.experimental.teacher_loop.teacher_manager import realign_teacher_rows
+
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                    sequence_ids=teacher_prefix_ids + response_ids,
+                    multi_modal_data=output.multi_modal_data,
+                    mm_processor_kwargs=output.mm_processor_kwargs,
+                    mm_processor_output=getattr(output, "mm_processor_output", None),
+                    routing_key=routing_key,
+                )
+                # The teacher saw a longer prefix, so its rows are shifted by
+                # delta; put them back on the student's grid before the loss
+                # asserts the two against each other.
+                teacher_ids, teacher_logprobs = realign_teacher_rows(
+                    teacher_ids,
+                    teacher_logprobs,
+                    student_len=len(prompt_ids) + len(response_ids),
+                    delta=len(teacher_prefix_ids) - len(prompt_ids),
+                )
+            else:
+                teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                    sequence_ids=prompt_ids + response_ids,
+                    multi_modal_data=output.multi_modal_data,
+                    mm_processor_kwargs=output.mm_processor_kwargs,
+                    mm_processor_output=getattr(output, "mm_processor_output", None),
+                    routing_key=routing_key,
+                )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 

@@ -173,8 +173,17 @@ class MultiTurnSFTDataset(Dataset):
             self.dataframe = self.dataframe.iloc[indices.tolist()]
             print(f"selected {self.max_samples} random samples out of {total}")
 
-        # Extract messages list from dataframe
-        self.messages = self.dataframe[self.messages_key].apply(convert_nested_value_to_list_recursive).tolist()
+        # Extract messages list from dataframe. Pre-tokenized datasets carry their ids
+        # instead of a conversation, so the column is optional in that case.
+        if self.messages_key in self.dataframe.columns:
+            self.messages = self.dataframe[self.messages_key].apply(convert_nested_value_to_list_recursive).tolist()
+        elif "input_ids" in self.dataframe.columns:
+            self.messages = [[] for _ in range(len(self.dataframe))]
+        else:
+            raise KeyError(
+                f"dataset has neither the messages column {self.messages_key!r} nor pre-tokenized "
+                f"input_ids; columns are {list(self.dataframe.columns)}"
+            )
 
         # Extract tools list from dataframe
         if self.tools_key in self.dataframe.columns:
@@ -378,6 +387,15 @@ class MultiTurnSFTDataset(Dataset):
 
     def __getitem__(self, item):
         row_dict: dict = self.dataframe.iloc[item].to_dict()
+
+        # Pre-tokenized rows: the ids come from an engine that already decided the
+        # exact sequence (a rollout, or the teacher side of a distillation datum).
+        # Re-tokenizing such a row through a chat template cannot be trusted to
+        # reproduce the same ids, so when the caller supplies them they are used
+        # verbatim and the message path is skipped entirely.
+        if row_dict.get("input_ids") is not None:
+            return self._sample_from_token_ids(row_dict)
+
         messages = self._build_messages(row_dict)
         tools = self.tools[item] if self.tools is not None else None
         enable_thinking = (
@@ -428,6 +446,35 @@ class MultiTurnSFTDataset(Dataset):
             vision_token_types = torch.cat(aligned_rows, dim=0).unsqueeze(0)
         else:
             vision_token_types = None
+
+        # Optional teacher distribution, precomputed for distillation (on-policy
+        # self-distillation reads the teacher under a privileged context, which is a
+        # separate forward and therefore a separate pass). Row i holds the teacher's
+        # top-k for the token following position i, the same alignment target_tokens
+        # uses; a length mismatch is a data bug that would train on shifted targets,
+        # so it fails here rather than silently misaligning.
+        teacher_ids = row_dict.get("teacher_ids")
+        teacher_logprobs = row_dict.get("teacher_logprobs")
+        if (teacher_ids is None) != (teacher_logprobs is None):
+            raise ValueError(
+                "teacher_ids and teacher_logprobs must be provided together; "
+                f"got {type(teacher_ids).__name__} and {type(teacher_logprobs).__name__}"
+            )
+        teacher_tensors = {}
+        if teacher_ids is not None:
+            teacher_ids_t = torch.tensor(teacher_ids, dtype=torch.int64)
+            teacher_logprobs_t = torch.tensor(teacher_logprobs, dtype=torch.float32)
+            if teacher_ids_t.shape != teacher_logprobs_t.shape:
+                raise ValueError(
+                    f"teacher_ids {tuple(teacher_ids_t.shape)} and teacher_logprobs "
+                    f"{tuple(teacher_logprobs_t.shape)} must have the same shape"
+                )
+            if teacher_ids_t.shape[0] != input_ids.shape[0]:
+                raise ValueError(
+                    f"teacher rows ({teacher_ids_t.shape[0]}) must match the tokenized length "
+                    f"({input_ids.shape[0]}); the teacher distribution is position-aligned by construction"
+                )
+            teacher_tensors = {"teacher_ids": teacher_ids_t, "teacher_logprobs": teacher_logprobs_t}
 
         print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
         self.sanity_check(input_ids, messages, tools, enable_thinking)
@@ -522,6 +569,7 @@ class MultiTurnSFTDataset(Dataset):
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
+                **teacher_tensors,
             }
             if len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
@@ -544,12 +592,100 @@ class MultiTurnSFTDataset(Dataset):
                 "input_ids": input_ids,
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
+                **teacher_tensors,
             }
             if len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
         else:
             raise ValueError(f"Unknown pad mode {self.pad_mode}")
+
+    def _sample_from_token_ids(self, row_dict: dict) -> dict:
+        """Build one sample from pre-tokenized ids, keeping the caller's exact tokens."""
+        input_ids = torch.tensor(row_dict["input_ids"], dtype=torch.int64)
+        length = input_ids.shape[0]
+        if length > self.max_length:
+            if self.truncation == "error":
+                raise ValueError(f"pre-tokenized row has {length} tokens > max_length={self.max_length}")
+            input_ids = input_ids[: self.max_length]
+            length = input_ids.shape[0]
+
+        raw_mask = row_dict.get("loss_mask")
+        if raw_mask is None:
+            # no mask given: supervise everything after the first token
+            loss_mask = torch.ones(length, dtype=torch.int64)
+            loss_mask[0] = 0
+        else:
+            loss_mask = torch.tensor(raw_mask, dtype=torch.int64)
+            if loss_mask.shape[0] != length:
+                raise ValueError(
+                    f"loss_mask has {loss_mask.shape[0]} entries for {length} tokens; "
+                    "the mask is token-level and must cover every token"
+                )
+
+        teacher_ids = row_dict.get("teacher_ids")
+        teacher_logprobs = row_dict.get("teacher_logprobs")
+        teacher_tensors = {}
+        if (teacher_ids is None) != (teacher_logprobs is None):
+            raise ValueError("teacher_ids and teacher_logprobs must be provided together")
+        if teacher_ids is not None:
+            ids_t = torch.tensor(teacher_ids, dtype=torch.int64)
+            lp_t = torch.tensor(teacher_logprobs, dtype=torch.float32)
+            if ids_t.shape != lp_t.shape or ids_t.shape[0] != length:
+                raise ValueError(
+                    f"teacher rows {tuple(ids_t.shape)} must align with the {length} tokens"
+                )
+            # Padded mode can ship these as tensors: a [max_length, topk] row stacks
+            # into a batch-aligned tensor that the engine slices per micro-batch along
+            # with the logits. No-padding cannot — the rows are ragged and verl's
+            # non-tensor channel does not carry them reliably — so it keeps lists and
+            # the loss builds its tensors from them.
+            # Deliberately NOT attached to the sample: the teacher payload is per-token
+            # and ragged, and every route through the batch (tensor key, nested key,
+            # non-tensor) either fails the batch-dimension contract or is flattened on
+            # the way in. The trainer hands it to the loss function directly, per datum.
+            teacher_tensors = {}
+
+        # passthrough ids: the caller keys precomputed data (teacher distributions) by
+        # this column, and the collator carries scalars as non-tensor batch entries
+        passthrough = {}
+        if row_dict.get("sample") is not None:
+            passthrough["sample"] = int(row_dict["sample"])
+
+        if self.pad_mode == DatasetPadMode.NO_PADDING:
+            return {
+                "input_ids": input_ids,
+                "position_ids": torch.arange(length, dtype=torch.int64),
+                "loss_mask": loss_mask,
+                **teacher_tensors,
+                **passthrough,
+            }
+
+        pad_len = self.max_length - length
+        pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+        padded = torch.full((self.max_length,), pad_id, dtype=torch.int64)
+        padded[:length] = input_ids
+        attention_mask = torch.zeros(self.max_length, dtype=torch.int64)
+        attention_mask[:length] = 1
+        mask_padded = torch.zeros(self.max_length, dtype=torch.int64)
+        mask_padded[:length] = loss_mask
+        res = {
+            "input_ids": padded,
+            "attention_mask": attention_mask,
+            "position_ids": torch.arange(self.max_length, dtype=torch.int64),
+            "loss_mask": mask_padded,
+            **passthrough,
+        }
+        if teacher_tensors and isinstance(teacher_tensors["teacher_ids"], torch.Tensor):
+            pad_k = teacher_tensors["teacher_ids"].shape[1]
+            t_ids = torch.zeros((self.max_length, pad_k), dtype=torch.int64)
+            t_lp = torch.full((self.max_length, pad_k), float("-inf"), dtype=torch.float32)
+            t_ids[:length] = teacher_tensors["teacher_ids"]
+            t_lp[:length] = teacher_tensors["teacher_logprobs"]
+            res["teacher_ids"] = t_ids
+            res["teacher_logprobs"] = t_lp
+        del pad_len
+        return res
 
     def sanity_check(self, input_ids: torch.Tensor, messages: list[dict], tools: list[dict], enable_thinking: bool):
         """Check concatenated input_ids of apply_chat_template to each turn equals

@@ -795,12 +795,26 @@ class MegatronEngine(BaseEngine):
         # compute num_tokens in global batch for loss normalization
         loss_mask = data["loss_mask"]
         batch_num_tokens = (loss_mask.values().sum() if loss_mask.is_nested else loss_mask.sum()).to(get_device_id())
-        if not self.engine_config.dynamic_context_parallel:
+        # Context parallelism: collectives over the data-parallel subgroup do not
+        # complete on this stack once CP is on (the group and its sizes agree on every
+        # rank, yet the reduce hangs). Under CP every rank holds an equal share of the
+        # global batch, so the rank-local count is the global count divided by the DP
+        # factor; normalising by the local count with dp_size=1 yields exactly the same
+        # per-token mean, and the training step no longer blocks on the collective.
+        cp_size = 1
+        try:
+            import megatron.core.parallel_state as _mpu
+
+            cp_size = _mpu.get_context_parallel_world_size()
+        except Exception:  # noqa: BLE001 - non-megatron paths keep the global reduce
+            cp_size = 1
+        local_normalisation = cp_size > 1
+        if not self.engine_config.dynamic_context_parallel and not local_normalisation:
             torch.distributed.all_reduce(
                 batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
             )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
-        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+        tu.assign_non_tensor(data, dp_size=1 if local_normalisation else self.get_data_parallel_size())
 
         # Global routed-token count for the per-token-loss regime (consumed in
         # postprocess_micro_batch_func). Static CP replicates real tokens inside

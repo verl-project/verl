@@ -76,6 +76,48 @@ def _pad_teacher_outputs(
     )
 
 
+def realign_teacher_rows(
+    teacher_ids: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    *,
+    student_len: int,
+    delta: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shift teacher rows onto the student's position grid.
+
+    With privileged context (on-policy self-distillation) the teacher reads
+    ``[teacher_prefix][response]`` while the student reads ``[prompt][response]``.
+    Both score the same response tokens, but a token that the student predicts at
+    position ``i`` sits at teacher position ``i + delta`` where
+    ``delta = len(teacher_prefix) - len(prompt)``.
+
+    Returns arrays of length ``student_len`` (prompt + response), which is the
+    shape the megatron distillation loss requires: it asserts the teacher tensors
+    against ``student_logits.shape[:2]``. Rows that fall outside the teacher's
+    sequence are filled with ``(0, -inf)``; the loss mask zeroes those positions
+    anyway, and ``-inf`` keeps them out of the teacher mass.
+    """
+    if teacher_ids.dim() != 2 or teacher_logprobs.dim() != 2:
+        raise ValueError(
+            f"teacher rows must be 2-D [seq, k], got {tuple(teacher_ids.shape)} and "
+            f"{tuple(teacher_logprobs.shape)}"
+        )
+    if teacher_ids.shape != teacher_logprobs.shape:
+        raise ValueError(
+            f"teacher ids {tuple(teacher_ids.shape)} and logprobs "
+            f"{tuple(teacher_logprobs.shape)} must have the same shape"
+        )
+    topk = teacher_ids.shape[1]
+    ids_out = teacher_ids.new_zeros((student_len, topk))
+    lp_out = teacher_logprobs.new_full((student_len, topk), float("-inf"))
+    src = torch.arange(student_len, device=teacher_ids.device) + delta
+    valid = (src >= 0) & (src < teacher_ids.shape[0])
+    if valid.any():
+        ids_out[valid] = teacher_ids[src[valid]].to(ids_out.dtype)
+        lp_out[valid] = teacher_logprobs[src[valid]].to(lp_out.dtype)
+    return ids_out, lp_out
+
+
 class AsyncTeacherLLMServerManager:
     """Teacher-specific async client used for distillation logprob computation."""
 

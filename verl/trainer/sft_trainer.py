@@ -235,7 +235,47 @@ class SFTTrainer:
         from verl.workers.engine_workers import TrainingWorkerConfig
         from verl.workers.utils.losses import sft_loss
 
-        self.loss_fn = partial(sft_loss, config=None)
+        # Distillation replaces CE when a distillation config is present: the engine
+        # then asks this object for the per-position divergence (it owns the logits)
+        # and reduces it afterwards, exactly like sft_loss does for CE.
+        # Teacher distributions for distillation. They are keyed by the dataset's
+        # `sample` column and attached to each batch here, because they are ragged
+        # [tokens, topk] payloads that the generic collator cannot nest: routing them
+        # through the dataset turned them into empty non-tensor stacks.
+        self.teacher_data = None
+        if self.config.trainer.get("teacher_data", None) is not None:
+            # Registered process-wide: the engine rebuilds the loss object, so path or
+            # payload state has to live outside the instance to reach it.
+            from verl.workers.utils.distill_sft_loss import set_teacher_data
+
+            set_teacher_data(str(self.config.trainer.teacher_data))
+            raw = torch.load(str(self.config.trainer.teacher_data), map_location="cpu")
+            # normalize to {key: (ids, logps)}
+            self.teacher_data = {
+                k: (v["ids"] if isinstance(v, dict) else v[0], v["logps"] if isinstance(v, dict) else v[1])
+                for k, v in raw.items()
+            }
+        self.distillation_config = None
+        if self.config.get("distillation", None) is not None:
+            from verl.workers.config import DistillationConfig
+            from verl.workers.utils.distill_sft_loss import SFTDistillationLoss
+
+            self.distillation_config = (
+                self.config.distillation
+                if isinstance(self.config.distillation, DistillationConfig)
+                else DistillationConfig(**dict(self.config.distillation))
+            )
+            self.loss_fn = SFTDistillationLoss(
+                self.distillation_config,
+                teacher_lookup=self.teacher_data,
+                teacher_data_path=(
+                    str(self.config.trainer.teacher_data)
+                    if self.config.trainer.get("teacher_data", None) is not None
+                    else None
+                ),
+            )
+        else:
+            self.loss_fn = partial(sft_loss, config=None)
 
         config = TrainingWorkerConfig(
             model_type="language_model",
@@ -371,10 +411,27 @@ class SFTTrainer:
             )  # (global_bsz,)
 
         dp_group = self.engine.get_data_parallel_group()
-        dp_size = self.engine.get_data_parallel_size()
+        # Take the size from the group itself. Under context parallelism the engine's
+        # data-parallel size and the group it hands to the collective can differ (the
+        # group may include the CP dimension), and a buffer sized by the wrong one makes
+        # all_gather_into_tensor hang instead of failing.
+        dp_size = torch.distributed.get_world_size(dp_group) if dp_group is not None else 1
+
 
         if dp_size == 1 or dp_group is None:
             return batch_seqlens.tolist()
+
+        # Context parallelism: this gather only feeds the token-count metrics, and the
+        # collective over the data-parallel group did not complete on this stack once CP
+        # was on (consistent group and sizes on every rank, still a PCCP broadcast
+        # timeout). Metrics stay rank-local rather than blocking training.
+        try:
+            import megatron.core.parallel_state as _mpu
+
+            if _mpu.get_context_parallel_world_size() > 1:
+                return batch_seqlens.tolist()
+        except Exception:  # noqa: BLE001 - not a megatron run
+            pass
 
         output_tensor = torch.empty(
             (batch_seqlens.shape[0] * dp_size,),
@@ -437,6 +494,9 @@ class SFTTrainer:
             "pad_mode": self.config.data.pad_mode,
             "pad_token_id": self.model_config.tokenizer.pad_token_id,
         }
+        if self.distillation_config is not None:
+            # keys MegatronEngine's forward off its distillation branch
+            meta_info["distillation_use_topk"] = True
 
         train_time = 0
         total_tokens = 0
@@ -536,12 +596,119 @@ class SFTTrainer:
                     return
 
 
+    def dump_teacher_topk(self) -> None:
+        """Forward-only pass that exports the model's top-k next-token distribution.
+
+        On-policy self-distillation reads the teacher (this same model, under a
+        privileged context) at the student's rollout positions. Those positions
+        usually live in a different dataset, so the distribution is exported once
+        and replayed by the training run instead of being recomputed in-step.
+
+        The dump is self-checked against the engine's own ``log_probs``: for every
+        position whose true next token falls inside the exported top-k, the
+        exported log-prob must equal ``log_probs`` exactly. That is what separates
+        "a file was written" from "the distribution is the model's".
+        """
+        from verl.workers.utils.teacher_dump import DUMP_IDS_KEY, TeacherTopKDump
+
+        cfg = self.config.trainer.teacher_dump
+        out_path = str(cfg.path)
+        topk = int(cfg.topk)
+        max_steps = int(cfg.get("max_steps", 0)) or None
+
+        dump = TeacherTopKDump(topk)
+        meta_info = {
+            "use_remove_padding": self.config.model.use_remove_padding,
+            "use_dynamic_bsz": self.config.data.use_dynamic_bsz,
+            "max_token_len_per_gpu": self.config.data.max_token_len_per_gpu,
+            "micro_batch_size_per_gpu": self.config.data.micro_batch_size_per_gpu,
+            "gradient_accumulation_steps": 1,
+            "temperature": 1.0,
+            "global_batch_size": self.global_batch_size,
+            "pad_mode": self.config.data.pad_mode,
+            "pad_token_id": self.model_config.tokenizer.pad_token_id,
+            # The engine keys its distillation branch off this non-tensor flag.
+            "distillation_use_topk": True,
+        }
+
+        save_tensors = bool(cfg.get("save_tensors", False))
+        is_src = self.engine.is_mp_src_rank_with_outputs()
+        records = []
+        payload_tensors = []
+        for step, raw in enumerate(self.train_dataloader):
+            data = tu.get_tensordict(tensor_dict=raw, non_tensor_dict=meta_info)
+            batch_seqlens = self._get_batch_seqlens(data=data)
+            tu.assign_non_tensor(data, update_lr_scheduler=False, global_token_num=NonTensorData(batch_seqlens))
+            out = self.engine.infer_batch(data, loss_function=dump)
+            model_output = ((out or {}).get("model_output") or {}) if is_src else {}
+
+            if save_tensors:
+                from verl.workers.utils.teacher_dump import capture_dump_tensors
+
+                # Every data-parallel rank holds a different slice of the batch, so a
+                # dump that kept only the source rank's share would silently export
+                # 1/dp_size of the corpus. The collective runs on every rank — the ones
+                # without outputs contribute an empty capture — and costs one gather per
+                # step, which is nothing next to the forward.
+                captured = (
+                    capture_dump_tensors(model_output, data["input_ids"])
+                    if is_src
+                    else {"ids": None, "empty_rank": True}
+                )
+                world = torch.distributed.get_world_size()
+                gathered = [None] * world
+                torch.distributed.all_gather_object(gathered, captured)
+                payload_tensors.extend(g for g in gathered if g is not None and not g.get("empty_rank"))
+
+            if is_src:
+                if DUMP_IDS_KEY not in model_output:
+                    raise RuntimeError(
+                        "the engine produced no top-k: the batch lost its distillation_use_topk flag "
+                        "or the logits processor was not called"
+                    )
+                stats = self._dump_consistency_stats(model_output, data)
+                stats["step"] = step
+                stats["topk"] = topk
+                records.append(stats)
+                log_with_rank(
+                    f"teacher dump step {step}: coverage={stats['coverage']:.4f} "
+                    f"max|dump - log_probs|={stats['max_abs_diff']:.3e}",
+                    logger=logger,
+                    rank=0,
+                    log_only_rank_0=True,
+                )
+            if max_steps is not None and step + 1 >= max_steps:
+                break
+
+        if is_src:
+            payload = {
+                "records": records,
+                "tensors": payload_tensors,
+                "topk": topk,
+                "model_path": self.config.model.path,
+                "pad_mode": str(self.config.data.pad_mode),
+                "use_remove_padding": self.config.model.use_remove_padding,
+            }
+            torch.save(payload, out_path)
+            log_with_rank(f"teacher dump written to {out_path}", logger=logger, rank=0, log_only_rank_0=True)
+
+    @staticmethod
+    def _dump_consistency_stats(model_output, data) -> dict:
+        """Compare the exported top-k against the engine's own log-probs."""
+        from verl.workers.utils.teacher_dump import dump_consistency_stats
+
+        return dump_consistency_stats(model_output, data["input_ids"])
+
 def run_sft(config):
     from verl.utils.distributed import initialize_global_process_group
 
     initialize_global_process_group()
     trainer = SFTTrainer(config=config)
-    trainer.fit()
+    if config.trainer.get("teacher_dump", None) is not None:
+        # Forward-only export of the model's top-k distribution (teacher replay).
+        trainer.dump_teacher_topk()
+    else:
+        trainer.fit()
     destroy_global_process_group()
 
 

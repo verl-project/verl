@@ -122,7 +122,10 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # the loss should be scaled by `num_microbatches` for pp schedule.
         loss = -masked_sum(log_prob_flatten, loss_mask_flatten) / batch_num_tokens * dp_size
     else:
-        response_mask = data["response_mask"].to(bool)
+        # Padded batches from the SFT dataset carry loss_mask; the PPO path uses
+        # response_mask. Both are token-level masks of the same shape.
+        mask = data["loss_mask"] if "loss_mask" in data else data["response_mask"]
+        response_mask = mask.to(bool)
         loss = -masked_sum(log_prob, response_mask) / batch_num_tokens * dp_size
 
     return loss, {}

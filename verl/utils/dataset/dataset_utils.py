@@ -70,7 +70,13 @@ class SFTTensorCollator:
             if isinstance(batch[0][key], torch.Tensor):
                 tensors = [item[key] for item in batch]
                 if tensors[0].dim() >= 2:
-                    final_batch[key] = nested_tensor_from_tensor_list(tensors)
+                    # ragged_idx defaults to the last dim, which assumes every sample's
+                    # leading dims agree (true for vision patches). Position-aligned
+                    # per-token tensors — a teacher distribution of [seq, k] — vary in
+                    # dim 0 instead, and concatenating them along dim 1 raises
+                    # "Sizes of tensors must match except in dimension 1".
+                    same_lead = all(t.shape[0] == tensors[0].shape[0] for t in tensors)
+                    final_batch[key] = nested_tensor_from_tensor_list(tensors, None if same_lead else 1)
                 else:
                     final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
             else:
