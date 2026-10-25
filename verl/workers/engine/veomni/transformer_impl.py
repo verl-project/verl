@@ -225,6 +225,7 @@ class VeOmniEngine(FSDPEngine):
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
         self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
+        self._rollout_weight_quantizer = None
 
     def initialize(self):
         """
@@ -653,7 +654,7 @@ class VeOmniEngine(FSDPEngine):
         # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)
         if converter is not None and hasattr(converter, "export_weights"):
-            return converter.export_weights(self.module), None
+            return self._quantize_for_rollout(converter.export_weights(self.module)), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
@@ -691,7 +692,17 @@ class VeOmniEngine(FSDPEngine):
                         yield name, unsharded_tensor
 
         # TODO: support VeOmni LoRA
-        return param_generator(), None
+        return self._quantize_for_rollout(param_generator()), None
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
+
+    def _quantize_for_rollout(self, per_tensor_param):
+        # A converter that exports the checkpoint's own quantized layout (DeepSeek-V4's FP8 / FP4
+        # experts) meets a pass-through quantizer for that model type, as with Megatron-Bridge.
+        if self._rollout_weight_quantizer is None:
+            return per_tensor_param
+        return self._rollout_weight_quantizer(per_tensor_param)
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
