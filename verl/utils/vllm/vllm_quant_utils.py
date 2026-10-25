@@ -99,6 +99,9 @@ def set_default_vllm_quantization_backends(
         quantization_config = quantization_config.to_dict()
     if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
         return
+    # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
+    if torch.version.hip is not None:
+        return
     for option in ("linear_backend", "moe_backend"):
         engine_kwargs.setdefault(option, "deep_gemm")
     if (

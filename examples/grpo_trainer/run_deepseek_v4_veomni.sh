@@ -156,6 +156,23 @@ TRAINER=(
     trainer.total_training_steps=500
 )
 
+# Environment of every Ray worker, also on a cluster started with a plain `ray start`.
+#   OMP_NUM_THREADS        Ray pins it to 1 in its workers; with enable_fsdp_offload the gradient
+#                          accumulation and the AdamW step run on the host, so give each rank its share of cores
+#   NCCL_DEBUG=VERSION     ROCm: at verl's default WARN, RCCL logs a deprecation warning for every MoE all-to-all
+#   VLLM_ROCM_USE_AITER=1  gfx94x (MI300 series): vLLM's DeepSeek-V4 sparse-attention indexer has no other ROCm path
+EV='+ray_kwargs.ray_init.runtime_env.env_vars'
+n_cores=$({ lscpu -p=CORE,SOCKET 2>/dev/null || true; } | awk '!/^#/' | sort -u | wc -l)
+[ "$n_cores" -gt 0 ] || n_cores=$(nproc)
+RUNTIME_ENV=("${EV}.OMP_NUM_THREADS=\"${OMP_NUM_THREADS:-$((n_cores > n_gpus_per_node ? n_cores / n_gpus_per_node : 1))}\"")
+gpu_arch=$(python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName if torch.version.hip else '')" 2>/dev/null || true)
+if [ -n "$gpu_arch" ]; then
+    RUNTIME_ENV+=("${EV}.NCCL_DEBUG=\"${NCCL_DEBUG:-VERSION}\"")
+fi
+if [[ "$gpu_arch" == gfx94* ]]; then
+    RUNTIME_ENV+=("${EV}.VLLM_ROCM_USE_AITER=\"${VLLM_ROCM_USE_AITER:-1}\"")
+fi
+
 ########################### launch ###########################
 python -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -163,4 +180,5 @@ python -m verl.trainer.main_ppo \
     "${ENGINE_CONFIG[@]}" \
     "${ACTOR_CONFIG[@]}" \
     "${ROLLOUT_CONFIG[@]}" \
+    "${RUNTIME_ENV[@]}" \
     "$@"

@@ -62,9 +62,15 @@ class PlatformROCm(PlatformCUDA):
         # routes SGLang's non-attention kernels (RMSNorm/RoPE/MoE/quant) through AITER.
         # Default to "1" but honor an explicit user override (e.g. SGLANG_USE_AITER=0
         # to fall back to vLLM kernels).
+        #
+        # VLLM_ROCM_DSV4_BPRESHUFFLE: with AITER, vLLM B-preshuffles DeepSeek-V4's attention and
+        # shared-expert FP8 weights after loading and swaps the loadable parameters for plain tensors
+        # in the shuffled layout, so the first rollout weight sync fails (or would land unshuffled
+        # data). verl always updates the rollout weights at runtime, so keep them loadable.
         return {
             **super().rollout_env_vars(),
             "SGLANG_USE_AITER": os.environ.get("SGLANG_USE_AITER", "1"),
+            "VLLM_ROCM_DSV4_BPRESHUFFLE": os.environ.get("VLLM_ROCM_DSV4_BPRESHUFFLE", "0"),
         }
 
     def ray_noset_envvars(self) -> list[str]:
