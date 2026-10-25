@@ -102,13 +102,20 @@ def _resolve_fused_temperature(temperature: float | torch.Tensor) -> float:
 def _use_qat_layer_spec(provider, provider_overrides: dict) -> None:
     """Build the model from ModelOpt's layer spec so QAT can insert its quantizers.
 
+    Only models on Megatron-Bridge's default GPT spec switch. A bridge that sets its own spec (OLMoE,
+    Qwen3-Next, DeepSeek-V3, ...) maps the HF weights onto the modules of that spec, and the ModelOpt spec
+    drops them (OLMoE's full-width QK norm, Qwen3-Next's linear attention). ModelOpt quantizes the TE
+    modules of those specs in place.
+
     With ``use_arbitrary_attention_mask`` unset, ``modelopt_transformer_layer_spec`` turns it on whenever
     CP=1 (the mask is meant for speculative-decoding training), and TE then rejects verl's packed THD
     sequences ("Attention mask type must be padding or padding_causal for qkv_format=thd"). Default it off,
     which keeps the causal mask of the non-QAT TE spec; an explicit ``override_transformer_config`` wins.
     """
-    from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
+    from megatron.bridge.models.gpt_provider import default_layer_spec, modelopt_transformer_layer_spec
 
+    if provider.transformer_layer_spec is not default_layer_spec:
+        return
     provider.transformer_layer_spec = modelopt_transformer_layer_spec
     provider_overrides.setdefault("use_arbitrary_attention_mask", False)
 

@@ -21,19 +21,28 @@ import pytest
 from verl.workers.engine.megatron.transformer_impl import _use_qat_layer_spec
 
 
+def _default_spec(config):
+    return "te-spec"
+
+
 def _modelopt_spec(config):
     return "modelopt-spec"
+
+
+def _bridge_spec(config):
+    return "bridge-spec"
 
 
 @pytest.fixture(autouse=True)
 def _fake_gpt_provider(monkeypatch):
     module = types.ModuleType("megatron.bridge.models.gpt_provider")
+    module.default_layer_spec = _default_spec
     module.modelopt_transformer_layer_spec = _modelopt_spec
     monkeypatch.setitem(sys.modules, "megatron.bridge.models.gpt_provider", module)
 
 
 def test_qat_spec_defaults_arbitrary_attention_mask_off():
-    provider = SimpleNamespace(transformer_layer_spec=None)
+    provider = SimpleNamespace(transformer_layer_spec=_default_spec)
     overrides = {"context_parallel_size": 1}
 
     _use_qat_layer_spec(provider, overrides)
@@ -44,9 +53,20 @@ def test_qat_spec_defaults_arbitrary_attention_mask_off():
 
 
 def test_qat_spec_keeps_an_explicit_override():
-    provider = SimpleNamespace(transformer_layer_spec=None)
+    provider = SimpleNamespace(transformer_layer_spec=_default_spec)
     overrides = {"use_arbitrary_attention_mask": True}
 
     _use_qat_layer_spec(provider, overrides)
 
     assert overrides["use_arbitrary_attention_mask"] is True
+
+
+def test_qat_spec_keeps_a_bridge_specific_spec():
+    # e.g. OLMoE: its bridge loads the full-width QK norm into modules only its own spec builds.
+    provider = SimpleNamespace(transformer_layer_spec=_bridge_spec)
+    overrides = {}
+
+    _use_qat_layer_spec(provider, overrides)
+
+    assert provider.transformer_layer_spec is _bridge_spec
+    assert overrides == {}

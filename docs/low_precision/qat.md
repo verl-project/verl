@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 10/24/2026
+Last updated: 10/25/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -256,3 +256,7 @@ SGLang uses the default CUDA Graph configuration):
   128x128 block-FP8 models are quantized by the trainer-side exporter; DeepSeek-V4
   keeps the private mixed FP8/FP4 layout already exported by Megatron-Bridge.
 - Megatron QAT and the rollout use separate ignore lists and naming conventions. Users must keep them aligned.
+- Megatron QAT builds models on Megatron-Bridge's default GPT layer spec from ModelOpt's layer spec instead. Its
+  expert module (`SequentialMLP`) rejects tensor and expert parallelism together, so set TP=1 or EP=1 for these
+  models. Models whose bridge defines its own spec (OLMoE, Qwen3.5, Qwen3-Next, DeepSeek-V3, ...) keep it, and
+  ModelOpt quantizes their Transformer Engine modules in place.
