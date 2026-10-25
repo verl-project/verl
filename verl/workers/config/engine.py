@@ -320,6 +320,11 @@ class VeOmniEngineConfig(EngineConfig):
         enable_full_shard (bool): Enable fully shard for FSDP training (ZeRO-3), default False
         enable_fsdp_offload (bool): Enable CPU offload for FSDP1, default False
         enable_reentrant (bool): Use reentrant gradient checkpointing, default False
+        broadcast_model_weights_from_rank0 (bool): Rank 0 reads the checkpoint and broadcasts
+            every tensor; False makes every rank read it instead, which avoids pushing the whole
+            model through a slow inter-node network. Default True
+        ep_sharded_stream_load (bool): With broadcast_model_weights_from_rank0=False, each rank
+            reads only its own slice of expert-parallel tensors, default False
         attn_implementation (str): Attention implementation to use.
             1. `eager`
             2. `sdpa`
@@ -428,6 +433,8 @@ class VeOmniEngineConfig(EngineConfig):
     load_checkpoint_path: Optional[str] = None
     enable_fsdp_offload: bool = False
     enable_reentrant: bool = False
+    broadcast_model_weights_from_rank0: bool = True
+    ep_sharded_stream_load: bool = False
     attn_implementation: str = "flash_attention_2"
     moe_implementation: str = "fused"
     # Kernel-backend selectors for VeOmni's per-model patches; passed into

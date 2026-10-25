@@ -57,6 +57,13 @@ enable_fsdp_offload: false
 
 enable_reentrant: false
 
+# Rank 0 reads the checkpoint and broadcasts it; set false to have every rank read it
+# (avoids sending the whole model through a slow inter-node network).
+broadcast_model_weights_from_rank0: true
+
+# With broadcast_model_weights_from_rank0=false, each rank reads only its expert-parallel slice.
+ep_sharded_stream_load: false
+
 # support eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp,
 # veomni_flash_attention_3_with_sp and native-sparse
 attn_implementation: flash_attention_2
