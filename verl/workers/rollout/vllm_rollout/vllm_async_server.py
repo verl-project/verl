@@ -895,6 +895,8 @@ class vLLMHttpServer:
         )
 
     async def wake_up(self, tags: list[str] | None = None):
+        if self.node_rank != 0:
+            return
 
         if self.rollout_mode == RolloutMode.HYBRID:
             # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
@@ -914,7 +916,7 @@ class vLLMHttpServer:
             logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
-        if not self.config.free_cache_engine:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
@@ -925,6 +927,9 @@ class vLLMHttpServer:
             logger.info("skip sleep in standalone mode")
 
     async def clear_kv_cache(self):
+        if self.node_rank != 0:
+            return
+
         # reset_connector=True drops any attached external KV store
         # (e.g. MooncakeStoreConnector) whose entries were computed
         # against the previous model weights. With no connector it
