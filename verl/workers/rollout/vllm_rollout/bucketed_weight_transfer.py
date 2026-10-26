@@ -162,6 +162,16 @@ class BucketedWeightSender:
             get_torch_device().synchronize()
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
             self.socket.recv()
+        except BaseException:
+            # A failed or cancelled producer would leave the receiver waiting for is_last forever.
+            if self.buffer is not None:
+                try:
+                    self.socket.send_pyobj({"abort": True}, flags=zmq.NOBLOCK)
+                    if self.socket.poll(10_000):
+                        self.socket.recv()
+                except zmq.ZMQError:
+                    pass
+            raise
         finally:
             self._cleanup()
 
@@ -284,6 +294,9 @@ class BucketedWeightReceiver:
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
+                if metadata.get("abort"):
+                    self._ack_pending = True
+                    raise RuntimeError("weight sender aborted the transfer before the last bucket")
                 weights, tensor = [], None
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
