@@ -97,6 +97,10 @@ ACTOR=(
     "${ACTOR_TURBO}.distributed.ulysses_parallel_size=${SP_SIZE}"
     "+${ACTOR_TURBO}.distributed.fsdp_plan.apply_modules=${FSDP_APPLY_MODULES}"
     "+${ACTOR_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
+    # Keep CPU offload but use pageable host memory instead of pinned: pinned memory is not
+    # accounted by the container cgroup and its allocation can fail on a busy node
+    # (aclrtMallocHostWithCfg, error 207001).
+    "+${ACTOR_TURBO}.distributed.fsdp_plan.pin_memory=False"
     "+${ACTOR_TURBO}.memory.recompute=True"
     "+${ACTOR_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
     actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
@@ -115,6 +119,8 @@ REF=(
     "${REF_TURBO}.distributed.ulysses_parallel_size=${SP_SIZE}"
     "+${REF_TURBO}.distributed.fsdp_plan.apply_modules=${FSDP_APPLY_MODULES}"
     "+${REF_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
+    # Pageable host memory, same reason as ACTOR above.
+    "+${REF_TURBO}.distributed.fsdp_plan.pin_memory=False"
     "+${REF_TURBO}.memory.recompute=True"
     "+${REF_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
     actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
