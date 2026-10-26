@@ -617,8 +617,51 @@ def get_shard_placement_fn(fsdp_size):
     return shard_placement_fn
 
 
-def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
-    """torch.nn.utils.clip_grad_norm_ cann't run on cpu parameter DTensor"""
+def _all_dim_sharded(grads) -> bool:
+    """True if every gradient is a DTensor on one 1-D mesh that is sharded (not replicated)."""
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:
+        return False
+    if not grads or not all(isinstance(g, DTensor) for g in grads):
+        return False
+    mesh = grads[0].device_mesh
+    # CPU shards (CPUOffloadPolicy) stay on torch's path: the mesh group may be NCCL-only.
+    return mesh.ndim == 1 and all(
+        g.device_mesh == mesh and len(g.placements) == 1 and g.placements[0].is_shard() and g.device.type != "cpu"
+        for g in grads
+    )
+
+
+def _clip_sharded_grad_norm_(grads, max_norm, error_if_nonfinite=False):
+    """L2 clip of sharded DTensor gradients, computed on the local shards.
+
+    The shards of a ``Shard`` placement partition the tensor, so the squared global
+    norm is the all-reduced sum of the squared local norms. A DTensor ``foreach``
+    op re-derives the sharding of all its inputs for each output, which is
+    quadratic in the number of tensors and takes tens of minutes for a per-expert
+    LoRA (tens of thousands of adapter tensors).
+    """
+    local = [g.to_local() for g in grads]
+    squared = torch.stack([norm.double() for norm in torch._foreach_norm(local)]).square().sum()
+    torch.distributed.all_reduce(squared, group=grads[0].device_mesh.get_group())
+    total_norm = squared.sqrt().float()
+    if error_if_nonfinite and not torch.isfinite(total_norm):
+        raise RuntimeError(f"The total norm for gradients from `parameters` is non-finite: {total_norm}")
+    # Same clip coefficient as torch.nn.utils.clip_grad_norm_.
+    clip_coef = torch.clamp(max_norm / (total_norm + 1e-6), max=1.0)
+    torch._foreach_mul_(local, clip_coef)
+    return total_norm
+
+
+def fsdp2_clip_grad_norm_(
+    parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None, local_shards: bool = False
+):
+    """torch.nn.utils.clip_grad_norm_ cann't run on cpu parameter DTensor
+
+    ``local_shards=True`` computes the L2 norm of 1-D-mesh sharded gradients on their local
+    shards (see ``_clip_sharded_grad_norm_``); other gradients keep the default path.
+    """
     from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
 
     if isinstance(parameters, torch.Tensor):
@@ -627,6 +670,8 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
         # prevent generators from being exhausted
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
+    if local_shards and _all_dim_sharded(grads) and float(norm_type) == 2.0:
+        return _clip_sharded_grad_norm_(grads, max_norm, error_if_nonfinite)
     total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
     total_norm = total_norm.to(get_device_id(), non_blocking=True)
     _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
@@ -703,15 +748,85 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     return lora_params
 
 
-def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool) -> OrderedDict:
+def _evenly_dim_sharded(tensor) -> bool:
+    """True for a DTensor on a 1-D mesh whose single ``Shard`` dim splits evenly over the ranks.
+
+    Depends only on the global shape, mesh and placement, so every rank decides the same.
+    """
+    if not _all_dim_sharded([tensor]):
+        return False
+    return tensor.shape[tensor.placements[0].dim] % tensor.device_mesh.size() == 0
+
+
+def iter_full_tensors(named, max_gathered_bytes: int = 1 << 30):
+    """Yield ``(name, full tensor)`` on the local device for FSDP2 parameters.
+
+    Evenly sharded ``DTensor``s are all-gathered in groups: the local shards of a
+    group are concatenated, gathered with one collective, and split back. A
+    per-expert MoE LoRA has tens of thousands of small adapter tensors, and one
+    collective plus one host copy per tensor dominated the export (and kept a
+    full host copy of the adapter on every rank). Anything else is gathered with
+    ``full_tensor()``; plain tensors pass through.
+
+    The gathers are collectives: every rank must consume the generator in the
+    same order.
+    """
+    group: list[tuple[str, torch.Tensor]] = []
+    group_bytes = 0
+
+    def flush():
+        nonlocal group, group_bytes
+        if not group:
+            return
+        mesh = group[0][1].device_mesh
+        size = mesh.size()
+        local = [tensor.to_local().detach() for _, tensor in group]
+        flat = torch.cat([shard.reshape(-1) for shard in local])
+        gathered = torch.empty((size, flat.numel()), dtype=flat.dtype, device=flat.device)
+        dist.all_gather_into_tensor(gathered, flat, group=mesh.get_group())
+        offset = 0
+        for (name, tensor), shard in zip(group, local, strict=True):
+            # [rank, *local shape] -> ranks concatenated along the shard dim.
+            stacked = gathered[:, offset : offset + shard.numel()].reshape(size, *shard.shape)
+            offset += shard.numel()
+            yield name, stacked.movedim(0, tensor.placements[0].dim).reshape(tensor.shape)
+        group, group_bytes = [], 0
+
+    for name, tensor in named.items():
+        if not _evenly_dim_sharded(tensor):
+            yield from flush()
+            yield name, (tensor.full_tensor() if hasattr(tensor, "full_tensor") else tensor).detach()
+            continue
+        nbytes = tensor.numel() * tensor.element_size()
+        if group and (
+            group_bytes + nbytes > max_gathered_bytes
+            or tensor.dtype != group[0][1].dtype
+            or tensor.device_mesh != group[0][1].device_mesh
+        ):
+            yield from flush()
+        group.append((name, tensor))
+        group_bytes += nbytes
+    yield from flush()
+
+
+def collect_lora_params(
+    module: FSDP, layered_summon: bool, base_sync_done: bool, materialize: bool = True
+) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
+
+    ``materialize=False`` (FSDP2 adapter-only export): return the sharded adapter
+    parameters as they are; the caller streams them with ``iter_full_tensors``.
     """
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     lora_params = OrderedDict()
     peft_model = getattr(module, "_fsdp_wrapped_module", module)
+    if not materialize:
+        if not (fsdp_version(module) == 2 and base_sync_done and not layered_summon):
+            raise ValueError("materialize=False needs FSDP2, base_sync_done and no layered_summon")
+        return get_peft_model_state_dict(peft_model)
     if fsdp_version(module) > 0:
         if layered_summon:
             if not base_sync_done:

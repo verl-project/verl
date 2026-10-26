@@ -71,12 +71,15 @@ def squeeze(x):
 def update_model_config(module_config, override_config_kwargs):
     """Update the module config with the override_config_kwargs.
     Args:
-        module_config: The module config from Huggingface Transformers.
+        module_config: The module config from Huggingface Transformers, or a nested config dictionary.
         override_config_kwargs: The kwargs to override the module config.
     """
     for key, val in override_config_kwargs.items():
         if isinstance(val, dict):
-            update_model_config(getattr(module_config, key), val)
+            child = module_config[key] if isinstance(module_config, dict) else getattr(module_config, key)
+            update_model_config(child, val)
+        elif isinstance(module_config, dict):
+            module_config[key] = val
         else:
             setattr(module_config, key, val)
 
@@ -514,6 +517,28 @@ _architecture_to_auto_class = {
     "ForTokenClassification": AutoModelForTokenClassification,
     "ForSequenceClassification": AutoModelForSequenceClassification,
 }
+
+
+# model_type -> "module:Class" of verl-native training models. Such a class sets
+# ``_verl_sharded_init = True`` and provides ``verl_load_sharded(model, path,
+# device, seed)``: the FSDP engine builds it on the meta device on every rank and
+# loads each rank's shard from the released checkpoint after ``apply_fsdp2``.
+_VERL_NATIVE_MODELS = {
+    "minimax_m3_vl": "verl.models.transformers.minimax_m3:MiniMaxM3ForCausalLM",
+    "minimax_m3_tiny": "verl.models.transformers.minimax_m3:MiniMaxM3ForCausalLM",
+    "minimax_m3": "verl.models.transformers.minimax_m3:MiniMaxM3ForCausalLM",
+}
+
+
+def get_verl_native_model_class(hf_config):
+    """The verl-native model class registered for ``hf_config.model_type``, or None."""
+    import importlib
+
+    target = _VERL_NATIVE_MODELS.get(getattr(hf_config, "model_type", None))
+    if target is None:
+        return None
+    module_name, class_name = target.split(":")
+    return getattr(importlib.import_module(module_name), class_name)
 
 
 def get_hf_auto_model_class(hf_config):

@@ -33,7 +33,11 @@ def get_max_position_embeddings(hf_config) -> int:
     if max_len is None:
         text_config = getattr(hf_config, "text_config", None)
         if text_config is not None:
-            max_len = getattr(text_config, "max_position_embeddings", None)
+            max_len = (
+                text_config.get("max_position_embeddings")
+                if isinstance(text_config, dict)
+                else getattr(text_config, "max_position_embeddings", None)
+            )
 
     if max_len is None:
         raise ValueError("max_position_embeddings not found in HFModelConfig!")
