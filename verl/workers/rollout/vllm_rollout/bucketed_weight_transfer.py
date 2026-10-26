@@ -163,12 +163,14 @@ class BucketedWeightSender:
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
             self.socket.recv()
         except BaseException:
-            # A failed or cancelled producer would leave the receiver waiting for is_last forever.
-            if self.buffer is not None:
+            # A sender that fails or is cancelled, even before the buffer handshake, would leave the receiver
+            # waiting forever. POLLOUT waits for the receiver to connect and never fires mid-request.
+            if self.socket is not None:
                 try:
-                    self.socket.send_pyobj({"abort": True}, flags=zmq.NOBLOCK)
-                    if self.socket.poll(10_000):
-                        self.socket.recv()
+                    if self.socket.poll(10_000, zmq.POLLOUT):
+                        self.socket.send_pyobj({"abort": True}, flags=zmq.NOBLOCK)
+                        if self.socket.poll(10_000):
+                            self.socket.recv()
                 except zmq.ZMQError:
                     pass
             raise
@@ -294,9 +296,7 @@ class BucketedWeightReceiver:
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
-                if metadata.get("abort"):
-                    self._ack_pending = True
-                    raise RuntimeError("weight sender aborted the transfer before the last bucket")
+                self._raise_if_aborted(metadata)
                 weights, tensor = [], None
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
@@ -321,6 +321,12 @@ class BucketedWeightReceiver:
         finally:
             self._cleanup()
 
+    def _raise_if_aborted(self, message):
+        """Raise on the sender's abort marker; ``_cleanup`` acks it after releasing the buffer."""
+        if isinstance(message, dict) and message.get("abort"):
+            self._ack_pending = True
+            raise RuntimeError("weight sender aborted the transfer")
+
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
         self.socket = self.zmq_context.socket(zmq.REP)
@@ -329,6 +335,7 @@ class BucketedWeightReceiver:
     def _init_buffer(self):
         """Receive and rebuild communication buffer from sender."""
         comm_metadata = self.socket.recv_pyobj()
+        self._raise_if_aborted(comm_metadata)
         buffer, shm = None, None
         if not self.use_shm:
             handle = comm_metadata
