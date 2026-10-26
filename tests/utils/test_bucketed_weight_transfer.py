@@ -73,6 +73,9 @@ class _FakeTorchDevice:
     def synchronize(self):
         pass
 
+    def empty_cache(self):
+        pass
+
 
 def test_sender_accepts_strided_tensor(monkeypatch):
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
@@ -117,6 +120,39 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert buffer.dtype == torch.uint8
     assert buffer.numel() == weight.nbytes
     assert torch.equal(recovered, weight)
+
+
+def test_sender_failure_aborts_receiver(monkeypatch):
+    """A producer that fails mid-stream must not leave the receiver waiting for the last bucket,
+    where it would block the next update_weights on the same vLLM worker."""
+    import threading
+
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+    monkeypatch.setattr(bucketed_weight_transfer, "is_support_ipc", lambda: False)
+    zmq_handle = _unique_zmq_handle()
+    errors = []
+
+    def receive():
+        receiver = bucketed_weight_transfer.BucketedWeightReceiver(zmq_handle, torch.device("cpu"), use_shm=True)
+        try:
+            receiver.receive_weights(lambda weights, is_last: None)
+        except RuntimeError as e:
+            errors.append(str(e))
+
+    def weights():
+        yield "w", torch.ones(4)
+        raise ValueError("producer failed")
+
+    receiver_thread = threading.Thread(target=receive, daemon=True)
+    receiver_thread.start()
+    sender = bucketed_weight_transfer.BucketedWeightSender(zmq_handle, bucket_size_mb=1, use_shm=True)
+    with pytest.raises(ValueError, match="producer failed"):
+        asyncio.run(sender.async_send_weights(weights()))
+    receiver_thread.join(timeout=PROCESS_TIMEOUT)
+    assert not receiver_thread.is_alive(), "receiver still waiting for the last bucket"
+    assert errors and "aborted" in errors[0]
 
 
 # ---------------------------------------------------------------------------
