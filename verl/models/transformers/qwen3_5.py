@@ -14,6 +14,7 @@
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from inspect import signature
@@ -37,6 +38,8 @@ from verl.utils.ulysses import (
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_MISSING = object()
+
 
 def _call_accepts_kwarg(fn, name: str) -> bool:
     params = signature(fn).parameters
@@ -55,6 +58,59 @@ def _prepare_packed_seq_idx(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: Option
             for i, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True))
         ]
         return torch.cat(seq_idx, dim=0).unsqueeze(0)
+
+
+def _cache_has_previous_state(cache_params, layer_idx: int) -> bool:
+    """Support both the legacy cache flags and Transformers 5 layer caches."""
+    if cache_params is None:
+        return False
+    has_previous_state = getattr(cache_params, "has_previous_state", False)
+    if callable(has_previous_state):
+        try:
+            return bool(has_previous_state(layer_idx, state_idx=0))
+        except TypeError:
+            try:
+                return bool(has_previous_state(layer_idx))
+            except TypeError:
+                return bool(has_previous_state())
+    if isinstance(has_previous_state, Mapping):
+        return bool(has_previous_state[0])
+    return bool(has_previous_state)
+
+
+def _cache_state_at_zero(states):
+    return states[0] if isinstance(states, Mapping) else states
+
+
+def _cache_layer_states(cache_params, layer_idx: int):
+    layers = getattr(cache_params, "layers", None)
+    if layers is not None:
+        layer = layers[layer_idx]
+        return _cache_state_at_zero(layer.conv_states), _cache_state_at_zero(layer.recurrent_states)
+    return cache_params.conv_states[layer_idx], cache_params.recurrent_states[layer_idx]
+
+
+def _qwen35_kernel(self, module, attribute_name: str, module_name: str):
+    kernel = getattr(self, attribute_name, _MISSING)
+    if kernel is _MISSING:
+        kernel = getattr(module, module_name)
+    return kernel
+
+
+def _cache_update_conv_state(cache_params, conv_state: torch.Tensor, layer_idx: int) -> None:
+    update = getattr(cache_params, "update_conv_state", None)
+    if callable(update):
+        update(conv_state, layer_idx)
+    else:
+        cache_params.conv_states[layer_idx] = conv_state
+
+
+def _cache_update_recurrent_state(cache_params, recurrent_state: torch.Tensor, layer_idx: int) -> None:
+    update = getattr(cache_params, "update_recurrent_state", None)
+    if callable(update):
+        update(recurrent_state, layer_idx)
+    else:
+        cache_params.recurrent_states[layer_idx] = recurrent_state
 
 
 def _split_packed_args(
@@ -155,28 +211,46 @@ def _packed_causal_conv1d_fallback(
     return torch.cat(outputs, dim=-1)
 
 
-def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None):
+def _packed_chunk_gated_delta_rule(
+    self,
+    query,
+    key,
+    value,
+    g,
+    beta,
+    cu_seqlens,
+    cu_seqlens_cpu,
+    cp_context=None,
+    initial_state=None,
+    output_final_state: bool = False,
+):
+    chunk_gated_delta_rule = _qwen35_kernel(
+        self,
+        import_module(self.__class__.__module__),
+        "chunk_gated_delta_rule",
+        "torch_chunk_gated_delta_rule",
+    )
     kwargs = {
         "g": g,
         "beta": beta,
-        "initial_state": None,
-        "output_final_state": False,
+        "initial_state": initial_state,
+        "output_final_state": output_final_state,
         "use_qk_l2norm_in_kernel": True,
     }
     if cu_seqlens is None:
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return chunk_gated_delta_rule(query, key, value, **kwargs)
 
     if cp_context is not None:
-        if not _call_accepts_kwarg(self.chunk_gated_delta_rule, "cp_context"):
+        if not _call_accepts_kwarg(chunk_gated_delta_rule, "cp_context"):
             raise NotImplementedError("Qwen3.5 Ulysses SP requires FLA chunk_gated_delta_rule cp_context support.")
         kwargs["cp_context"] = cp_context
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return chunk_gated_delta_rule(query, key, value, **kwargs)
 
-    if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens"):
+    if _call_accepts_kwarg(chunk_gated_delta_rule, "cu_seqlens"):
         kwargs["cu_seqlens"] = cu_seqlens
-        if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens_cpu"):
+        if _call_accepts_kwarg(chunk_gated_delta_rule, "cu_seqlens_cpu"):
             kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return chunk_gated_delta_rule(query, key, value, **kwargs)
 
     outputs = []
     for q_i, k_i, v_i, g_i, beta_i in _split_packed_args(
@@ -185,7 +259,7 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         split_kwargs = dict(kwargs)
         split_kwargs["g"] = g_i
         split_kwargs["beta"] = beta_i
-        out_i, _ = self.chunk_gated_delta_rule(q_i, k_i, v_i, **split_kwargs)
+        out_i, _ = chunk_gated_delta_rule(q_i, k_i, v_i, **split_kwargs)
         outputs.append(out_i)
     return torch.cat(outputs, dim=1), None
 
@@ -202,6 +276,11 @@ def qwen3_5_gated_delta_net_forward(
         raise NotImplementedError("Packed Qwen3.5 linear attention does not support cached forward.")
 
     module = import_module(self.__class__.__module__)
+    causal_conv1d_fn = _qwen35_kernel(self, module, "causal_conv1d_fn", "causal_conv1d_fn")
+    causal_conv1d_update = _qwen35_kernel(self, module, "causal_conv1d_update", "causal_conv1d_update")
+    recurrent_gated_delta_rule = _qwen35_kernel(
+        self, module, "recurrent_gated_delta_rule", "torch_recurrent_gated_delta_rule"
+    )
     hidden_states = module.apply_mask_to_padding_states(hidden_states, attention_mask)
 
     batch_size, seq_len, _ = hidden_states.shape
@@ -224,10 +303,9 @@ def qwen3_5_gated_delta_net_forward(
             model_cu_seqlens = cp_context.cu_seqlens
             model_cu_seqlens_cpu = cp_context.cu_seqlens_cpu
 
-    use_precomputed_states = cache_params is not None and cache_params.has_previous_state and seq_len == 1
-    if cache_params is not None:
-        conv_state = cache_params.conv_states[self.layer_idx]
-        recurrent_state = cache_params.recurrent_states[self.layer_idx]
+    use_precomputed_states = _cache_has_previous_state(cache_params, self.layer_idx)
+    if use_precomputed_states:
+        conv_state, recurrent_state = _cache_layer_states(cache_params, self.layer_idx)
 
     mixed_qkv = self.in_proj_qkv(hidden_states)
     mixed_qkv = mixed_qkv.transpose(1, 2)
@@ -238,8 +316,8 @@ def qwen3_5_gated_delta_net_forward(
     b = self.in_proj_b(hidden_states)
     a = self.in_proj_a(hidden_states)
 
-    if use_precomputed_states:
-        mixed_qkv = self.causal_conv1d_update(
+    if use_precomputed_states and seq_len == 1:
+        mixed_qkv = causal_conv1d_update(
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
@@ -247,10 +325,12 @@ def qwen3_5_gated_delta_net_forward(
             self.activation,
         )
     else:
+        if use_precomputed_states:
+            mixed_qkv = torch.cat([conv_state, mixed_qkv], dim=-1)
         if cache_params is not None:
             conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
-            cache_params.conv_states[self.layer_idx] = conv_state
-        if self.causal_conv1d_fn is not None:
+            _cache_update_conv_state(cache_params, conv_state, self.layer_idx)
+        if causal_conv1d_fn is not None:
             conv_prefix_len = 0
             conv_input = mixed_qkv
             if cp_context is not None:
@@ -262,8 +342,8 @@ def qwen3_5_gated_delta_net_forward(
                 if model_cu_seqlens is not None
                 else None
             )
-            conv_output = self.causal_conv1d_fn(
-                x=conv_input,
+            conv_output = causal_conv1d_fn(
+                conv_input,
                 weight=self.conv1d.weight.squeeze(1),
                 bias=self.conv1d.bias,
                 activation=self.activation,
@@ -284,7 +364,9 @@ def qwen3_5_gated_delta_net_forward(
             else:
                 mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)
         else:
-            mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+            mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, : mixed_qkv.shape[-1]])
+        if use_precomputed_states:
+            mixed_qkv = mixed_qkv[..., -seq_len:]
 
     mixed_qkv = mixed_qkv.transpose(1, 2)
     query, key, value = torch.split(
@@ -307,12 +389,8 @@ def qwen3_5_gated_delta_net_forward(
         query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
         key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
-    if not use_precomputed_states:
-        core_attn_out, last_recurrent_state = _packed_chunk_gated_delta_rule(
-            self, query, key, value, g, beta, model_cu_seqlens, model_cu_seqlens_cpu, cp_context
-        )
-    else:
-        core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+    if use_precomputed_states and seq_len == 1:
+        core_attn_out, last_recurrent_state = recurrent_gated_delta_rule(
             query,
             key,
             value,
@@ -322,9 +400,23 @@ def qwen3_5_gated_delta_net_forward(
             output_final_state=cache_params is not None,
             use_qk_l2norm_in_kernel=True,
         )
+    else:
+        core_attn_out, last_recurrent_state = _packed_chunk_gated_delta_rule(
+            self,
+            query,
+            key,
+            value,
+            g,
+            beta,
+            model_cu_seqlens,
+            model_cu_seqlens_cpu,
+            cp_context,
+            initial_state=recurrent_state if use_precomputed_states else None,
+            output_final_state=cache_params is not None,
+        )
 
     if cache_params is not None:
-        cache_params.recurrent_states[self.layer_idx] = last_recurrent_state
+        _cache_update_recurrent_state(cache_params, last_recurrent_state, self.layer_idx)
 
     core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
     z = z.reshape(-1, self.head_v_dim)
