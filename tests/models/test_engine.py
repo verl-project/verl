@@ -138,7 +138,8 @@ def create_training_config(model_type, strategy, device_count, model):
 
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "megatron"])
-def test_actor_engine(strategy):
+def test_actor_engine(strategy, request):
+    request.addfinalizer(ray.shutdown)
     ray.init()
     device_count = get_torch_device().device_count()
     config = create_training_config(
@@ -255,8 +256,6 @@ def test_actor_engine(strategy):
     print(ppo_metrics)
     wg.to("cpu")
 
-    ray.shutdown()
-
 
 def create_value_model(language_model_path, output_path):
     config = AutoConfig.from_pretrained(language_model_path)
@@ -274,7 +273,7 @@ def create_value_model(language_model_path, output_path):
 
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
-def test_critic_engine(strategy):
+def test_critic_engine(strategy, request):
     device_count = get_torch_device().device_count()
     value_model_path = os.path.expanduser("~/models/test_model")
     language_model_path = get_test_language_model(device_count=device_count)
@@ -283,6 +282,7 @@ def test_critic_engine(strategy):
     torch.manual_seed(1)
     np.random.seed(1)
 
+    request.addfinalizer(ray.shutdown)
     ray.init()
 
     config = create_training_config(
@@ -373,8 +373,6 @@ def test_critic_engine(strategy):
     ppo_metrics = ppo_metrics.get()
     ppo_metrics = tu.get(ppo_metrics, "metrics")
     print(ppo_metrics)
-
-    ray.shutdown()
 
 
 def create_actor_model(tmp_path, config):
