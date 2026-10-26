@@ -1182,7 +1182,7 @@ class vLLMHttpServer:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
-            # pause_generation with wait_for_inflight_requests=False will:
+            # pause_generation with mode="abort" will:
             # 1. Set engine to paused state (new requests are accepted but not scheduled)
             # 2. Abort all in-flight requests
             # 3. Wait for requests to drain
@@ -1193,7 +1193,7 @@ class vLLMHttpServer:
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
             await self.engine.pause_generation(
-                wait_for_inflight_requests=False,
+                mode="abort",
                 clear_cache=reset_prefix_cache,
             )
 
