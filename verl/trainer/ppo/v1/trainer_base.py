@@ -1759,11 +1759,12 @@ class PPOTrainer(ABC):
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
-        # Only persist fields here. The return value is a fresh KVBatchMeta without
-        # controller-owned extra_info such as the UID mini-batch layout.
-        tq.kv_batch_put(
+        mini_batch_layout = batch.extra_info.get(_MINIBATCH_LAYOUT_KEY)
+        batch = tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
+        if mini_batch_layout is not None:
+            batch.extra_info[_MINIBATCH_LAYOUT_KEY] = mini_batch_layout
 
         data = DataProto(batch=data.to_padded_tensor())
 
@@ -1892,10 +1893,10 @@ class PPOTrainer(ABC):
             output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
 
-        # Preserve the original KVBatchMeta for the same reason as in
-        # _compute_old_log_prob: TransferQueue owns fields, while the controller
-        # owns optimizer layout metadata.
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+        mini_batch_layout = batch.extra_info.get(_MINIBATCH_LAYOUT_KEY)
+        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+        if mini_batch_layout is not None:
+            batch.extra_info[_MINIBATCH_LAYOUT_KEY] = mini_batch_layout
 
         return batch
 
