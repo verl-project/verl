@@ -14,7 +14,7 @@ _RESHARD_BUFFER_BYTES = 64 * 1024 * 1024
 
 @lru_cache(maxsize=32)
 def _reshard_plan(shape, mesh_shape, ranks, shard_dims, target_ep, rank, element_size, buffer_bytes):
-    """Plan disjoint expert/row tiles; no weight or metadata gather is needed."""
+    """Plan disjoint expert/matrix tiles; no weight or metadata gather is needed."""
     owners = {}
     for source_rank, coordinate in zip(ranks, product(*(range(size) for size in mesh_shape)), strict=True):
         sizes, offsets = list(shape), [0, 0, 0]
@@ -26,14 +26,14 @@ def _reshard_plan(shape, mesh_shape, ranks, shard_dims, target_ep, rank, element
             offsets[dim] += offset
             sizes[dim] = min(chunk, sizes[dim] - offset)
         if all(sizes):
-            owners.setdefault((*offsets[:2], *sizes[:2]), []).append(source_rank)
+            owners.setdefault((*offsets, *sizes), []).append(source_rank)
 
     world_size, local_experts = len(ranks), shape[0] // target_ep
     sends, receives = {}, {}
     send_degree, recv_degree = [0] * world_size, [0] * world_size
     largest = 0
     target_start = rank % target_ep * local_experts
-    for (expert_start, row_start, expert_count, row_count), replicas in owners.items():
+    for (expert_start, row_start, column_start, expert_count, row_count, column_count), replicas in owners.items():
         first_ep = expert_start // local_experts
         last_ep = (expert_start + expert_count - 1) // local_experts
         for replica_start in range(0, world_size, target_ep):
@@ -48,14 +48,14 @@ def _reshard_plan(shape, mesh_shape, ranks, shard_dims, target_ep, rank, element
                 )
                 begin = max(expert_start, target * local_experts)
                 end = min(expert_start + expert_count, (target + 1) * local_experts)
-                count = (end - begin) * row_count * shape[2]
+                count = (end - begin) * row_count * column_count
                 send_degree[source] += 1
                 recv_degree[destination] += 1
                 largest = max(largest, count)
                 if source == rank:
-                    sends[destination] = ((begin - expert_start) * row_count * shape[2], count)
+                    sends[destination] = ((begin - expert_start) * row_count * column_count, count)
                 if destination == rank:
-                    receives[source] = (begin - target_start, row_start, row_count, count)
+                    receives[source] = (begin - target_start, row_start, column_start, row_count, column_count, count)
     degree = max(*send_degree, *recv_degree)
     chunk = max(1, buffer_bytes // (element_size * degree))
     return tuple(sorted(sends.items())), tuple(sorted(receives.items())), chunk, (largest + chunk - 1) // chunk
@@ -65,10 +65,10 @@ def _exchange_expert_shards(param, device, target_ep):
     """Send source eFSDP shards directly to their target expert owners."""
     mesh = param.device_mesh
     shard_dims = tuple(placement.dim if isinstance(placement, Shard) else -1 for placement in param.placements)
-    if any(dim not in (-1, 0, 1) for dim in shard_dims) or any(
+    if any(dim not in (-1, 0, 1, 2) for dim in shard_dims) or any(
         not isinstance(placement, (Shard, Replicate)) for placement in param.placements
     ):
-        raise ValueError("Kimi reshard requires expert Shard(0), matrix-row Shard(1), or Replicate placements")
+        raise ValueError("Kimi reshard requires expert/matrix Shard(0/1/2) or Replicate placements")
     rank, world_size = dist.get_rank(), dist.get_world_size()
     sends, receives, chunk, rounds = _reshard_plan(
         tuple(param.shape),
@@ -90,27 +90,38 @@ def _exchange_expert_shards(param, device, target_ep):
             size = max(0, min(chunk, count - begin))
             send_sizes[peer] = size
             pieces.append(local.narrow(0, offset + min(begin, count), size))
-        for peer, (_, _, _, count) in receives:
+        for peer, (_, _, _, _, _, count) in receives:
             recv_sizes[peer] = max(0, min(chunk, count - begin))
         send_buffer = torch.cat(pieces) if pieces else local.new_empty(0)
         recv_buffer = local.new_empty(sum(recv_sizes))
         dist.all_to_all_single(recv_buffer, send_buffer, recv_sizes, send_sizes)
         offset = 0
-        for peer, (expert, row, rows, _) in receives:
+        for peer, (expert, row, column, rows, columns, _) in receives:
             size = recv_sizes[peer]
             position, stop = begin, begin + size
-            expert_elements = rows * param.shape[2]
+            expert_elements = rows * columns
             while position < stop:
                 index, within = divmod(position, expert_elements)
                 complete = (stop - position) // expert_elements if within == 0 else 0
                 if complete:
                     length = complete * expert_elements
-                    destination = target[expert + index : expert + index + complete, row : row + rows]
-                    destination.copy_(recv_buffer.narrow(0, offset, length).view(complete, rows, param.shape[2]))
+                    destination = target[
+                        expert + index : expert + index + complete, row : row + rows, column : column + columns
+                    ]
+                    destination.copy_(recv_buffer.narrow(0, offset, length).view(complete, rows, columns))
                 else:
-                    length = min(stop - position, expert_elements - within)
-                    destination = target[expert + index, row : row + rows].view(-1)
-                    destination.narrow(0, within, length).copy_(recv_buffer.narrow(0, offset, length))
+                    local_row, local_column = divmod(within, columns)
+                    complete_rows = min(rows - local_row, (stop - position) // columns) if local_column == 0 else 0
+                    if complete_rows:
+                        length = complete_rows * columns
+                        target[
+                            expert + index, row + local_row : row + local_row + complete_rows, column : column + columns
+                        ].copy_(recv_buffer.narrow(0, offset, length).view(complete_rows, columns))
+                    else:
+                        length = min(stop - position, columns - local_column)
+                        target[
+                            expert + index, row + local_row, column + local_column : column + local_column + length
+                        ].copy_(recv_buffer.narrow(0, offset, length))
                 position += length
                 offset += length
     return target

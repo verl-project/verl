@@ -254,6 +254,7 @@ for role in actor ref; do
         "$prefix.fsdp_config.turbo_config.distributed.expert_parallel_size=$turbo_ep_size"
         "+$prefix.fsdp_config.turbo_config.distributed.ep_plan.apply_modules=['language_model.model.layers.{*}.block_sparse_moe.experts']"
         "+$prefix.fsdp_config.turbo_config.distributed.ep_plan.dispatcher=custom_ep_forward_fused"
+        "++$prefix.fsdp_config.turbo_config.distributed.ep_plan.efsdp_shard_placements=[[gate_up_proj,2],[down_proj,1]]"
         "$prefix.fsdp_config.turbo_config.distributed.expert_fully_shard_parallel_size=$turbo_efsdp_size"
         "+$prefix.fsdp_config.turbo_config.distributed.ep_plan.apply_efsdp_modules=['language_model.model.layers.{*}.block_sparse_moe.experts']"
         "$prefix.fsdp_config.reshard_after_forward=True"
