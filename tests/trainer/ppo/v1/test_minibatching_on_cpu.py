@@ -182,3 +182,55 @@ def test_balance_batch_allows_partial_final_uid_minibatches(monkeypatch):
 
     assert_uid_minibatches(config.actor_rollout_ref.actor.ppo_mini_batch_size, [10, 8], [2, 1])
     assert_uid_minibatches(config.critic.ppo_mini_batch_size, [4, 6, 6, 2], [1, 1, 1, 0])
+
+
+def test_step_restores_minibatch_layout_after_metadata_rebuild():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = _minibatching_config(dynamic=True)
+    trainer.config.actor_rollout_ref.rollout.temperature = 1.0
+    trainer.global_steps = 1
+    trainer.use_critic = False
+    trainer.use_reference_policy = False
+    trainer.actor_step_residency = False
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=object())
+
+    layout = {
+        "unit_prompt_count": 2,
+        "unit_global_sizes": [4],
+        "unit_padding_counts": [0],
+    }
+    source_batch = KVBatchMeta(
+        partition_id="test",
+        keys=["p0_0_0", "p0_0_1", "p1_0_0", "p1_0_1"],
+        tags=[{"seq_len": 8}] * 4,
+        extra_info={},
+    )
+
+    trainer.replay_buffer = SimpleNamespace(sample=lambda **kwargs: (source_batch, {}))
+
+    def balance_batch(batch, metrics):
+        batch.extra_info["_minibatch_layout"] = layout
+        return batch
+
+    trainer._balance_batch = balance_batch
+
+    def rebuild_metadata(batch, metrics):
+        return KVBatchMeta(
+            partition_id=batch.partition_id,
+            keys=list(batch.keys),
+            tags=list(batch.tags),
+            extra_info={},
+        )
+
+    trainer._compute_old_log_prob = rebuild_metadata
+    trainer._compute_advantage = rebuild_metadata
+
+    def update_actor(batch, metrics):
+        assert batch.extra_info["_minibatch_layout"] == layout
+        return batch
+
+    trainer._update_actor = update_actor
+
+    result = trainer._step_once(metrics={}, timing_raw={}, sample_batch_size=2)
+
+    assert result.extra_info["_minibatch_layout"] == layout

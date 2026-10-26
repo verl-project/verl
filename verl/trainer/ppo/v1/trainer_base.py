@@ -599,6 +599,9 @@ class PPOTrainer(ABC):
 
         # 3. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
+        # TransferQueue writes can rebuild KVBatchMeta and drop caller-owned extra_info.
+        # Keep the controller-computed layout locally so optimizer updates can restore it.
+        mini_batch_layout = batch.extra_info[_MINIBATCH_LAYOUT_KEY]
 
         # 4. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -621,11 +624,13 @@ class PPOTrainer(ABC):
         # 8. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
+                batch.extra_info.setdefault(_MINIBATCH_LAYOUT_KEY, mini_batch_layout)
                 batch = self._update_critic(batch, metrics=metrics)
 
         # 9. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
+                batch.extra_info.setdefault(_MINIBATCH_LAYOUT_KEY, mini_batch_layout)
                 batch = self._update_actor(batch, metrics=metrics)
 
         return batch
@@ -1754,7 +1759,9 @@ class PPOTrainer(ABC):
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
-        batch = tq.kv_batch_put(
+        # Only persist fields here. The return value is a fresh KVBatchMeta without
+        # controller-owned extra_info such as the UID mini-batch layout.
+        tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
 
@@ -1885,7 +1892,10 @@ class PPOTrainer(ABC):
             output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
 
-        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+        # Preserve the original KVBatchMeta for the same reason as in
+        # _compute_old_log_prob: TransferQueue owns fields, while the controller
+        # owns optimizer layout metadata.
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
 
         return batch
 
