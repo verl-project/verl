@@ -92,6 +92,9 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
         def __init__(self, moe):
             FusedMoEMethodBase.__init__(self, moe)
             self.weight_dtype = "mxfp4"
+            self.activation_key = kFp8Dynamic128Sym
+            self.is_k3_situ_aiter = False
+            self.is_k3_situ_int4_gfx942 = False
             self.group_size = _MXFP4_SF_BLOCK
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe, activation_key=kFp8Dynamic128Sym)
             self.max_capture_size = moe.max_capture_size
