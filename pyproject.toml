@@ -18,7 +18,7 @@ requires-python = ">=3.10,<3.13"
 #
 # All backends use torch 2.13.0: vllm/sglang/fsdp/megatron/veomni on cu130, cpu on cpu
 # wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
-# torchaudio stays at 2.11.0 — its last release, and what vllm 0.29 / sglang
+# torchaudio stays at 2.11.0 — its last release, and what vllm 0.32 / sglang
 # 0.5.20 themselves pin alongside torch 2.13.
 # DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
 # cuDNN/NCCL: torch's wheel pins them, so after `uv lock` sync CUDNN_VERSION /
@@ -90,14 +90,14 @@ vllm = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    # PyPI's 0.29.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
+    # PyPI's 0.32.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
     # no wheelhouse routing and no source build.
-    "vllm==0.29.0",
-    # flashinfer is a transitive dep vllm 0.29 hard-pins to ==0.6.18 (pure-python
-    # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
-    # vllm 0.29 needs transformers>=5.10.4; 5.12.1 is the project-wide pin
-    # (enforced in override-dependencies below).
-    "transformers==5.12.1",
+    "vllm==0.32.0",
+    # flashinfer is a transitive dependency supplied from PyPI rather than the
+    # wheelhouse so vllm can select its compatible version.
+    # transformers 5.16.1 is the project-wide pin (enforced in
+    # override-dependencies below).
+    "transformers==5.16.1",
 ]
 
 sglang = [
@@ -114,9 +114,8 @@ sglang = [
     # sglang hard-deps flash-attn-4 but we EXCLUDE it (it collides with the
     # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
     # imported lazily (fa4 backend only), so the default backends work.
-    # sglang 0.5.20 hard-pins transformers==5.12.1, which is also the project-wide
-    # override below.
-    "transformers==5.12.1",
+    # sglang's transformers requirement is settled by the project-wide override.
+    "transformers==5.16.1",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -191,10 +190,9 @@ megatron = [
 # `uv run --extra vllm --extra veomni -- python -m verl.trainer.main_ppo ...`.
 # veomni itself is installed deps-free (empty requires-dist in
 # [[tool.uv.dependency-metadata]] below): its real metadata pins
-# datasets<=2.21.0, which would downgrade the shared datasets dependency. Some
-# VeOmni-generated models additionally need an on-the-fly Transformers overlay
-# (`uv run --with transformers==5.16.1`); the locked 5.12.1 covers the Qwen / GPT-OSS
-# models the examples use.
+# datasets<=2.21.0, which would downgrade the shared datasets dependency. The
+# project-wide transformers 5.16.1 pin covers VeOmni-generated models as well as
+# the Qwen / GPT-OSS models used by the examples.
 veomni = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch213]",
@@ -229,7 +227,7 @@ ci = [
 # above instead, which bundles the matching fsdp stack. Installed deps-free (empty
 # requires-dist in [[tool.uv.dependency-metadata]] below): its real metadata pins
 # datasets<=2.21.0, which would downgrade the shared datasets dependency.
-# VeOmni CI overlays transformers==5.16.1 for this pinned revision.
+# This pinned VeOmni revision uses the project-wide transformers==5.16.1.
 veomni-sft = ["veomni==0.1.12"]
 
 # TorchTitan engine add-on, layered on a cu130 backend (fsdp / megatron) like
@@ -251,7 +249,7 @@ cpu = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    "transformers==5.12.1",
+    "transformers==5.16.1",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -395,16 +393,17 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers==5.12.1 project-wide — one version for every backend, so a
+#   * transformers==5.16.1 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
-#     on the package, so this also settles the engines' own pins (vllm 0.29 asks
-#     >=5.10.4, sglang 0.5.20 hard-pins ==5.12.1). Keep it inside setup.py /
-#     requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.13) and bump all
-#     of them together. Do NOT add
+#     on the package, so this also settles the engines' own pins. Keep it inside
+#     setup.py / requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.17)
+#     and bump all of them together. Do NOT add
 #     an `extra` marker back unless a backend truly needs to diverge: such a
 #     marker matches only a requirement verl declares under that extra, never a
 #     transitive one, and a fork no override matches drops transformers outright.
+#   * tokenizers==0.23.2 — required by vllm 0.32 and compatible with transformers
+#     5.16.1. This overrides sglang 0.5.20's stale ==0.22.2 metadata pin.
 #   * numpy>=2.0.0 floor.
 #   * kernels>=0.14.1,<0.15 — sglang 0.5.20's own window. transformers only
 #     bounds `kernels` under extras we don't install (<0.13 there), so without an
@@ -422,7 +421,8 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.12.1",
+    "transformers==5.16.1",
+    "tokenizers==0.23.2",
     "numpy>=2.0.0",
     "kernels>=0.14.1,<0.15",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
