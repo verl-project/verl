@@ -118,13 +118,21 @@ def test_abort_does_not_pause_until_inflight_admissions_land():
     asyncio.run(main())
 
 
-def test_abort_uses_vllm_pause_abort_mode():
+@pytest.mark.parametrize(
+    ("vllm_version", "expected_kwargs"),
+    [
+        ("0.29.0", {"wait_for_inflight_requests": False, "clear_cache": False}),
+        ("0.32.0", {"mode": "abort", "clear_cache": False}),
+    ],
+)
+def test_abort_uses_compatible_vllm_pause_api(monkeypatch, vllm_version, expected_kwargs):
     async def main():
         server = _make_server()
+        monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", vllm_async_server.version.parse(vllm_version))
 
         await server.abort_all_requests(reset_prefix_cache=False)
 
-        assert server.engine.pause_kwargs == [{"mode": "abort", "clear_cache": False}]
+        assert server.engine.pause_kwargs == [expected_kwargs]
 
     asyncio.run(main())
 
