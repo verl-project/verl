@@ -24,11 +24,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 RECIPE = Path(__file__).resolve().parents[2] / "examples" / "grpo_trainer" / "run_deepseek_v4_veomni.sh"
 PREFIX = "+ray_kwargs.ray_init.runtime_env.env_vars."
 
 
-def _worker_env(tmp_path, hip=None, env=None, cpus=None, gfx_target_version=None):
+def _worker_env(tmp_path, hip=None, env=None, cpus=None, gfx_target_version=None, vllm_bpreshuffle_knob=True):
     shim = tmp_path / "bin" / "python"
     shim.parent.mkdir(exist_ok=True)
     shim.write_text(
@@ -52,8 +54,17 @@ def _worker_env(tmp_path, hip=None, env=None, cpus=None, gfx_target_version=None
     torch = tmp_path / "torch"
     torch.mkdir(exist_ok=True)
     (torch / "__init__.py").write_text(f"class version:\n    hip = {hip!r}\n")
+    vllm = tmp_path / "vllm"
+    vllm.mkdir(exist_ok=True)
+    (vllm / "__init__.py").write_text("")
+    knobs = ["VLLM_ROCM_DSV4_BPRESHUFFLE"] if vllm_bpreshuffle_knob else []
+    (vllm / "envs.py").write_text(f"environment_variables = dict.fromkeys({knobs!r})\n")
     run_env = {
-        **{k: v for k, v in os.environ.items() if k not in ("OMP_NUM_THREADS", "NCCL_DEBUG", "VLLM_ROCM_USE_AITER")},
+        **{
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("OMP_NUM_THREADS", "NCCL_DEBUG", "VLLM_ROCM_USE_AITER", "RAY_JOB_CONFIG_JSON_ENV_VAR")
+        },
         "PATH": f"{shim.parent}{os.pathsep}{os.environ['PATH']}",
         "PYTHONPATH": str(tmp_path),
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -89,6 +100,18 @@ def test_rocm_defaults_and_explicit_values(tmp_path):
 def test_rocm_enables_aiter_on_gfx94x_only(tmp_path):
     assert _worker_env(tmp_path, hip="7.2", gfx_target_version=90402)["VLLM_ROCM_USE_AITER"] == "1"  # gfx942
     assert "VLLM_ROCM_USE_AITER" not in _worker_env(tmp_path, hip="7.2", gfx_target_version=90500)  # gfx950
+
+
+def test_rocm_refuses_a_vllm_that_preshuffles_under_aiter(tmp_path):
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        _worker_env(tmp_path, hip="7.2", gfx_target_version=90402, vllm_bpreshuffle_knob=False)
+    assert "vllm-project/vllm#63604" in error.value.stderr
+    # Without AITER, vLLM does not preshuffle.
+    env = _worker_env(tmp_path, hip="7.2", env={"VLLM_ROCM_USE_AITER": "0"}, vllm_bpreshuffle_knob=False)
+    assert env["VLLM_ROCM_USE_AITER"] == "0"
+    assert "VLLM_ROCM_USE_AITER" not in _worker_env(
+        tmp_path, hip="7.2", gfx_target_version=90500, vllm_bpreshuffle_knob=False
+    )
 
 
 def test_omp_threads_follow_the_cpu_affinity(tmp_path):

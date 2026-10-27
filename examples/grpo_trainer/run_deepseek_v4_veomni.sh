@@ -3,7 +3,7 @@
 #
 # Environment:
 #   - transformers==5.9.0
-#   - vllm==0.24.0
+#   - vllm==0.24.0; on AMD ROCm, a vLLM with VLLM_ROCM_DSV4_BPRESHUFFLE (vllm-project/vllm#63604)
 #   - veomni==0.1.12
 
 set -xeuo pipefail
@@ -180,6 +180,15 @@ if python -c "import sys, torch; sys.exit(torch.version.hip is None)" 2>/dev/nul
     gfx_version=$(awk '$1 == "gfx_target_version" && $2 > 0 {print $2; exit}' /sys/class/kfd/kfd/topology/nodes/*/properties 2>/dev/null || true)
     if [ -n "${VLLM_ROCM_USE_AITER:-}" ] || [[ "$gfx_version" == 904?? ]]; then
         add_worker_env VLLM_ROCM_USE_AITER "${VLLM_ROCM_USE_AITER:-1}"
+        aiter=${VLLM_ROCM_USE_AITER:-1}
+        # With AITER, a vLLM without VLLM_ROCM_DSV4_BPRESHUFFLE B-preshuffles DeepSeek-V4's FP8 weights once after
+        # loading, and the weights verl syncs later are not reshuffled. A vLLM that cannot be imported here is not checked.
+        if [[ $rollout_name == vllm && (${aiter,,} == 1 || ${aiter,,} == true) ]] &&
+            python -c "import sys, vllm.envs as e; sys.exit('VLLM_ROCM_DSV4_BPRESHUFFLE' in e.environment_variables)" 2>/dev/null; then
+            echo "With AITER this vLLM B-preshuffles DeepSeek-V4's FP8 weights, so the rollouts would run on corrupted weights" \
+                "after the first weight sync. Use a vLLM with VLLM_ROCM_DSV4_BPRESHUFFLE (vllm-project/vllm#63604)." >&2
+            exit 1
+        fi
     fi
 fi
 
