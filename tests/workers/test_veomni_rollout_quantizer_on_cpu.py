@@ -17,6 +17,7 @@ VeOmni is optional in CPU CI, so its import surfaces are stubbed as in the other
 """
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 for _mod in (
@@ -45,3 +46,19 @@ def test_rollout_weight_quantizer_wraps_the_exported_stream():
 
     engine.set_rollout_weight_quantizer(lambda weights: ((f"{name}.q", value) for name, value in weights))
     assert list(engine._quantize_for_rollout(iter([("w", 1), ("b", 2)]))) == [("w.q", 1), ("b.q", 2)]
+
+
+def test_checkpoint_export_skips_the_rollout_weight_quantizer(monkeypatch):
+    engine = object.__new__(transformer_impl.VeOmniEngine)
+    engine._rollout_weight_quantizer = None
+    engine._uses_fsdp2_cpu_offload_policy = True  # CPUOffloadPolicy owns placement: no model move
+    engine.module = object()
+    converter = SimpleNamespace(export_weights=lambda module: iter([("w", 1)]))
+    monkeypatch.setattr(transformer_impl, "get_checkpoint_tensor_converter", lambda module: converter)
+    engine.set_rollout_weight_quantizer(lambda weights: ((f"{name}.q", value) for name, value in weights))
+
+    # The checkpoint manager's 'hf_model' export keeps the trainer's weights; only the sync is quantized.
+    exported, _ = engine._get_hf_export_per_tensor_param()
+    assert list(exported) == [("w", 1)]
+    synced, _ = engine.get_per_tensor_param()
+    assert list(synced) == [("w.q", 1)]

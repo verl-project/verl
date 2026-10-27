@@ -274,7 +274,7 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
-            per_tensor_param_fn=self.get_per_tensor_param,
+            per_tensor_param_fn=self._get_hf_export_per_tensor_param,
             hf_export_dtype=hf_export_dtype,
         )
 
@@ -644,6 +644,11 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
+        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
+        return self._quantize_for_rollout(per_tensor_param), peft_config
+
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
@@ -654,7 +659,7 @@ class VeOmniEngine(FSDPEngine):
         # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)
         if converter is not None and hasattr(converter, "export_weights"):
-            return self._quantize_for_rollout(converter.export_weights(self.module)), None
+            return converter.export_weights(self.module), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
@@ -692,7 +697,7 @@ class VeOmniEngine(FSDPEngine):
                         yield name, unsharded_tensor
 
         # TODO: support VeOmni LoRA
-        return self._quantize_for_rollout(param_generator()), None
+        return param_generator(), None
 
     def set_rollout_weight_quantizer(self, quantizer) -> None:
         self._rollout_weight_quantizer = quantizer
