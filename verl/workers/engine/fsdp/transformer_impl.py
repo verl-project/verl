@@ -1323,6 +1323,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits_rmpad, DTensor):
                     logits_rmpad = logits_rmpad.full_tensor()
+                # the vLLM sampler divides the fp32 logits by the temperature, so the sampler path takes them unscaled
+                unscaled_logits_rmpad = logits_rmpad
                 logits_rmpad = _scale_logits_by_temperature(
                     logits_rmpad,
                     temperature_rmpad.unsqueeze(-1),
@@ -1364,12 +1366,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     # entropy and the score centering hook reuse the logits in their backward
                     inplace_backward = not (calculate_entropy or score_centering)
-                    logprobs_fn = logprobs_from_logits_sampler if self._batch_invariant else logprobs_from_logits
-                    log_probs = logprobs_fn(
-                        logits=logits_rmpad,
-                        labels=input_ids_rmpad_rolled,
-                        inplace_backward=inplace_backward,
-                    )
+                    if self._batch_invariant:
+                        log_probs = logprobs_from_logits_sampler(
+                            logits=unscaled_logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            temperature=None if temperature_is_one else temperature_rmpad,
+                        )
+                    else:
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=inplace_backward,
+                        )
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]
@@ -1420,6 +1428,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
+                unscaled_logits = logits
                 logits = _scale_logits_by_temperature(
                     logits,
                     temperature,
@@ -1441,6 +1450,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
                     logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
                     logits_rmpad = torch.cat([t for t in logits.unbind()])
+                    if self._batch_invariant:
+                        unscaled_logits = torch.nested.narrow(
+                            unscaled_logits, 1, starts, seq_lengths, layout=torch.jagged
+                        )
+                        unscaled_logits_rmpad = torch.cat([t for t in unscaled_logits.unbind()])
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
 
                     # Mirror the use_remove_padding=True branch (see verl#6293).
@@ -1459,12 +1473,20 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        logprobs_fn = logprobs_from_logits_sampler if self._batch_invariant else logprobs_from_logits
-                        log_probs = logprobs_fn(
-                            logits=logits_rmpad,
-                            labels=input_ids_rmpad_rolled,
-                            inplace_backward=not score_centering,
-                        )
+                        if self._batch_invariant:
+                            log_probs = logprobs_from_logits_sampler(
+                                logits=unscaled_logits_rmpad,
+                                labels=input_ids_rmpad_rolled,
+                                temperature=None
+                                if temperature_is_one
+                                else temperature.flatten().repeat_interleave(seq_lengths),
+                            )
+                        else:
+                            log_probs = logprobs_from_logits(
+                                logits=logits_rmpad,
+                                labels=input_ids_rmpad_rolled,
+                                inplace_backward=not score_centering,
+                            )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:

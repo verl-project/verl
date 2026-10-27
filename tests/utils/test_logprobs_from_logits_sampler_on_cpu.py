@@ -63,3 +63,18 @@ def test_backward_matches_reference_without_keeping_fp32_log_softmax():
     assert torch.equal(out, ref.detach())
     assert torch.equal(logits.grad, ref_logits.grad)
     assert (torch.float32, (16, 4096)) not in saved, saved
+
+
+def test_temperature_divides_the_fp32_logits_like_the_vllm_sampler():
+    # vLLM casts the logits to fp32, then divides by the fp32 temperature.
+    torch.manual_seed(0)
+    logits = torch.randn(50, 4096, dtype=torch.bfloat16) * 4
+    labels = torch.randint(0, 4096, (50,))
+    temperature = torch.full((50,), 0.7)
+    ref = torch.log_softmax(logits.float() / temperature.unsqueeze(-1), dim=-1)
+    ref = ref.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    for chunk_size in (7, 2048):
+        out = logprobs_from_logits_sampler(logits, labels, temperature=temperature, chunk_size=chunk_size)
+        assert torch.equal(out, ref)
+    bf16_scaled = logits / temperature.unsqueeze(-1).to(logits.dtype)
+    assert not torch.equal(logprobs_from_logits_sampler(bf16_scaled, labels), ref)
