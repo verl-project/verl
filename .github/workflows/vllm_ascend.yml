@@ -66,6 +66,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+
 jobs:
   vllm_ascend:
     if: github.repository_owner == 'verl-project'

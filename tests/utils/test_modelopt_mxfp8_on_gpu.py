@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -65,12 +66,69 @@ def test_mxfp8_qat_appends_user_ignores_without_mutating_modelopt_preset():
 
     config = build_quantize_config("mxfp8", ["*linear_attn.in_proj_a"])
 
-    assert config["quant_cfg"][:-1] == original
-    assert config["quant_cfg"][-1] == {
-        "quantizer_name": "*linear_attn.in_proj_a",
-        "enable": False,
-    }
+    model = torch.nn.Module()
+    model.linear_attn = torch.nn.Module()
+    model.linear_attn.in_proj_a = torch.nn.Linear(128, 32, bias=False)
+    model.linear_attn.in_proj_ab = torch.nn.Linear(128, 128, bias=False)
+    mtq.quantize(model, config)
+
+    assert not model.linear_attn.in_proj_a.input_quantizer.is_enabled
+    assert not model.linear_attn.in_proj_a.weight_quantizer.is_enabled
+    assert model.linear_attn.in_proj_ab.input_quantizer.is_enabled
+    assert model.linear_attn.in_proj_ab.weight_quantizer.is_enabled
     assert mtq.normalize_quant_cfg_list(mtq.MXFP8_DEFAULT_CFG["quant_cfg"]) == original
+
+
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8"])
+@pytest.mark.parametrize(
+    "pattern, input_enabled, weight_enabled",
+    [
+        ("projection", False, False),
+        ("projectio?", False, False),
+        ("projection.*", False, False),
+        ("projection.weight_quantizer", True, False),
+        ("*input_quantizer", False, True),
+    ],
+)
+def test_qat_ignore_module_and_quantizer_patterns(mode, pattern, input_enabled, weight_enabled):
+    model = torch.nn.Module()
+    model.projection = torch.nn.Linear(128, 128, bias=False)
+    mtq.quantize(model, build_quantize_config(mode, [pattern]))
+
+    assert model.projection.input_quantizer.is_enabled == input_enabled
+    assert model.projection.weight_quantizer.is_enabled == weight_enabled
+
+
+@pytest.mark.parametrize(
+    "pattern, module_name", [("lm_head", "output_layer"), ("*mlp.gate", "router"), ("*self_attn*", "self_attention")]
+)
+def test_qat_ignore_keeps_megatron_aliases(pattern, module_name):
+    model = torch.nn.Module()
+    model.add_module(module_name, torch.nn.Linear(128, 128, bias=False))
+    mtq.quantize(model, build_quantize_config("fp8", [pattern]))
+
+    layer = model.get_submodule(module_name)
+    assert not layer.input_quantizer.is_enabled
+    assert not layer.weight_quantizer.is_enabled
+
+
+def test_fp8_ignored_module_preserves_forward_and_backward():
+    torch.manual_seed(7)
+    model = torch.nn.Module()
+    model.projection = torch.nn.Linear(128, 32, bias=False).to(torch.bfloat16)
+    reference = copy.deepcopy(model.projection)
+    mtq.quantize(model, build_quantize_config("fp8", ["projection"]))
+    inputs = torch.randn(16, 128, dtype=torch.bfloat16, requires_grad=True)
+    reference_inputs = inputs.detach().clone().requires_grad_(True)
+
+    actual = model.projection(inputs)
+    expected = reference(reference_inputs)
+    actual.float().square().mean().backward()
+    expected.float().square().mean().backward()
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(model.projection.weight.grad, reference.weight.grad, rtol=0, atol=0)
+    torch.testing.assert_close(inputs.grad, reference_inputs.grad, rtol=0, atol=0)
 
 
 def test_mxfp8_rollout_requires_explicit_shape_ignore():

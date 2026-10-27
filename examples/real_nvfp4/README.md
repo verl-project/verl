@@ -32,24 +32,12 @@ graphs and no speculative decoding.
 
 ## Installation
 
-The runtime uses PyTorch 2.13.0/CUDA 13, Transformer Engine 2.18.0,
-Megatron-Core 0.19.2, Megatron-Bridge 0.6.2, vLLM 0.29.0, Transformers 5.12.1
-and FlashInfer 0.6.18:
+The runtime uses PyTorch 2.13.0/CUDA 13, Transformer Engine 2.20.2,
+Megatron-Core 0.19.2, Megatron-Bridge 0.6.2 and vLLM 0.32.0:
 
 ```bash
 uv sync --frozen --extra megatron --extra vllm
 ```
-
-Keep the FlashInfer Python, cubin and CUDA JIT-cache packages aligned. For a
-non-Docker launch, use the environment's NCCL library:
-
-```bash
-export LD_LIBRARY_PATH="$PWD/.venv/lib/python3.12/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}"
-```
-
-Transformer Engine 2.18.0 uses its official PyPI distribution; its PyTorch
-extension selects a matching release wheel when available and otherwise builds
-against the selected Torch runtime. Use a persistent uv cache to reuse the build.
 
 ## Run
 

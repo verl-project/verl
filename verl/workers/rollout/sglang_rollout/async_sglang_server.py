@@ -466,6 +466,9 @@ class SGLangHttpServer:
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
 
+    @RLInsightLogger.trace_state_decorator(
+        "wake_up", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def wake_up(self):
         if self.node_rank != 0:
             return
@@ -490,6 +493,9 @@ class SGLangHttpServer:
         """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
         return lora_served_as_adapter(self.model_config)
 
+    @RLInsightLogger.trace_state_decorator(
+        "sleep", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -513,10 +519,16 @@ class SGLangHttpServer:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
             await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    @RLInsightLogger.trace_state_decorator(
+        "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -524,6 +536,9 @@ class SGLangHttpServer:
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "resume_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:

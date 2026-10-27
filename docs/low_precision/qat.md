@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 10/21/2026
+Last updated: 10/25/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -83,7 +83,7 @@ DeepGEMM implementation.
 | NVFP4 (MoE only) | `NVFP4` | `nvfp4` | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_cutlass)` | ❌ (BF16 dense) | W4A4<br>`auto` selects FlashInfer CUTLASS | ✅ Blackwell (MoE only) | ✅ Blackwell (MoE only) |
 | NVFP4, per-token activations (MoE only) | `NVFP4_PER_TOKEN` | - (native NVFP4 training, see below) | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_trtllm)` | ❌ | ❌ | ✅ Blackwell (MoE only) | Blocked by engine support |
 
-MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix.
+MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset has no such fallback: its MXFP4-weight × FP8-activation experts are served only by vLLM's DeepGEMM FP4 MoE kernel (SM100/SM120), and Marlin and Triton reject the FP8 1x128 activation scheme, so on Hopper the rollout fails at engine start.
 
 ¹ verl passes `linear_backend=deep_gemm`, but vLLM 0.29 has no DeepGEMM
 MXFP8 Linear kernel and deliberately falls back to its MXFP8 auto-selection.

@@ -15,9 +15,9 @@
 
 The trainer exports compressed-tensors NVFP4 expert weights; vLLM loads them and
 quantizes activations per token in FlashInfer's TRT-LLM kernel, matching
-Transformer Engine's row-scaled NVFP4 training. vLLM 0.29 implements per-token
-activations only for its online method, so this module provides the
-compressed-tensors equivalent.
+Transformer Engine's row-scaled NVFP4 training. vLLM supports per-token
+activations for its online method and ModelOpt checkpoints; this module adds
+the compressed-tensors equivalent.
 
 Refits go through vLLM's layerwise reload: each expert layer is rebuilt in
 checkpoint layout, post-processed once it is complete, and copied back into the
@@ -133,8 +133,8 @@ def install_nvfp4_per_token_compressed_tensors_patch():
     def get_moe_method(quant_config, layer, layer_name):
         quant_config._add_fused_moe_to_target_scheme_map()
         schemes = [
-            quant_config.get_scheme_dict(layer, layer_name + projection)
-            for projection in (".0.gate_proj", ".0.up_proj", ".0.down_proj")
+            quant_config.get_scheme_dict(layer, f"{layer_name}.0.{projection}")
+            for projection in (layer.ckpt_gate_proj_name, layer.ckpt_up_proj_name, layer.ckpt_down_proj_name)
         ]
         if schemes[0] is not None and all(scheme == schemes[0] for scheme in schemes):
             weights, inputs = schemes[0].get("weights"), schemes[0].get("input_activations")

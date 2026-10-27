@@ -48,6 +48,7 @@ class _FakeEngine:
         self.output_processor = SimpleNamespace(request_states={}, parent_requests={})
         self.server = None
         self.pause_calls = 0
+        self.pause_kwargs = []
         self.resume_calls = 0
         self.admitting_at_pause = None
         self.abort_calls = []
@@ -65,6 +66,7 @@ class _FakeEngine:
 
     async def pause_generation(self, **kwargs):
         self.pause_calls += 1
+        self.pause_kwargs.append(kwargs)
         self.admitting_at_pause = self.server._admitting
 
     async def resume_generation(self):
@@ -112,6 +114,25 @@ def test_abort_does_not_pause_until_inflight_admissions_land():
 
         assert server.engine.pause_calls == 1
         assert server.engine.admitting_at_pause == 0
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("vllm_version", "expected_kwargs"),
+    [
+        ("0.29.0", {"wait_for_inflight_requests": False, "clear_cache": False}),
+        ("0.32.0", {"mode": "abort", "clear_cache": False}),
+    ],
+)
+def test_abort_uses_compatible_vllm_pause_api(monkeypatch, vllm_version, expected_kwargs):
+    async def main():
+        server = _make_server()
+        monkeypatch.setattr(vllm_async_server, "_VLLM_VERSION", vllm_async_server.version.parse(vllm_version))
+
+        await server.abort_all_requests(reset_prefix_cache=False)
+
+        assert server.engine.pause_kwargs == [expected_kwargs]
 
     asyncio.run(main())
 

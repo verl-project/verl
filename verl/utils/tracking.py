@@ -16,15 +16,16 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import inspect
 import json
 import logging
 import os
 from contextlib import contextmanager
 from enum import Enum
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import orjson
 from packaging.version import Version
@@ -287,14 +288,21 @@ class RLInsightLogger:
         if not cls.enabled():
             return
         cls._ensure_rl_insight_init()
-        metric_gauge = cls._get_rl_insight().metric_gauge
+        module = cls._get_rl_insight()
+        # Present on current main, but not in the released 0.3.0 package.
+        metric_log = getattr(module, "metric_log", None)
+        if not callable(metric_log):
+            metric_log = None
 
         for key, value in data.items():
             try:
                 scalar = float(value)
             except (TypeError, ValueError):
                 continue
-            metric_gauge(str(key).replace("/", "_"), scalar)
+            if metric_log is not None:
+                metric_log(str(key), scalar, step=int(step))
+            else:
+                module.metric_gauge(str(key).replace("/", "_"), scalar)
 
     @classmethod
     def finish(cls):
@@ -321,6 +329,32 @@ class RLInsightLogger:
         cls._ensure_rl_insight_init()
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
+
+    @classmethod
+    def trace_state_decorator(
+        cls,
+        state_name: str,
+        *,
+        state_lane_id: str | int | Callable[[Any], str | int | None] | None = None,
+    ):
+        """Decorate an async instance method with an RL-Insight state trace."""
+
+        def decorator(method):
+            if not inspect.iscoroutinefunction(method):
+                raise TypeError("trace_state_decorator can only decorate async methods")
+
+            @wraps(method)
+            async def wrapped(self, *args, **kwargs):
+                if not cls.enabled():
+                    return await method(self, *args, **kwargs)
+
+                lane_id = state_lane_id(self) if callable(state_lane_id) else state_lane_id
+                with cls.trace_state(state_name, state_lane_id=lane_id):
+                    return await method(self, *args, **kwargs)
+
+            return wrapped
+
+        return decorator
 
     @classmethod
     def trace_span(

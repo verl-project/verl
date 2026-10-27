@@ -288,6 +288,9 @@ def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> list[dict]:
     for pattern in ignore_patterns:
         key = mapping.get(pattern, pattern)
         cfg.append({"quantizer_name": key, "enable": False})
+        # Module patterns must also match their child quantizers. Keep the
+        # original rule for callers that already name quantizers explicitly.
+        cfg.append({"quantizer_name": f"{key}.*", "enable": False})
     return cfg
 
 

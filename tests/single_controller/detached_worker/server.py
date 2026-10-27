@@ -33,6 +33,7 @@ from verl.models.mcore.bridge import AutoBridge
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
 from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
 from verl.workers.config.optimizer import McoreOptimizerConfig
@@ -42,9 +43,9 @@ from verl.workers.config.optimizer import McoreOptimizerConfig
 class Trainer(Worker):
     def __init__(self):
         super().__init__()
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        get_torch_device().set_device(int(os.environ["LOCAL_RANK"]))
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            torch.distributed.init_process_group(backend=get_nccl_backend())
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -95,7 +96,7 @@ class Trainer(Worker):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"))
     def train_model(self, data: DataProto) -> DataProto:
-        data = data.to(torch.device("cuda", torch.cuda.current_device()))
+        data = data.to(torch.device(get_device_name(), get_torch_device().current_device()))
         input_ids = data.batch["input_ids"]
         if not data.batch["attention_mask"].bool().all():
             raise ValueError("This example expects unpadded sequences.")
