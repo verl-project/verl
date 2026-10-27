@@ -1,4 +1,5 @@
 # KubeRay RayCluster for the GRPO examples (see README.md): 1 CPU head pod and 2 single-host TPU v6e-1 slices (2 chips).
+# The comments give the values for 2 v6e-4, v6e-8 or v6e-32 slices.
 # Replace <IMAGE>, <BUCKET> and <GSA_EMAIL> before applying (see README.md, step 4).
 ---
 apiVersion: v1
@@ -54,6 +55,7 @@ spec:
     - groupName: tpu-group
       replicas: 2  # 2 slices: trainer and rollout
       numOfHosts: 1  # v6e-1: 1 host with 1 chip (v6e-4: 1 host with 4 chips, v6e-8: 2 hosts with 4 chips each)
+      # v6e-32: numOfHosts: 8 (8 hosts with 4 chips each)
       rayStartParams: {}
       template:
         metadata:
@@ -72,12 +74,12 @@ spec:
                   value: "0.99"
               resources:
                 limits:
-                  memory: 128Gi  # v6e-4 / v6e-8: 400Gi
-                  google.com/tpu: "1"  # v6e-4 / v6e-8: "4"
+                  memory: 128Gi  # v6e-4 / v6e-8: 400Gi, v6e-32 (Qwen3-32B): 600Gi
+                  google.com/tpu: "1"  # v6e-4 / v6e-8 / v6e-32: "4"
                 requests:
-                  cpu: "32"  # v6e-4 / v6e-8: "48"
-                  memory: 128Gi  # v6e-4 / v6e-8: 400Gi
-                  google.com/tpu: "1"  # v6e-4 / v6e-8: "4"
+                  cpu: "32"  # v6e-4 / v6e-8: "48", v6e-32: "160"
+                  memory: 128Gi  # v6e-4 / v6e-8: 400Gi, v6e-32 (Qwen3-32B): 600Gi
+                  google.com/tpu: "1"  # v6e-4 / v6e-8 / v6e-32: "4"
               volumeMounts:
                 - name: gcs-volume
                   mountPath: /data
@@ -95,4 +97,4 @@ spec:
                 path: /tmp
           nodeSelector:
             cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
-            cloud.google.com/gke-tpu-topology: 1x1  # v6e-4: 2x2, v6e-8: 2x4
+            cloud.google.com/gke-tpu-topology: 1x1  # v6e-4: 2x2, v6e-8: 2x4, v6e-32: 4x8
