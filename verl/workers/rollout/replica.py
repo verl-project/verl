@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -29,6 +30,24 @@ from verl.utils.device import get_device_name
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
+
+# Shared by every replica this process creates, and fresh per run, so a cache entry left in an
+# external KV store by an earlier run never matches even when it reaches the same global step.
+_PREFIX_CACHE_NAMESPACE = uuid.uuid4().hex
+
+
+def prefix_cache_salt(config: RolloutConfig, global_steps: Optional[int]) -> Optional[str]:
+    """Engine cache_salt for a request served by weights of ``global_steps``.
+
+    None under ``external_kv_cache_invalidation="reset"``, where verl resets caches instead.
+    The server computes the salt after its pause gate, so a request parked across a weight
+    update is salted with the weights it actually runs on.
+    """
+    if config.external_kv_cache_invalidation != "salt":
+        return None
+    # Set by RolloutReplica; without it, salts from different runs would collide in a shared store.
+    assert config.prefix_cache_namespace, "prefix_cache_namespace is unset; servers must be launched by RolloutReplica"
+    return f"{config.prefix_cache_namespace}:{global_steps}"
 
 
 class TokenOutput(BaseModel):
@@ -97,6 +116,8 @@ class RolloutReplica(ABC):
     ) -> None:
         self.replica_rank = replica_rank
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
+        if self.config.prefix_cache_namespace is None:
+            self.config.prefix_cache_namespace = _PREFIX_CACHE_NAMESPACE
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (

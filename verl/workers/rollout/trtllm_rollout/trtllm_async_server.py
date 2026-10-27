@@ -34,7 +34,7 @@ from verl.utils.profiler import (
     rollout_profiler_global_ranks,
 )
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, prefix_cache_salt
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -339,6 +339,9 @@ class TRTLLMHttpServer:
         rejected = await self._park_until_allowed(request_id)
         if rejected is not None:
             return rejected
+        cache_salt = prefix_cache_salt(self.config, self.global_steps)
+        # Only pass it when set, so "reset" keeps working on TRT-LLM releases without cache_salt.
+        salt_kwargs = {"cache_salt": cache_salt} if cache_salt is not None else {}
         if self.is_vlm_model and (image_data or video_data):
             deduped_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
             org_prompt = self.llm.tokenizer.decode(deduped_ids)
@@ -355,11 +358,13 @@ class TRTLLMHttpServer:
             outputs = await self.llm.generate_async(
                 inputs=input_dict,
                 sampling_params=trt_llm_sampling_params,
+                **salt_kwargs,
             )
         else:
             outputs = await self.llm.generate_async(
                 inputs=prompt_ids,
                 sampling_params=trt_llm_sampling_params,
+                **salt_kwargs,
             )
         token_ids = outputs.outputs[0].token_ids
         log_probs = None

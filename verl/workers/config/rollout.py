@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -176,6 +177,31 @@ class RolloutQuantizationConfig(BaseConfig):
         )
 
 
+# vLLM KV connectors that key their store by vLLM's prefix block hashes, which carry the cache_salt.
+# Whether or not they implement reset_cache(), old-version entries are never matched under "salt".
+# Others (e.g. LMCacheConnectorV1, which looks up by raw token ids) would serve old-version KV.
+_SALTED_VLLM_KV_CONNECTORS = ("MooncakeStoreConnector", "OffloadingConnector", "LMCacheMPConnector", "HF3FSKVConnector")
+
+
+def _check_salted_kv_connectors(engine_kwargs) -> None:
+    vllm_kwargs = (engine_kwargs or {}).get("vllm", {}) or {}
+    # Keys reach vLLM as CLI flags spelled as written, so both spellings set the connector.
+    transfer = vllm_kwargs.get("kv_transfer_config") or vllm_kwargs.get("kv-transfer-config")
+    if isinstance(transfer, str):
+        transfer = json.loads(transfer)
+    pending = [transfer] if transfer else []
+    while pending:
+        connector = pending.pop()
+        name = connector.get("kv_connector")
+        if name == "MultiConnector":
+            pending.extend((connector.get("kv_connector_extra_config") or {}).get("connectors", []))
+        elif name not in _SALTED_VLLM_KV_CONNECTORS:
+            raise ValueError(
+                f"external_kv_cache_invalidation='salt' keeps the KV connector's store across weight updates, "
+                f"so it requires a connector keyed by vLLM block hashes {_SALTED_VLLM_KV_CONNECTORS}; got {name!r}"
+            )
+
+
 @dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
@@ -189,6 +215,7 @@ class RolloutConfig(BaseConfig):
         "moe_tensor_parallel_size",
         "full_determinism",
         "max_num_seqs",
+        "prefix_cache_namespace",
     }
 
     name: Optional[str] = MISSING
@@ -288,6 +315,12 @@ class RolloutConfig(BaseConfig):
 
     enable_prefix_caching: bool = True
 
+    # "reset" or "salt"; see rollout.yaml.
+    external_kv_cache_invalidation: str = "reset"
+
+    # Run-unique part of the cache salt under "salt", filled in by RolloutReplica. Internal.
+    prefix_cache_namespace: Optional[str] = None
+
     load_format: str = "dummy"
 
     layered_summon: bool = False
@@ -354,6 +387,12 @@ class RolloutConfig(BaseConfig):
                     f"tensor_model_parallel_size={self.tensor_model_parallel_size})"
                 )
 
+        if self.external_kv_cache_invalidation not in ("reset", "salt"):
+            raise ValueError(
+                f"rollout.external_kv_cache_invalidation must be 'reset' or 'salt', "
+                f"got {self.external_kv_cache_invalidation!r}"
+            )
+
         if self.pipeline_model_parallel_size > 1:
             if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
                 raise NotImplementedError(
@@ -380,6 +419,13 @@ class RolloutConfig(BaseConfig):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
+
+        if self.external_kv_cache_invalidation == "salt":
+            # PD dispatch runs before the server's pause gate and salts prefill and decode apart.
+            if self.disaggregation.enabled:
+                raise ValueError("external_kv_cache_invalidation='salt' does not support PD disaggregation yet")
+            if self.name == "vllm":
+                _check_salted_kv_connectors(self.engine_kwargs)
 
         if self.topk_log_probs:
             if self.name != "vllm":
