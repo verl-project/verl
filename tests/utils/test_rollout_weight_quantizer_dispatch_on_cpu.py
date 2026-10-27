@@ -23,11 +23,12 @@ from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
 FP8_BLOCK = {"quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [128, 128]}
 
 
-def _configs(quantization_config, linear=None):
+def _configs(quantization_config, linear=None, checkpoint_backend="naive"):
     hf_config = SimpleNamespace(model_type="deepseek_v4", quantization_config=quantization_config)
     quantization = SimpleNamespace(linear=linear, moe=None, ignore=[], config_file=None)
     model_config = SimpleNamespace(hf_config=hf_config, local_path=None)
-    return model_config, SimpleNamespace(name="vllm", quantization=quantization)
+    checkpoint_engine = SimpleNamespace(backend=checkpoint_backend)
+    return model_config, SimpleNamespace(name="vllm", quantization=quantization, checkpoint_engine=checkpoint_engine)
 
 
 def test_native_quantization_passes_through():
@@ -40,6 +41,15 @@ def test_override_on_a_quantized_checkpoint_is_rejected():
     model_config, rollout_config = _configs(FP8_BLOCK, linear="FP8_BLOCK")
     with pytest.raises(NotImplementedError, match="already quantized DeepSeek-V4"):
         dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
+
+
+def test_delta_sharded_sync_is_rejected_for_a_quantized_rollout():
+    # Its steady-state deltas come from get_per_tensor_param_delta_shard, which bypasses the quantizer.
+    model_config, rollout_config = _configs(FP8_BLOCK, checkpoint_backend="delta_sharded")
+    with pytest.raises(NotImplementedError, match="delta_sharded"):
+        dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
+    model_config, rollout_config = _configs(None, checkpoint_backend="delta_sharded")
+    assert dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config) is None
 
 
 def test_override_on_an_unquantized_checkpoint_is_dispatched(monkeypatch):

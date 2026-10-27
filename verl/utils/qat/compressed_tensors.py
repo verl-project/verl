@@ -581,6 +581,11 @@ def dispatch_rollout_weight_quantizer(
                 "quantization_config or set rollout.quantization.linear / moe / config_file"
             )
         return None
+    if getattr(getattr(rollout_config, "checkpoint_engine", None), "backend", None) == "delta_sharded":
+        raise NotImplementedError(
+            "checkpoint_engine.backend='delta_sharded' does not support quantized rollouts: its steady-state "
+            "deltas bypass the trainer-side rollout weight quantizer"
+        )
 
     quant_method = str(quantization_config.get("quant_method", "")).lower()
     if quant_method == "compressed-tensors":
