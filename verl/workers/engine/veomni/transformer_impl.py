@@ -287,20 +287,21 @@ class VeOmniEngine(FSDPEngine):
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
 
     def _build_optimizer(self, module):
-        optimizer_kwargs = dict(self.optimizer_config.override_optimizer_config or {})
+        optim_config = self.optimizer_config
+        # override_optimizer_config wins over the base arguments, as in the FSDP engine's builder.
+        optimizer_kwargs = {
+            "lr": optim_config.lr,
+            "betas": optim_config.betas,
+            "weight_decay": optim_config.weight_decay,
+            "optimizer_type": optim_config.optimizer,
+            **(optim_config.override_optimizer_config or {}),
+        }
         if self.engine_config.enable_fsdp_offload:
             # FSDP2 CPU offload keeps the sharded parameters, gradients and optimizer states on the
             # host, where foreach AdamW materializes a temporary as large as the local fp32
             # parameters at every step; the fused CPU kernel computes the same update in place.
             optimizer_kwargs.setdefault("fused", True)
-        optimizer = build_optimizer(
-            module,
-            lr=self.optimizer_config.lr,
-            betas=self.optimizer_config.betas,
-            weight_decay=self.optimizer_config.weight_decay,
-            optimizer_type=self.optimizer_config.optimizer,
-            **optimizer_kwargs,
-        )
+        optimizer = build_optimizer(module, **optimizer_kwargs)
         get_optimizer_pre_hook = getattr(module, "get_optimizer_pre_hook", None)
         if get_optimizer_pre_hook is not None:
             optimizer_pre_hook = get_optimizer_pre_hook(module, module.config, self.data_parallel_mode)
@@ -313,7 +314,7 @@ class VeOmniEngine(FSDPEngine):
         lr_scheduler = build_lr_scheduler(
             optimizer,
             train_steps=optim_config.total_training_steps,
-            lr=optim_config.lr,
+            lr=(optim_config.override_optimizer_config or {}).get("lr", optim_config.lr),
             lr_min=optim_config.lr_min,
             lr_decay_style=optim_config.lr_scheduler_type,
             lr_decay_ratio=optim_config.lr_decay_ratio,

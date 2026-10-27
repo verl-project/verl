@@ -85,3 +85,18 @@ def test_override_keys_other_than_fused_are_forwarded(build_optimizer_calls):
 
     (kwargs,) = build_optimizer_calls
     assert kwargs["eps"] == 1e-6 and kwargs["fused"] is True
+
+
+def test_overrides_replace_the_base_optimizer_arguments(build_optimizer_calls, monkeypatch):
+    override = {"lr": 2e-6, "betas": (0.9, 0.99), "weight_decay": 0.0}
+    engine = _engine(False, override)
+    engine._build_optimizer(SimpleNamespace())
+
+    (kwargs,) = build_optimizer_calls
+    assert {key: kwargs[key] for key in override} == override
+
+    scheduler_calls = []
+    monkeypatch.setattr(transformer_impl, "build_lr_scheduler", lambda optimizer, **kw: scheduler_calls.append(kw))
+    engine._build_lr_scheduler(SimpleNamespace())
+    (scheduler_kwargs,) = scheduler_calls
+    assert scheduler_kwargs["lr"] == 2e-6
