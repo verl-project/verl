@@ -86,7 +86,7 @@ DEFAULT_IGNORE = [
 
 
 _HIGH_PRECISION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
-# Trainers export these checkpoints in their own mixed FP8/FP4 layout.
+# Trainers export these checkpoints under their own names, in their mixed FP8/FP4 layout.
 _DEEPSEEK_V4_MODEL_TYPES = frozenset({"deepseek_v4", "deepseek_v41"})
 
 
@@ -557,11 +557,11 @@ def dispatch_rollout_weight_quantizer(
         getattr(getattr(hf_config, "text_config", None), "model_type", None),
     }
     if has_override:
-        if native is not None and model_types & _DEEPSEEK_V4_MODEL_TYPES:
+        if model_types & _DEEPSEEK_V4_MODEL_TYPES:
             raise NotImplementedError(
-                "rollout.quantization overrides cannot be combined with an already quantized DeepSeek-V4 "
-                "checkpoint: the trainer exports the checkpoint's own FP8/FP4 layout, not the override's "
-                "compressed-tensors layout. Drop the override to sync the native quantization."
+                "rollout.quantization overrides are not supported for DeepSeek-V4: the trainer exports its "
+                "checkpoint names (e.g. ffn.experts) and its own FP8/FP4 layout, which the override's "
+                "compressed-tensors targets do not match. Drop the override to sync the native quantization."
             )
         quantization_config = build_compressed_tensors_config(
             linear=linear,
