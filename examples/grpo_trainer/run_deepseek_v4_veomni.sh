@@ -156,21 +156,31 @@ TRAINER=(
     trainer.total_training_steps=500
 )
 
-# Environment of every Ray worker, also on a cluster started with a plain `ray start`.
+# Environment of every Ray worker, also on a cluster started with a plain `ray start`. A value set in the
+# launching shell wins. Keys that `ray job submit --runtime-env` already sets are left to the job, since Ray
+# rejects the same key in ray.init's runtime env.
 #   OMP_NUM_THREADS        Ray pins it to 1 in its workers; with enable_fsdp_offload the gradient
 #                          accumulation and the AdamW step run on the host, so give each rank its share of cores
 #   NCCL_DEBUG=VERSION     ROCm: at verl's default WARN, RCCL logs a deprecation warning for every MoE all-to-all
-#   VLLM_ROCM_USE_AITER=1  gfx94x (MI300 series): vLLM's DeepSeek-V4 sparse-attention indexer has no other ROCm path
+#   VLLM_ROCM_USE_AITER=1  gfx94x: vLLM's DeepSeek-V4 sparse-attention indexer has no other ROCm path. The GPU
+#                          architecture is read from this node's KFD topology, so set it explicitly when
+#                          launching from a node without AMD GPUs
 EV='+ray_kwargs.ray_init.runtime_env.env_vars'
+job_env_keys=" $(python -c "import json, os; print(*json.loads(os.environ.get('RAY_JOB_CONFIG_JSON_ENV_VAR', '{}')).get('runtime_env', {}).get('env_vars', {}))" 2>/dev/null || true) "
+RUNTIME_ENV=()
+add_worker_env() {
+    [[ "$job_env_keys" == *" $1 "* ]] || RUNTIME_ENV+=("${EV}.$1=\"$2\"")
+}
 n_cores=$({ lscpu -p=CORE,SOCKET 2>/dev/null || true; } | awk '!/^#/' | sort -u | wc -l)
-[ "$n_cores" -gt 0 ] || n_cores=$(nproc)
-RUNTIME_ENV=("${EV}.OMP_NUM_THREADS=\"${OMP_NUM_THREADS:-$((n_cores > n_gpus_per_node ? n_cores / n_gpus_per_node : 1))}\"")
-gpu_arch=$(python -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName if torch.version.hip else '')" 2>/dev/null || true)
-if [ -n "$gpu_arch" ]; then
-    RUNTIME_ENV+=("${EV}.NCCL_DEBUG=\"${NCCL_DEBUG:-VERSION}\"")
-fi
-if [[ "$gpu_arch" == gfx94* ]]; then
-    RUNTIME_ENV+=("${EV}.VLLM_ROCM_USE_AITER=\"${VLLM_ROCM_USE_AITER:-1}\"")
+# lscpu reports the host; nproc counts the CPUs this process may use under a Slurm or container cpuset.
+[ "$n_cores" -gt 0 ] && [ "$n_cores" -le "$(nproc)" ] || n_cores=$(nproc)
+add_worker_env OMP_NUM_THREADS "${OMP_NUM_THREADS:-$((n_cores > n_gpus_per_node ? n_cores / n_gpus_per_node : 1))}"
+if python -c "import sys, torch; sys.exit(torch.version.hip is None)" 2>/dev/null; then
+    add_worker_env NCCL_DEBUG "${NCCL_DEBUG:-VERSION}"
+    gfx_version=$(awk '$1 == "gfx_target_version" && $2 > 0 {print $2; exit}' /sys/class/kfd/kfd/topology/nodes/*/properties 2>/dev/null || true)
+    if [ -n "${VLLM_ROCM_USE_AITER:-}" ] || [[ "$gfx_version" == 904?? ]]; then
+        add_worker_env VLLM_ROCM_USE_AITER "${VLLM_ROCM_USE_AITER:-1}"
+    fi
 fi
 
 ########################### launch ###########################
