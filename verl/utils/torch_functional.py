@@ -27,6 +27,7 @@ from tensordict import TensorDict
 from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedTokenizer
 
 from verl.utils.device import get_device_name, get_torch_device
@@ -205,6 +206,45 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> 
             logprobs_labels.append(row_logprobs_labels)
         logprobs_labels = torch.stack(logprobs_labels)
     return logprobs_labels
+
+
+def logprobs_from_logits_sampler(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    inplace_backward: bool = True,
+    chunk_size: int = 2048,
+    temperature: Optional[torch.Tensor] = None,
+):
+    """Log-probabilities computed the way the vLLM sampler reports them: fp32 logits divided by the fp32
+    per-row ``temperature`` (unscaled when ``None`` or below 1e-5), fp32 log_softmax over the full vocabulary, then
+    gather. Returns float32 regardless of the logits dtype.
+
+    log_softmax is row-wise, so processing chunks of rows gives the same values as one call on the
+    whole tensor while bounding the fp32 copy to one chunk. Each chunk is checkpointed, so backward
+    recomputes its fp32 log_softmax instead of keeping one full-vocabulary copy per chunk alive.
+    ``inplace_backward`` is accepted for call-site compatibility and unused.
+    """
+    temperatures = [None] * len(logits.split(chunk_size)) if temperature is None else temperature.split(chunk_size)
+    logprobs_labels = []
+    for chunk_logits, chunk_labels, chunk_temperature in zip(
+        logits.split(chunk_size), labels.split(chunk_size), temperatures, strict=True
+    ):
+        logprobs_labels.append(
+            checkpoint(_sampler_chunk_logprobs, chunk_logits, chunk_labels, chunk_temperature, use_reentrant=False)
+        )
+    return torch.cat(logprobs_labels)
+
+
+def _sampler_chunk_logprobs(
+    chunk_logits: torch.Tensor, chunk_labels: torch.Tensor, chunk_temperature: Optional[torch.Tensor]
+) -> torch.Tensor:
+    chunk_logits = chunk_logits.float()
+    if chunk_temperature is not None:
+        # vLLM samples greedily below this temperature and reports the log-probs of the unscaled logits
+        chunk_temperature = torch.where(chunk_temperature < 1e-5, 1.0, chunk_temperature.float())
+        chunk_logits = chunk_logits / chunk_temperature.unsqueeze(-1)
+    chunk_logprobs = F.log_softmax(chunk_logits, dim=-1)
+    return chunk_logprobs.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1)
 
 
 def clip_by_value(x: torch.Tensor, tensor_min: torch.Tensor, tensor_max: torch.Tensor) -> torch.Tensor:
