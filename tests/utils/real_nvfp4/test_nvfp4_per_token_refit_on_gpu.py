@@ -176,8 +176,9 @@ def _kv_caches(llm):
     return caches
 
 
-def _close(llm):
-    del llm
+def _free():
+    # Callers drop their engine reference first: shutting an engine down tears down
+    # vLLM's process-wide parallel state, which the next engine would otherwise lose.
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -202,7 +203,8 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
         moe_backend="flashinfer_trtllm",
     )
     expected = _logprobs(online)
-    _close(online)
+    del online
+    _free()
 
     apply_vllm_quant_patches()
     ignore = [r"re:.*layers\.(" + "|".join(map(str, carved)) + r")\.mlp\.experts\..*"]
@@ -224,7 +226,8 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
     clear_kv_cache(_runner(preset).get_model())
     assert _kv_caches(preset) and all(torch.isfinite(t).all() for t in _kv_caches(preset))
     assert refit(preset, 1.0) == expected
-    _close(preset)
+    del preset
+    _free()
 
     # vLLM allows one sleep-mode (CuMem) engine per process, so one model covers the sleep.
     sleep = request.node.callspec.id == "qwen3_moe"
@@ -243,4 +246,5 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
         preset.sleep(level=2)
         preset.wake_up()
         assert refit(preset, 1.0) == first
-    _close(preset)
+    del preset
+    _free()
