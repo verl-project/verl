@@ -73,7 +73,8 @@ def test_rocm_defaults_and_explicit_values(tmp_path):
 
 
 def test_omp_threads_follow_the_cpu_affinity(tmp_path):
-    assert _worker_env(tmp_path, cpus={0})["OMP_NUM_THREADS"] == "1"
+    one_cpu = {min(os.sched_getaffinity(0))}  # a restricted runner may not include CPU 0
+    assert _worker_env(tmp_path, cpus=one_cpu)["OMP_NUM_THREADS"] == "1"
 
 
 def test_keys_of_the_job_runtime_env_are_left_to_the_job(tmp_path):
