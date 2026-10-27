@@ -15,6 +15,7 @@
 import os
 import sys
 import types
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -137,7 +138,12 @@ def test_batch_invariant_log_probs_divide_fp32_logits_by_temperature(use_remove_
     engine.use_ulysses_sp = False
     engine._batch_invariant = True
 
-    model_output = FSDPEngineWithLMHead.prepare_model_outputs(engine, output, output_args, micro_batch, None)
+    narrow = torch.nested.narrow
+    with patch.object(torch.nested, "narrow", wraps=narrow) as narrow_calls:
+        model_output = FSDPEngineWithLMHead.prepare_model_outputs(engine, output, output_args, micro_batch, None)
 
     ref = torch.log_softmax(logits_rmpad.float() / temperature, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
     assert torch.equal(model_output["log_probs"].values(), ref)
+    if not use_remove_padding:
+        # at T=1 the unscaled logits are the scaled ones, so they are packed once
+        assert narrow_calls.call_count == (1 if temperature == 1.0 else 2)

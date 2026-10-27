@@ -1451,10 +1451,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
                     logits_rmpad = torch.cat([t for t in logits.unbind()])
                     if self._batch_invariant:
-                        unscaled_logits = torch.nested.narrow(
-                            unscaled_logits, 1, starts, seq_lengths, layout=torch.jagged
-                        )
-                        unscaled_logits_rmpad = torch.cat([t for t in unscaled_logits.unbind()])
+                        if temperature_is_one:
+                            unscaled_logits_rmpad = logits_rmpad
+                        else:
+                            unscaled_logits = torch.nested.narrow(
+                                unscaled_logits, 1, starts, seq_lengths, layout=torch.jagged
+                            )
+                            unscaled_logits_rmpad = torch.cat([t for t in unscaled_logits.unbind()])
                     input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
 
                     # Mirror the use_remove_padding=True branch (see verl#6293).

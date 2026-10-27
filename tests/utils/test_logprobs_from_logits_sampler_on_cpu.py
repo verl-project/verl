@@ -78,3 +78,13 @@ def test_temperature_divides_the_fp32_logits_like_the_vllm_sampler():
         assert torch.equal(out, ref)
     bf16_scaled = logits / temperature.unsqueeze(-1).to(logits.dtype)
     assert not torch.equal(logprobs_from_logits_sampler(bf16_scaled, labels), ref)
+
+
+def test_greedy_temperature_reports_unscaled_log_probs_like_the_vllm_sampler():
+    # vLLM samples greedily below a temperature of 1e-5 and reports the log-probs of the unscaled fp32 logits.
+    torch.manual_seed(0)
+    logits = torch.randn(6, 64, dtype=torch.bfloat16) * 4
+    labels = torch.randint(0, 64, (6,))
+    temperature = torch.tensor([0.0, 1e-6, 0.0, 1.0, 0.0, 0.0])
+    ref = torch.log_softmax(logits.float(), dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    assert torch.equal(logprobs_from_logits_sampler(logits, labels, temperature=temperature), ref)

@@ -216,7 +216,7 @@ def logprobs_from_logits_sampler(
     temperature: Optional[torch.Tensor] = None,
 ):
     """Log-probabilities computed the way the vLLM sampler reports them: fp32 logits divided by the fp32
-    per-row ``temperature`` (unscaled when ``None``), fp32 log_softmax over the full vocabulary, then
+    per-row ``temperature`` (unscaled when ``None`` or below 1e-5), fp32 log_softmax over the full vocabulary, then
     gather. Returns float32 regardless of the logits dtype.
 
     log_softmax is row-wise, so processing chunks of rows gives the same values as one call on the
@@ -240,7 +240,9 @@ def _sampler_chunk_logprobs(
 ) -> torch.Tensor:
     chunk_logits = chunk_logits.float()
     if chunk_temperature is not None:
-        chunk_logits = chunk_logits / chunk_temperature.float().unsqueeze(-1)
+        # vLLM samples greedily below this temperature and reports the log-probs of the unscaled logits
+        chunk_temperature = torch.where(chunk_temperature < 1e-5, 1.0, chunk_temperature.float())
+        chunk_logits = chunk_logits / chunk_temperature.unsqueeze(-1)
     chunk_logprobs = F.log_softmax(chunk_logits, dim=-1)
     return chunk_logprobs.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1)
 
