@@ -18,6 +18,7 @@ The recipe runs as is; a ``python`` shim on PATH prints the trainer's arguments 
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ def _worker_env(tmp_path, hip=None, env=None, cpus=None, gfx_target_version=None
     shim.write_text(
         "#!/bin/bash\n"
         'if [ "${1:-}" = -m ] && [ "${2:-}" = verl.trainer.main_ppo ]; then shift 2; printf "%s\\n" "$@"; exit 0; fi\n'
-        f'exec {sys.executable} "$@"\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
     )
     shim.chmod(0o755)
     if gfx_target_version is not None:
@@ -41,10 +42,11 @@ def _worker_env(tmp_path, hip=None, env=None, cpus=None, gfx_target_version=None
         properties = tmp_path / "properties"
         properties.write_text(f"gfx_target_version 0\ngfx_target_version {gfx_target_version}\n")
         awk = shim.parent / "awk"
+        target, real_awk = shlex.quote(str(properties)), shlex.quote(shutil.which("awk"))
         awk.write_text(
             "#!/bin/bash\n"
-            f'args=(); for a in "$@"; do [[ $a == /sys/class/kfd/* ]] && a={properties}; args+=("$a"); done\n'
-            f'exec {shutil.which("awk")} "${{args[@]}}"\n'
+            f'args=(); for a in "$@"; do [[ $a == /sys/class/kfd/* ]] && a={target}; args+=("$a"); done\n'
+            f'exec {real_awk} "${{args[@]}}"\n'
         )
         awk.chmod(0o755)
     torch = tmp_path / "torch"
