@@ -18,6 +18,7 @@ The recipe runs as is; a ``python`` shim on PATH prints the trainer's arguments 
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,7 @@ RECIPE = Path(__file__).resolve().parents[2] / "examples" / "grpo_trainer" / "ru
 PREFIX = "+ray_kwargs.ray_init.runtime_env.env_vars."
 
 
-def _worker_env(tmp_path, hip=None, env=None, cpus=None):
+def _worker_env(tmp_path, hip=None, env=None, cpus=None, gfx_target_version=None):
     shim = tmp_path / "bin" / "python"
     shim.parent.mkdir(exist_ok=True)
     shim.write_text(
@@ -35,6 +36,17 @@ def _worker_env(tmp_path, hip=None, env=None, cpus=None):
         f'exec {sys.executable} "$@"\n'
     )
     shim.chmod(0o755)
+    if gfx_target_version is not None:
+        # The recipe's awk reads this KFD topology (a CPU node, then a GPU node) instead of the host's.
+        properties = tmp_path / "properties"
+        properties.write_text(f"gfx_target_version 0\ngfx_target_version {gfx_target_version}\n")
+        awk = shim.parent / "awk"
+        awk.write_text(
+            "#!/bin/bash\n"
+            f'args=(); for a in "$@"; do [[ $a == /sys/class/kfd/* ]] && a={properties}; args+=("$a"); done\n'
+            f'exec {shutil.which("awk")} "${{args[@]}}"\n'
+        )
+        awk.chmod(0o755)
     torch = tmp_path / "torch"
     torch.mkdir(exist_ok=True)
     (torch / "__init__.py").write_text(f"class version:\n    hip = {hip!r}\n")
@@ -70,6 +82,11 @@ def test_rocm_defaults_and_explicit_values(tmp_path):
     # A value set in the launching shell is forwarded even where the GPU architecture is unknown.
     env = _worker_env(tmp_path, hip="7.2", env={"VLLM_ROCM_USE_AITER": "0", "OMP_NUM_THREADS": "3"})
     assert env["VLLM_ROCM_USE_AITER"] == "0" and env["OMP_NUM_THREADS"] == "3"
+
+
+def test_rocm_enables_aiter_on_gfx94x_only(tmp_path):
+    assert _worker_env(tmp_path, hip="7.2", gfx_target_version=90402)["VLLM_ROCM_USE_AITER"] == "1"  # gfx942
+    assert "VLLM_ROCM_USE_AITER" not in _worker_env(tmp_path, hip="7.2", gfx_target_version=90500)  # gfx950
 
 
 def test_omp_threads_follow_the_cpu_affinity(tmp_path):
