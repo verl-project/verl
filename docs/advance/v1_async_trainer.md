@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 10/19/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -49,6 +49,25 @@ data.train_batch_size
 For example, a train batch of 64 with a PPO mini-batch of 16 requires `parameter_sync_step=4`.
 
 ## Partial Rollout and Staleness
+
+By default, weight synchronization aborts in-flight requests and retries them with re-prefill. Set `rollout.preserve_kv_cache: True` to retain in-flight requests for standalone vLLM text-model replicas. The checkpoint manager pauses the engine at a decode boundary, transfers the weights, and resumes the same requests without re-prefilling their history. KV cache, generated tokens, sampling log probabilities, and recorded MoE expert routing remain in memory. Multimodal models, hybrid replicas, prefill/decode disaggregation, and unmerged LoRA updates continue to use abort and retry.
+
+Tokens generated after a weight switch use the new weights with the retained historical KV. This is a mixed-version trajectory, not the result of recomputing the full context with the new weights. Existing routing records describe the original forwards; new tokens use the updated router. The reported minimum and maximum versions bound the request's lifetime, including time spent queued, rather than identifying an exact version for each token.
+
+When preserving KV, prefix caching stays enabled and `prefix_cache_mode: versioned` uses the weight version at the first generation as the task's cache namespace. New tasks after a weight update use a new namespace; existing tool-agent tasks keep theirs across turns. `shared` allows new tasks to reuse prefixes from earlier weight versions. Setting `enable_prefix_caching: False` disables sharing while still retaining each active request's KV. With `preserve_kv_cache: False`, prefix caching retains its existing behavior and `prefix_cache_mode` is unused.
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    preserve_kv_cache: True
+    enable_prefix_caching: True
+    prefix_cache_mode: versioned  # or shared
+    calculate_log_probs: True
+```
+
+Custom multi-turn loops can pass `output.extra_fields["cache_salt"]` back as `cache_salt` on later `generate()` calls. Partial-rollout retries preserve it automatically.
+
+The KV allocation stays resident during synchronization, so leave space for weight-transfer buffers using `rollout.gpu_memory_utilization` and `rollout.checkpoint_engine.update_weights_bucket_megabytes`. Ordinary memory-pressure preemption can still recompute history. Requests are not migrated to another replica, and their in-memory state does not survive an engine restart.
 
 Partial rollout is part of the V1 async client behavior rather than a V1 configuration switch. When a request is aborted:
 

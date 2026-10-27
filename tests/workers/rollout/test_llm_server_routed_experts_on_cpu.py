@@ -96,6 +96,24 @@ def _client() -> FullyAsyncLLMServerClient:
 
 
 @pytest.mark.asyncio
+async def test_resume_preserves_prefix_cache_namespace(monkeypatch):
+    salts = []
+
+    async def generate(self, request_id, *, cache_salt=None, **kwargs):
+        salts.append(cache_salt)
+        return TokenOutput(
+            token_ids=[5],
+            stop_reason="aborted" if len(salts) == 1 else "completed",
+            extra_fields={"cache_salt": "7"},
+        )
+
+    monkeypatch.setattr(llm_server.LLMServerClient, "generate", generate)
+    output = await _client().generate(request_id="session", prompt_ids=[1, 2, 3], sampling_params={})
+    assert salts == [None, "7"]
+    assert output.extra_fields["cache_salt"] == "7"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend):
     """Two resumes: each attempt re-sends the accumulated prompt and returns routing for
@@ -185,3 +203,32 @@ async def test_merged_routing_converts_for_downstream(monkeypatch, backend):
     # a fresh writable buffer, so from_numpy is safe without one.
     assert merged.flags.writeable
     assert _markers(torch.from_numpy(merged)) == [10, 11, 22]
+
+
+@pytest.mark.asyncio
+async def test_resume_merges_server_weight_version_ranges(monkeypatch):
+    segments = [
+        TokenOutput(
+            token_ids=[101],
+            log_probs=[-0.2],
+            routed_experts=_routing([1, 2], "vllm"),
+            stop_reason="aborted",
+            extra_fields={"global_steps": 8, "min_global_steps": 7, "max_global_steps": 8},
+        ),
+        TokenOutput(
+            token_ids=[102],
+            log_probs=[-0.7],
+            routed_experts=_routing([3, 4, 5], "vllm"),
+            stop_reason="completed",
+            extra_fields={"global_steps": 10, "min_global_steps": 8, "max_global_steps": 10},
+        ),
+    ]
+    _install_segments(monkeypatch, segments)
+
+    output = await _client().generate(request_id="r", prompt_ids=[1], sampling_params={})
+
+    assert output.extra_fields["global_steps"] == 10
+    assert output.extra_fields["min_global_steps"] == 7
+    assert output.extra_fields["max_global_steps"] == 10
+    assert output.log_probs == [-0.2, -0.7]
+    assert _markers(output.routed_experts) == [1, 2, 5]

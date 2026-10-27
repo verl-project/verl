@@ -288,6 +288,12 @@ class RolloutConfig(BaseConfig):
 
     enable_prefix_caching: bool = True
 
+    # Retain standalone vLLM requests and KV across weight updates.
+    preserve_kv_cache: bool = False
+
+    # Prefix sharing when preserving KV: task's starting weight version, or across versions.
+    prefix_cache_mode: str = "versioned"
+
     load_format: str = "dummy"
 
     layered_summon: bool = False

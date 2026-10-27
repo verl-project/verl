@@ -330,6 +330,8 @@ actor_rollout_ref:
     ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
+    preserve_kv_cache: false
+    prefix_cache_mode: versioned
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
