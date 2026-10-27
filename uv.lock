@@ -5503,7 +5503,7 @@ wheels = [
 [[package]]
 name = "veomni"
 version = "0.1.12"
-source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=10a26aca258f91a7af3e698cc0db8c6c51705989#10a26aca258f91a7af3e698cc0db8c6c51705989" }
+source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=7a5779ff83a847b75bfe552de1cf6d62afd34a9b#7a5779ff83a847b75bfe552de1cf6d62afd34a9b" }
 
 [[package]]
 name = "verl"
@@ -5975,8 +5975,8 @@ requires-dist = [
     { name = "trl", marker = "extra == 'veomni'", specifier = "==0.27.0" },
     { name = "tyro", marker = "extra == 'torchtitan'" },
     { name = "uvicorn", marker = "extra == 'verl-core'" },
-    { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=10a26aca258f91a7af3e698cc0db8c6c51705989" },
-    { name = "veomni", marker = "extra == 'veomni-sft'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=10a26aca258f91a7af3e698cc0db8c6c51705989" },
+    { name = "veomni", marker = "extra == 'veomni'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=7a5779ff83a847b75bfe552de1cf6d62afd34a9b" },
+    { name = "veomni", marker = "extra == 'veomni-sft'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=7a5779ff83a847b75bfe552de1cf6d62afd34a9b" },
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'fsdp'" },
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'megatron'" },
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'veomni'" },

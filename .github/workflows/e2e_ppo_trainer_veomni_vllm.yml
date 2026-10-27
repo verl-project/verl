@@ -49,6 +49,8 @@ on:
       # Validate changes to the environment consumed by uv run --frozen.
       - "pyproject.toml"
       - "uv.lock"
+      - "examples/tuning/lora/run_qwen3_0.6b_veomni.sh"
+      - "tests/utils/veomni/test_dense_lora_on_cpu.py"
   pull_request:
     branches:
       - main
@@ -76,6 +78,8 @@ on:
       - "tests/special_e2e/profiler_finish_hook_marker.sh"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_trainer.yaml"
+      - "examples/tuning/lora/run_qwen3_0.6b_veomni.sh"
+      - "tests/utils/veomni/test_dense_lora_on_cpu.py"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -138,6 +142,9 @@ jobs:
         run: |
           $UV_RUN ray stop --force
           $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+      - name: Native dense LoRA CPU contracts in the VeOmni environment
+        run: |
+          CUDA_VISIBLE_DEVICES="" $UV_RUN python3 -m pytest tests/utils/veomni/test_dense_lora_on_cpu.py -q
       - name: Prepare GEO3K dataset
         run: |
           $UV_RUN ray stop --force
@@ -150,6 +157,13 @@ jobs:
         run: |
           $UV_RUN ray stop --force
           MODEL_ID=Qwen/Qwen3-VL-2B-Instruct TRAIN_FILES=${HOME}/data/geo3k/train.parquet VAL_FILES=${HOME}/data/gsm8k/test.parquet FSDP_SIZE=8 SP_SIZE=1 bash tests/special_e2e/run_ppo_trainer_veomni.sh
+      - name: Qwen3 Dense native LoRA GRPO on two GPUs
+        run: |
+          $UV_RUN ray stop --force
+          NUM_GPUS=2 MODEL_PATH=Qwen/Qwen3-0.6B $UV_RUN bash examples/tuning/lora/run_qwen3_0.6b_veomni.sh \
+            trainer.total_training_steps=2 trainer.resume_mode=disable \
+            trainer.default_local_dir=checkpoints/ci-qwen3-veomni-lora \
+            +actor_rollout_ref.actor.checkpoint.save_lora_only=True
       - name: Test export unfused experts
         run: |
           $UV_RUN python3 -m torch.distributed.run --nproc_per_node=8 tests/utils/veomni/test_special_export_unfused_experts.py

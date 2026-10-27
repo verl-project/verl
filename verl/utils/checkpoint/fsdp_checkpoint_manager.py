@@ -192,7 +192,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         )
 
     def _get_lora_train_meta(self, unwrap_model):
-        peft_config = getattr(unwrap_model, "peft_config", None)
+        peft_config = getattr(unwrap_model, "peft_config", None) or getattr(unwrap_model, "veomni_lora_config", None)
         if not peft_config:
             return None
         if isinstance(peft_config, dict):
@@ -229,7 +229,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
     def _has_lora(self) -> bool:
         unwrap = getattr(self.model, "_fsdp_wrapped_module", self.model)
-        return hasattr(unwrap, "peft_config")
+        return hasattr(unwrap, "peft_config") or bool(getattr(unwrap, "veomni_lora_config", None))
 
     def _backfill_optimizer_state(self, state_dict: dict) -> dict:
         """Fill in entries that a flattened DSD optimizer checkpoint does not contain.

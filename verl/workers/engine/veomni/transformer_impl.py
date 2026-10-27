@@ -26,7 +26,13 @@ from veomni.arguments import AcceleratorConfig, FSDPConfig, MixedPrecisionConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
-from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
+
+try:
+    from veomni.models.checkpoint import get_checkpoint_tensor_converter
+except ModuleNotFoundError as error:
+    if error.name != "veomni.models.checkpoint":
+        raise
+    from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
@@ -144,12 +150,25 @@ class VeOmniEngine(FSDPEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
-        # VeOmniEngine only supports fsdp2.
-        self.data_parallel_mode = "fsdp2"
+        if getattr(self.model_config, "lora", {}).get("rank", 0) > 0:
+            raise ValueError(
+                "VeOmni dense LoRA uses model.lora_rank, lora_alpha and target_modules; "
+                "model.lora.rank is the separate Megatron configuration."
+            )
+        world_size = dist.get_world_size()
+        # VeOmni skips parallel wrapping at world size one. Its FSDP2 config
+        # requires meta init, so an explicitly materialized singleton must use
+        # the unsharded (DDP-configured) path instead.
+        self.data_parallel_mode = (
+            "ddp" if world_size == 1 and self.engine_config.init_device == get_device_name() else "fsdp2"
+        )
+        if self.data_parallel_mode == "ddp" and (
+            self.engine_config.param_offload or self.engine_config.enable_fsdp_offload
+        ):
+            raise ValueError("VeOmni single-device accelerator initialization does not support model offload.")
         self.rank = dist.get_rank()
 
         fsdp_size = self.engine_config.fsdp_size
-        world_size = dist.get_world_size()
         dp_size = world_size // self.engine_config.ulysses_parallel_size
 
         if fsdp_size < 0 or fsdp_size >= dp_size:
@@ -189,7 +208,9 @@ class VeOmniEngine(FSDPEngine):
 
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
-        self._is_lora = self.model_config.lora_rank > 0
+        self._is_lora = (
+            self.model_config.lora_rank > 0 or getattr(self.model_config, "lora_adapter_path", None) is not None
+        )
         # When VeOmni parallelizes with enable_fsdp_offload, FSDP2 uses CPUOffloadPolicy and
         # owns CPU<->accelerator placement. Manually calling model.to(device) then crashes
         # state_dict() with a DTensor storage device mismatch (see #5995 / #6604, which fixed
@@ -273,7 +294,7 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
-            per_tensor_param_fn=self.get_per_tensor_param,
+            per_tensor_param_fn=self.get_hf_model_per_tensor_param,
             hf_export_dtype=hf_export_dtype,
         )
 
@@ -347,6 +368,12 @@ class VeOmniEngine(FSDPEngine):
         log_gpu_memory_usage("After apply async activation offload", logger=logger)
 
     def _build_model_optimizer(self):
+        if getattr(self, "_is_lora", False):
+            if not self.model_config.lora.get("merge", False):
+                raise ValueError("VeOmni dense LoRA requires model.lora.merge=True for rollout weight synchronization.")
+            if self.engine_config.expert_parallel_size != 1 or self.engine_config.ulysses_parallel_size != 1:
+                raise ValueError("The initial VeOmni dense LoRA integration requires EP=1 and Ulysses SP=1.")
+
         # build_foundation_model runs apply_ops_config(ops_implementation)
         # before constructing the model, so per-model device_patch files see
         # the resolved kernel backends.
@@ -364,6 +391,11 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
         )
         log_gpu_memory_usage("After load base model", logger=logger)
+
+        lora_kwargs = {}
+        if getattr(self, "_is_lora", False):
+            module, adapter_path = self._build_native_lora_module(module)
+            lora_kwargs = {"is_peft_model": True, "adapter_path": adapter_path}
 
         self._maybe_apply_async_activation_offload(module)
 
@@ -385,6 +417,7 @@ class VeOmniEngine(FSDPEngine):
             enable_forward_prefetch=self.engine_config.forward_prefetch,
             broadcast_model_weights_from_rank0=True,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
+            **lora_kwargs,
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
@@ -400,6 +433,81 @@ class VeOmniEngine(FSDPEngine):
         self.module = module
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+
+    def _build_native_lora_module(self, module):
+        """Inject native Qwen3 dense adapters before FSDP materialization."""
+        from veomni.lora import VeOmniLoraConfig, VeOmniLoraModel
+        from veomni.lora.mapping import find_target_linear_names
+
+        from verl.utils.fs import copy_to_local
+        from verl.utils.py_functional import convert_to_regular_types
+
+        if self.model_config.lora.get("type", "lora") != "lora":
+            raise ValueError("VeOmni RL supports LoRA type='lora' only; DoRA and other adapter types are unsupported.")
+        if module.config.model_type != "qwen3":
+            raise ValueError("VeOmni's initial dense LoRA integration supports Qwen3 Dense only.")
+        adapter_path = getattr(self.model_config, "lora_adapter_path", None)
+        if adapter_path is not None:
+            import json
+
+            adapter_path = copy_to_local(adapter_path, use_shm=self.model_config.use_shm)
+            with open(f"{adapter_path}/adapter_config.json") as stream:
+                adapter_settings = json.load(stream)
+            unsupported = (
+                "use_dora",
+                "fan_in_fan_out",
+                "layer_replication",
+                "loftq_config",
+                "trainable_token_indices",
+                "alora_invocation_tokens",
+                "use_qalora",
+                "lora_bias",
+                "megatron_config",
+            )
+            if any(adapter_settings.get(name) for name in unsupported):
+                raise ValueError("The adapter uses unsupported LoRA features for VeOmni RL.")
+            config = VeOmniLoraConfig.from_pretrained(adapter_path)
+        else:
+            config = VeOmniLoraConfig(
+                r=self.model_config.lora_rank,
+                lora_alpha=self.model_config.lora_alpha,
+                target_modules=convert_to_regular_types(self.model_config.target_modules),
+                target_parameters=convert_to_regular_types(self.model_config.target_parameters),
+                exclude_modules=convert_to_regular_types(self.model_config.exclude_modules),
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+        if config.has_moe or config.bias != "none" or config.modules_to_save:
+            raise ValueError("VeOmni RL currently supports dense LoRA with bias='none' and no modules_to_save.")
+        if config.lora_dropout != 0 or self.model_config.lora.get("dropout", 0) != 0:
+            raise ValueError("VeOmni RL requires zero LoRA dropout for deterministic reference and rollout inference.")
+        if config.target_modules == "all-linear":
+            output_embedding = module.get_output_embeddings()
+            config = config.replace(
+                target_modules=[
+                    name
+                    for name, layer in module.named_modules()
+                    if isinstance(layer, torch.nn.Linear) and layer is not output_embedding
+                ]
+            )
+        output_embedding = module.get_output_embeddings()
+        if any(module.get_submodule(name) is output_embedding for name in find_target_linear_names(module, config)):
+            raise ValueError("VeOmni RL does not support lm_head/output embedding LoRA targets.")
+        if not hasattr(VeOmniLoraModel, "disable_adapter"):
+            raise RuntimeError(
+                "Install a VeOmni revision providing native LoRA disable_adapter() for reference inference."
+            )
+        module.enable_input_require_grads()
+        module = VeOmniLoraModel(module, config)
+        if adapter_path is not None and not next(module.parameters()).is_meta:
+            # A singleton with accelerator init never enters VeOmni's FSDP
+            # materializer, which normally loads the adapter after wrapping.
+            from veomni.lora.weight_loading import load_lora_weights
+
+            load_lora_weights(module, adapter_path, init_device=str(next(module.parameters()).device))
+        if not any(param.requires_grad for param in module.parameters()):
+            raise ValueError("LoRA target_modules matched no trainable adapters.")
+        return module, adapter_path
 
     def optimizer_step(self):
         """
@@ -612,6 +720,8 @@ class VeOmniEngine(FSDPEngine):
         """
         from .utils import veomni_shard_export
 
+        if self._is_lora:
+            raise NotImplementedError("VeOmni LoRA does not support delta-sharded rollout synchronization.")
         manual_offload = not getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
         if manual_offload:
             load_veomni_model_to_gpu(self.module)
@@ -643,6 +753,11 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
+        if self._is_lora:
+            from verl.utils.veomni.lora import merged_dense_lora_weights
+
+            return merged_dense_lora_weights(self.module, device=get_device_id()), None
+
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
@@ -690,8 +805,11 @@ class VeOmniEngine(FSDPEngine):
                     else:
                         yield name, unsharded_tensor
 
-        # TODO: support VeOmni LoRA
         return param_generator(), None
+
+    def get_hf_model_per_tensor_param(self):
+        """Use the same non-mutating full-weight export for HF checkpoints."""
+        return self.get_per_tensor_param()
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

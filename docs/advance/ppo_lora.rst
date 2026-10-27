@@ -1,7 +1,7 @@
 RL(HF) algorithms with LoRA Support
 ===========================================
 
-Last updated: 02/03/2026.
+Last updated: 10/21/2026.
 
 We support LoRA (Low-Rank Adaptation) for reinforcement learning algorithms such as PPO, GRPO, and others.
 
@@ -212,3 +212,60 @@ For end-to-end examples, refer to the scripts below:
 **Megatron Examples:**
 
 - LoRA training with MoE: examples/tuning/lora/run_qwen3_30b_a3b_megatron.sh
+
+VeOmni-native Qwen3 Dense LoRA
+-----------------------------
+
+The VeOmni engine supports Qwen3 Dense native adapters with
+``actor_rollout_ref.model.lora_rank > 0`` and
+``actor_rollout_ref.model.lora.merge=True``. Use a matching VeOmni checkout
+that provides ``VeOmniLoraModel.disable_adapter()``; older revisions are
+rejected with an upgrade message. See
+``examples/tuning/lora/run_qwen3_0.6b_veomni.sh`` for a short GRPO recipe.
+With ``NUM_GPUS=1`` the recipe uses CUDA initialization without FSDP wrapping;
+multiple GPUs use meta initialization and FSDP2. Single-device initialization
+requires parameter offload and FSDP CPU offload to remain disabled.
+
+Adapters are injected before FSDP2 materialization. The native loader initializes
+or loads their weights alongside frozen base parameters. Rollout and HF export
+stream temporary merged weights without merging or unloading the live actor.
+Merged export sends full base weights each update; it does not provide the
+bandwidth benefit of adapter-only synchronization.
+
+The initial scope requires EP=1, Ulysses SP=1, ``bias=none`` and no
+``modules_to_save``, and zero adapter dropout. Configure rank/alpha/targets via
+``model.lora_rank``, ``model.lora_alpha``, and ``model.target_modules``; the
+nested Megatron ``model.lora.rank`` configuration is rejected. Output embedding / ``lm_head`` adapter targets, expert
+adapters, adapter-only synchronization and delta-sharded synchronization are
+unsupported. ``target_modules=all-linear`` expands to linear layers excluding
+the output embedding. Reference-policy inference reuses the actor with dense
+adapters temporarily disabled. Native checkpoint detection supports full and
+adapter-only training checkpoints; reconstruct the same frozen base when
+resuming an adapter-only checkpoint. HF-format export contains merged base
+weights and is distinct from the training-resume checkpoint.
+
+CPU tests exercise real tiny Qwen3 models, the patched VeOmni chunked
+log-probability backward, native weight loading, two-rank Gloo DTensor gathering,
+and checkpoint-manager round trips. The VeOmni/vLLM CI workflow runs these
+contracts and a two-GPU GRPO smoke test.
+
+Single-device validation used Qwen3-0.6B on one A800 80GB, PyTorch 2.13.0+cu130,
+Transformers 5.16.1 and vLLM 0.29.0. Four GRPO updates completed with nonzero
+gradients; resuming step 2 completed two further updates of all 392 adapter
+tensors. A separate controlled engine probe checked frozen-base/reference
+preservation and exact next-step optimizer restoration. Stochastic GRPO
+trajectories are not asserted to match bitwise after restarting the sampler.
+This hardware run did not exercise cross-rank FSDP2 sharding or CPU offload.
+
+Merged BF16 inference is numerically approximate. In the four-step smoke run,
+the mean actor/rollout token log-probability difference was 0.0042–0.0051,
+with a maximum of 0.236. These measurements establish an exercised integration,
+not bitwise on-policy equivalence, model-quality improvement or throughput gains.
+
+Run the recipe in its matching environment, for example:
+
+.. code-block:: bash
+
+    NUM_GPUS=1 uv run --frozen --extra veomni --extra vllm \
+        --with transformers==5.16.1 bash examples/tuning/lora/run_qwen3_0.6b_veomni.sh \
+        +actor_rollout_ref.actor.checkpoint.save_lora_only=True
