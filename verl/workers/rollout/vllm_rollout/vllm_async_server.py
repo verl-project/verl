@@ -1449,13 +1449,10 @@ class vLLMHttpServer:
         """Keep NVFP4_PER_TOKEN to the validated layout: no all2all expert parallelism, colocated
         IPC refit and full CUDA graphs for decode only."""
         dp = self.config.data_parallel_size
-        # vLLM runs per-token NVFP4 activations only on the monolithic FlashInfer TRT-LLM
-        # MoE kernel, which has no all2all expert dispatch.
+        # verl runs per-token NVFP4 on the monolithic FlashInfer TRT-LLM MoE kernel,
+        # which has no all2all expert dispatch.
         if dp != 1 or engine_kwargs.get("enable_eplb", False):
-            raise ValueError(
-                "NVFP4_PER_TOKEN rollout requires data_parallel_size=1 and no EPLB: vLLM supports "
-                f"per-token NVFP4 MoE only without all2all expert parallelism, got dp={dp}"
-            )
+            raise ValueError(f"NVFP4_PER_TOKEN rollout requires data_parallel_size=1 and no EPLB, got dp={dp}")
         # DCP cannot run FULL CUDA graphs, and PCP turns expert parallelism into all2all.
         context_parallel = {
             key: engine_kwargs.get(key, 1) or 1

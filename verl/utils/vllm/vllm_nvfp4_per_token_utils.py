@@ -65,7 +65,7 @@ def install_nvfp4_per_token_compressed_tensors_patch():
         """Compressed-tensors NVFP4 weights with per-token dynamic NVFP4 activations."""
 
         def __init__(self, moe, layer_name=None):
-            # Only FlashInfer TRT-LLM quantizes activations per token.
+            # verl runs per-token activations on FlashInfer TRT-LLM.
             selection_moe = replace(moe, moe_backend="flashinfer_trtllm") if moe.moe_backend == "auto" else moe
             super().__init__(selection_moe, layer_name=layer_name, use_a16=False)
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:

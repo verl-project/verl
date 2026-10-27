@@ -224,7 +224,7 @@ DAPO script.
   requested expert activation scheme. verl routes MXFP4 experts through the
   DeepGEMM FP4 backend, whose dynamic FP8 activations use group size 128.
 - **vLLM NVFP4**: verl supports only W4A4 routed experts and forces FlashInfer CUTLASS. W4A16, dense NVFP4 and other MoE backends are rejected.
-- **vLLM NVFP4_PER_TOKEN**: per-token activation scaling exists only in FlashInfer TRT-LLM, which verl selects. The trainer quantizes expert weights with its own NVFP4 kernel, bit-identical to vLLM's online `nvfp4_per_token` method; refits use vLLM's layerwise reload. Rollout supports TP with or without EP, but not data-parallel EP or EPLB, for which vLLM has no per-token path. With EP off, each rank computes the FC2 per-token scale over its shard of the expert. Rollout also needs `FULL_DECODE_ONLY` CUDA graphs and the `naive` checkpoint engine, and does not support context parallelism (DCP/PCP). This path is experimental.
+- **vLLM NVFP4_PER_TOKEN**: verl runs per-token activations on FlashInfer TRT-LLM. The trainer quantizes expert weights with its own NVFP4 kernel, bit-identical to vLLM's online `nvfp4_per_token` method; refits use vLLM's layerwise reload. Rollout supports TP with or without EP; data-parallel EP and EPLB are not supported. With EP off, each rank computes the FC2 per-token scale over its shard of the expert. Rollout also needs `FULL_DECODE_ONLY` CUDA graphs and the `naive` checkpoint engine, and does not support context parallelism (DCP/PCP).
 
 ## Example
 
