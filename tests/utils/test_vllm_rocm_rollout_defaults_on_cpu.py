@@ -13,9 +13,13 @@
 # limitations under the License.
 """vLLM rollout defaults that differ on ROCm."""
 
+import os
+import shutil
+
 import pytest
 import torch
 
+from verl.plugin.platform.platform_manager import _detect_platform_name
 from verl.plugin.platform.platform_rocm import PlatformROCm
 from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
@@ -43,3 +47,19 @@ def test_rocm_rollout_keeps_deepseek_v4_weights_reloadable(monkeypatch):
 
     monkeypatch.setenv("VLLM_ROCM_DSV4_BPRESHUFFLE", "1")
     assert PlatformROCm().rollout_env_vars()["VLLM_ROCM_DSV4_BPRESHUFFLE"] == "1"
+
+
+def test_rocm_is_detected_without_rocm_smi(monkeypatch):
+    """Without rocm-smi the HIP build identifies the platform, also in a CPU-only Ray actor that sees no
+    GPU. Falling back to NVIDIA would drop the ROCm rollout defaults above."""
+    which, isfile = shutil.which, os.path.isfile
+    monkeypatch.setattr(
+        shutil, "which", lambda cmd, *args, **kwargs: None if cmd == "rocm-smi" else which(cmd, *args, **kwargs)
+    )
+    monkeypatch.setattr(os.path, "isfile", lambda path: not path.endswith("/rocm-smi") and isfile(path))
+    monkeypatch.setattr(torch.version, "hip", "7.2", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.delenv("VERL_PLATFORM", raising=False)
+
+    assert PlatformROCm().is_platform_available(use_smi_check=True)
+    assert _detect_platform_name() == "amd"

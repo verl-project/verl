@@ -52,7 +52,8 @@ class PlatformROCm(PlatformCUDA):
                         cmd_path = path
                         break
                 if cmd_path is None:
-                    return False
+                    # No rocm-smi to ask: the HIP build checked above is the evidence.
+                    return True
             if self.check_smi_command(cmd_path):
                 return True
         return torch.cuda.is_available()
@@ -63,10 +64,9 @@ class PlatformROCm(PlatformCUDA):
         # Default to "1" but honor an explicit user override (e.g. SGLANG_USE_AITER=0
         # to fall back to vLLM kernels).
         #
-        # VLLM_ROCM_DSV4_BPRESHUFFLE: with AITER, vLLM B-preshuffles DeepSeek-V4's attention and
-        # shared-expert FP8 weights after loading and swaps the loadable parameters for plain tensors
-        # in the shuffled layout, so the first rollout weight sync fails (or would land unshuffled
-        # data). verl always updates the rollout weights at runtime, so keep them loadable.
+        # VLLM_ROCM_DSV4_BPRESHUFFLE: with AITER, vLLM B-preshuffles three DeepSeek-V4 FP8 weights
+        # (attention and shared experts) once after loading, so the weight syncs that follow silently
+        # corrupt the rollouts. verl updates the rollout weights at runtime, so keep the checkpoint layout.
         return {
             **super().rollout_env_vars(),
             "SGLANG_USE_AITER": os.environ.get("SGLANG_USE_AITER", "1"),
