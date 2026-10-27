@@ -62,3 +62,27 @@ def test_checkpoint_export_skips_the_rollout_weight_quantizer(monkeypatch):
     assert list(exported) == [("w", 1)]
     synced, _ = engine.get_per_tensor_param()
     assert list(synced) == [("w.q", 1)]
+
+
+def test_initialize_wires_the_checkpoint_manager_to_the_unquantized_export(monkeypatch):
+    engine = object.__new__(transformer_impl.VeOmniEngine)
+    engine.__dict__.update(
+        _rollout_weight_quantizer=None,
+        enable_routing_replay=False,
+        engine_config=SimpleNamespace(mixed_precision=False),
+        model_config=SimpleNamespace(get_processor=lambda: None, trust_remote_code=False),
+        checkpoint_config=None,
+        module=None,
+        optimizer=None,
+        lr_scheduler=None,
+        _is_offload_param=False,
+        _is_offload_optimizer=False,
+    )
+    monkeypatch.setattr(transformer_impl.VeOmniEngine, "_build_model_optimizer", lambda self: None)
+    monkeypatch.setattr(transformer_impl.VeOmniEngine, "to", lambda self, **kwargs: None)
+    monkeypatch.setattr(transformer_impl, "log_gpu_memory_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transformer_impl, "FSDPCheckpointManager", lambda **kwargs: SimpleNamespace(**kwargs))
+
+    engine.initialize()
+
+    assert engine.checkpoint_manager.per_tensor_param_fn == engine._get_hf_export_per_tensor_param
