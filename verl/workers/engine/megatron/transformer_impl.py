@@ -66,8 +66,10 @@ from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
     get_megatron_mtp_loss,
+    load_megatron_grad_to_gpu,
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
+    offload_megatron_grad_to_cpu,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
     patch_engine_mtp,
@@ -194,6 +196,7 @@ class MegatronEngine(BaseEngine):
         set_random_seed(seed=self.engine_config.seed)
 
         self._is_offload_param = self.engine_config.param_offload
+        self._is_offload_grad = self.engine_config.grad_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
 
         self.mode = None
@@ -639,6 +642,8 @@ class MegatronEngine(BaseEngine):
             optimizer=self._is_offload_optimizer,
             grad=self._is_offload_param,
         )
+        if self._is_offload_grad and not self._is_offload_param:
+            self._set_grad_storage("cpu")
 
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
 
@@ -679,9 +684,10 @@ class MegatronEngine(BaseEngine):
         Returns:
             grad_norm (float): The norm of the gradients before clipping or update.
         """
-        # forward_kl_topk leaves large fp32 vocab tensors until backward ends;
-        # free cached blocks before grad-norm all_reduce to reduce OOM on tight VRAM.
-        if getattr(self, "_distillation_use_topk_active", False):
+        # Distillation and grad offload are memory-reclamation modes. Release
+        # inactive allocator blocks before HCCL creates its grad-norm workspace.
+        if getattr(self, "_distillation_use_topk_active", False) or self._is_offload_grad:
+            get_torch_device().synchronize()
             get_torch_device().empty_cache()
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
 
@@ -714,6 +720,7 @@ class MegatronEngine(BaseEngine):
             device: Target device identifier.
             model: If True, move the model.
             optimizer: If True, move the optimizer states.
+            grad: If True, move or recreate gradient storage.
         """
         super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
@@ -730,6 +737,16 @@ class MegatronEngine(BaseEngine):
                 offload_megatron_model_to_cpu(self.module)
             if optimizer and self.optimizer is not None:
                 offload_megatron_optimizer(self.optimizer)
+        else:
+            raise ValueError(f"Invalid device type: {device}")
+
+    def _set_grad_storage(self, device: str) -> None:
+        """Stage Megatron DDP gradient storage independently of parameters."""
+        device_name = get_device_name()
+        if device == device_name:
+            load_megatron_grad_to_gpu(self.module)
+        elif device == "cpu":
+            offload_megatron_grad_to_cpu(self.module)
         else:
             raise ValueError(f"Invalid device type: {device}")
 
@@ -958,15 +975,21 @@ class MegatronEngine(BaseEngine):
 
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
-        losses_reduced = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.module,
-            num_microbatches=n_micro_batch,
-            seq_length=1,  # the communication shape is obtained via p2p comm
-            micro_batch_size=1,  # the communication shape is obtained via p2p comm
-            forward_only=forward_only,
-        )
+        # Megatron's pipeline schedule skips backward for forward-only calls,
+        # but it does not disable autograd itself.  Old/ref log-prob therefore
+        # retained a useless graph and could not take inference-only operator
+        # paths.  Keep training unchanged while matching the no-grad contract
+        # already used by the FSDP and AutoModel engines.
+        with torch.set_grad_enabled(not forward_only):
+            losses_reduced = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.module,
+                num_microbatches=n_micro_batch,
+                seq_length=1,  # the communication shape is obtained via p2p comm
+                micro_batch_size=1,  # the communication shape is obtained via p2p comm
+                forward_only=forward_only,
+            )
 
         if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
             # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
@@ -1150,6 +1173,12 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, MegatronEngine)
         super().__enter__()
+        # train_mini_batch opens an outer context and train_batch opens a nested
+        # context with disable_auto_offload=True.  Stage the flat DDP gradient
+        # storage only at the outer boundary; doing it in both contexts leaves
+        # the outer zero_grad() pointing at storage released by the inner one.
+        if self.engine._is_offload_grad and not self.engine._is_offload_param and not self.disable_auto_offload:
+            self.engine._set_grad_storage(get_device_name())
         # mcore module is a list of model chunk in each vpp stage
         for module in self.engine.module:
             module.train()
@@ -1158,6 +1187,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, MegatronEngine)
         if self.zero_grad_on_exit or exc_type is not None:
             self.engine.optimizer_zero_grad()
+        if self.engine._is_offload_grad and not self.engine._is_offload_param and not self.disable_auto_offload:
+            self.engine._set_grad_storage("cpu")
         super().__exit__(exc_type, exc_value, traceback)
 
 

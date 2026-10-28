@@ -25,7 +25,12 @@ from megatron.core.optimizer.optimizer import ChainedOptimizer
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
+from verl.utils.megatron_utils import (
+    load_megatron_grad_to_gpu,
+    load_megatron_optimizer,
+    offload_megatron_grad_to_cpu,
+    offload_megatron_optimizer,
+)
 
 # ==== Helper functions ==== #
 
@@ -136,6 +141,22 @@ def test_precision_aware_optimizer_offload_and_load(tmp_path):
         optimizer.zero_grad(set_to_none=False)
         update_successful, _, _ = optimizer.step()
         assert update_successful
+
+        # Grad-only offload releases and recreates the flat DDP buffers without
+        # moving model parameters.
+        grad_buffers = [
+            buffer
+            for model_chunk in model_chunks
+            for buffers in (model_chunk.buffers, model_chunk.expert_parallel_buffers)
+            for buffer in buffers
+        ]
+        expected_sizes = [buffer.grad_data.storage().size() for buffer in grad_buffers]
+        assert all(size > 0 for size in expected_sizes)
+        offload_megatron_grad_to_cpu(model_chunks)
+        assert all(buffer.grad_data.storage().size() == 0 for buffer in grad_buffers)
+        load_megatron_grad_to_gpu(model_chunks)
+        assert [buffer.grad_data.storage().size() for buffer in grad_buffers] == expected_sizes
+        assert all(torch.count_nonzero(buffer.grad_data) == 0 for buffer in grad_buffers)
 
         # Offload optimizer state.
         offload_megatron_optimizer(optimizer)

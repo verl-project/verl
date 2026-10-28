@@ -7,6 +7,9 @@ param_offload: False
 # Whether to offload optimizer state to CPU
 optimizer_offload: False
 
+# Release disposable gradient buffers between phases, independently of parameters
+grad_offload: False
+
 # tensor model parallel size
 tensor_model_parallel_size: 1
 
