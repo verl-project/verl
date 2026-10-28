@@ -159,8 +159,6 @@ TRAINER=(
 # Environment of every Ray worker, also on a cluster started with a plain `ray start`. A value set in the
 # launching shell wins. Keys that `ray job submit --runtime-env` already sets are left to the job, since Ray
 # rejects the same key in ray.init's runtime env.
-#   OMP_NUM_THREADS        Ray pins it to 1 in its workers; with enable_fsdp_offload the gradient
-#                          accumulation and the AdamW step run on the host, so give each rank its share of cores
 #   NCCL_DEBUG=VERSION     ROCm: at verl's default WARN, RCCL logs a deprecation warning for every MoE all-to-all
 #   VLLM_ROCM_USE_AITER=1  gfx94x: vLLM's DeepSeek-V4 sparse-attention indexer has no other ROCm path. The GPU
 #                          architecture is read from this node's KFD topology, so set it explicitly when
@@ -171,10 +169,6 @@ RUNTIME_ENV=()
 add_worker_env() {
     [[ "$job_env_keys" == *" $1 "* ]] || RUNTIME_ENV+=("${EV}.$1=\"$2\"")
 }
-n_cores=$({ lscpu -p=CORE,SOCKET 2>/dev/null || true; } | awk '!/^#/' | sort -u | wc -l)
-# lscpu reports the host; nproc counts the CPUs this process may use under a Slurm or container cpuset.
-[ "$n_cores" -gt 0 ] && [ "$n_cores" -le "$(nproc)" ] || n_cores=$(nproc)
-add_worker_env OMP_NUM_THREADS "${OMP_NUM_THREADS:-$((n_cores > n_gpus_per_node ? n_cores / n_gpus_per_node : 1))}"
 if python -c "import sys, torch; sys.exit(torch.version.hip is None)" 2>/dev/null; then
     add_worker_env NCCL_DEBUG "${NCCL_DEBUG:-VERSION}"
     gfx_version=$(awk '$1 == "gfx_target_version" && $2 > 0 {print $2; exit}' /sys/class/kfd/kfd/topology/nodes/*/properties 2>/dev/null || true)
