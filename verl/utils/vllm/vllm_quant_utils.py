@@ -54,24 +54,45 @@ from verl.utils.vllm.vllm_fp8_utils import (
 )
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+def _collect_strings(value: Any, values: list[str] | None = None) -> list[str]:
+    """Every string nested anywhere in a quantization config, lower-cased."""
+    if values is None:
+        values = []
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _collect_strings(nested, values)
+    elif isinstance(value, list | tuple):
+        for nested in value:
+            _collect_strings(nested, values)
+    elif isinstance(value, str):
+        values.append(value.lower())
+    return values
 
 
 def _is_nvfp4_quantization(quantization_config: Mapping[str, Any]) -> bool:
     """Whether a quantization config contains the NVFP4 format."""
-    values = []
+    return any("nvfp4" in value for value in _collect_strings(quantization_config))
 
-    def collect(value: Any) -> None:
-        if isinstance(value, Mapping):
-            for nested in value.values():
-                collect(nested)
-        elif isinstance(value, list | tuple):
-            for nested in value:
-                collect(nested)
-        elif isinstance(value, str):
-            values.append(value.lower())
 
-    collect(quantization_config)
-    return any("nvfp4" in value for value in values)
+def _has_mxfp4_experts(quantization_config: Mapping[str, Any], hf_config: Any = None) -> bool:
+    """Whether the routed experts are stored in MXFP4.
+
+    Native DeepSeek-V4 checkpoints keep only the FP8 block config under
+    ``quantization_config`` and declare the expert format as ``expert_dtype``
+    (top-level in V4, inside ``quantization_config`` in V4.1); the ``-Base``
+    checkpoints say ``fp8`` there and keep DeepGEMM on every architecture.
+    Compressed-tensors checkpoints name the scheme inside ``quantization_config``.
+    """
+    expert_dtypes = (
+        getattr(hf_config, "expert_dtype", None),
+        quantization_config.get("expert_dtype"),  # DeepSeek-V4.1 nests it under quantization_config
+    )
+    if any(str(dtype or "").lower() in {"fp4", "mxfp4"} for dtype in expert_dtypes):
+        return True
+    return any("mxfp4" in value for value in _collect_strings(quantization_config))
 
 
 def _uses_fp32_block_scales(quantization_config: Mapping[str, Any]) -> bool:
@@ -90,22 +111,58 @@ def _is_hopper() -> bool:
     return current_platform.is_device_capability(90)
 
 
+def checkpoint_hf_config_for_backend_defaults(hf_overrides: Mapping[str, Any] | None, hf_config: Any) -> Any:
+    """The ``hf_config`` to hand to :func:`set_default_vllm_quantization_backends`.
+
+    The checkpoint's own expert format only matters when the rollout keeps the
+    checkpoint's quantization; a rollout quantization override (``hf_overrides``
+    carrying a ``quantization_config``) requantizes the experts as well.
+    """
+    if hf_overrides and hf_overrides.get("quantization_config"):
+        return None
+    return hf_config
+
+
 def set_default_vllm_quantization_backends(
     quantization_config: Mapping[str, Any] | None,
     engine_kwargs: dict[str, Any],
+    hf_config: Any = None,
 ) -> None:
-    """Default non-NVFP4 quantization backends to DeepGEMM."""
+    """Default non-NVFP4 quantization backends to DeepGEMM.
+
+    ``VERL_ROLLOUT_USE_DEEP_GEMM=0`` leaves every backend to vLLM's automatic
+    selection. MXFP4 routed experts keep vLLM's selection on Hopper, where vLLM
+    has no DeepGEMM MXFP4 kernel and picks Marlin, the refittable backend there;
+    forcing ``moe_backend=deep_gemm`` would fail at ``load_model``. Pass
+    ``hf_config`` only when ``quantization_config`` is the checkpoint's own: a
+    rollout quantization override requantizes the experts as well.
+
+    On Hopper, FP8 block checkpoints with FP32 scales always disable DeepGEMM's
+    E8M0 mode when DeepGEMM may run, whether verl set it, the user set it or
+    vLLM's own selection may pick it.
+    """
     if hasattr(quantization_config, "to_dict"):
         quantization_config = quantization_config.to_dict()
     if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
         return
-    for option in ("linear_backend", "moe_backend"):
-        engine_kwargs.setdefault(option, "deep_gemm")
-    if (
-        "deep_gemm" in (engine_kwargs["linear_backend"], engine_kwargs["moe_backend"])
-        and _is_hopper()
-        and _uses_fp32_block_scales(quantization_config)
-    ):
+    opt_out = os.getenv("VERL_ROLLOUT_USE_DEEP_GEMM", "1") == "0"
+    if opt_out:
+        logger.info("VERL_ROLLOUT_USE_DEEP_GEMM=0: linear_backend and moe_backend are left to vLLM's selection")
+    else:
+        engine_kwargs.setdefault("linear_backend", "deep_gemm")
+        if "moe_backend" not in engine_kwargs:
+            if _is_hopper() and _has_mxfp4_experts(quantization_config, hf_config):
+                logger.info(
+                    "MXFP4 routed experts on Hopper: moe_backend is left to vLLM's automatic selection "
+                    "(vLLM's DeepGEMM MXFP4 kernel needs SM100; Marlin is the refittable backend here)"
+                )
+            else:
+                engine_kwargs["moe_backend"] = "deep_gemm"
+    # DeepGEMM may run when verl or the user named it, or when a backend is unset / "auto" and vLLM picks it.
+    deep_gemm_possible = any(
+        engine_kwargs.get(option) in (None, "auto", "deep_gemm") for option in ("linear_backend", "moe_backend")
+    )
+    if deep_gemm_possible and _is_hopper() and _uses_fp32_block_scales(quantization_config):
         os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
 
 
