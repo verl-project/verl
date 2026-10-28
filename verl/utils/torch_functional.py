@@ -100,7 +100,7 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
         labels = labels.reshape(-1)
         output = logprobs_from_logits_flash_attn(logits, labels, inplace_backward=inplace_backward)
         output = output.view(*batch_dim)
-    elif NPU_CROSS_ENTROPY_LOSS_AVAILABLE:
+    elif NPU_CROSS_ENTROPY_LOSS_AVAILABLE and logits.device.type == "npu":
         output = logprobs_from_logits_torch_npu(logits, labels)
     else:
         output = logprobs_from_logits_v2(logits, labels)

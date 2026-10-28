@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+import verl.utils.torch_functional as verl_F
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.torch_functional import (
     calculate_sum_pi_squared_from_logits,
@@ -27,6 +28,23 @@ from verl.utils.torch_functional import (
     expand_as_nested,
     masked_mean,
 )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
+def test_logprobs_preserve_dtype_and_gradients_on_cpu(dtype, monkeypatch):
+    monkeypatch.setattr(verl_F, "FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE", False)
+    monkeypatch.setattr(verl_F, "NPU_CROSS_ENTROPY_LOSS_AVAILABLE", True)
+    torch.manual_seed(7)
+    logits = torch.randn(2, 3, 7, dtype=dtype, requires_grad=True)
+    reference = logits.detach().clone().requires_grad_()
+    labels = torch.tensor([[0, 3, 6], [2, 4, 1]])
+    actual = verl_F.logprobs_from_logits(logits, labels)
+    expected = reference.log_softmax(-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    expected.sum().backward()
+    torch.testing.assert_close(logits.grad, reference.grad)
 
 
 def _worker_mean(rank: int, world_size: int, rendezvous_file: str):
