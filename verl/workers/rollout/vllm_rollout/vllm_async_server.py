@@ -100,6 +100,28 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _disable_expandable_segments_for_vllm() -> None:
+    """Keep vLLM's CaMem memory pool compatible with torch-npu.
+
+    The colocated FSDP actor benefits from expandable segments, but vLLM's
+    CaMemAllocator explicitly rejects that allocator option.  vLLM servers run
+    in separate Ray actors, so remove only that option in the server process
+    before EngineCore and its TP workers inherit the environment.
+    """
+    env_name = "PYTORCH_NPU_ALLOC_CONF"
+    conf = os.environ.get(env_name, "")
+    options = [option.strip() for option in conf.split(",") if option.strip()]
+    retained = [option for option in options if option.replace(" ", "").lower() != "expandable_segments:true"]
+    if len(retained) == len(options):
+        return
+
+    if retained:
+        os.environ[env_name] = ",".join(retained)
+    else:
+        os.environ.pop(env_name, None)
+    logger.info("Disabled expandable_segments in %s for the vLLM CaMem memory pool", env_name)
+
+
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -507,7 +529,9 @@ class vLLMHttpServer:
         if server_args.subparser in cmds:
             cmds[server_args.subparser].validate(server_args)
 
-        # 3. launch server
+        # 3. launch server. The actor/ref workers are separate processes and
+        # keep their expandable-segments allocator setting.
+        _disable_expandable_segments_for_vllm()
         if self.node_rank == 0:
             await self.run_server(server_args)
         else:
@@ -622,6 +646,8 @@ class vLLMHttpServer:
                 session_id=session_id,
             )
 
+        for key, value in ((self.config.custom or {}).get("sampling_defaults") or {}).items():
+            sampling_params.setdefault(key, value)
         prompt_ids = normalize_token_ids(prompt_ids)
 
         # Calculate the maximum possible new tokens based on available context space
@@ -696,7 +722,6 @@ class vLLMHttpServer:
             multi_modal_data["video"] = video_data
         if audio_data is not None:
             multi_modal_data["audio"] = audio_data
-
         prompt_kwargs = {"prompt_token_ids": prompt_ids, "multi_modal_data": multi_modal_data}
         if mm_processor_kwargs:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
@@ -927,7 +952,6 @@ class vLLMHttpServer:
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
-
         if self.rollout_mode == RolloutMode.HYBRID:
             # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
             # processes across all DP shards (unlike collective_rpc which only reaches
@@ -963,15 +987,16 @@ class vLLMHttpServer:
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
-        if self.node_rank == 0:
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous model weights. With no connector it
-            # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+        if self.node_rank != 0:
+            return
+        # reset_connector=True drops any attached external KV store
+        # (e.g. MooncakeStoreConnector) whose entries were computed
+        # against the previous model weights. With no connector it
+        # is a no-op success, so we can pass it unconditionally.
+        await self.engine.reset_prefix_cache(reset_connector=True)
 
-            await self.engine.reset_mm_cache()
-            await self.engine.reset_encoder_cache()
+        await self.engine.reset_mm_cache()
+        await self.engine.reset_encoder_cache()
 
     @RLInsightLogger.trace_state_decorator(
         "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
