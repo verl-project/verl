@@ -100,6 +100,34 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 LoRA variants live in `examples/tuning/lora/`, profiling variants in `examples/profile/`.
 Scale / hardware-specific demos (e.g. `run_qwen3_8b_fsdp_gb200.sh`, FP8 variants, VeOmni) keep a trailing suffix to stay discoverable.
 
+## Single GPU (24 GB) + LoRA
+
+The recipes above assume multi-GPU nodes. For a single 24 GB card (RTX 4090, L4, A10), use
+[`run_qwen2_5_1p5b_lora_24g.sh`](run_qwen2_5_1p5b_lora_24g.sh) as a starting point:
+
+```bash
+MODEL=/path/to/Qwen2.5-Math-1.5B-Instruct \
+DATA=/path/to/math/train.parquet \
+bash examples/grpo_trainer/run_qwen2_5_1p5b_lora_24g.sh
+```
+
+It fixes a verified set of knobs for 24 GB: LoRA r=32 / alpha=32 / all-linear, vLLM colocate
+with `gpu_memory_utilization=0.45`, `max_response_length=3072`, micro-batch=1, and
+`use_shm=False`, `rollout.load_format=dummy`, `rollout.layered_summon=False`
+(the defaults OOM or stall on a single card).
+
+Tested stack: torch 2.8.0+cu128, vllm 0.11.0, verl v0.8.0; 20-step smoke and a 600-step
+run both fit at ~18-20 GB peak. This measurement is scoped to **v0.8.0**: `main` currently pins
+newer torch/vLLM versions, so some config keys or values may need adjustment when running on the
+current revision.
+
+`DATA` must follow the default `NaiveRewardManager` schema: each row needs `prompt`,
+`data_source` (e.g. `math`), and `reward_model.ground_truth`. The script sets
+`trainer.total_epochs` only as a guard (default 100) so `STEPS` controls the run; the dataset
+needs at least `STEPS * train_batch_size` rows (300 * 4 = 1,200 by default) to finish within one
+epoch.
+
+
 ## Reference
 
 - See [verl baselines](https://verl.readthedocs.io/en/latest/algo/baseline.html) for reference metrics.
