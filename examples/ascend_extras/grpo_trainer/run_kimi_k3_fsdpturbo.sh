@@ -24,6 +24,7 @@ esac
 
 turbo_fsdp_size=$((nnodes * npus_per_node))
 turbo_ep_size=${TURBO_EP_SIZE:-$npus_per_node}
+turbo_cp_size=${TURBO_CP_SIZE:-1}
 rollout_tp_size=${ROLLOUT_TP:-$npus_per_node}
 rollout_dp_size=${ROLLOUT_DP:-1}
 rollout_ep_size=$((rollout_tp_size * rollout_dp_size))
@@ -250,7 +251,7 @@ for role in actor ref; do
         "$prefix.fsdp_config.turbo_config.distributed.fsdp_plan.reduce_dtype=bf16"
         "$prefix.fsdp_config.turbo_config.distributed.fsdp_plan.fsdp_implementation=native"
         "$prefix.fsdp_config.turbo_config.distributed.fully_shard_parallel_size=$turbo_fsdp_size"
-        "$prefix.fsdp_config.turbo_config.distributed.ulysses_parallel_size=1"
+        "$prefix.fsdp_config.turbo_config.distributed.ulysses_parallel_size=$turbo_cp_size"
         "$prefix.fsdp_config.turbo_config.distributed.expert_parallel_size=$turbo_ep_size"
         "+$prefix.fsdp_config.turbo_config.distributed.ep_plan.apply_modules=['language_model.model.layers.{*}.block_sparse_moe.experts']"
         "+$prefix.fsdp_config.turbo_config.distributed.ep_plan.dispatcher=custom_ep_forward_fused"
@@ -263,6 +264,12 @@ for role in actor ref; do
         "$prefix.entropy_from_logits_with_chunking=True"
         "$prefix.use_torch_compile=False"
     )
+    if ((turbo_cp_size > 1)); then
+        FSDP_CONFIG+=(
+            "+$prefix.fsdp_config.turbo_config.distributed.cp_plan.ulysses_function_patches=[{target_functions:[modeling_kimi_linear.eager_attention_forward],type:full_attention},{target_functions:[modeling_kimi_linear.KimiDeltaAttention.forward],type:kda}]"
+            "+$prefix.fsdp_config.turbo_config.module_patches=[{target:modeling_kimi_k3.KimiK3ForConditionalGeneration.forward,replacement:fsdp_turbo.models.kimi.kimi_k3_cp.kimi_k3_model_forward}]"
+        )
+    fi
 done
 FSDP_CONFIG+=(
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False

@@ -1632,8 +1632,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
         if logits_to_input_indices is not None:
             if use_fused_kernels:
                 raise NotImplementedError("Kimi K3 image-expanded logits are not supported by fused log-prob kernels")
-            if self.use_ulysses_sp:
-                raise NotImplementedError("Kimi K3 image-expanded logit alignment is not implemented with Ulysses SP")
+            if self.use_ulysses_sp and use_remove_padding:
+                raise NotImplementedError("Kimi K3 packed image-expanded logits are not supported with Ulysses SP")
             output_args["logits_to_input_indices"] = logits_to_input_indices
 
         return model_inputs, output_args

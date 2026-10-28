@@ -18,12 +18,17 @@ import math
 from contextlib import contextmanager
 
 import torch
+from torch.distributed.nn.functional import all_reduce
 
+import verl.utils.tensordict_utils as tu
+import verl.utils.torch_functional as verl_F
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import fsdp2_load_full_state_dict
+from verl.utils.model_adapters import kimi_k3_logits_to_input_indices
+from verl.utils.torch_functional import logprobs_from_logits
 
 from ..base import EngineRegistry
-from .transformer_impl import FSDPEngineWithLMHead
+from .transformer_impl import FSDPEngineWithLMHead, _scale_logits_by_temperature
 
 logger = logging.getLogger(__file__)
 
@@ -153,6 +158,94 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         else:
             is_collect = True
         return is_collect
+
+    def prepare_model_inputs(self, micro_batch):
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        if self._is_ulysses_enabled() and "routed_experts" in model_inputs:
+            from fsdp_turbo.distributed.context_parallel.batch import pad_tensor_to_group, split_tensor_to_group
+            from fsdp_turbo.models.kimi.kimi_r3_utils import align_kimi_full_model_routes
+
+            # The CP forward receives routes already aligned to its local fused
+            # rows. Preserve image rows and left padding before slicing all three
+            # replay tensors on exactly the same axis as the hidden states.
+            raw_mask = model_inputs["attention_mask"]
+            raw_lengths = raw_mask.sum(-1)
+            indices = output_args.get("logits_to_input_indices")
+            if indices is None:
+                expanded_mask = raw_mask
+            else:
+                unpadded_indices = kimi_k3_logits_to_input_indices(
+                    model_inputs["input_ids"], model_inputs, self.model_config.hf_config, padding_mask=raw_mask
+                )
+                last_raw = (raw_lengths - 1).unsqueeze(-1)
+                ends = indices.gather(1, last_raw) + 1
+                lengths = unpadded_indices.gather(1, last_raw) + 1
+                positions = torch.arange(int(indices[:, -1].max()) + 1, device=indices.device)[None, :]
+                expanded_mask = (positions >= ends - lengths) & (positions < ends)
+            keys = ("routed_experts", "routed_expert_weights", "router_replay_mask")
+            aligned = align_kimi_full_model_routes(*(model_inputs[key] for key in keys), expanded_mask)
+            for key, value in zip(keys, aligned, strict=True):
+                model_inputs[key] = split_tensor_to_group(
+                    pad_tensor_to_group(value, self.ulysses_parallel_group, dim=1),
+                    self.ulysses_parallel_group,
+                    dim=1,
+                )
+        return model_inputs, output_args
+
+    def prepare_model_outputs(self, output, output_args, micro_batch, logits_processor_func):
+        if (
+            not self._is_ulysses_enabled()
+            or self.model_config.hf_config.model_type != "kimi_k3"
+            or tu.get_non_tensor_data(micro_batch, "use_remove_padding", default=True)
+        ):
+            return super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func)
+
+        # Turbo shards the image-expanded sequence. Select only raw-token
+        # positions owned by this rank and exchange scalar outputs, not logits.
+        logits = output.logits
+        input_ids = micro_batch["input_ids"]
+        offsets = input_ids.offsets()
+        lengths = offsets.diff()
+        indices = output_args.get("logits_to_input_indices")
+        if indices is None:
+            indices = torch.arange(int(lengths.max()), device=logits.device).expand(len(lengths), -1)
+        valid = torch.arange(indices.shape[1], device=logits.device)[None, :] < lengths[:, None]
+        start = self._parallel_state.get_ulysses_rank() * logits.shape[1]
+        owned = valid & (indices >= start) & (indices < start + logits.shape[1])
+        batch_indices, token_indices = owned.nonzero(as_tuple=True)
+        local_logits = logits[batch_indices, indices[owned] - start]
+        local_logits = _scale_logits_by_temperature(
+            local_logits,
+            output_args["temperature"][batch_indices, None],
+            is_unit_temperature=output_args["temperature_is_one"],
+        )
+        flat_indices = offsets[batch_indices] + token_indices
+        labels = output_args["input_ids_rmpad_rolled"][flat_indices]
+        values = {
+            "log_probs": logprobs_from_logits(
+                logits=local_logits, labels=labels, inplace_backward=False, force_fp32=logits_processor_func is None
+            )
+            if local_logits.shape[0]
+            else local_logits.sum(dim=-1)
+        }
+        if tu.get_non_tensor_data(micro_batch, "calculate_entropy", default=False):
+            if self.engine_config.entropy_checkpointing:
+                values["entropy"] = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, local_logits)
+            else:
+                values["entropy"] = verl_F.entropy_from_logits(local_logits)
+        if tu.get_non_tensor_data(micro_batch, "calculate_sum_pi_squared", default=False):
+            values["sum_pi_squared"] = verl_F.calculate_sum_pi_squared_from_logits(local_logits)
+
+        local_values = torch.stack(list(values.values()), dim=-1)
+        dense_values = local_values.new_zeros((*indices.shape, len(values)))
+        dense_values = dense_values.index_put((batch_indices, token_indices), local_values)
+        # Backward sums the replicated loss gradients across CP; FSDP averages
+        # them with the other model replicas, matching the CP=1 normalization.
+        dense_values = all_reduce(dense_values, group=self.ulysses_parallel_group)
+        return {
+            name: torch.nested.nested_tensor_from_jagged(dense_values[..., column][valid], offsets)
+            for column, name in enumerate(values)
+        }
 
     @contextmanager
     def _gradient_sync_context(self, *, is_last_micro_batch: bool):
