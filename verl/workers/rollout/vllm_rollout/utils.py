@@ -164,6 +164,12 @@ class vLLMColocateWorkerExtension:
     def __new__(cls, **kwargs):
         set_death_signal()
 
+        if os.environ.get("VERL_ASCEND_MEMORY_DIAGNOSTICS"):
+            from verl.utils.ascend_memory_diagnostics import install, install_worker_init
+
+            install()
+            install_worker_init(cls)
+
         if os.environ.get("VERL_FULL_DETERMINISM", "0") == "1":
             from verl.workers.engine.utils import enable_full_determinism
 

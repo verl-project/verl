@@ -1,15 +1,8 @@
 name: docker-build-ascend-sglang-a2
 
 on:
+  # Keep other CI manual while investigating Ascend pinned host memory.
   workflow_dispatch:
-  push:
-    branches: ["main"]
-    paths:
-      - "docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2"
-      - ".github/workflows/docker-build-ascend-sglang-a2.yml"
-
-  schedule:
-    - cron: "0 16 * * *"
 
 jobs:
   build-ascend-sglang-image-a2:

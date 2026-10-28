@@ -175,7 +175,11 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
     # lazy init FSDP model
     _lazy_init(model, model)
     assert model._is_root, "Only support root model offloading to CPU"
-    for handle in model._all_handles:
+    diagnose_offload = bool(os.environ.get("VERL_ASCEND_MEMORY_DIAGNOSTICS"))
+    if diagnose_offload:
+        from verl.utils.ascend_memory_diagnostics import fsdp_offload
+
+    for handle_index, handle in enumerate(model._all_handles):
         if handle._offload_params:
             continue
         flat_param = handle.flat_param
@@ -184,7 +188,8 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
             and id(flat_param.data) != id(flat_param._local_shard)
             and flat_param.data.size() == flat_param._local_shard.size()
         )
-        handle.flat_param_to(torch.device("cpu"), non_blocking=True)
+        with fsdp_offload(flat_param, handle_index) if diagnose_offload else nullcontext():
+            handle.flat_param_to(torch.device("cpu"), non_blocking=True)
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
         assert id(flat_param._local_shard) != id(flat_param.data)

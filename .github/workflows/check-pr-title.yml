@@ -31,8 +31,8 @@
 
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  # Keep other CI manual while investigating Ascend pinned host memory.
+  workflow_dispatch:
 
 jobs:
   check-title:

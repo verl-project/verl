@@ -1,0 +1,112 @@
+name: Ascend PPO pinned host memory diagnostic
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned_memory:
+    runs-on: linux-aarch64-a3-800i-test-16
+    timeout-minutes: 90
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      options: --shm-size 16g
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      OMP_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+      ASCEND_PROCESS_LOG_PATH: ${{ github.workspace }}/pinned-memory-artifacts/ascend
+      VERL_ASCEND_MEMORY_DIAGNOSTICS: ${{ github.workspace }}/pinned-memory-artifacts/ppo
+      HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      TRANSFORMERS_VERBOSITY: error
+      UV_SYSTEM_PYTHON: "1"
+      UV_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record driver and CANN installation
+        shell: bash
+        run: |
+          mkdir -p pinned-memory-artifacts/ascend
+          date -u --iso-8601=seconds > pinned-memory-artifacts/start.txt
+          hostname > pinned-memory-artifacts/hostname.txt
+          cat /usr/local/Ascend/driver/version.info > pinned-memory-artifacts/driver-version.txt 2>&1 || true
+          {
+            echo 'CANN installation metadata (may include multiple installed versions)'
+            for variable in ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_INSTALL_PATH; do
+              printf '%s=%s\n' "$variable" "${!variable:-<unset>}"
+            done
+            metadata_files=$(mktemp)
+            for root in "${ASCEND_HOME_PATH:-}" "${ASCEND_TOOLKIT_HOME:-}" \
+              "${ASCEND_INSTALL_PATH:-}" /usr/local/Ascend/ascend-toolkit \
+              /usr/local/Ascend/cann /usr/local/Ascend/nnal; do
+              [ -n "$root" ] || continue
+              printf '\nSearch root: %s\n' "$root"
+              if [ ! -d "$root" ]; then
+                echo 'Directory missing or inaccessible'
+                continue
+              fi
+              printf 'Resolved root: %s\n' "$(readlink -f "$root")"
+              # latest and architecture directories can be symlinks.
+              timeout 20s find -L "$root" -maxdepth 6 -type f \
+                \( -name '*install.info' -o -name 'version.info' -o -name 'version.cfg' \) \
+                -print >> "$metadata_files" || echo 'WARNING: metadata search failed or timed out; results may be incomplete'
+            done
+            if [ -s "$metadata_files" ]; then
+              sort -u "$metadata_files" -o "$metadata_files"
+              while IFS= read -r metadata; do
+                printf '\n=== %s ===\n' "$metadata"
+                cat "$metadata" || echo 'WARNING: could not read metadata'
+                echo
+              done < "$metadata_files"
+            else
+              echo 'WARNING: no CANN version metadata found; CANN version remains unknown'
+            fi
+            rm -f "$metadata_files"
+          } > pinned-memory-artifacts/cann-version.txt 2>&1
+      - name: Prepare original PPO workload
+        shell: bash
+        run: |
+          command -v uv >/dev/null || python3 -m pip install uv
+          uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.11
+          uv pip uninstall nvidia-resiliency-ext
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
+      - name: Run PPO with worker initialization, offload and optional kernel tracing
+        shell: bash
+        run: |
+          set -o pipefail
+          ray stop --force
+          python3 verl/utils/ascend_kernel_trace.py --output pinned-memory-artifacts/kernel-trace -- \
+          python3 verl/utils/ascend_memory_diagnostics.py --output "$VERL_ASCEND_MEMORY_DIAGNOSTICS" \
+            --require-fsdp-offload -- \
+            bash tests/special_npu/run_qwen3_06b_ppo.sh \
+            "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_ASCEND_MEMORY_DIAGNOSTICS=$VERL_ASCEND_MEMORY_DIAGNOSTICS" \
+            2>&1 | tee pinned-memory-artifacts/ppo-console.log
+      - name: Collect final kernel diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p pinned-memory-artifacts
+          python3 verl/utils/ascend_kernel_trace.py --output pinned-memory-artifacts/kernel-trace --stop || true
+          timeout 20s dmesg -T > pinned-memory-artifacts/kernel-final.txt 2>&1 || true
+          timeout 20s journalctl -k --utc --since '-45 minutes' --no-pager > pinned-memory-artifacts/kernel-journal.txt 2>&1 || true
+          if [ -d /tmp/ray/session_latest/logs ]; then
+            timeout 60s tar -czf pinned-memory-artifacts/ray-logs.tar.gz -C /tmp/ray/session_latest logs || true
+          fi
+          date -u --iso-8601=seconds > pinned-memory-artifacts/end.txt
+      - name: Upload diagnostics even if allocations fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-pinned-memory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pinned-memory-artifacts/
+          retention-days: 14
+          if-no-files-found: warn

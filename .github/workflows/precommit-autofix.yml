@@ -1,9 +1,7 @@
 name: scheduled pre-commit autofix
 
 on:
-  schedule:
-    # Every hour
-    - cron: "0 * * * *"
+  # Keep other CI manual while investigating Ascend pinned host memory.
   workflow_dispatch:
 
 permissions:

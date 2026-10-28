@@ -47,8 +47,7 @@
 name: Auto Doc Translate
 
 on:
-  schedule:
-    - cron: '0 0 * * 0'
+  # Keep other CI manual while investigating Ascend pinned host memory.
   workflow_dispatch:
     inputs:
       target_branch:

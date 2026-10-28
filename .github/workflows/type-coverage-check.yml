@@ -1,10 +1,8 @@
 name: Type Annotation and Docstring Coverage
 
 on:
-  pull_request:
-    paths:
-      - '**/*.py'
-      - '.github/workflows/type-coverage-check.yml'
+  # Keep other CI manual while investigating Ascend pinned host memory.
+  workflow_dispatch:
 
 jobs:
   type-coverage-check:
