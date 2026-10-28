@@ -39,12 +39,13 @@ from verl.utils.device import get_device_name, get_torch_device, set_expandable_
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
+from verl.utils.megatron.low_precision import bf16_layers_at_start_end
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
 from verl.utils.py_functional import append_to_dict
 from verl.utils.qat import dispatch_rollout_weight_quantizer
-from verl.utils.real_nvfp4 import real_nvfp4_bf16_layers
+from verl.utils.real_nvfp4 import real_nvfp4_enabled
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.utils.tracking import RLInsightLogger
@@ -733,13 +734,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             engine_config = getattr(self.actor.engine, "engine_config", None)
+            overrides = getattr(engine_config, "override_transformer_config", None) or {}
             weight_quantizer = dispatch_rollout_weight_quantizer(
                 model_config=model_config,
                 rollout_config=self.config.rollout,
                 qat_config=getattr(engine_config, "qat", None),
-                real_nvfp4_bf16_layers=real_nvfp4_bf16_layers(
-                    getattr(engine_config, "override_transformer_config", None) or {}
-                ),
+                real_nvfp4_bf16_layers=bf16_layers_at_start_end(overrides) if real_nvfp4_enabled(overrides) else None,
             )
             if weight_quantizer is not None:
                 self.actor.engine.set_rollout_weight_quantizer(weight_quantizer)

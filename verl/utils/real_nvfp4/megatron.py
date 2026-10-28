@@ -19,11 +19,10 @@ from typing import Any, Iterable
 
 import torch
 
-from verl.utils.megatron.low_precision import bf16_layer_indices, num_decoder_layers
+from verl.utils.megatron.low_precision import bf16_layer_indices, bf16_layers_at_start_end, num_decoder_layers
 
 from .config import (
     is_routed_expert_module,
-    real_nvfp4_bf16_layers,
     real_nvfp4_quant_recipe_config,
     validate_real_nvfp4_model_contract,
     validate_real_nvfp4_parallelism,
@@ -48,7 +47,7 @@ def apply_real_nvfp4_overrides(
 
     from megatron.core.quantization.quant_config import RecipeConfig
 
-    start, end = real_nvfp4_bf16_layers(override_transformer_config)
+    start, end = bf16_layers_at_start_end(override_transformer_config)
     validate_real_nvfp4_model_contract(hf_config)
     # Layer-index recipes and the post-build attestation use global layer
     # indices, which only holds without pipeline splitting.

@@ -15,9 +15,9 @@
 """Validation for routed-expert, per-token NVFP4 training and rollout."""
 
 import fnmatch
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
-from verl.utils.megatron.low_precision import bf16_layer_indices, bf16_layers_at_start_end, hf_config_get, text_config
+from verl.utils.megatron.low_precision import bf16_layer_indices, hf_config_get, text_config
 
 # Megatron module paths of routed-expert GEMMs (grouped or sequential experts). Dense MLPs
 # (``mlp.linear_fc1``) and shared experts (``mlp.shared_experts.linear_fc1``) do not match.
@@ -28,20 +28,20 @@ def is_routed_expert_module(module_path: str) -> bool:
     return any(fnmatch.fnmatch(module_path, pattern) for pattern in ROUTED_EXPERT_PATTERNS)
 
 
-def real_nvfp4_bf16_layers(override_transformer_config: Mapping[str, Any]) -> Optional[tuple[int, int]]:
-    """BF16 decoder layers at the start and end, or None without NVFP4 training.
+def real_nvfp4_enabled(override_transformer_config: Mapping[str, Any]) -> bool:
+    """Whether ``override_transformer_config.fp4`` trains the routed experts in NVFP4.
 
-    NVFP4 training is switched on by ``override_transformer_config.fp4``, as FP8
-    training is by ``fp8``; it applies to routed-expert GEMMs only.
+    NVFP4 training is switched on by ``fp4``, as FP8 training is by ``fp8``; it applies
+    to routed-expert GEMMs only.
     """
 
     fp4 = override_transformer_config.get("fp4")
     if not fp4:
-        return None
+        return False
     fp4_recipe = override_transformer_config.get("fp4_recipe") or "nvfp4"
     if fp4 != "e2m1" or fp4_recipe != "nvfp4":
         raise ValueError(f"FP4 training supports fp4='e2m1' with fp4_recipe='nvfp4', got {fp4!r}/{fp4_recipe!r}")
-    return bf16_layers_at_start_end(override_transformer_config)
+    return True
 
 
 def real_nvfp4_quant_recipe_config(num_layers: int, num_layers_at_start: int, num_layers_at_end: int) -> dict:

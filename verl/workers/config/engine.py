@@ -216,9 +216,9 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
-        from verl.utils.real_nvfp4 import real_nvfp4_bf16_layers
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
 
-        if real_nvfp4_bf16_layers(self.override_transformer_config) is not None:
+        if real_nvfp4_enabled(self.override_transformer_config):
             if self.qat.enable:
                 raise ValueError("override_transformer_config.fp4 and ModelOpt QAT are mutually exclusive")
             if self.dtype != "bfloat16":

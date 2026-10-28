@@ -19,8 +19,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from verl.utils.megatron.low_precision import bf16_layers_at_start_end
 from verl.utils.real_nvfp4.config import (
-    real_nvfp4_bf16_layers,
+    real_nvfp4_enabled,
     real_nvfp4_quant_recipe_config,
     validate_real_nvfp4_te_recipe,
 )
@@ -106,15 +107,22 @@ def test_fp4_override_limits_nvfp4_to_routed_experts(module_path, expected):
     assert get_quant_config_or_none(module_path, overrides["quant_recipe"]).config_key == expected
 
 
-def test_bf16_layers_follow_megatron_core_options():
-    assert real_nvfp4_bf16_layers({}) is None
-    assert real_nvfp4_bf16_layers({"fp8": "e4m3"}) is None
-    assert real_nvfp4_bf16_layers(_fp4_overrides()) == (2, 4)
-    assert real_nvfp4_bf16_layers(_fp4_overrides(first_last_layers_bf16=False)) == (0, 0)
-    # Megatron-Core keeps one layer at each end by default.
-    assert real_nvfp4_bf16_layers({"fp4": "e2m1", "first_last_layers_bf16": True}) == (1, 1)
+def test_nvfp4_training_is_switched_on_by_fp4():
+    assert not real_nvfp4_enabled({})
+    assert not real_nvfp4_enabled({"fp8": "e4m3"})
+    assert real_nvfp4_enabled(_fp4_overrides())
     with pytest.raises(ValueError, match="fp4_recipe='nvfp4'"):
-        real_nvfp4_bf16_layers({"fp4": "e2m1", "fp4_recipe": "custom"})
+        real_nvfp4_enabled({"fp4": "e2m1", "fp4_recipe": "custom"})
+
+
+def test_bf16_layers_follow_megatron_core_options():
+    assert bf16_layers_at_start_end({}) == (0, 0)
+    assert bf16_layers_at_start_end(_fp4_overrides()) == (2, 4)
+    assert bf16_layers_at_start_end(_fp4_overrides(first_last_layers_bf16=False)) == (0, 0)
+    # Megatron-Core keeps one layer at each end by default.
+    assert bf16_layers_at_start_end({"fp8": "e4m3", "first_last_layers_bf16": True}) == (1, 1)
+    with pytest.raises(ValueError, match="non-negative"):
+        bf16_layers_at_start_end({"first_last_layers_bf16": True, "num_layers_at_start_in_bf16": -1})
 
 
 @pytest.mark.parametrize(

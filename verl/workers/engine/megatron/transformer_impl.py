@@ -214,10 +214,12 @@ class MegatronEngine(BaseEngine):
         self._rollout_weight_quantizer = None
 
         # override_transformer_config.fp4 trains the routed experts in NVFP4.
-        from verl.utils.real_nvfp4 import real_nvfp4_bf16_layers
+        from verl.utils.megatron.low_precision import bf16_layers_at_start_end
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
 
-        self._real_nvfp4_bf16_layers = real_nvfp4_bf16_layers(self.engine_config.override_transformer_config)
-        self._real_nvfp4_enabled = self._real_nvfp4_bf16_layers is not None
+        overrides = self.engine_config.override_transformer_config
+        self._real_nvfp4_enabled = real_nvfp4_enabled(overrides)
+        self._real_nvfp4_bf16_layers = bf16_layers_at_start_end(overrides)
         if self._real_nvfp4_enabled:
             logger.info("NVFP4 routed-expert training: BF16 layers at start/end=%d/%d", *self._real_nvfp4_bf16_layers)
 
