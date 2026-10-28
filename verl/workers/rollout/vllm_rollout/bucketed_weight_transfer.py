@@ -40,15 +40,46 @@ class TensorMetadata(TypedDict):
     handle: tuple
 
 
+_ACCELERATOR_REBUILD_FUNCTIONS = frozenset(
+    {
+        "rebuild_cuda_tensor",
+        "rebuild_npu_tensor",
+        # Compatibility with older torch/torch_npu spellings.
+        "rebuild_tensor_cuda",
+        "rebuild_tensor_npu",
+    }
+)
+
+
 # copy from https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/rlhf_utils.py
 def rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
     func, args = handle
     list_args = list(args)
-    if device_id is not None:
-        # the key is to change device id to the current device id
-        # in case two processes have different CUDA_VISIBLE_DEVICES
+    func_name = getattr(func, "__name__", type(func).__name__)
+    if device_id is not None and func_name in _ACCELERATOR_REBUILD_FUNCTIONS:
+        if len(list_args) <= 6:
+            raise RuntimeError(
+                f"{func_name} IPC handle has {len(list_args)} arguments; "
+                "expected an accelerator device id at argument 6"
+            )
+        # Accelerator rebuilders carry the producer device at argument 6.
+        # Rewrite it when sender and receiver have different local visibility.
         list_args[6] = device_id
+    elif device_id is not None and func_name == "rebuild_tensor":
+        # CPU reduce_tensor() handles intentionally have no device-id slot.
+        logger.debug("Rebuilding CPU IPC tensor on receiver before accelerator copy")
     buffer = func(*list_args)
+    # vLLM weight loaders consume device tensors.  A CPU IPC handle is rebuilt
+    # on the receiver first, then copied to the local accelerator; this keeps
+    # CPU-offloaded large parameters compatible with the existing IPC protocol
+    # without forcing the actor to stage the whole tensor on NPU beforehand.
+    if (
+        device_id is not None
+        and isinstance(buffer, torch.Tensor)
+        and buffer.device.type == "cpu"
+        and get_device_name() != "cpu"
+    ):
+        buffer = buffer.to(device=f"{get_device_name()}:{device_id}", non_blocking=True)
     return buffer
 
 
