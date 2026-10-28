@@ -92,6 +92,8 @@ def apply_buffer_updates(
     model: torch.nn.Module,
     buffer_updates: list[WeightUpdate],
     named_buffers: dict[str, torch.Tensor] | None = None,
+    *,
+    layerwise_reload: bool = False,
 ) -> int:
     """Copy updated buffer tensors into the target model in-place."""
     if not buffer_updates:
@@ -105,6 +107,13 @@ def apply_buffer_updates(
             continue
 
         target = named_buffers[name]
+        loader = getattr(target, "weight_loader", None)
+        if layerwise_reload and loader is not None:
+            # Native reload wraps buffer loaders as well as parameter loaders.
+            # Let them materialize/process meta buffers and own deferred inputs.
+            loader(target, tensor.clone())
+            loaded += 1
+            continue
         if target.shape != tensor.shape:
             raise ValueError(
                 f"Buffer shape mismatch for {name}: expected {tuple(target.shape)}, got {tuple(tensor.shape)}"
