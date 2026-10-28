@@ -142,6 +142,38 @@ def _load_hf_language_model(
     )
 
 
+def _select_raw_token_logits(logits: torch.Tensor, indices: torch.Tensor | None) -> torch.Tensor:
+    """Contract image-expanded logits back to the raw input-token sequence."""
+    if indices is None:
+        return logits
+    if logits.ndim != 3 or indices.ndim != 2 or logits.shape[0] != indices.shape[0]:
+        raise ValueError(
+            f"Invalid multimodal logit alignment shapes: logits={tuple(logits.shape)}, indices={tuple(indices.shape)}"
+        )
+    indices = indices.to(device=logits.device, dtype=torch.long)
+    expanded_length = int(indices.max().item()) + 1
+    if logits.shape[1] != expanded_length:
+        raise ValueError(
+            "Multimodal logit length does not match the reconstructed expanded sequence: "
+            f"logits={logits.shape[1]}, reconstructed={expanded_length}"
+        )
+    batch_indices = torch.arange(logits.shape[0], device=logits.device)[:, None]
+    return logits[batch_indices, indices]
+
+
+def _move_multimodal_inputs_to_device(value, device):
+    # Move tensor leaves from non-tensor multimodal replay data to the model device.
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device, non_blocking=True)
+    if isinstance(value, list):
+        return [_move_multimodal_inputs_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_move_multimodal_inputs_to_device(item, device) for item in value)
+    if isinstance(value, dict):
+        return {key: _move_multimodal_inputs_to_device(item, device) for key, item in value.items()}
+    return value
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1210,9 +1242,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
-        multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
+        multi_modal_inputs = _move_multimodal_inputs_to_device(
+            extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", [])),
+            input_ids.device,
+        )
         pass_packed_cu_seqlens = getattr(self, "pass_packed_cu_seqlens", False)
 
         if not isinstance(temperature, torch.Tensor):
@@ -1371,6 +1406,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         model_inputs.update(multi_modal_inputs)
         model_inputs.update(extra_args)
+        forward_params = getattr(self, "_model_forward_parameters", None)
+        if forward_params is None:
+            forward_params = signature(getattr(self.module, "module", self.module).forward).parameters
+        if "output_raw_logits" in forward_params:
+            if use_fused_kernels:
+                raise ValueError("Raw-logit model outputs require unfused kernels")
+            model_inputs["output_raw_logits"] = True
 
         return model_inputs, output_args
 
@@ -1406,6 +1448,36 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         input_ids = micro_batch["input_ids"]
 
+        # Input and output layouts may differ for models that expand tokens internally.
+        # Packed outputs obey the same raw-token/SP ownership as the standard path.
+        if getattr(output, "logits_layout", None) == "packed" and not use_remove_padding:
+            if use_fused_kernels:
+                raise ValueError("Model-provided packed logits require unfused outputs")
+            labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+            temperatures = verl_F.expand_as_nested(output_args["temperature"], input_ids).values().unsqueeze(0)
+            pad_size = 0
+            if self.use_ulysses_sp:
+                labels, _, pad_size = ulysses_pad_and_slice_inputs(
+                    labels,
+                    position_ids_rmpad=None,
+                    sp_size=self.ulysses_sequence_parallel_size,
+                )
+                temperatures, _, _ = ulysses_pad_and_slice_inputs(
+                    temperatures,
+                    position_ids_rmpad=None,
+                    sp_size=self.ulysses_sequence_parallel_size,
+                    pad_value=1,
+                )
+            if output.logits_pad_size != pad_size or output.logits.shape[:2] != labels.shape:
+                raise ValueError("Model packed logits do not match raw-token/SP ownership")
+            output_args = dict(
+                output_args,
+                input_ids_rmpad_rolled=labels.squeeze(0),
+                temperature_rmpad=temperatures.squeeze(0),
+                pad_size=pad_size,
+            )
+            use_remove_padding = True
+
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
             temperature_rmpad = output_args["temperature_rmpad"]
@@ -1430,10 +1502,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                             model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
-                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                logits = output.logits  # (bsz, response_length, vocab_size)
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
-                if isinstance(logits_rmpad, DTensor):
-                    logits_rmpad = logits_rmpad.full_tensor()
+                if isinstance(logits, DTensor):
+                    logits = logits.full_tensor()
+                logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
+                logits_rmpad = logits.squeeze(0)  # (total_nnz, vocab_size)
                 logits_rmpad = _scale_logits_by_temperature(
                     logits_rmpad,
                     temperature_rmpad.unsqueeze(-1),
@@ -1530,6 +1604,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
+                logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
                 logits = _scale_logits_by_temperature(
                     logits,
                     temperature,
