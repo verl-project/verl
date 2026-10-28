@@ -300,7 +300,7 @@ class NIXLCheckpointEngine(CheckpointEngine):
             "rank": list(range(1, rollout_world_size + 1)),
             "world_size": [rollout_world_size + 1] * rollout_world_size,
             "prev_agent_metadata": [metadata[0]] + metadata[-rollout_world_size:-1],
-            "next_agent_metadata": metadata[-rollout_world_size + 1 :] + [None],
+            "next_agent_metadata": metadata[len(metadata) - rollout_world_size + 1 :] + [None],
         }
         return actor_wg_kwargs, rollout_kwargs
 
