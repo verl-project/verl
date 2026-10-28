@@ -260,6 +260,27 @@ def test_cpu_receiver_failure_on_intermediate_bucket_reaches_sender():
     assert receiver_result == ("KeyError", "'embed_tokens.weight'")
 
 
+def test_cpu_sender_times_out_when_receiver_never_connects():
+    ctx = mp.get_context("spawn")
+    handle = _handle()
+    sender_ready = ctx.Event()
+    sender_result = ctx.Queue()
+    sender = ctx.Process(target=_send_weights, args=(handle, sender_ready, [], sender_result))
+    try:
+        sender.start()
+        _wait(sender)
+
+        assert sender.exitcode == 0
+        assert sender_result.get(timeout=1) == (
+            "RuntimeError",
+            f"timed out waiting {ACK_TIMEOUT_MS}ms for weight receiver to accept data (buffer initialization)",
+        )
+    finally:
+        _stop(sender)
+        if sender.pid is not None:
+            _assert_no_transfer_artifacts(handle, sender.pid)
+
+
 def test_cpu_sender_times_out_after_peer_loss():
     ctx = mp.get_context("spawn")
     handle = _handle()

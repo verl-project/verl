@@ -161,7 +161,7 @@ class BucketedWeightSender:
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
-                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                    self._send({"bucket_meta": bucket_meta, "is_last": False}, "intermediate bucket")
                     self._receive_ack("intermediate bucket")
                     bucket_meta = {}
                     offset = 0
@@ -189,10 +189,18 @@ class BucketedWeightSender:
             # send the last bucket
             name = weight = None
             get_torch_device().synchronize()
-            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
+            self._send({"bucket_meta": bucket_meta, "is_last": True}, "final bucket")
             self._receive_ack("final bucket")
         finally:
             self._cleanup()
+
+    def _send(self, payload, phase: str) -> None:
+        try:
+            self.socket.send_pyobj(payload)
+        except zmq.Again:
+            raise RuntimeError(
+                f"timed out waiting {self.ack_timeout_ms}ms for weight receiver to accept data ({phase})"
+            ) from None
 
     def _receive_ack(self, phase: str) -> None:
         if not _is_ack_available(self.socket, self.ack_timeout_ms):
@@ -211,27 +219,28 @@ class BucketedWeightSender:
                 pass
         self.socket = self.zmq_context.socket(zmq.REQ)
         self.socket.setsockopt(zmq.LINGER, 0)
+        # A REQ send blocks until a peer connects, so a receiver that never starts would hang
+        # the first send before any ACK timeout applies.
+        self.socket.setsockopt(zmq.SNDTIMEO, self.ack_timeout_ms)
         self.socket.bind(self.zmq_handle)
 
     def _init_buffer(self):
         """build communication buffer"""
         buffer, shm = None, None
-        if not self.use_shm:
-            buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
-            handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
-        else:
-            import uuid
-
-            # Create unique name for shared memory
-            shm_name = f"verl_weights_{uuid.uuid4().hex}"
-            shm = create_shared_memory(self.bucket_size, shm_name)
-            buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
-
-            comm_metadata = {"name": shm_name, "size": self.bucket_size}
-            self.socket.send_pyobj(comm_metadata)
-
         try:
+            if not self.use_shm:
+                buffer = torch.empty(
+                    self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}"
+                )
+                self._send(reduce_tensor(buffer), "buffer initialization")
+            else:
+                import uuid
+
+                # Create unique name for shared memory
+                shm_name = f"verl_weights_{uuid.uuid4().hex}"
+                shm = create_shared_memory(self.bucket_size, shm_name)
+                buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
+                self._send({"name": shm_name, "size": self.bucket_size}, "buffer initialization")
             self._receive_ack("buffer initialization")
         except Exception:
             if shm is not None:
@@ -276,7 +285,7 @@ class BucketedWeightSender:
             "offset": 0,
             "handle": handle,
         }
-        self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+        self._send({"bucket_meta": bucket_meta, "is_last": False}, f"oversized tensor {name}")
         self._receive_ack(f"oversized tensor {name}")
 
 
