@@ -132,6 +132,11 @@ def gptmodel_forward_model_engine(
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
     position_ids: torch.Tensor | None = None,
+    # Outer-sequence chunking: one pass of a K-way temporal split of the same sequence.
+    # Defaults describe the unchunked run, so existing callers are unaffected.
+    cp_chunk_index: int = 0,
+    cp_chunk_count: int = 1,
+    chunk_tape=None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -163,6 +168,9 @@ def gptmodel_forward_model_engine(
             local_cp_size=local_cp_size,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
+            cp_chunk_index=cp_chunk_index,
+            cp_chunk_count=cp_chunk_count,
+            chunk_tape=chunk_tape,
         )
         # Rank-local THD rows + positions for every model and PP stage: rope LLMs only read positions
         # in MTP; MRoPE positions, when present, are read on every stage.
@@ -200,6 +208,9 @@ def gptmodel_forward_model_engine(
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
+                    cp_chunk_index=cp_chunk_index,
+                    cp_chunk_count=cp_chunk_count,
+                    chunk_tape=chunk_tape,
                 )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
@@ -231,6 +242,9 @@ def gptmodel_forward_model_engine(
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
+                    cp_chunk_index=cp_chunk_index,
+                    cp_chunk_count=cp_chunk_count,
+                    chunk_tape=chunk_tape,
                 )[0]
                 for k, v in logits_processor_args.items()
             }
@@ -244,6 +258,8 @@ def gptmodel_forward_model_engine(
                     post_process=post_process,
                     local_cp_size=local_cp_size,
                     cp_layout=cp_layout,
+                    cp_chunk_index=cp_chunk_index,
+                    cp_chunk_count=cp_chunk_count,
                 )
                 for k, v in output_dict.items()
             }
@@ -256,6 +272,8 @@ def gptmodel_forward_model_engine(
                 post_process=post_process,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
+                cp_chunk_index=cp_chunk_index,
+                cp_chunk_count=cp_chunk_count,
             )
     else:
         """

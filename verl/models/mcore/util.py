@@ -306,6 +306,9 @@ def preprocess_thd_engine(
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
+    cp_chunk_index: int = 0,
+    cp_chunk_count: int = 1,
+    chunk_tape: object = None,
 ) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
 
@@ -334,6 +337,15 @@ def preprocess_thd_engine(
         cp_rank = mpu.get_context_parallel_rank()
     if _packed_seq_params_supports("cp_partition_mode"):
         extra_packed_args["cp_partition_mode"] = cp_layout
+    # Outer-sequence chunking: pass g of a K-way temporal split of one sequence presents
+    # itself as virtual rank g*cp_size + cp_rank of a group that is K times wider, so the
+    # row arithmetic below (alignment and the per-rank slice) covers this pass's window of
+    # the *whole* sequence. The process group stays physical.
+    if cp_chunk_count > 1:
+        if not 0 <= cp_chunk_index < cp_chunk_count:
+            raise ValueError("cp_chunk_index must be within cp_chunk_count")
+        cp_rank = cp_chunk_index * cp_size + cp_rank
+        cp_size = cp_size * cp_chunk_count
     cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
     align_size = tp_size * cp_size * cp_layout_factor
     seqlens_in_batch = input_ids.offsets().diff()
@@ -513,6 +525,15 @@ def preprocess_thd_engine(
             "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
         )
 
+    # Outer-sequence chunking: pass g of a K-way temporal split of one sequence presents
+    # itself as virtual rank g*cp_size + cp_rank of a group that is K times wider. Only the
+    # row arithmetic above is virtual - every collective still runs over the physical group.
+    extra_packed_args["cp_chunk_index"] = cp_chunk_index
+    extra_packed_args["cp_chunk_count"] = cp_chunk_count
+    # Opaque carrier: the layout hands it to CSA2State, which is where the passes'
+    # cross-pass state (compressed KV, halo tails) actually matters.
+    extra_packed_args["chunk_tape"] = chunk_tape
+
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,
@@ -537,9 +558,16 @@ def postprocess_thd_engine(
     post_process: bool = True,
     local_cp_size: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
+    cp_chunk_index: int = 0,
+    cp_chunk_count: int = 1,
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
+
+    ``cp_chunk_index``/``cp_chunk_count`` mirror the preprocess arguments: pass g of K owns
+    the rows a K-times-wider CP group would give to virtual rank g*cp + rank, so the gather
+    must widen by chunk_count. They are explicit parameters because the packed_seq_params
+    object reaching this function does not carry them.
     """
     if cp_layout not in ("zigzag", "contiguous"):
         raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
@@ -566,10 +594,21 @@ def postprocess_thd_engine(
         cp_size = mpu.get_context_parallel_world_size()
         cp_group = mpu.get_context_parallel_group()
         cp_rank = mpu.get_context_parallel_rank()
+    # Outer-sequence chunking: pass g of K owns the rows a K-times-wider CP group would give
+    # to virtual rank g*cp + rank. This must run for BOTH branches above - verl always passes
+    # an explicit local_cp_size, so keeping it in the fallback branch silently skipped it and
+    # every pass reassembled at the physical width (the 2-chunk read then ran past each rank's
+    # data, filling the back half of the buffer with garbage).
+    _cc2 = int(cp_chunk_count or 1)
+    if _cc2 > 1:
+        _ci2 = int(cp_chunk_index or 0)
+        cp_rank = _ci2 * cp_size + cp_rank
+        cp_size = cp_size * _cc2
     # all gather output across context parallel group
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
+        # zeros: virtual CP leaves slots the gather does not cover
         output_list = [torch.zeros_like(output) for _ in range(cp_size)]
         torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
         output_list[cp_rank] = output
@@ -581,6 +620,16 @@ def postprocess_thd_engine(
         for i in range(batch_size):
             sequence_start = cu_padded_cpu[i]
             output_new.append(packed_output[sequence_start : sequence_start + seq_lens_cpu[i]])
+        if batch_size == 1:
+            # `as_nested_tensor` copies the rows and then runs a jag pass over the
+            # whole packed length: at 768K/CP32 that is a 7.6 GB allocation plus
+            # 14.4 s per call (measured), and this function runs once per output
+            # (logits, entropy), so the ranks drift far enough apart that the
+            # following per-token all-gather hits the 600 s watchdog. Wrapping the
+            # rows we already have is O(1) and produces the same jagged object.
+            rows = output_new[0]
+            offsets = torch.tensor([0, rows.size(0)], dtype=torch.int64, device=rows.device)
+            return torch.nested.nested_tensor_from_jagged(rows, offsets=offsets)
         return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
     for i in range(batch_size):
@@ -589,6 +638,13 @@ def postprocess_thd_engine(
             start_idx = cu_padded_cpu[i]
             output_new.append(output[0][start_idx : start_idx + s])
             continue
+        import os as _opp
+        if _opp.environ.get("PP_DEBUG", "0") == "1":
+            _ov = o.values() if hasattr(o, "values") else o
+            _ov = _ov.reshape(-1) if hasattr(_ov, "reshape") else _ov
+            print("[pp] in_numel=%s max=%s min=%s at237723=%s"
+                  % (_ov.numel(), float(_ov.max()), float(_ov.min()),
+                     float(_ov[237723]) if _ov.numel() > 237723 else "NA"), flush=True)
         s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
         half_seqlen = s_len_padded_chunk // 2
         s_len = seq_lens_cpu[i]
@@ -611,6 +667,28 @@ def postprocess_thd_engine(
 
     output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
+    # --- 外层序列分块：还原成整段布局，只填本 pass 的行（GPT 会诊方案）---
+    # 每个 pass 只算了自己那段，把它写回全局位置、其余置 0，
+    # 于是 mask 无需改动、batch_num_tokens(=12) 保持整段口径，K 段 loss 相加 = 整段。
+    # global_start 不需要跨调用状态：pass 0 -> 0；最后一个 pass -> total - n
+    # （K=2 时 pass 1 就是最后一个 pass）。
+    _ccs = int(cp_chunk_count or 1)
+    if _ccs > 1 and hasattr(output_new_tensor, "values"):
+        _vals = output_new_tensor.values()
+        _n = int(_vals.numel())
+        try:
+            # 真实长度（不是 padded 总长）：缓冲区里每个真实 token 一个 log_prob。
+            # 用 cu_padded_cpu[-1] 会多出 8,025 行，使最后一个 pass 的窗口整体偏移。
+            _tot = int(s_len)
+        except Exception:
+            _tot = _n
+        _ci = int(cp_chunk_index or 0)
+        if _tot > _n:
+            _gs = 0 if _ci == 0 else max(0, _tot - _n)
+            _take = min(_n, _tot - _gs)
+            _full = _vals.new_zeros(_tot)
+            _full[_gs : _gs + _take] = _vals.reshape(-1)[:_take]
+            output_new_tensor = torch.nested.nested_tensor([_full], layout=torch.jagged)
     return output_new_tensor
 
 
@@ -770,7 +848,7 @@ def postprocess_bshd_engine(
         torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
         output_list[cp_rank] = output
 
-        mask_list = [torch.empty_like(attention_mask, dtype=attention_mask.dtype) for _ in range(cp_size)]
+        mask_list = [torch.zeros_like(attention_mask, dtype=attention_mask.dtype) for _ in range(cp_size)]
         torch.distributed.all_gather(mask_list, attention_mask, group=cp_group)
     else:
         output_list = [output]
@@ -789,7 +867,8 @@ def postprocess_bshd_engine(
         half_seqlen = local_seqlen // 2
         full_seqlen = local_seqlen * cp_size
 
-        tmp = torch.empty(full_seqlen, *output.shape[2:], device=output.device, dtype=output.dtype)
+        # zeros: rows the scatter does not cover must not carry recycled GPU memory
+        tmp = torch.zeros(full_seqlen, *output.shape[2:], device=output.device, dtype=output.dtype)
         full_mask = torch.zeros(full_seqlen, device=attention_mask.device, dtype=torch.bool)
 
         for j in range(cp_size):
