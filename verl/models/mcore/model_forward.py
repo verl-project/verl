@@ -132,12 +132,43 @@ def gptmodel_forward_model_engine(
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
     position_ids: torch.Tensor | None = None,
+    routed_experts: torch.Tensor | None = None,
+    replay_response_mask: torch.Tensor | None = None,
+    recorded_routes: list | None = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
-    pre_process = unwrap_model(model).pre_process
-    post_process = unwrap_model(model).post_process
+    unwrapped_model = unwrap_model(model)
+    pre_process = unwrapped_model.pre_process
+    post_process = unwrapped_model.post_process
+    # Optional model-owned dense layout. No model names or expansion rules belong here.
+    prepare_layout = getattr(unwrapped_model, "prepare_inputs_for_forward", None)
+    model_row_mask = None
+    if prepare_layout is not None and data_format != "bshd":
+        raise NotImplementedError("Model-owned input layouts require dense BSHD inputs")
+
+    if routed_experts is not None and prepare_layout is None:
+        from verl.utils.megatron.router_replay_utils import (
+            align_r3_router_replay_data,
+            build_r3_replay_mask,
+            set_router_replay_data,
+        )
+
+        replay_mask = None
+        if replay_response_mask is not None:
+            routed_experts = align_r3_router_replay_data(routed_experts, input_ids)
+            replay_mask = build_r3_replay_mask(input_ids, replay_response_mask)
+        unwrapped_model = unwrap_model(model)
+        set_router_replay_data(
+            routed_experts,
+            None,
+            unwrapped_model.config,
+            vp_rank=getattr(unwrapped_model, "vp_stage", None),
+            replay_mask=replay_mask,
+            local_cp_size=local_cp_size,
+            model=unwrapped_model,
+        )
 
     quant_align_size = get_thd_quant_align_size(unwrap_model(model).config)
     # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
@@ -302,19 +333,36 @@ def gptmodel_forward_model_engine(
             logits_processor_args.pop("response_attention_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
-        if vision_model:
+        if vision_model and prepare_layout is None:
             input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
                 input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen
             )
         else:
             attention_mask = attention_mask_bshd
 
-        output_orig = model(
-            input_ids=input_ids_bshd,
-            attention_mask=attention_mask,
-            position_ids=None if vision_model else position_ids_bshd,
-            **model_kwargs,
-        )
+        model_kwargs.update(attention_mask=attention_mask, position_ids=None if vision_model else position_ids_bshd)
+        if prepare_layout is not None:
+            # Use source lengths, not the NPU attention mask (which is BNSS).
+            valid_rows = torch.arange(input_ids_bshd.shape[1], device=input_ids.device)[None, :]
+            valid_rows = valid_rows < input_ids.offsets().diff()[:, None]
+            layout_kwargs, model_row_mask = prepare_layout(
+                input_ids_bshd, valid_rows, multi_modal_inputs, value_model=value_model
+            )
+            model_kwargs.update(layout_kwargs)
+            if routed_experts is not None:
+                from verl.utils.megatron.router_replay_utils import prepare_model_row_routes, set_router_replay_data
+
+                route_ids, replay_mask = prepare_model_row_routes(routed_experts, model_row_mask)
+                set_router_replay_data(
+                    route_ids,
+                    None,
+                    unwrapped_model.config,
+                    vp_rank=getattr(unwrapped_model, "vp_stage", None),
+                    model=unwrapped_model,
+                    preprocessed=True,
+                    replay_mask=replay_mask,
+                )
+        output_orig = model(input_ids=input_ids_bshd, **model_kwargs)
         if post_process and logits_processor is not None:
             args = {
                 k: preprocess_bshd_engine(
@@ -340,5 +388,21 @@ def gptmodel_forward_model_engine(
         # ValueError: NestedTensor _nested_select_backward_default(grad_output: t, self: jt_all, dim: any, index: any)
         # so we use `squeeze` to remove the last dimension
         output = output.squeeze(-1)
+
+    if recorded_routes is not None:
+        from verl.utils.megatron.router_replay_utils import merge_router_topk_indices
+
+        unwrapped_model = unwrap_model(model)
+        merge_router_topk_indices(
+            None,
+            input_ids,
+            recorded_routes,
+            unwrapped_model.config,
+            vp_rank=getattr(unwrapped_model, "vp_stage", None),
+            local_cp_size=local_cp_size,
+            model=unwrapped_model,
+            model_sequence_length=model_row_mask.shape[1] if model_row_mask is not None else None,
+            model_row_lengths=model_row_mask.sum(-1).tolist() if model_row_mask is not None else None,
+        )
 
     return output

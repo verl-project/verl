@@ -242,6 +242,8 @@ def merge_router_topk_indices(
     vp_rank=None,
     local_cp_size=None,
     model=None,
+    model_sequence_length: int | None = None,
+    model_row_lengths: list[int] | None = None,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -295,7 +297,8 @@ def merge_router_topk_indices(
                 )
             if input_ids.is_nested:
                 empty_routes = [
-                    torch.empty((tokens.shape[0], 0, topk), dtype=torch.int16) for tokens in input_ids.unbind()
+                    torch.empty((length, 0, topk), dtype=torch.int16)
+                    for length in (model_row_lengths or input_ids.offsets().diff().tolist())
                 ]
                 mini_layer_topk_idx_list.append(torch.nested.as_nested_tensor(empty_routes, layout=torch.jagged))
             else:
@@ -327,11 +330,19 @@ def merge_router_topk_indices(
         layers_topk_idx = torch.stack(layers_topk_idx).permute(1, 0, 2).to(device_name)
         layers_topk_idx = layers_topk_idx.contiguous().view(torch.uint8)
         # dynamic_bs, layer_num, topk -> 1, dynamic_bs_all, layer_num, topk
-        layers_topk_idx = (
-            gather_from_sequence_parallel_region(layers_topk_idx, tensor_parallel_output_grad=False)
-            .unsqueeze(0)
-            .contiguous()
-        )
+        if model_sequence_length is None or tf_config.sequence_parallel:
+            layers_topk_idx = gather_from_sequence_parallel_region(layers_topk_idx, tensor_parallel_output_grad=False)
+        layers_topk_idx = layers_topk_idx.unsqueeze(0).contiguous()
+
+        if model_sequence_length is not None:
+            if model_row_lengths is None or len(model_row_lengths) != input_ids.shape[0]:
+                raise ValueError("Expanded route recording requires one model-row length per sample")
+            dense = layers_topk_idx.reshape(model_sequence_length, input_ids.shape[0], *layers_topk_idx.shape[2:])
+            pieces = [
+                dense[:length, sample].contiguous().view(torch.int16) for sample, length in enumerate(model_row_lengths)
+            ]
+            mini_layer_topk_idx_list.append(torch.nested.as_nested_tensor(pieces, layout=torch.jagged).cpu())
+            return
 
         # RECORD and REPLAY must pack exactly like the model forward
         quant_align_size = get_thd_quant_align_size(tf_config)
@@ -432,6 +443,31 @@ def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.
     return torch.nested.as_nested_tensor(aligned_parts, layout=torch.jagged)
 
 
+def prepare_model_row_routes(
+    ids: torch.Tensor,
+    model_row_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack IDs against right-padded valid model rows in [sequence, batch] order."""
+    max_model_rows = model_row_mask.shape[1]
+    if not ids.is_nested or max_model_rows <= 0:
+        raise ValueError("Model-row replay requires jagged routes and a positive sequence length")
+    lengths = ids.offsets().diff()
+    if ids.shape[0] != model_row_mask.shape[0]:
+        raise ValueError("Route IDs and model-row mask must have the same batch size")
+    if bool((lengths > model_row_mask.sum(-1)).any()):
+        raise ValueError(
+            f"Captured model rows exceed the runtime sequence: max_capture={int(lengths.max())}, "
+            f"max_model_rows={max_model_rows}"
+        )
+    batch_size = ids.shape[0]
+    shape = (batch_size, max_model_rows, *ids.shape[2:])
+    dense_ids = ids.to_padded_tensor(0, output_size=shape)
+    positions = torch.arange(max_model_rows, device=dense_ids.device).unsqueeze(0)
+    mask = (positions < lengths.unsqueeze(1)) & model_row_mask
+    dense_ids = dense_ids.transpose(0, 1).reshape(1, max_model_rows * batch_size, *ids.shape[2:])
+    return dense_ids.contiguous(), mask.transpose(0, 1).reshape(1, -1).contiguous()
+
+
 def set_router_replay_data(
     layers_topk_idx,
     attention_mask,
@@ -440,6 +476,7 @@ def set_router_replay_data(
     replay_mask=None,
     local_cp_size=None,
     model=None,
+    preprocessed: bool = False,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -459,6 +496,8 @@ def set_router_replay_data(
             unmasked tokens keep native Megatron routes.
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
+        preprocessed (bool): IDs/mask already share the router's flattened sequence-major rows.
+            Otherwise, prepare ordinary raw-token THD/BSHD routes before sequence-parallel scatter.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -478,7 +517,10 @@ def set_router_replay_data(
         )
 
         replay_mask_rmpad = None
-        if layers_topk_idx.is_nested:
+        if preprocessed:
+            layers_topk_idx_rmpad = layers_topk_idx
+            replay_mask_rmpad = replay_mask
+        elif layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx,
                 pre_process=True,
@@ -505,14 +547,15 @@ def set_router_replay_data(
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
         # 1, dynamic_bs_split, layer_num, topk
-        layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
-            layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
-        ).unsqueeze(dim=0)
+        scatter = (
+            scatter_to_sequence_parallel_region
+            if not preprocessed or tf_config.sequence_parallel
+            else lambda tensor: tensor
+        )
+        layers_topk_idx_rmpad_split = scatter(layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)).unsqueeze(dim=0)
         replay_mask_rmpad_split = None
         if replay_mask_rmpad is not None:
-            replay_mask_rmpad_split = scatter_to_sequence_parallel_region(
-                replay_mask_rmpad.to(device_name).squeeze(dim=0)
-            )
+            replay_mask_rmpad_split = scatter(replay_mask_rmpad.to(device_name).squeeze(dim=0))
 
         # dynamic_bs_split, layer_num, topk -> layer_num, dynamic_bs_split, topk
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
