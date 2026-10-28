@@ -103,6 +103,45 @@ def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bo
     return logits / temperature.clamp(min=1e-8).to(logits.dtype)
 
 
+def _get_fsdp2_parameter_export(module):
+    """Collect physical FSDP2 state, including persistent buffers and tied aliases."""
+    params = dict(module.named_parameters(remove_duplicate=False))
+    for prefix, child in module.named_modules(remove_duplicate=False):
+        for name, buffer in child._buffers.items():
+            if buffer is not None and name not in child._non_persistent_buffers_set:
+                params[f"{prefix}.{name}" if prefix else name] = buffer
+    return params
+
+
+def _is_weight_source_rank(mesh) -> bool:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return True
+    if mesh is None:
+        return torch.distributed.get_rank() == 0
+    coordinate = mesh.get_coordinate()
+    return coordinate is None or coordinate[-1] == 0
+
+
+def _load_hf_language_model(
+    auto_class,
+    model_config,
+    torch_dtype,
+    load_pretrained=True,
+):
+    if not load_pretrained:
+        return auto_class.from_config(
+            model_config.hf_config,
+            torch_dtype=torch_dtype,
+            trust_remote_code=model_config.trust_remote_code,
+        )
+    return auto_class.from_pretrained(
+        pretrained_model_name_or_path=model_config.local_path,
+        torch_dtype=torch_dtype,
+        config=model_config.hf_config,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -221,8 +260,8 @@ class FSDPEngine(BaseEngine):
 
         self.to(
             device="cpu",
-            model=self._is_offload_param,
-            optimizer=self._is_offload_optimizer,
+            model=self._is_offload_param or self._uses_fsdp2_cpu_offload_policy,
+            optimizer=self._is_offload_optimizer or self._uses_fsdp2_cpu_offload_policy,
             grad=self._is_offload_param,
         )
 
@@ -247,7 +286,7 @@ class FSDPEngine(BaseEngine):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
-    def _build_module(self):
+    def _build_module(self, load_pretrained=None, force_meta=False):
         from verl.utils.model import get_hf_auto_model_class
         from verl.utils.torch_dtypes import PrecisionType
 
@@ -259,21 +298,32 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
-        )
+        if getattr(self.model_config.hf_config, "load_checkpoint_after_shard", False):
+            force_meta = True
+            load_pretrained = False
+        if force_meta:
+            # Streaming FSDP-Turbo loading materializes only the final local
+            # DTensor shard.  No rank may construct the full CPU model.
+            from accelerate import init_empty_weights
+
+            init_context = init_empty_weights
+        else:
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
+            )
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
             if self.model_config.model_type == "language_model":
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
-
-                module = auto_class.from_pretrained(
-                    pretrained_model_name_or_path=self.model_config.local_path,
+                if load_pretrained is None:
+                    load_pretrained = _is_weight_source_rank(self.device_mesh)
+                module = _load_hf_language_model(
+                    auto_class=auto_class,
+                    model_config=self.model_config,
                     torch_dtype=torch_dtype,
-                    config=self.model_config.hf_config,
-                    trust_remote_code=self.model_config.trust_remote_code,
+                    load_pretrained=load_pretrained,
                 )
 
                 # Strip sub-modules listed in _verl_strip_modules (e.g.
@@ -455,7 +505,12 @@ class FSDPEngine(BaseEngine):
             if self.engine_config.offload_policy or self.engine_config.forward_only:
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
-                offload_policy = CPUOffloadPolicy(pin_memory=True)
+                # torch_npu cannot reliably complete the asynchronous pinned-CPU
+                # destination used by FSDP2 foreach_reduce().  It reports a null
+                # destination during the first actor backward even when HBM is
+                # available.  Keep CPU offload, but use synchronous pageable host
+                # copies on NPU; CUDA retains the pinned-copy fast path.
+                offload_policy = CPUOffloadPolicy(pin_memory=get_device_name() != "npu")
                 self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {
@@ -464,9 +519,11 @@ class FSDPEngine(BaseEngine):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
+            load_after_shard = getattr(self.model_config.hf_config, "load_checkpoint_after_shard", False)
+            full_state = None if load_after_shard else module.state_dict()
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
-            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            if full_state is not None:
+                fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 
@@ -535,8 +592,11 @@ class FSDPEngine(BaseEngine):
         # Load base model with specified configuration and dtype
         module = self._build_module()
         try:
-            self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
+            forward_params = signature(module.forward).parameters
+            self._model_forward_parameters = frozenset(forward_params)
+            self.pass_packed_cu_seqlens = "cu_seqlens" in forward_params
         except (TypeError, ValueError):
+            self._model_forward_parameters = frozenset()
             self.pass_packed_cu_seqlens = False
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
@@ -551,6 +611,16 @@ class FSDPEngine(BaseEngine):
         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
         log_gpu_memory_usage("Before FSDP", logger=None)
         module = self._build_fsdp_module(module)
+        if getattr(self.model_config.hf_config, "load_checkpoint_after_shard", False):
+            load_context = (
+                FSDP.summon_full_params(module, writeback=True) if fsdp_version(module) == 1 else nullcontext()
+            )
+            with load_context:
+                module.load_hf_checkpoint_shards(
+                    self.model_config.local_path,
+                    device="cpu" if self._uses_fsdp2_cpu_offload_policy else get_device_id(),
+                )
+            torch.distributed.barrier()
         log_gpu_memory_usage("After FSDP", logger=None)
 
         if not self.engine_config.forward_only:
@@ -783,8 +853,25 @@ class FSDPEngine(BaseEngine):
         """
         super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
+        if self._uses_fsdp2_cpu_offload_policy:
+            if device == "cpu" and model:
+                offload_fsdp_model_to_cpu(self.module)
+                # FSDP stages parameters, not ordinary RoPE/vision buffers.
+                # Keep buffers ready for the next forward while parking shards.
+                for buffer in self.module.buffers():
+                    buffer.data = buffer.to(get_device_id(), non_blocking=True)
+            if device == "cpu" and optimizer and self.optimizer is not None:
+                offload_fsdp_optimizer(self.optimizer)
+            return
+
         if self.engine_config.forward_only:
-            # force cpu_offload
+            # FSDP1's CPUOffload handles forward-only parameters itself, but
+            # FSDP2/FSDP-Turbo's CPUOffloadPolicy does not move the initial
+            # materialized shard when an explicit to("cpu") is requested.
+            # Keep the policy for normal execution while honoring this manual
+            # residency transition so colocated vLLM can reclaim the NPU.
+            if device == "cpu" and model:
+                offload_fsdp_model_to_cpu(self.module)
             return
 
         device_name = get_device_name()
@@ -850,6 +937,25 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    def _get_parameter_export(self, *, merged=False):
+        """Collect state without staging policy-managed FSDP2 parameters."""
+        native_export = callable(getattr(self.module, "iter_checkpoint_weights", None))
+        if fsdp_version(self.module) == 2 and (native_export or (not merged and self._uses_fsdp2_cpu_offload_policy)):
+            return _get_fsdp2_parameter_export(self.module)
+        return self.module.state_dict()
+
+    def _iter_per_tensor_params(self, params, rollout_layout=None):
+        """Materialize and convert ordinary parameters one tensor at a time."""
+        device = get_device_id()
+        native_export = getattr(self.module, "iter_checkpoint_weights", None)
+        if native_export is not None:
+            yield from native_export(params, device=device, rollout_layout=rollout_layout)
+            return
+        for name, param in params.items():
+            if isinstance(param, DTensor):
+                param = param.to(device, non_blocking=True).full_tensor()
+            yield from unfuse_moe_params([(name, param.detach())], self.model_config.hf_config.model_type)
+
     def get_per_tensor_param_shard(self, **kwargs):
         """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
         ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
@@ -862,7 +968,7 @@ class FSDPEngine(BaseEngine):
         _needs_staging = fsdp_version(self.module) == 1
         if _needs_staging and not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
-        params = self.module.state_dict()
+        params = self._get_parameter_export()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
         if _needs_staging and self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
@@ -878,7 +984,11 @@ class FSDPEngine(BaseEngine):
                 if p.is_floating_point():
                     p = p.to(torch.bfloat16, non_blocking=True)
                 local = p.to_local() if hasattr(p, "to_local") else p
-                yield name, local.reshape(-1), spec
+                # ``named_parameters`` preserves autograd-connected live
+                # handles.  The old state_dict path detached them implicitly;
+                # detach only after device staging so CPUOffloadPolicy never
+                # sees the invalid CPU-wrapper/NPU-storage combination.
+                yield name, local.reshape(-1).detach(), spec
 
         return _gen(), None
 
@@ -887,6 +997,14 @@ class FSDPEngine(BaseEngine):
         params only (weight name == HF name, coordinates translate). EP/converter
         specs are the veomni engine's business -- it overrides this hook."""
         from ..utils import _hf_entry_identity
+
+        native_map = getattr(self.module, "map_checkpoint_indices", None)
+        if native_map is not None:
+            from ..spec import translate_flat_indices
+
+            entry = native_map(name, spec.full_shape, translate_flat_indices(lidx, place), lval)
+            if entry is not None:
+                return entry
 
         if spec.to_hf_chunk is not None:
             raise NotImplementedError(
@@ -910,6 +1028,7 @@ class FSDPEngine(BaseEngine):
         return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        """Yield global HF tensors, or an explicit colocated rollout layout."""
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -946,9 +1065,9 @@ class FSDPEngine(BaseEngine):
                 # restores the un-merged base weights on exit, so tensors must be
                 # materialized while the context is still open (inside the generator).
                 # Materializing after exit silently sends base weights without adapters.
-                return self._merged_lora_per_tensor_param(), None
+                return self._merged_lora_per_tensor_param(rollout_layout=kwargs.get("rollout_layout")), None
         else:
-            params = self.module.state_dict()
+            params = self._get_parameter_export()
 
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
@@ -960,20 +1079,12 @@ class FSDPEngine(BaseEngine):
         if peft_config is not None and base_sync_done:
             per_tensor_param = params.items()
         else:
-            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
-                )
-                for name, param in params.items()
-            )
-            per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
+            per_tensor_param = self._iter_per_tensor_params(params, rollout_layout=kwargs.get("rollout_layout"))
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
-    def _merged_lora_per_tensor_param(self):
+    def _merged_lora_per_tensor_param(self, rollout_layout=None):
         """Stream merged (base + LoRA) weights for rollout weight sync.
 
         ``state_dict()`` returns tensors that alias the live FSDP parameter
@@ -984,20 +1095,24 @@ class FSDPEngine(BaseEngine):
         Consuming a state_dict captured inside the context after the context
         has exited would silently send base weights without the adapters.
         """
-        device = get_device_id()
         try:
             with merged_lora_context(self.module, backup_adapters=True):
-                params = normalize_peft_param_name(self.module.state_dict())
+                params = normalize_peft_param_name(self._get_parameter_export(merged=True))
                 params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
                 for name, param in params.items():
-                    yield (
-                        name,
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                        if isinstance(param, DTensor)
-                        # clone: plain tensors also alias module storage, and bucketed
-                        # senders may flush after the restore has already run
-                        else param.detach().clone(),
-                    )
+                    for export_name, tensor in self._iter_per_tensor_params(
+                        {name: param}, rollout_layout=rollout_layout
+                    ):
+                        # Buckets may outlive the merge context, including
+                        # exports that alias a live parameter's storage.
+                        yield (
+                            export_name,
+                            (
+                                tensor.to(torch.bfloat16, non_blocking=True, copy=True)
+                                if isinstance(param, DTensor)
+                                else tensor.clone()
+                            ),
+                        )
         finally:
             log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
             if self._is_offload_param:
@@ -1030,14 +1145,21 @@ class EngineEvalModeCtx(BaseEngineCtx):
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
-        # unshard the root FSDP module
-        if self.engine.engine_config.fsdp_size > 1:
-            if fsdp_version(self.engine.module) == 1:
-                self.engine.module._handle.reshard(True)
-            elif fsdp_version(self.engine.module) == 2:
-                self.engine.module.reshard()
+        # Reshard every FSDP unit before leaving eval. FSDPModule.reshard() is
+        # explicitly non-recursive, so calling it only on the root leaves nested
+        # all-gather storage alive and carries the old-logprob forward peak into
+        # the following actor backward. Traverse children first, then the root.
+        version = fsdp_version(self.engine.module)
+        if version == 1 and self.engine.engine_config.fsdp_size > 1:
+            self.engine.module._handle.reshard(True)
+        elif version == 2:
+            for module in reversed(list(self.engine.module.modules())):
+                if isinstance(module, FSDPModule):
+                    module.reshard()
 
         super().__exit__(exc_type, exc_value, traceback)
+        if self.engine._uses_fsdp2_cpu_offload_policy and not self.disable_auto_offload:
+            self.engine.to(device="cpu", model=True, optimizer=False, grad=False)
 
 
 class EngineTrainModeCtx(BaseEngineCtx):
@@ -1057,6 +1179,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
         if self.zero_grad_on_exit or exc_type is not None:
             self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
+        if self.engine._uses_fsdp2_cpu_offload_policy and not self.disable_auto_offload:
+            self.engine.to(device="cpu", model=True, optimizer=True, grad=True)
 
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])

@@ -828,6 +828,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
             return metrics or {}
 
+        rollout_layout = {
+            "expert_parallel_size": self.config.rollout.expert_parallel_size or 1,
+            "tensor_parallel_size": self.config.rollout.tensor_model_parallel_size,
+            "data_parallel_size": self.config.rollout.data_parallel_size,
+            "pipeline_model_parallel_size": self.config.rollout.pipeline_model_parallel_size,
+        }
+
         set_expandable_segments(False)
         get_torch_device().empty_cache()
         log_gpu_memory_usage("Before resume weights", logger=logger)
@@ -847,7 +854,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon, base_sync_done=True, rollout_layout=rollout_layout
         )
 
         do_lora_base_sync = False
@@ -858,7 +865,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
             per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=False
+                layered_summon=self.layered_summon, base_sync_done=False, rollout_layout=rollout_layout
             )
             await self.rollout.update_weights(
                 per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps

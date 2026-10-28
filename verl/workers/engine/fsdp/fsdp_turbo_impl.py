@@ -12,14 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import logging
+import math
 from contextlib import contextmanager
 
 import torch
 
+from verl.utils.device import get_device_name
 from verl.utils.fsdp_utils import fsdp2_load_full_state_dict
 
 from ..base import EngineRegistry
 from .transformer_impl import FSDPEngineWithLMHead
+
+logger = logging.getLogger(__file__)
 
 
 @EngineRegistry.register(model_type="language_model", backend="fsdp_turbo", device=["cuda", "npu"])
@@ -32,27 +38,45 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         from fsdp_turbo.distributed.parallel_state import get_parallel_state, init_parallel_state
         from fsdp_turbo.fsdp_turbo_config import FSDPTurboConfig, _dict_to_dataclass
 
-        self.fsdp_turbo_config = _dict_to_dataclass(FSDPTurboConfig, self.engine_config.turbo_config)
-        self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload = self.engine_config.offload_policy
+        turbo_config = copy.deepcopy(self.engine_config.turbo_config)
+        fsdp_plan = turbo_config.setdefault("distributed", {}).setdefault("fsdp_plan", {})
+        cpu_offload = bool(self.engine_config.offload_policy or self.engine_config.forward_only)
+        fsdp_plan["cpu_offload"] = cpu_offload
+        if cpu_offload and get_device_name() == "npu":
+            fsdp_plan["pin_memory"] = False
+        reshard_after_forward = self.engine_config.reshard_after_forward
+        fsdp_plan["reshard_after_forward"] = True if reshard_after_forward is None else reshard_after_forward
+        self.fsdp_turbo_config = _dict_to_dataclass(FSDPTurboConfig, turbo_config)
+        attn_implementation = getattr(self.fsdp_turbo_config.model, "attn_implementation", "eager")
+        for config in (
+            self.model_config.hf_config,
+            getattr(self.model_config.hf_config, "text_config", None),
+        ):
+            if config is not None:
+                config._attn_implementation = attn_implementation
+        vision_config = getattr(self.model_config.hf_config, "vision_config", None)
+        if vision_config is not None:
+            vision_config._attn_implementation = attn_implementation
         init_parallel_state(self.fsdp_turbo_config)
         self._parallel_state = get_parallel_state()
         if self._is_ulysses_enabled():
             self._process_ulysses_config()
 
-    def _build_module(self):
+    def _build_module(self, load_pretrained=None, force_meta=False):
         # Do not let verl's Qwen VLM monkey patch slice the text model before
         # FSDP-Turbo's post-fusion model patch does the CP split.
         cp_size = self.ulysses_sequence_parallel_size
         self.ulysses_sequence_parallel_size = 1
         try:
-            return super()._build_module()
+            return super()._build_module(load_pretrained=load_pretrained, force_meta=force_meta)
         finally:
             self.ulysses_sequence_parallel_size = cp_size
 
     def _build_fsdp_module(self, module):
         from fsdp_turbo.fsdp_turbo import FSDPTurbo
 
-        full_state = module.state_dict()
+        load_after_shard = getattr(self.model_config.hf_config, "load_checkpoint_after_shard", False)
+        full_state = None if load_after_shard else module.state_dict()
         module = FSDPTurbo(self.fsdp_turbo_config, module).model
         offload_policy = None
         if self.engine_config.offload_policy or self.engine_config.forward_only:
@@ -60,7 +84,8 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
             self._is_offload_optimizer = False
             offload_policy = True
             self._uses_fsdp2_cpu_offload_policy = True
-        fsdp2_load_full_state_dict(module, full_state, None, offload_policy)
+        if full_state is not None:
+            fsdp2_load_full_state_dict(module, full_state, None, offload_policy)
 
         return module
 
@@ -127,19 +152,18 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
 
         from fsdp_turbo.training.clip_grads import clip_grad_norm
 
-        grad_norm_value = clip_grad_norm(model=self.module, max_norm=self.optimizer_config.clip_grad)
-        grad_norm = torch.tensor(grad_norm_value, device=next(self.module.parameters()).device, dtype=torch.float32)
-
-        if scaler is not None:
+        grad_norm = clip_grad_norm(model=self.module, max_norm=self.optimizer_config.clip_grad)
+        if not math.isfinite(grad_norm):
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            marker = f"FSDP-Turbo NONFINITE GRADIENT: rank={rank} grad_norm={grad_norm} optimizer_step=False"
+            logger.error(marker)
+            self.optimizer.zero_grad()
+            raise FloatingPointError(marker)
+        elif scaler is not None:
             # scaler handles inf/nan skipping internally via _check_inf_per_device.
             scaler.step(self.optimizer)
             scaler.update()
         else:
-            # if grad_norm is not finite, skip the update
-            if not torch.isfinite(grad_norm):
-                print(f"WARN: grad_norm is not finite: {grad_norm}")
-                self.optimizer.zero_grad()
-            else:
-                self.optimizer.step()
+            self.optimizer.step()
 
-        return grad_norm.item()
+        return grad_norm
