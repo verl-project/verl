@@ -65,6 +65,7 @@ from verl.workers.rollout.utils import (
     validate_topk_logprob_request,
     warn_topk_logprob_budget,
 )
+from verl.workers.rollout.vllm_rollout.routing_cache import RoutingCachePolicy
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -181,6 +182,11 @@ class vLLMHttpServer:
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
+        self._routing_cache_policy = RoutingCachePolicy.from_config(
+            prefix_caching=self.config.enable_prefix_caching,
+            routing_replay=self.config.enable_rollout_routing_replay,
+            engine_args_type=AsyncEngineArgs,
+        )
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
@@ -379,7 +385,7 @@ class vLLMHttpServer:
             "max_num_seqs": self.config.max_num_seqs,
             "enable_chunked_prefill": self.config.enable_chunked_prefill,
             "max_num_batched_tokens": self.config.max_num_batched_tokens,
-            "enable_prefix_caching": self.config.enable_prefix_caching,
+            "enable_prefix_caching": self._routing_cache_policy.prefix_caching,
             "enable_sleep_mode": self.config.enable_sleep_mode,
             "logprobs_mode": self.config.logprobs_mode,
             "enforce_eager": self.config.enforce_eager,
@@ -723,6 +729,7 @@ class vLLMHttpServer:
         if audio_data is not None:
             multi_modal_data["audio"] = audio_data
         prompt_kwargs = {"prompt_token_ids": prompt_ids, "multi_modal_data": multi_modal_data}
+        self._routing_cache_policy.prepare_prompt(prompt_kwargs)
         if mm_processor_kwargs:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
         try:
@@ -821,6 +828,8 @@ class vLLMHttpServer:
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
             routed_experts = final_res.outputs[0].routed_experts
+            if routed_experts is None and token_ids:
+                raise RuntimeError("routing replay was requested but vLLM returned no expert IDs")
 
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason
@@ -858,6 +867,11 @@ class vLLMHttpServer:
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
+            routed_experts_source_semantics=(
+                (self.config.custom or {}).get("routed_experts_source_semantics")
+                if routed_experts is not None
+                else None
+            ),
             stop_reason=stop_reason,
             num_preempted=num_preempted,
             extra_fields=extra_fields,

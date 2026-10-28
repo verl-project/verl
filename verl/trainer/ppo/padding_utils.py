@@ -58,16 +58,16 @@ def build_padding_position_ids(source_position_ids: Any, attention_mask: torch.T
 
 
 def build_padding_routed_experts(source_routed_experts: Any, seq_len: int) -> torch.Tensor | None:
-    """Build a zero routed-experts tensor matching the source per-token expert shape."""
+    """Reuse valid source IDs for synthetic zero-loss rows."""
     if not isinstance(source_routed_experts, torch.Tensor):
         return None
     if source_routed_experts.dim() == 0:
         return torch.zeros_like(source_routed_experts)
-    return torch.zeros(
-        (seq_len, *source_routed_experts.shape[1:]),
-        dtype=source_routed_experts.dtype,
-        device=source_routed_experts.device,
-    )
+    if seq_len == 0:
+        return source_routed_experts[:0].clone()
+    if source_routed_experts.shape[0] == 0:
+        raise ValueError("Padding cannot reuse an empty source route")
+    return source_routed_experts[:1].expand(seq_len, *source_routed_experts.shape[1:]).clone()
 
 
 def construct_minimal_padding_template(
@@ -101,7 +101,9 @@ def construct_minimal_padding_template(
     attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
     response_mask = torch.zeros_like(responses)
     position_ids = build_padding_position_ids(template_sample.get("position_ids"), attention_mask)
-    routed_experts = build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
+    source_routed_experts = template_sample.get("routed_experts")
+    model_rows = template_sample.get("routed_experts_transport_semantics") == "model_rows"
+    routed_experts = build_padding_routed_experts(source_routed_experts, max(input_ids.size(0) - int(model_rows), 0))
 
     sequence_length = input_ids.size(0)
     teacher_ids = template_sample.get("teacher_ids")

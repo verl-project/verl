@@ -130,6 +130,14 @@ Meta initialization with new LoRA adapter parameters needs an initializer for
 those parameters; a strict checkpoint loader must report missing adapter
 weights rather than leave uninitialized tensors in training.
 
+Router replay
+-------------
+
+Checkpoint loading/export and model forward support are independent of router
+replay. Enable replay separately through ``actor.fsdp_config.router_replay.mode``;
+the default is ``disabled``. The FSDP replay path supports ID-only R3, with
+selected-expert weights computed by the current native router.
+
 Validation checklist
 --------------------
 

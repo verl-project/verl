@@ -302,6 +302,8 @@ class FSDPEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
+        if self.router_replay.mode == "R2":
+            raise ValueError("FSDP routing replay supports only 'disabled' and 'R3'")
 
 
 @dataclass

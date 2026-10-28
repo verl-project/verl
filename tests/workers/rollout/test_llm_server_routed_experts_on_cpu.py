@@ -26,6 +26,7 @@ differ and the merge has to survive all of them:
 from __future__ import annotations
 
 import asyncio
+from functools import wraps
 from types import SimpleNamespace
 from typing import Any
 
@@ -39,6 +40,16 @@ from verl.workers.rollout.replica import TokenOutput
 
 LAYERS, TOPK = 2, 4
 BACKENDS = ["vllm", "sglang_detokenized", "sglang_skip_tokenizer_init"]
+
+
+def _run_async_test(coro):
+    """Run coroutine tests without requiring the optional pytest-asyncio plugin."""
+
+    @wraps(coro)
+    def wrapper(*args, **kwargs):
+        return asyncio.run(coro(*args, **kwargs))
+
+    return wrapper
 
 
 def _routing(markers: list[int], backend: str) -> np.ndarray:
@@ -95,7 +106,7 @@ def _client() -> FullyAsyncLLMServerClient:
     return FullyAsyncLLMServerClient(config=SimpleNamespace(), load_balancer_handle=None)
 
 
-@pytest.mark.asyncio
+@_run_async_test
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend):
     """Two resumes: each attempt re-sends the accumulated prompt and returns routing for
@@ -132,7 +143,7 @@ async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend)
     assert output.routed_experts.shape == (8, LAYERS, TOPK)
 
 
-@pytest.mark.asyncio
+@_run_async_test
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_merge_yields_numpy_and_preserves_dtype(monkeypatch, backend):
     """Backends agree on numpy, which is what lets the merge be a plain concatenate. Dtype
@@ -150,7 +161,7 @@ async def test_merge_yields_numpy_and_preserves_dtype(monkeypatch, backend):
     assert merged.dtype == original.dtype
 
 
-@pytest.mark.asyncio
+@_run_async_test
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_single_attempt_passes_backend_object_through(monkeypatch, backend):
     """Without a resume there is nothing to concatenate, so the backend object reaches the
@@ -164,7 +175,7 @@ async def test_single_attempt_passes_backend_object_through(monkeypatch, backend
     assert output.routed_experts is original
 
 
-@pytest.mark.asyncio
+@_run_async_test
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_merged_routing_converts_for_downstream(monkeypatch, backend):
     """Both downstream sinks normalize to int64 tensors: ``AgentLoopOutput.as_dict`` via
@@ -185,3 +196,51 @@ async def test_merged_routing_converts_for_downstream(monkeypatch, backend):
     # a fresh writable buffer, so from_numpy is safe without one.
     assert merged.flags.writeable
     assert _markers(torch.from_numpy(merged)) == [10, 11, 22]
+
+
+@_run_async_test
+async def test_model_row_resume_preserves_ids_and_explicit_layout(monkeypatch):
+    segments = [
+        TokenOutput(
+            token_ids=[101, 102],
+            routed_experts=_routing([10, 11, 12, 13, 14], "vllm"),
+            routed_experts_source_semantics="model_rows",
+            stop_reason="aborted",
+        ),
+        TokenOutput(
+            token_ids=[103],
+            routed_experts=_routing([20, 21, 22, 23, 24, 25], "vllm"),
+            routed_experts_source_semantics="model_rows",
+            stop_reason="completed",
+        ),
+    ]
+    _install_segments(monkeypatch, segments)
+
+    output = await _client().generate(request_id="req-model-rows", prompt_ids=[1, 2, 3], sampling_params={})
+
+    assert _markers(output.routed_experts) == [10, 11, 12, 13, 14, 25]
+    assert output.routed_experts_source_semantics == "model_rows"
+    assert all("weight" not in field for field in TokenOutput.model_fields)
+
+
+@_run_async_test
+async def test_resume_rejects_mixed_row_layouts(monkeypatch):
+    _install_segments(
+        monkeypatch,
+        [
+            TokenOutput(
+                token_ids=[101],
+                routed_experts=_routing([10, 11], "vllm"),
+                routed_experts_source_semantics="model_rows",
+                stop_reason="aborted",
+            ),
+            TokenOutput(
+                token_ids=[102],
+                routed_experts=_routing([20, 21, 22], "vllm"),
+                stop_reason="completed",
+            ),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="cannot switch"):
+        await _client().generate(request_id="req-incomplete-r3", prompt_ids=[], sampling_params={})

@@ -29,10 +29,22 @@ from verl.utils.tokenizer import build_multimodal_processor_inputs
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+MODEL_ROW_ROUTE_SEMANTICS = "model_rows"
+
 BASE_CHAT_HISTORY = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "I am a user."},
 ]
+
+
+def validate_model_row_capture(routes: torch.Tensor, prompt_length: int, response_length: int, response_mask) -> None:
+    """Validate a single-turn capture in model coordinates before transport."""
+    if routes.dim() != 3:
+        raise ValueError(f"Model-row routes must be [rows, layers, topk], got {routes.shape}")
+    if len(response_mask) != response_length or any(int(value) != 1 for value in response_mask):
+        raise ValueError("Model-row replay requires a single-turn all-generated response")
+    if routes.shape[0] < prompt_length + response_length - 1:
+        raise ValueError("Model-row route capture is shorter than the causal logical input")
 
 
 class FinishReasonTypeEnum(str, Enum):

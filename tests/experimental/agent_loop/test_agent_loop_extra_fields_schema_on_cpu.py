@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import warnings
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import numpy as np
@@ -34,6 +35,7 @@ from verl.experimental.agent_loop.agent_loop import (
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.schemas import MODEL_ROW_ROUTE_SEMANTICS
 
 
 class _FakeServerManager:
@@ -281,10 +283,46 @@ def test_agent_loop_output_as_dict_rejects_misaligned_rollout_topk():
         output.as_dict()
 
 
+@pytest.mark.parametrize(
+    "rows,mask,message",
+    [
+        (2, [1, 1], "shorter"),
+        (3, [0, 1], "single-turn"),
+        (3, [1], "single-turn"),
+        (None, [1, 1], "expert IDs"),
+        (0, [1, 1], "shorter"),
+        ("rank", [1, 1], "layers"),
+    ],
+)
+def test_independent_serialization_checks_natural_capture_rows(rows, mask, message):
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=mask,
+        metrics=AgentLoopMetrics(),
+        routed_experts=(None if rows is None else np.zeros((3, 1) if rows == "rank" else (rows, 1, 1), dtype=np.int32)),
+        routed_experts_source_semantics=MODEL_ROW_ROUTE_SEMANTICS,
+    )
+    with pytest.raises(ValueError, match=message):
+        output.as_dict()
+
+
 @pytest.mark.asyncio
-async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
+@pytest.mark.parametrize("route_case", ["plain", "model_rows", "malformed_shape"])
+@pytest.mark.parametrize("trajectory_list", [False, True])
+async def test_agent_loop_shared_exit_validates_routes_and_passes_scalar_model_type(
+    monkeypatch, route_case, trajectory_list
+):
     captured_kwargs: dict[str, Any] = {}
-    expected_output = object()
+    sample = AgentLoopOutput(prompt_ids=[101, 102], response_ids=[11], response_mask=[1], metrics=AgentLoopMetrics())
+    if route_case != "plain":
+        routes = np.array([[[256, 895]], [[0, 1]]], dtype=np.int32)
+        if route_case == "malformed_shape":
+            routes = routes[:, :, 0]
+        routes.setflags(write=False)
+        sample.routed_experts = routes
+        sample.routed_experts_source_semantics = MODEL_ROW_ROUTE_SEMANTICS
+    expected_output = [sample] if trajectory_list else sample
 
     class _FakeAgentLoop:
         async def run(self, sampling_params: dict[str, Any], **kwargs):
@@ -305,6 +343,7 @@ async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeyp
     worker.llm_client = object()
     worker.tokenizer = _FakeTokenizer()
     worker.processor = None
+    worker.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_moe"))
     worker.hf_model_type = "qwen2_5_vl"
     worker.dataset_cls = RLHFDataset
     worker.tools = []
@@ -314,16 +353,127 @@ async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeyp
         return output
 
     worker._agent_loop_postprocess = passthrough_postprocess
-    result = await worker._run_agent_loop(
-        {},
-        {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False},
-        agent_name="scalar_model_type_test",
-    )
 
-    assert result is expected_output
+    async def run():
+        return await worker._run_agent_loop(
+            {},
+            {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False},
+            agent_name="scalar_model_type_test",
+        )
+
+    if route_case == "malformed_shape":
+        with pytest.raises(ValueError, match="shape|layers"):
+            await run()
+    else:
+        assert await run() is expected_output
+        if route_case == "model_rows":
+            assert isinstance(sample.routed_experts, torch.Tensor)
     assert captured_kwargs["hf_model_type"] == "qwen2_5_vl"
     assert isinstance(captured_kwargs["hf_model_type"], str)
     assert "hf_config" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_name", ["legacy", "transfer_queue"])
+@pytest.mark.parametrize("capture", ["valid", "malformed_shape", "tool_mask", "short", "missing_ids"])
+async def test_model_row_validation_precedes_both_real_exits(monkeypatch, exit_name, capture):
+    import importlib.util
+    import sys
+    from pathlib import Path
+    from types import MethodType, ModuleType
+    from unittest.mock import AsyncMock, patch
+
+    routes = torch.tensor([[[256, 895]], [[0, 1]]], dtype=torch.int32)
+    sample = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11],
+        response_mask=[1],
+        routed_experts=routes,
+        routed_experts_source_semantics=MODEL_ROW_ROUTE_SEMANTICS,
+        metrics=AgentLoopMetrics(),
+    )
+    error = None
+    if capture == "malformed_shape":
+        sample.routed_experts = routes[:, :, 0]
+        error = "shape|layers"
+    elif capture == "tool_mask":
+        sample.response_mask = [0]
+        error = "single-turn"
+    elif capture == "short":
+        sample.routed_experts = routes[:1]
+        error = "shorter"
+    elif capture == "missing_ids":
+        sample.routed_experts = None
+        error = "expert IDs"
+
+    class Loop:
+        async def run(self, *args, **kwargs):
+            return sample
+
+    monkeypatch.setattr(agent_loop_module.hydra.utils, "instantiate", lambda **kwargs: Loop())
+    monkeypatch.setattr(agent_loop_module, "rollout_trace_attr", lambda **kwargs: nullcontext())
+    monkeypatch.setitem(agent_loop_module._agent_loop_registry, "test_kimi_exits", {})
+    worker = object.__new__(AgentLoopWorker)
+    worker.config = OmegaConf.create({"data": {}})
+    worker.llm_client = None
+    worker.tokenizer = _FakeTokenizer()
+    worker.processor = None
+    worker.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_moe"))
+    worker.hf_model_type = "kimi_k3"
+    worker.dataset_cls = RLHFDataset
+    worker.tools = []
+    worker.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+    worker.mm_processor_kwargs = {}
+    worker.reward_loop_worker_handles = None
+    worker.distillation_enabled = False
+    put = AsyncMock()
+    if exit_name == "transfer_queue":
+        # Isolate the external service; import and run the actual decorated worker.
+        tq = ModuleType("transfer_queue")
+        tq.async_kv_batch_put = put
+        path = Path(agent_loop_module.__file__).parents[2] / "trainer/ppo/v1/agent_loop_tq.py"
+        spec = importlib.util.spec_from_file_location("agent_loop_tq_cpu", path)
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"transfer_queue": tq}):
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+        cls = module.AgentLoopWorkerTQ.__ray_metadata__.modified_class
+        worker._agent_loop_postprocess = MethodType(cls._agent_loop_postprocess, worker)
+
+    async def run():
+        return await worker._run_agent_loop(
+            {},
+            {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False},
+            agent_name="test_kimi_exits",
+            raw_prompt=[],
+            uid="prompt",
+            session_id=0,
+            global_steps=0,
+        )
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            await run()
+        put.assert_not_called()
+    else:
+        result = await run()
+        if exit_name == "transfer_queue":
+            fields = put.call_args.kwargs["fields"]
+            actual_ids = fields["routed_experts"]
+            actual_ids = actual_ids.values() if actual_ids.is_nested else actual_ids[0]
+            assert list(fields["routed_experts_transport_semantics"]) == [MODEL_ROW_ROUTE_SEMANTICS]
+        else:
+            actual_ids = result.routed_experts.values()
+            # Exercise the real legacy batch exit, not just per-sample padding.
+            batch_output = worker._postprocess([result])
+            from verl.utils import tensordict_utils as tu
+
+            assert (
+                tu.get_non_tensor_data(batch_output.batch, "routed_experts_transport_semantics", None)
+                == MODEL_ROW_ROUTE_SEMANTICS
+            )
+            torch.testing.assert_close(batch_output.batch["routed_experts"].values(), routes)
+        torch.testing.assert_close(actual_ids, routes)
 
 
 def _pad_1d(ids: list[int], *, length: int, pad_id: int = 0) -> list[int]:
@@ -378,7 +528,8 @@ def _to_internal(
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu():
+@pytest.mark.parametrize("model_rows", [False, True])
+async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(model_rows):
     # Minimal config surface used by the agent loops.
     config = OmegaConf.create(
         {
@@ -396,6 +547,16 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     )
 
     server_manager = _FakeServerManager()
+    if model_rows:
+        base_generate = server_manager.generate
+
+        async def generate_with_model_rows(*args, **kwargs):
+            output = await base_generate(*args, **kwargs)
+            output.routed_experts = np.tile(np.array([[[256, 895]]], dtype=np.int32), (50, 1, 1))
+            output.routed_experts_source_semantics = MODEL_ROW_ROUTE_SEMANTICS
+            return output
+
+        server_manager.generate = generate_with_model_rows
     tokenizer = _FakeTokenizer()
     processor = None
 
@@ -415,6 +576,11 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     sampling_params: dict[str, Any] = {}
 
     out = await single_turn.run(sampling_params=sampling_params, raw_prompt=raw_prompt)
+
+    if model_rows:
+        # Coordinate ownership comes from the producer tag, even without a Kimi model config.
+        assert out.routed_experts.shape == (50, 1, 2)
+        assert out.routed_experts_source_semantics == MODEL_ROW_ROUTE_SEMANTICS
 
     # Agent loop outputs should always contain these fields with consistent types.
     assert out.extra_fields["turn_scores"] == []
@@ -466,7 +632,8 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
+@pytest.mark.parametrize("model_rows", [False, True])
+async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu(model_rows):
     class _DummyWorker:
         _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
         _compute_position_ids = AgentLoopWorker._compute_position_ids
@@ -483,7 +650,13 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
             self.mm_processor_kwargs = {}
             self.reward_loop_worker_handles = None
 
+    worker = _DummyWorker()
+    worker.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="kimi_k3", num_hidden_layers=2, num_experts=896, num_experts_per_token=1)
+    )
     routed_experts = np.arange(8, dtype=np.int64).reshape(4, 2, 1)
+    if model_rows:
+        routed_experts = np.array([0, 255, 256, 895] * 2, dtype=np.int32).reshape(4, 2, 1)
     routed_experts.setflags(write=False)
     assert not routed_experts.flags.writeable
 
@@ -492,6 +665,7 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
         response_ids=[11, 12],
         response_mask=[1, 1],
         routed_experts=routed_experts,
+        routed_experts_source_semantics=MODEL_ROW_ROUTE_SEMANTICS if model_rows else None,
         metrics=AgentLoopMetrics(),
         extra_fields={},
     )
@@ -503,17 +677,22 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
             category=UserWarning,
         )
         internal = await AgentLoopWorker._agent_loop_postprocess(
-            _DummyWorker(),
+            worker,
             output,
             validate=False,
             raw_prompt=[{"role": "user", "content": "hi"}],
         )
 
-    # Rollout is where routed_experts gets its int16 storage dtype, whatever dtype
-    # the backend handed over.
-    expected = torch.tensor(routed_experts.copy()).to(torch.int16).unsqueeze(0)
+    if model_rows:
+        assert internal.routed_experts.is_nested
+        expected = torch.tensor(routed_experts.copy())
+        torch.testing.assert_close(internal.routed_experts.values(), expected)
+        torch.testing.assert_close(output.as_dict()["routed_experts"], expected)
+        return
+
+    expected = torch.tensor(routed_experts.copy()).unsqueeze(0)
     assert internal.routed_experts is not None
-    assert internal.routed_experts.dtype == torch.int16
+    assert internal.routed_experts.dtype == expected.dtype
     assert internal.routed_experts.shape == (1, 8, 2, 1)
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0

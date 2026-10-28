@@ -184,6 +184,7 @@ MODEL_CONFIG=(
 )
 
 ACTOR_CONFIG=(
+    actor_rollout_ref.actor.fsdp_config.router_replay.mode=R3
     actor_rollout_ref.actor.checkpoint.load_contents="['model','optimizer','extra']"
     "actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}"
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
@@ -208,7 +209,8 @@ ROLLOUT_CONFIG=(
     "actor_rollout_ref.rollout.expert_parallel_size=${rollout_ep_size}"
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
-    '+actor_rollout_ref.rollout.custom={sampling_defaults:{stop:"<|close|> response <|sep|>"}}'
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=True
+    '+actor_rollout_ref.rollout.custom={sampling_defaults:{stop:"<|close|> response <|sep|>"},routed_experts_source_semantics:model_rows}'
     "actor_rollout_ref.rollout.max_model_len=${rollout_max_model_len}"
     "actor_rollout_ref.rollout.max_num_seqs=${rollout_max_num_seqs}"
     "actor_rollout_ref.rollout.n=${rollout_n}"

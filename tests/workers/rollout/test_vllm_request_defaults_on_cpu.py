@@ -23,6 +23,7 @@ import uuid
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -85,6 +86,7 @@ def _server(cls, *, custom=None, routes=None, aborted=False):
     server._disaggregation_role = "null"
     server._submission_paused = False
     server._admitting = 0
+    server._routing_cache_policy = SimpleNamespace(prepare_prompt=lambda prompt: None)
     server.requests = []
 
     async def add_request(request_id, prompt, sampling_params, **kwargs):
@@ -114,10 +116,13 @@ def _server(cls, *, custom=None, routes=None, aborted=False):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("row_semantics", [None, "model_rows"])
 @pytest.mark.parametrize("ignore_eos", [False, True])
-async def test_sampling_defaults_preserve_native_payload(server_class, ignore_eos):
+async def test_explicit_row_semantics_and_sampling_defaults_preserve_native_payload(
+    server_class, row_semantics, ignore_eos
+):
     routes = np.zeros((2, 1, 2), dtype=np.int32)
-    custom = dict(sampling_defaults=dict(stop="END", max_tokens=5))
+    custom = dict(sampling_defaults=dict(stop="END", max_tokens=5), routed_experts_source_semantics=row_semantics)
     server = _server(server_class, custom=custom, routes=routes)
     image = object()
     output = await server.generate([1, 2, 3], dict(ignore_eos=ignore_eos), "r", image_data=[image])
@@ -126,7 +131,7 @@ async def test_sampling_defaults_preserve_native_payload(server_class, ignore_eo
     assert request["sampling_params"].max_tokens == 5
     assert request["sampling_params"].stop == "END" and request["sampling_params"].detokenize is True
     assert request["sampling_params"].ignore_eos is ignore_eos
-    assert output.routed_experts is routes
+    assert output.routed_experts is routes and output.routed_experts_source_semantics == row_semantics
     assert server._admitting == 0
 
 
@@ -144,15 +149,15 @@ async def test_ordinary_server_without_custom_config_keeps_legacy_routes_and_no_
     routes = np.zeros((2, 1, 2), dtype=np.int32)
     server = _server(server_class, routes=routes)
     output = await server.generate([1, 2], {}, "r")
-    assert output.routed_experts is routes
+    assert output.routed_experts is routes and output.routed_experts_source_semantics is None
     assert server.requests[0]["sampling_params"].detokenize is False
 
 
 @pytest.mark.asyncio
-async def test_aborted_output_has_no_ids(server_class):
-    server = _server(server_class, aborted=True)
+async def test_aborted_output_has_no_row_contract_without_ids(server_class):
+    server = _server(server_class, custom=dict(routed_experts_source_semantics="model_rows"), aborted=True)
     output = await server.generate([1], {}, "r")
-    assert output.stop_reason == "aborted" and output.routed_experts is None
+    assert output.stop_reason == "aborted" and output.routed_experts_source_semantics is None
     assert server._admitting == 0
 
 
@@ -173,3 +178,42 @@ async def test_pd_legs_reuse_native_prompt_and_each_apply_request_defaults(serve
         assert request["prompt"]["prompt_token_ids"] == [1, 2, 3]
         assert request["sampling_params"].max_tokens == max_tokens
         assert request["sampling_params"].stop == "END" and request["sampling_params"].detokenize is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_semantics", [None, "model_rows"])
+async def test_tool_loop_preserves_explicit_row_contract_and_rejects_tool_mask(row_semantics):
+    from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
+
+    loop = object.__new__(ToolAgentLoop)
+    loop.rollout_config = RolloutConfig(name="vllm")
+    loop.response_length = 4
+    loop.tools, loop.tool_schemas, loop.mm_processor_kwargs = {}, [], {}
+    loop.max_assistant_turns, loop.max_user_turns = 1, None
+    loop.tool_parser = SimpleNamespace(stop_token_ids=[])
+    loop.process_multi_modal_info = AsyncMock(return_value={})
+    routes = np.zeros((7 if row_semantics else 3, 1, 2), dtype=np.int32)
+    loop.server_manager = SimpleNamespace(
+        generate=AsyncMock(
+            return_value=TokenOutput(
+                token_ids=[8],
+                routed_experts=routes,
+                routed_experts_source_semantics=row_semantics,
+            )
+        )
+    )
+
+    async def pending(data, params):
+        data.prompt_ids, data.response_mask = [1, 2, 3], [1, 0]
+        return AgentState.GENERATING
+
+    loop._handle_pending_state = pending
+    loop.ct_merge_assistant_token = AsyncMock(return_value=(SimpleNamespace(token_ids=[1, 2, 3, 8]), [1, 0, 1], None))
+    output = await ToolAgentLoop.run.__wrapped__(loop, {}, raw_prompt=[dict(role="user", content="q")])
+    assert output.routed_experts_source_semantics == row_semantics
+    if row_semantics:
+        assert output.routed_experts.shape[0] == 7
+        with pytest.raises(ValueError, match="single-turn"):
+            output.as_dict()
+    else:
+        assert output.as_dict()["routed_experts"].shape == (4, 1, 2)

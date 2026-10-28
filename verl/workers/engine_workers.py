@@ -531,14 +531,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             tool_config = None
 
-        # Router replay is supported on the megatron engine and on the veomni
-        # engine. Both expose `router_replay` on their per-strategy engine
-        # config (the field lives on the shared `EngineConfig` base).
+        # Router replay is configured on each strategy's engine config.
         actor_strategy = self.config.actor.strategy
         if actor_strategy == "megatron":
             rr_mode = self.config.actor.megatron.router_replay.mode
         elif actor_strategy == "veomni":
             rr_mode = self.config.actor.veomni.router_replay.mode
+        elif actor_strategy in ("fsdp", "fsdp2", "fsdp_turbo"):
+            rr_mode = self.config.actor.fsdp_config.router_replay.mode
         else:
             rr_mode = "disabled"
         self.enable_routing_replay = rr_mode != "disabled"

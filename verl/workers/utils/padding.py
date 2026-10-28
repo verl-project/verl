@@ -78,10 +78,39 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
 
     routed_experts = data.get("routed_experts", None)
     if routed_experts is not None and not routed_experts.is_nested:
-        routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
-        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
-            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
-        )
+        semantics = tu.get_non_tensor_data(data, "routed_experts_transport_semantics", None)
+        if hasattr(semantics, "tolist"):
+            semantics = semantics.tolist()
+        contracts = {semantics} if semantics is None or isinstance(semantics, str) else set(semantics)
+        if len(contracts) != 1 or not contracts <= {None, "model_rows"}:
+            raise ValueError(f"Routing rows require one supported layout, got {contracts}")
+        if contracts == {"model_rows"}:
+            # Model coordinates have an independent row axis; do not unpad
+            # them with an attention mask in raw-token coordinates.
+            route_seq_len = routed_experts.shape[1]
+            route_offsets = torch.arange(
+                0,
+                (routed_experts.shape[0] + 1) * route_seq_len,
+                route_seq_len,
+                dtype=torch.int64,
+                device=routed_experts.device,
+            )
+            routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+                routed_experts.flatten(0, 1), offsets=route_offsets
+            )
+        else:
+            if routed_experts.max() <= 255:
+                routed_experts = routed_experts.to(torch.uint8)
+            if routed_experts.shape[1] != attention_mask.shape[1]:
+                raise ValueError(
+                    "logical-token routed experts must match attention-mask "
+                    f"length: routes={routed_experts.shape[1]}, "
+                    f"tokens={attention_mask.shape[1]}"
+                )
+            routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
+            routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+                routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
+            )
         data["routed_experts"] = routed_experts_nested
 
     # (bsz, seqlen, topk)

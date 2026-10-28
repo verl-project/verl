@@ -25,7 +25,7 @@ from typing import Callable, ContextManager, Optional
 import torch
 import torch.distributed
 from peft import LoraConfig, TaskType, get_peft_model
-from tensordict import TensorDict
+from tensordict import NonTensorStack, TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
@@ -1421,6 +1421,19 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if use_fused_kernels:
                 raise ValueError("Raw-logit model outputs require unfused kernels")
             model_inputs["output_raw_logits"] = True
+        if tu.get_non_tensor_data(micro_batch, "enable_routing_replay", default=False):
+            if "routed_experts" not in forward_params:
+                raise ValueError("This model does not accept routing replay inputs")
+            if "routed_experts" not in micro_batch:
+                raise ValueError("Routing replay requires routed_experts")
+            model_inputs["routed_experts"] = micro_batch["routed_experts"]
+            if "router_replay_mask" in micro_batch:
+                model_inputs["router_replay_mask"] = micro_batch["router_replay_mask"]
+            if "routed_experts_transport_semantics" in forward_params:
+                semantics = tu.get_non_tensor_data(micro_batch, "routed_experts_transport_semantics", default=None)
+                if isinstance(semantics, NonTensorStack):
+                    semantics = semantics.tolist()
+                model_inputs["routed_experts_transport_semantics"] = semantics
 
         return model_inputs, output_args
 

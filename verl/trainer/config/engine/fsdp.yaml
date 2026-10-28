@@ -81,6 +81,15 @@ strategy: fsdp
 # Mixed precision training param dtype
 dtype: bfloat16 # ["bfloat16", "float16"]
 
+# Router replay configuration for MoE models.
+router_replay:
+
+  # Target dataclass shared by engine backends.
+  _target_: verl.workers.config.EngineRouterReplayConfig
+
+  # FSDP supports disabled or rollout expert-ID replay (R3).
+  mode: disabled
+
 turbo_config:
   distributed:
     fully_shard_parallel_size: 16

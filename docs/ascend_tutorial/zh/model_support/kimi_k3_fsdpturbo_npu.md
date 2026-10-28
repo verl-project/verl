@@ -22,6 +22,9 @@
 容器还需提供与宿主驱动匹配的 `npu-smi`，可只读挂载宿主的
 `/usr/local/sbin/npu-smi`。verl 使用它检查 IPC 支持；仅挂载驱动库并不能替代该工具。
 
+main 的 AuxOutput 路由输出要求启用底层前缀缓存机制。配置
+`rollout.enable_prefix_caching=False` 时，verl 会为每次生成分配独立的
+`cache_salt`，保留不跨请求复用前缀的行为，同时支持完整路由记录。
 权重更新后的缓存清理仍由 rollout 生命周期执行。图模式使用
 `additional_config.rl_config.sleep_mode_extra_cleanup=False`；旧的顶层
 `enable_sleep_mode_extra_cleanup` 字段不再受支持。
@@ -81,6 +84,15 @@ CP 模型先交换 hidden states 到标准 packed/SP ownership，再执行 head�
 通用引擎据此复用已有 packed labels、temperature、log-prob、entropy 和 score-centering 流程。
 默认 HF/SFT forward 不启用此输出契约，保留原展开序列输出；CP1 的 packed 输入也保留。
 
+### ID-only R3（独立启用）
+
+模型加载、前向和权重同步不依赖 R3；路由采集与回放单独配置。
+R3 仅透传专家 IDs 和传输语义，模型在实际图文合并后对齐有效行，再切分 CP。
+训练端使用 `actor.fsdp_config.router_replay.mode=R3`，复用现有回放配置；
+`rollout.enable_rollout_routing_replay=True` 只控制推理端采集。默认 `disabled`，不支持 R2。
+自然缺失的最后一个因果行继续使用当前 router 的选择，权重由当前 gate scores gather、
+归一化和 scaling 得到。verl 中不保留 Kimi 展开几何或专家权重回放逻辑。
+
 ### Megatron 原生布局
 
 Megatron 路径复用标准 GPT forward。MS-Bridge 的 Kimi 模型通过
@@ -96,7 +108,9 @@ rollout 使用标准 vLLM server，图像保持 PIL 输入。配套 vLLM-Ascend 
 processor 通过原生 prompt-update 接口接受 HF processor 产生的媒体块。
 脚本在 `rollout.custom.sampling_defaults.stop` 配置响应结束字符串，请求参数优先于这些
 默认值；EOS 由 vLLM 从 tokenizer 和 HF generation config 读取，`ignore_eos` 只控制
-EOS，显式配置的字符串 stop 仍然生效。
+EOS，显式配置的字符串 stop 仍然生效。`rollout.custom.routed_experts_source_semantics=model_rows`
+显式保留展开序列的专家 IDs，未设置时保留原有逻辑 token 传输。
+包含 tool mask 的多轮输出目前不支持 model-row 回放，会在输出校验时明确拒绝。
 
 ### 权重导出和同步
 
@@ -104,6 +118,7 @@ EOS，显式配置的字符串 stop 仍然生效。
 `naive` 同卡同步路径显式传入 rollout 拓扑，保留本地 packed 权重重分片优化；
 separate async 和 HF checkpoint 使用完整全局 HF 流，不传入本地布局。
 delta 的全量 seed 和后续更新共用相同的 HF 名称、转置和索引规则。
+这些权重能力与 R3 的启用状态独立。
 
 ### FSDPTurbo Ulysses CP（关闭 TND）
 
@@ -121,6 +136,10 @@ NNODES=1 NPUS_PER_NODE=16 TURBO_EP_SIZE=8 TURBO_CP_SIZE=2 \
 
 CP 大小需要整除设备数和 attention/KDA 的 head 数。CP 分组内处理同一批样本，
 数据并行大小为设备数除以 CP 大小；FSDP 仍覆盖全部训练设备。
+本配置保持 rollout routing replay 开启。rollout 只传专家 IDs，原生模型将完整展开序列的
+IDs 和有效行 mask 对齐到实际图文融合位置，再使用与隐藏状态相同的 CP padding 和切分。
+训练前向按当前 router 参数重算所选专家的 gate 权重，沿用模型的归一化和 scaling；
+重算复用相同的 IDs，不传输或回放采样时的 gate 权重。
 模型先完成图文融合，再切分展开后的序列。原生模型在 LM head 前将 raw-token hidden states
 重排到 packed/SP 分块；普通 log-prob、entropy、sum_pi_squared 和 score centering 均使用
 同一通用 logits processor/标量汇总路径。词表 logits 始终留在本卡。

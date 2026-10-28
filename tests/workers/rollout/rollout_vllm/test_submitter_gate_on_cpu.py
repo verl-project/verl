@@ -349,6 +349,7 @@ def _make_generating_server(monkeypatch, cls, outputs):
     server.model_config = SimpleNamespace(processor=None, lora_rank=0, lora={})
     server.replica_rank = 0
     server.engine.outputs = outputs
+    server._routing_cache_policy = vllm_async_server.RoutingCachePolicy(False, False)
     # Outside a Ray actor, get_runtime_context() would start a local cluster.
     monkeypatch.setattr(
         vllm_async_server.ray, "get_runtime_context", lambda: SimpleNamespace(get_actor_name=lambda: "test")

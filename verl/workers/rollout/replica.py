@@ -38,6 +38,8 @@ class TokenOutput(BaseModel):
     """logprobs of response token ids"""
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
+    routed_experts_source_semantics: Optional[str] = None
+    """Routing row layout; model_rows is independent of logical-token positions."""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None

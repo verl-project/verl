@@ -124,7 +124,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             if not trajectory["validate"] and not do_sample:
                 apply_greedy_sampling_params(run_sampling_params)
 
-            tasks = []
             for i in range(n):
                 task = asyncio.create_task(
                     self._run_agent_loop(
@@ -195,9 +194,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
             ).squeeze(0)
 
-            keys.append(f"{uid}_{session_id}_{i}")
+            rollout_key = f"{uid}_{session_id}_{i}"
+            keys.append(rollout_key)
             field = output.as_dict()
             field.update(kwargs)
+            # ``uid`` intentionally remains the prompt/group id used by GRPO.
+            # Persist the unique TransferQueue row key separately so audit
+            # dumps can verify and sort rows without conflating the two ids.
+            field["rollout_key"] = rollout_key
             # do not store raw image/video
             field.pop("multi_modal_data", None)
             # TODO: uniform response_mask and loss_mask

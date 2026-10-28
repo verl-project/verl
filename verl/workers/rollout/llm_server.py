@@ -304,12 +304,14 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
-            # On partial rollout resume the model version may differ, so keep
-            # existing routing and only append routing for newly generated tokens.
-            if output.routed_experts is not None and len(output.token_ids) > 0:
+            # Preserve earlier routing when a resumed request uses a newer model.
+            if output.routed_experts is not None and output.token_ids:
                 if final_output.routed_experts is None:
                     final_output.routed_experts = output.routed_experts
+                    final_output.routed_experts_source_semantics = output.routed_experts_source_semantics
                 else:
+                    if final_output.routed_experts_source_semantics != output.routed_experts_source_semantics:
+                        raise RuntimeError("a resumed rollout cannot switch routing row semantics")
                     final_output.routed_experts = np.concatenate(
                         [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]]
                     )
