@@ -15,10 +15,16 @@
 import logging
 import os
 
-try:
-    from mindspeed.megatron_adaptor import repatch
-except ImportError:
+from ..bootstrap import USE_MEGATRON_ADAPTOR
+
+if USE_MEGATRON_ADAPTOR:
     repatch = None
+
+else:
+    try:
+        from mindspeed.megatron_adaptor import repatch
+    except ImportError:
+        repatch = None
 
 from verl.trainer.config import CheckpointConfig
 from verl.workers.config import (
