@@ -352,7 +352,14 @@ def _stage_per_token_moe(module: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 @torch.no_grad()
 def _fold_per_token_moe(module: torch.nn.Module, live: dict[str, torch.Tensor]) -> None:
-    """Post-process one staged layer and copy the results into its live tensors."""
+    """Post-process one staged layer and copy the results into its live tensors.
+
+    ``vllm_fp4_utils`` writes back in place by patching vLLM's module-level
+    ``replace_parameter`` and ``convert_to_nvfp4_moe_kernel_format``. The per-token
+    method above binds both itself and derives extra tensors, so its results are
+    copied back here instead. This goes away once vLLM's compressed-tensors NVFP4
+    MoE supports per-token activations.
+    """
     method = module.quant_method
     kernel, quant_config = method.moe_kernel, method.moe_quant_config
     type(method).process_weights_after_loading(method, module)
