@@ -23,6 +23,7 @@ These tests drive the worker methods with mocked engines, so no GPU or ray is ne
 """
 
 from contextlib import nullcontext
+from inspect import unwrap
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,7 +31,7 @@ import torch
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
-from verl.workers.engine_workers import TrainingWorker
+from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
 
 
 def _engine(**overrides):
@@ -103,3 +104,23 @@ def test_forward_only_stage_is_not_a_profiler_step():
 
     assert TrainingWorker.infer_batch(worker, data) is None
     worker.profiler.step.assert_not_called()
+
+
+def test_reference_returns_the_infer_batch_cpu_result():
+    data = TensorDict({}, batch_size=[])
+    tu.assign_non_tensor(data, global_token_num=[4])
+    cpu_output = TensorDict({"ref_log_prob": torch.zeros(1)}, batch_size=[])
+    processed = MagicMock()
+    processed.cpu.return_value = cpu_output
+    inner = _worker(_engine(is_mp_src_rank_with_outputs=lambda: True))
+    inner._postprocess_output = MagicMock(return_value=processed)
+    inner.infer_batch = lambda data: TrainingWorker.infer_batch(inner, data)
+    outer = SimpleNamespace(ref=inner)
+    result = unwrap(ActorRolloutRefWorker.compute_ref_log_prob)(outer, data)
+    assert result.device == torch.device("cpu")
+    torch.testing.assert_close(result["ref_log_prob"], cpu_output["ref_log_prob"])
+    processed.cpu.assert_called_once_with()
+    assert cpu_output["ref_log_prob"].device.type == "cpu"
+
+    inner.engine.is_mp_src_rank_with_outputs = lambda: False
+    assert unwrap(ActorRolloutRefWorker.compute_ref_log_prob)(outer, data) is None
