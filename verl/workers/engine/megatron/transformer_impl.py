@@ -470,7 +470,12 @@ class MegatronEngine(BaseEngine):
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
-        if self.engine_config.use_dist_checkpointing:
+        # ``use_dist_checkpointing`` also selects the format used by the
+        # checkpoint manager for subsequent training saves.  A fresh run can
+        # therefore request sharded saves while still bootstrapping from the
+        # HuggingFace path in ``model.local_path``.  Only take the direct
+        # MCore-load branch when an initial dist-checkpoint path was supplied.
+        if self.engine_config.use_dist_checkpointing and self.engine_config.dist_checkpointing_path is not None:
             load_mcore_dist_weights(
                 module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
             )
