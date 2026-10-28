@@ -45,7 +45,7 @@ def test_checkpoint_engine_ack_timeout_default():
     assert CheckpointEngineConfig().update_weights_ack_timeout_seconds == 30.0
 
 
-@pytest.mark.parametrize("timeout", [0, -1, math.inf, -math.inf, math.nan])
+@pytest.mark.parametrize("timeout", [0, 0.0005, -1, math.inf, -math.inf, math.nan])
 def test_checkpoint_engine_rejects_invalid_ack_timeout(timeout):
-    with pytest.raises(ValueError, match="positive finite"):
+    with pytest.raises(ValueError, match="at least 0.001"):
         CheckpointEngineConfig(update_weights_ack_timeout_seconds=timeout)

@@ -27,7 +27,7 @@ import torch
 import zmq
 
 PROCESS_TIMEOUT = 10
-ACK_TIMEOUT_MS = 1_000
+ACK_TIMEOUT_MS = 5_000
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 

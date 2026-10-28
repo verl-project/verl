@@ -146,8 +146,10 @@ class CheckpointEngineConfig(BaseConfig):
     custom_backend_module: Optional[str] = None
 
     def __post_init__(self):
-        if not math.isfinite(self.update_weights_ack_timeout_seconds) or self.update_weights_ack_timeout_seconds <= 0:
-            raise ValueError("update_weights_ack_timeout_seconds must be a positive finite number.")
+        # The sender takes whole milliseconds, so anything below 1 ms would round to 0.
+        timeout = self.update_weights_ack_timeout_seconds
+        if not math.isfinite(timeout) or timeout < 0.001:
+            raise ValueError("update_weights_ack_timeout_seconds must be a finite number of at least 0.001.")
 
 
 @dataclass

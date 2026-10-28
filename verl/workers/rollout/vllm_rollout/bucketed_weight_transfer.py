@@ -33,6 +33,9 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 _RECEIVER_ERROR_PREFIX = b"error:"
 _DEFAULT_ACK_TIMEOUT_MS = 30_000
+# Bounded so close() still flushes the receiver's final or error ACK, without letting a
+# vanished sender hold the process at context teardown.
+_RECEIVER_LINGER_MS = 1_000
 
 
 class _AcknowledgementSocket(Protocol):
@@ -364,7 +367,7 @@ class BucketedWeightReceiver:
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
         self.socket = self.zmq_context.socket(zmq.REP)
-        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.setsockopt(zmq.LINGER, _RECEIVER_LINGER_MS)
         self.socket.connect(self.zmq_handle)
 
     def _init_buffer(self):
