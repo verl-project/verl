@@ -1,7 +1,7 @@
 Add models with the FSDP backend
 ================================
 
-Last updated: 07/29/2026.
+Last updated: 11/03/2026.
 
 The FSDP and FSDP2 engines use Hugging Face model implementations directly.
 If a checkpoint can be loaded by the installed ``transformers`` version, and
@@ -89,6 +89,46 @@ fused kernels. In that case:
 Megatron model definitions and checkpoint conversion are separate from the
 FSDP path. See ``verl/models/mcore/`` and :doc:`../workers/model_engine` when
 the training backend is Megatron.
+
+Native multimodal processors
+---------------------------
+
+The checkpoint's native processor should accept the standard Hugging Face
+``text`` and ``images`` arguments and expose its own image-token metadata.
+``build_multimodal_processor_inputs`` forwards the common processor arguments;
+AgentLoop reconstructs text with ``skip_special_tokens=True`` and consumes the
+returned image features. Support for model-specific media text belongs in the
+native processor, not a model branch or decoding adapter in these utilities.
+When special media markers are stripped, a processor used for feature
+reconstruction must still be able to process the supplied images.
+
+Native checkpoint layouts
+-------------------------
+
+A model with a physical parameter layout different from its Hugging Face
+checkpoint may provide three data operations on its native implementation:
+
+* ``iter_checkpoint_weights(params, device=..., rollout_layout=None)`` yields
+  complete global HF tensors for separate async workers and checkpoint export.
+  Colocated synchronization may supply the rollout layout to reshard directly
+  to local packed tensors.
+* ``map_checkpoint_indices(name, shape, indices, values)`` maps global physical
+  indices to the same HF slots as the full export, or returns ``None`` for an
+  ordinary identity parameter. The framework owns DTensor placement and delta
+  snapshots; the model owns physical-to-checkpoint naming and coordinates.
+* ``load_hf_checkpoint_shards(path, device=...)`` initializes the final wrapped
+  shards from the HF checkpoint. A native model that needs this loading order
+  declares ``load_checkpoint_after_shard=True`` in its HF config. The existing
+  model ``override_config`` can supply that declaration. Other models retain
+  normal ``from_pretrained`` loading.
+
+These are optional native data capabilities, not per-model worker subclasses
+or an additional engine registry. FSDP/FSDP2 and FSDP-Turbo keep their normal
+backend selection, lifecycle, LoRA merge context and transport orchestration.
+Model code must not import worker Engine or rollout Server implementations.
+Meta initialization with new LoRA adapter parameters needs an initializer for
+those parameters; a strict checkpoint loader must report missing adapter
+weights rather than leave uninitialized tensors in training.
 
 Validation checklist
 --------------------
