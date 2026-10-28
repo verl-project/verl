@@ -54,8 +54,9 @@ actor_rollout_ref:
 The `NVFP4_PER_TOKEN` preset exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
 online `nvfp4_per_token` quantization, and runs them on FlashInfer's TRT-LLM MoE kernel with per-token
 activation scales. Refits load each bucket in place into the storage the CUDA graphs captured, so the extra
-memory is one MoE layer's post-processing. With EP off, each rank computes the FC2 per-token scale over its
-shard of the expert.
+memory is one MoE layer's post-processing. With rollout TP and EP off, each rank holds a slice of every
+expert and computes the per-token scale of the `down_proj` input over its slice, so results differ slightly
+from TP=1.
 
 ## Mismatch
 
