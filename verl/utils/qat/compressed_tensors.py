@@ -759,11 +759,9 @@ def dispatch_rollout_weight_quantizer(
         if per_token:
             bf16_expert_layers = None
             if real_nvfp4:
-                from verl.utils.real_nvfp4 import real_nvfp4_bf16_layer_indices, real_nvfp4_num_layers
+                from verl.utils.megatron.low_precision import bf16_layer_indices, num_decoder_layers
 
-                bf16_expert_layers = real_nvfp4_bf16_layer_indices(
-                    real_nvfp4_num_layers(hf_config), *real_nvfp4_bf16_layers
-                )
+                bf16_expert_layers = bf16_layer_indices(num_decoder_layers(hf_config), *real_nvfp4_bf16_layers)
             quantizer = NVFP4PerTokenWeightQuantizer(quantization_config, bf16_expert_layers=bf16_expert_layers)
         elif getattr(rollout_config, "name", None) == "sglang" and is_all_mxfp8_config(quantization_config):
             from verl.utils.sglang.sglang_quant_utils import SGLangMxfp8WeightQuantizer

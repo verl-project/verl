@@ -15,10 +15,9 @@
 """Megatron/Transformer Engine NVFP4 training helpers."""
 
 from .config import (
+    check_nvfp4_per_token_rollout,
     is_routed_expert_module,
-    real_nvfp4_bf16_layer_indices,
     real_nvfp4_bf16_layers,
-    real_nvfp4_num_layers,
     real_nvfp4_quant_recipe_config,
     validate_real_nvfp4_model_contract,
     validate_real_nvfp4_parallelism,
@@ -26,10 +25,9 @@ from .config import (
 )
 
 __all__ = [
+    "check_nvfp4_per_token_rollout",
     "is_routed_expert_module",
-    "real_nvfp4_bf16_layer_indices",
     "real_nvfp4_bf16_layers",
-    "real_nvfp4_num_layers",
     "real_nvfp4_quant_recipe_config",
     "validate_real_nvfp4_model_contract",
     "validate_real_nvfp4_parallelism",

@@ -327,11 +327,9 @@ class vLLMHttpServer:
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
-        from verl.utils.qat.compressed_tensors import is_nvfp4_per_token_config
+        from verl.utils.real_nvfp4 import check_nvfp4_per_token_rollout
 
-        # Whether it comes from rollout.quantization or ships with the checkpoint.
-        if is_nvfp4_per_token_config(effective_quantization_config):
-            self._check_nvfp4_per_token_rollout(compilation_config, engine_kwargs)
+        check_nvfp4_per_token_rollout(self.config, effective_quantization_config, compilation_config, engine_kwargs)
         compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
@@ -1444,32 +1442,6 @@ class vLLMHttpServer:
         quantization_config = quantization.build_quantization_config(self.model_config.local_path)
         logger.info(f"Rollout compressed-tensors quantization_config: {quantization_config}")
         return {"quantization_config": quantization_config}
-
-    def _check_nvfp4_per_token_rollout(self, compilation_config: dict, engine_kwargs: dict) -> None:
-        """Keep NVFP4_PER_TOKEN to the validated layout: no all2all expert parallelism, colocated
-        IPC refit and full CUDA graphs for decode only."""
-        dp = self.config.data_parallel_size
-        # verl runs per-token NVFP4 on the monolithic FlashInfer TRT-LLM MoE kernel,
-        # which has no all2all expert dispatch.
-        if dp != 1 or engine_kwargs.get("enable_eplb", False):
-            raise ValueError(f"NVFP4_PER_TOKEN rollout requires data_parallel_size=1 and no EPLB, got dp={dp}")
-        # DCP cannot run FULL CUDA graphs, and PCP turns expert parallelism into all2all.
-        context_parallel = {
-            key: engine_kwargs.get(key, 1) or 1
-            for key in ("decode_context_parallel_size", "prefill_context_parallel_size")
-        }
-        if any(size > 1 for size in context_parallel.values()):
-            raise ValueError(f"NVFP4_PER_TOKEN rollout does not support context parallelism, got {context_parallel}")
-        if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            raise ValueError("NVFP4_PER_TOKEN rollout does not support speculative decoding/MTP")
-        checkpoint_backend = getattr(self.config.checkpoint_engine, "backend", None)
-        if checkpoint_backend != "naive":
-            raise ValueError(
-                f"NVFP4_PER_TOKEN refits through the colocated naive IPC checkpoint backend, got {checkpoint_backend!r}"
-            )
-        compilation_config.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
-        if compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
-            raise ValueError("NVFP4_PER_TOKEN rollout requires compilation_config.cudagraph_mode=FULL_DECODE_ONLY")
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""

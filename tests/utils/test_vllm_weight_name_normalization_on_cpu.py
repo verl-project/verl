@@ -973,13 +973,16 @@ class _FakeNVFP4BucketReceiver:
 def _nvfp4_per_token_worker(monkeypatch, events, load_weights):
     pytest.importorskip("vllm")
     pytest.importorskip("compressed_tensors")
-    import vllm.model_executor.model_loader.reload as vllm_reload
-
     import verl.utils.vllm.vllm_nvfp4_per_token_utils as per_token
     from verl.utils.qat.compressed_tensors import build_compressed_tensors_config
 
-    monkeypatch.setattr(vllm_reload, "initialize_layerwise_reload", lambda model: events.append("initialize"))
-    monkeypatch.setattr(vllm_reload, "finalize_layerwise_reload", lambda model, config: events.append("finalize"))
+    @contextlib.contextmanager
+    def refit(model, model_config, device):
+        events.append("stage")
+        yield
+        events.append("post_process")
+
+    monkeypatch.setattr(per_token, "nvfp4_per_token_refit", refit)
     monkeypatch.setattr(
         per_token, "attest_nvfp4_per_token_runtime", lambda model, config: events.append(("attest", config))
     )
@@ -1021,7 +1024,7 @@ def _nvfp4_per_token_worker(monkeypatch, events, load_weights):
     return worker, [[name for name, _ in bucket] for bucket in buckets]
 
 
-def test_nvfp4_per_token_update_uses_layerwise_reload_per_bucket(monkeypatch):
+def test_nvfp4_per_token_update_loads_every_bucket_in_place(monkeypatch):
     events = []
     worker, names = _nvfp4_per_token_worker(
         monkeypatch, events, lambda weights: events.append(("load", [name for name, _ in weights]))
@@ -1030,14 +1033,14 @@ def test_nvfp4_per_token_update_uses_layerwise_reload_per_bucket(monkeypatch):
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
     assert events == [
-        "initialize",
+        "stage",
         ("load", names[0]),
         "ack0",
         ("load", names[1]),
         "ack1",
         ("load", names[2]),
         "ack2",
-        "finalize",
+        "post_process",
         ("attest", worker._nvfp4_per_token_config),
     ]
 
@@ -1053,12 +1056,12 @@ def test_nvfp4_per_token_load_error_still_drains_the_round(monkeypatch):
 
     with pytest.raises(ValueError, match="load failed"):
         worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
-    # Every bucket is still acknowledged; nothing is loaded or finalized after the error.
-    assert events == ["initialize", "load", "ack0", "ack1", "ack2"]
+    # Every bucket is still acknowledged; nothing is loaded or post-processed after the error.
+    assert events == ["stage", "load", "ack0", "ack1", "ack2"]
 
     # The model is now partly updated: neither a later refit nor generation may use it.
     with pytest.raises(RuntimeError, match="restart the job"):
         worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
     with pytest.raises(RuntimeError, match="restart the job"):
         worker.model_runner.execute_model(None)
-    assert events == ["initialize", "load", "ack0", "ack1", "ack2"]
+    assert events == ["stage", "load", "ack0", "ack1", "ack2"]

@@ -267,17 +267,6 @@ def test_worker_reads_the_quantization_config_vllm_built_its_methods_from():
     assert find(vllm_config(None, per_token)) == per_token
 
 
-def test_refit_check_keeps_only_the_local_experts_of_an_expert_parallel_rank():
-    model = _model([1], num_layers=2)
-    for layer in model.model.layers:
-        # This rank holds expert 1 of every layer.
-        layer.mlp.experts.routed_experts._map_global_expert_id_to_local_expert_id = lambda expert: expert - 1
-    check = _ROLLOUT.NVFP4PerTokenRefitCheck(model, _config(_LAYER0_BF16))
-    weights = _stream() + [("model.embed_tokens.weight", torch.ones(2, 16))]
-    kept = [name for name, _ in check.local_updates(weights)]
-    assert kept == [name for name, _ in weights if ".experts.0." not in name]
-
-
 class CompressedTensorsW4A4Nvfp4PerTokenMoEMethod:
     def __init__(self, per_token_activation: bool = True) -> None:
         self.moe_kernel = SimpleNamespace(fused_experts=SimpleNamespace(per_token_activation=per_token_activation))
@@ -379,13 +368,13 @@ def test_runtime_attestation_rejects_a_stale_derived_scale():
         _ROLLOUT.attest_nvfp4_per_token_runtime(model, _LAYERS_0_3_BF16)
 
 
-def test_rollout_server_checks_a_per_token_config_file(tmp_path):
+def test_per_token_rollout_check_reads_a_config_file(tmp_path):
     pytest.importorskip("vllm")
     import json
 
     from verl.utils.qat.compressed_tensors import is_nvfp4_per_token_config
+    from verl.utils.real_nvfp4 import check_nvfp4_per_token_rollout
     from verl.workers.config.rollout import RolloutQuantizationConfig
-    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
     config_file = tmp_path / "quantization_config.json"
     config_file.write_text(json.dumps(_config()))
@@ -396,29 +385,34 @@ def test_rollout_server_checks_a_per_token_config_file(tmp_path):
     static = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
     assert not is_nvfp4_per_token_config(static)
 
-    server = object.__new__(vLLMHttpServer)
-    server.config = SimpleNamespace(
+    rollout = SimpleNamespace(
         tensor_model_parallel_size=4,
         expert_parallel_size=4,
         data_parallel_size=1,
         mtp=None,
         checkpoint_engine=SimpleNamespace(backend="naive"),
     )
+
+    def check(compilation_config, engine_kwargs, config=built):
+        check_nvfp4_per_token_rollout(rollout, config, compilation_config, engine_kwargs)
+
+    # Other quantization configs are left alone.
+    check_nvfp4_per_token_rollout(rollout, static, {"cudagraph_mode": "FULL_AND_PIECEWISE"}, {"enable_eplb": True})
     # Expert parallelism within one engine keeps whole experts per rank.
     compilation_config = {}
-    server._check_nvfp4_per_token_rollout(compilation_config, {})
+    check(compilation_config, {})
     assert compilation_config == {"cudagraph_mode": "FULL_DECODE_ONLY"}
     with pytest.raises(ValueError, match="FULL_DECODE_ONLY"):
-        server._check_nvfp4_per_token_rollout({"cudagraph_mode": "FULL_AND_PIECEWISE"}, {})
+        check({"cudagraph_mode": "FULL_AND_PIECEWISE"}, {})
     with pytest.raises(ValueError, match="no EPLB"):
-        server._check_nvfp4_per_token_rollout({}, {"enable_eplb": True})
+        check({}, {"enable_eplb": True})
     for context_parallel in ("decode_context_parallel_size", "prefill_context_parallel_size"):
         with pytest.raises(ValueError, match="context parallelism"):
-            server._check_nvfp4_per_token_rollout({}, {context_parallel: 2})
+            check({}, {context_parallel: 2})
     # Tensor-parallel experts
-    server.config.expert_parallel_size = 1
-    server._check_nvfp4_per_token_rollout({}, {})
+    rollout.expert_parallel_size = 1
+    check({}, {})
     # Data-parallel attention with all2all expert parallelism
-    server.config.tensor_model_parallel_size, server.config.data_parallel_size = 1, 4
+    rollout.tensor_model_parallel_size, rollout.data_parallel_size = 1, 4
     with pytest.raises(ValueError, match="data_parallel_size=1"):
-        server._check_nvfp4_per_token_rollout({}, {})
+        check({}, {})

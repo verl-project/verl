@@ -19,11 +19,11 @@ from typing import Any, Iterable
 
 import torch
 
+from verl.utils.megatron.low_precision import bf16_layer_indices, num_decoder_layers
+
 from .config import (
     is_routed_expert_module,
-    real_nvfp4_bf16_layer_indices,
     real_nvfp4_bf16_layers,
-    real_nvfp4_num_layers,
     real_nvfp4_quant_recipe_config,
     validate_real_nvfp4_model_contract,
     validate_real_nvfp4_parallelism,
@@ -60,7 +60,7 @@ def apply_real_nvfp4_overrides(
     if override_transformer_config.get("quant_recipe") is not None:
         raise ValueError("NVFP4 training sets override_transformer_config.quant_recipe itself")
     override_transformer_config["quant_recipe"] = RecipeConfig.from_config_dict(
-        real_nvfp4_quant_recipe_config(real_nvfp4_num_layers(hf_config), start, end)
+        real_nvfp4_quant_recipe_config(num_decoder_layers(hf_config), start, end)
     )
 
 
@@ -108,9 +108,7 @@ def attest_real_nvfp4_runtime(
     # Check the effective precision of every TE linear module: routed-expert
     # GEMMs outside the carve-out in NVFP4, everything else in BF16.
     carved = set(
-        real_nvfp4_bf16_layer_indices(
-            real_nvfp4_num_layers(hf_config), num_layers_at_start_in_bf16, num_layers_at_end_in_bf16
-        )
+        bf16_layer_indices(num_decoder_layers(hf_config), num_layers_at_start_in_bf16, num_layers_at_end_in_bf16)
     )
 
     def recipe_name(training_recipe, field):

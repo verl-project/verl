@@ -19,14 +19,15 @@ Transformer Engine's row-scaled NVFP4 training. vLLM supports per-token
 activations for its online method and ModelOpt checkpoints; this module adds
 the compressed-tensors equivalent.
 
-Refits go through vLLM's layerwise reload: each expert layer is rebuilt in
-checkpoint layout, post-processed once it is complete, and copied back into the
-storage the CUDA graphs captured. The post-process derives its scales from the
-freshly loaded tensors and keeps the original kernel, whose quant config points
-at that captured storage.
+Refits load in place, like the NVFP4 refit in ``vllm_fp4_utils``: each expert
+layer gets checkpoint-layout views over the storage the CUDA graphs captured,
+every bucket loads straight into them, and after the last bucket each layer is
+post-processed and the results are copied back into that storage. The
+post-process keeps the original kernel, whose quant config points at it.
 """
 
 import re
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Optional
 
@@ -108,9 +109,9 @@ def install_nvfp4_per_token_compressed_tensors_patch():
             replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
             replace_parameter(layer, "w2_input_scale", a2_scale)
 
-            # Post-process with a kernel built from the fresh tensors. On a refit the
-            # layerwise reload copies the results into the original storage, which the
-            # retained kernel (and its CUDA graphs) references.
+            # Post-process with a kernel built from the fresh tensors. A refit copies the
+            # results into the original storage, which the retained kernel (and its CUDA
+            # graphs) references.
             processing_quant_config = self.get_fused_moe_quant_config(layer)
             replace_parameter(layer, "nvfp4_a1_gscale", processing_quant_config.a1_gscale)
             replace_parameter(layer, "nvfp4_a2_gscale", processing_quant_config.a2_gscale)
@@ -272,24 +273,6 @@ class NVFP4PerTokenRefitCheck:
                     if not torch.equal(other, tensor.detach().float().cpu()):
                         raise RuntimeError(f"NVFP4_PER_TOKEN gate_proj and up_proj global scales differ at {name}")
 
-    def local_updates(self, weights: list[tuple[str, torch.Tensor]]) -> list[tuple[str, torch.Tensor]]:
-        """Drop the expert tensors other expert-parallel ranks hold.
-
-        vLLM skips them anyway, but its layerwise reload post-processes a layer once the
-        local experts are loaded, so a later tensor of another rank's expert would reach
-        the already processed layer.
-        """
-        kept = []
-        for name, tensor in weights:
-            match = _EXPERT_TENSOR_RE.search(name)
-            if match is not None:
-                module = self.layers[int(match.group(1))][0]
-                to_local = getattr(module, "_map_global_expert_id_to_local_expert_id", None)
-                if to_local is not None and to_local(int(match.group(2))) == -1:
-                    continue
-            kept.append((name, tensor))
-        return kept
-
     def finish(self) -> None:
         missing = sorted(self.expected - self.seen)
         if missing:
@@ -329,6 +312,113 @@ def _attest_scale_references(module) -> None:
         expected = quant_config.g1_alphas * quant_config.a2_gscale
     if not torch.equal(registered, expected):
         raise RuntimeError("NVFP4_PER_TOKEN g1_scale_c does not match the current weight scales")
+
+
+def _tensor_attrs(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """The module's own parameters, buffers and plain tensor attributes."""
+    tensors = {name: param for name, param in module._parameters.items() if param is not None}
+    tensors.update((name, buffer) for name, buffer in module._buffers.items() if buffer is not None)
+    tensors.update(
+        (name, value)
+        for name, value in vars(module).items()
+        if isinstance(value, torch.Tensor) and not name.startswith("_")
+    )
+    return tensors
+
+
+def _stage_per_token_moe(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Give ``load_weights`` checkpoint-layout views over the live expert storage.
+
+    Returns the live tensors, which the CUDA graphs captured, for ``_fold_per_token_moe``.
+    """
+    from verl.utils.vllm.vllm_fp4_utils import _mxfp4_staging_data, _nvfp4_checkpoint_layout
+
+    live = _tensor_attrs(module)
+    for name, (shape, dtype, scale_kind, checkpoint_name) in _nvfp4_checkpoint_layout(module).items():
+        param = live.get(name)
+        # Global scales keep their checkpoint layout and load as they are.
+        if not isinstance(param, torch.nn.Parameter) or name.endswith("global_scale"):
+            continue
+        data = _mxfp4_staging_data(param, shape, dtype)
+        if data.data_ptr() != param.data_ptr():
+            raise RuntimeError(f"NVFP4_PER_TOKEN {name} {tuple(param.shape)} cannot hold its checkpoint layout {shape}")
+        staged = torch.nn.Parameter(data, requires_grad=False)
+        staged.weight_loader = module.weight_loader
+        if scale_kind is not None:
+            staged.quant_method = scale_kind
+        setattr(module, checkpoint_name, staged)
+    return live
+
+
+@torch.no_grad()
+def _fold_per_token_moe(module: torch.nn.Module, live: dict[str, torch.Tensor]) -> None:
+    """Post-process one staged layer and copy the results into its live tensors."""
+    method = module.quant_method
+    kernel, quant_config = method.moe_kernel, method.moe_quant_config
+    type(method).process_weights_after_loading(method, module)
+    current = _tensor_attrs(module)
+    added = sorted(set(current) - set(live))
+    if added:
+        raise RuntimeError(f"NVFP4_PER_TOKEN refit derived tensors the CUDA graphs do not know: {added}")
+    for name, tensor in live.items():
+        new = current.get(name)
+        if new is None:
+            raise RuntimeError(f"NVFP4_PER_TOKEN refit dropped {name}")
+        if new.data_ptr() != tensor.data_ptr():
+            if new.shape != tensor.shape or new.dtype != tensor.dtype:
+                raise RuntimeError(
+                    f"NVFP4_PER_TOKEN refit re-derived {name} as {tuple(new.shape)}/{new.dtype}, "
+                    f"but the CUDA-graph tensor is {tuple(tensor.shape)}/{tensor.dtype}"
+                )
+            tensor.copy_(new)
+        if name in module._parameters:
+            module._parameters[name] = tensor
+        elif name in module._buffers:
+            module._buffers[name] = tensor
+        else:
+            setattr(module, name, tensor)
+    method.moe_kernel, method.moe_quant_config = kernel, quant_config
+
+
+@contextmanager
+def nvfp4_per_token_refit(model: torch.nn.Module, model_config, device: torch.device):
+    """Refit in place: load every bucket inside the context, post-process on exit.
+
+    The extra memory is one layer's post-processing. The rest of the model is
+    post-processed as the BF16 refit does it; KV-cache scales are not refit.
+    """
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+    from verl.utils.vllm.vllm_unquant_utils import fold_unquantized_moe_params, stage_unquantized_moe_params
+
+    staged = {
+        module: _stage_per_token_moe(module)
+        for module in model.modules()
+        if is_nvfp4_per_token_method(getattr(module, "quant_method", None))
+    }
+    staged_bf16 = stage_unquantized_moe_params(model)
+    yield
+
+    def fold(layer):
+        _fold_per_token_moe(layer, staged[layer])
+
+    overridden = []
+    for module in model.modules():
+        method = getattr(module, "quant_method", None)
+        if module in staged:
+            method.process_weights_after_loading = fold
+        elif isinstance(method, BaseKVCacheMethod):
+            method.process_weights_after_loading = lambda layer: None
+        else:
+            continue
+        overridden.append(method)
+    try:
+        with fold_unquantized_moe_params(staged_bf16):
+            process_weights_after_loading(model, model_config, device)
+    finally:
+        for method in overridden:
+            del method.process_weights_after_loading
 
 
 def clear_kv_cache(model: torch.nn.Module) -> None:

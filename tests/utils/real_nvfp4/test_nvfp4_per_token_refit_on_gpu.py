@@ -14,7 +14,7 @@
 
 """NVFP4_PER_TOKEN rollout refit on small Qwen3-MoE and DeepSeek-V3 models.
 
-The preset engine refits from the trainer-side export through vLLM's layerwise reload.
+The preset engine refits from the trainer-side export in place, as the rollout does.
 Its greedy logprobs must equal vLLM's online nvfp4_per_token method loading the same BF16
 weights, and with CUDA graphs a refit must restore them exactly, including after other
 weights and after a level-2 sleep.
@@ -147,14 +147,13 @@ def _runner(llm):
 
 
 def _refit(llm, weights):
-    from vllm.model_executor.model_loader.reload import finalize_layerwise_reload, initialize_layerwise_reload
+    from verl.utils.vllm.vllm_nvfp4_per_token_utils import nvfp4_per_token_refit
 
     runner = _runner(llm)
     model = runner.get_model()
-    initialize_layerwise_reload(model)
-    for start in range(0, len(weights), 32):
-        model.load_weights([(name, tensor.clone()) for name, tensor in weights[start : start + 32]])
-    finalize_layerwise_reload(model, runner.vllm_config.model_config)
+    with nvfp4_per_token_refit(model, runner.vllm_config.model_config, torch.device("cuda")):
+        for start in range(0, len(weights), 32):
+            model.load_weights(weights[start : start + 32])
 
 
 def _logprobs(llm):

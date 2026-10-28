@@ -17,25 +17,11 @@
 import fnmatch
 from typing import Any, Mapping, Optional
 
+from verl.utils.megatron.low_precision import bf16_layer_indices, bf16_layers_at_start_end, hf_config_get, text_config
+
 # Megatron module paths of routed-expert GEMMs (grouped or sequential experts). Dense MLPs
 # (``mlp.linear_fc1``) and shared experts (``mlp.shared_experts.linear_fc1``) do not match.
 ROUTED_EXPERT_PATTERNS = ("*.mlp.experts.*linear_fc1", "*.mlp.experts.*linear_fc2")
-
-
-def _hf_get(hf_config: Any, name: str, default: Any = None) -> Any:
-    if isinstance(hf_config, dict):
-        return hf_config.get(name, default)
-    return getattr(hf_config, name, default)
-
-
-def _text_config(hf_config: Any) -> Any:
-    """The decoder config; multimodal HF configs nest it under ``text_config``."""
-    text_config = _hf_get(hf_config, "text_config")
-    return hf_config if text_config is None else text_config
-
-
-def real_nvfp4_num_layers(hf_config: Any) -> int:
-    return int(_hf_get(_text_config(hf_config), "num_hidden_layers") or 0)
 
 
 def is_routed_expert_module(module_path: str) -> bool:
@@ -46,8 +32,7 @@ def real_nvfp4_bf16_layers(override_transformer_config: Mapping[str, Any]) -> Op
     """BF16 decoder layers at the start and end, or None without NVFP4 training.
 
     NVFP4 training is switched on by ``override_transformer_config.fp4``, as FP8
-    training is by ``fp8``; it applies to routed-expert GEMMs only. The BF16
-    layers follow Megatron-Core's ``first_last_layers_bf16`` options.
+    training is by ``fp8``; it applies to routed-expert GEMMs only.
     """
 
     fp4 = override_transformer_config.get("fp4")
@@ -56,29 +41,7 @@ def real_nvfp4_bf16_layers(override_transformer_config: Mapping[str, Any]) -> Op
     fp4_recipe = override_transformer_config.get("fp4_recipe") or "nvfp4"
     if fp4 != "e2m1" or fp4_recipe != "nvfp4":
         raise ValueError(f"FP4 training supports fp4='e2m1' with fp4_recipe='nvfp4', got {fp4!r}/{fp4_recipe!r}")
-    if not override_transformer_config.get("first_last_layers_bf16", False):
-        return 0, 0
-    # Megatron-Core defaults
-    start = override_transformer_config.get("num_layers_at_start_in_bf16", 1)
-    end = override_transformer_config.get("num_layers_at_end_in_bf16", 1)
-    if start < 0 or end < 0:
-        raise ValueError(f"NVFP4 BF16 layer carve-out must be non-negative, got {start}/{end}")
-    return start, end
-
-
-def real_nvfp4_bf16_layer_indices(num_layers: int, num_layers_at_start: int, num_layers_at_end: int) -> list[int]:
-    """Decoder layers kept in BF16 by the first/last carve-out."""
-
-    if num_layers_at_start < 0 or num_layers_at_end < 0:
-        raise ValueError(
-            f"real_nvfp4 BF16 layer carve-out must be non-negative, got {num_layers_at_start}/{num_layers_at_end}"
-        )
-    if num_layers_at_start + num_layers_at_end >= num_layers:
-        raise ValueError(
-            f"real_nvfp4 BF16 layer carve-out {num_layers_at_start}/{num_layers_at_end} "
-            f"leaves no quantized layer of {num_layers}"
-        )
-    return list(range(num_layers_at_start)) + list(range(num_layers - num_layers_at_end, num_layers))
+    return bf16_layers_at_start_end(override_transformer_config)
 
 
 def real_nvfp4_quant_recipe_config(num_layers: int, num_layers_at_start: int, num_layers_at_end: int) -> dict:
@@ -97,7 +60,7 @@ def real_nvfp4_quant_recipe_config(num_layers: int, num_layers_at_start: int, nu
 
     matchers = {
         f"layer_{index}_bf16": glob("bf16", f"*.layers.{index}.*")
-        for index in real_nvfp4_bf16_layer_indices(num_layers, num_layers_at_start, num_layers_at_end)
+        for index in bf16_layer_indices(num_layers, num_layers_at_start, num_layers_at_end)
     }
     matchers["experts_fc1_nvfp4"] = glob("nvfp4", ROUTED_EXPERT_PATTERNS[0])
     matchers["experts_fc2_nvfp4"] = glob("nvfp4", ROUTED_EXPERT_PATTERNS[1])
@@ -119,8 +82,8 @@ def real_nvfp4_quant_recipe_config(num_layers: int, num_layers_at_start: int, nu
 def validate_real_nvfp4_model_contract(hf_config: Any) -> None:
     """real_nvfp4 trains routed experts in NVFP4, so the model must have them."""
 
-    text_config = _text_config(hf_config)
-    num_experts = int(_hf_get(text_config, "num_experts") or _hf_get(text_config, "n_routed_experts") or 0)
+    decoder = text_config(hf_config)
+    num_experts = int(hf_config_get(decoder, "num_experts") or hf_config_get(decoder, "n_routed_experts") or 0)
     if num_experts <= 0:
         raise ValueError(
             "real_nvfp4 requires a routed-expert MoE model; this config declares no experts "
@@ -178,3 +141,39 @@ def validate_real_nvfp4_te_recipe(recipe: Any) -> None:
         mismatches["backward_override"] = {"expected": BACKWARD_OVERRIDES, "actual": backward_override}
     if mismatches:
         raise RuntimeError(f"real_nvfp4 Transformer Engine recipe drifted: {mismatches}")
+
+
+def check_nvfp4_per_token_rollout(
+    rollout_config: Any, quantization_config: Any, compilation_config: dict, engine_kwargs: dict
+) -> None:
+    """Keep an ``NVFP4_PER_TOKEN`` rollout to the validated layout: no all2all expert
+    parallelism, colocated IPC refit and full CUDA graphs for decode only.
+
+    A no-op for other quantization configs, from ``rollout.quantization`` or the checkpoint.
+    """
+    from verl.utils.qat.compressed_tensors import is_nvfp4_per_token_config
+
+    if not is_nvfp4_per_token_config(quantization_config):
+        return
+    dp = rollout_config.data_parallel_size
+    # verl runs per-token NVFP4 on the monolithic FlashInfer TRT-LLM MoE kernel,
+    # which has no all2all expert dispatch.
+    if dp != 1 or engine_kwargs.get("enable_eplb", False):
+        raise ValueError(f"NVFP4_PER_TOKEN rollout requires data_parallel_size=1 and no EPLB, got dp={dp}")
+    # DCP cannot run FULL CUDA graphs, and PCP turns expert parallelism into all2all.
+    context_parallel = {
+        key: engine_kwargs.get(key, 1) or 1 for key in ("decode_context_parallel_size", "prefill_context_parallel_size")
+    }
+    if any(size > 1 for size in context_parallel.values()):
+        raise ValueError(f"NVFP4_PER_TOKEN rollout does not support context parallelism, got {context_parallel}")
+    mtp = rollout_config.mtp
+    if mtp is not None and mtp.enable and mtp.enable_rollout:
+        raise ValueError("NVFP4_PER_TOKEN rollout does not support speculative decoding/MTP")
+    checkpoint_backend = getattr(rollout_config.checkpoint_engine, "backend", None)
+    if checkpoint_backend != "naive":
+        raise ValueError(
+            f"NVFP4_PER_TOKEN refits through the colocated naive IPC checkpoint backend, got {checkpoint_backend!r}"
+        )
+    compilation_config.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
+    if compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
+        raise ValueError("NVFP4_PER_TOKEN rollout requires compilation_config.cudagraph_mode=FULL_DECODE_ONLY")

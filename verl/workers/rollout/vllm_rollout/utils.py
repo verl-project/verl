@@ -273,15 +273,8 @@ class vLLMColocateWorkerExtension:
         attest_nvfp4_per_token_runtime(self.model_runner.get_model(), self._nvfp4_per_token_config)
 
     def _update_nvfp4_per_token_weights(self, use_shm: bool):
-        """Refit through vLLM's layerwise reload, one bucket at a time.
-
-        This is ``model_runner.reload_weights`` split into per-bucket loads: each expert
-        layer is post-processed once complete and copied back into the storage the CUDA
-        graphs captured.
-        """
-        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload, initialize_layerwise_reload
-
-        from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck
+        """Refit in place: buckets load into the live expert storage, post-processed after the last."""
+        from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck, nvfp4_per_token_refit
 
         if self._nvfp4_per_token_update_failed:
             raise RuntimeError(_NVFP4_PER_TOKEN_PARTIAL_REFIT)
@@ -296,26 +289,23 @@ class vLLMColocateWorkerExtension:
                 return
             try:
                 check.check_bucket(weights)
-                weights = check.local_updates(weights)
                 param_updates, buffer_updates, named_buffers = split_buffer_updates(model, weights)
-                # The layerwise reload holds a layer's tensors until the layer is complete,
-                # while the receiver reuses its IPC buffer for the next bucket.
-                param_updates = drop_tied_alias_updates(model, param_updates)
-                model.load_weights([(name, tensor.clone()) for name, tensor in param_updates])
+                model.load_weights(drop_tied_alias_updates(model, param_updates))
                 apply_buffer_updates(model, buffer_updates, named_buffers=named_buffers)
             except BaseException as exc:
                 # Keep acknowledging the remaining buckets so the sender is not left
                 # blocked, then raise once the round has finished.
                 error = exc
 
-        initialize_layerwise_reload(model)
         try:
-            receiver = BucketedWeightReceiver(zmq_handle=self._get_zmq_handle(), device=self.device, use_shm=use_shm)
-            receiver.receive_weights(on_bucket_received=load_bucket)
-            if error is not None:
-                raise error
-            check.finish()
-            finalize_layerwise_reload(model, model_config)
+            with nvfp4_per_token_refit(model, model_config, self.device):
+                receiver = BucketedWeightReceiver(
+                    zmq_handle=self._get_zmq_handle(), device=self.device, use_shm=use_shm
+                )
+                receiver.receive_weights(on_bucket_received=load_bucket)
+                if error is not None:
+                    raise error
+                check.finish()
             self._attest_nvfp4_per_token_runtime()
         except BaseException:
             # Earlier buckets may already have replaced weights, so neither this model nor a
