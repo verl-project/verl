@@ -72,14 +72,18 @@ from verl.trainer.ppo.utils import (
     need_teacher_policy,
 )
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
-from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
+from verl.trainer.ppo.v1.utils import (
+    REMAX_BASELINE_SESSION_ID,
+    MetricsAggregator,
+    compute_advantage_for_multi_trajectories,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_class_from_fqn, load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -111,6 +115,33 @@ def _count_tq_prompt_groups(partition_id: str = "train") -> int:
     return sum(1 for tag in data.get(partition_id, {}).values() if tag.get("is_prompt", False))
 
 
+def validate_remax_config(config: DictConfig) -> None:
+    """ReMax needs its greedy baseline generated with the same weights as the sampled responses."""
+    if config.algorithm.adv_estimator != core_algos.AdvantageEstimator.REMAX:
+        return
+    trainer_mode = config.trainer.v1.trainer_mode
+    if trainer_mode != "sync":
+        raise NotImplementedError(
+            f"algorithm.adv_estimator=remax requires trainer.v1.trainer_mode=sync (got {trainer_mode!r}): the "
+            "greedy baseline must come from the same policy version as the sampled responses."
+        )
+    filter_groups = config.algorithm.get("filter_groups", None)
+    if filter_groups is not None and filter_groups.get("enable", False):
+        raise NotImplementedError("algorithm.adv_estimator=remax does not support algorithm.filter_groups.")
+    manager_fqn = (config.actor_rollout_ref.rollout.get("agent", None) or {}).get("agent_loop_manager_class")
+    if manager_fqn:
+        manager_cls = load_class_from_fqn(manager_fqn, "AgentLoopManager")
+        if not getattr(manager_cls, "supports_remax_baseline", False):
+            raise NotImplementedError(
+                f"algorithm.adv_estimator=remax needs the agent loop manager to run a greedy baseline session for "
+                f"each prompt flagged __remax_baseline__; {manager_fqn} does not declare supports_remax_baseline."
+            )
+    skip_tq = (config.get("skip", None) or {}).get("rollout_tq", None)
+    if skip_tq is not None and skip_tq.get("enable", False):
+        # replayed rollouts are rebuilt from range(n) sessions and would lose the greedy baseline session
+        raise NotImplementedError("algorithm.adv_estimator=remax does not support skip.rollout_tq.")
+
+
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
 
@@ -120,6 +151,7 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        validate_remax_config(self.config)
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -578,6 +610,10 @@ class PPOTrainer(ABC):
         if self.reward_loop_manager.reward_loop_worker_handles is None:
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch, metrics=metrics)
+
+        # 2.5 [ReMax] move the greedy baseline sessions out of the batch into ``reward_baselines``
+        if self._use_remax:
+            batch = self._extract_remax_baselines(batch, metrics=metrics)
 
         # 3. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
@@ -1477,6 +1513,10 @@ class PPOTrainer(ABC):
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         return tu.get_tensordict(batch_dict)
 
+    @property
+    def _use_remax(self) -> bool:
+        return self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX
+
     def _next_train_batch(self, num_prompts: int | None = None) -> TensorDict:
         """Fetch and coalesce the requested number of prompts."""
         train_batch_size = self.config.data.train_batch_size
@@ -1497,6 +1537,9 @@ class PPOTrainer(ABC):
     def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
         """Register prompts in TransferQueue and dispatch them for generation."""
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
+        if self._use_remax:
+            # ask the rollout worker for one extra greedy session per prompt (the ReMax baseline)
+            tu.assign_non_tensor_data(batch, "__remax_baseline__", True)
         if self.trainer_mode != "sync":
             tq.kv_batch_put(
                 keys=list(batch["uid"]),
@@ -1580,6 +1623,66 @@ class PPOTrainer(ABC):
         )
 
         return batch
+
+    def _extract_remax_baselines(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Turn each prompt's greedy session into ``reward_baselines`` on its sampled rows and drop it.
+
+        The greedy session is generated and scored like any other session of the group; here its
+        outcome reward (sum of ``rm_scores``) becomes the baseline of every sampled response of that
+        prompt, and its rows are removed so they are never trained on.
+        """
+        baseline_keys, sampled_keys, sampled_tags = [], [], []
+        for key, tag in zip(batch.keys, batch.tags, strict=True):
+            if key.rsplit("_", 2)[1] == REMAX_BASELINE_SESSION_ID:
+                baseline_keys.append(key)
+            else:
+                sampled_keys.append(key)
+                sampled_tags.append(tag)
+
+        if not baseline_keys:
+            raise ValueError("ReMax is enabled but the batch contains no greedy baseline session")
+
+        data = tq.kv_batch_get(keys=baseline_keys, partition_id=batch.partition_id, select_fields=["rm_scores"])
+        rewards = data["rm_scores"].to_padded_tensor(padding=0.0).sum(dim=-1)
+        # multi-output agent loops: the last output of the greedy session carries the outcome
+        baseline_by_uid: dict[str, tuple[int, float]] = {}
+        for key, reward in zip(baseline_keys, rewards.tolist(), strict=True):
+            uid, _, index = key.rsplit("_", 2)
+            if uid not in baseline_by_uid or baseline_by_uid[uid][0] < int(index):
+                baseline_by_uid[uid] = (int(index), reward)
+
+        # A prompt needs both a greedy baseline and sampled rows to be trainable. Without a baseline its
+        # sampled rows are dropped; a baseline without sampled rows (every sampled session produced nothing)
+        # is dropped too. Both are skipped like any other empty session instead of failing the whole run.
+        sampled_uids = {key.rsplit("_", 2)[0] for key in sampled_keys}
+        missing = sampled_uids - baseline_by_uid.keys()
+        baseline_only = baseline_by_uid.keys() - sampled_uids
+        if missing:
+            logger.warning(f"ReMax greedy baseline missing for {len(missing)} prompt(s); dropping their sessions")
+            dropped_keys = [key for key in sampled_keys if key.rsplit("_", 2)[0] in missing]
+            kept = [i for i, key in enumerate(sampled_keys) if key.rsplit("_", 2)[0] not in missing]
+            sampled_keys = [sampled_keys[i] for i in kept]
+            sampled_tags = [sampled_tags[i] for i in kept]
+            tq.kv_clear(keys=dropped_keys, partition_id=batch.partition_id)
+        if baseline_only:
+            logger.warning(f"ReMax prompt(s) with a greedy baseline but no sampled rows: {len(baseline_only)}")
+        metrics["remax/baseline_missing_prompts"] = len(missing)
+        metrics["remax/baseline_only_prompts"] = len(baseline_only)
+        if not sampled_keys:
+            tq.kv_clear(keys=baseline_keys, partition_id=batch.partition_id)
+            raise ValueError("ReMax: no prompt in the batch has both a greedy baseline and sampled rows")
+
+        baselines = torch.tensor([baseline_by_uid[key.rsplit("_", 2)[0]][1] for key in sampled_keys])
+        tq.kv_batch_put(
+            keys=sampled_keys,
+            partition_id=batch.partition_id,
+            fields=TensorDict({"reward_baselines": baselines}, batch_size=len(sampled_keys)),
+        )
+        tq.kv_clear(keys=baseline_keys, partition_id=batch.partition_id)
+        # one baseline per prompt (the selected final output), not one per greedy output row
+        used_uids = {key.rsplit("_", 2)[0] for key in sampled_keys}
+        metrics["remax/baseline_reward_mean"] = sum(baseline_by_uid[uid][1] for uid in used_uids) / len(used_uids)
+        return KVBatchMeta(partition_id=batch.partition_id, keys=sampled_keys, tags=sampled_tags)
 
     @staticmethod
     def _lengths_to_mask(lengths: torch.Tensor, width: int) -> torch.Tensor:
@@ -1744,6 +1847,8 @@ class PPOTrainer(ABC):
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        if self._use_remax:
+            fields.append("reward_baselines")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]

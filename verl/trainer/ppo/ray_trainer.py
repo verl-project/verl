@@ -257,6 +257,8 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        elif adv_estimator == AdvantageEstimator.REMAX:
+            raise ValueError("adv_estimator=remax requires data.batch['reward_baselines'] (greedy baseline rollout)")
         # GDPO: pass raw data for per-dimension reward extraction
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch

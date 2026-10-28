@@ -146,6 +146,10 @@ class MetricsAggregator:
         self.step_count = 0
 
 
+# Session id of the extra greedy rollout that ReMax uses as its per-prompt reward baseline.
+REMAX_BASELINE_SESSION_ID = "remaxbase"
+
+
 def compute_advantage_for_multi_trajectories(
     data: DataProto,
     batch_keys: list[str],
