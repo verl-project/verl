@@ -66,6 +66,22 @@ DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / T
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
 FUSE_QKV="${FUSE_QKV:-True}"
 
+# Memory settings for very large MoE models (e.g. Qwen3.5-397B-A17B on 24 chips): USE_KL_LOSS=False drops the
+# reference model; EXPERT_PARALLEL_SIZE shards the trainer's routed experts; PARAM_DTYPE=bfloat16 keeps bf16
+# parameters and gradients, and FP32_MASTER=True adds fp32 master weights and fp32 AdamW states to it;
+# OPTIMIZER_HOST_OFFLOAD=True keeps the optimizer states (and masters) in host memory; ROLLOUT_EXPERT_PARALLEL_SIZE
+# (= ROLLOUT_TENSOR_PARALLEL_SIZE) runs vLLM expert parallelism, which tpu-sync then fills without a staging copy; and
+# ROLLOUT_LOAD_FORMAT=dummy skips the rollout's checkpoint load (the first weight sync writes every weight).
+USE_KL_LOSS="${USE_KL_LOSS:-True}"
+EXPERT_PARALLEL_SIZE="${EXPERT_PARALLEL_SIZE:-1}"
+EP_CAPACITY_FACTOR="${EP_CAPACITY_FACTOR:-4.0}"
+PARAM_DTYPE="${PARAM_DTYPE:-float32}"
+OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-False}"
+FP32_MASTER="${FP32_MASTER:-False}"
+ROLLOUT_EXPERT_PARALLEL_SIZE="${ROLLOUT_EXPERT_PARALLEL_SIZE:-1}"
+ROLLOUT_LOAD_FORMAT="${ROLLOUT_LOAD_FORMAT:-safetensors}"
+ROLLOUT_EXPERT_PARALLEL=$( (( ROLLOUT_EXPERT_PARALLEL_SIZE > 1 )) && echo True || echo False )
+
 # Training & validation settings
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
@@ -138,6 +154,12 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_simple_fsdp=True \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.optim_impl="${OPTIM_IMPL}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.param_dtype="${PARAM_DTYPE}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.optimizer_host_offload="${OPTIMIZER_HOST_OFFLOAD}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fp32_master="${FP32_MASTER}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_capacity_factor="${EP_CAPACITY_FACTOR}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.rollout_expert_parallel="${ROLLOUT_EXPERT_PARALLEL}" \
+    actor_rollout_ref.actor.torchtitan.expert_parallel_size="${EXPERT_PARALLEL_SIZE}" \
     actor_rollout_ref.actor.optim.lr="${LEARNING_RATE}" \
     actor_rollout_ref.actor.optim.lr_warmup_steps="${LR_WARMUP_STEPS}" \
     actor_rollout_ref.actor.optim.decay_type=cosine \
@@ -151,7 +173,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
     actor_rollout_ref.actor.clip_ratio_high=0.2 \
     actor_rollout_ref.actor.clip_ratio_c=3.0 \
-    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.use_kl_loss="${USE_KL_LOSS}" \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -180,11 +202,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TENSOR_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.data_parallel_size=1 \
+    actor_rollout_ref.rollout.expert_parallel_size="${ROLLOUT_EXPERT_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.rollout.load_format="${ROLLOUT_LOAD_FORMAT}" \
     actor_rollout_ref.rollout.dtype=bfloat16 \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.seed="${SEED}" \
