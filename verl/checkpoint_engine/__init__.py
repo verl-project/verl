@@ -20,6 +20,7 @@ from .base import (
     ColocatedCheckpointEngine,
     TensorMeta,
 )
+from .filesystem_checkpoint_engine import FileSystemCheckpointEngine
 
 __all__ = [
     "CheckpointEngine",
@@ -28,6 +29,7 @@ __all__ = [
     "ColocatedCheckpointEngine",
     "CheckpointEngineManager",
     "CheckpointEngineWorker",
+    "FileSystemCheckpointEngine",
 ]
 
 # Every engine below is optional: it carries its own transport dependency, and

@@ -20,6 +20,19 @@ Checkpoint Engine is an unified abstract layer to synchronize weights between va
 |nixl|NIXL|all_gather+ring p2p|Various transport backends (D2D, H2H, H2D, etc)<br>- UCX<br>- UCCL<br>- Mooncacke|Medium/High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Elastic rollout<br>- Rollout fault tolerance<br>- Heterogeneous hardware rollout
 |kimi_ckpt_engine|MOONCAKE+NCCL/HCCL|p2p+broadcast|NVIDIA/Ascend|High|Low: rebuild communication group|Off-policy training<br>- Actor/rollout disaggregated<br>- Save checkpoint each time
 |mooncake|Mooncake Transfer Engine|all_gather+ring p2p|NVIDIA/Ascend|High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Fixed clusters
+|filesystem|Shared file system (e.g. HDFS fuse mount)|all_gather+safetensors files|Any|Low|High: no communication group|Off-policy training<br>- Actor/rollout disaggregated<br>- Different hardware or data centers
+
+##### filesystem ckpt engine detail:
+
+Set `engine_kwargs.filesystem.path` to a directory mounted on all actor and rollout nodes, e.g. the same HDFS directory mounted through fuse:
+
+```bash
+actor_rollout_ref.rollout.checkpoint_engine.backend=filesystem \
++actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.filesystem.path=/mnt/hdfs/path/to/weights \
++actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.filesystem.distributed_write=True
+```
+
+`distributed_write` is enabled by default: actor ranks write different HF shards in parallel; disable it to make rank 0 write all shards.
 
 ##### kimi_ckpt_engine detail:
 

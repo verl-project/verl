@@ -519,6 +519,11 @@ class CheckpointEngineManager:
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
+        # filesystem send_weights needs no rollout participation, so rollout keeps generating until it is done
+        actor_results = None
+        if self.backend == "filesystem":
+            actor_results = ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+
         # 1. abort and save all unfinished requests for partial rollout
         await self.abort_replicas()
 
@@ -536,14 +541,18 @@ class CheckpointEngineManager:
         self.build_process_group(rollout)
 
         # 5. update weights of all workers
-        results = ray.get(
-            actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
-        )
+        if actor_results is None:
+            results = ray.get(
+                actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
+                + rollout.update_weights(global_steps=global_steps)
+            )
+            actor_results = results[: actor_wg.world_size]
+        else:
+            ray.get(rollout.update_weights(global_steps=global_steps))
         # The sender workers return the engine's per-sync metrics (empty for
         # backends that don't track any); merge and hand them to the trainer.
         sync_metrics: dict = {}
-        for result in results[: actor_wg.world_size]:
+        for result in actor_results:
             if isinstance(result, dict):
                 sync_metrics.update(result)
 

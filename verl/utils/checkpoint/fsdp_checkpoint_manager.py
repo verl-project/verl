@@ -23,7 +23,6 @@ from typing import Callable, Generator, Optional
 import torch
 import torch.distributed
 from omegaconf import DictConfig
-from safetensors.torch import save_file
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp._common_utils import clean_tensor_name
@@ -37,6 +36,7 @@ from verl.utils.logger import log_with_rank
 from verl.utils.model import convert_weight_keys
 
 from .checkpoint_manager import BaseCheckpointManager
+from .hf_safetensors import export_hf_safetensors
 
 # Setup logging
 logger = logging.getLogger(__file__)
@@ -146,46 +146,23 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         tied_aliases = self._get_tied_alias_names(unwrap_model) if self.rank == 0 else set()
         preserved_names = self._get_dtype_preserved_names(unwrap_model) if self.rank == 0 else set()
 
-        shard, shard_bytes, total_size = {}, 0, 0
-        tmp_shards: list[tuple[str, list[str]]] = []
-
-        def flush_shard():
-            nonlocal shard, shard_bytes
-            tmp_path = os.path.join(hf_local_path, f"model-{len(tmp_shards) + 1:05d}.safetensors.tmp")
-            save_file(shard, tmp_path, metadata={"format": "pt"})
-            tmp_shards.append((tmp_path, list(shard)))
-            shard, shard_bytes = {}, 0
-
         # Every rank must drain the generator since it issues collectives; only rank 0 writes.
-        for name, tensor in per_tensor_param:
-            if self.rank != 0 or name in tied_aliases:
-                continue
-            if self.hf_export_dtype is not None and tensor.dtype == torch.float32 and name not in preserved_names:
-                tensor = tensor.to(self.hf_export_dtype)
-            nbytes = tensor.numel() * tensor.element_size()
-            if shard and shard_bytes + nbytes > max_shard_bytes:
-                flush_shard()
-            # Yielded tensors may be views of a buffer the generator overwrites later (EP broadcast),
-            # so copy them out before advancing.
-            shard[name] = tensor.detach().contiguous().to("cpu", copy=True)
-            shard_bytes += nbytes
-            total_size += nbytes
-
         if self.rank != 0:
+            for _name, _tensor in per_tensor_param:
+                pass
             return
-        if shard:
-            flush_shard()
 
-        weight_map = {}
-        for i, (tmp_path, names) in enumerate(tmp_shards, start=1):
-            file_name = f"model-{i:05d}-of-{len(tmp_shards):05d}.safetensors"
-            os.replace(tmp_path, os.path.join(hf_local_path, file_name))
-            weight_map.update(dict.fromkeys(names, file_name))
-        with open(os.path.join(hf_local_path, "model.safetensors.index.json"), "w") as f:
-            json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f, indent=2)
+        _total_size, num_shards, num_tensors = export_hf_safetensors(
+            per_tensor_param,
+            output_dir=hf_local_path,
+            max_shard_bytes=max_shard_bytes,
+            exclude_names=tied_aliases,
+            target_dtype=self.hf_export_dtype,
+            preserve_dtype_names=preserved_names,
+        )
+
         log_with_rank(
-            f"Saved hf_model ({len(weight_map)} tensors in {len(tmp_shards)} shards) "
-            f"to {os.path.abspath(hf_local_path)}",
+            f"Saved hf_model ({num_tensors} tensors in {num_shards} shards) to {os.path.abspath(hf_local_path)}",
             rank=self.rank,
             logger=logger,
             log_only_rank_0=True,
