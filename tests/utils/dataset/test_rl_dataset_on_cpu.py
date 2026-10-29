@@ -108,31 +108,39 @@ def _mock_filter_dataset(processor=None, num_workers=2):
     return dataset
 
 
-def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_filter(monkeypatch):
+def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_filter(monkeypatch, tmp_path):
     """Multiprocessing receives a reload source and serializable state, never the live processor."""
     calls = []
+    snapshot_paths = []
+    tokenizer, _ = _make_local_filter_models(tmp_path, use_processor=False)
 
     def load_fake_processor(source, trust_remote_code=False, use_fast=True):
         """Validate the worker's reload options without accessing external model files."""
-        assert source == "fake-processor"
+        assert source == tokenizer.name_or_path
         assert not trust_remote_code
         assert use_fast
         return _FakeProcessor()
 
     monkeypatch.setattr(rl_dataset_module, "_load_filter_processor", load_fake_processor, raising=False)
     monkeypatch.setattr(rl_dataset_module, "_FILTER_PROCESSOR_CACHE", {})
+    monkeypatch.setattr(rl_dataset_module, "_FILTER_TOKENIZER_CACHE", {})
 
     class FakeDataFrame(list):
-        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+        _fingerprint = "fake-input"
+
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None, new_fingerprint=None):
             """Check worker serialization before applying the predicate locally."""
             calls.append(num_proc)
             if num_proc is not None:
                 pickle.dumps((function, fn_kwargs))
-                assert fn_kwargs["processor_path"] == "fake-processor"
+                assert fn_kwargs["processor_path"] == tokenizer.name_or_path
+                snapshot_paths.append(Path(fn_kwargs["tokenizer_path"]))
+                assert snapshot_paths[-1].is_dir()
                 assert "processor" not in fn_kwargs
             return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
 
     dataset = _mock_filter_dataset(processor=_UnpickleableProcessor(), num_workers=2)
+    dataset.processor.tokenizer = tokenizer
     dataframe = FakeDataFrame(
         [
             {"prompt": [{"role": "user", "content": "short"}]},
@@ -145,6 +153,7 @@ def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_fil
     assert calls == [2]
     assert len(filtered) == 1
     assert filtered[0]["prompt"][0]["content"] == "short"
+    assert snapshot_paths and all(not path.exists() for path in snapshot_paths)
 
 
 @pytest.mark.parametrize("reload_path", [None, ""])
@@ -156,7 +165,7 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processo
         tokenizer = type("PathlessTokenizer", (_FakeTokenizer,), {"name_or_path": reload_path})()
 
     class FakeDataFrame(list):
-        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None, new_fingerprint=None):
             """Check serial execution and keep live objects out of fingerprint kwargs."""
             calls.append(num_proc)
             assert num_proc is None
@@ -191,7 +200,7 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenize
             self.context = ssl.create_default_context()
 
     class FakeDataFrame(list):
-        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None, new_fingerprint=None):
             """Verify that filtering uses the serial callable without object kwargs."""
             calls.append(num_proc)
             assert num_proc is None
@@ -287,17 +296,31 @@ def test_prompt_filter_preserves_runtime_chat_template(tmp_path, num_workers, us
 
 
 @pytest.mark.parametrize("use_processor", [False, True])
-def test_prompt_filter_propagates_worker_load_failure(tmp_path, use_processor):
+def test_prompt_filter_propagates_worker_load_failure(tmp_path, monkeypatch, use_processor):
     """A real worker loading an invalid checkpoint must fail instead of emptying the dataset."""
     from datasets import Dataset
 
-    dataset = _mock_filter_dataset(processor=_FakeProcessor() if use_processor else None)
-    formatter = dataset.processor if use_processor else dataset.tokenizer
-    formatter.name_or_path = str(tmp_path)
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor)
+    dataset = _mock_filter_dataset(processor=processor)
+    dataset.tokenizer = tokenizer
+    snapshot_paths = []
+    if use_processor:
+        processor.name_or_path = str(tmp_path)
+    else:
+
+        def save_invalid_snapshot(destination):
+            """Simulate a checkpoint whose tokenizer implementation cannot be loaded by workers."""
+            snapshot_paths.append(Path(destination))
+            (Path(destination) / "tokenizer_config.json").write_text(
+                json.dumps({"tokenizer_class": "MissingTokenizerImplementation"})
+            )
+
+        monkeypatch.setattr(tokenizer, "save_pretrained", save_invalid_snapshot)
     dataframe = Dataset.from_list([{"prompt": [{"role": "user", "content": "short"}]}] * 2)
 
     with pytest.raises(ValueError):
         dataset.maybe_filter_out_long_prompts(dataframe)
+    assert all(not path.exists() for path in snapshot_paths)
 
 
 @pytest.mark.parametrize("use_processor", [False, True])
@@ -347,6 +370,112 @@ def test_prompt_filter_preserves_named_templates(tmp_path, num_workers, use_proc
     filtered = dataset.maybe_filter_out_long_prompts(dataframe)
 
     assert filtered["prompt"] == [[{"role": "user", "content": "short"}]]
+
+
+@pytest.mark.parametrize("num_workers", [None, 2])
+@pytest.mark.parametrize("use_processor", [False, True])
+@pytest.mark.parametrize("runtime_change", ["added_token", "special_token", "pre_tokenizer", "split_special_tokens"])
+def test_prompt_filter_preserves_runtime_tokenizer_state(tmp_path, num_workers, use_processor, runtime_change):
+    """Live vocabulary and backend changes must produce identical filtering in real workers."""
+    from datasets import Dataset
+    from tokenizers import AddedToken
+    from tokenizers.pre_tokenizers import WhitespaceSplit
+
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor)
+    live_tokenizer = processor.tokenizer if use_processor else tokenizer
+    prompt = "one two three"
+    if runtime_change == "pre_tokenizer":
+        live_tokenizer.backend_tokenizer.pre_tokenizer = WhitespaceSplit()
+        prompt = "one-two-three"
+    else:
+        live_tokenizer.add_tokens(
+            [AddedToken(prompt, normalized=False, lstrip=True)], special_tokens=runtime_change != "added_token"
+        )
+        if runtime_change == "split_special_tokens":
+            live_tokenizer.split_special_tokens = True
+    live_tokenizer.context = ssl.create_default_context()
+    if processor is not None:
+        processor.context = ssl.create_default_context()
+    with pytest.raises(TypeError, match="SSLContext"):
+        pickle.dumps(live_tokenizer)
+
+    dataset = _mock_filter_dataset(processor=processor, num_workers=num_workers)
+    dataset.tokenizer = tokenizer
+    dataframe = Dataset.from_list([{"prompt": [{"role": "user", "content": text}]} for text in ["short", prompt]])
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    expected = ["short"] if runtime_change == "split_special_tokens" else ["short", prompt]
+    assert [row["prompt"][0]["content"] for row in filtered] == expected
+
+
+@pytest.mark.parametrize("use_processor", [False, True])
+def test_prompt_filter_falls_back_when_tokenizer_snapshot_fails(tmp_path, monkeypatch, caplog, use_processor):
+    """Unexportable runtime state must use the live tokenizer and clean up partial snapshots."""
+    from datasets import Dataset
+
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor)
+    live_tokenizer = processor.tokenizer if use_processor else tokenizer
+    live_tokenizer.add_tokens(["one two three"])
+    live_tokenizer.context = ssl.create_default_context()
+    snapshot_paths = []
+    calls = []
+
+    def fail_to_save(destination):
+        """Reject exporting a custom tokenizer's runtime state."""
+        snapshot_paths.append(Path(destination))
+        raise TypeError("custom tokenizer state cannot be exported")
+
+    original_filter = Dataset.filter
+
+    def record_filter(dataframe, *args, **kwargs):
+        """Record the actual Datasets execution mode without replacing its filtering logic."""
+        calls.append(kwargs.get("num_proc"))
+        return original_filter(dataframe, *args, **kwargs)
+
+    monkeypatch.setattr(live_tokenizer, "save_pretrained", fail_to_save)
+    monkeypatch.setattr(Dataset, "filter", record_filter)
+    dataset = _mock_filter_dataset(processor=processor)
+    dataset.tokenizer = tokenizer
+    dataframe = Dataset.from_list(
+        [{"prompt": [{"role": "user", "content": text}]} for text in ["short", "one two three"]]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert len(filtered) == 2
+    assert calls == [None]
+    assert "using a single process" in caplog.text
+    assert snapshot_paths and all(not path.exists() for path in snapshot_paths)
+
+
+@pytest.mark.parametrize("use_processor", [False, True])
+def test_prompt_filter_cache_tracks_runtime_tokenizer_state(tmp_path, use_processor):
+    """Equivalent snapshots reuse Arrow caches, while changed vocabulary invalidates them."""
+    from datasets import Dataset
+
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor)
+    dataset = _mock_filter_dataset(processor=processor)
+    dataset.tokenizer = tokenizer
+    dataframe = Dataset.from_list(
+        [{"prompt": [{"role": "user", "content": text}]} for text in ["short", "one two three"]]
+    )
+    data_path = tmp_path / "data"
+    dataframe.save_to_disk(data_path)
+    dataframe = Dataset.load_from_disk(data_path)
+
+    first = dataset.maybe_filter_out_long_prompts(dataframe)
+    unchanged = dataset.maybe_filter_out_long_prompts(dataframe)
+    assert len(first) == len(unchanged) == 1
+    assert first._fingerprint == unchanged._fingerprint
+    assert first.cache_files == unchanged.cache_files
+
+    live_tokenizer = processor.tokenizer if use_processor else tokenizer
+    live_tokenizer.add_tokens(["one two three"])
+    changed = dataset.maybe_filter_out_long_prompts(dataframe)
+    assert len(changed) == 2
+    assert changed._fingerprint != first._fingerprint
+    assert changed.cache_files != first.cache_files
 
 
 class _CustomMultimodalDataset(RLHFDataset):
@@ -479,7 +608,7 @@ def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
     """Image paths must reach the dataset's media hook before prompt length is measured."""
 
     class FakeDataFrame(list):
-        def filter(self, fn, num_proc=None, desc=None, fn_kwargs=None):
+        def filter(self, fn, num_proc=None, desc=None, fn_kwargs=None, new_fingerprint=None):
             """Apply the predicate with the same kwargs contract as Dataset.filter."""
             return FakeDataFrame([doc for doc in self if fn(doc, **(fn_kwargs or {}))])
 

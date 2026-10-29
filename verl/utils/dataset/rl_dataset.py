@@ -21,12 +21,16 @@ import os
 import re
 import traceback
 from collections import defaultdict
+from contextlib import ExitStack
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
 import datasets
 import numpy as np
 import torch
+from datasets.fingerprint import Hasher
 from omegaconf import DictConfig, ListConfig
 from PIL import Image
 from torch.utils.data import Dataset
@@ -39,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 _FILTER_PROCESSOR_CACHE: dict[tuple[str, bool, bool], ProcessorMixin] = {}
-_FILTER_TOKENIZER_CACHE: dict[tuple[str, bool], PreTrainedTokenizer] = {}
+_FILTER_TOKENIZER_CACHE: dict[tuple[str, bool, bool], PreTrainedTokenizer] = {}
 
 
 def _get_processor_path(processor: ProcessorMixin) -> str | None:
@@ -66,11 +70,30 @@ def _load_filter_processor(source: str, trust_remote_code: bool = False, use_fas
     return processor
 
 
-def _load_filter_tokenizer(source: str, trust_remote_code: bool = False) -> PreTrainedTokenizer:
-    """Reload a tokenizer in the process performing prompt filtering."""
-    from verl.utils import hf_tokenizer
+def _save_filter_tokenizer(tokenizer: PreTrainedTokenizer, destination: str) -> str:
+    """Export live tokenizer state and hash its contents independently of the temporary path."""
+    snapshot = copy.copy(tokenizer)
+    snapshot.init_kwargs = dict(tokenizer.init_kwargs)
+    # save_pretrained only refreshes attributes already present in init_kwargs.
+    # Preserve these runtime options even when the constructor used their defaults.
+    for name in ("padding_side", "truncation_side", "split_special_tokens"):
+        snapshot.init_kwargs[name] = getattr(tokenizer, name)
+    snapshot.save_pretrained(destination)
+    snapshot_root = Path(destination)
+    return Hasher.hash(
+        {
+            path.relative_to(snapshot_root).as_posix(): path.read_bytes()
+            for path in sorted(snapshot_root.rglob("*"))
+            if path.is_file()
+        }
+    )
 
-    return hf_tokenizer(source, trust_remote_code=trust_remote_code)
+
+def _load_filter_tokenizer(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> PreTrainedTokenizer:
+    """Load an exported tokenizer as-is, without applying pad-token or model-specific corrections."""
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(source, trust_remote_code=trust_remote_code, use_fast=use_fast)
 
 
 def _get_filter_processor(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> ProcessorMixin:
@@ -83,11 +106,13 @@ def _get_filter_processor(source: str, trust_remote_code: bool = False, use_fast
     return _FILTER_PROCESSOR_CACHE[key]
 
 
-def _get_filter_tokenizer(source: str, trust_remote_code: bool = False) -> PreTrainedTokenizer:
+def _get_filter_tokenizer(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> PreTrainedTokenizer:
     """Reuse a process-local tokenizer without sharing the parent's live object."""
-    key = (source, bool(trust_remote_code))
+    key = (source, bool(trust_remote_code), bool(use_fast))
     if key not in _FILTER_TOKENIZER_CACHE:
-        _FILTER_TOKENIZER_CACHE[key] = _load_filter_tokenizer(source, trust_remote_code=trust_remote_code)
+        _FILTER_TOKENIZER_CACHE[key] = _load_filter_tokenizer(
+            source, trust_remote_code=trust_remote_code, use_fast=use_fast
+        )
     return _FILTER_TOKENIZER_CACHE[key]
 
 
@@ -185,6 +210,8 @@ def _filter_prompt_length_with_processor(
     mm_processor_kwargs: dict,
     tool_schemas: list[dict] | None,
     processor_path: str | None = None,
+    tokenizer_path: str | None = None,
+    tokenizer_use_fast: bool = True,
     processor: ProcessorMixin | None = None,
     trust_remote_code: bool = False,
     use_fast: bool = True,
@@ -197,9 +224,14 @@ def _filter_prompt_length_with_processor(
         if processor_path is None:
             raise ValueError("processor_path is required when processor is not provided")
         processor = _get_filter_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=use_fast)
-    if chat_template is not None:
-        # Restore runtime templates without changing the shared cached processor.
+    if tokenizer_path is not None or chat_template is not None:
+        # Restore runtime state without changing the shared cached processor.
         processor = copy.copy(processor)
+    if tokenizer_path is not None:
+        processor.tokenizer = _get_filter_tokenizer(
+            tokenizer_path, trust_remote_code=trust_remote_code, use_fast=tokenizer_use_fast
+        )
+    if chat_template is not None:
         processor.chat_template = chat_template
 
     try:
@@ -257,13 +289,16 @@ def _filter_prompt_length_with_tokenizer(
     tokenizer_path: str | None = None,
     tokenizer: PreTrainedTokenizer | None = None,
     trust_remote_code: bool = False,
+    tokenizer_use_fast: bool = True,
     chat_template: str | dict[str, str] | None = None,
 ) -> bool:
     """Filter one text prompt while keeping worker loading errors visible to the caller."""
     if tokenizer is None:
         if tokenizer_path is None:
             raise ValueError("tokenizer_path is required when tokenizer is not provided")
-        tokenizer = _get_filter_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
+        tokenizer = _get_filter_tokenizer(
+            tokenizer_path, trust_remote_code=trust_remote_code, use_fast=tokenizer_use_fast
+        )
     if chat_template is not None:
         # Let Transformers select default/tool/named templates using its native rules.
         tokenizer = copy.copy(tokenizer)
@@ -462,51 +497,69 @@ class RLHFDataset(Dataset):
             if chat_template is not None:
                 filter_kwargs["chat_template"] = chat_template
 
-            use_multiprocessing = self.num_workers not in (None, 0)
-
             if self.processor is not None:
-                processor_path = _get_processor_path(self.processor)
-                if processor_path is None:
-                    use_multiprocessing = False
-                if use_multiprocessing:
-                    filter_kwargs["processor_path"] = processor_path
-                else:
-                    filter_kwargs["processor"] = self.processor
-                filter_kwargs.update(
-                    {
-                        "image_key": self.image_key,
-                        "video_key": self.video_key,
-                        "audio_key": self.audio_key,
-                        "image_patch_size": self.image_patch_size,
-                        "mm_processor_kwargs": dict(**self.mm_processor_kwargs),
-                    }
-                )
-                # This classmethod captures the dataset class, not its live processor or instance.
-                filter_kwargs["process_multi_modal_info_fn"] = self._process_multi_modal_info
-                filter_kwargs["config"] = self.config
-                filter_function = _filter_prompt_length_with_processor
+                reload_path = _get_processor_path(self.processor)
+                live_tokenizer = getattr(self.processor, "tokenizer", None)
             else:
-                tokenizer_path = _get_tokenizer_path(self.tokenizer)
-                if tokenizer_path is None:
-                    use_multiprocessing = False
+                reload_path = _get_tokenizer_path(self.tokenizer)
+                live_tokenizer = self.tokenizer
+            use_multiprocessing = self.num_workers not in (None, 0, 1) and reload_path is not None
+
+            # Workers must see runtime vocabulary, special tokens, and backend changes.
+            # Keep the exported files alive until Dataset.filter joins all workers.
+            with ExitStack() as stack:
                 if use_multiprocessing:
-                    filter_kwargs["tokenizer_path"] = tokenizer_path
+                    try:
+                        tokenizer_path = stack.enter_context(TemporaryDirectory(prefix="verl-prompt-filter-"))
+                        tokenizer_fingerprint = _save_filter_tokenizer(live_tokenizer, tokenizer_path)
+                    except Exception as error:
+                        logger.warning(
+                            "Cannot export tokenizer state for prompt filtering; using a single process: %s", error
+                        )
+                        use_multiprocessing = False
+                    else:
+                        filter_kwargs["tokenizer_path"] = tokenizer_path
+                        filter_kwargs["tokenizer_use_fast"] = bool(getattr(live_tokenizer, "is_fast", False))
+
+                if self.processor is not None:
+                    if use_multiprocessing:
+                        filter_kwargs["processor_path"] = reload_path
+                    else:
+                        filter_kwargs["processor"] = self.processor
+                    filter_kwargs.update(
+                        {
+                            "image_key": self.image_key,
+                            "video_key": self.video_key,
+                            "audio_key": self.audio_key,
+                            "image_patch_size": self.image_patch_size,
+                            "mm_processor_kwargs": dict(**self.mm_processor_kwargs),
+                        }
+                    )
+                    # Classmethods bind the dataset type, not its live processor or instance.
+                    filter_kwargs["process_multi_modal_info_fn"] = self._process_multi_modal_info
+                    filter_kwargs["config"] = self.config
+                    filter_function = _filter_prompt_length_with_processor
                 else:
-                    filter_kwargs["tokenizer"] = self.tokenizer
-                filter_function = _filter_prompt_length_with_tokenizer
+                    if not use_multiprocessing:
+                        filter_kwargs["tokenizer"] = self.tokenizer
+                    filter_function = _filter_prompt_length_with_tokenizer
 
-            def single_process_filter(doc):
-                """Use live objects without exposing their repr to Datasets fingerprint warnings."""
-                # Keep live objects out of fn_kwargs: Datasets formats them when fingerprinting
-                # fails, and a processor's repr can itself try to pickle its SSLContext.
-                return filter_function(doc, **filter_kwargs)
+                def single_process_filter(doc):
+                    """Keep live objects out of Datasets fingerprint warning representations."""
+                    return filter_function(doc, **filter_kwargs)
 
-            dataframe = dataframe.filter(
-                filter_function if use_multiprocessing else single_process_filter,
-                num_proc=self.num_workers if use_multiprocessing else None,
-                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-                fn_kwargs=filter_kwargs if use_multiprocessing else None,
-            )
+                # Identical exports should reuse the filtered dataset cache despite temporary paths.
+                new_fingerprint = None
+                if use_multiprocessing:
+                    fingerprint_kwargs = {**filter_kwargs, "tokenizer_path": tokenizer_fingerprint}
+                    new_fingerprint = Hasher.hash((dataframe._fingerprint, filter_function, fingerprint_kwargs))
+                dataframe = dataframe.filter(
+                    filter_function if use_multiprocessing else single_process_filter,
+                    num_proc=self.num_workers if use_multiprocessing else None,
+                    desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+                    fn_kwargs=filter_kwargs if use_multiprocessing else None,
+                    new_fingerprint=new_fingerprint,
+                )
 
             print(f"filter dataset len: {len(dataframe)}")
         return dataframe
