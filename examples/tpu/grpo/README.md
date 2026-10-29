@@ -9,6 +9,8 @@ By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1`
 | [`run_qwen3_0_6b_torchtitan.sh`](run_qwen3_0_6b_torchtitan.sh) | 5-step smoke test (Qwen3-0.6B, 2 `v6e-1` slices / 2 chips by default) |
 | [`run_qwen3_4b_torchtitan.sh`](run_qwen3_4b_torchtitan.sh) | 100-step GRPO run (Qwen3-4B, 2 `v6e-4` slices / 8 chips) |
 | [`run_qwen3_5_torchtitan.sh`](run_qwen3_5_torchtitan.sh) | Qwen3.5 GRPO on TPU v7x (default `Qwen3.5-35B-A3B` MoE; also `Qwen3.5-0.8B`) |
+| [`run_qwen3_30b_a3b_torchtitan.sh`](run_qwen3_30b_a3b_torchtitan.sh) | Qwen3-30B-A3B (MoE) GRPO on TPU (default v7x `2x2x1` + `2x2x1`) |
+| [`stage_model_local.py`](stage_model_local.py) | Copies a checkpoint to local disk on every TPU host (optional, used by the 30B-A3B recipe) |
 | [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | KubeRay `RayCluster`: 1 CPU head pod and 2 TPU `v6e-1` slices (configurable for `v6e-4` / `v6e-8`) |
 | [`Dockerfile`](Dockerfile) | Image of the Ray pods |
 
@@ -158,3 +160,41 @@ To scale further to **2 `v6e-8` slices (16 chips)**, create two multi-host node 
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
+
+## 8. Qwen3-30B-A3B (MoE)
+
+[`run_qwen3_30b_a3b_torchtitan.sh`](run_qwen3_30b_a3b_torchtitan.sh) runs GRPO on GSM8K with Qwen3-30B-A3B (128 experts, 8 active per token). It needs a `verl-hardware-plugin` version with Qwen3 MoE training support (verl-hardware-plugin#88) and its MoE trainer options (verl-hardware-plugin#112): without them the trainer does not route tokens like the checkpoint vLLM serves, `use_dynamic_bsz=True` fails on TPU, and the recipe's `engine_kwargs.tpu` options are unknown. With the plugin's direct Qwen3 MoE expert install, the weight sync writes each rollout rank's experts straight into vLLM (a few seconds per sync instead of about 90 s through vLLM's loaders).
+
+- **Trainer:** FSDP only over all trainer chips (expert parallelism 1). Packed micro-batches of up to `MAX_TOKEN_LEN_PER_GPU=8192` tokens (`use_dynamic_bsz=True`) padded to multiples of `SEQ_BUCKET_SIZE=1024`: every micro-batch pays the FSDP all-gathers of all 30.5B parameters, so the budget should fit each chip's share of a mini-batch in one micro-batch. The plugin computes the log-probs with Tokamax's fused LM-head kernel (required for MoE), which keeps the `[tokens, vocab]` logits out of HBM. The recipe turns on the plugin's Splash attention 1024 blocks and torchtitan's paired / native-layout expert kernels (`SPLASH_MAX_BLOCK_SIZE`, `MOE_PAIRED_GROUPED_MM`, `MOE_NATIVE_WEIGHT_LAYOUT`).
+- **Rollout:** one vLLM replica per rollout host (`ROLLOUT_TENSOR_PARALLEL_SIZE`, default = chips per host), with expert parallelism over each replica's TP group (`ROLLOUT_EXPERT_PARALLEL_SIZE`, default = TP; set 1 to turn it off). Set `ROLLOUT_TENSOR_PARALLEL_SIZE` to the number of rollout chips for a single replica. The plugin installs the experts directly either way.
+- **Model loading:** with the model on GCS Fuse, set `STAGE_MODEL=1` to copy the ~61 GB checkpoint to `/tmp/models/` on every TPU host first ([`stage_model_local.py`](stage_model_local.py)).
+
+On TPU v7x (default: a `2x2x1` trainer slice and a `2x2x1` rollout slice), submit it as in step 5:
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+```
+
+On TPU v5p (e.g. a `2x2x4` trainer slice and a `2x2x4` rollout slice, 4 hosts x 4 chips each), set the topology and add these to `env_vars` in `RUNTIME_ENV`. vllm-torchtpu's SparseCore MoE kernel does not support expert parallelism on v5p, so `USE_MOE_SPARSE_CORE=0` (copied to vLLM's workers) selects the TensorCore kernel. With `TPU_ACCELERATOR_TYPE=v5p` the recipe adds the libtpu flags it needs to `LIBTPU_INIT_ARGS`: a 64 MiB scoped VMEM limit, and the async FSDP all-gather offloaded to the SparseCores.
+
+```bash
+# in RUNTIME_ENV's env_vars:
+#   "TPU_ACCELERATOR_TYPE": "v5p", "TORCH_TPU_TOPOLOGY": "2,2,4",
+#   "USE_MOE_SPARSE_CORE": "0", "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": "USE_MOE_SPARSE_CORE"
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+
+# 4x larger batches: 128 prompts x 8, one 24k-token micro-batch per chip, padded to one compiled shape
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 \
+  TRAIN_BATCH_SIZE=128 PPO_MINI_BATCH_SIZE=128 MAX_NUM_SEQS=128 \
+  MAX_TOKEN_LEN_PER_GPU=24576 STATIC_MICRO_BATCH_LEN=24576 \
+  bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+```
+
+On v5p (`2x2x4` + `2x2x4`, 4 rollout replicas x TP4), after compilation:
+
+| Batch | `update_actor` | Step | Weight sync |
+|---|---|---|---|
+| 32 prompts x 8 (default) | ~3.7 s | ~9.5 s | ~5.6 s |
+| 128 prompts x 8, `MAX_TOKEN_LEN_PER_GPU=STATIC_MICRO_BATCH_LEN=24576` | ~7.9 s | 14-33 s | ~5.7 s |
