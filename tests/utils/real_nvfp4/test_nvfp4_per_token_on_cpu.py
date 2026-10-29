@@ -294,8 +294,8 @@ class _FakeNVFP4MoE(torch.nn.Module):
         self.w2_weight_scale = torch.ones((2, 2), dtype=torch.float8_e4m3fn)
         self.w13_weight_scale_2 = torch.ones(2)
         self.w2_weight_scale_2 = torch.ones(2)
-        self.nvfp4_a1_gscale = torch.ones(2)
-        self.nvfp4_a2_gscale = torch.ones(2)
+        self.w13_input_scale = torch.ones(2)
+        self.w2_input_scale = torch.ones(2)
         self.g1_scale_c = self.w13_weight_scale_2.clone()
         experts = self.quant_method.moe_kernel.fused_experts
         experts.quant_config = SimpleNamespace(
@@ -303,9 +303,10 @@ class _FakeNVFP4MoE(torch.nn.Module):
             g2_alphas=self.w2_weight_scale_2,
             w1_scale=self.w13_weight_scale,
             w2_scale=self.w2_weight_scale,
-            a1_gscale=self.nvfp4_a1_gscale,
-            a2_gscale=self.nvfp4_a2_gscale,
+            a1_gscale=torch.ones(2),
+            a2_gscale=torch.ones(2),
         )
+        self.quant_method.moe_quant_config = experts.quant_config
         experts.moe_config = SimpleNamespace(is_act_and_mul=True)
         experts.g1_scale_c = self.g1_scale_c
 

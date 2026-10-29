@@ -971,18 +971,24 @@ class _FakeNVFP4BucketReceiver:
 
 
 def _nvfp4_per_token_worker(monkeypatch, events, load_weights):
+    """A worker on the NVFP4_PER_TOKEN preset, with the shared quantized refit steps recorded."""
     pytest.importorskip("vllm")
     pytest.importorskip("compressed_tensors")
     import verl.utils.vllm.vllm_nvfp4_per_token_utils as per_token
     from verl.utils.qat.compressed_tensors import build_compressed_tensors_config
 
-    @contextlib.contextmanager
-    def refit(model, model_config, device):
-        events.append("stage")
-        yield
-        events.append("post_process")
-
-    monkeypatch.setattr(per_token, "nvfp4_per_token_refit", refit)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(
+        _vllm_rollout_utils, "prepare_quanted_weights_for_loading", lambda model: events.append("stage") or {}
+    )
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "process_quanted_weights_after_loading",
+        lambda model, state: events.append("post_process"),
+    )
+    monkeypatch.setattr(
+        _vllm_rollout_utils, "load_quanted_weights", lambda weights, runner, is_drafter=False: load_weights(weights)
+    )
     monkeypatch.setattr(
         per_token, "attest_nvfp4_per_token_runtime", lambda model, config: events.append(("attest", config))
     )
@@ -1013,7 +1019,6 @@ def _nvfp4_per_token_worker(monkeypatch, events, load_weights):
     )
 
     model = _FakeModel({"q.weight": torch.empty(0)})
-    model.load_weights = load_weights
     worker = _make_worker(model)
     worker.model_runner.get_model = lambda: model
     worker.device = torch.device("cpu")
@@ -1024,10 +1029,10 @@ def _nvfp4_per_token_worker(monkeypatch, events, load_weights):
     return worker, [[name for name, _ in bucket] for bucket in buckets]
 
 
-def test_nvfp4_per_token_update_loads_every_bucket_in_place(monkeypatch):
+def test_nvfp4_per_token_update_goes_through_the_quantized_refit(monkeypatch):
     events = []
     worker, names = _nvfp4_per_token_worker(
-        monkeypatch, events, lambda weights: events.append(("load", [name for name, _ in weights]))
+        monkeypatch, events, lambda weights: events.append(("load", [name for name, _ in weights])) or []
     )
 
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
@@ -1045,23 +1050,15 @@ def test_nvfp4_per_token_update_loads_every_bucket_in_place(monkeypatch):
     ]
 
 
-def test_nvfp4_per_token_load_error_still_drains_the_round(monkeypatch):
+def test_nvfp4_per_token_refit_check_stops_a_bad_round(monkeypatch):
     events = []
+    worker, _ = _nvfp4_per_token_worker(monkeypatch, events, lambda weights: events.append("load") or [])
+    receiver = _vllm_rollout_utils.BucketedWeightReceiver()
+    # The second bucket repeats the first one.
+    receiver.buckets[1] = receiver.buckets[0]
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: receiver)
 
-    def failing_load(weights):
-        events.append("load")
-        raise ValueError("load failed")
-
-    worker, _ = _nvfp4_per_token_worker(monkeypatch, events, failing_load)
-
-    with pytest.raises(ValueError, match="load failed"):
+    with pytest.raises(RuntimeError, match="duplicate expert tensor"):
         worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
-    # Every bucket is still acknowledged; nothing is loaded or post-processed after the error.
-    assert events == ["stage", "load", "ack0", "ack1", "ack2"]
-
-    # The model is now partly updated: neither a later refit nor generation may use it.
-    with pytest.raises(RuntimeError, match="restart the job"):
-        worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
-    with pytest.raises(RuntimeError, match="restart the job"):
-        worker.model_runner.execute_model(None)
-    assert events == ["stage", "load", "ack0", "ack1", "ack2"]
+    # Nothing past the bad bucket is loaded or post-processed.
+    assert events == ["stage", "load", "ack0"]

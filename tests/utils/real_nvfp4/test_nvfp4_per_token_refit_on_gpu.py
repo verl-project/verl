@@ -147,13 +147,23 @@ def _runner(llm):
 
 
 def _refit(llm, weights):
-    from verl.utils.vllm.vllm_nvfp4_per_token_utils import nvfp4_per_token_refit
+    """The rollout worker's quantized refit, in buckets of 32 tensors."""
+    from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck, nvfp4_per_token_quantization_config
+    from verl.utils.vllm.vllm_quant_utils import (
+        load_quanted_weights,
+        prepare_quanted_weights_for_loading,
+        process_quanted_weights_after_loading,
+    )
 
     runner = _runner(llm)
     model = runner.get_model()
-    with nvfp4_per_token_refit(model, runner.vllm_config.model_config, torch.device("cuda")):
-        for start in range(0, len(weights), 32):
-            model.load_weights(weights[start : start + 32])
+    check = NVFP4PerTokenRefitCheck(model, nvfp4_per_token_quantization_config(runner.vllm_config))
+    reload_state = prepare_quanted_weights_for_loading(model)
+    for start in range(0, len(weights), 32):
+        check.check_bucket(weights[start : start + 32])
+        load_quanted_weights(weights[start : start + 32], runner)
+    check.finish()
+    process_quanted_weights_after_loading(model, reload_state)
 
 
 def _logprobs(llm):

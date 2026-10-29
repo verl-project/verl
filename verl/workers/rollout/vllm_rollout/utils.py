@@ -147,11 +147,6 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
     model.compute_logits = MethodType(compute_logits, model)
 
 
-_NVFP4_PER_TOKEN_PARTIAL_REFIT = (
-    "A previous NVFP4_PER_TOKEN refit did not complete and left part of the model updated; restart the job"
-)
-
-
 class vLLMColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
@@ -168,8 +163,6 @@ class vLLMColocateWorkerExtension:
 
     # Set per instance in __new__ when the rollout uses the NVFP4_PER_TOKEN preset.
     _nvfp4_per_token_config = None
-    # Set when an NVFP4_PER_TOKEN refit stopped part-way and left a mix of old and new layers.
-    _nvfp4_per_token_update_failed = False
 
     def __new__(cls, **kwargs):
         set_death_signal()
@@ -272,52 +265,6 @@ class vLLMColocateWorkerExtension:
         # get_model() unwraps vLLM's CUDA-graph wrapper.
         attest_nvfp4_per_token_runtime(self.model_runner.get_model(), self._nvfp4_per_token_config)
 
-    def _update_nvfp4_per_token_weights(self, use_shm: bool):
-        """Refit in place: buckets load into the live expert storage, post-processed after the last."""
-        from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck, nvfp4_per_token_refit
-
-        if self._nvfp4_per_token_update_failed:
-            raise RuntimeError(_NVFP4_PER_TOKEN_PARTIAL_REFIT)
-        model = self.model_runner.get_model()
-        model_config = self.model_runner.vllm_config.model_config
-        check = NVFP4PerTokenRefitCheck(model, self._nvfp4_per_token_config)
-        error = None
-
-        def load_bucket(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
-            nonlocal error
-            if error is not None:
-                return
-            try:
-                check.check_bucket(weights)
-                param_updates, buffer_updates, named_buffers = split_buffer_updates(model, weights)
-                model.load_weights(drop_tied_alias_updates(model, param_updates))
-                apply_buffer_updates(model, buffer_updates, named_buffers=named_buffers)
-            except BaseException as exc:
-                # Keep acknowledging the remaining buckets so the sender is not left
-                # blocked, then raise once the round has finished.
-                error = exc
-
-        try:
-            with nvfp4_per_token_refit(model, model_config, self.device):
-                receiver = BucketedWeightReceiver(
-                    zmq_handle=self._get_zmq_handle(), device=self.device, use_shm=use_shm
-                )
-                receiver.receive_weights(on_bucket_received=load_bucket)
-                if error is not None:
-                    raise error
-                check.finish()
-            self._attest_nvfp4_per_token_runtime()
-        except BaseException:
-            # Earlier buckets may already have replaced weights, so neither this model nor a
-            # later refit starting from it can be trusted: refuse both.
-            self._nvfp4_per_token_update_failed = True
-
-            def refuse(*args, **kwargs):
-                raise RuntimeError(_NVFP4_PER_TOKEN_PARTIAL_REFIT)
-
-            self.model_runner.execute_model = refuse
-            raise
-
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         if self.device is None:
@@ -336,13 +283,15 @@ class vLLMColocateWorkerExtension:
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
 
+        refit_check = None
         if self._nvfp4_per_token_config is not None:
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck
+
             if peft_config is not None:
                 raise NotImplementedError("NVFP4_PER_TOKEN rollout does not support LoRA weight sync")
             if self._use_mtp_drafter_weight_sync():
                 raise NotImplementedError("NVFP4_PER_TOKEN rollout does not support MTP drafter weight sync")
-            self._update_nvfp4_per_token_weights(use_shm)
-            return
+            refit_check = NVFP4PerTokenRefitCheck(self.model_runner.get_model(), self._nvfp4_per_token_config)
 
         if peft_config and base_sync_done:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
@@ -381,6 +330,8 @@ class vLLMColocateWorkerExtension:
             pin_memory = is_pin_memory_available()
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            if refit_check is not None:
+                refit_check.check_bucket(weights)
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
                 # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
@@ -411,6 +362,8 @@ class vLLMColocateWorkerExtension:
             )
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
+        if refit_check is not None:
+            refit_check.finish()
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -418,6 +371,8 @@ class vLLMColocateWorkerExtension:
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
+            if refit_check is not None:
+                self._attest_nvfp4_per_token_runtime()
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
