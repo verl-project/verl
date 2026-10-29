@@ -1,51 +1,17 @@
-# NVFP4 QAT (Quantization-Aware Training) in verl
+# NVFP4 QAT
 
-Last updated: 04/02/2026
+Last updated: 10/19/2026
+verl supports NVFP4 as **W4A4 routed experts** on Blackwell:
 
-verl supports NVFP4 Quantization-Aware Training (QAT), which applies fake quantization during training so the model learns to tolerate NVFP4 quantization error. At rollout time, weights are packed into real NVFP4 format for vLLM inference. This closes the precision gap between training and inference, preventing KL divergence explosion.
+- trainer: Megatron + ModelOpt QAT
+- rollout: vLLM compressed-tensors
+- kernel: FlashInfer CUTLASS
+- dense linear layers: BF16 or MXFP8; NVFP4 linear is not supported
 
-| Training Backend | Training Precision | Rollout Precision | vLLM Quant Method |
-|---|---|---|---|
-| **FSDP** | BF16 + fake quantization | NVFP4 W4A16 | `compressed-tensors` |
-| **Megatron** | BF16 + fake quantization | NVFP4 W4A16 | `modelopt` |
+W4A16, FSDP NVFP4 and non-CUTLASS NVFP4 backends are not supported by this
+path.
 
-> [!TIP]
-> For ready-to-run scripts, environment setup, and experimental results, see the [QAT recipe](https://github.com/verl-project/verl-recipe/tree/main/qat).
-
----
-
-## Key Configuration
-
-### FSDP Backend
-
-Configured under `actor_rollout_ref.actor.fsdp_config.qat`:
-
-```yaml
-actor_rollout_ref:
-  actor:
-    fsdp_config:
-      qat:
-        enable: true
-        mode: "w4a16"
-        group_size: 16
-        ignore_patterns:
-          - "lm_head"
-          - "embed_tokens"
-          - "re:.*mlp.gate$"
-        quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
-```
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `fsdp_config.qat.enable` | Enable QAT | `False` |
-| `fsdp_config.qat.mode` | Quantization mode | `"w4a16"` |
-| `fsdp_config.qat.group_size` | Quantization group size | `16` |
-| `fsdp_config.qat.ignore_patterns` | Layers to skip. Supports `re:` prefix for regex, otherwise substring match | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
-| `fsdp_config.qat.quantization_config_path` | vLLM quantization config JSON path | Required |
-
-### Megatron Backend
-
-Configured under `actor_rollout_ref.actor.megatron.qat`:
+## Configuration
 
 ```yaml
 actor_rollout_ref:
@@ -53,35 +19,40 @@ actor_rollout_ref:
     megatron:
       qat:
         enable: true
-        mode: "w4a16"
-        group_size: 16
-        ignore_patterns:
-          - "lm_head"
-          - "*mlp.gate"
-        quantization_config_path: "recipe/qat/config/nvfp4_w4a16_megatron.json"
+        mode: nvfp4
+  rollout:
+    quantization:
+      linear: null
+      moe: NVFP4
 ```
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `megatron.qat.enable` | Enable QAT | `False` |
-| `megatron.qat.mode` | Quantization mode | `"w4a16"` |
-| `megatron.qat.group_size` | Quantization group size | `16` |
-| `megatron.qat.ignore_patterns` | Layers to skip. Uses `fnmatch` glob syntax | `["lm_head", "*mlp.gate"]` |
-| `megatron.qat.quantization_config_path` | vLLM quantization config JSON path | Required |
+The weight uses E2M1 values in groups of 16, FP8 E4M3 local scales and one
+tensor-level global divisor. Activations use the same NVFP4 hierarchy with
+dynamic group scales. Before ModelOpt observes an activation, verl exports the
+neutral tensor divisor `1.0`; subsequent syncs use the running QAT value.
 
----
+ModelOpt fake quantization and compressed-tensors export share the same QDQ
+implementation. The exporter also aligns gate/up global scales, as required by
+vLLM's fused MoE loader.
 
-## Support Matrix
+## Validation
 
-- NVFP4 W4A16 (weight-only FP4 quantization)
-- Dense models and MoE models
-- FSDP and Megatron training backends
-- Full quantization and FFN-only quantization strategies
-- Verified on Qwen3-8B-Base and Qwen3-30B-A3B-Base
+Use CUDA Graph mode; eager-mode results are not representative:
 
----
+```bash
+.venv-vllm/bin/python scripts/rollout_logprob_diff.py \
+  --model-path /mnt/efs/model/Qwen/Qwen3.5-35B-A3B --ep 8 \
+  --quant-moe NVFP4 --qat-mode nvfp4 \
+  '+actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune=false'
+```
 
-## Notes
-
-- FSDP backend has scalability limitations for very large models. For large-scale training, use the Megatron backend.
-- FSDP uses `re:` prefix regex for `ignore_patterns`, while Megatron uses `fnmatch` glob syntax. The two are not interchangeable.
+On Qwen3.5-35B-A3B with EP=8, CUDA Graph and no R3, the final validation
+measured `k3_kl=0.25778` without QAT and `k3_kl=0.32112` with NVFP4 QAT
+(Pearson correlation `0.991763` and `0.981248`, respectively). FlashInfer's
+fused finalize is nondeterministic; repeated results ranged from `0.219–0.258`
+and `0.263–0.380`. A synthetic single-expert CUTLASS comparison confirmed that
+the exported weights and activation QDQ use the expected NVFP4 format, but the
+fused kernel still differed from dequantize-then-BF16 matmul by mean absolute
+`0.0084` per MoE layer (correlation `0.99855`). This validates the refit
+lifecycle and kernel execution, but not numerical acceptance: the accumulated
+model-level mismatch remains too large for training.

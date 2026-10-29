@@ -15,21 +15,30 @@
 """
 QAT (Quantization-Aware Training) module for verl.
 
-Supports NVFP4 (W4A4 and W4A16) quantization modes for FSDP training.
+Provides compressed-tensors rollout presets and trainer-side export helpers.
 
 Module Structure:
 - core.py: QATConfig, apply_qat, enable_qat_fuse (training setup)
 - linear.py: QATLinear layer with Triton kernels for fake quantization
 - quantizer.py: QATQuantizer for true quantization + scale computation utilities
-- vllm_patch.py: Patches for vLLM dynamic weight loading
+- compressed_tensors.py: compressed-tensors rollout config and trainer-side weight quantizer
+- modelopt.py: ModelOpt fake quantization and Megatron QAT workflow helpers
 
 Usage:
     from verl.utils.qat import apply_qat, QATConfig
 
-    config = QATConfig(enable=True, mode="w4a16")
+    config = QATConfig(enable=True, mode="w4a4")
     model = apply_qat(model, config)  # Before FSDP wrapping
 """
 
+from verl.utils.qat.compressed_tensors import (
+    CompressedTensorsWeightQuantizer,
+    Fp8ConfigWeightQuantizer,
+    build_compressed_tensors_config,
+    dispatch_rollout_weight_quantizer,
+    is_all_mxfp8_config,
+    qat_modes_for_config,
+)
 from verl.utils.qat.core import (
     QATConfig,
     apply_qat,
@@ -37,21 +46,17 @@ from verl.utils.qat.core import (
     invalidate_all_scales,
     load_quantization_config,
 )
-from verl.utils.qat.vllm_patch import (
-    apply_qat_patches,
-    manual_process_weights_after_loading,
-    prepare_qat_for_load_weights,
-)
 
 __all__ = [
-    # Core
     "QATConfig",
     "apply_qat",
     "load_quantization_config",
     "enable_qat_fuse",
     "invalidate_all_scales",
-    # vLLM Patch
-    "apply_qat_patches",
-    "manual_process_weights_after_loading",
-    "prepare_qat_for_load_weights",
+    "CompressedTensorsWeightQuantizer",
+    "Fp8ConfigWeightQuantizer",
+    "build_compressed_tensors_config",
+    "dispatch_rollout_weight_quantizer",
+    "is_all_mxfp8_config",
+    "qat_modes_for_config",
 ]

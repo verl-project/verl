@@ -207,7 +207,12 @@ def _compute_rollout_moe_load_counts(
     response_mask: torch.Tensor | None,
     num_experts: int | None,
 ) -> torch.Tensor | None:
-    """Count routed experts in response tokens as [num_layers, num_experts]."""
+    """Count routed experts in response tokens as [num_layers, num_experts].
+
+    Each sequence's last valid response position is excluded: that token is
+    sampled but never fed back through the model, so it carries no routing
+    record (its slot is filler, not data).
+    """
     if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
         return None
     if routed_experts.dim() != 4:
@@ -220,6 +225,8 @@ def _compute_rollout_moe_load_counts(
         return None
 
     response_len = response_mask.shape[1]
+    if response_len == 0:
+        return None
     if routed_experts.shape[1] < response_len:
         logger.warning(
             "routed_experts sequence length %s is shorter than response length %s",
@@ -230,6 +237,17 @@ def _compute_rollout_moe_load_counts(
 
     response_routed_experts = routed_experts[:, -response_len:]
     response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
+    # The final response token is sampled but never fed back through the model,
+    # so it has no routing record; its slot holds filler from batch assembly
+    # (zeros, see AgentLoopWorker._postprocess). Counting it would credit
+    # expert 0 with num_layers * topk phantom assignments per sequence, so drop
+    # each sequence's last valid position. This is the metrics counterpart of
+    # build_r3_replay_mask, which skips the same row on the replay side.
+    positions = torch.arange(response_len, device=response_mask.device)
+    last_valid = torch.where(response_mask, positions, positions.new_full((), -1)).amax(dim=-1)
+    has_valid = last_valid >= 0
+    is_last_valid = (positions.unsqueeze(0) == last_valid.unsqueeze(1)) & has_valid.unsqueeze(1)
+    response_mask = response_mask & ~is_last_valid
     selected = response_routed_experts[response_mask]
     selected = selected.detach().to(device="cpu", dtype=torch.long)
     if selected.numel() == 0:
@@ -876,7 +894,11 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
 
 
 def process_validation_metrics(
-    data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
+    data_sources: list[str],
+    sample_uids: list[str],
+    infos_dict: dict[str, list[Any]],
+    seed: int = 42,
+    expected_acc_counts: dict[tuple[str, str], int] | None = None,
 ) -> dict[str, dict[str, dict[str, float]]]:
     """
     Process validation metrics into a structured format with statistical analysis.
@@ -891,6 +913,9 @@ def process_validation_metrics(
         sample_uids: List of sample uids corresponding to each sample.
         infos_dict: Dictionary mapping variable names to lists of values for each sample.
         seed: Random seed for bootstrap sampling. Defaults to 42.
+        expected_acc_counts: Expected session count keyed by ``(data_source, uid)``. For data
+            sources that emit ``acc``, failure sessions are included with ``acc=0`` while
+            ``acc_success_only`` preserves the metric over materialized sessions.
 
     Returns:
         A nested dictionary with the structure:
@@ -927,6 +952,24 @@ def process_validation_metrics(
         for var_name, var_vals in infos_dict.items():
             var2vals[var_name].append(var_vals[sample_idx])
 
+    if expected_acc_counts:
+        # Only sources that actually define acc opt into this policy; reward-only evaluators must not
+        # acquire a synthetic accuracy metric merely because another source emits one.
+        acc_data_sources = {
+            data_source
+            for data_source, uid2var2vals in data_src2uid2var2vals.items()
+            if any(value is not None for var2vals in uid2var2vals.values() for value in var2vals.get("acc", []))
+        }
+        for (data_source, uid), expected_count in expected_acc_counts.items():
+            if data_source not in acc_data_sources:
+                continue
+
+            var2vals = data_src2uid2var2vals[data_source][uid]
+            observed_acc = [value for value in var2vals.get("acc", []) if value is not None]
+            var2vals["acc_success_only"] = observed_acc
+            missing_count = max(expected_count - len(observed_acc), 0)
+            var2vals["acc"] = observed_acc + [0.0] * missing_count
+
     np_mean = np.mean
     np_std = np.std
     reduce_fns_best_worst = [np.max, np.min]
@@ -956,13 +999,18 @@ def process_validation_metrics(
 
         for uid, var2vals in uid2var2vals.items():
             pred_vals = var2vals.get("pred")
-            has_pred = pred_vals is not None
             var_dict = uid_dict.setdefault(uid, {})
 
             for var_name, var_vals in var2vals.items():
+                var_vals = [value for value in var_vals if value is not None]
                 # skip empty or string values
                 if not var_vals or isinstance(var_vals[0], str):
                     continue
+                has_pred = (
+                    pred_vals is not None
+                    and len(pred_vals) == len(var_vals)
+                    and all(pred is not None for pred in pred_vals)
+                )
 
                 # compute mean and std
                 n_resps = len(var_vals)

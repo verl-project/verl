@@ -12,9 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from torch.nn import ModuleDict
+
 # To support different vLLM versions, we add the model into SUPPORTED_MOE_MODELS separately to avoid triggering
 # unsupported issues.
 SUPPORTED_MOE_MODELS = []
+# Exact model classes with ModuleDict predictors wrapping a decoder in mtp_block.
+MTP_MOE_MODELS = []
+
+try:
+    from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
+
+    SUPPORTED_MOE_MODELS.append(DeepSeekMTP)
+    MTP_MOE_MODELS.append(DeepSeekMTP)
+except ImportError:
+    pass
 
 try:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, DeepseekV3ForCausalLM
@@ -125,7 +137,15 @@ def patch_vllm_moe_model_weight_loader(model):
     if type(inner_model).__name__ in ("Qwen3MoeLLMForCausalLM", "Qwen3_5MoeForCausalLM"):
         inner_model = inner_model.model  # Reassign inner_model in Qwen3-vl
 
-    for layer_idx, layer in enumerate(inner_model.layers):
+    # Restrict mtp_block unwrapping to explicitly supported MTP model classes.
+    # Iterate ModuleDict values for all supported models to visit layer objects.
+    is_mtp_model = type(model) in MTP_MOE_MODELS
+    layers = inner_model.layers
+    if isinstance(layers, ModuleDict):
+        layers = layers.values()
+    for layer_idx, layer in enumerate(layers):
+        if is_mtp_model:
+            layer = layer.mtp_block
         mlp_attr = MLP_ATTR_MAPPING.get(original_model_type, DEFAULT_MLP_ATTR)
 
         mlp = getattr(layer, mlp_attr, None)
@@ -133,7 +153,18 @@ def patch_vllm_moe_model_weight_loader(model):
             continue
 
         experts = getattr(mlp, "experts", None)
-        if not experts or not hasattr(experts, "weight_loader"):
+        if not experts:
+            continue
+
+        # verl syncs plain HF names, not PEFT checkpoint names, so the LoRA MoE
+        # ``lora_base_layer_prefix`` (folded into a dotted param_name that
+        # getattr can't resolve) must be cleared. Runs before the
+        # ``weight_loader`` guard so LoRA-wrapped MoE (no weight_loader) is covered.
+        routed_experts = getattr(getattr(experts, "base_layer", None), "routed_experts", None)
+        if routed_experts is not None and getattr(routed_experts, "lora_base_layer_prefix", ""):
+            routed_experts.lora_base_layer_prefix = ""
+
+        if not hasattr(experts, "weight_loader"):
             continue
 
         # Patch the weight loaders

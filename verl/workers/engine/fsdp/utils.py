@@ -85,3 +85,39 @@ def get_sharding_strategy(device_mesh, zero3_enable=True):
     else:
         raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
     return sharding_strategy
+
+
+def unfuse_moe_params(weights, model_type: str | None = None):
+    """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
+
+    Transformers 5 stores Qwen-style MoE experts as packed 3D parameters:
+    ``mlp.experts.gate_up_proj`` with shape
+    ``[num_experts, 2 * intermediate_size, hidden_size]`` and
+    ``mlp.experts.down_proj`` with shape
+    ``[num_experts, hidden_size, intermediate_size]``. vLLM's Qwen MoE reload
+    path still accepts the original per-expert checkpoint keys during live
+    weight sync, so stream those keys without materializing a full dict.
+    """
+    for name, tensor in weights:
+        # GPT-OSS checkpoint weights use packed 3D expert tensors directly.
+        # Splitting them into per-expert 2D tensors makes vLLM's GPT-OSS loader
+        # index a 2D tensor as 3D during TP slicing.
+        if model_type == "gpt_oss" and ".mlp.experts." in name and tensor.dim() == 3:
+            yield name, tensor
+            continue
+
+        if name.endswith(".mlp.experts.gate_up_proj") and tensor.dim() == 3:
+            gate, up = tensor.chunk(2, dim=1)
+            base = name.removesuffix(".gate_up_proj")
+            for expert_id in range(tensor.size(0)):
+                yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id].contiguous()
+                yield f"{base}.{expert_id}.up_proj.weight", up[expert_id].contiguous()
+            continue
+
+        if name.endswith(".mlp.experts.down_proj") and tensor.dim() == 3:
+            base = name.removesuffix(".down_proj")
+            for expert_id in range(tensor.size(0)):
+                yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id].contiguous()
+            continue
+
+        yield name, tensor

@@ -718,10 +718,12 @@ def compute_reinforce_plus_plus_outcome_advantage(
         running_return = 0
 
         for t in reversed(range(token_level_rewards.shape[1])):
-            running_return = token_level_rewards[:, t] + gamma * running_return
-            returns[:, t] = running_return
-            # Reset after EOS
-            running_return = running_return * response_mask[:, t]
+            new_running_return = token_level_rewards[:, t] + gamma * running_return
+            # For valid tokens (mask=1): update returns and running_return.
+            # For observation tokens (mask=0): skip — carry running_return
+            # through unchanged so rewards propagate past observation spans.
+            returns[:, t] = new_running_return * response_mask[:, t]
+            running_return = new_running_return * response_mask[:, t] + running_return * (1 - response_mask[:, t])
 
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
@@ -1171,6 +1173,11 @@ def agg_loss(
                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
+    elif loss_agg_mode == "token-sum":
+        # DDP/FSDP average gradients across data-parallel ranks. Scaling each
+        # rank's local token sum by dp_size makes the reduced gradient equal to
+        # the sum over all valid tokens in the global batch.
+        loss = verl_F.masked_sum(loss_mat, loss_mask) * dp_size
     elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
@@ -1593,9 +1600,10 @@ def compute_policy_loss_gspo(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    # NOTE: differ from GSPO original paper that aggregate the loss at the sequence level (seq-mean-token-mean),
+    # we support aggregate the loss in different modes, default is token-mean.
     pg_loss = agg_loss(
-        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean", **config.global_batch_info
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
@@ -2003,6 +2011,39 @@ def compute_policy_loss_geo_mean(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("dro")
+def compute_policy_loss_dro(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute Direct Reward Optimization with a quadratic log-ratio penalty."""
+    assert config is not None
+    assert config.policy_loss is not None
+
+    beta = config.policy_loss.dro_beta
+    if beta is None or beta <= 0:
+        raise ValueError("policy_loss.dro_beta must be a positive value when using DRO")
+
+    log_ratio = log_prob - old_log_prob
+    pg_losses = -(log_prob * advantages - 0.5 * beta * log_ratio.square())
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+    pg_metrics = {
+        "actor/ppo_kl": verl_F.masked_mean(-log_ratio, response_mask).detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 @register_policy_loss("cispo")
 def compute_policy_loss_cispo(
     old_log_prob: torch.Tensor,
@@ -2088,6 +2129,10 @@ def compute_value_loss(
     response_mask: torch.Tensor,
     cliprange_value: float,
     loss_agg_mode: str = "token-mean",
+    dp_size: int = 1,
+    batch_num_tokens: Optional[int] = None,
+    global_batch_size: Optional[int] = None,
+    loss_scale_factor: Optional[int] = None,
 ):
     """
     Compute the clipped value-function loss for PPO.
@@ -2107,6 +2152,15 @@ def compute_value_loss(
             Clip range for value prediction updates.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        dp_size (int, optional):
+            Data parallel size, forwarded to `agg_loss` for global-batch normalization. Defaults to 1.
+        batch_num_tokens (Optional[int], optional):
+            Number of valid tokens in the global batch, forwarded to `agg_loss`. Defaults to None
+            (normalize by the local micro-batch token count).
+        global_batch_size (Optional[int], optional):
+            Global batch size, forwarded to `agg_loss` for the seq-mean modes. Defaults to None.
+        loss_scale_factor (Optional[int], optional):
+            Scale factor for the "seq-mean-token-sum-norm" mode, forwarded to `agg_loss`. Defaults to None.
 
     Returns:
         vf_loss (torch.FloatTensor):
@@ -2118,7 +2172,15 @@ def compute_value_loss(
     vf_losses1 = (vpreds - returns) ** 2
     vf_losses2 = (vpredclipped - returns) ** 2
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-    vf_loss = 0.5 * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    vf_loss = 0.5 * agg_loss(
+        loss_mat=clipped_vf_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=loss_scale_factor,
+    )
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 
@@ -2276,6 +2338,7 @@ def compute_policy_loss_reinforce(
     loss_agg_mode: str = "seq-mean-token-sum",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: Optional[torch.Tensor] = None,
+    sc_correction: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute REINFORCE-style policy gradient loss with optional IS correction.
 
@@ -2305,6 +2368,8 @@ def compute_policy_loss_reinforce(
         config: Actor config (required for global_batch_info).
         rollout_is_weights: Pre-computed IS weights (π_current / π_rollout).
             Shape: (batch_size, seq_length). None to disable IS correction.
+        sc_correction: Score-centering term per token, added as ``advantages * sc_correction``
+            after the IS weighting. Shape: (batch_size, seq_length). None to disable.
 
     Returns:
         Tuple of (loss, metrics):
@@ -2328,6 +2393,8 @@ def compute_policy_loss_reinforce(
     else:
         # Standard REINFORCE: L = -E[log π · A]
         pg_losses = -advantages * log_prob
+    if sc_correction is not None:
+        pg_losses = pg_losses + advantages * sc_correction
 
     # Aggregate loss
     pg_loss = agg_loss(
@@ -2344,6 +2411,8 @@ def compute_policy_loss_reinforce(
     pg_metrics = {
         "actor/ppo_kl": kl_divergence.detach().item(),
     }
+    if sc_correction is not None:
+        pg_metrics["actor/sc_correction"] = verl_F.masked_mean(sc_correction.detach(), response_mask).item()
 
     return pg_loss, pg_metrics
 
@@ -2357,6 +2426,7 @@ def compute_policy_loss_bypass_mode(
     loss_agg_mode: str = "token-mean",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
+    sc_correction: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Bypass mode policy loss supporting both REINFORCE and PPO-clip.
 
@@ -2391,6 +2461,7 @@ def compute_policy_loss_bypass_mode(
         loss_agg_mode: Loss aggregation mode (passed to underlying loss function).
         config: Actor config containing rollout_correction settings in policy_loss.
         rollout_is_weights: Pre-computed IS weights (ignored, computed internally).
+        sc_correction: Score-centering term from the logits processor; only with loss_type="reinforce".
 
     Config options (in config.policy_loss.rollout_correction):
         loss_type: "ppo_clip" (default) or "reinforce"
@@ -2462,6 +2533,7 @@ def compute_policy_loss_bypass_mode(
             loss_agg_mode=loss_agg_mode,
             config=config,
             rollout_is_weights=computed_is_weights,
+            sc_correction=sc_correction,
         )
 
     elif loss_type == "ppo_clip":

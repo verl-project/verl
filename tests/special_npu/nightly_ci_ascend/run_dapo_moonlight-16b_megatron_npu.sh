@@ -26,14 +26,14 @@ infer_ppo_micro_batch_size_per_gpu=2
 
 # Paths
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
 mkdir -p $LOG_DIR
 
-TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
-TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
+TRAIN_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
+TEST_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
 
 # Algorithm
 temperature=1.0
@@ -128,7 +128,6 @@ python3 -m recipe.dapo.main_dapo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
-    actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.ref.megatron.param_offload=True \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
@@ -151,7 +150,6 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${INFER_TP} \
     actor_rollout_ref.rollout.data_parallel_size=1 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \

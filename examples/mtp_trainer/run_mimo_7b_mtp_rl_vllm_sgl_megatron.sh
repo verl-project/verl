@@ -105,7 +105,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.context_parallel_size=${actor_cp}
     actor_rollout_ref.actor.megatron.sequence_parallel=True
     actor_rollout_ref.actor.megatron.param_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
@@ -182,7 +181,16 @@ EXTRA=(
 )
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_backend}" = vllm ] || [ "${rollout_backend}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_backend}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_backend} --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
@@ -191,4 +199,5 @@ python3 -m verl.trainer.main_ppo \
     "${REWARD[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

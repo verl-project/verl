@@ -26,7 +26,7 @@ from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.ray_utils import parallel_put
 
 
@@ -48,7 +48,7 @@ class DummyWorker(Worker):
 def test_data_transfer():
     ray.init()
     # construct resource pool
-    ngpus = torch.cuda.device_count()
+    ngpus = get_torch_device().device_count()
     resource_pool = RayResourcePool([ngpus])
     cls_with_init = RayClassWithInitArgs(cls=DummyWorker)
     # construct worker group

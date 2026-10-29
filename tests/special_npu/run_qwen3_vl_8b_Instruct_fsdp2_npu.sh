@@ -5,12 +5,12 @@
 set -xeuo pipefail
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-VL-8B-Instruct}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
@@ -26,7 +26,7 @@ SP_SIZE=${SP_SIZE:-1}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-15}
-SAVE_FREQ=${SAVE_FREQ:-20}
+SAVE_FREQ=${SAVE_FREQ:--1}
 TEST_FREQ=${TEST_FREQ:-20}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_geo3k}
@@ -40,7 +40,7 @@ TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 
 ########################### derived defaults ###########################
-n_devices_per_node=${NDEVICES_PER_NODE:-8}
+n_devices_per_node=${NDEVICES_PER_NODE:-16}
 
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
@@ -86,7 +86,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.calculate_log_probs=True

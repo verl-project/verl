@@ -23,7 +23,7 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.trainer.config import CheckpointConfig
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_device_available
 
 
 class BaseCheckpointManager:
@@ -96,6 +96,20 @@ class BaseCheckpointManager:
         model and saved.
         """
         return "hf_model" in self.checkpoint_save_contents
+
+    @property
+    def should_save_lora_only(self) -> bool:
+        if not self.checkpoint_config:
+            return False
+        if isinstance(self.checkpoint_config, dict):
+            return self.checkpoint_config.get("save_lora_only", False)
+        return getattr(self.checkpoint_config, "save_lora_only", False)
+
+    @staticmethod
+    def is_lora_only_state_dict(state_dict: dict) -> bool:
+        if not state_dict:
+            return False
+        return all("lora_" in k or ".adapter_" in k for k in state_dict)
 
     @property
     def should_load_model(self) -> bool:
@@ -187,7 +201,10 @@ class BaseCheckpointManager:
             "random": random.getstate(),
         }
 
-        if get_device_name() != "cpu":
+        # get_device_name() reports the platform's accelerator even on hosts that have
+        # none, so the accelerator RNG state is only reachable when the device is
+        # actually usable in this process.
+        if get_device_name() != "cpu" and is_device_available():
             rng_state[get_device_name()] = get_torch_device().get_rng_state()
 
         return rng_state
@@ -198,7 +215,7 @@ class BaseCheckpointManager:
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
-        if get_device_name() != "cpu":
+        if is_device_available() and get_device_name() in rng_state:
             get_torch_device().set_rng_state(rng_state[get_device_name()])
 
 

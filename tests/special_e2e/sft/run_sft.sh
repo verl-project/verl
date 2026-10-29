@@ -31,7 +31,7 @@ ckpts_home=${ckpts_home:-$HOME/${project_name}/${exp_name}}
 
 mkdir -p "${ckpts_home}"
 
-torchrun --standalone --nnodes=1 --nproc_per_node=${NUM_GPUS} ${ENTRYPOINT} \
+python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${NUM_GPUS} ${ENTRYPOINT} \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.messages_key=messages \

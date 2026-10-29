@@ -43,13 +43,15 @@ _FILTER_TOKENIZER_CACHE: dict[tuple[str, bool], PreTrainedTokenizer] = {}
 
 
 def _get_processor_path(processor: ProcessorMixin) -> str | None:
-    return getattr(processor, "name_or_path", None) or getattr(
-        getattr(processor, "tokenizer", None), "name_or_path", None
+    return (
+        getattr(processor, "name_or_path", None)
+        or getattr(getattr(processor, "tokenizer", None), "name_or_path", None)
+        or None
     )
 
 
 def _get_tokenizer_path(tokenizer: PreTrainedTokenizer) -> str | None:
-    return getattr(tokenizer, "name_or_path", None)
+    return getattr(tokenizer, "name_or_path", None) or None
 
 
 def _load_filter_processor(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> ProcessorMixin:
@@ -472,6 +474,11 @@ class RLHFDataset(Dataset):
                 "tool_schemas": self.tool_schemas,
                 "trust_remote_code": self.config.get("trust_remote_code", False),
             }
+            # Workers reload from disk, but rollout may use a runtime template override.
+            formatter = self.processor if self.processor is not None else self.tokenizer
+            chat_template = getattr(formatter, "chat_template", None)
+            if chat_template is not None:
+                filter_kwargs["apply_chat_template_kwargs"].setdefault("chat_template", chat_template)
 
             use_multiprocessing = self.num_workers not in (None, 0)
 
@@ -506,11 +513,16 @@ class RLHFDataset(Dataset):
                     filter_kwargs["tokenizer"] = self.tokenizer
                 filter_function = _filter_prompt_length_with_tokenizer
 
+            def single_process_filter(doc):
+                # Keep live objects out of fn_kwargs: Datasets formats them when fingerprinting
+                # fails, and a processor's repr can itself try to pickle its SSLContext.
+                return filter_function(doc, **filter_kwargs)
+
             dataframe = dataframe.filter(
-                filter_function,
+                filter_function if use_multiprocessing else single_process_filter,
                 num_proc=self.num_workers if use_multiprocessing else None,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-                fn_kwargs=filter_kwargs,
+                fn_kwargs=filter_kwargs if use_multiprocessing else None,
             )
 
             print(f"filter dataset len: {len(dataframe)}")
@@ -684,7 +696,11 @@ class RLHFDataset(Dataset):
         image_patch_size,
         config: DictConfig,
     ) -> tuple[list[Image.Image], list[Any], list[Any]]:
-        return cls._process_multi_modal_info(messages, image_patch_size=image_patch_size, config=config)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: cls._process_multi_modal_info(messages, image_patch_size=image_patch_size, config=config),
+        )
 
     def split(self, num_splits: int):
         """

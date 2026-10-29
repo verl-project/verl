@@ -32,12 +32,7 @@
 name: vllm_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -71,18 +66,25 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+
 jobs:
   vllm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 120g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -100,17 +102,28 @@ jobs:
         run: |
           pip3 install --no-deps -e .[test]
           pip3 install pytest-asyncio
+          pip install "av<19"
+          pip uninstall -y nvidia-resiliency-ext
       - name: Check final pip list
         run: |
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Test the latest vLLM Rollout async with agent loop
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
+      - name: Test the latest vLLM Rollout async with deterministic agent loop
+        env:
+          PYTHONHASHSEED: "0"
+          AGENT_LOOP_TOOL_AGENT_ROLLOUT_CONFIG: |
+            temperature: 0.0
+            top_p: 1.0
+            top_k: -1
+            full_determinism: true
+            seed: 0
+            scheduling_policy: priority
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
@@ -119,6 +132,6 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
-      - name: Test vllm server abort functionality
+      - name: Test bucketed weight transfer
         run: |
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+          pytest -svvv tests/utils/test_bucketed_weight_transfer.py

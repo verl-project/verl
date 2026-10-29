@@ -1,0 +1,23 @@
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -443,6 +443,7 @@
+                 KVBlockSize=block_size,
+                 WavePerEU=2,
+             )
++            out_logits.nan_to_num_(float("-inf"))
+             return out_logits
+         deepgemm_fp8_paged_mqa_logits_stage1 = (
+             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
+@@ -587,7 +588,11 @@
+ 
+     if aiter_mqa_logits_module is not None:
+         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
+-        return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
++        # Same reason as the decode path: K values that overflowed the fp8 cast
++        # come back as NaN, which the radix top-k cannot rank.
++        logits = fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
++        logits.nan_to_num_(float("-inf"))
++        return logits
+     else:
+         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)

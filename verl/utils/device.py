@@ -19,6 +19,7 @@ import logging
 import os
 import platform
 import subprocess
+from enum import IntEnum, unique
 
 import torch
 from packaging import version
@@ -182,15 +183,41 @@ def get_device_capability(device_id: int = 0) -> tuple[int | None, int | None]:
     return get_platform().get_device_capability(device_id)
 
 
-def get_npu_versions() -> tuple[str, str]:
-    """Get the software version and CANN toolkit version for NPU devices.
+@unique
+class AscendHardwareVersion(IntEnum):
+    NONE = 0
+    A2 = 2
+    A3 = 3
+    A5 = 5
+    MAX_VERSION = 999
+
+
+def get_npu_versions() -> tuple[AscendHardwareVersion, str, str]:
+    """Get the NPU chip generation, software version and CANN toolkit version.
 
     Returns:
-        tuple[str, str]: A tuple of (software_version, cann_version)
+        tuple[AscendHardwareVersion, str, str]: A tuple of
+        (hardware_version, software_version, cann_version)
 
     Raises:
         RuntimeError: If unable to retrieve version information
     """
+    try:
+        import torch_npu
+
+        device_name = torch_npu.npu.get_device_name()
+    except Exception:
+        hardware_version = AscendHardwareVersion.NONE
+    else:
+        if "Ascend910_95" in device_name or "Ascend950" in device_name:
+            hardware_version = AscendHardwareVersion.A5
+        elif "Ascend910_93" in device_name:
+            hardware_version = AscendHardwareVersion.A3
+        elif "Ascend910B" in device_name or "A2G" in device_name:
+            hardware_version = AscendHardwareVersion.A2
+        else:
+            hardware_version = AscendHardwareVersion.MAX_VERSION
+
     # Check npu-smi software version
     try:
         result = subprocess.run(
@@ -263,7 +290,7 @@ def get_npu_versions() -> tuple[str, str]:
     if not cann_version:
         raise RuntimeError("Could not find version in CANN toolkit info file")
 
-    return software_version, cann_version
+    return hardware_version, software_version, cann_version
 
 
 def check_ipc_version_support(software_version: str, cann_version: str) -> bool:

@@ -33,12 +33,7 @@
 name: reward_model_sglang_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -58,13 +53,17 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+
 jobs:
   reward_model_sglang_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -83,6 +82,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -108,11 +108,11 @@ jobs:
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running sglang generative reward model tests on 8 NPUs
         run: |
           ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py

@@ -3,8 +3,7 @@ set -xeuo pipefail
 # GB200 config: 2 trainer nodes + 2 rollout nodes, 4 GPUs each (8+8 GPUs total)
 
 # GB200 NCCL WAR for async-RL Megatron: disable NVLS/MNNVL transports so NCCL
-# falls back to IB. Required on GB200 nodes without IMEX channel support, where
-# mbridge `export_weights -> all_gather` otherwise raises ncclUnhandledCudaError 801.
+# falls back to IB on GB200 nodes without IMEX channel support.
 export TLLM_DISABLE_NVLS_MNNVL=1
 
 project_name=${PROJECT_NAME:-'GRPO-Qwen3-30b-Base-MATH-fully-async-trtllm'}
@@ -91,8 +90,8 @@ RM_TP=${RM_TP:-$TRAIN_TP}
 RM_EP=${RM_EP:-$COMMON_EP}
 RM_ETP=${RM_ETP:-$COMMON_ETP}
 
-# install mbridge
-# pip3 install git+https://github.com/ISEEKYAN/mbridge
+# install Megatron-Bridge
+# pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 USE_MBRIDGE=True
 USE_DIST_CKPT=False
 
@@ -116,13 +115,6 @@ partial_rollout=True
 rollout_is=null
 rollout_rs=seq_mean_k1
 rollout_rs_threshold="0.999_1.001"
-
-# To use fp8 rollout, add the following flags
-# actor_rollout_ref.rollout.expert_parallel_size=2 \
-# +actor_rollout_ref.rollout.moe_tensor_parallel_size=2 \
-# +actor_rollout_ref.rollout.quantization="fp8" \
-# +actor_rollout_ref.rollout.engine_kwargs.trtllm.moe_config.backend=TRTLLM \
-
 
 python -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
@@ -166,7 +158,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
-    actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \

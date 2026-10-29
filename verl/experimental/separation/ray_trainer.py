@@ -160,12 +160,20 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             else:
                 raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
 
+            # Wire the critic profiler config via the hydra path (real dataclass tool_config), so the
+            # standalone critic TrainingWorker gets a working DistProfiler instead of a silent no-op.
+            critic_omega_profiler_config = self.config.critic.get("profiler", {})
+            critic_profiler_config = (
+                omega_conf_to_dataclass(critic_omega_profiler_config) if critic_omega_profiler_config else None
+            )
+
             critic_cfg = TrainingWorkerConfig(
                 model_type="value_model",
                 model_config=self.orig_critic_cfg.model,
                 engine_config=engine_config,
                 optimizer_config=self.orig_critic_cfg.optim,
                 checkpoint_config=self.orig_critic_cfg.checkpoint,
+                profiler_config=critic_profiler_config,
             )
 
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
@@ -527,7 +535,14 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 metrics.update(old_log_prob_metrics)
                 old_log_prob.batch.pop("entropys")
                 if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
-                    router_mode = getattr(self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled")
+                    actor_cfg = self.config.actor_rollout_ref.actor
+                    if getattr(actor_cfg, "strategy", None) == "megatron":
+                        engine_cfg = getattr(actor_cfg, "megatron", None)
+                    elif getattr(actor_cfg, "strategy", None) == "veomni":
+                        engine_cfg = getattr(actor_cfg, "veomni", None)
+                    else:
+                        engine_cfg = None
+                    router_mode = getattr(getattr(engine_cfg, "router_replay", None), "mode", "disabled")
                     if router_mode == "R2":
                         batch.batch.pop("routed_experts")
                     else:
@@ -642,7 +657,11 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.config.trainer.critic_warmup <= self.global_steps:
             # update weights from trainer to rollout
             with marked_timer("update_weights", timing_raw, color="red"):
-                self.checkpoint_manager.update_weights(self.global_steps)
+                sync_metrics = self.checkpoint_manager.update_weights(self.global_steps)
+            # Engines may report per-sync stats (e.g. the delta backends' changed
+            # ratio / wire payload); surface them in this step's metrics.
+            if sync_metrics:
+                self.metrics.update(sync_metrics)
 
     def _fit_dump_data(self, batch: DataProto):
         timing_raw = self.timing_raw

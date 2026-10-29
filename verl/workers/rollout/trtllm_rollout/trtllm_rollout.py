@@ -292,14 +292,6 @@ class ServerAdapter(BaseRollout):
         self, config: RolloutConfig, model_config: HFModelConfig, device_mesh: DeviceMesh, replica_rank: int = -1
     ):
         super().__init__(config, model_config, device_mesh)
-        if self.config.quantization == "fp8" and self.model_config.hf_config is not None:
-            FP8_BLOCK_QUANT_KWARGS = {
-                "activation_scheme": "dynamic",
-                "fmt": "e4m3",
-                "quant_method": "fp8",
-                "weight_block_size": [128, 128],
-            }
-            self.model_config.hf_config.quantization_config = dict(FP8_BLOCK_QUANT_KWARGS)
         self._adapter = None
         self.hybrid_device_mesh = None
         self.gpu_id = None
@@ -448,26 +440,24 @@ class ServerAdapter(BaseRollout):
         await asyncio.to_thread(dist.barrier, group=group)
 
     async def update_weights(
-        self, weights: AsyncGenerator[tuple[str, torch.Tensor], None], global_steps: int = None, **kwargs
+        self,
+        weights: AsyncGenerator[tuple[str, torch.Tensor], None],
+        global_steps: int = None,
+        wire_format: str = "named_tensors",
+        **kwargs,
     ):
         """Update the weights of the rollout model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
         """
+        assert wire_format == "named_tensors", (
+            f"TensorRT-LLM rollout only consumes full named tensors; got wire_format={wire_format!r}"
+        )
         if self.is_leader_rank:
             await self._init_server_adapter()
 
         total_available_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) * 1024 * 1024
-
-        if self.config.get("quantization", None) == "fp8":
-            from verl.utils.trtllm.trtllm_fp8_utils import TRTLLMFP8QuantizerHelper
-
-            fp8_quantizer_helper = TRTLLMFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
-            weights = fp8_quantizer_helper.quant_weights_by_name(
-                weights,
-                dtype=self.model_config.hf_config.dtype,
-            )
 
         try:
             device_uuid = get_device_uuid(int(self.gpu_id))

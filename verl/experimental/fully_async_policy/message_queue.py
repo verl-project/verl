@@ -232,3 +232,11 @@ class MessageQueueClient:
     def get_statistics_sync(self) -> dict[str, Any]:
         """Get statistics (sync - deprecated, use get_statistics instead)"""
         return ray.get(self.queue_actor.get_statistics.remote())
+
+    def get_queue_size_sync(self) -> int:
+        """Get current queue length (sync, blocking).
+
+        Used by callers running outside an event loop (e.g. synchronous
+        post-processing hooks) that need an immediate snapshot of the queue size.
+        """
+        return ray.get(self.queue_actor.get_queue_size.remote())

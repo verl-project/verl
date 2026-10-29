@@ -1,38 +1,39 @@
 #!/usr/bin/env bash
 # Qwen3.5-35B-A3B MoE GRPO RL with Megatron (single node, 8 GPUs, geo3k dataset)
-#
-# notes on vllm:
-#     by 20260225, the latest vllm nightly does not support qwen3.5 rollout, to use this script, you need to 
-#         1. wait until vllm supports qwen3.5 officially, and build a verl docker with that version of vllm
-#         2. self build a verl docker image with vllm from source code with qwen3.5 support (main branch 20260225 is OK)
-#     I succeeded in running this script with the main branch of vllm on 20260225, yet there are still some minor issues
-#     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be 
-#     fixed, either by verl team with supoorts to vllm0.16, or by vllm team.
+# Using verlai/verl:uv.cu130.dev3 docker image
 # Requirements:
 #   - 8 GPUs (80GB each, e.g. 1x8 H100/H200)
-#   - Additional packages on top of the base image:
-#       pip install --upgrade transformers
-#       pip install flash-linear-attention
-#       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM==0.16.0
+#   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
+#   - flash-linear-attention is installed by the launcher's megatron extra.
+#     The launcher uses dependencies from the current uv.lock.
 #
-# Requirements on Ascend:
+# CUDA dependencies from the current uv.lock (Python 3.12):
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
+#
+# Requirements on Ascend (scripts/install_vllm_mcore_npu.sh baseline):
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
-#   - Additional packages on base image(verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
-#       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.1
-#   - MindSpeed==0.16.0
-#   - Megatron-Bridge==de93536e
+#   - Megatron-LM==core_r0.18.0
+#   - Megatron-Bridge==v0.5.0
+#   - MindSpeed==core_r0.18.0
+#   - MegatronAdaptor==core_r0.18.0
+#   - TransformerEngineNPU==main
+#   -   pip install decorator pybind11 diffusers
+#   - MindSpeed-Ops==master
+#   - MindSpeed-Bridge: repository default branch (no pinned tag/commit)
+#   - flash-linear-attention-npu==v26.1.0
+#       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
+#   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
 #
 # Qwen3.5 architecture notes:
-#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
-#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
-#     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
-#     - actor.use_dynamic_bsz=False              (required for bshd mode)
-#
-#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
-#   can be set to True for better performance.
+#   This example uses BSHD compute format on CUDA:
+#     - model.use_remove_padding=False
+#     - actor.megatron.use_remove_padding=False
+#     - actor.use_dynamic_bsz=False
+#   Megatron-Core 0.18.0 and 0.19.2 also support THD for GDN.
+#   The settings above retain BSHD for this example's CUDA path.
+#   Ascend overrides below enable packing with MindSpeed-Bridge.
 #
 # Tested parallelism config (8 GPUs / 1 node):
 #   TP=2 PP=1 CP=1 EP=8 ETP=1 GEN_TP=8
@@ -41,7 +42,6 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
-
 set -xeuo pipefail
 
 ########################### Quick Config ###########################
@@ -63,6 +63,8 @@ case "${DEVICE}" in
         TP=${TP:-2}
         PP=${PP:-2}
         CP=${CP:-1}
+        # Add hyperparameters to enable CP when CP != 1
+        # +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_algo=megatron_cp_algo
         EP=${EP:-8}
         ETP=${ETP:-1}
         GEN_TP=${GEN_TP:-8}
@@ -75,6 +77,8 @@ case "${DEVICE}" in
 esac
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
+# Set to True when using Mindspeed-Bridge to enable ascend GDN performance optimization
+USE_MINDSPEED_BRIDGE=${USE_MINDSPEED_BRIDGE:-False}
 
 rollout_name="vllm"
 project_name='verl_grpo_qwen3_5_35b_geo3k'
@@ -116,7 +120,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_remove_padding=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -125,7 +128,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.dtype=bfloat16
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -151,6 +153,8 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
     actor_rollout_ref.rollout.calculate_log_probs=True
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
+    actor_rollout_ref.rollout.enforce_eager=False
 )
 
 REF=(
@@ -193,11 +197,29 @@ case "${DEVICE}" in
     npu)
         export CPU_AFFINITY_CONF=1
         ACTOR+=(
-            actor_rollout_ref.actor.megatron.vanilla_mbridge=False
+            actor_rollout_ref.actor.use_dynamic_bsz=True
             actor_rollout_ref.actor.checkpoint.strict=False
+            actor_rollout_ref.actor.megatron.use_remove_padding=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+        )
+        if [ "${USE_MINDSPEED_BRIDGE}" = "True" ]; then
+          ACTOR+=(
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+          )
+        fi
+        ROLLOUT+=(
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.65
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        )
+        MODEL+=(
+            actor_rollout_ref.model.use_remove_padding=True
+        )
+        REF+=(
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
         )
         ;;
     *)
@@ -208,7 +230,16 @@ esac
 
 ########################### Launch ###########################
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_name}" = vllm ] || [ "${rollout_name}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_name}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_name} --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -217,4 +248,5 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

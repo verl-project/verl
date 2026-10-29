@@ -5,10 +5,10 @@ set -xeuo pipefail
 # reward model (disRM). This exercises PPOTrainer._compute_reward_colocate, which is the
 # colocated-RM path shared by all V1 trainers (sync / colocate_async / separate_async).
 #
-# Unlike run_fully_async_policy_genrm.sh (which uses a STANDALONE GenRM on its own GPUs),
-# here the reward model is colocated with the actor/rollout on the same GPUs
-# (reward.reward_model.enable_resource_pool=False). The rollout replicas are slept after
-# sampling so the reward model can reuse their GPU memory for scoring.
+# The reward model is colocated with the actor/rollout on the same GPUs
+# (reward.reward_model.enable_resource_pool=False), as opposed to a standalone RM holding
+# its own GPUs. The rollout replicas are slept after sampling so the reward model can
+# reuse their GPU memory for scoring.
 #
 # GPU allocation: all GPUs are shared between training, rollout and the reward model
 # (colocate); a single node with >=2 GPUs is sufficient for the smoke test.
@@ -28,6 +28,19 @@ TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
 
 rollout_name=${ROLLOUT_NAME:-vllm}
+
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python): on GPU this runs the driver and every
+# Ray worker (runtime_env.py_executable) through `uv run` on the matching extras of
+# the committed uv.lock, so the job needs no install step. This script is fsdp2, so
+# it takes the `fsdp` extra alongside whichever rollout engine is selected.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_name}" = vllm ] || [ "${rollout_name}" = sglang ]; }; then
+    UV_EXTRAS=(--extra "${rollout_name}" --extra fsdp)
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -49,7 +62,7 @@ exp_name="$(basename "${MODEL_PATH,,}")-v1-colocate-async-disrm-minimal"
 echo "Running V1 colocate_async trainer with COLOCATED disRM"
 echo "Total GPUs: ${NUM_GPUS} (shared by training / rollout / reward model)"
 
-python3 -m verl.trainer.main_ppo \
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
     trainer.v1.colocate_async.num_warmup_batches=1 \
@@ -102,6 +115,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=${NUM_GPUS} \
     trainer.total_epochs=1 \
     trainer.total_training_steps=1 \
+    "${RAY[@]}" \
     "$@"
 
 echo "V1 colocate_async + colocated disRM E2E test completed successfully"

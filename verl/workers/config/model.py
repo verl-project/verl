@@ -183,9 +183,23 @@ class HFModelConfig(BaseConfig):
 
         # construct hf_config
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
-        self.hf_config = AutoConfig.from_pretrained(
-            self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
-        )
+        try:
+            self.hf_config = AutoConfig.from_pretrained(
+                self.local_hf_config_path,
+                trust_remote_code=self.trust_remote_code,
+                attn_implementation=attn_implementation,
+            )
+        except ValueError as error:
+            lookup_error = error.__cause__ or error.__context__
+            if not isinstance(lookup_error, KeyError) or lookup_error.args != ("deepseek_v4",):
+                raise
+            from vllm.transformers_utils.config import get_config
+
+            self.hf_config = get_config(
+                self.local_hf_config_path,
+                trust_remote_code=self.trust_remote_code,
+                attn_implementation=attn_implementation,
+            )
 
         override_config_kwargs = {}
 

@@ -169,6 +169,8 @@ def _parse_rollout_rs_thresholds(
                 raise ValueError(f"Invalid numeric threshold '{spec}' for option '{option}'.") from exc
             if lower <= 0 or upper <= 0:
                 raise ValueError(f"Thresholds for option '{option}' must be positive, got {spec}.")
+            if lower > upper:
+                raise ValueError(f"Thresholds for option '{option}' must be lower <= upper, got {spec}.")
             thresholds[option] = {
                 "lower": lower,
                 "upper": upper,

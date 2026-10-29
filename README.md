@@ -48,6 +48,11 @@ verl is fast with:
 </p>
 
 ## News
+- [2026/08] [verl-vla](https://github.com/verl-project/verl-vla) `v0.1.0` is released: a unified VLA post-training framework for human-in-the-loop data collection, supervised fine-tuning, and reinforcement learning across simulators, real robots, and distributed cloud-edge resources, built on top of verl.
+- [2026/08] [VeRL-Tinker](https://github.com/verl-project/verl-recipe/tree/main/verl_tinker) is released: keep the Tinker Cookbook loop you know, and run SFT, RL, and distillation on verl-managed GPU workers you control; read the blog [here](https://verl-project.github.io/posts/2026-08-11-verl-tinker/).
+- [2026/08] [VeRL-Omni](https://github.com/verl-project/verl-omni) `v0.2.0` is released: faster diffusion RL, rebuilt Qwen3-Omni multimodal training (DPO & GSPO), plus LTX-2.3, Qwen-Image-Edit support and more.
+- [2026/07] [RL-Insight](https://github.com/verl-project/rl-insight) is released: online observability for reinforcement learning training. RL-Insight connects training-side metrics, RL state traces, and service dashboards across distributed rollout and optimization workloads.
+- [2026/06] [verl-SpeCo](https://github.com/verl-project/verl-SpeCo) is pre-released: a co-training framework for speculative decoding across RL training and inference, keeping draft models aligned during training and reusable for accelerated serving, built on top of verl.
 - [2026/05] [uni-agent](https://github.com/verl-project/uni-agent) is released: a unified agent framework to build, run, and train LLM agents at scale, built on top of verl.
 - [2026/05] [VeRL-Omni](https://github.com/verl-project/verl-omni) is pre-released: a unified RL stack for diffusion and omni-modal model post-training built on top of verl. Read the [blog post](https://vllm.ai/blog/2026-05-14-verl-omni) for details.
 - [2026/05] verl's zero-mismatch HuggingFace rollout [vexact](https://github.com/verl-project/vexact) is released: with batch-invariant kernels, shared model definition with FSDP, and out-of-box examples compatible with VeOmni.
@@ -101,7 +106,7 @@ verl is fast with:
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/README.md)
+- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/README.md)
 
 ## Getting Started
 
@@ -148,7 +153,7 @@ verl is fast with:
   - [Ray API design tutorial](https://verl.readthedocs.io/en/latest/advance/placement.html)
 
 **Blogs from the community**
-
+- [Hands-on: Launch verl Fully Async DAPO Training on 4 AMD Instinct GPUs with AMD Developer Cloud](https://cloud.oneclickamd.ai/templates/1925/preview)
 - [When Reasoning Models Break Tokenization: The Hidden Complexity of Multiturn Training](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/fast_tokenization/multiturn_tokenization_and_masking.md)
 - [verl deployment on AWS SageMaker](https://medium.com/@kaige.yang0110/run-verl-on-sagemaker-using-4x8-l40s-gpus-8e6d5c3c61d3)
 - [verl x SGLang Multi-turn Code Walkthrough](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/code-walk-through/readme_EN.md)

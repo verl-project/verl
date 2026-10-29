@@ -390,7 +390,7 @@ def _get_input_embeds(
         patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
         pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
         image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
+        image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
         inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if attention_mask is not None:
@@ -511,7 +511,7 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO()
+    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
     log_probs, entropy = fused_linear_for_ppo.forward(
         hidden_states=hidden_states,
         vocab_weights=self.lm_head.weight,

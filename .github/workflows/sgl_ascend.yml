@@ -33,15 +33,7 @@ name: sglang_ascend
 
 on:
   #  workflow_dispatch: # Manual
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - .github/workflows/sgl_ascend.yml
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -76,10 +68,10 @@ permissions:
 jobs:
   sglang_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -99,6 +91,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -117,18 +110,17 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install pytest pytest-asyncio
-          uv pip install megatron-bridge --no-deps
-          uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
+          uv pip install megatron-bridge==0.5.0 --no-deps
           uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name:  Prepare gsm8k dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto

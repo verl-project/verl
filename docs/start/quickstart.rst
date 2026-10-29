@@ -19,6 +19,23 @@ Prerequisite:
 
 - a GPU with at least 24 GB HBM
 
+.. note::
+
+   The ``python3`` commands below assume an interpreter that already provides
+   verl — one of the docker images, or an activated ``.venv``. With the uv
+   workflow there is no install step: run them from the repo root behind a
+   ``uv run`` prefix, which builds ``.venv`` from the committed ``uv.lock`` on
+   first use::
+
+       UV_RUN="uv run --frozen --all-packages --extra vllm --extra fsdp"
+       $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k
+       $UV_RUN python3 -m verl.trainer.main_ppo ... \
+           ray_kwargs.ray_init.runtime_env.py_executable="${UV_RUN}"
+
+   That last override is what makes Ray start the TaskRunner and every worker
+   actor in the same environment; the ``examples/`` scripts set it for you. See
+   :doc:`Installation<install>` for the full uv workflow.
+
 
 Dataset Introduction
 --------------------

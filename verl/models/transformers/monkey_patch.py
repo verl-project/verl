@@ -243,7 +243,7 @@ def patch_forward_with_backends(
         use_fused_kernels (bool): Whether to use fused kernels.
         fused_kernels_backend (str): The backend to use for fused kernels.
     """
-    if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch"]:
+    if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch", "liger"]:
         print(
             f"Skipping monkey patch for {model.__class__.__name__} as use_fused_kernels is "
             f"{use_fused_kernels} or fused_kernels_backend is {fused_kernels_backend}"
@@ -278,14 +278,17 @@ def patch_forward_with_backends(
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
 
+    model._verl_fused_kernels_backend = fused_kernels_backend
     if fused_kernels_backend == "triton":
         model.__class__.forward = forward_with_triton_backend_function
         print(f"Using Triton backend for fused kernels in {model.__class__.__name__}")
-    elif fused_kernels_backend == "torch":
+    elif fused_kernels_backend in ("torch", "liger"):
         model.__class__.forward = forward_with_torch_backend_function
-        print(f"Using Torch backend for fused kernels in {model.__class__.__name__}")
+        print(f"Using {fused_kernels_backend.capitalize()} backend for fused kernels in {model.__class__.__name__}")
     else:
-        raise ValueError(f"Unsupported fused_kernels_backend: {fused_kernels_backend}. Choose 'triton' or 'torch'.")
+        raise ValueError(
+            f"Unsupported fused_kernels_backend: {fused_kernels_backend}. Choose 'triton', 'torch', or 'liger'."
+        )
 
 
 def apply_monkey_patch(
@@ -497,13 +500,17 @@ def apply_monkey_patch(
     elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
         # Step 1: patch model to support image-text mixed data
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5DecoderLayer,
             Qwen3_5ForConditionalGeneration,
+            Qwen3_5GatedDeltaNet,
             Qwen3_5Model,
             Qwen3_5TextModel,
             Qwen3_5VisionModel,
         )
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeDecoderLayer,
             Qwen3_5MoeForConditionalGeneration,
+            Qwen3_5MoeGatedDeltaNet,
             Qwen3_5MoeModel,
             Qwen3_5MoeTextModel,
             Qwen3_5MoeVisionModel,
@@ -513,10 +520,16 @@ def apply_monkey_patch(
             fast_pos_embed_interpolate,
             forward_with_normal_backend,
             qwen3_5_base_forward,
+            qwen3_5_decoder_layer_forward,
+            qwen3_5_gated_delta_net_forward,
         )
 
         Qwen3_5Model.forward = qwen3_5_base_forward
         Qwen3_5MoeModel.forward = qwen3_5_base_forward
+        Qwen3_5DecoderLayer.forward = qwen3_5_decoder_layer_forward
+        Qwen3_5MoeDecoderLayer.forward = qwen3_5_decoder_layer_forward
+        Qwen3_5GatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
+        Qwen3_5MoeGatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
         Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
         Qwen3_5MoeForConditionalGeneration.forward = forward_with_normal_backend
         print(f"Monkey patch {model.__class__.__name__} model forward")

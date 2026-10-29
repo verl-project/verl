@@ -114,7 +114,6 @@ def test_parallelism():
     print(scores)
 
 
-@pytest.mark.skip("pyext not compatible with python 3.12")
 def test_prime_code():
     """
     Test PRIME code sandbox.
@@ -172,7 +171,6 @@ def test_continuous_score_consistency():
     print(f"Continuous Score (Sandbox Fusion): {fusion_score}")
 
 
-@pytest.mark.skip("pyext not compatible with python 3.12")
 def test_check_correctness():
     from verl.utils.reward_score.prime_code import apps_check_correctness
 

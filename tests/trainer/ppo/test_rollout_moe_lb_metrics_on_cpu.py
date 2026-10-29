@@ -30,6 +30,9 @@ from verl.trainer.ppo.metric_utils import (
 
 
 def test_rollout_moe_load_balance_metrics_response_tokens_only():
+    # The last valid response position holds zero-filler, not a routing
+    # record: the final sampled token never re-enters the model. Metrics must
+    # come from the four real records only.
     routed_experts = torch.tensor(
         [
             [
@@ -39,11 +42,12 @@ def test_rollout_moe_load_balance_metrics_response_tokens_only():
                 [[2, 3], [2, 2]],
                 [[0, 1], [2, 2]],
                 [[2, 3], [2, 2]],
+                [[0, 0], [0, 0]],
             ]
         ],
         dtype=torch.long,
     )
-    response_mask = torch.tensor([[True, True, True, True]], dtype=torch.bool)
+    response_mask = torch.tensor([[True, True, True, True, True]], dtype=torch.bool)
 
     metrics = compute_rollout_moe_load_balance_metrics(
         routed_experts=routed_experts,
@@ -70,12 +74,79 @@ def test_rollout_moe_load_balance_metrics_skips_invalid_inputs():
     )
 
 
+def test_rollout_moe_load_balance_metrics_last_token_filler_is_ignored():
+    # The final sampled token has no routing record; whatever the batch
+    # assembly left in its slot must not reach the counts. The default
+    # zero-fill would otherwise credit expert 0 with layers * topk phantom
+    # assignments per sequence.
+    real = torch.tensor([[[[1, 2]], [[3, 1]], [[2, 3]]]], dtype=torch.long)
+    response_mask = torch.ones(1, 4, dtype=torch.bool)
+    expected = torch.bincount(real.flatten(), minlength=4).unsqueeze(0)
+
+    for filler_value in (0, 3):
+        routed_experts = torch.cat([real, torch.full((1, 1, 1, 2), filler_value, dtype=torch.long)], dim=1)
+        counts = metric_utils._compute_rollout_moe_load_counts(
+            routed_experts=routed_experts, response_mask=response_mask, num_experts=4
+        )
+        assert torch.equal(counts, expected)
+    assert expected[0, 0] == 0  # no phantom expert-0 load
+
+
+def test_rollout_moe_load_balance_metrics_survive_negative_filler():
+    # A -1 sentinel in the never-routed last slot must not disable the whole
+    # metric via the expert-id range guard.
+    real = torch.tensor([[[[1, 2]], [[3, 1]]]], dtype=torch.long)
+    filler = torch.full((1, 1, 1, 2), -1, dtype=torch.long)
+    response_mask = torch.ones(1, 3, dtype=torch.bool)
+
+    metrics = compute_rollout_moe_load_balance_metrics(
+        routed_experts=torch.cat([real, filler], dim=1),
+        response_mask=response_mask,
+        num_experts=4,
+    )
+
+    assert metrics
+
+
+def test_rollout_moe_load_balance_metrics_drop_last_valid_per_sequence():
+    # Ragged batch: each sequence drops its own final valid position, not a
+    # shared column.
+    routed_experts = torch.zeros(2, 4, 1, 1, dtype=torch.long)
+    routed_experts[0, :, 0, 0] = torch.tensor([1, 2, 3, 0])  # filler at position 3
+    routed_experts[1, :, 0, 0] = torch.tensor([2, 0, 0, 0])  # filler at position 1
+    response_mask = torch.tensor([[True, True, True, True], [True, True, False, False]])
+
+    counts = metric_utils._compute_rollout_moe_load_counts(
+        routed_experts=routed_experts, response_mask=response_mask, num_experts=4
+    )
+
+    assert torch.equal(counts, torch.tensor([[0, 1, 2, 1]]))
+
+
+def test_rollout_moe_load_balance_metrics_single_token_response_yields_nothing():
+    # A one-token response consists solely of the never-routed final token.
+    routed_experts = torch.zeros(1, 1, 1, 1, dtype=torch.long)
+    response_mask = torch.ones(1, 1, dtype=torch.bool)
+
+    assert compute_rollout_moe_load_balance_metrics(routed_experts, response_mask, num_experts=4) == {}
+
+
+def test_rollout_moe_load_balance_metrics_zero_width_response_mask_yields_nothing():
+    # A zero-width response mask must not crash (amax over an empty dim, and
+    # routed_experts[:, -0:] would silently select the whole tensor).
+    routed_experts = torch.zeros(1, 3, 1, 1, dtype=torch.long)
+    response_mask = torch.zeros(1, 0, dtype=torch.bool)
+
+    assert compute_rollout_moe_load_balance_metrics(routed_experts, response_mask, num_experts=4) == {}
+
+
 def test_rollout_moe_load_balance_accumulator_spans_updates():
     accumulator = RolloutMoELoadBalanceMetricsAccumulator()
-    response_mask = torch.tensor([[True]], dtype=torch.bool)
+    # one real record plus the trailing filler slot of the final sampled token
+    response_mask = torch.tensor([[True, True]], dtype=torch.bool)
 
     for expert_id in range(4):
-        routed_experts = torch.tensor([[[[expert_id]]]], dtype=torch.long)
+        routed_experts = torch.tensor([[[[expert_id]], [[0]]]], dtype=torch.long)
         assert accumulator.update(routed_experts=routed_experts, response_mask=response_mask, num_experts=4)
 
     assert accumulator.total_assignments() == 4
@@ -90,8 +161,8 @@ def test_rollout_moe_load_balance_accumulator_spans_updates():
 
 def test_rollout_moe_load_balance_accumulator_infers_num_experts(monkeypatch):
     accumulator = RolloutMoELoadBalanceMetricsAccumulator(model_config={"num_experts": 4})
-    response_mask = torch.tensor([[True]], dtype=torch.bool)
-    routed_experts = torch.tensor([[[[1]]]], dtype=torch.long)
+    response_mask = torch.tensor([[True, True]], dtype=torch.bool)
+    routed_experts = torch.tensor([[[[1]], [[0]]]], dtype=torch.long)
 
     monkeypatch.setattr(
         metric_utils,
@@ -107,8 +178,8 @@ def test_compute_moe_lb_metrics_accumulates_until_interval():
     accumulator = RolloutMoELoadBalanceMetricsAccumulator(model_config={"num_experts": 2})
     batch = SimpleNamespace(
         batch={
-            "routed_experts": torch.tensor([[[[0]], [[1]]]], dtype=torch.long),
-            "response_mask": torch.tensor([[True, True]], dtype=torch.bool),
+            "routed_experts": torch.tensor([[[[0]], [[1]], [[0]]]], dtype=torch.long),
+            "response_mask": torch.tensor([[True, True, True]], dtype=torch.bool),
         }
     )
 

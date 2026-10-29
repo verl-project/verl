@@ -58,6 +58,8 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
     config.actor_rollout_ref.rollout.nnodes = 1
+    # No trainer to sync weights from, so the server must load them from disk.
+    config.actor_rollout_ref.rollout.load_format = "auto"
     config.trainer.n_gpus_per_node = 4
     config.trainer.nnodes = 1
 

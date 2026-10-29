@@ -57,7 +57,10 @@ RUN ARCH=$(uname -m) && \
     git clone https://github.com/vllm-project/vllm-ascend.git && \
     cd vllm-ascend && git checkout 54879467c41784a446aa5b486a391d9bfbf488fa && cd .. && \
     git clone https://github.com/huggingface/transformers.git && \
-    cd transformers && git checkout cc7ab9be508ce6ed3637bba9e50367b29b742dc6 && cd ..
+    cd transformers && git checkout cc7ab9be508ce6ed3637bba9e50367b29b742dc6 && cd .. && \
+    git clone https://gitcode.com/Ascend/MindSpeed.git && \
+    cd MindSpeed && git checkout core_r0.16.0 && cd .. && \
+    git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git
 
 # 避免vllm-ascend 安装失败
 ENV MAX_JOBS=1
@@ -74,6 +77,13 @@ RUN ARCH=$(uname -m) && \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
+
+    # Install MindSpeed
+    pip install -e MindSpeed && \
+    # Install Megatron-LM
+    pip install -e Megatron-LM && \
+    # Install Megatron-Bridge
+    pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@de93536e --no-deps --no-build-isolation && \
 
     # Install vllm
     cd vllm && pip install -r requirements/build.txt && \

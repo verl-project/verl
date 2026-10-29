@@ -4,9 +4,9 @@
 #
 # Knobs:
 #   INFER_BACKEND          rollout backend: vllm | sglang | trtllm   (default: vllm)
-#   ROLLOUT_QUANTIZATION   fp8 to enable TRT-LLM FP8 rollout         (default: unset)
+#   ROLLOUT_QUANTIZATION   compressed-tensors preset for a vLLM low-precision rollout, e.g. FP8_BLOCK (default: unset)
 #
-# Ascend NPU users: see run_qwen3_30b_a3b_mindspeed.sh.
+# Ascend NPU users: see examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh.
 
 set -xeuo pipefail
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -81,8 +81,8 @@ experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_${INFER_BACKEND}_megatron${ROLL
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-if [ -n "${ROLLOUT_QUANTIZATION}" ] && [ "${INFER_BACKEND}" != trtllm ]; then
-    echo "ROLLOUT_QUANTIZATION is only supported with INFER_BACKEND=trtllm, got: ${INFER_BACKEND}" >&2
+if [ -n "${ROLLOUT_QUANTIZATION}" ] && [ "${INFER_BACKEND}" != vllm ]; then
+    echo "ROLLOUT_QUANTIZATION is only supported with INFER_BACKEND=vllm, got: ${INFER_BACKEND}" >&2
     exit 1
 fi
 
@@ -152,7 +152,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.context_parallel_size=${actor_cp}
     actor_rollout_ref.actor.megatron.param_offload=${all_offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${all_offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${all_offload}
     actor_rollout_ref.actor.megatron.use_mbridge=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
@@ -235,13 +234,11 @@ if [ "${INFER_BACKEND}" = trtllm ]; then
     )
 fi
 
-if [ "${ROLLOUT_QUANTIZATION}" = fp8 ]; then
-    # Avoid stray launcher env leaking into Ray workers under FP8 TRT-LLM.
-    for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'); do
-        unset "$v"
-    done
-    export RAY_DEDUP_LOGS=0
-    EXTRA+=(+actor_rollout_ref.rollout.quantization=fp8)
+if [ -n "${ROLLOUT_QUANTIZATION}" ]; then
+    EXTRA+=(
+        actor_rollout_ref.rollout.quantization.linear=${ROLLOUT_QUANTIZATION}
+        actor_rollout_ref.rollout.quantization.moe=${ROLLOUT_QUANTIZATION}
+    )
 fi
 
 if [ -n "$MCORE_MODEL_PATH" ]; then
@@ -254,7 +251,16 @@ if [ -n "$MCORE_MODEL_PATH" ]; then
 fi
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${INFER_BACKEND}" = vllm ] || [ "${INFER_BACKEND}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${INFER_BACKEND}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${INFER_BACKEND} --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
     "${REWARD[@]}" \
     "${DATA[@]}" \
@@ -264,4 +270,5 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

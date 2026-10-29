@@ -26,6 +26,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClas
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
+from .output_validation import validate_hf_model_output
+
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
@@ -35,9 +37,20 @@ def parse_args():
 
     base_op_parser = argparse.ArgumentParser(add_help=False)
     base_op_parser.add_argument(
-        "--backend", type=str, required=True, choices=["fsdp", "megatron"], help="The backend of the model"
+        "--backend",
+        type=str,
+        required=True,
+        choices=["fsdp", "megatron", "veomni"],
+        help="The backend of the model",
     )
     base_op_parser.add_argument("--local_dir", type=str, default=None, help="Path to the saved model checkpoints.")
+    base_op_parser.add_argument(
+        "--base_model_path",
+        type=str,
+        default=None,
+        help="Path to the HuggingFace model the training started from. Required by the veomni backend for models "
+        "exported in their original quantized layout (DeepSeek-V4).",
+    )
     base_op_parser.add_argument(
         "--tie-word-embedding",
         action="store_true",
@@ -84,7 +97,7 @@ class ModelMergerConfig:
 
     Args:
         operation (str): Operation type - 'merge' or 'test'.
-        backend (str): Backend type for the model ('fsdp' or 'megatron').
+        backend (str): Backend type for the model ('fsdp', 'megatron' or 'veomni').
         target_dir (Optional[str]): Directory to save the merged huggingface model. Defaults to "tmp".
         hf_upload_path (Optional[str]): Hugging Face repository ID to upload the model. Defaults to None.
         private (bool): Whether to upload the model to a private Hugging Face repository. Defaults to False.
@@ -98,6 +111,7 @@ class ModelMergerConfig:
         hf_model_config_path (Optional[str]): Path to HuggingFace model configuration files. Defaults to None.
         hf_upload (bool): Whether to upload to HuggingFace (computed automatically). Not for initialization.
         use_cpu_initialization (bool): Whether to use CPU initialization for large models. Defaults to False.
+        base_model_path (Optional[str]): Path to the HuggingFace model the training started from. Defaults to None.
     """
 
     operation: str  # 'merge' or 'test'
@@ -113,6 +127,7 @@ class ModelMergerConfig:
     hf_model_config_path: Optional[str] = None
     hf_upload: bool = field(init=False)
     use_cpu_initialization: bool = False
+    base_model_path: Optional[str] = None
 
     def __post_init__(self):
         self.hf_upload = self.operation == "merge" and bool(self.hf_upload_path)
@@ -147,6 +162,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "local_dir": args.local_dir,
         "hf_model_config_path": _default_hf_model_config_path(args.backend, args.local_dir),
         "use_cpu_initialization": args.use_cpu_initialization,
+        "base_model_path": args.base_model_path,
     }
 
     if args.operation == "merge":
@@ -238,14 +254,32 @@ class BaseModelMerger(ABC):
         This function patch the generation_config created from model config to the pretrained model.
         """
         if model.can_generate():
-            try:
-                model.generation_config = GenerationConfig.from_pretrained(self.hf_model_config_path)
-            except OSError:
+            generation_config = self.load_generation_config()
+            if generation_config is not None:
+                model.generation_config = generation_config
+        return model
+
+    def load_generation_config(self, warn_if_missing: bool = True):
+        """Load the generation config stored alongside the pretrained model config."""
+        generation_config_path = os.path.join(self.hf_model_config_path, "generation_config.json")
+        if not os.path.isfile(generation_config_path):
+            if warn_if_missing:
                 print(
                     f"Warning: Generation config file not found in {self.hf_model_config_path}, using a "
                     f"generation config created from the model config."
                 )
-        return model
+            return None
+        return GenerationConfig.from_pretrained(self.hf_model_config_path)
+
+    def save_generation_config(self, target_dir):
+        """Preserve the pretrained generation config in a merged model directory."""
+        generation_config = self.load_generation_config(warn_if_missing=False)
+        if generation_config is not None:
+            generation_config.save_pretrained(target_dir)
+        else:
+            stale_config_path = os.path.join(target_dir, "generation_config.json")
+            if os.path.isfile(stale_config_path):
+                os.remove(stale_config_path)
 
     def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
         if not self.config.local_dir:
@@ -415,6 +449,8 @@ class BaseModelMerger(ABC):
         if tokenizer is not None:
             print(f"Saving tokenizer to {self.config.target_dir}")
             tokenizer.save_pretrained(self.config.target_dir)
+
+        validate_hf_model_output(self.config.target_dir)
 
     def upload_to_huggingface(self):
         import requests

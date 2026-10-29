@@ -49,7 +49,7 @@ We already pre-implemented some reward functions in `reward_score directory <htt
   use string matching to compare with the ground truth. If completely
   correct, score 1 point; if the format is correct, score 0.1 points; if
   the format is incorrect, score 0 points.
-- In the `MATH example <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math.py>`_, we follow
+- In the `MATH example <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math_reward.py>`_, we follow
   the implementation in `lm-evaluation-harness repository <https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py>`_.
 
 Customized

@@ -18,7 +18,7 @@ Old layout (schema v1, produced by verl <= the previous release)::
 
     <checkpoint>/
     ├── dist_ckpt/                  # optimizer + rng + (maybe) model shards
-    ├── huggingface/                # mbridge HF tree (optional)
+    ├── huggingface/                # HF tree (optional)
     ├── transformer_config.json     # optional
     └── ckpt_contents.json          # optional
 
@@ -26,8 +26,8 @@ New layout (schema v2, produced by current verl)::
 
     <checkpoint>/
     ├── model/
-    │   ├── dist_ckpt/              # model shards (mbridge off / PEFT)
-    │   └── huggingface/            # mbridge HF tree
+    │   ├── dist_ckpt/              # model or PEFT adapter shards
+    │   └── huggingface/            # HF tree
     ├── optimizer/dist_ckpt/        # optimizer + lr_scheduler
     ├── extra/dist_ckpt/            # rng_state
     ├── transformer_config.json

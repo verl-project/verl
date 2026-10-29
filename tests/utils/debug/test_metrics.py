@@ -42,6 +42,39 @@ class TestMetrics(unittest.TestCase):
         metrics = calculate_debug_metrics(data)
         print(metrics)
         assert metrics["training/rollout_probs_diff_valid"] == 1
+        assert metrics["training/rollout_logprobs_mismatch_count"] == 20
+        assert metrics["training/rollout_logprobs_diff_max"] > 0
+
+    def test_one_ulp_logprob_difference_is_hidden_by_probs_diff(self):
+        rollout = torch.tensor([[-0.10000000149, -2.0, -0.5]], dtype=torch.float32)
+        actor = torch.tensor([[-0.10000000894, -2.0, -0.75]], dtype=torch.float32)
+        assert torch.exp(rollout[0, 0]) == torch.exp(actor[0, 0])
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": rollout,
+                "old_log_probs": actor,
+                "response_mask": torch.tensor([[1, 1, 0]]),
+                "responses": torch.zeros((1, 3)),
+            }
+        )
+        metrics = calculate_debug_metrics(data)
+        assert metrics["training/rollout_probs_diff_max"] == 0
+        assert metrics["training/rollout_logprobs_mismatch_count"] == 1
+        assert metrics["training/rollout_logprobs_diff_max"] == (rollout[0, 0] - actor[0, 0]).abs().item()
+        assert metrics["training/rollout_logprobs_diff_mean"] == metrics["training/rollout_logprobs_diff_max"] / 2
+
+    def test_all_masked_returns_invalid(self):
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": torch.tensor([[-1.0, -2.0]]),
+                "old_log_probs": torch.tensor([[-1.5, -2.0]]),
+                "response_mask": torch.tensor([[0, 0]]),
+                "responses": torch.zeros((1, 2)),
+            }
+        )
+        metrics = calculate_debug_metrics(data)
+        assert metrics["training/rollout_probs_diff_valid"] == 0
+        assert metrics["training/rollout_logprobs_mismatch_count"] == 0
 
 
 if __name__ == "__main__":

@@ -143,6 +143,11 @@ class TinkerTrainingWorker(TrainingWorker):
             if key not in data.keys():
                 tu.assign_non_tensor(data, **{key: val})
 
+        # Tinker returns per-token log-probs to the client after backward.
+        # FSDP normally discards model_output to reduce peak memory, so
+        # explicitly opt this split-training path into retaining it.
+        tu.assign_non_tensor(data, return_model_output=True)
+
         maybe_fix_3d_position_ids(data)
 
         with (
@@ -156,7 +161,6 @@ class TinkerTrainingWorker(TrainingWorker):
         delta_time = timer.last
 
         if self.engine.is_mp_src_rank_with_outputs():
-            output.pop("model_output")
             final_output = self._postprocess_output(
                 output,
                 global_token_num=global_token_num,

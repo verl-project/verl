@@ -30,6 +30,7 @@ actor_rollout_ref:
       ulysses_parallel_size: 1
       expert_parallel_size: 1
       mixed_precision: true
+      low_precision_reduce_scatter_comm: false
       seed: 42
       full_determinism: false
       init_device: meta
@@ -44,6 +45,8 @@ actor_rollout_ref:
       forward_only: false
       enable_fsdp_offload: false
       enable_reentrant: false
+      broadcast_model_weights_from_rank0: true
+      ep_sharded_stream_load: false
       attn_implementation: flash_attention_2
       moe_implementation: fused
       cross_entropy_loss_implementation: eager
@@ -54,9 +57,17 @@ actor_rollout_ref:
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: eager
+      dsa_indexer_implementation: eager
+      dsa_attention_implementation: eager
+      mhc_implementation: eager
+      qat_implementation: none
       force_use_huggingface: false
-      activation_gpu_limit: 0.0
+      enable_async_activation_offload: false
+      activation_offload_modules: []
+      activation_offload_host_cache_limit_gb: 4.0
       basic_modules: []
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
+      pad_to_length_bucket: 1024
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -82,6 +93,7 @@ actor_rollout_ref:
       clip_cov_ub: 5.0
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
+      dro_beta: null
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null
@@ -113,6 +125,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -127,21 +143,24 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     qat:
       enable: false
       mode: w4a16
@@ -153,6 +172,7 @@ actor_rollout_ref:
       activation_observer: static_minmax
       quantization_config_path: null
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    pad_to_length: false
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -168,6 +188,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -182,21 +206,24 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     veomni:
       _target_: verl.workers.config.VeOmniEngineConfig
       param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
@@ -205,6 +232,7 @@ actor_rollout_ref:
       ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
       expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
       mixed_precision: true
+      low_precision_reduce_scatter_comm: false
       seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
       full_determinism: false
       init_device: meta
@@ -219,6 +247,8 @@ actor_rollout_ref:
       forward_only: true
       enable_fsdp_offload: false
       enable_reentrant: false
+      broadcast_model_weights_from_rank0: true
+      ep_sharded_stream_load: false
       attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
       moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
       cross_entropy_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation,eager}
@@ -229,13 +259,22 @@ actor_rollout_ref:
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
+      dsa_indexer_implementation: eager
+      dsa_attention_implementation: eager
+      mhc_implementation: eager
+      qat_implementation: none
       force_use_huggingface: false
-      activation_gpu_limit: 0.0
+      enable_async_activation_offload: false
+      activation_offload_modules: []
+      activation_offload_host_cache_limit_gb: 4.0
       basic_modules: []
+      pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.veomni.pad_to_length_bucket,1024}
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
+    pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -251,6 +290,7 @@ actor_rollout_ref:
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
     ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
@@ -261,7 +301,8 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
-    max_num_seqs: 1024
+    max_num_seqs: 256
+    ray_actor_max_concurrency: 1024
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -288,6 +329,7 @@ actor_rollout_ref:
       temperature: 0
       'n': 1
       do_sample: false
+    router_config_path: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -303,6 +345,7 @@ actor_rollout_ref:
       format: hermes
       num_repeat_rollouts: null
     calculate_log_probs: true
+    topk_log_probs: 0
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -335,6 +378,10 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:actor_rollout_ref.actor.profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -362,10 +409,13 @@ actor_rollout_ref:
       port: 9090
       file: /tmp/ray/session_latest/metrics/prometheus/prometheus.yml
       served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
-    quantization: null
-    quantization_config_file: null
+    quantization:
+      _target_: verl.workers.config.RolloutQuantizationConfig
+      linear: null
+      moe: null
+      ignore: []
+      config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
     disaggregation:
       enabled: false
       prefill_replicas: 1
@@ -447,6 +497,7 @@ data:
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
+  gen_batch_size: null
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}
@@ -472,9 +523,6 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
-  continuous_token:
-    enable: false
-    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -502,6 +550,7 @@ critic:
     ulysses_parallel_size: 1
     expert_parallel_size: 1
     mixed_precision: true
+    low_precision_reduce_scatter_comm: false
     seed: 42
     full_determinism: false
     init_device: meta
@@ -516,6 +565,8 @@ critic:
     forward_only: false
     enable_fsdp_offload: false
     enable_reentrant: false
+    broadcast_model_weights_from_rank0: true
+    ep_sharded_stream_load: false
     attn_implementation: flash_attention_2
     moe_implementation: fused
     cross_entropy_loss_implementation: eager
@@ -526,9 +577,17 @@ critic:
     causal_conv1d_implementation: eager
     chunk_gated_delta_rule_implementation: eager
     load_balancing_loss_implementation: eager
+    dsa_indexer_implementation: eager
+    dsa_attention_implementation: eager
+    mhc_implementation: eager
+    qat_implementation: none
     force_use_huggingface: false
-    activation_gpu_limit: 0.0
+    enable_async_activation_offload: false
+    activation_offload_modules: []
+    activation_offload_host_cache_limit_gb: 4.0
     basic_modules: []
+    pad_to_length: false
+    pad_to_length_bucket: 1024
     router_replay:
       _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled
@@ -547,6 +606,7 @@ critic:
   data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+  loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
     _target_: verl.trainer.config.CheckpointConfig
     save_contents:
@@ -562,6 +622,10 @@ critic:
     all_ranks: false
     ranks: []
     save_path: ${oc.select:global_profiler.save_path,null}
+    relocate_results: ${oc.select:global_profiler.relocate_results,false}
+    finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+    finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+    finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
     tool_config:
       nsys:
         _target_: verl.utils.profiler.config.NsightToolConfig
@@ -576,10 +640,18 @@ critic:
         _target_: verl.utils.profiler.config.TorchProfilerToolConfig
         contents: []
         discrete: false
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
       torch_memory:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
       precision_debugger:
         _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
         config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
@@ -744,8 +816,12 @@ reward:
       'n': 1
       prompt_length: 2048
       response_length: 2048
-      quantization: null
-      quantization_config_file: null
+      quantization:
+        _target_: verl.workers.config.RolloutQuantizationConfig
+        linear: null
+        moe: null
+        ignore: []
+        config_file: null
       mtp: null
       disaggregation:
         enabled: false
@@ -769,11 +845,18 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
+    score_centering: false
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: true
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: reward
+    max_num_gen_batches: 0
+    max_inflight_gen_batches: 1
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:
@@ -797,6 +880,7 @@ distillation:
     distillation_loss_coef: 1.0
     loss_max_clamp: null
     log_prob_min_clamp: null
+    tail_mass_eps: 1.0e-06
     use_policy_gradient: false
     policy_loss_mode: vanilla
     clip_ratio: 0.2
@@ -835,6 +919,24 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+transfer_queue:
+  enable: false
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: null
+      num_data_storage_units: 8
+      ssd_offload:
+        enabled: false
+        path: null
+        threshold_bytes: 1048576
+    MooncakeStore:
+      auto_init: false
+      metadata_server: P2PHANDSHAKE
+      master_server_address: localhost:50124
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      hard_pin: true
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -853,6 +955,7 @@ trainer:
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
+  checkpoint_callback_class: null
   val_before_train: true
   val_only: false
   test_freq: -1
@@ -871,11 +974,21 @@ trainer:
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      num_warmup_batches: 4
+      num_warmup_batches: 1
       parameter_sync_step: 4
+      hybrid_rollout:
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+        enable_switch: false
+        switch_threshold_ratio: 0.4
+        adaptive_switch_threshold: true
+        switch_threshold_step_up: 0.05
+        switch_threshold_step_down: 0.03
+        switch_threshold_release_steps: 2
+        switch_cost_window_size: 3
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
+      sync_refill_failed_groups: false
       custom_sampler:
         path: null
         name: null
@@ -886,6 +999,10 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  relocate_results: false
+  finish_hook_cmd: null
+  finish_hook_all_ranks: false
+  finish_hook_ranks: []
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig
@@ -904,6 +1021,7 @@ global_profiler:
     torch_memory:
       trace_alloc_max_entries: 100000
       stack_depth: 32
+      memory_snapshot_num_steps: 1
       context: all
       stacks: all
       kw_args: {}
@@ -913,28 +1031,14 @@ global_profiler:
       steps: null
       stages: null
       strict: false
-transfer_queue:
-  enable: false
-  metrics:
-    enabled: false
-    port: 0
-  backend:
-    storage_backend: SimpleStorage
-    SimpleStorage:
-      total_storage_size: 100000
-      num_data_storage_units: 8
-    MooncakeStore:
-      auto_init: false
-      metadata_server: localhost:50123
-      master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
-      global_segment_size: 4294967296
-      local_buffer_size: 1073741824
-      device_name: ''
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  rollout_tq:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []
@@ -947,4 +1051,6 @@ skip:
 ray_kwargs:
   ray_init:
     num_cpus: null
+    runtime_env:
+      py_executable: null
   timeline_json_file: null

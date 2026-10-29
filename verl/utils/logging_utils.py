@@ -14,8 +14,22 @@
 
 import logging
 import os
+import sys
 
 import torch
+
+
+def configure_verl_logging() -> None:
+    """Isolate verl logs from root logger changes in the current process."""
+    level = os.getenv("VERL_LOGGING_LEVEL", "INFO")
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s:%(message)s"))
+
+    verl_logger = logging.getLogger("verl")
+    verl_logger.handlers = [handler]
+    verl_logger.setLevel(level)
+    verl_logger.propagate = False
 
 
 def set_basic_config(level):

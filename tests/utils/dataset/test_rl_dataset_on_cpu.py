@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import os
 import pickle
 import ssl
+import threading
 from copy import deepcopy
 from pathlib import Path
 
@@ -105,6 +107,7 @@ def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_fil
         return _FakeProcessor()
 
     monkeypatch.setattr(rl_dataset_module, "_load_filter_processor", load_fake_processor, raising=False)
+    monkeypatch.setattr(rl_dataset_module, "_FILTER_PROCESSOR_CACHE", {})
 
     class FakeDataFrame(list):
         def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
@@ -130,18 +133,18 @@ def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_fil
     assert filtered[0]["prompt"][0]["content"] == "short"
 
 
-def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processor_path():
+@pytest.mark.parametrize("reload_path", [None, ""])
+def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processor_path(reload_path):
     calls = []
 
     class PathlessProcessor(_UnpickleableProcessor):
-        tokenizer = type("PathlessTokenizer", (_FakeTokenizer,), {"name_or_path": None})()
+        tokenizer = type("PathlessTokenizer", (_FakeTokenizer,), {"name_or_path": reload_path})()
 
     class FakeDataFrame(list):
         def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
             calls.append(num_proc)
             assert num_proc is None
-            assert "processor" in fn_kwargs
-            assert "processor_path" not in fn_kwargs
+            assert fn_kwargs is None
             return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
 
     dataset = _mock_filter_dataset(processor=PathlessProcessor(), num_workers=2)
@@ -159,18 +162,21 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processo
     assert filtered[0]["prompt"][0]["content"] == "short"
 
 
-def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenizer_path():
+@pytest.mark.parametrize("reload_path", [None, ""])
+def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenizer_path(reload_path):
     calls = []
 
     class PathlessTokenizer(_FakeTokenizer):
-        name_or_path = None
+        name_or_path = reload_path
+
+        def __init__(self):
+            self.context = ssl.create_default_context()
 
     class FakeDataFrame(list):
         def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
             calls.append(num_proc)
             assert num_proc is None
-            assert "tokenizer" in fn_kwargs
-            assert "tokenizer_path" not in fn_kwargs
+            assert fn_kwargs is None
             return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
 
     dataset = _mock_filter_dataset(num_workers=2)
@@ -187,6 +193,71 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenize
     assert calls == [None]
     assert len(filtered) == 1
     assert filtered[0]["prompt"][0]["content"] == "short"
+
+
+@pytest.mark.parametrize("num_workers", [None, 2])
+@pytest.mark.parametrize("use_processor", [False, True])
+def test_prompt_filter_preserves_runtime_chat_template(tmp_path, num_workers, use_processor):
+    """Real filtering must retain runtime templates without pickling live SSL contexts."""
+    from datasets import Dataset
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import (
+        PreTrainedTokenizerFast,
+        Qwen2VLConfig,
+        Qwen2VLImageProcessor,
+        Qwen2VLProcessor,
+        Qwen2VLVideoProcessor,
+    )
+
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "[EOS]": 1, "short": 2, "extra": 3}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend, unk_token="[UNK]", eos_token="[EOS]", pad_token="[EOS]"
+    )
+    tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    tokenizer_path = tmp_path / "tokenizer"
+    processor = None
+    if use_processor:
+        processor = Qwen2VLProcessor(
+            image_processor=Qwen2VLImageProcessor(),
+            video_processor=Qwen2VLVideoProcessor(),
+            tokenizer=tokenizer,
+            chat_template=tokenizer.chat_template,
+        )
+        processor.save_pretrained(tokenizer_path)
+        Qwen2VLConfig().save_pretrained(tokenizer_path)
+        processor = hf_processor(str(tokenizer_path))
+        assert processor is not None
+    else:
+        tokenizer.save_pretrained(tokenizer_path)
+    tokenizer = hf_tokenizer(str(tokenizer_path))
+    formatter = processor if use_processor else tokenizer
+    formatter.chat_template += " extra extra"
+    # Reproduce the original failure with a live object that cannot be pickled.
+    formatter.context = ssl.create_default_context()
+    with pytest.raises(TypeError, match="SSLContext"):
+        pickle.dumps(formatter)
+
+    data_path = tmp_path / "prompts.parquet"
+    Dataset.from_list(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    ).to_parquet(data_path)
+    dataset = RLHFDataset(
+        data_files=str(data_path),
+        tokenizer=tokenizer,
+        processor=processor,
+        config=OmegaConf.create(
+            {"max_prompt_length": 3, "filter_overlong_prompts_workers": num_workers, "cache_dir": str(tmp_path)}
+        ),
+    )
+
+    assert len(dataset) == 1
+    assert dataset[0]["raw_prompt"][0]["content"] == "short"
 
 
 def test_rl_dataset():
@@ -329,6 +400,36 @@ def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
         {"type": "text", "text": "Describe "},
         {"type": "image", "image": image_path},
     ]
+
+
+def test_process_multi_modal_info_keeps_event_loop_responsive(monkeypatch):
+    processing_started = threading.Event()
+    observer_ran = threading.Event()
+
+    def blocking_process_multi_modal_info(cls, messages, image_patch_size, config):
+        processing_started.set()
+        observer_ran.wait(timeout=0.2)
+        return None, None, None
+
+    monkeypatch.setattr(
+        RLHFDataset,
+        "_process_multi_modal_info",
+        classmethod(blocking_process_multi_modal_info),
+    )
+
+    async def run():
+        async def observe_event_loop():
+            await asyncio.sleep(0)
+            observer_ran.set()
+
+        observer = asyncio.create_task(observe_event_loop())
+        await RLHFDataset.process_multi_modal_info([], image_patch_size=14, config=OmegaConf.create({}))
+        observer_ran_while_processing = observer_ran.is_set()
+        await observer
+        return observer_ran_while_processing
+
+    assert asyncio.run(run())
+    assert processing_started.is_set()
 
 
 def test_image_rl_data():

@@ -19,11 +19,12 @@ from verl.base_config import BaseConfig
 __all__ = ["DisaggregationConfig"]
 
 _ALLOWED_BACKENDS = ("nixl", "mooncake", "ascend", "mori", "fake")
+_ALLOWED_MOONCAKE_PROTOCOLS = ("nvlink", "local", "rdma", "tcp")
 
 
 @dataclass
 class DisaggregationConfig(BaseConfig):
-    """Prefill-Decode disaggregation knobs (SGLang only)."""
+    """Prefill-Decode disaggregation knobs."""
 
     enabled: bool = False
     prefill_replicas: int = 1
@@ -32,6 +33,7 @@ class DisaggregationConfig(BaseConfig):
     transfer_backend: str = "nixl"
     bootstrap_port: Optional[int] = None
     ib_device: Optional[str] = None
+    mooncake_protocol: str = "nvlink"
 
     def __post_init__(self) -> None:
         if not self.enabled:
@@ -45,6 +47,10 @@ class DisaggregationConfig(BaseConfig):
             )
         if self.bootstrap_port is not None and not (0 < self.bootstrap_port < 65536):
             raise ValueError(f"bootstrap_port out of range: {self.bootstrap_port}")
+        if self.transfer_backend == "mooncake" and self.mooncake_protocol not in _ALLOWED_MOONCAKE_PROTOCOLS:
+            raise ValueError(
+                f"disaggregation.mooncake_protocol={self.mooncake_protocol!r} not in {_ALLOWED_MOONCAKE_PROTOCOLS}"
+            )
 
     def effective_decode_tp(self, prefill_tp: int) -> int:
         """Resolve decode TP (defaults to ``prefill_tp``). Test-only helper; runtime paths

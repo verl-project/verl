@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 03/05/2026
+Last updated: 09/29/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -10,7 +10,7 @@ verl supports two FP8 modes for accelerating RL training:
 | **FP8 End-to-End** | FP8 (Megatron) | FP8 (vLLM) |
 
 > [!TIP]
-> For ready-to-run scripts, see the [low-precision recipe directory](https://github.com/verl-project/verl-recipe/low_precision).
+> For ready-to-run scripts, see the [low-precision recipe directory](https://github.com/verl-project/verl-recipe/tree/main/low_precision).
 
 ---
 
@@ -20,19 +20,15 @@ FP8 rollout-only mode keeps training in BF16 and quantizes rollout inference to 
 
 ### Implementation
 
-We monkey patch several vLLM functions to enable FP8 rollout for reinforcement learning:
-
-1. **Quantize weights**: Quantize model weights on-the-fly from higher-precision formats to FP8.
-2. **Process weights after loading**: For vLLM, we replace the `vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading` function to handle weight processing after quantization. For SGLang, this patch is not needed as it natively supports loading quantized weights.
+The rollout engine starts from a compressed-tensors `quantization_config` with dummy weights, and the trainer quantizes every weight sync to that config with the compressed-tensors compressors (`verl/utils/qat/compressed_tensors.py`). On the vLLM side we monkey patch `process_weights_after_loading` of the compressed-tensors FP8 linear/MoE methods so refits are written back into the live parameters (`verl/utils/vllm/vllm_fp8_utils.py`).
 
 ### Support Matrix
 
-- FP8 blockwise quantization for rollout
+- FP8 blockwise quantization for rollout (compressed-tensors preset `FP8_BLOCK`)
   - Used in Deepseek, which is 1x128 quantization for activations and 128x128 quantization for model weights
 - Dense models and MoE models
 - Async rollout interfaces
-- vLLM 0.10.x & vLLM 0.11 & vLLM 0.12 & SGLang 0.5.5
-- FSDP and Megatron training backends
+- vLLM or SGLang rollout (SGLang validated on Hopper only) with the Megatron training backend; TRT-LLM and FSDP are not supported
 
 ### Usage
 
@@ -40,14 +36,20 @@ Enable in config file:
 
 ```yaml
 rollout:
-  quantization: "fp8"
+  quantization:
+    linear: FP8_BLOCK  # dense linear layers (attention, dense MLP, shared experts)
+    moe: FP8_BLOCK     # routed experts
+    ignore: []         # extra "re:" patterns kept in BF16
 ```
 
 Or via command line:
 
 ```bash
-actor_rollout_ref.rollout.quantization=fp8
+actor_rollout_ref.rollout.quantization.linear=FP8_BLOCK \
+actor_rollout_ref.rollout.quantization.moe=FP8_BLOCK
 ```
+
+Routers, `lm_head`, embeddings, vision towers and MTP layers stay in BF16 by default, as do layers whose weight shape is not a multiple of the 128x128 block. To provide a complete compressed-tensors `quantization_config` instead, set `actor_rollout_ref.rollout.quantization.config_file=/path/to/quantization_config.json` (exclusive with `linear` / `moe` / `ignore`).
 
 ### Experiments and Outcomes
 
@@ -130,7 +132,7 @@ FP8 E2E applies FP8 to the entire RL pipeline: forward/backward passes via Trans
 
 - **CUDA 12.9+** (required for block-wise FP8 scaling)
 - **Transformer Engine** with block-wise FP8 support
-- Environment variable: `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1`
+- Environment variable: `NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1`, on **Hopper only**. Do not set it on Blackwell (SM100+): there Transformer Engine runs block-wise scaling through MXFP8 GEMMs, whose E8M0 scales hold only an exponent, so it requires power-of-two block scales and stops at the first FP8 quantization with `Assertion failed: pow2_scale ... requires using power of two scaling factors` when the variable is set (see [#6172](https://github.com/verl-project/verl/issues/6172)). Leaving it unset gives power-of-two scales, the Transformer Engine default.
 
 ### Key Configuration
 
@@ -145,8 +147,9 @@ actor_rollout_ref.actor.optim.override_optimizer_config:
   fp8_recipe: "blockwise"
 
 # FP8 rollout inference (vLLM)
-actor_rollout_ref.rollout:
-  quantization: fp8
+actor_rollout_ref.rollout.quantization:
+  linear: FP8_BLOCK
+  moe: FP8_BLOCK
 ```
 
 ### Support Matrix

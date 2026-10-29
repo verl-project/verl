@@ -25,6 +25,11 @@ All CI tests are configured by yaml files in `.github/workflows/`. Here's an ove
 4. Unit tests
   - `cpu_unit_tests.yml`, run pytest on all scripts with file name pattern `tests/**/test_*_on_cpu.py`
   - `gpu_unit_tests.yml`, run pytest on all scripts with file without the `on_cpu.py` suffix.
+  - An `on_cpu.py` script needs no GPU but may still need a backend the `cpu` extra cannot install
+    (vllm, sglang, ...). Such a script must `pytest.importorskip` its backend, so that
+    `cpu_unit_tests.yml` skips it, and be listed explicitly in a workflow whose venv has that
+    backend synced (e.g. `vllm.yml` for vllm). Megatron is not one of those: `megatron-core` is
+    in the `cpu` extra, so `*_on_cpu.py` scripts may import it directly.
   - Since cpu/gpu unit tests by default runs all tests under `tests`, please make sure tests are manually excluded in them when
     - new workflow yaml is added to `.github/workflows`
     - new tests are added to workflow mentioned in 2.

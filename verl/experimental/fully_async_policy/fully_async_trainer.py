@@ -29,6 +29,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
     MetricsAggregator,
     assemble_batch_from_rollout_samples,
 )
+from verl.experimental.fully_async_policy.dynamic_schedule import DynamicScheduleContext
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -144,25 +145,74 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.progress_bar = None
         self.trigger_parameter_sync_step = config.async_training.trigger_parameter_sync_step
         self.last_ckpt_version = 0
-        self.train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
+        # When use_trainer_do_validate OR use_dynamic_resource_scheduling is enabled, trainer
+        # workers must carry a rollout engine (Role.ActorRollout) so that the master rank
+        # can push weight updates directly to the colocated hybrid rollout instance via the
+        # naive path (hybrid_checkpoint_manager).
+        needs_hybrid_rollout = config.async_training.use_trainer_do_validate or config.async_training.get(
+            "use_dynamic_resource_scheduling", False
+        )
+        self.train_role = Role.ActorRollout if needs_hybrid_rollout else Role.Actor
 
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
-        total_gpus = (
-            config.trainer.nnodes * config.trainer.n_gpus_per_node
-            + config.rollout.nnodes * config.rollout.n_gpus_per_node
+        self._step_wait_times: list[float] = []  # per-collection wait times within the current step (seconds)
+        # Per-collection count of samples that actually had to be waited on (not
+        # already sitting in the queue at collection start). Parallel to
+        # _step_wait_times; see _get_samples_from_queue().
+        self._step_wait_samples: list[int] = []
+        # Hybrid GPUs (trainer-node GPUs that switch between rollout/train under dynamic
+        # resource scheduling) and standalone GPUs (dedicated rollout-node GPUs, always
+        # doing rollout). Used both for the existing throughput metric and to combine
+        # dynamic_resource/{train,rollout}_resource_utilization into a single
+        # dynamic_resource/resource_utilization metric (see MetricsAggregator).
+        hybrid_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node
+        standalone_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
+        total_gpus = hybrid_gpus + standalone_gpus
+        self.metrics_aggregator = MetricsAggregator(
+            total_gpus=total_gpus, hybrid_gpus=hybrid_gpus, standalone_gpus=standalone_gpus
         )
-        self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
 
         # Reference to rollouter for parameter synchronization
         self.rollouter = None
         self.checkpoint_manager = None
 
         # Hybrid checkpoint manager for trainer-side validation (use_trainer_do_validate)
+        # and/or dynamic resource scheduling (use_dynamic_resource_scheduling).
         # Uses naive backend to sync weights from trainer to hybrid rollout replicas.
-        # Initialized in _setup_hybrid_checkpoint_manager_and_sleep() via set_rollouter().
+        # Initialized in _setup_hybrid_checkpoint_manager() via set_rollouter().
         self.hybrid_checkpoint_manager = None
+
+        # Dynamic resource controller — activated when use_dynamic_resource_scheduling=True.
+        self.dynamic_resource_controller = None
+        self.dynamic_schedule_enabled: bool = config.async_training.get("use_dynamic_resource_scheduling", False)
+        # Name of the scheduling policy (resolved in _setup_dynamic_resource_controller).
+        self._dynamic_schedule_policy_name: str = config.async_training.get("dynamic_schedule_policy", "default")
+        # Initial deactivate_ratio forwarded to the policy constructor.
+        self._dynamic_schedule_deactivate_ratio_init: float = config.async_training.get(
+            "dynamic_schedule_deactivate_ratio", 0.3
+        )
+        # Whether to enable request rebalancing (abort + clear sticky cache +
+        # resume) after hybrid replica activation. Default False.
+        self._dynamic_schedule_enable_rebalance: bool = config.async_training.get(
+            "dynamic_schedule_enable_rebalance", True
+        )
+        self.staleness_threshold: float = config.async_training.get("staleness_threshold", 1)
+
+        # When standalone rollout resources are 0 (rollout.nnodes == 0), there are no
+        # standalone replicas: all rollout happens on hybrid (trainer-side) GPUs.
+        self.only_hybrid: bool = self.dynamic_schedule_enabled and config.rollout.nnodes == 0
+
+        # Per-step dynamic scheduling context — built once at init, mutable fields updated each step.
+        self.dynamic_schedule_ctx = DynamicScheduleContext(
+            required_samples=self.required_samples,
+            trigger_parameter_sync_step=self.trigger_parameter_sync_step,
+            total_generated_samples=0,
+            expected_samples=0,
+            buffer_samples=0,
+            only_hybrid=self.only_hybrid,
+        )
 
     async def _setup_checkpoint_manager(self):
         """Setup checkpoint manager after rollouter is initialized"""
@@ -171,7 +221,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config, actor_wg=self.actor_wg, replicas=replicas
         )
-        print("[FullyAsyncTrainer] Checkpoint manager initialized")
+        print(f"[FullyAsyncTrainer] Checkpoint manager initialized (backend={checkpoint_engine_config.backend})")
 
     async def _setup_hybrid_checkpoint_manager(self):
         """Setup hybrid checkpoint manager and perform initial sleep of hybrid replicas.
@@ -189,7 +239,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         This mirrors the colocate pattern in ray_trainer.py:882-889 but fetches
         replicas from the rollouter's ALM via RPC since they live on the rollout side.
         """
-        if not self.config.async_training.use_trainer_do_validate:
+        needs_hybrid = self.config.async_training.use_trainer_do_validate or self.config.async_training.get(
+            "use_dynamic_resource_scheduling", False
+        )
+        if not needs_hybrid:
             return
 
         # --- Part 1: Create hybrid CheckpointEngineManager with naive backend ---
@@ -246,12 +299,59 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """Set message queue client"""
         self.message_queue_client = message_queue_client
 
+    async def _setup_dynamic_resource_controller(self) -> None:
+        """Initialise :class:`DynamicResourceController` with the configured policy.
+
+        The policy is selected by ``async_training.dynamic_schedule_policy`` (a
+        registered name string) or can be overridden by subclasses.  The
+        ``only_hybrid`` flag is derived from the number of standalone replicas
+        so the policy can adjust its behaviour accordingly.
+
+        Pre-conditions:
+          - ``self.hybrid_checkpoint_manager`` already set up.
+          - ``self.rollouter`` is set.
+        """
+        from verl.experimental.fully_async_policy.dynamic_schedule import (
+            DynamicResourceController,
+            build_policy,
+        )
+
+        num_standalone = len(ray.get(self.rollouter.get_standalone_replicas.remote()))
+        num_hybrid = len(ray.get(self.rollouter.get_all_hybrid_replicas.remote()))
+        only_hybrid = num_standalone == 0
+
+        policy = build_policy(
+            self._dynamic_schedule_policy_name,
+            deactivate_ratio=self._dynamic_schedule_deactivate_ratio_init,
+            only_hybrid=only_hybrid,
+        )
+        print(
+            f"[FullyAsyncTrainer] Dynamic scheduling policy '{self._dynamic_schedule_policy_name}' "
+            f"instantiated (deactivate_ratio={self._dynamic_schedule_deactivate_ratio_init}, "
+            f"only_hybrid={only_hybrid})"
+        )
+
+        self.dynamic_resource_controller = DynamicResourceController(
+            rollouter=self.rollouter,
+            hybrid_checkpoint_manager=self.hybrid_checkpoint_manager,
+            num_standalone_replicas=num_standalone,
+            num_hybrid_replicas=num_hybrid,
+            policy=policy,
+        )
+        print(
+            f"[FullyAsyncTrainer] DynamicResourceController initialised "
+            f"(standalone={num_standalone}, hybrid={num_hybrid})"
+        )
+
     async def set_rollouter(self, rollouter):
         """Set rollouter reference and initialize all checkpoint managers."""
         self.rollouter = rollouter
         # Setup checkpoint manager after rollouter is set
         await self._setup_checkpoint_manager()
         await self._setup_hybrid_checkpoint_manager()
+        # Setup dynamic resource controller if enabled
+        if self.dynamic_schedule_enabled:
+            await self._setup_dynamic_resource_controller()
 
     def set_total_train_steps(self, total_training_steps):
         self.total_train_steps = total_training_steps
@@ -287,6 +387,16 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         # Collect samples using a simple loop calling get_sample
         consumer_start = time.time()
+        # Snapshot the queue backlog at collection start: samples already sitting
+        # in the queue are served instantly and don't reflect actual generation
+        # rate, so they must be excluded from the wait-time-per-sample estimate.
+        # Only queried when dynamic scheduling is enabled, since it's the sole consumer
+        # of this signal and the extra RPC would otherwise be pure overhead.
+        if self.dynamic_schedule_enabled:
+            queue_size_at_start = await self.message_queue_client.get_queue_size()
+            pending_wait_samples = max(0, self.required_samples - queue_size_at_start)
+        else:
+            pending_wait_samples = 0
         queue_samples = []
         queue_len = 0
         while len(queue_samples) < self.required_samples:
@@ -301,6 +411,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 break
 
             queue_samples.append(sample)
+            print(
+                f"[FullyAsyncTrainer] sample collected {len(queue_samples)}/{self.required_samples}. "
+                f"mq_len: {queue_len}",
+                flush=True,
+            )
 
             if len(queue_samples) % 64 == 0:
                 print(
@@ -329,12 +444,19 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
 
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
+        self._step_wait_times.append(total_wait_time)
+        # pending_wait_samples may be 0 when this collection was served entirely
+        # from queue backlog (no real waiting for generation happened); the policy
+        # layer special-cases that when estimating the generation rate.
+        self._step_wait_samples.append(pending_wait_samples)
         return 0, batch
 
     def _create_actor_rollout_classes(self):
-        # create actor — always use Role.Actor (not ActorRollout) even when
-        # use_trainer_do_validate is enabled. Rollout capability on trainer GPUs
-        # is handled by ElasticAgentLoopManager's hybrid replicas.
+        # create actor — the role is Role.ActorRollout when use_trainer_do_validate or
+        # use_dynamic_resource_scheduling is enabled (so the trainer worker also hosts a
+        # local rollout engine for naive weight sync via hybrid_checkpoint_manager).
+        # Otherwise it is Role.Actor.  Rollout capability is managed by ElasticAgentLoopManager's
+        # hybrid replicas.
         for role in [self.train_role]:
             resource_pool = self.resource_pool_manager.get_resource_pool(role)
             role_cls = RayClassWithInitArgs(
@@ -405,9 +527,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         self.progress_bar.close()
         if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
-            weights_updated = await self._fit_update_weights()
-            if weights_updated:
-                self._fit_log_aggregated_training_metrics()
+            rollout_reset_timing_raw = await self._fit_update_weights()
+            if rollout_reset_timing_raw is not None:
+                self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
             await self._fit_validate()
         self._fit_save_checkpoint(force=True)
 
@@ -435,6 +557,31 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._fit_start_profile(should_profiler=should_profile)
 
         with marked_timer("step", self.timing_raw):
+            ctrl = self.dynamic_resource_controller
+            if self.dynamic_schedule_enabled and ctrl.policy.should_deactivate(
+                global_steps=self.current_param_version,
+                is_hybrid_active=ctrl.is_hybrid_active,
+                ctx=self.dynamic_schedule_ctx,
+            ):
+                threshold_samples = ctrl.policy.deactivate_wait_samples(self.dynamic_schedule_ctx)
+                with marked_timer("wait_for_enough_samples", self.timing_raw):
+                    _ = ray.get(self.rollouter.wait_for_enough_samples.remote(threshold_samples))
+                _deact_start = time.time()
+                await ctrl.deactivate_hybrid_replicas(self.current_param_version)
+                deactivate_duration = time.time() - _deact_start
+                self.dynamic_schedule_ctx.last_deactivate_duration_s += deactivate_duration
+                print(
+                    f"[FullyAsyncTrainer] step={self.current_param_version} "
+                    f"deactivation took {deactivate_duration:.2f}s "
+                    f"(accumulated this cycle: {self.dynamic_schedule_ctx.last_deactivate_duration_s:.2f}s)",
+                    flush=True,
+                )
+            elif self.dynamic_schedule_enabled:
+                # Not deactivating this step: still emit the metric as 0 so the
+                # timing_s/wait_for_enough_samples curve stays continuous.
+                self.timing_raw["wait_for_enough_samples"] = 0.0
+
+            _allocated_start = time.time()
             batch = await self._fit_generate(None)
             batch = self._fit_compute_reward(batch)
             batch = self._fit_compute_log_prob(batch)
@@ -444,16 +591,54 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             batch = self._fit_update_critic(batch)
             batch = self._fit_update_actor(batch)
             self._fit_update_local_step()
-            weights_updated = await self._fit_update_weights()
+            rollout_reset_timing_raw = await self._fit_update_weights()
             self._fit_dump_data(batch)
+            self._record_train_resource_utilization(allocated_time=time.time() - _allocated_start)
 
         await self._fit_validate()
         self._fit_save_checkpoint()
         self._fit_stop_profile(should_profiler=should_profile)
         self._fit_collect_metrics(batch)
-        if weights_updated:
-            self._fit_log_aggregated_training_metrics()
+        if rollout_reset_timing_raw is not None:
+            self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
         self._fit_postprocess_step()
+
+    # Timing-raw keys that represent actual training-GPU compute, from
+    # _fit_compute_reward() through _fit_update_actor(). Some keys may be
+    # absent for a given step (e.g. "values"/"update_critic" when
+    # use_critic=False, or "old_log_prob" under rollout_correction bypass
+    # mode), so callers must default missing keys to 0.0.
+    _TRAIN_COMPUTE_TIMING_KEYS = (
+        "reward",
+        "old_log_prob",
+        str(Role.RefPolicy),
+        "values",
+        "adv",
+        "update_critic",
+        "update_actor",
+    )
+
+    def _record_train_resource_utilization(self, allocated_time: float) -> None:
+        """Record raw (unratioed) numerator/denominator seconds for train-resource utilization.
+
+        Numerator: time spent on actual training-GPU compute, i.e. the sum of
+        the timing_raw entries from _fit_compute_reward() through
+        _fit_update_actor() (reward, old_log_prob, ref, values, adv,
+        update_critic, update_actor).
+
+        Denominator: wall-clock time allocated to this fit_step()'s "training
+        turn", i.e. from _fit_generate() through _fit_update_weights() and
+        _fit_dump_data() (includes timing_s/param_sync and any hybrid
+        activation — these are intentionally NOT subtracted).
+
+        Both quantities are logged as raw seconds (not a ratio) so that
+        MetricsAggregator can sum them across all micro-steps in a sync
+        cycle first, and the ratio is computed once from the summed totals
+        in _special_metrics_aggergate() (see "dynamic_resource/train_resource_utilization").
+        """
+        train_compute_time = sum(self.timing_raw.get(key, 0.0) for key in self._TRAIN_COMPUTE_TIMING_KEYS)
+        self.metrics["dynamic_resource/train_compute_time_s"] = train_compute_time
+        self.metrics["dynamic_resource/train_allocated_time_s"] = allocated_time
 
     async def _fit_generate(self, batch: DataProto = None) -> DataProto | None:
         metrics = self.metrics
@@ -502,17 +687,74 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.current_param_version += 1
             self.local_trigger_step = 1
 
-    async def _fit_update_weights(self):
+    async def _fit_update_weights(self) -> dict | None:
+        """Sync updated weights to rollout replicas.
+
+        Returns:
+            The timing_raw dict returned by the rollouter's reset_staleness() (contains
+            dynamic_resource/rollout_resource_utilization, used by
+            _fit_log_aggregated_training_metrics()) if weights were actually updated this
+            call, or None if this call was a no-op (not the last local_trigger_step). Callers
+            should treat "weights were updated" and "return value is not None" as equivalent.
+        """
         if self.local_trigger_step != 1:
-            return False
+            return None
 
         steps = self.config.global_profiler.steps
         last_profiler_step = self.current_param_version
         if steps is not None and last_profiler_step in steps:
             await asyncio.wrap_future(self.rollouter._stop_profiling.remote().future())
 
+        _total_generated_samples, _completed_steps = ray.get(
+            [self.rollouter.get_total_produced_samples.remote(), self.rollouter.get_completed_steps.remote()]
+        )
+        _expect_samples = self.dynamic_schedule_ctx.step_required_samples * _completed_steps
+        _buffer_sampels = self.dynamic_schedule_ctx.step_required_samples * self.staleness_threshold
+
+        if self.dynamic_schedule_enabled:
+            ctrl = self.dynamic_resource_controller
+            # Update per-step mutable fields on the persistent context.
+            ctx = self.dynamic_schedule_ctx
+            ctx.total_generated_samples = _total_generated_samples
+            ctx.expected_samples = _expect_samples
+            ctx.buffer_samples = _buffer_sampels
+            ctx.step_wait_times = list(self._step_wait_times)
+            ctx.step_wait_samples = list(self._step_wait_samples)
+            should_activate = ctrl.policy.should_activate_after_step(
+                global_steps=self.current_param_version,
+                is_hybrid_active=ctrl.is_hybrid_active,
+                ctx=ctx,
+            )
+
         with marked_timer("timing_s/param_sync", self.timing_raw):
-            await self.checkpoint_manager.update_weights(global_steps=self.current_param_version)
+            # Step 1: NCCL broadcast from trainer to standalone rollout replicas.
+            # Skipped when there are no standalone replicas (e.g. rollout.nnodes=0,
+            # all rollout is hybrid) -- there is nothing to sync weights to.
+            if not self.only_hybrid:
+                await self.checkpoint_manager.update_weights(
+                    global_steps=self.current_param_version,
+                )
+            # Step 2: When dynamic resource scheduling is enabled, the Trainer GPUs
+            # also co-host hybrid rollout replicas.  Push weights to them via
+            # a separate naive sync (same mechanism as colocated training).
+            if self.dynamic_schedule_enabled and should_activate:
+                _act_start = time.time()
+                await self.dynamic_resource_controller.sync_hybrid_weights(
+                    global_steps=self.current_param_version,
+                )
+                await self.dynamic_resource_controller.activate_hybrid_replicas(self.current_param_version)
+
+                # Allow policy to redistribute requests across newly activated replicas.
+                if self._dynamic_schedule_enable_rebalance:
+                    self.dynamic_resource_controller.policy.request_rebalance(
+                        global_steps=self.current_param_version,
+                        ctx=ctx,
+                    )
+
+                self.dynamic_schedule_ctx.last_activate_duration_s += time.time() - _act_start
+
+        timing_raw = await asyncio.wrap_future(self.rollouter.reset_staleness.remote().future())
+
         print(
             f"[FullyAsyncTrainer] _fit_update_weights, "
             f"timing_s/param_sync: {self.timing_raw['timing_s/param_sync']:.4f} seconds "
@@ -524,17 +766,42 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if steps is not None and profiler_step in steps:
             await asyncio.wrap_future(self.rollouter._start_profiling.remote().future())
 
-        # Reset staleness in rollouter
-        timing_raw = await asyncio.wrap_future(self.rollouter.reset_staleness.remote().future())
+        if self.dynamic_schedule_enabled:
+            # Let the policy update its internal state (e.g. adapt deactivate_ratio).
+            self.dynamic_resource_controller.policy.update_after_step(
+                global_steps=self.current_param_version,
+                ctx=ctx,
+            )
+            # Now that update_after_step() has consumed this cycle's switch timing,
+            # reset it so it doesn't leak into the next sync cycle.
+            self.dynamic_schedule_ctx.last_deactivate_duration_s = 0.0
+            self.dynamic_schedule_ctx.last_activate_duration_s = 0.0
+
+        self._step_wait_times = []  # reset for next step
+        self._step_wait_samples = []  # reset for next step
+
         self.logger.log(
             data=timing_raw,
             step=self.current_param_version,
         )
 
-        return True
+        return timing_raw
 
-    def _fit_log_aggregated_training_metrics(self):
-        aggregated_metrics = self.metrics_aggregator.get_aggregated_metrics()
+    def _fit_log_aggregated_training_metrics(self, rollout_reset_timing_raw: dict):
+        """Log aggregated training metrics for the sync cycle just finished.
+
+        Args:
+            rollout_reset_timing_raw: timing_raw dict returned by _fit_update_weights()
+                (i.e. the rollouter's reset_staleness()). rollout_resource_utilization is
+                computed on the rollouter side and passed in here (rather than flowing
+                through add_step_metrics()) so it can be combined with
+                dynamic_resource/train_resource_utilization into
+                dynamic_resource/resource_utilization -- see
+                MetricsAggregator._special_metrics_aggergate().
+        """
+        aggregated_metrics = self.metrics_aggregator.get_aggregated_metrics(
+            rollout_resource_utilization=rollout_reset_timing_raw.get("dynamic_resource/rollout_resource_utilization"),
+        )
         if aggregated_metrics:
             self.logger.log(
                 data=aggregated_metrics,
@@ -632,6 +899,13 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _fit_postprocess_step(self):
         self.global_steps += 1
+
+        # Snapshot of samples left in the message queue for subsequent steps, taken right
+        # after this fit_step() (including any partial-rollout resumption) has fully
+        # finished. Registered under the "last" aggregation rule (see MetricsAggregator)
+        # so the value reported per sync-cycle is this end-of-cycle snapshot rather than
+        # an average across the cycle's micro-steps.
+        self.metrics["dynamic_resource/mq_size"] = self.message_queue_client.get_queue_size_sync()
 
         self.metrics_aggregator.add_step_metrics(
             metrics=self.metrics, sample_count=self.required_samples, timestamp=time.time()

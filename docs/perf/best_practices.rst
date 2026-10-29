@@ -109,19 +109,11 @@ Parameter Reference
   - ``actor_rollout_ref.model.path``:
     Path to the actor checkpoint in HuggingFace-compatible format.
   - ``actor_rollout_ref.actor.megatron.use_mbridge``:
-    Selects the model-weight backend for the Megatron checkpoint manager. With ``True``
-    (default), model weights are saved/loaded in HuggingFace format via `mbridge
-    <https://github.com/ISEEKYAN/mbridge>`_ and ``hf_model`` in ``save_contents`` is
-    deduplicated against ``model``. With ``False``, model weights go through Megatron's
-    native ``dist_checkpointing`` and ``hf_model`` in ``save_contents`` is rejected
-    (use ``verl.model_merger`` after training instead). Optimizer / LR-scheduler / RNG
-    states always go through ``dist_checkpointing`` regardless of this flag.
-    The legacy alias ``actor_rollout_ref.actor.megatron.use_dist_checkpointing=True``
-    still works and is equivalent to ``use_mbridge=False``.
-    See :ref:`checkpoint-page` for the full save/load behaviour matrix.
-  - ``actor_rollout_ref.actor.megatron.vanilla_mbridge``:
-    If set to True, use mbridge, else use Megatron-Bridge https://github.com/NVIDIA-NeMo/Megatron-Bridge.
-    Now it is True by default. and it will defaultly be set to False in the future(v0.8).
+    Keep this option ``True``. The Megatron engine uses
+    `Megatron-Bridge <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_ for model
+    construction and HuggingFace weight conversion. Set ``use_dist_checkpointing=True``
+    to save or load Megatron model shards. Optimizer, LR scheduler, and RNG states
+    always use distributed checkpointing. See :ref:`checkpoint-page`.
 
 :math:`\pi`
   - ``actor_rollout_ref.rollout.name``:
@@ -137,7 +129,7 @@ Parameter Reference
   - ``actor_rollout_ref.rollout.val_kwargs.temperature`` / ``top_p`` / ``top_k`` / ``do_sample`` / ``n``:
     Sampling options for validation. Set ``temperature > 0`` to prevent repetitive thinking chains. For small test sets (e.g., AIME24) raise ``n`` (64 is a common choice) to reduce variance. A practical starting point is ``temperature=1.0``, ``top_p=0.7``, ``top_k=-1``, ``do_sample=True``, ``n=1`` and then increase ``n`` as needed.
   - ``+actor_rollout_ref.rollout.engine_kwargs.vllm.*`` / ``+actor_rollout_ref.rollout.engine_kwargs.sglang.*``:
-    Extra backend options injected via the ``+`` syntax. Consult backend docs for exact semantics. Some switches (for example ``pipeline_parallel_size``) may not be supported yet; when TP=32, ``enable_expert_parallel=True`` can even slow down DeepSeek-V3 rollout, so benchmark carefully.
+    Extra backend options injected via the ``+`` syntax. Consult backend docs for exact semantics. Some switches (for example ``pipeline_parallel_size``) may not be supported yet; when TP=32, expert parallelism (``actor_rollout_ref.rollout.expert_parallel_size``) can even slow down DeepSeek-V3 rollout, so benchmark carefully.
 
 :math:`\pi_\theta`
   - ``data.train_batch_size``:
@@ -224,8 +216,9 @@ Optimizer settings
     Companion switches for hybrid optimizers. Turn them on alongside CPU offload.
 
 Megatron-related parameters
-  - ``actor_rollout_ref.actor.megatron.param_offload`` / ``optimizer_offload`` / ``grad_offload``:
-    Offload parameters, optimizer states, and gradients to CPU when GPU memory is insufficient.
+  - ``actor_rollout_ref.actor.megatron.param_offload`` / ``optimizer_offload``:
+    Offload parameters and optimizer states to CPU when GPU memory is insufficient. Parameter offload also releases
+    gradient buffers while the actor is inactive.
   - ``+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method`` / ``recompute_granularity`` / ``recompute_num_layers``:
     Gradient checkpointing controls. Enable (e.g., ``uniform``, ``full``, ``1``) to trade computation for memory.
   - ``+actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype`` / ``moe_shared_expert_overlap`` / ``moe_permute_fusion`` / ``moe_enable_deepep`` / ``moe_token_dispatcher_type``:

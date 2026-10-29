@@ -29,8 +29,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
+from unittest.mock import patch
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -48,7 +51,7 @@ import verl.utils.torch_functional as verl_F
 
 compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
-MAX_TEST_CASES = os.environ.get("MAX_TEST_CASES", 5)
+MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 5))
 VERIFY_TORCH_SELF = os.environ.get("VERIFY_TORCH_SELF", False)
 LOW_MEMORY = os.environ.get("LOW_MEMORY", False)
 LOW_MEMORY_DIV_FACTOR = os.environ.get("LOW_MEMORY_DIV_FACTOR", 16)
@@ -487,6 +490,78 @@ class TestLinearCrossEntropy_TensorParallel:
             print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
             print(f"[INFO]: Kernel Backward pass peak memory: {kernel_backward_max_memory:.2f} MB")
 
+    def verify_liger_correctness(self):
+        if importlib.util.find_spec("liger_cute_kernels") is None:
+            print("[SKIP] Optional native Liger is not installed")
+            return
+        from verl.utils.kernel.linear_cross_entropy import configure_liger_flsce
+
+        # Ref uses a larger TP size first; actor then needs more tokens and
+        # local vocabulary. Reserve both before the first native allocation.
+        tp_sizes = sorted({min(4, self.world_size), 2}, reverse=True)
+        if any(self.world_size % size for size in tp_sizes):
+            print("[SKIP] Native Liger multi-group parity requires an even world size")
+            return
+        hidden_size, vocab_size, capacity = 512, 8192, 256
+        generator = torch.Generator(device="cuda").manual_seed(1234)
+        full_weight = torch.randn(vocab_size, hidden_size, device="cuda", generator=generator).to(torch.bfloat16) * 0.02
+        for tp_size in tp_sizes:
+            group = None
+            for start in range(0, self.world_size, tp_size):
+                ranks = list(range(start, start + tp_size))
+                candidate = dist.new_group(ranks)
+                if self.local_rank in ranks:
+                    group = candidate
+            configured = configure_liger_flsce(
+                max_tokens=capacity,
+                hidden_size=hidden_size,
+                local_vocab_size=vocab_size // min(tp_sizes),
+                process_group=group,
+                device=torch.device("cuda", self.local_rank),
+            )
+            if not configured:
+                print("[SKIP] Native Liger does not support this device")
+                return
+            shard = full_weight.chunk(tp_size)[dist.get_rank(group)].detach().requires_grad_()
+            # Fail instead of accidentally comparing Triton against a fallback.
+            with patch(
+                "liger_kernel.ops.fused_linear_scaled_cross_entropy._apply_tp_fallback",
+                side_effect=AssertionError("Native Liger parity selected a fallback"),
+            ):
+                for tokens, temperature in ((64, 0.8), (137, 1.5), (capacity, 1.0)):
+                    x = torch.randn(tokens, hidden_size, device="cuda", generator=generator).to(torch.bfloat16)
+                    labels = torch.randint(vocab_size, (tokens,), device="cuda", generator=generator)
+                    grads = (
+                        torch.randn(tokens, device="cuda", generator=generator) / tokens,
+                        torch.randn(tokens, device="cuda", generator=generator) / tokens,
+                    )
+                    source = dist.get_process_group_ranks(group)[0]
+                    for tensor in (x, labels, *grads):
+                        dist.broadcast(tensor, src=source, group=group)
+                    x.requires_grad_()
+                    results = []
+                    for backend in ("triton", "liger"):
+                        outputs = linear_cross_entropy(
+                            x, shard, labels, temperature, "none", group, impl_backend=backend
+                        )
+                        derivatives = torch.autograd.grad(outputs, (x, shard), grads)
+                        if backend == "triton":
+                            dist.all_reduce(derivatives[0], group=group)
+                        results.append((*outputs, *derivatives))
+                    for index, (expected, actual) in enumerate(zip(*results, strict=True)):
+                        torch.testing.assert_close(
+                            actual, expected, atol=1e-3 if index >= 2 else 1e-2, rtol=3e-2 if index >= 2 else 1e-3
+                        )
+                with pytest.raises(ValueError, match="exceeds configured capacity"):
+                    linear_cross_entropy(
+                        torch.zeros(capacity + 1, hidden_size, device="cuda", dtype=torch.bfloat16),
+                        shard,
+                        torch.zeros(capacity + 1, device="cuda", dtype=torch.int64),
+                        dist_process_group=group,
+                        impl_backend="liger",
+                    )
+            print(f"[PASS] Native Liger forward/entropy/gradients/overflow, TP={tp_size}")
+
 
 if __name__ == "__main__":
     # TP command: torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/kernels/test_linear_cross_entropy_tp.py
@@ -511,4 +586,5 @@ if __name__ == "__main__":
         test.verify_kernel_correctness()
         test.check_kernel_storage()
 
+    test.verify_liger_correctness()
     test.shutdown()

@@ -72,8 +72,12 @@ reward_model:
     prompt_length: 2048
     response_length: 2048
 
-    quantization: null
-    quantization_config_file: null
+    quantization:
+      _target_: verl.workers.config.RolloutQuantizationConfig
+      linear: null
+      moe: null
+      ignore: []
+      config_file: null
     mtp: null
     disaggregation:
       enabled: false

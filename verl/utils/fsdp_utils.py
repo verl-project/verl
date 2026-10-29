@@ -194,7 +194,10 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
-    model.cpu()
+    # FSDPModule._apply may read CPU data to repad uneven shards or pin memory
+    # inside model.to(). Complete each D2H copy before those reads: synchronizing
+    # after model.to() cannot repair values copied from an unfinished transfer.
+    model.to("cpu", non_blocking=False)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -222,7 +225,7 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
-    model.to(device)
+    model.to(device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -510,7 +513,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         dist.broadcast(buf, src=0)
 
     if cpu_offload:
-        model.to("cpu", non_blocking=True)
+        offload_fsdp2_model_to_cpu(model, empty_cache=False)
         for buf in model.buffers():
             buf.data = buf.data.to(get_device_id())
 
@@ -1090,6 +1093,47 @@ def merged_lora_context(actor, backup_adapters=False):
             fsdp_merge_unmerge(actor, do_merge=False)
 
 
+def fsdp1_sharded_save_to_cpu(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """
+    Sharded Save for FSDP1: each rank copies its own local parameter shards to CPU memory.
+
+    FSDP1 exposes flat, already-sharded ``torch.nn.Parameter`` tensors (or views into them when
+    ``use_orig_params=True``) instead of DTensors, so the sharding layout is implicit in the local
+    shapes and does not need to be recorded.
+
+    Args:
+        model: FSDP1-wrapped model.
+
+    Returns:
+        Dictionary mapping parameter name to its local shard on CPU.
+    """
+    cpu_sharded_state = {}
+    for param_name, param in model.named_parameters():
+        cpu_sharded_state[param_name] = param.data.detach().to("cpu", copy=True)
+    return cpu_sharded_state
+
+
+def fsdp1_sharded_load_from_cpu(model: torch.nn.Module, cpu_sharded_state: dict[str, torch.Tensor]) -> None:
+    """
+    Sharded Load for FSDP1: each rank copies its own CPU shards back into the live parameters.
+
+    The model must be in the same sharding state as when :func:`fsdp1_sharded_save_to_cpu` was
+    called, so that local shapes still match.
+
+    Args:
+        model: FSDP1-wrapped model to be restored.
+        cpu_sharded_state: Shards saved by :func:`fsdp1_sharded_save_to_cpu` on this rank.
+    """
+    with torch.no_grad():
+        for param_name, param in model.named_parameters():
+            # Skip parameters not in the saved state (e.g., newly added parameters)
+            if param_name not in cpu_sharded_state:
+                continue
+            param.data.copy_(cpu_sharded_state[param_name].to(param.device))
+
+    dist.barrier()
+
+
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
 ) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
@@ -1111,7 +1155,7 @@ def fsdp2_sharded_save_to_cpu(
         # Only process sharded parameters of DTensor type (core parameters of FSDP2)
         if not isinstance(param, DTensor):
             # Save non-sharded parameters (e.g., running_mean of BatchNorm) as local data
-            cpu_tensor = param.detach().cpu()
+            cpu_tensor = param.detach().to("cpu", copy=True)
             cpu_sharded_state[param_name] = (cpu_tensor, None)
             continue
 
@@ -1124,7 +1168,7 @@ def fsdp2_sharded_save_to_cpu(
         # 1. Extract local shard data from the current GPU (_local_tensor)
         local_gpu_tensor = param._local_tensor  # Local shard attribute defined in your DTensor class
         # 2. Move to CPU memory and detach from computation graph
-        local_cpu_tensor = local_gpu_tensor.detach().cpu()
+        local_cpu_tensor = local_gpu_tensor.detach().to("cpu", copy=True)
         # 3. Save CPU shard + original DTensorSpec (ensure sharding rules remain unchanged)
         cpu_sharded_state[param_name] = (local_cpu_tensor, param._spec)
 

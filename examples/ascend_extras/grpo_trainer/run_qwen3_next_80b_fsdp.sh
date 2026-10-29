@@ -4,6 +4,9 @@ set -xeuo pipefail
 project_name="verl_grpo_qwen3-next-80b"
 experiment_name="Qwen3_Next_80B_Instruct"
 
+# Enable the NPU state-allocation workaround from #8033 (requires Transformers 5.10.4).
+export VERL_QWEN3_NEXT_NPU_SYNC_BEFORE_STATE=1
+
 # Paths
 WORK_DIR=${WORK_DIR:-"${HOME}/verl"}
 MODEL_PATH=${WORK_DIR}/Qwen3-Next-80B-A3B-Instruct
@@ -42,7 +45,7 @@ warmup_steps=0
 
 # performance
 sp_size=8
-gen_tp=4
+gen_tp=8
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
@@ -99,7 +102,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.n=${rollout_n}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.load_format=auto
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length))

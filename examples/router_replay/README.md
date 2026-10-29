@@ -76,3 +76,13 @@ actor_rollout_ref.rollout.enable_rollout_routing_replay=True
 ```
 
 R3 mode requires the rollout backend to support returning router selection results. Currently, this functionality is being tested based on the vllm implementation at https://github.com/vllm-project/vllm/pull/28284 as well as bug fix at https://github.com/vllm-project/vllm/pull/33013 and SGLang implementation at https://github.com/sgl-project/sglang/commit/bed301a5acaa9577c9aa706468bdf242f6a43051.
+
+#### Requirements (vLLM backend)
+
+For **hybrid-attention MoE** models (e.g. Qwen3.5, whose Gated Delta Net linear +
+periodic full-attention layout yields more than one KV-cache group), the routed-experts
+capture path only produces a correctly-sized buffer starting from **vLLM `>= 0.22.0`**
+(`pip install -U "vllm>=0.22.0"`). On older vLLM, verl now fails fast at startup with
+an actionable error when `enable_rollout_routing_replay=True`, instead of crashing
+later inside vLLM.
+

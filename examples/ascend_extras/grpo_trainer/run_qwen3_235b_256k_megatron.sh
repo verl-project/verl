@@ -118,7 +118,6 @@ ACTOR_ARGS=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${train_etp}
     actor_rollout_ref.actor.megatron.param_offload=${all_offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${all_offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${all_offload}
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.dist_checkpointing_path=${MCORE_MODEL_PATH}

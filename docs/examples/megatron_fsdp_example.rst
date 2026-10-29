@@ -53,7 +53,6 @@ Then run:
 The script launches RL training and enables Megatron-FSDP with:
 
 - ``actor_rollout_ref.actor.megatron.use_mbridge=True``
-- ``actor_rollout_ref.actor.megatron.vanilla_mbridge=False``
 - ``actor_rollout_ref.actor.megatron.use_megatron_fsdp=True``
 
 Checkpoint Notes

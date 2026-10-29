@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 06/18/2025.
+Last updated: 10/01/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -159,10 +159,9 @@ Actor/Rollout/Reference Policy
       checkpoint:
         # What to include in saved checkpoints
         # 'hf_model' saves the full model in HuggingFace format. For Megatron this requires
-        # actor.megatron.use_mbridge=True (the default); 'model' and 'hf_model' then produce
-        # the same HF checkpoint and are deduplicated (saved once). With mbridge disabled,
-        # only the sharded 'model' is supported -- use verl.model_merger after training to
-        # convert it to HF format.
+        # 'model' and 'hf_model' produce the same HF checkpoint by default and
+        # are deduplicated. With use_dist_checkpointing=True, 'model' stores
+        # Megatron shards and 'hf_model' requests a separate HF export.
         save_contents: ['model', 'optimizer', 'extra']
         # For more flexibility, you can specify the contents to load from the checkpoint.
         load_contents: ${actor_rollout_ref.actor.checkpoint.save_contents}
@@ -221,8 +220,12 @@ Actor/Rollout/Reference Policy
 
 **Common config for actor, rollout and reference model**
 
-- ``actor_rollout_ref.hybrid_engine``: Whether it's a hybrid engine,
-  currently only supports hybrid engine
+- ``actor_rollout_ref.hybrid_engine``: Whether actor and rollout colocate
+  on the same GPUs (hybrid engine). In the V1 ``separate_async`` trainer
+  no colocated rollout replicas are created on the training GPUs unless
+  ``trainer.v1.separate_async.hybrid_rollout.enable_switch=True``; setting
+  this flag to ``False`` also disables them then (with a warning).
+  All other trainers require ``True``
 - ``actor_rollout_ref.model.path``: Huggingface model path. This can be
   either local path or HDFS path. For HDFS path, we provide utils to
   download it to DRAM and convert the HDFS path to local path.
@@ -248,10 +251,14 @@ Actor/Rollout/Reference Policy
   used.
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
-    implementation backend for fused kernels. Options: "triton" or
-    "torch". Default is "torch".
-    While in megatron, we only support "triton" as the
-    implementation backend, so there is no need for this option.
+    implementation backend for fused kernels. Options: "triton", "torch",
+    or "liger". The "torch" backend always uses verl's native
+    output-head implementation; select "liger" explicitly to use Liger's fused
+    output-head kernel. Default is "torch".
+    Megatron does not use this option. With Megatron fused kernels enabled,
+    ``actor_rollout_ref.model.use_liger=False`` keeps Verl's Triton
+    tensor-parallel output head, while ``use_liger=True`` calls Liger's public
+    tensor-parallel fused scaled cross entropy operator.
 
 - ``actor_rollout_ref.model.use_remove_padding``: Whether to use remove
   padding in the model. If set to True, the model will remove padding
@@ -332,21 +339,23 @@ Actor/Rollout/Reference Policy
     ``model``, ``optimizer``, ``extra`` and ``hf_model``. Default is
     ``['model', 'optimizer', 'extra']``. The extra information includes RNG states (and the
     LR scheduler for FSDP, the ``opt_param_scheduler`` for Megatron).
-    For Megatron, the meaning of ``model`` depends on the active backend
-    (``actor.megatron.use_mbridge``):
-
-    - With ``use_mbridge=True`` (default): both ``model`` and ``hf_model`` save the full model
-      in HuggingFace format under ``${ckpt_path}/model/huggingface/`` via mbridge; if both are
-      listed, the model is saved once (deduplicated).
-    - With ``use_mbridge=False``: ``model`` saves Megatron sharded weights via
-      ``dist_checkpointing`` under ``${ckpt_path}/model/dist_ckpt/``; ``hf_model`` is **not**
-      supported in this mode -- use ``python -m verl.model_merger merge --backend megatron``
-      to convert sharded checkpoints to HF format after training.
+    For Megatron, ``model`` uses HuggingFace format under
+    ``${ckpt_path}/model/huggingface/`` by default. With
+    ``actor.megatron.use_dist_checkpointing=True``, it instead saves Megatron
+    shards under ``${ckpt_path}/model/dist_ckpt/``. Listing ``hf_model`` also
+    writes an HF export through Megatron-Bridge.
 
     For FSDP, ``hf_model`` saves the full HF model on rank 0 in addition to the sharded
-    ``model`` shards.
+    ``model`` shards. Weights are streamed into safetensors shards one tensor at a time, and
+    fp32 parameters are stored in the mixed-precision ``param_dtype``. With LoRA, the adapters are
+    merged into the exported weights. Saving ``hf_model`` is not supported with QAT.
 
   - ``load_contents``: The contents to load in the checkpoint, you can specify different checkpoint loading contents. By default, it is the same with ``save_checkpoint``.
+
+  - ``save_lora_only`` (bool, default ``False``): When ``True`` and the model has LoRA adapters,
+    only LoRA/adapter weights are saved instead of the full model state dict. On load, LoRA-only
+    checkpoints are auto-detected and merged into the base model via ``strict=False``.
+    Reduces checkpoint size dramatically (e.g. ~150 MiB vs ~54 GiB for a 27B model).
 
 **Reference Model**
 
@@ -599,6 +608,7 @@ Trainer
      default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name} # local checkpoint path
      resume_mode: auto # or disable or resume_path if resume_from_path is set
      resume_from_path: null
+     checkpoint_callback_class: null
      remove_previous_ckpt_in_save: False
      del_local_ckpt_after_load: False
      ray_wait_register_center_timeout: 300
@@ -606,7 +616,7 @@ Trainer
 - ``trainer.total_epochs``: Number of epochs in training.
 - ``trainer.project_name``: For wandb, swanlab, mlflow
 - ``trainer.experiment_name``: For wandb, swanlab, mlflow
-- ``trainer.logger``: Support console and wandb, swanlab, mlflow, tensorboard, trackio
+- ``trainer.logger``: Support console, wandb, swanlab, mlflow, tensorboard, trackio, and rl_insight.
 - ``trainer.log_val_generations``: The number of logged generation during validation (default ``0``)
 - ``trainer.nnodes``: Number of nodes used in the training.
 - ``trainer.n_gpus_per_node``: Number of GPUs per node.
@@ -623,6 +633,11 @@ Trainer
   from the path specified in ``resume_from_path``.
 - ``trainer.resume_from_path``: The path to resume training from. Only
   effective when ``resume_mode`` is set to ``resume_path``.
+- ``trainer.checkpoint_callback_class``: Fully qualified class name of a
+  user-defined checkpoint callback (a ``CheckpointCallback`` subclass).
+  Instantiated on the driver; its ``on_save`` hook is called after each
+  checkpoint save. See :doc:`../advance/checkpoint` for the interface.
+  Default is null (no callback).
 - ``trainer.remove_previous_ckpt_in_save``: Whether to remove previous
   checkpoints in the save directory. Default is False.
 - ``trainer.del_local_ckpt_after_load``: Whether to delete local
@@ -744,4 +759,14 @@ Most parameters for Model are similar to Reward Model.
   default to ``all-linear``. See `peft docs <https://huggingface.co/docs/peft/v0.15.0/en/package_reference/lora#peft.LoraConfig.target_modules>`_ for detail.
 
 - ``use_liger``: Whether to enable Liger kernel, default to False. If True,
-  we apply Liger kernel to the model (depends on `liger-kernel`).
+  we apply Liger kernel to the model (pinned to ``liger-kernel==0.8.4``).
+  With Megatron fused kernels enabled, this also selects Liger's public
+  tensor-parallel output-head operator. Installing a compatible
+  ``liger-cute-kernels`` wheel lets Liger select its native implementation.
+  Liger Kernel is pinned to ``0.8.4``. Megatron's native setup requires matching Liger Python/native builds
+  containing the public configuration API from mainline commit
+  ``0043f43309144bb3054518d28efed25fc314edaf`` and the configuration fallback
+  follow-up merged as ``8866e4ee7945bc3cac0e40062e7bde26ecc09f65``
+  (`Liger-Kernel PR #1502 <https://github.com/linkedin/Liger-Kernel/pull/1502>`_);
+  see the Liger section of
+  :doc:`../perf/perf_tuning` for collective setup and capacity requirements.

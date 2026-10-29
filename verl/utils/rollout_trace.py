@@ -315,6 +315,52 @@ def _current_trace_attributes():
     return {**(_trace_attributes.get() or {})}
 
 
+def _trace_field(value, field_name):
+    if isinstance(value, dict):
+        return value.get(field_name)
+    return getattr(value, field_name, None)
+
+
+def _trace_output_copy(output):
+    if isinstance(output, BaseModel):
+        return output.model_dump()
+    if isinstance(output, dict):
+        return dict(output)
+    if hasattr(output, "__dict__"):
+        return dict(vars(output))
+    return None
+
+
+async def _add_token2text(instance, inputs, output):
+    tokenizer = getattr(instance, "tokenizer", None)
+    decode = getattr(tokenizer, "decode", None)
+    if not callable(decode):
+        return output
+
+    # Agent-loop outputs contain prompt_ids/response_ids, while per-turn
+    # LLMServerClient.generate calls receive prompt_ids and return token_ids.
+    prompt_ids = _trace_field(output, "prompt_ids")
+    if prompt_ids is None:
+        prompt_ids = inputs.get("prompt_ids")
+    response_ids = _trace_field(output, "response_ids")
+    if response_ids is None:
+        response_ids = _trace_field(output, "token_ids")
+
+    if prompt_ids is None and response_ids is None:
+        return output
+
+    output_copy = _trace_output_copy(output)
+    if output_copy is None:
+        return output
+
+    loop = get_event_loop()
+    if prompt_ids is not None:
+        output_copy["prompt_text"] = await loop.run_in_executor(None, decode, prompt_ids)
+    if response_ids is not None:
+        output_copy["response_text"] = await loop.run_in_executor(None, decode, response_ids)
+    return output_copy
+
+
 def rollout_trace_op(func):
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
@@ -332,26 +378,6 @@ def rollout_trace_op(func):
         inputs = dict(bound_args.arguments)
         del inputs["self"]
 
-        async def add_token2text(self, result):
-            if hasattr(result, "prompt_ids") and hasattr(self, "tokenizer") and hasattr(self.tokenizer, "decode"):
-                # Use model_dump() for Pydantic models to get a proper copy,
-                # otherwise vars() returns a reference to internal __dict__ which
-                # can cause serialization issues with MLflow
-                if isinstance(result, BaseModel):
-                    _result = result.model_dump()
-                else:
-                    _result = dict(vars(result))
-                loop = get_event_loop()
-                if hasattr(result, "prompt_ids"):
-                    prompt_text = await loop.run_in_executor(None, self.tokenizer.decode, result.prompt_ids)
-                    _result["prompt_text"] = prompt_text
-
-                if hasattr(result, "response_ids"):
-                    response_text = await loop.run_in_executor(None, self.tokenizer.decode, result.response_ids)
-                    _result["response_text"] = response_text
-                return _result
-            return result
-
         if backend == "weave":
             tracer = RolloutTraceConfig.get_client()
 
@@ -361,7 +387,7 @@ def rollout_trace_op(func):
                 result = await func(self, *args, **kwargs)
 
                 if enable_token2text:
-                    _result = await add_token2text(self, result)
+                    _result = await _add_token2text(self, inputs, result)
                     tracer.finish_call(call, output=_result)
                 else:
                     tracer.finish_call(call, output=result)
@@ -378,7 +404,7 @@ def rollout_trace_op(func):
                 span.set_inputs(inputs)
                 result = await func(self, *args, **kwargs)
                 if enable_token2text:
-                    _result = await add_token2text(self, result)
+                    _result = await _add_token2text(self, inputs, result)
                     span.set_outputs(_result)
                 else:
                     span.set_outputs(result)
@@ -388,7 +414,7 @@ def rollout_trace_op(func):
             try:
                 result = await func(self, *args, **kwargs)
                 if enable_token2text:
-                    _result = await add_token2text(self, result)
+                    _result = await _add_token2text(self, inputs, result)
                     _log_trackio_trace(func.__qualname__, inputs, output=_result)
                 else:
                     _log_trackio_trace(func.__qualname__, inputs, output=result)

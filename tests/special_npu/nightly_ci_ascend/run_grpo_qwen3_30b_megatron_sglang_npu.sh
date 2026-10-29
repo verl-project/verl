@@ -32,11 +32,11 @@ NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 
 # Model Weights Paths
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 # File System Paths
-TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
-TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
+TRAIN_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
+TEST_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
 
 # Data Length Configuration
 max_prompt_length=$((1024 * 2))
@@ -132,7 +132,6 @@ ACTOR_CONFIG=(
     # Memory Optimization
     actor_rollout_ref.actor.megatron.param_offload=${all_offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${all_offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${all_offload}
     # Model Weights Management
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True

@@ -1,11 +1,32 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 export VERL_LOGGING_LEVEL=INFO
 export VERL_PPO_LOGGING_LEVEL=INFO
 
 NUM_GPUS=${NUM_GPUS:-8}
+
+ENGINE=${ENGINE:-"vllm"}
+
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python, as the ascend / rocm / trtllm images do):
+# GPU vllm/sglang x megatron run every python entrypoint here — including the Ray
+# workers, via runtime_env.py_executable — through `uv run` on the matching extras of
+# the committed uv.lock, so the job needs no install step. Other backends / NPU fall
+# back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${ENGINE}" = vllm ] || [ "${ENGINE}" = sglang ]; }; then
+    UV_EXTRAS=(--extra "${ENGINE}" --extra megatron --extra math)
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -20,7 +41,7 @@ if [ "$USE_DUMMY_MODEL" = "True" ]; then
         exit 1
     fi
 
-    python scripts/init_random_model.py \
+    "${LAUNCH[@]}" scripts/init_random_model.py \
         --hf_model_path "${MODEL_PATH}" \
         --new_config_path "${DUMMY_MODEL_CONFIG_PATH}" \
         --output_path "${DUMMY_MODEL_PATH}"
@@ -93,20 +114,15 @@ CRITIC_ETP=${CRITIC_ETP:-$COMMON_ETP}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 COMMON_PARAM_OFFLOAD=${COMMON_PARAM_OFFLOAD:-$ALL_OFFLOAD}
-COMMON_GRAD_OFFLOAD=${COMMON_GRAD_OFFLOAD:-$ALL_OFFLOAD}
 COMMON_OPTIMIZER_OFFLOAD=${COMMON_OPTIMIZER_OFFLOAD:-$ALL_OFFLOAD}
 
 ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
-ACTOR_GRAD_OFFLOAD=${ACTOR_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
 REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
 CRITIC_PARAM_OFFLOAD=${CRITIC_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
-CRITIC_GRAD_OFFLOAD=${CRITIC_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
 CRITIC_OPTIMIZER_OFFLOAD=${CRITIC_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
 RM_PARAM_OFFLOAD=${RM_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
 USE_MBRIDGE=${USE_MBRIDGE:-True}
-VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-True}
-VALUE_VANILLA_MBRIDGE=${VALUE_VANILLA_MBRIDGE:-$VANILLA_MBRIDGE}
 USE_MEGATRON_FSDP=${USE_MEGATRON_FSDP:-False}
 USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-False}
 
@@ -124,12 +140,11 @@ if [ "$USE_DIST_CKPT" = "True" ]; then
     if [ "$USE_DUMMY_MODEL" = "True" ]; then
         DIST_CKPT_PATH=${HOME}/dist_ckpt_dummy/${MODEL_ID}
     fi
-    python scripts/converter_hf_to_mcore.py \
+    "${LAUNCH[@]}" scripts/converter_hf_to_mcore.py \
         --hf_model_path "${MODEL_PATH}" \
         --output_path "${DIST_CKPT_PATH}"
 fi
 
-ENGINE=${ENGINE:-"vllm"}
 if [ "$ENGINE" = "vllm" ]; then
     export VLLM_USE_V1=1
 fi
@@ -186,7 +201,6 @@ common_params=(
     actor_rollout_ref.actor.use_dynamic_bsz=${USE_DYNAMIC_BSZ}
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
     actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE}
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE}
     actor_rollout_ref.actor.megatron.use_megatron_fsdp=${USE_MEGATRON_FSDP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$ACTOR_PP
     actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=$ACTOR_VPP
@@ -196,7 +210,6 @@ common_params=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=$ACTOR_ETP
     actor_rollout_ref.actor.megatron.param_offload=${ACTOR_PARAM_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ACTOR_GRAD_OFFLOAD}
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     actor_rollout_ref.actor.megatron.dist_checkpointing_path=${DIST_CKPT_PATH}
     actor_rollout_ref.actor.use_kl_loss=True
@@ -211,12 +224,12 @@ common_params=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.n=${n_resp_per_prompt}
-    ++actor_rollout_ref.rollout.quantization=${ROLLOUT_QUANTIZATION}
+    actor_rollout_ref.rollout.quantization.linear=${ROLLOUT_QUANTIZATION}
+    actor_rollout_ref.rollout.quantization.moe=${ROLLOUT_QUANTIZATION}
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu}
     actor_rollout_ref.rollout.enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY}
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu}
     actor_rollout_ref.ref.megatron.use_mbridge=${USE_MBRIDGE}
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=${VANILLA_MBRIDGE}
     actor_rollout_ref.ref.megatron.use_megatron_fsdp=${USE_MEGATRON_FSDP}
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$REF_PP
     actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=$REF_VPP
@@ -239,7 +252,6 @@ common_params=(
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu}
     critic.ppo_max_token_len_per_gpu=${forward_max_token_len_per_gpu}
     critic.megatron.use_mbridge=${USE_MBRIDGE}
-    critic.megatron.vanilla_mbridge=${VALUE_VANILLA_MBRIDGE}
     critic.megatron.use_megatron_fsdp=${USE_MEGATRON_FSDP}
     critic.megatron.pipeline_model_parallel_size=$CRITIC_PP
     critic.megatron.virtual_pipeline_model_parallel_size=$CRITIC_VPP
@@ -249,7 +261,6 @@ common_params=(
     critic.megatron.expert_tensor_parallel_size=$CRITIC_ETP
     critic.megatron.param_offload=${CRITIC_PARAM_OFFLOAD}
     critic.megatron.optimizer_offload=${CRITIC_OPTIMIZER_OFFLOAD}
-    critic.megatron.grad_offload=${CRITIC_GRAD_OFFLOAD}
     critic.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     critic.megatron.dist_checkpointing_path=${DIST_CKPT_PATH}
     critic.checkpoint.save_contents=$CHECKPOINT_CONTENTS
@@ -286,26 +297,25 @@ common_params=(
 )
 
     # Detect device
-    device_name=$(python3 - <<'EOF'
+    device_name=$("${LAUNCH[@]}" - <<'EOF'
 from verl.utils.device import get_device_name
 print(get_device_name())
 EOF
 )
 
 if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
-    python3 -m verl.trainer.main_ppo \
+    "${LAUNCH[@]}" -m verl.trainer.main_ppo \
         --config-path=config \
         --config-name='ppo_megatron_trainer.yaml' \
-        "${common_params[@]}" $@
+        "${common_params[@]}" "${RAY[@]}" $@
 
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
-    python3 -m verl.trainer.main_ppo \
+    "${LAUNCH[@]}" -m verl.trainer.main_ppo \
         --config-path=config \
         --config-name='ppo_megatron_trainer.yaml' \
-        "${common_params[@]}" \
+        "${common_params[@]}" "${RAY[@]}" \
         +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${ACTOR_CP} \
         +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-        ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
         global_profiler.tool=npu \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=[npu,cpu,memory,shapes,module] \
         actor_rollout_ref.actor.profiler.tool_config.npu.level='level1' \

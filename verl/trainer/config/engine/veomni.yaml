@@ -16,6 +16,10 @@ expert_parallel_size: 1
 
 mixed_precision: true
 
+# Opt in to node-local BF16 gradient transport with FP32 accumulation and output.
+# Requires CUDA FSDP2 with mixed_precision; affects backward gradient communication only.
+low_precision_reduce_scatter_comm: false
+
 # Random seed for reproducibility.
 seed: 42
 
@@ -53,6 +57,13 @@ enable_fsdp_offload: false
 
 enable_reentrant: false
 
+# Rank 0 reads the checkpoint and broadcasts it; set false to have every rank read it
+# (avoids sending the whole model through a slow inter-node network).
+broadcast_model_weights_from_rank0: true
+
+# With broadcast_model_weights_from_rank0=false, each rank reads only its expert-parallel slice.
+ep_sharded_stream_load: false
+
 # support eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp,
 # veomni_flash_attention_3_with_sp and native-sparse
 attn_implementation: flash_attention_2
@@ -73,13 +84,41 @@ rms_norm_gated_implementation: eager
 causal_conv1d_implementation: eager
 chunk_gated_delta_rule_implementation: eager
 load_balancing_loss_implementation: eager
+dsa_indexer_implementation: eager
+dsa_attention_implementation: eager
+mhc_implementation: eager
+qat_implementation: none
 
 force_use_huggingface: false
 
-activation_gpu_limit: 0.0
+# Offload activations to CPU with VeOmni's stream-based D2H/H2D transfers. This is the only
+# activation offload mode this engine supports; model.enable_activation_offload (the synchronous
+# saved_tensors_hooks path) is rejected.
+enable_async_activation_offload: false
+
+# Module name patterns whose activations are offloaded when enable_async_activation_offload=true.
+# Supports segment-aware globs (`model.layers.*` matches direct children only) and `{*}` for
+# sequential groups (`model.layers.{*}`). Empty means auto-discovery from model._no_split_modules.
+activation_offload_modules: []
+
+# Upper bound in GB on the free pinned-host buffers async activation offload keeps for reuse
+# between steps. In-flight offloads may exceed it; 0 disables buffer reuse.
+activation_offload_host_cache_limit_gb: 4.0
 
 # List of basic modules to use
 basic_modules: []
+
+# Round every packed micro-batch up to a multiple of `pad_to_length_bucket` tokens, so the packed
+# shape only takes a few distinct values instead of a new one per micro-batch (avoids kernel
+# recompilation / re-autotuning). Requires use_remove_padding=True. Pad tokens are stripped before
+# the loss but still cost a forward.
+pad_to_length: false
+
+# Padding granularity in tokens, on the global packed sequence (before the SP split). Rounded up
+# internally to a multiple of ulysses_parallel_size. Smaller wastes fewer tokens but admits more
+# shapes; set it to `max_token_len_per_gpu * ulysses_parallel_size` to collapse every within-budget
+# micro-batch onto a single shape. Only read when pad_to_length=true.
+pad_to_length_bucket: 1024
 
 router_replay:
 
