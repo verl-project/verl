@@ -15,13 +15,27 @@
 import warnings
 from enum import Enum
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.single_controller.base import Worker
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 
 WorkerType = type[Worker]
+
+
+def get_trainer_worker_env(config: DictConfig) -> dict[str, str]:
+    """Return resolved environment variables scoped to training workers."""
+    worker_env = OmegaConf.select(config, "trainer.worker_env", default=None)
+    if worker_env is None:
+        return {}
+
+    resolved_env = OmegaConf.to_container(worker_env, resolve=True)
+    if not isinstance(resolved_env, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in resolved_env.items()
+    ):
+        raise TypeError("trainer.worker_env must map strings to strings")
+    return resolved_env
 
 
 class Role(Enum):
