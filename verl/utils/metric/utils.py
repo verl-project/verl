@@ -140,20 +140,23 @@ class Metric:
         if not metric_lists:
             raise ValueError("Cannot aggregate an empty list of metrics.")
         value_lists = [ml.values for ml in metric_lists]
+        aggregation = metric_lists[0].aggregation
+        if aggregation in (AggregationType.MIN, AggregationType.MAX):
+            # Padding-only microbatches contribute no extrema. Unlike SUM/MEAN,
+            # MIN/MAX do not require aligned observation counts across ranks.
+            values = [value for rank_values in value_lists for value in rank_values]
+            return cls._aggregate(values, aggregation) if values else float("nan")
         if not all(len(ls) == len(value_lists[0]) for ls in value_lists):
             raise ValueError(
                 f"All Metric instances must have the same number of values "
                 f"for dp aggregation: {[len(ls) for ls in value_lists]}"
             )
         value_arrays = np.array(value_lists)  # [num_dp, num_grad_accumulation]
-        aggregation = metric_lists[0].aggregation
         match aggregation:
             case AggregationType.SUM | AggregationType.MEAN:
                 return cls._aggregate(
                     values=np.mean(value_arrays, axis=0), aggregation=aggregation
                 )  # mean over dp ranks
-            case AggregationType.MIN | AggregationType.MAX:
-                return cls._aggregate(values=value_arrays.flatten(), aggregation=aggregation)  # min/max over all values
 
     @classmethod
     def from_dict(cls, data: dict[str, Numeric], aggregation: str | AggregationType) -> dict[str, "Metric"]:
