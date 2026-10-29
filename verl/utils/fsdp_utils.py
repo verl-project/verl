@@ -36,6 +36,7 @@ from transformers.trainer_pt_utils import get_module_class_from_name
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.model import check_exclude_modules, check_target_modules
+from verl.utils.weight_diagnostics import trace_weights
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,9 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
     # FSDPModule._apply may read CPU data to repad uneven shards or pin memory
     # inside model.to(). Complete each D2H copy before those reads: synchronizing
     # after model.to() cannot repair values copied from an unfinished transfer.
+    trace_weights("offload.before", model=model, non_blocking=False, empty_cache=empty_cache)
     model.to("cpu", non_blocking=False)
+    trace_weights("offload.after", model=model, non_blocking=False)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -225,7 +228,9 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
+    trace_weights("reload.before", model=model, non_blocking=True)
     model.to(device, non_blocking=True)
+    trace_weights("reload.after", model=model, non_blocking=True)
 
 
 @torch.no_grad()
@@ -493,6 +498,8 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         # use torch 2.7.0 copy from verl/third_party/torch/distributed/checkpoint
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
+    trace_weights("checkpoint.input", tensors=full_state.items(), cpu_offload=str(cpu_offload))
+    trace_weights("checkpoint.before", model=model, cpu_offload=str(cpu_offload))
     # To broadcast, it needs to be instantiated in the GPU.
     if dist.get_rank() == 0:
         model = model.to(device=get_device_id(), non_blocking=True)
@@ -502,6 +509,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     cpu_offload = cpu_offload is not None
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
     set_model_state_dict(model, full_state, options=options)
+    trace_weights("checkpoint.after_set", model=model, cpu_offload=cpu_offload)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
     # Sort by name to ensure deterministic order across ranks. FSDP2 can return
@@ -511,11 +519,13 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     bufs = sorted(model.named_buffers(), key=lambda x: x[0])
     for name, buf in bufs:
         dist.broadcast(buf, src=0)
+    trace_weights("checkpoint.after_buffers", model=model)
 
     if cpu_offload:
         offload_fsdp2_model_to_cpu(model, empty_cache=False)
         for buf in model.buffers():
             buf.data = buf.data.to(get_device_id())
+    trace_weights("checkpoint.complete", model=model, cpu_offload=cpu_offload)
 
 
 @contextmanager

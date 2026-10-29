@@ -32,10 +32,18 @@
 name: nightly_ci_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  # For push, for now only anti-patterns are specified so it is more conservative
-  # and achieves higher coverage.
+  pull_request:
+    branches: [main]
+    paths:
+      - "verl/**/*.py"
+      - "verl/trainer/config/**"
+      - ".github/workflows/nightly_ascend.yml"
+      - "tests/special_npu/env_diagnostics/**"
+      - "tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh"
+      - "examples/data_preprocess/geo3k.py"
+      - "requirements-npu.txt"
+      - "pyproject.toml"
+      - "setup.py"
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -103,7 +111,9 @@ jobs:
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    if: >-
+      github.repository_owner == 'verl-project' &&
+      (github.event_name == 'pull_request' || github.event.schedule == '0 17 * * *')
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -111,6 +121,9 @@ jobs:
       options: >-
         --shm-size 160g
     env:
+      VERL_WEIGHT_DIAGNOSTICS_DIR: ${{ github.workspace }}/ascend-diagnostics/weights
+      VERL_WEIGHT_DIAGNOSTICS_MODE: metadata
+      VERL_WEIGHT_DIAGNOSTICS_LIMIT: '2'
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
@@ -141,11 +154,28 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Collect Ascend environment and asset fingerprints
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          export HCCL_CONNECT_TIMEOUT=1500
+          export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+          export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
+          export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+          python3 tests/special_npu/env_diagnostics/collect.py \
+            --label "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --repo "$GITHUB_WORKSPACE" \
+            --asset "${MODEL_PATH:-$HOME/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct}" \
+            --asset "$HOME/data/geo3k/train.parquet" \
+            --asset "$HOME/data/geo3k/test.parquet" \
+            --output "$GITHUB_WORKSPACE/ascend-diagnostics/environment"
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend
         run: |
+          mkdir -p "$GITHUB_WORKSPACE/ascend-diagnostics"
           ray stop --force
           NDEVICES_PER_NODE=16 TRAIN_BATCH_SIZE=32 PPO_MINI_BATCH_SIZE=16 \
-            bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+            bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh \
+            > "$GITHUB_WORKSPACE/ascend-diagnostics/training-console.log" 2>&1
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
@@ -168,6 +198,27 @@ jobs:
           curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a2/nightly_log/run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_qwen3_vl_8b_Instruct_fsdp2_npu.txt"
           python check_npu.py --log "$LOG" --base baseline.txt
   
+      - name: Summarize recorded weight transfers
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          python3 tests/special_npu/env_diagnostics/summarize_weights.py \
+            "$VERL_WEIGHT_DIAGNOSTICS_DIR" \
+            --output "$GITHUB_WORKSPACE/ascend-diagnostics/weight-summary.json"
+      - name: Upload Ascend diagnostics and original training log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/ascend-diagnostics/
+            /root/.cache/nightly_log/run_qwen3_vl_8b_Instruct_fsdp2_npu/
+            /root/.cache/nightly_log/baseline.txt
+            /root/.cache/nightly_log/check_npu.py
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
+
   # Test dapo moonlight-16b megatron vllm
   # Temporarily disabled due to flaky performance metrics; re-enable after analysis.
   # nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:

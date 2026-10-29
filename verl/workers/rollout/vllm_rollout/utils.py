@@ -300,6 +300,9 @@ class vLLMColocateWorkerExtension:
             pin_memory = is_pin_memory_available()
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            from verl.utils.weight_diagnostics import trace_weights
+
+            trace_weights("rollout.received_bucket", tensors=weights, is_last=is_last)
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
                 # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
@@ -344,6 +347,10 @@ class vLLMColocateWorkerExtension:
             with fold_unquantized_moe_params(staged_moe_layers):
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
+
+        from verl.utils.weight_diagnostics import trace_weights
+
+        trace_weights("rollout.after_load", model=self.model_runner.model)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
