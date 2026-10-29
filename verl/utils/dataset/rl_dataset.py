@@ -43,6 +43,7 @@ _FILTER_TOKENIZER_CACHE: dict[tuple[str, bool], PreTrainedTokenizer] = {}
 
 
 def _get_processor_path(processor: ProcessorMixin) -> str | None:
+    """Find a nonempty processor source, including processors that only expose a tokenizer path."""
     return (
         getattr(processor, "name_or_path", None)
         or getattr(getattr(processor, "tokenizer", None), "name_or_path", None)
@@ -51,10 +52,12 @@ def _get_processor_path(processor: ProcessorMixin) -> str | None:
 
 
 def _get_tokenizer_path(tokenizer: PreTrainedTokenizer) -> str | None:
+    """Return the tokenizer reload source, treating an empty path as unavailable."""
     return getattr(tokenizer, "name_or_path", None) or None
 
 
 def _load_filter_processor(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> ProcessorMixin:
+    """Reload a processor in a worker and reject unsupported or incomplete checkpoints."""
     from verl.utils import hf_processor
 
     processor = hf_processor(source, trust_remote_code=trust_remote_code, use_fast=use_fast)
@@ -64,12 +67,14 @@ def _load_filter_processor(source: str, trust_remote_code: bool = False, use_fas
 
 
 def _load_filter_tokenizer(source: str, trust_remote_code: bool = False) -> PreTrainedTokenizer:
+    """Reload a tokenizer in the process performing prompt filtering."""
     from verl.utils import hf_tokenizer
 
     return hf_tokenizer(source, trust_remote_code=trust_remote_code)
 
 
 def _get_filter_processor(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> ProcessorMixin:
+    """Reuse a process-local processor for the same source and loading options."""
     key = (source, bool(trust_remote_code), bool(use_fast))
     if key not in _FILTER_PROCESSOR_CACHE:
         _FILTER_PROCESSOR_CACHE[key] = _load_filter_processor(
@@ -79,6 +84,7 @@ def _get_filter_processor(source: str, trust_remote_code: bool = False, use_fast
 
 
 def _get_filter_tokenizer(source: str, trust_remote_code: bool = False) -> PreTrainedTokenizer:
+    """Reuse a process-local tokenizer without sharing the parent's live object."""
     key = (source, bool(trust_remote_code))
     if key not in _FILTER_TOKENIZER_CACHE:
         _FILTER_TOKENIZER_CACHE[key] = _load_filter_tokenizer(source, trust_remote_code=trust_remote_code)
@@ -93,6 +99,7 @@ def _build_messages_for_filter(
     video_key: str,
     audio_key: str,
 ) -> list:
+    """Replace media placeholders without modifying the original example or its media dictionaries."""
     messages = copy.deepcopy(example[prompt_key])
     # When concatenating multimodal datasets, get will return None for samples without a modality column.
     images = example.get(image_key, None) or []
@@ -165,43 +172,6 @@ def _build_messages_for_filter(
     return messages
 
 
-def _extract_audio_info_for_filter(messages: list[dict]) -> list[Any]:
-    audios = []
-    for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if not isinstance(item, dict) or item.get("type") != "audio":
-                continue
-            if "audio" in item:
-                audios.append(item["audio"])
-            elif "audio_url" in item:
-                audios.append(item["audio_url"])
-            else:
-                audios.append({k: v for k, v in item.items() if k != "type"})
-    return audios or None
-
-
-def _process_multi_modal_info_for_filter(
-    messages: list[dict],
-    image_patch_size,
-) -> tuple[list[Image.Image], list[Any], list[Any]]:
-    has_visual = any(
-        isinstance(message.get("content"), list)
-        and any(isinstance(item, dict) and item.get("type") in {"image", "video"} for item in message["content"])
-        for message in messages
-    )
-    if has_visual:
-        from qwen_vl_utils import process_vision_info
-
-        images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
-    else:
-        images, videos = None, None
-    audios = _extract_audio_info_for_filter(messages)
-    return images, videos, audios
-
-
 def _filter_prompt_length_with_processor(
     doc: dict,
     *,
@@ -218,15 +188,21 @@ def _filter_prompt_length_with_processor(
     processor: ProcessorMixin | None = None,
     trust_remote_code: bool = False,
     use_fast: bool = True,
+    chat_template: str | dict[str, str] | None = None,
     process_multi_modal_info_fn=None,
     config: DictConfig | None = None,
 ) -> bool:
-    try:
-        if processor is None:
-            if processor_path is None:
-                raise ValueError("processor_path is required when processor is not provided")
-            processor = _get_filter_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=use_fast)
+    """Keep valid prompts within the limit; propagate worker initialization failures."""
+    if processor is None:
+        if processor_path is None:
+            raise ValueError("processor_path is required when processor is not provided")
+        processor = _get_filter_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=use_fast)
+    if chat_template is not None:
+        # Restore runtime templates without changing the shared cached processor.
+        processor = copy.copy(processor)
+        processor.chat_template = chat_template
 
+    try:
         messages = _build_messages_for_filter(
             doc,
             prompt_key=prompt_key,
@@ -241,9 +217,8 @@ def _filter_prompt_length_with_processor(
 
         raw_prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, **apply_kwargs)
         if process_multi_modal_info_fn is None:
-            images, videos, audios = _process_multi_modal_info_for_filter(messages, image_patch_size)
-        else:
-            images, videos, audios = process_multi_modal_info_fn(messages, image_patch_size, config)
+            process_multi_modal_info_fn = RLHFDataset._process_multi_modal_info
+        images, videos, audios = process_multi_modal_info_fn(messages, image_patch_size, config)
         if images is None and videos is None and audios is None:
             # only text prompt
             prompt_length = len(
@@ -282,13 +257,19 @@ def _filter_prompt_length_with_tokenizer(
     tokenizer_path: str | None = None,
     tokenizer: PreTrainedTokenizer | None = None,
     trust_remote_code: bool = False,
+    chat_template: str | dict[str, str] | None = None,
 ) -> bool:
-    try:
-        if tokenizer is None:
-            if tokenizer_path is None:
-                raise ValueError("tokenizer_path is required when tokenizer is not provided")
-            tokenizer = _get_filter_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
+    """Filter one text prompt while keeping worker loading errors visible to the caller."""
+    if tokenizer is None:
+        if tokenizer_path is None:
+            raise ValueError("tokenizer_path is required when tokenizer is not provided")
+        tokenizer = _get_filter_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
+    if chat_template is not None:
+        # Let Transformers select default/tool/named templates using its native rules.
+        tokenizer = copy.copy(tokenizer)
+        tokenizer.chat_template = chat_template
 
+    try:
         apply_kwargs = dict(**apply_chat_template_kwargs)
         if tool_schemas is not None:
             apply_kwargs["tools"] = tool_schemas
@@ -465,6 +446,7 @@ class RLHFDataset(Dataset):
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
+        """Filter prompts using reloadable worker state, or live objects for serial execution."""
         # filter out too long prompts
         if self.filter_overlong_prompts:
             filter_kwargs = {
@@ -478,7 +460,7 @@ class RLHFDataset(Dataset):
             formatter = self.processor if self.processor is not None else self.tokenizer
             chat_template = getattr(formatter, "chat_template", None)
             if chat_template is not None:
-                filter_kwargs["apply_chat_template_kwargs"].setdefault("chat_template", chat_template)
+                filter_kwargs["chat_template"] = chat_template
 
             use_multiprocessing = self.num_workers not in (None, 0)
 
@@ -499,9 +481,9 @@ class RLHFDataset(Dataset):
                         "mm_processor_kwargs": dict(**self.mm_processor_kwargs),
                     }
                 )
-                if not use_multiprocessing:
-                    filter_kwargs["process_multi_modal_info_fn"] = self._process_multi_modal_info
-                    filter_kwargs["config"] = self.config
+                # This classmethod captures the dataset class, not its live processor or instance.
+                filter_kwargs["process_multi_modal_info_fn"] = self._process_multi_modal_info
+                filter_kwargs["config"] = self.config
                 filter_function = _filter_prompt_length_with_processor
             else:
                 tokenizer_path = _get_tokenizer_path(self.tokenizer)
@@ -514,6 +496,7 @@ class RLHFDataset(Dataset):
                 filter_function = _filter_prompt_length_with_tokenizer
 
             def single_process_filter(doc):
+                """Use live objects without exposing their repr to Datasets fingerprint warnings."""
                 # Keep live objects out of fn_kwargs: Datasets formats them when fingerprinting
                 # fails, and a processor's repr can itself try to pickle its SSLContext.
                 return filter_function(doc, **filter_kwargs)

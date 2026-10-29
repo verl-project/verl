@@ -51,34 +51,45 @@ def get_gsm8k_data():
 
 
 class _FakeTokenizer:
+    """Count whitespace-separated words without requiring model files."""
+
     name_or_path = "fake-processor"
 
     def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
+        """Return one token per word while checking the filter's template options."""
         assert add_generation_prompt
         assert tokenize
         return list(range(len(messages[0]["content"].split())))
 
     def __call__(self, text, add_special_tokens=False, return_attention_mask=False):
+        """Tokenize a rendered prompt without adding padding or special tokens."""
         assert not add_special_tokens
         assert not return_attention_mask
         return {"input_ids": list(range(len(text.split())))}
 
 
 class _FakeProcessor:
+    """Provide the text-only path of a multimodal processor for isolated filter tests."""
+
     tokenizer = _FakeTokenizer()
 
     def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False, **kwargs):
+        """Render the user content while checking that processor tokenization is disabled."""
         assert add_generation_prompt
         assert not tokenize
         return messages[0]["content"]
 
 
 class _UnpickleableProcessor(_FakeProcessor):
+    """Model a processor holding a live network context that workers cannot deserialize."""
+
     def __init__(self):
+        """Attach the unpicklable state that originally broke multiprocessing."""
         self.context = ssl.create_default_context()
 
 
 def _mock_filter_dataset(processor=None, num_workers=2):
+    """Construct only the dataset state needed to exercise prompt filtering."""
     dataset = RLHFDataset.__new__(RLHFDataset)
     dataset.processor = processor
     dataset.tokenizer = None if processor is not None else _FakeTokenizer()
@@ -98,9 +109,11 @@ def _mock_filter_dataset(processor=None, num_workers=2):
 
 
 def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_filter(monkeypatch):
+    """Multiprocessing receives a reload source and serializable state, never the live processor."""
     calls = []
 
     def load_fake_processor(source, trust_remote_code=False, use_fast=True):
+        """Validate the worker's reload options without accessing external model files."""
         assert source == "fake-processor"
         assert not trust_remote_code
         assert use_fast
@@ -111,6 +124,7 @@ def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_fil
 
     class FakeDataFrame(list):
         def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            """Check worker serialization before applying the predicate locally."""
             calls.append(num_proc)
             if num_proc is not None:
                 pickle.dumps((function, fn_kwargs))
@@ -135,6 +149,7 @@ def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_fil
 
 @pytest.mark.parametrize("reload_path", [None, ""])
 def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processor_path(reload_path):
+    """A processor without a reload source must remain in the serial filtering path."""
     calls = []
 
     class PathlessProcessor(_UnpickleableProcessor):
@@ -142,6 +157,7 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processo
 
     class FakeDataFrame(list):
         def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            """Check serial execution and keep live objects out of fingerprint kwargs."""
             calls.append(num_proc)
             assert num_proc is None
             assert fn_kwargs is None
@@ -164,16 +180,19 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processo
 
 @pytest.mark.parametrize("reload_path", [None, ""])
 def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenizer_path(reload_path):
+    """Missing and empty tokenizer sources must preserve the live tokenizer in serial mode."""
     calls = []
 
     class PathlessTokenizer(_FakeTokenizer):
         name_or_path = reload_path
 
         def __init__(self):
+            """Ensure the fallback also handles genuinely unpicklable tokenizer state."""
             self.context = ssl.create_default_context()
 
     class FakeDataFrame(list):
         def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            """Verify that filtering uses the serial callable without object kwargs."""
             calls.append(num_proc)
             assert num_proc is None
             assert fn_kwargs is None
@@ -195,11 +214,8 @@ def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenize
     assert filtered[0]["prompt"][0]["content"] == "short"
 
 
-@pytest.mark.parametrize("num_workers", [None, 2])
-@pytest.mark.parametrize("use_processor", [False, True])
-def test_prompt_filter_preserves_runtime_chat_template(tmp_path, num_workers, use_processor):
-    """Real filtering must retain runtime templates without pickling live SSL contexts."""
-    from datasets import Dataset
+def _make_local_filter_models(tmp_path, use_processor):
+    """Build reloadable tokenizer/processor fixtures without model downloads."""
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from tokenizers.pre_tokenizers import Whitespace
@@ -233,6 +249,16 @@ def test_prompt_filter_preserves_runtime_chat_template(tmp_path, num_workers, us
     else:
         tokenizer.save_pretrained(tokenizer_path)
     tokenizer = hf_tokenizer(str(tokenizer_path))
+    return tokenizer, processor
+
+
+@pytest.mark.parametrize("num_workers", [None, 2])
+@pytest.mark.parametrize("use_processor", [False, True])
+def test_prompt_filter_preserves_runtime_chat_template(tmp_path, num_workers, use_processor):
+    """Real filtering must retain runtime templates without pickling live SSL contexts."""
+    from datasets import Dataset
+
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor)
     formatter = processor if use_processor else tokenizer
     formatter.chat_template += " extra extra"
     # Reproduce the original failure with a live object that cannot be pickled.
@@ -258,6 +284,109 @@ def test_prompt_filter_preserves_runtime_chat_template(tmp_path, num_workers, us
 
     assert len(dataset) == 1
     assert dataset[0]["raw_prompt"][0]["content"] == "short"
+
+
+@pytest.mark.parametrize("use_processor", [False, True])
+def test_prompt_filter_propagates_worker_load_failure(tmp_path, use_processor):
+    """A real worker loading an invalid checkpoint must fail instead of emptying the dataset."""
+    from datasets import Dataset
+
+    dataset = _mock_filter_dataset(processor=_FakeProcessor() if use_processor else None)
+    formatter = dataset.processor if use_processor else dataset.tokenizer
+    formatter.name_or_path = str(tmp_path)
+    dataframe = Dataset.from_list([{"prompt": [{"role": "user", "content": "short"}]}] * 2)
+
+    with pytest.raises(ValueError):
+        dataset.maybe_filter_out_long_prompts(dataframe)
+
+
+@pytest.mark.parametrize("use_processor", [False, True])
+def test_prompt_filter_still_skips_malformed_samples(use_processor):
+    """Only a malformed row is dropped when a valid live formatter is already available."""
+    from datasets import Dataset
+
+    dataset = _mock_filter_dataset(processor=_FakeProcessor() if use_processor else None, num_workers=None)
+    dataframe = Dataset.from_list(
+        [{"prompt": [{"role": "user", "content": text}]} for text in ["short", None, "one two three"]]
+    )
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert filtered["prompt"] == [[{"role": "user", "content": "short"}]]
+
+
+@pytest.mark.parametrize("num_workers", [None, 2])
+@pytest.mark.parametrize("use_processor", [False, True])
+@pytest.mark.parametrize("selection", ["default", "tool_use", "custom"])
+def test_prompt_filter_preserves_named_templates(tmp_path, num_workers, use_processor, selection):
+    """Native default/tool/named selection must see runtime templates in either execution mode."""
+    from datasets import Dataset
+
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor)
+    formatter = processor if use_processor else tokenizer
+    formatter.chat_template = {
+        "default": "{{ messages[0]['content'] }} extra extra",
+        "tool_use": "{{ messages[0]['content'] }} extra extra extra extra",
+        "custom": "{{ messages[0]['content'] }} extra",
+    }
+    dataset = _mock_filter_dataset(processor=processor, num_workers=num_workers)
+    dataset.tokenizer = tokenizer
+    dataset.max_prompt_length = 3
+    if selection == "custom":
+        dataset.apply_chat_template_kwargs = {"chat_template": "custom"}
+        dataset.max_prompt_length = 2
+    elif selection == "tool_use":
+        dataset.tool_schemas = [
+            {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}
+        ]
+        # Processors select their default template; tokenizers auto-select tool_use.
+        dataset.max_prompt_length = 3 if use_processor else 5
+    dataframe = Dataset.from_list(
+        [{"prompt": [{"role": "user", "content": text}]} for text in ["short", "one two three"]]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert filtered["prompt"] == [[{"role": "user", "content": "short"}]]
+
+
+class _CustomMultimodalDataset(RLHFDataset):
+    @classmethod
+    def _process_multi_modal_info(cls, messages, image_patch_size, config):
+        """Reject rows according to the custom dataset's media configuration."""
+        if messages[0]["content"] != config.keep_prompt:
+            raise ValueError("Unsupported custom media sample")
+        return None, None, None
+
+
+class _CustomAudioDataset(RLHFDataset):
+    @classmethod
+    def _extract_audio_info(cls, messages):
+        """Reject rows that violate a custom audio extraction rule."""
+        if messages[0]["content"] != "short":
+            raise ValueError("Unsupported custom audio sample")
+        return None
+
+
+@pytest.mark.parametrize("num_workers", [None, 2])
+@pytest.mark.parametrize("dataset_class", [_CustomMultimodalDataset, _CustomAudioDataset])
+def test_prompt_filter_preserves_custom_media_hooks(tmp_path, num_workers, dataset_class):
+    """Real multiprocessing must honor class hooks without capturing a live dataset instance."""
+    from datasets import Dataset
+
+    tokenizer, processor = _make_local_filter_models(tmp_path, use_processor=True)
+    dataset = _mock_filter_dataset(processor=processor, num_workers=num_workers)
+    dataset.__class__ = dataset_class
+    dataset.tokenizer = tokenizer
+    dataset.config.keep_prompt = "short"
+    dataset.max_prompt_length = 10
+    dataset.context = ssl.create_default_context()
+    dataframe = Dataset.from_list(
+        [{"prompt": [{"role": "user", "content": text}]} for text in ["short", "one two three"]]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert filtered["prompt"] == [[{"role": "user", "content": "short"}]]
 
 
 def test_rl_dataset():
@@ -347,8 +476,11 @@ def test_build_messages_accepts_video_path_or_frame_list(videos, expected_video)
 
 
 def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
+    """Image paths must reach the dataset's media hook before prompt length is measured."""
+
     class FakeDataFrame(list):
         def filter(self, fn, num_proc=None, desc=None, fn_kwargs=None):
+            """Apply the predicate with the same kwargs contract as Dataset.filter."""
             return FakeDataFrame([doc for doc in self if fn(doc, **(fn_kwargs or {}))])
 
     class FakeProcessor:
