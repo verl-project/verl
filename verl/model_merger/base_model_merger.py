@@ -352,6 +352,20 @@ class BaseModelMerger(ABC):
             target_modules.add(lora_key.split(".")[-3])
             lora_params[lora_key] = state_dict.pop(name)
 
+        # Fully-trained heads (PEFT ``modules_to_save``, e.g. the critic's ``score``): the adapter keeps the
+        # trained copy under its plain name plus a ``modules_to_save`` entry; the frozen ``original_module``
+        # copy is dropped so the exported base model carries the trained head too.
+        head_modules = set()
+        for name in [n for n in state_dict if ".modules_to_save.default." in n]:
+            trained = state_dict.pop(name)
+            module_path, _, param = name.partition(".modules_to_save.default.")
+            head_modules.add(module_path.removeprefix("base_model.model."))
+            plain = f"{module_path}.{param}"
+            lora_params[plain] = trained
+            state_dict[plain] = trained
+        for name in [n for n in state_dict if ".original_module." in n]:
+            state_dict.pop(name)
+
         inferred_lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
         lora_meta = self._load_lora_train_meta()
 
@@ -392,6 +406,8 @@ class BaseModelMerger(ABC):
         }
         if task_type is not None:
             peft_dict["task_type"] = task_type
+        if head_modules:
+            peft_dict["modules_to_save"] = sorted(head_modules)
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
         peft_config["task_type"] = (
             peft_config["task_type"].value

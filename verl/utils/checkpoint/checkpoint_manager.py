@@ -106,10 +106,15 @@ class BaseCheckpointManager:
         return getattr(self.checkpoint_config, "save_lora_only", False)
 
     @staticmethod
+    def is_adapter_key(key: str) -> bool:
+        """LoRA weights, adapter weights, and fully-trained heads PEFT keeps via ``modules_to_save``."""
+        return "lora_" in key or ".adapter_" in key or ".modules_to_save." in key
+
+    @staticmethod
     def is_lora_only_state_dict(state_dict: dict) -> bool:
         if not state_dict:
             return False
-        return all("lora_" in k or ".adapter_" in k for k in state_dict)
+        return all(BaseCheckpointManager.is_adapter_key(k) for k in state_dict)
 
     @property
     def should_load_model(self) -> bool:

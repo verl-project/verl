@@ -205,11 +205,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             return None
 
         lora_alpha = int(getattr(peft_config, "lora_alpha", lora_rank) or 0)
-        task_type = getattr(peft_config, "task_type", None) or "CAUSAL_LM"
+        # value-model (critic) LoRA has no PEFT task type; keep None so the export does not invent one.
+        task_type = getattr(peft_config, "task_type", None)
         if hasattr(task_type, "value"):
             task_type = task_type.value
 
-        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": None if task_type is None else str(task_type)}
 
     def _save_lora_train_meta(self, local_path: str, unwrap_model):
         lora_train_meta = self._get_lora_train_meta(unwrap_model)
@@ -409,9 +410,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     model_state_dict = self.model.state_dict()
                     if self.should_save_lora_only and self._has_lora():
                         n_total = len(model_state_dict)
-                        model_state_dict = {
-                            k: v for k, v in model_state_dict.items() if "lora_" in k or ".adapter_" in k
-                        }
+                        model_state_dict = {k: v for k, v in model_state_dict.items() if self.is_adapter_key(k)}
                         if not model_state_dict:
                             raise ValueError(
                                 f"save_lora_only is True and the model has a peft_config, "

@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
@@ -848,18 +849,23 @@ def normalize_peft_param_name(params: dict) -> dict:
     For example,
         base_model.model.model.embed_tokens.weight -> model.embed_tokens.weight
         base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight -> model.layers.0.self_attn.q_proj.weight
+        base_model.model.score.modules_to_save.default.weight -> score.weight
     and remove params such as base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight,
-    base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight
+    base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight and
+    base_model.model.score.original_module.weight
     """
 
     def _normalize_peft_name(name: str) -> str:
-        return name.replace("base_model.model.", "").replace("base_model.", "").replace(".base_layer", "")
+        name = name.replace("base_model.model.", "").replace("base_model.", "").replace(".base_layer", "")
+        # modules_to_save: the trained copy takes the original module's name
+        return re.sub(r"\.modules_to_save\.[^.]+", "", name)
 
     def _is_lora_key(name: str) -> bool:
         # catch typical PEFT keys
         return ("lora_" in name) or (".adapter_" in name)
 
-    params = [(_normalize_peft_name(k), v) for k, v in params.items()]
+    # the frozen original of a modules_to_save module is superseded by its trained copy
+    params = [(_normalize_peft_name(k), v) for k, v in params.items() if ".original_module." not in k]
     # strip any residual LoRA tensors
     params = {k: v for k, v in params if not _is_lora_key(k)}
     return params
