@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
+from torch.distributed.tensor import DTensor
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -24,6 +25,34 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 class CausalLMOutputForPPO(CausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None
+
+
+def fused_lm_head_forward(
+    self,
+    hidden_states: torch.Tensor,
+    labels: Optional[torch.LongTensor] = None,
+    temperature: float = 1.0,
+    impl_backend: str = "torch",
+):
+    """Compute PPO outputs inside the LM head's FSDP module boundary."""
+    if labels is None:
+        return self._verl_original_forward(hidden_states)
+
+    from verl.utils.experimental.torch_functional import FusedLinearForPPO
+
+    # Module.__call__ runs FSDP's pre-forward hook before we read the weight,
+    # and registers its pre-backward hook on the returned PPO outputs.
+    vocab_weights = self.weight
+    if isinstance(vocab_weights, DTensor):
+        vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
+    hidden_states = hidden_states.to(dtype=vocab_weights.dtype)
+
+    return FusedLinearForPPO(impl_backend=impl_backend)(
+        hidden_states=hidden_states,
+        vocab_weights=vocab_weights,
+        input_ids=labels,
+        temperature=temperature,
+    )
 
 
 def forward_base_model(
@@ -86,8 +115,6 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
 ) -> tuple | CausalLMOutputForPPO:
-    from verl.utils.experimental.torch_functional import FusedLinearForPPO
-
     outputs = forward_base_model(
         self,
         input_ids=input_ids,
@@ -119,12 +146,11 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
+    log_probs, entropy = self.lm_head(
+        hidden_states,
+        labels=rolled_labels,
         temperature=temperature,
+        impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"),
     )
 
     return CausalLMOutputForPPO(
