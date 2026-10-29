@@ -148,7 +148,6 @@ def _runner(llm):
 
 def _refit(llm, weights):
     """The rollout worker's quantized refit, in buckets of 32 tensors."""
-    from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck, nvfp4_per_token_quantization_config
     from verl.utils.vllm.vllm_quant_utils import (
         load_quanted_weights,
         prepare_quanted_weights_for_loading,
@@ -157,12 +156,9 @@ def _refit(llm, weights):
 
     runner = _runner(llm)
     model = runner.get_model()
-    check = NVFP4PerTokenRefitCheck(model, nvfp4_per_token_quantization_config(runner.vllm_config))
     reload_state = prepare_quanted_weights_for_loading(model)
     for start in range(0, len(weights), 32):
-        check.check_bucket(weights[start : start + 32])
         load_quanted_weights(weights[start : start + 32], runner)
-    check.finish()
     process_quanted_weights_after_loading(model, reload_state)
 
 

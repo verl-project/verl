@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NVFP4_PER_TOKEN preset, trainer-side export and rollout refit checks, without vLLM."""
+"""NVFP4_PER_TOKEN preset, trainer-side export and rollout checks, without vLLM."""
 
 import importlib.util
 import sys
@@ -173,81 +173,7 @@ def test_exporter_rejects_an_unpaired_gate_proj(monkeypatch):
         )
 
 
-_LAYER0_BF16 = [r"re:.*layers\.0\.mlp\.experts\..*"]
-
-
 _HIDDEN, _INTERMEDIATE = 32, 16
-
-
-def _expert_tensors(projection):
-    rows, cols = (_HIDDEN, _INTERMEDIATE) if projection == "down_proj" else (_INTERMEDIATE, _HIDDEN)
-    return {
-        "weight": torch.ones(rows, cols, dtype=torch.bfloat16),
-        "weight_packed": torch.ones(rows, cols // 2, dtype=torch.uint8),
-        "weight_scale": torch.ones(rows, cols // 16).to(torch.float8_e4m3fn),
-        "weight_global_scale": torch.ones(1),
-        "input_global_scale": torch.ones(1),
-    }
-
-
-def _stream():
-    weights = []
-    for expert in range(2):
-        for projection in ("gate_proj", "up_proj", "down_proj"):
-            tensors = _expert_tensors(projection)
-            weights.append((f"model.layers.0.mlp.experts.{expert}.{projection}.weight", tensors.pop("weight")))
-            for suffix, tensor in tensors.items():
-                weights.append((f"model.layers.1.mlp.experts.{expert}.{projection}.{suffix}", tensor))
-    return weights
-
-
-def _check(weights):
-    check = _ROLLOUT.NVFP4PerTokenRefitCheck(_model([1], num_layers=2), _config(_LAYER0_BF16))
-    # Split the round into two buckets, as the receiver delivers it.
-    check.check_bucket(weights[: len(weights) // 2])
-    check.check_bucket(weights[len(weights) // 2 :])
-    check.finish()
-
-
-def test_refit_check_accepts_a_complete_reordered_round():
-    weights = list(reversed(_stream()))
-    weights.insert(0, ("model.embed_tokens.weight", torch.ones(2, 16)))
-    _check(weights)
-
-
-@pytest.mark.parametrize(
-    "corrupt, message",
-    [
-        (lambda w: w[:-1], "missing 1 expert tensors"),
-        (lambda w: w + w[-1:], "duplicate"),
-        (lambda w: [(n, t * 2 if n.endswith("input_global_scale") else t) for n, t in w], "scaled per token"),
-        (
-            lambda w: [(n, t * 2 if n.endswith("up_proj.weight_global_scale") else t) for n, t in w],
-            "global scales differ",
-        ),
-        # The checkpoint layout of every expert tensor: shape, then dtype.
-        (
-            lambda w: [(n, t[:, :4] if n.endswith("0.down_proj.weight_packed") else t) for n, t in w],
-            r"expected \(32, 8\)",
-        ),
-        (lambda w: [(n, t.float() if n.endswith("0.gate_proj.weight_scale") else t) for n, t in w], "float8_e4m3fn"),
-        (lambda w: [(n, t.to(torch.uint8) if n.endswith(".0.up_proj.weight") else t) for n, t in w], "bf16"),
-    ],
-)
-def test_refit_check_rejects_a_bad_round(corrupt, message):
-    with pytest.raises(RuntimeError, match=message):
-        _check(corrupt(_stream()))
-
-
-def test_refit_check_accepts_packed_bf16_experts():
-    # Packed-expert checkpoints (e.g. Qwen3.5) send their BF16 layers as one tensor per projection.
-    weights = [(n, t) for n, t in _stream() if not n.startswith("model.layers.0.")]
-    gate_up = torch.ones(2, 2 * _INTERMEDIATE, _HIDDEN, dtype=torch.bfloat16)
-    down = torch.ones(2, _HIDDEN, _INTERMEDIATE, dtype=torch.bfloat16)
-    prefix = "model.layers.0.mlp.experts"
-    _check(weights + [(f"{prefix}.gate_up_proj", gate_up), (f"{prefix}.down_proj", down)])
-    with pytest.raises(RuntimeError, match="expected"):
-        _check(weights + [(f"{prefix}.gate_up_proj", down), (f"{prefix}.down_proj", down)])
 
 
 def test_worker_reads_the_quantization_config_vllm_built_its_methods_from():

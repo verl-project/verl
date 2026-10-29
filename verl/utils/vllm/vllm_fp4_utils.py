@@ -582,6 +582,18 @@ def _attest_nvfp4_kernel_scale_references(module):
         if not torch.equal(actual, 1.0 / input_scale):
             raise RuntimeError(f"nvfp4 {config_name} does not match the current activation scale")
 
+    # FlashInfer TRT-LLM derives g1_scale_c from the scales above and keeps its own reference.
+    derived = getattr(experts, "g1_scale_c", None)
+    if isinstance(derived, torch.Tensor):
+        registered = getattr(module, "g1_scale_c", None)
+        if not isinstance(registered, torch.Tensor) or derived.data_ptr() != registered.data_ptr():
+            raise RuntimeError("nvfp4 kernel has a stale g1_scale_c reference")
+        expected = config.a2_gscale
+        if experts.moe_config.is_act_and_mul:
+            expected = config.g1_alphas * config.a2_gscale
+        if not torch.equal(registered, expected):
+            raise RuntimeError("nvfp4 g1_scale_c does not match the current scales")
+
 
 def _restore_nvfp4_kernel_config_in_place(module, retained_kernel, retained_config):
     """Copy newly derived scales into the config storage captured by CUDA graphs."""

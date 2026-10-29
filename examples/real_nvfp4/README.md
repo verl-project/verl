@@ -95,5 +95,5 @@ python -m pytest -q tests/utils/real_nvfp4
 python -m pytest -q tests/utils/test_bucketed_weight_transfer.py
 ```
 
-Coverage includes recipe compatibility, the rollout preset, refit checks, and
+Coverage includes recipe compatibility, the rollout preset, the in-place refit, and
 bit-exact agreement of the trainer-side export with vLLM's online NVFP4 quantization.

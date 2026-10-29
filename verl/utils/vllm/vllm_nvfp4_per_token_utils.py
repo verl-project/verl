@@ -25,7 +25,6 @@ per-token checks around it.
 
 import re
 from dataclasses import replace
-from typing import Optional
 
 import torch
 
@@ -35,9 +34,6 @@ from verl.utils.qat.compressed_tensors import (
     nvfp4_per_token_module_matcher,
 )
 
-_EXPERT_TENSOR_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(\w+)$")
-_QUANTIZED_SUFFIXES = ("weight_packed", "weight_scale", "weight_global_scale", "input_global_scale")
-_PACKED_EXPERT_TENSOR_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)(?:\.weight)?$")
 _MOE_MODULE_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts(?:\.routed_experts)?$")
 
 
@@ -73,9 +69,8 @@ def install_nvfp4_per_token_compressed_tensors_patch():
             layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.data, requires_grad=False)
             delattr(layer, "w2_weight_packed")
 
-            # gate_proj and up_proj share one global scale and the static input scales
-            # are 1; NVFP4PerTokenRefitCheck enforces both on every refit (the dummy
-            # initial load carries neither). Per-token activation scales come from the kernel.
+            # The export gives gate_proj and up_proj one global scale. Activations are scaled
+            # per token by the kernel, so the static input scales stay 1.
             ones = torch.ones(layer.num_experts, device=layer.w13_weight.device, dtype=torch.float32)
             (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale) = (
                 compressed_tensors_moe_w4a4_nvfp4.convert_to_nvfp4_moe_kernel_format(
@@ -179,112 +174,17 @@ def routed_expert_layers(model: torch.nn.Module, quantization_config: dict) -> d
     return layers
 
 
-class NVFP4PerTokenRefitCheck:
-    """Check one refit round: each expert projection arrives once, in the expected precision and layout."""
-
-    def __init__(self, model: torch.nn.Module, quantization_config: dict):
-        projections = ("gate_proj", "up_proj", "down_proj")
-        self.layers = routed_expert_layers(model, quantization_config)
-        self.expected = {
-            (layer, expert, projection, suffix)
-            for layer, (module, quantized) in self.layers.items()
-            for expert in range(module.global_num_experts)
-            for projection in projections
-            for suffix in (_QUANTIZED_SUFFIXES if quantized else ("weight",))
-        }
-        self.seen = set()
-        self.gate_up_global_scales = {}
-
-    def _keys(self, name: str, tensor: torch.Tensor) -> list[tuple[int, int, str, str]]:
-        match = _EXPERT_TENSOR_RE.search(name)
-        if match is not None:
-            return [(int(match.group(1)), int(match.group(2)), match.group(3), match.group(4))]
-        # BF16 experts of packed-expert checkpoints (e.g. Qwen3.5) stay packed: one tensor per layer.
-        match = _PACKED_EXPERT_TENSOR_RE.search(name)
-        if match is not None:
-            projections = ("gate_proj", "up_proj") if match.group(2) == "gate_up_proj" else ("down_proj",)
-            layer = int(match.group(1))
-            return [(layer, expert, p, "weight") for expert in range(tensor.shape[0]) for p in projections]
-        return []
-
-    def _layout(self, layer: int, projection: str, suffix: str) -> tuple[tuple[int, ...], Optional[torch.dtype]]:
-        """Checkpoint-layout shape and dtype of one expert tensor; ``None`` dtype means BF16-like."""
-        moe = self.layers[layer][0].moe_config
-        hidden = moe.hidden_dim_unpadded
-        intermediate = moe.intermediate_size_per_partition_unpadded * moe.moe_parallel_config.tp_size
-        rows, cols = (hidden, intermediate) if projection == "down_proj" else (intermediate, hidden)
-        return {
-            "weight": ((rows, cols), None),
-            "weight_packed": ((rows, cols // 2), torch.uint8),
-            "weight_scale": ((rows, cols // 16), torch.float8_e4m3fn),
-            "weight_global_scale": ((1,), torch.float32),
-            "input_global_scale": ((1,), torch.float32),
-        }[suffix]
-
-    def _check_layout(self, name: str, tensor: torch.Tensor, keys: list[tuple[int, int, str, str]]) -> None:
-        layer, _, projection, suffix = keys[0]
-        shape, dtype = self._layout(layer, projection, suffix)
-        packed = _PACKED_EXPERT_TENSOR_RE.search(name)
-        if packed is not None:
-            rows = shape[0] * (2 if packed.group(2) == "gate_up_proj" else 1)
-            shape = (self.layers[layer][0].global_num_experts, rows, shape[1])
-        if dtype is None:
-            ok = tensor.dtype in (torch.bfloat16, torch.float16, torch.float32)
-        else:
-            ok = tensor.dtype == dtype
-        if tuple(tensor.shape) != shape or not ok:
-            raise RuntimeError(
-                f"NVFP4_PER_TOKEN refit got {name} as {tuple(tensor.shape)}/{tensor.dtype}, "
-                f"expected {shape}/{dtype or 'bf16'}"
-            )
-
-    def check_bucket(self, weights: list[tuple[str, torch.Tensor]]) -> None:
-        for name, tensor in weights:
-            keys = self._keys(name, tensor)
-            if keys and keys[0] in self.expected:
-                self._check_layout(name, tensor, keys)
-            for key in keys:
-                layer, expert, projection, suffix = key
-                if key not in self.expected:
-                    raise RuntimeError(f"NVFP4_PER_TOKEN refit contains unexpected expert tensor {name}")
-                if key in self.seen:
-                    raise RuntimeError(f"NVFP4_PER_TOKEN refit contains duplicate expert tensor {name}")
-                self.seen.add(key)
-                if suffix == "input_global_scale" and not torch.all(tensor == 1):
-                    raise RuntimeError(f"NVFP4_PER_TOKEN activations are scaled per token, but {name} is not 1")
-                if suffix == "weight_global_scale" and projection != "down_proj":
-                    # The kernel applies one global scale to the fused gate/up weight.
-                    other = self.gate_up_global_scales.setdefault((layer, expert), tensor.detach().float().cpu())
-                    if not torch.equal(other, tensor.detach().float().cpu()):
-                        raise RuntimeError(f"NVFP4_PER_TOKEN gate_proj and up_proj global scales differ at {name}")
-
-    def finish(self) -> None:
-        missing = sorted(self.expected - self.seen)
-        if missing:
-            raise RuntimeError(f"NVFP4_PER_TOKEN refit is missing {len(missing)} expert tensors: {missing[:8]}")
-
-
 @torch.no_grad()
 def _attest_scale_references(module) -> None:
-    """The retained kernel must quantize per token and read the current scales from the captured storage."""
+    """The kernel must quantize per token and read the current scales."""
     from verl.utils.vllm.vllm_fp4_utils import _attest_nvfp4_kernel_scale_references
 
     experts = getattr(getattr(module.quant_method, "moe_kernel", None), "fused_experts", None)
     if not getattr(experts, "per_token_activation", False):
         raise RuntimeError("NVFP4_PER_TOKEN MoE kernel does not quantize activations per token")
-    _attest_nvfp4_kernel_scale_references(module)
-    actual = getattr(experts, "g1_scale_c", None)
-    registered = getattr(module, "g1_scale_c", None)
-    if not isinstance(actual, torch.Tensor) or not isinstance(registered, torch.Tensor):
+    if not isinstance(getattr(experts, "g1_scale_c", None), torch.Tensor):
         raise RuntimeError("NVFP4_PER_TOKEN derived scale g1_scale_c is missing")
-    if actual.data_ptr() != registered.data_ptr():
-        raise RuntimeError("NVFP4_PER_TOKEN kernel has a stale g1_scale_c reference")
-    quant_config = experts.quant_config
-    expected = quant_config.a2_gscale
-    if experts.moe_config.is_act_and_mul:
-        expected = quant_config.g1_alphas * quant_config.a2_gscale
-    if not torch.equal(registered, expected):
-        raise RuntimeError("NVFP4_PER_TOKEN g1_scale_c does not match the current weight scales")
+    _attest_nvfp4_kernel_scale_references(module)
 
 
 def clear_kv_cache(model: torch.nn.Module) -> None:

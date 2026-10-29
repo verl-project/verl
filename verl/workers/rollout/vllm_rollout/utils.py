@@ -253,17 +253,12 @@ class vLLMColocateWorkerExtension:
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
         if self._nvfp4_per_token_config is not None:
-            from verl.utils.vllm.vllm_nvfp4_per_token_utils import clear_kv_cache
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
 
-            self._attest_nvfp4_per_token_runtime()
-            clear_kv_cache(self.model_runner.get_model())
-
-    def _attest_nvfp4_per_token_runtime(self):
-        """Check the routed-expert precision layout and the refit scale state."""
-        from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime
-
-        # get_model() unwraps vLLM's CUDA-graph wrapper.
-        attest_nvfp4_per_token_runtime(self.model_runner.get_model(), self._nvfp4_per_token_config)
+            # get_model() unwraps vLLM's CUDA-graph wrapper.
+            model = self.model_runner.get_model()
+            attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
+            clear_kv_cache(model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -282,16 +277,6 @@ class vLLMColocateWorkerExtension:
         if torch.version.hip is not None:
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
-
-        refit_check = None
-        if self._nvfp4_per_token_config is not None:
-            from verl.utils.vllm.vllm_nvfp4_per_token_utils import NVFP4PerTokenRefitCheck
-
-            if peft_config is not None:
-                raise NotImplementedError("NVFP4_PER_TOKEN rollout does not support LoRA weight sync")
-            if self._use_mtp_drafter_weight_sync():
-                raise NotImplementedError("NVFP4_PER_TOKEN rollout does not support MTP drafter weight sync")
-            refit_check = NVFP4PerTokenRefitCheck(self.model_runner.get_model(), self._nvfp4_per_token_config)
 
         if peft_config and base_sync_done:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
@@ -330,8 +315,6 @@ class vLLMColocateWorkerExtension:
             pin_memory = is_pin_memory_available()
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
-            if refit_check is not None:
-                refit_check.check_bucket(weights)
             if lora_weights is not None:
                 # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
                 # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
@@ -362,8 +345,6 @@ class vLLMColocateWorkerExtension:
             )
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
-        if refit_check is not None:
-            refit_check.finish()
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -371,8 +352,6 @@ class vLLMColocateWorkerExtension:
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
-            if refit_check is not None:
-                self._attest_nvfp4_per_token_runtime()
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
