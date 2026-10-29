@@ -112,6 +112,11 @@ custom_cls:
   # The name of the dataset class within the specified file.
   name: null
 
+# Optional Hydra class target for both train and validation loaders (V1 sync only).
+# Additional fields become user constructor arguments; _data_config, _split,
+# _batch_size, _tokenizer, _processor, and _collate_fn are supplied by Verl.
+custom_dataloader: null
+
 # Whether to return multi-modal inputs in the dataset. Set to False if rollout generates new multi-modal inputs.
 return_multi_modal_inputs: True
 
