@@ -76,6 +76,12 @@ from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_m
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataset.dataloader import (
+    DataLoaderExhausted,
+    close_dataloaders,
+    create_custom_dataloader,
+    validate_custom_batch,
+)
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -221,8 +227,14 @@ class PPOTrainer(ABC):
         4. RewardLoopManager: reward workers for rule-based reward, optional LLM server for model-based reward.
         5. [Optional] MultiTeacherModelManager: LLM teacher servers for on-policy distillation.
         """
-        self._setup()
-        self.on_init_end()
+        initialized = False
+        try:
+            self._setup()
+            self.on_init_end()
+            initialized = True
+        finally:
+            if not initialized:
+                self.close_dataloaders()
 
     def _setup(self):
         self._init_tokenizer()
@@ -416,6 +428,13 @@ class PPOTrainer(ABC):
         Args:
             agent_loop_manager: The agent loop manager to generate sequences.
         """
+        try:
+            self._fit(agent_loop_manager)
+        finally:
+            self.close_dataloaders()
+
+    def _fit(self, agent_loop_manager: AgentLoopManager):
+        """Run the training loop; fit owns custom reader cleanup."""
         self.agent_loop_manager = agent_loop_manager
 
         # initialize SkipManager for V1 rollout skip support
@@ -448,7 +467,7 @@ class PPOTrainer(ABC):
                 self._shutdown_dump_executor()
                 return
 
-        current_epoch = self.global_steps // self.steps_per_epoch
+        current_epoch = self.global_steps // self.steps_per_epoch if self.steps_per_epoch is not None else None
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
@@ -465,7 +484,9 @@ class PPOTrainer(ABC):
 
         self.on_train_begin()
         last_val_metrics = None
-        while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
+        while (
+            current_epoch is None or current_epoch < self.config.trainer.total_epochs
+        ) and self.global_steps <= self.total_training_steps:
             is_last_step = self.global_steps >= self.total_training_steps
             metrics = {}
             self.timing_raw = {}
@@ -475,8 +496,13 @@ class PPOTrainer(ABC):
                 self.on_step_begin()
 
                 self._start_profiling()
-                batch = self.step(metrics, self.timing_raw)
-                self._stop_profiling()
+                try:
+                    batch = self.step(metrics, self.timing_raw)
+                except DataLoaderExhausted:
+                    logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
+                    break
+                finally:
+                    self._stop_profiling()
 
                 # 2. save checkpoint
                 if self.config.trainer.save_freq > 0 and (
@@ -520,13 +546,16 @@ class PPOTrainer(ABC):
             progress_bar.update(1)
             self.global_steps += 1
             SkipManager.set_step(self.global_steps)
-            current_epoch = (self.global_steps - 1) // self.steps_per_epoch
+            current_epoch = (
+                (self.global_steps - 1) // self.steps_per_epoch if self.steps_per_epoch is not None else None
+            )
             if is_last_step:
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 return
 
+        progress_bar.close()
         self.on_train_end()
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
@@ -550,7 +579,11 @@ class PPOTrainer(ABC):
         for trigger_idx in range(self.parameter_sync_step):
             self.local_trigger_step = trigger_idx
             iter_metrics: dict = {}
-            batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
+            try:
+                batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
+            except DataLoaderExhausted as error:
+                # Earlier local updates may already have changed the weights.
+                raise RuntimeError("Custom training source exhausted during PPO update/refill.") from error
             sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
             metrics_aggregator.add_step_metrics(iter_metrics, sample_count=sample_count)
             combined_keys.extend(batch.keys)
@@ -707,7 +740,99 @@ class PPOTrainer(ABC):
         self.processor = model_config.processor
 
     def _init_dataloader(self):
-        """Initialize train and validate dataloader."""
+        """Select the input path and initialize the optimizer scheduling horizon."""
+        if self.config.data.get("custom_dataloader") is not None:
+            self._init_custom_dataloaders()
+        else:
+            self._init_builtin_dataloaders()
+
+        total_training_steps = self.config.trainer.total_training_steps
+        if total_training_steps is None:
+            total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
+        self.total_training_steps = total_training_steps
+        logger.info(f"Total training steps: {self.total_training_steps}")
+
+        # Each global step performs parameter_sync_step local optimizer updates.
+        optim_total_training_steps = total_training_steps * self.parameter_sync_step
+        try:
+            OmegaConf.set_struct(self.config, True)
+            with open_dict(self.config):
+                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
+                if OmegaConf.select(self.config, "critic.optim"):
+                    self.config.critic.optim.total_training_steps = optim_total_training_steps
+        except Exception as e:
+            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def _init_custom_dataloaders(self):
+        """Create independent role instances without requiring a dataset or file paths."""
+        if self.trainer_mode != "sync":
+            raise ValueError("data.custom_dataloader currently supports only V1 synchronous PPO.")
+        self.train_dataloader = self.val_dataloader = None
+        self.train_dataloader_it = None
+        train_batch_size = self.config.data.train_batch_size
+        requested_fetch_size = self.config.data.get("gen_batch_size")
+        if requested_fetch_size is not None and (type(requested_fetch_size) is not int or requested_fetch_size <= 0):
+            raise ValueError("data.gen_batch_size must be a positive integer or null.")
+        gen_batch_size = self._resolve_gen_batch_size()
+        if type(train_batch_size) is not int or train_batch_size <= 0:
+            raise ValueError("data.train_batch_size must be a positive integer.")
+        if type(gen_batch_size) is not int or gen_batch_size <= 0 or train_batch_size % gen_batch_size:
+            raise ValueError("Custom dataloader fetch size must be a positive divisor of data.train_batch_size.")
+        total_steps = self.config.trainer.total_training_steps
+        if total_steps is not None and (type(total_steps) is not int or total_steps <= 0):
+            raise ValueError("trainer.total_training_steps must be a positive integer.")
+
+        self.train_dataloader = create_custom_dataloader(
+            self.config.data,
+            split="train",
+            batch_size=gen_batch_size,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            collate_fn=collate_fn,
+        )
+        if total_steps is not None:
+            self.steps_per_epoch = None
+            logger.info("Custom dataloader uses step-based training; trainer.total_epochs is not used.")
+        else:
+            try:
+                num_batches = len(self.train_dataloader)
+            except TypeError as error:
+                raise ValueError("Unsized custom dataloaders require trainer.total_training_steps.") from error
+            self.steps_per_epoch = num_batches * gen_batch_size // train_batch_size
+            if self.steps_per_epoch <= 0:
+                raise ValueError("Custom training dataloader must provide at least one full training batch.")
+
+        trainer_config = self.config.trainer
+        if (
+            trainer_config.get("val_before_train", True)
+            or trainer_config.get("val_only", False)
+            or trainer_config.get("test_freq", -1) > 0
+        ):
+            val_batch_size = self.config.data.get("val_batch_size")
+            self._custom_val_batch_size = train_batch_size if val_batch_size is None else val_batch_size
+            self.val_dataloader = create_custom_dataloader(
+                self.config.data,
+                split="val",
+                batch_size=self._custom_val_batch_size,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                collate_fn=collate_fn,
+            )
+            if self.val_dataloader is self.train_dataloader:
+                raise ValueError("Custom train and validation dataloaders must be separate instances.")
+
+    def close_dataloaders(self):
+        """Release custom readers, including after partial trainer initialization."""
+        if self.config.data.get("custom_dataloader") is not None:
+            train = getattr(self, "train_dataloader", None)
+            val = getattr(self, "val_dataloader", None)
+            self.train_dataloader = self.val_dataloader = None
+            self.train_dataloader_it = None
+            close_dataloaders(train, val)
+
+    def _init_builtin_dataloaders(self):
+        """Preserve the existing custom-dataset and StatefulDataLoader path."""
         self.train_dataset = create_rl_dataset(
             self.config.data.train_files,
             self.config.data,
@@ -725,22 +850,7 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        # Exact refill counts require single-prompt dataloader fetches.
-        filter_groups = self.config.algorithm.get("filter_groups", None)
-        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
-        sync_refill_failed_groups = bool(self.config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
-        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
-        if requires_exact_refill:
-            user_gen_batch_size = self.config.data.get("gen_batch_size", None)
-            if user_gen_batch_size not in (None, 1):
-                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
-            elif user_gen_batch_size is None:
-                logger.info("data.gen_batch_size defaulted to 1.")
-            with open_dict(self.config):
-                self.config.data.gen_batch_size = 1
-
-        # use gen_batch_size as the batch size for the dataloader if set, otherwise use train_batch_size
-        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        gen_batch_size = self._resolve_gen_batch_size()
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=gen_batch_size,
@@ -765,26 +875,21 @@ class PPOTrainer(ABC):
 
         self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
 
-        # adjust total_training_steps
-        total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
-        self.total_training_steps = total_training_steps
-        logger.info(f"Total training steps: {self.total_training_steps}")
-
-        # The LR scheduler steps once per local update, and each global step performs
-        # ``parameter_sync_step`` local updates (see ``PPOTrainer.step``). The optimizer's
-        # schedule horizon must therefore count optimizer updates.
-        optim_total_training_steps = total_training_steps * self.parameter_sync_step
-        try:
-            OmegaConf.set_struct(self.config, True)
+    def _resolve_gen_batch_size(self):
+        """Resolve the trainer's fetch size before invoking a custom loader."""
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        sync_refill_failed_groups = bool(self.config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
+        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
+        if requires_exact_refill:
+            user_gen_batch_size = self.config.data.get("gen_batch_size", None)
+            if user_gen_batch_size not in (None, 1):
+                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
+            elif user_gen_batch_size is None:
+                logger.info("data.gen_batch_size defaulted to 1.")
             with open_dict(self.config):
-                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
-                if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = optim_total_training_steps
-        except Exception as e:
-            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+                self.config.data.gen_batch_size = 1
+        return self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
 
     def _init_resource_pool_mgr(self):
         config = self.config
@@ -873,6 +978,14 @@ class PPOTrainer(ABC):
         else:
             logger.exception(f"Unknown resume mode {self.config.trainer.resume_mode}")
 
+        if self.config.data.get("custom_dataloader") is not None and not callable(
+            getattr(self.train_dataloader, "load_state_dict", None)
+        ):
+            raise ValueError(
+                "Cannot resume training: the custom dataloader does not support checkpoint restoration. "
+                "Start a new run with trainer.resume_mode=disable; saved model weights remain usable."
+            )
+
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
         logger.info(f"Resuming from {global_step_folder}, setting global step to {self.global_steps}")
@@ -894,8 +1007,12 @@ class PPOTrainer(ABC):
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            if self.config.data.get("custom_dataloader") is not None and not isinstance(dataloader_state_dict, dict):
+                raise TypeError("Custom dataloader checkpoint must contain a state dictionary.")
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
+            if self.config.data.get("custom_dataloader") is not None:
+                raise FileNotFoundError(f"Cannot resume custom dataloader: missing {dataloader_local_path}")
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
@@ -997,7 +1114,17 @@ class PPOTrainer(ABC):
         # save dataloader state
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
+        if self.config.data.get("custom_dataloader") is None or callable(
+            getattr(self.train_dataloader, "state_dict", None)
+        ):
+            dataloader_state = self.train_dataloader.state_dict()
+            if self.config.data.get("custom_dataloader") is not None and not isinstance(dataloader_state, dict):
+                raise TypeError("Custom dataloader state_dict() must return a dictionary.")
+            torch.save(dataloader_state, dataloader_local_path)
+        else:
+            if os.path.exists(dataloader_local_path):
+                os.remove(dataloader_local_path)
+            logger.info("Saving model checkpoint without dataloader state; full training resume is unsupported.")
 
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
@@ -1047,6 +1174,8 @@ class PPOTrainer(ABC):
         expected_acc_counts: dict[tuple[str, str], int] = {}
 
         for batch_dict in self.val_dataloader:
+            if self.config.data.get("custom_dataloader") is not None:
+                validate_custom_batch(batch_dict, split="val", batch_size=self._custom_val_batch_size)
             # 1. put batch to agent loop manager
             batch_dict["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object
@@ -1471,9 +1600,14 @@ class PPOTrainer(ABC):
                 self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
         except StopIteration:
+            if self.config.data.get("custom_dataloader") is not None and self.steps_per_epoch is None:
+                raise DataLoaderExhausted from None
             self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
 
+        if self.config.data.get("custom_dataloader") is not None:
+            fetch_size = self.config.data.get("gen_batch_size") or self.config.data.train_batch_size
+            validate_custom_batch(batch_dict, split="train", batch_size=fetch_size)
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         return tu.get_tensordict(batch_dict)
 
@@ -1937,7 +2071,9 @@ class PPOTrainer(ABC):
         metrics_batch.non_tensor_batch["__num_turns__"] = np.asarray(num_turns_for_metrics, dtype=np.int32)
 
         # 2. compute metrics
-        metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+        metrics["training/global_step"] = global_steps
+        if epoch is not None:
+            metrics["training/epoch"] = epoch
         metrics.update(
             compute_moe_lb_metrics(
                 metrics_batch=metrics_batch,

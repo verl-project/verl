@@ -160,11 +160,15 @@ class TaskRunnerV1:
             succeeded = True
         finally:
             try:
-                tracking = getattr(self.trainer, "logger", None)
-                if tracking is not None:
-                    tracking.finish(exit_code=0 if succeeded else 1)
+                if self.trainer is not None:
+                    self.trainer.close_dataloaders()
             finally:
-                tq.close()
+                try:
+                    tracking = getattr(self.trainer, "logger", None)
+                    if tracking is not None:
+                        tracking.finish(exit_code=0 if succeeded else 1)
+                finally:
+                    tq.close()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)

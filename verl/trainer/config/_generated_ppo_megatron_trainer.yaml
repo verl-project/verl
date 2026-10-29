@@ -546,6 +546,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
