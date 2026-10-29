@@ -260,6 +260,74 @@ def test_rloo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+def _index_from_group_sizes(group_sizes: list[int]) -> np.ndarray:
+    index: list[int] = []
+    for gid, count in enumerate(group_sizes):
+        index.extend([gid] * count)
+    return np.asarray(index, dtype=np.int64)
+
+
+@pytest.mark.parametrize(
+    "group_sizes",
+    [
+        [4, 1, 4],  # one prompt lost all but one sibling rollout
+        [1, 1, 1],  # rollout.n == 1
+        [3, 1, 2],  # ragged groups
+    ],
+)
+def test_rloo_and_vectorized_equivalence_with_singleton_groups(group_sizes: list[int]):
+    """Singleton groups must be handled identically by both RLOO implementations.
+
+    ``_make_group_index`` guarantees >=2 samples per group, so the parametrized
+    equivalence test above cannot reach the branch where the leave-one-out baseline is
+    undefined. The vectorized variant used to zero those rows while the loop-based
+    reference passed the raw score through.
+    """
+    torch.manual_seed(0)
+    index = _index_from_group_sizes(group_sizes)
+    batch_size, seq_len = len(index), 4
+    response_mask = torch.ones(batch_size, seq_len, dtype=torch.float32)
+    token_level_rewards = torch.zeros(batch_size, seq_len, dtype=torch.float32)
+    token_level_rewards[:, -1] = torch.rand(batch_size)
+
+    adv1, ret1 = compute_rloo_outcome_advantage(
+        token_level_rewards=token_level_rewards.clone(),
+        response_mask=response_mask,
+        index=index,
+    )
+    adv2, ret2 = compute_rloo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards.clone(),
+        response_mask=response_mask,
+        index=index,
+    )
+
+    assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "adv_fn",
+    [compute_grpo_vectorized_outcome_advantage, compute_rloo_vectorized_outcome_advantage],
+)
+def test_vectorized_estimators_accept_sparse_and_negative_group_ids(adv_fn):
+    """Vectorized estimators used to raise IndexError on non-dense integer uids."""
+    token_level_rewards = torch.tensor([[0.0, 1.0], [0.0, 0.0], [0.0, 1.0], [0.0, 0.0]], dtype=torch.float32)
+    response_mask = torch.ones_like(token_level_rewards)
+
+    dense = adv_fn(
+        token_level_rewards=token_level_rewards.clone(),
+        response_mask=response_mask,
+        index=np.array([0, 0, 1, 1]),
+    )[0]
+    sparse = adv_fn(
+        token_level_rewards=token_level_rewards.clone(),
+        response_mask=response_mask,
+        index=np.array([-7, -7, 4096, 4096]),
+    )[0]
+
+    assert torch.allclose(dense, sparse, rtol=1e-5, atol=1e-6)
+
+
 def test_grpo_vectorized_matches_original_for_low_variance_rewards():
     token_level_rewards = torch.tensor([[1.0], [1.00001], [2.0], [2.00001]], dtype=torch.float32)
     response_mask = torch.ones_like(token_level_rewards)
