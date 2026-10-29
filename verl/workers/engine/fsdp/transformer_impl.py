@@ -157,8 +157,16 @@ def _select_raw_token_logits(logits: torch.Tensor, indices: torch.Tensor | None)
             "Multimodal logit length does not match the reconstructed expanded sequence: "
             f"logits={logits.shape[1]}, reconstructed={expanded_length}"
         )
-    batch_indices = torch.arange(logits.shape[0], device=logits.device)[:, None]
-    return logits[batch_indices, indices]
+    # Flatten and use index_select to avoid an Ascend advanced-index fallback.
+    batch, expanded_seq_len, vocab = logits.shape
+    row_indices = indices + (
+        torch.arange(batch, device=logits.device).unsqueeze(1) * expanded_seq_len
+    )
+    return (
+        logits.reshape(batch * expanded_seq_len, vocab)
+        .index_select(0, row_indices.reshape(-1))
+        .reshape(batch, indices.shape[1], vocab)
+    )
 
 
 def _move_multimodal_inputs_to_device(value, device):
