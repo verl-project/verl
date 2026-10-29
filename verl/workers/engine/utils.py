@@ -122,6 +122,9 @@ def prepare_micro_batches(
     else:
         total_data_size = len(data)
         micro_batch_size_per_gpu = data["micro_batch_size_per_gpu"]
+        assert micro_batch_size_per_gpu is not None and micro_batch_size_per_gpu > 0, (
+            f"micro_batch_size_per_gpu must be a positive integer, got {micro_batch_size_per_gpu}"
+        )
         assert total_data_size % (force_group_size * micro_batch_size_per_gpu) == 0, (
             "data size must be divisible by force_group_size * micro_batch_size_per_gpu"
         )
