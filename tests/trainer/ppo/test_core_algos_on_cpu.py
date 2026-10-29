@@ -22,14 +22,31 @@ import torch
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_gdpo_outcome_advantage,
+    compute_gpg_outcome_advantage,
     compute_grpo_outcome_advantage,
+    compute_grpo_passk_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_opo_outcome_advantage,
+    compute_reinforce_plus_plus_baseline_outcome_advantage,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
     kl_penalty,
     register_adv_est,
 )
+
+GROUP_OUTCOME_ADVANTAGE_CASES = [
+    (compute_grpo_outcome_advantage, {"norm_adv_by_std_in_grpo": False}),
+    (compute_grpo_vectorized_outcome_advantage, {"norm_adv_by_std_in_grpo": False}),
+    (compute_grpo_passk_outcome_advantage, {"config": {"norm_adv_by_std_in_grpo": False}}),
+    (compute_reinforce_plus_plus_baseline_outcome_advantage, {}),
+    (compute_rloo_outcome_advantage, {}),
+    (compute_opo_outcome_advantage, {}),
+    (compute_gpg_outcome_advantage, {}),
+    (compute_rloo_vectorized_outcome_advantage, {}),
+    (compute_gdpo_outcome_advantage, {"norm_adv_by_std_in_grpo": False}),
+]
 
 
 def mock_test_fn():
@@ -196,6 +213,48 @@ def test_multi_turn_compute_gae_advantage_return():
     assert torch.equal(adv1, adv2), f"{adv1=}, {adv2=}"
     assert torch.equal(ret1, ret2), f"{ret1=}, {ret2=}"
     print(f" [CORRECT] \n\n{adv1=}, \n\n{ret1=}")
+
+
+@pytest.mark.parametrize("adv_fn,kwargs", GROUP_OUTCOME_ADVANTAGE_CASES)
+def test_outcome_estimators_keep_reward_when_only_reward_storage_token_is_masked(adv_fn, kwargs):
+    response_mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+    token_level_rewards = torch.tensor([[0.0, 1.0], [0.0, 0.0]])
+    index = np.array(["prompt", "prompt"], dtype=object)
+
+    advantages, returns = adv_fn(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        **kwargs,
+    )
+
+    assert torch.count_nonzero(advantages).item() > 0
+    assert torch.count_nonzero(returns).item() > 0
+
+
+@pytest.mark.parametrize("adv_fn,kwargs", GROUP_OUTCOME_ADVANTAGE_CASES)
+def test_outcome_advantage_estimators_ignore_fully_masked_group_members(adv_fn, kwargs):
+    response_mask = torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+    token_level_rewards = torch.tensor([[0.0, 0.0, 100.0], [0.0, 0.0, 1.0], [0.0, 0.0, 2.0]])
+    index = np.array(["same_prompt", "same_prompt", "same_prompt"], dtype=object)
+
+    full_advantages, full_returns = adv_fn(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        **kwargs,
+    )
+    valid_only_advantages, valid_only_returns = adv_fn(
+        token_level_rewards=token_level_rewards[1:],
+        response_mask=response_mask[1:],
+        index=np.array(["same_prompt", "same_prompt"], dtype=object),
+        **kwargs,
+    )
+
+    torch.testing.assert_close(full_advantages[0], torch.zeros_like(full_advantages[0]))
+    torch.testing.assert_close(full_returns[0], torch.zeros_like(full_returns[0]))
+    torch.testing.assert_close(full_advantages[1:], valid_only_advantages)
+    torch.testing.assert_close(full_returns[1:], valid_only_returns)
 
 
 def _make_group_index(batch_size: int, num_groups: int) -> np.ndarray:
