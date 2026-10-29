@@ -273,6 +273,13 @@ def patch_forward_with_backends(
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     else:
+        text_config = model.config.get_text_config()
+        if getattr(text_config, "final_logit_softcapping", None):
+            raise ValueError(
+                f"The generic fused forward does not support final_logit_softcapping for "
+                f"{model.__class__.__name__}. Set use_fused_kernels=False to preserve the model's logit softcap."
+            )
+
         from verl.models.transformers.dense_common import forward_with_torch_backend, forward_with_triton_backend
 
         forward_with_torch_backend_function = forward_with_torch_backend
