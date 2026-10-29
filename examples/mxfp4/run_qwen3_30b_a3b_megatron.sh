@@ -48,6 +48,8 @@ total_epochs=${TOTAL_EPOCHS:-1}
 total_training_steps=${TOTAL_TRAINING_STEPS:-null}
 save_freq=${SAVE_FREQ:--1}
 test_freq=${TEST_FREQ:--1}
+# the same seed gives every arm the same data order, so steps pair across arms
+seed=${SEED:-1}
 
 project_name=${PROJECT_NAME:-verl_grpo_dapo_mxfp4}
 experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_megatron_${INFER_BACKEND}_${PRECISION}}
@@ -91,6 +93,7 @@ DATA=(
     data.max_response_length=${max_response_length}
     data.filter_overlong_prompts=True
     data.truncation='error'
+    data.seed=${seed}
 )
 
 MODEL=(
