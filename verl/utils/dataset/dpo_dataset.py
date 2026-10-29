@@ -515,7 +515,7 @@ class DPODataset(Dataset):
         dict with keys:
             input_ids:       (chosen_len + rejected_len,) — packed sequence
             loss_mask:       (chosen_len + rejected_len,) — 0=prompt, 1=response for each half
-            boundary_offset: int — index where rejected starts in the packed sequence
+            boundary_offset: 0-dim torch.long tensor — index where rejected starts in the packed sequence
     """
 
     def __init__(
@@ -632,7 +632,7 @@ class DPODataset(Dataset):
           input_ids = [chosen_tokens..., rejected_tokens...]
           loss_mask = [chosen_loss_mask..., rejected_loss_mask...]
 
-        Plus a boundary_offset integer marking where chosen ends and rejected begins.
+        Plus a boundary_offset (0-dim long tensor) marking where chosen ends and rejected begins.
 
         This ensures the chosen/rejected pair stays together through dynamic
         micro-batching. The micro_batch_transform_fn splits them back into
@@ -645,7 +645,7 @@ class DPODataset(Dataset):
             Dict with:
               input_ids: (chosen_len + rejected_len,) — packed sequence
               loss_mask: (chosen_len + rejected_len,) — packed mask
-              boundary_offset: int — index where rejected starts
+              boundary_offset: 0-dim torch.long tensor — index where rejected starts
         """
         prompt = self.prompts[item]
         chosen = self.chosen_responses[item]
@@ -668,5 +668,5 @@ class DPODataset(Dataset):
         return {
             "input_ids": packed_input_ids,
             "loss_mask": packed_loss_mask,
-            "boundary_offset": int(boundary_offset),
+            "boundary_offset": torch.tensor(boundary_offset, dtype=torch.long),
         }

@@ -37,7 +37,8 @@ class CustomTensorCollator:
         - Right-padded / left-right: All samples are already the same length.
           Uses PyTorch's default_collate which simply stacks tensors.
         - No-padding: Samples have variable lengths. Converts them to PyTorch
-          NestedTensors (jagged layout).
+          NestedTensors (jagged layout). 0-dim (scalar) tensors are stacked into a
+          dense (B,) tensor instead, since they cannot form a NestedTensor.
     """
 
     def __init__(self, pad_mode: DatasetPadMode):
@@ -62,7 +63,8 @@ class CustomTensorCollator:
 
         Returns:
             A dictionary representing the batched data, with variable-length
-            sequences converted to NestedTensors.
+            sequences converted to NestedTensors and 0-dim (per-sample scalar)
+            tensors stacked into a dense (B,) tensor.
         """
         final_batch = {}
         tensor_keys = set().union(*(d.keys() for d in batch))
@@ -70,7 +72,11 @@ class CustomTensorCollator:
         for key in tensor_keys:
             if isinstance(batch[0][key], torch.Tensor):
                 tensors = [item[key] for item in batch]
-                if tensors[0].dim() >= 2:
+                if tensors[0].dim() == 0:
+                    # Per-sample scalars (e.g. DPO boundary_offset): a nested tensor cannot be
+                    # built from 0-dim tensors, so stack them into a dense (B,) tensor.
+                    final_batch[key] = torch.stack(tensors)
+                elif tensors[0].dim() >= 2:
                     final_batch[key] = nested_tensor_from_tensor_list(tensors)
                 else:
                     final_batch[key] = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)

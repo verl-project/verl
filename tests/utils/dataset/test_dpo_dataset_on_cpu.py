@@ -19,7 +19,7 @@ Tests cover:
 - Packed-tensor output format: input_ids, loss_mask, boundary_offset
 - Truncation behavior
 - Invalid sample filtering
-- Collator: NestedTensor batching, boundary_offset preservation
+- Collator: NestedTensor batching, boundary_offset as a dense (B,) tensor through tensordict utils
 - YAML config resolution
 - Collator subclass defaults
 - Shuffle determinism (property-based)
@@ -347,8 +347,13 @@ class TestDPODatasetPackedOutput:
                         "rejected_labels", "chosen_attention_mask", "rejected_attention_mask"]:
             assert old_key not in sample
 
-    def test_boundary_offset_is_int(self, dataset):
-        assert isinstance(dataset[0]["boundary_offset"], int)
+    def test_boundary_offset_is_0dim_long_tensor(self, dataset):
+        import torch
+
+        offset = dataset[0]["boundary_offset"]
+        assert isinstance(offset, torch.Tensor)
+        assert offset.dim() == 0
+        assert offset.dtype == torch.long
 
     def test_boundary_offset_in_range(self, dataset):
         sample = dataset[0]
@@ -552,8 +557,8 @@ class TestDPOCollator:
         from verl.utils.dataset.dataset_utils import DPOTensorCollator
         collator = DPOTensorCollator("no_padding")
         batch = [
-            {"input_ids": torch.arange(10), "loss_mask": torch.zeros(10), "boundary_offset": 5},
-            {"input_ids": torch.arange(15), "loss_mask": torch.zeros(15), "boundary_offset": 8},
+            {"input_ids": torch.arange(10), "loss_mask": torch.zeros(10), "boundary_offset": torch.tensor(5)},
+            {"input_ids": torch.arange(15), "loss_mask": torch.zeros(15), "boundary_offset": torch.tensor(8)},
         ]
         result = collator(batch)
         assert result["input_ids"].is_nested
@@ -564,9 +569,9 @@ class TestDPOCollator:
         from verl.utils.dataset.dataset_utils import DPOTensorCollator
         collator = DPOTensorCollator("no_padding")
         batch = [
-            {"input_ids": torch.arange(10), "loss_mask": torch.zeros(10), "boundary_offset": 5},
-            {"input_ids": torch.arange(15), "loss_mask": torch.zeros(15), "boundary_offset": 8},
-            {"input_ids": torch.arange(12), "loss_mask": torch.zeros(12), "boundary_offset": 6},
+            {"input_ids": torch.arange(10), "loss_mask": torch.zeros(10), "boundary_offset": torch.tensor(5)},
+            {"input_ids": torch.arange(15), "loss_mask": torch.zeros(15), "boundary_offset": torch.tensor(8)},
+            {"input_ids": torch.arange(12), "loss_mask": torch.zeros(12), "boundary_offset": torch.tensor(6)},
         ]
         result = collator(batch)
         assert len(result["input_ids"].offsets()) - 1 == 3
@@ -576,8 +581,8 @@ class TestDPOCollator:
         from verl.utils.dataset.dataset_utils import DPOTensorCollator
         collator = DPOTensorCollator("no_padding")
         batch = [
-            {"input_ids": torch.ones(20), "loss_mask": torch.zeros(20), "boundary_offset": 10},
-            {"input_ids": torch.ones(50), "loss_mask": torch.zeros(50), "boundary_offset": 25},
+            {"input_ids": torch.ones(20), "loss_mask": torch.zeros(20), "boundary_offset": torch.tensor(10)},
+            {"input_ids": torch.ones(50), "loss_mask": torch.zeros(50), "boundary_offset": torch.tensor(25)},
         ]
         result = collator(batch)
         seqlens = result["input_ids"].offsets().diff()
@@ -589,12 +594,15 @@ class TestDPOCollator:
         from verl.utils.dataset.dataset_utils import DPOTensorCollator
         collator = DPOTensorCollator("no_padding")
         batch = [
-            {"input_ids": torch.arange(10), "loss_mask": torch.zeros(10), "boundary_offset": 5},
-            {"input_ids": torch.arange(15), "loss_mask": torch.zeros(15), "boundary_offset": 8},
+            {"input_ids": torch.arange(10), "loss_mask": torch.zeros(10), "boundary_offset": torch.tensor(5)},
+            {"input_ids": torch.arange(15), "loss_mask": torch.zeros(15), "boundary_offset": torch.tensor(8)},
         ]
         result = collator(batch)
         offsets = result["boundary_offset"]
-        assert offsets is not None
+        assert isinstance(offsets, torch.Tensor)
+        assert not offsets.is_nested
+        assert offsets.dtype == torch.long
+        assert offsets.tolist() == [5, 8]
 
     def test_dataloader_integration(self):
         import torch
@@ -610,6 +618,93 @@ class TestDPOCollator:
             batch = next(iter(dataloader))
             assert batch["input_ids"].is_nested
             assert len(batch["input_ids"].offsets()) - 1 == 3
+            expected = [int(dataset[i]["boundary_offset"]) for i in range(3)]
+            assert batch["boundary_offset"].tolist() == expected
+
+    # Regressions: boundary_offset must reach the trainer as a dense (B,) long tensor. With plain ints the
+    # collator wrapped each offset in NonTensorData; on tensordict 0.8.x torch.stack collapses equal values
+    # into ONE NonTensorData, which tu.get_tensordict rejects.
+
+    @staticmethod
+    def _collate(offsets, lengths=None):
+        import torch
+
+        from verl.utils.dataset.dataset_utils import DPOTensorCollator
+
+        lengths = lengths or [10 + 5 * i for i in range(len(offsets))]
+        batch = [
+            {"input_ids": torch.arange(n), "loss_mask": torch.ones(n), "boundary_offset": torch.tensor(o)}
+            for n, o in zip(lengths, offsets, strict=True)
+        ]
+        return DPOTensorCollator("no_padding")(batch)
+
+    def test_identical_offsets_stay_dense(self):
+        import torch
+
+        from verl.utils import tensordict_utils as tu
+
+        result = self._collate([5, 5])
+        assert isinstance(result["boundary_offset"], torch.Tensor)
+        assert not result["boundary_offset"].is_nested
+        assert result["boundary_offset"].shape == (2,)
+        td = tu.get_tensordict(result)
+        assert td["boundary_offset"].tolist() == [5, 5]
+
+    def test_single_sample_batch(self):
+        from verl.utils import tensordict_utils as tu
+
+        result = self._collate([7])
+        assert result["boundary_offset"].shape == (1,)
+        td = tu.get_tensordict(result)
+        assert td["boundary_offset"].tolist() == [7]
+
+    def test_dataloader_identical_offsets_pass_get_tensordict(self):
+        """End to end: real DPODataset samples with equal offsets survive collation and get_tensordict."""
+        from torch.utils.data import DataLoader
+
+        from verl.utils import tensordict_utils as tu
+        from verl.utils.dataset.dataset_utils import DPOTensorCollator
+        from verl.utils.dataset.dpo_dataset import DPODataset
+
+        tokenizer = _get_tokenizer()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = _create_parquet(tmp_dir, num_samples=2)
+            dataset = DPODataset(data_files=path, tokenizer=tokenizer, config=_default_config())
+            expected = [int(dataset[i]["boundary_offset"]) for i in range(2)]
+            assert expected[0] == expected[1]  # the fixture rows pack to equal offsets
+            batch = next(iter(DataLoader(dataset, batch_size=2, collate_fn=DPOTensorCollator("no_padding"))))
+            td = tu.get_tensordict(batch)
+            assert td["boundary_offset"].tolist() == expected
+
+    def test_offsets_follow_rows_through_index_select_and_chunk(self):
+        from verl.utils import tensordict_utils as tu
+
+        lengths = [10, 15, 12, 20]
+        offsets = [5, 8, 6, 9]
+        td = tu.get_tensordict(self._collate(offsets, lengths))
+
+        selected = tu.index_select_tensor_dict(td, [2, 0, 3])
+        assert selected["boundary_offset"].tolist() == [6, 5, 9]
+        assert selected["input_ids"].offsets().diff().tolist() == [12, 10, 20]
+
+        chunks = tu.chunk_tensordict(td, 2)
+        assert [c["boundary_offset"].tolist() for c in chunks] == [[5, 8], [6, 9]]
+        assert [c["input_ids"].offsets().diff().tolist() for c in chunks] == [[10, 15], [12, 20]]
+
+    def test_sft_collator_stacks_0dim_keeps_1d_nested(self):
+        """Only 0-dim tensors are stacked; equal-length 1-D keys must stay nested."""
+        import torch
+
+        from verl.utils.dataset.dataset_utils import SFTTensorCollator
+
+        batch = [
+            {"input_ids": torch.arange(6), "scalar": torch.tensor(1)},
+            {"input_ids": torch.arange(6), "scalar": torch.tensor(2)},
+        ]
+        result = SFTTensorCollator("no_padding")(batch)
+        assert result["input_ids"].is_nested
+        assert not result["scalar"].is_nested
+        assert result["scalar"].tolist() == [1, 2]
 
 
 # ═════════════════════════════════════════════════════════════════════════
