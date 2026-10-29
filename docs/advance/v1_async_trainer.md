@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 10/29/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -229,6 +229,37 @@ actor_rollout_ref.rollout.standalone_gpu_memory_utilization=0.85
 Choose both fractions for the memory available on their respective GPU pools. By default, `standalone_gpu_memory_utilization` follows `gpu_memory_utilization`. Setting it to `null` also falls back to `gpu_memory_utilization`. The override also applies when `actor_rollout_ref.hybrid_engine=False`, and does not change the trainer's or hybrid replicas' configuration.
 
 `separate_async` requires a non-`naive` checkpoint-engine backend such as `nccl`, `nixl`, or `mooncake` for standalone rollout weight synchronization.
+
+### Splitting a physical resource pool
+
+To place trainer and standalone rollout GPUs on the same physical nodes with an
+uneven per-node split, set `trainer.v1.separate_async.shared_rollout_gpus` to
+the total number of rollout GPUs. In this mode `trainer.nnodes` and
+`trainer.n_gpus_per_node` describe the physical pool; its remaining GPUs are
+used by the trainer. For example, on two 8-GPU nodes:
+
+```bash
+trainer.v1.trainer_mode=separate_async \
+trainer.nnodes=2 \
+trainer.n_gpus_per_node=8 \
+trainer.v1.separate_async.shared_rollout_gpus=12 \
+actor_rollout_ref.rollout.nnodes=1 \
+actor_rollout_ref.rollout.tensor_model_parallel_size=2
+```
+
+This allocates 12 GPUs to rollout and 4 to training. The rollout slice spans
+one full node and half of the other. Setting `shared_rollout_gpus=10` allocates
+10 and 6 GPUs respectively. The parent pool is reserved once and split into
+disjoint Ray placement bundles. Ray chooses the nodes and device IDs; their
+order is not a physical GPU affinity guarantee. Configure the physical node
+count and GPUs per node to match the available homogeneous cluster.
+
+In this mode `rollout.nnodes` remains a required positive value for compatibility,
+but it no longer determines the rollout replica count. A replica's
+`TP × DP × PP` must divide both the GPUs per physical node and the rollout GPU
+count, so that each replica stays on one node. Hybrid switching and rollout
+prefill/decode disaggregation are not supported with this split. When
+`shared_rollout_gpus` is unset, existing independent-pool allocation is unchanged.
 
 To enable step switching, add:
 

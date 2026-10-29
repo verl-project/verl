@@ -27,7 +27,7 @@ import numpy as np
 import ray
 from omegaconf import DictConfig
 
-from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup, split_resource_pool
 from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
@@ -379,7 +379,7 @@ class LLMServerManager:
         config (DictConfig): Config for the trainer entrypoint.
         worker_group (RayWorkerGroup): Worker group for the server replicas. If not none, init hybrid server,
             else init standalone server with a new resource pool.
-        rollout_resource_pool (RayResourcePool): Resource pool for the server replicas, only needed for TensorRT-LLM.
+        rollout_resource_pool (RayResourcePool): Existing pool for standalone replicas or colocated TensorRT-LLM.
         start_rank (int): First ``replica_rank`` to assign.  Defaults to 0.
         load_balancer_cls: Optional subclass of the default router strategy's
             load balancer to use as the routing actor (wrapped with
@@ -470,11 +470,28 @@ class LLMServerManager:
                 * self.rollout_config.data_parallel_size
                 * self.rollout_config.pipeline_model_parallel_size
             )
+        standalone_pool = self.rollout_resource_pool if self.worker_group is None else None
         world_size = (
             self.worker_group.world_size
             if self.worker_group
+            else standalone_pool.world_size
+            if standalone_pool is not None
             else self.rollout_config.n_gpus_per_node * self.rollout_config.nnodes
         )
+        if standalone_pool is not None:
+            if world_size % rollout_world_size:
+                raise ValueError("Standalone rollout resource pool size must be divisible by the replica size")
+            per_node = standalone_pool.store[0]
+            if any(count != per_node for count in standalone_pool.store):
+                raise ValueError("Standalone rollout sub-pools require a uniform physical parent pool")
+            offset = getattr(standalone_pool, "start_bundle_index", 0)
+            for start in range(offset, offset + world_size, rollout_world_size):
+                if rollout_world_size <= per_node:
+                    invalid = start % per_node + rollout_world_size > per_node
+                else:
+                    invalid = start % per_node != 0 or rollout_world_size % per_node != 0
+                if invalid:
+                    raise ValueError("Standalone rollout replica is not aligned with physical node boundaries")
         num_replicas = world_size // rollout_world_size
 
         self.rollout_replicas = [
@@ -482,7 +499,7 @@ class LLMServerManager:
                 replica_rank=start_rank + replica_rank,
                 config=self.rollout_config,
                 model_config=self.model_config,
-                gpus_per_node=self.rollout_config.n_gpus_per_node,
+                gpus_per_node=standalone_pool.store[0] if standalone_pool else self.rollout_config.n_gpus_per_node,
             )
             for replica_rank in range(num_replicas)
         ]
@@ -495,6 +512,14 @@ class LLMServerManager:
                 *[
                     server.init_hybrid_colocated(self.worker_group, self.rollout_resource_pool)
                     for server in self.rollout_replicas
+                ]
+            )
+        elif standalone_pool is not None:
+            replica_pools = split_resource_pool(standalone_pool, rollout_world_size)
+            await asyncio.gather(
+                *[
+                    server.init_standalone(pool)
+                    for server, pool in zip(self.rollout_replicas, replica_pools, strict=True)
                 ]
             )
         else:

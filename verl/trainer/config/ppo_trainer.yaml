@@ -252,6 +252,11 @@ trainer:
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
+      # Optional number of standalone rollout GPUs carved from the physical trainer pool.
+      # When set, trainer.nnodes and trainer.n_gpus_per_node describe the physical pool;
+      # the remaining GPUs run training. Default null preserves separate pool allocation.
+      shared_rollout_gpus: null
+
       # Number of warmup batches to add before training loop starts.
       # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
       # one full batch (64 prompts) plus half a batch (32 prompts); the fractional

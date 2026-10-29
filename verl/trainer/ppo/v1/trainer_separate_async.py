@@ -20,21 +20,62 @@ from dataclasses import replace
 from enum import Enum
 
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.single_controller.ray.base import ResourcePoolManager, split_resource_pool
 from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
-from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.config import get_trainer_gpu_count, omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def validate_shared_resource_pool(config: DictConfig) -> None:
+    """Validate the opt-in static split before any Ray resources are reserved."""
+    rollout_gpus = config.trainer.v1.separate_async.get("shared_rollout_gpus")
+    if rollout_gpus is None:
+        return
+    get_trainer_gpu_count(config)
+    rollout = config.actor_rollout_ref.rollout
+    if config.trainer.v1.separate_async.hybrid_rollout.enable_switch:
+        raise ValueError("shared_rollout_gpus does not support hybrid rollout switching")
+    if rollout.get("disaggregation", {}).get("enabled", False):
+        raise ValueError("shared_rollout_gpus does not support rollout disaggregation")
+    replica_size = (
+        rollout.tensor_model_parallel_size * rollout.data_parallel_size * rollout.pipeline_model_parallel_size
+    )
+    per_node = config.trainer.n_gpus_per_node
+    if replica_size <= 0 or per_node % replica_size or rollout_gpus % replica_size:
+        raise ValueError("shared rollout replica size must divide both GPUs per physical node and rollout GPU count")
+
+
+class SharedResourcePoolManager(ResourcePoolManager):
+    """Reserve a physical pool once and give disjoint slices to both roles."""
+
+    def __init__(self, *, rollout_gpus: int, **kwargs):
+        super().__init__(**kwargs)
+        self.rollout_gpus = rollout_gpus
+        self.rollout_resource_pool = None
+
+    def create_resource_pool(self):
+        super().create_resource_pool()
+        parent = self.resource_pool_dict["global_pool"]
+        self.rollout_resource_pool, self.resource_pool_dict["global_pool"] = split_resource_pool(
+            parent, [self.rollout_gpus, parent.world_size - self.rollout_gpus]
+        )
+        logger.info(
+            "Split shared physical pool into %s rollout and %s trainer GPUs",
+            self.rollout_resource_pool.world_size,
+            self.resource_pool_dict["global_pool"].world_size,
+        )
 
 
 class HybridEngineMode(Enum):
@@ -54,6 +95,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     _enable_hybrid_replicas = True
 
     def __init__(self, config: DictConfig):
+        validate_shared_resource_pool(config)
         train_batch_size = config.data.train_batch_size
         ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
         parameter_sync_step = config.trainer.v1.separate_async.parameter_sync_step
@@ -119,6 +161,15 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def _init_resource_pool_mgr(self):
         super()._init_resource_pool_mgr()
+        rollout_gpus = OmegaConf.select(self.config, "trainer.v1.separate_async.shared_rollout_gpus", default=None)
+        if rollout_gpus is not None:
+            manager = self.resource_pool_manager
+            self.resource_pool_manager = SharedResourcePoolManager(
+                resource_pool_spec=manager.resource_pool_spec,
+                mapping=manager.mapping,
+                max_colocate_count=manager.max_colocate_count,
+                rollout_gpus=rollout_gpus,
+            )
         # Replace ActorRolloutRefWorker with DetachActorWorker to get CPU save/restore
         # capability needed for Decoupled PPO when parameter_sync_step > 1.
         # The base class uses a pure Actor role when hybrid replicas are disabled.
@@ -164,9 +215,11 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
         if standalone_memory is not None:
             standalone_rollout_config.gpu_memory_utilization = standalone_memory
-        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=standalone_config, start_rank=hybrid_num_replicas
-        )
+        manager_kwargs = {"config": standalone_config, "start_rank": hybrid_num_replicas}
+        pool_manager = getattr(self, "resource_pool_manager", None)
+        if isinstance(pool_manager, SharedResourcePoolManager):
+            manager_kwargs["rollout_resource_pool"] = pool_manager.rollout_resource_pool
+        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(**manager_kwargs)
         rollout_config = self.config.actor_rollout_ref.rollout
         if rollout_config.prometheus.enable:
             server_addresses = (
@@ -409,6 +462,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def _get_n_gpus_for_throughput(self) -> int:
         """Include standalone rollout GPUs in the throughput denominator."""
         trainer_gpus = self.resource_pool_manager.get_n_gpus()
+        if isinstance(self.resource_pool_manager, SharedResourcePoolManager):
+            return trainer_gpus
         rollout_gpus = (
             self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
         )

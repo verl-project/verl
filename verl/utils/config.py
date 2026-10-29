@@ -17,7 +17,23 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-__all__ = ["omega_conf_to_dataclass", "validate_config"]
+__all__ = ["get_trainer_gpu_count", "omega_conf_to_dataclass", "validate_config"]
+
+
+def get_trainer_gpu_count(config: DictConfig) -> int:
+    """Return the trainer GPU count, accounting for an optional shared physical pool."""
+    total_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+    rollout_gpus = OmegaConf.select(config, "trainer.v1.separate_async.shared_rollout_gpus", default=None)
+    if rollout_gpus is None:
+        return total_gpus
+    if (
+        not OmegaConf.select(config, "trainer.use_v1", default=False)
+        or OmegaConf.select(config, "trainer.v1.trainer_mode", default=None) != "separate_async"
+    ):
+        raise ValueError("shared_rollout_gpus is only supported by the V1 separate_async trainer")
+    if isinstance(rollout_gpus, bool) or not isinstance(rollout_gpus, int) or not 0 < rollout_gpus < total_gpus:
+        raise ValueError(f"shared_rollout_gpus must be an integer between 0 and {total_gpus} (exclusive)")
+    return total_gpus - rollout_gpus
 
 
 def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[type[Any]] = None) -> Any:
@@ -132,7 +148,7 @@ def validate_config(
         use_critic (bool): is critic needed
     """
     # number of GPUs total
-    n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+    n_gpus = get_trainer_gpu_count(config)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if config.actor_rollout_ref.actor.strategy == "megatron":
