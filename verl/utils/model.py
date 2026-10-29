@@ -183,6 +183,147 @@ def get_model_size(model: nn.Module, scale="auto"):
     return n_params, scale
 
 
+# Attribute names under which generative VLMs in transformers register their
+# vision tower. New families: add the family's name here (and a layout case in
+# test_get_vl_model_vision_tower_layouts) — this is the single place to extend.
+#   visual       — Qwen2/2.5/3-VL, Qwen3.5, GLM-4V/Glm46V (nested), BridgeTower
+#   vision_tower — Kimi-VL, LLaVA, Gemma3/4, InternVL, Aya-Vision
+#   vision_model — Mllama, DeepSeek-VL, BLIP-2, PaLiGemma
+#   vision       — DeepSeek-VL2 (remote code)
+#   vpm          — MiniCPM-o (language model registers as ``llm``)
+VISION_TOWER_ATTRS = ("visual", "vision_tower", "vision_model", "vision", "vpm")
+
+# Sibling modules that also run only on the visual path (image ranks only), so
+# they must be frozen and wrap-excluded together with the tower: a trainable
+# one left in the root FSDP unit receives gradients on image ranks only and
+# hangs FSDP1 (see mark_frozen_vision_tower_for_skip). Families differ in
+# layout — Qwen / GLM keep the projector (merger) inside the tower, so nothing
+# is found there; Mllama / LLaVA / InternVL / PaLiGemma / Aya-Vision register
+# ``multi_modal_projector`` beside the tower, MiniCPM-o / Kimi-VL use
+# ``resampler``, DeepSeek-VL2 uses the bare top-level ``projector`` (in a
+# generative VLM a bare ``projector`` attribute is the image connector).
+VISUAL_PATH_SIBLING_ATTRS = ("multi_modal_projector", "mm_projector", "resampler", "projector")
+
+# Bare parameters (not submodules) that also live only on the visual path and
+# must be frozen together with the tower for the same reason as the siblings.
+# LlavaNext registers its per-image newline embedding as a top-level
+# ``image_newline`` nn.Parameter beside the tower; DeepSeek-VL2's remote code
+# registers ``view_seperator`` the same way (upstream spelling).
+VISUAL_PATH_PARAM_ATTRS = ("image_newline", "view_seperator")
+
+
+def _visual_path_probe_candidates(model: nn.Module) -> list:
+    """Surfaces probed for the vision tower and its siblings, in order: the
+    model itself, the nested ``model`` (transformers >= 4.52 layout), the TRL
+    value-head wrapper's ``pretrained_model``, and one more ``model`` level
+    under it (Gemma3-style layouts nest tower and projector inside
+    ``pretrained_model.model``). Only ``nn.Module`` values count as hits, so a
+    generic attribute name (``vision``, ``visual``) carrying a config string or
+    path is skipped rather than returned.
+    """
+    candidates = []
+    for top in (model, getattr(model, "pretrained_model", None)):
+        if top is None:
+            continue
+        candidates.append(top)
+        inner = getattr(top, "model", None)
+        if inner is not None and inner is not top:
+            candidates.append(inner)
+    return candidates
+
+
+def get_vl_model_vision_tower(model: nn.Module) -> Optional[nn.Module]:
+    """Return the vision tower of a vision-language model, or None if absent.
+
+    Restored from the pre-0.8 ``fsdp_workers.py`` (dropped in the engine
+    refactor). Probes ``VISION_TOWER_ATTRS`` over ``_visual_path_probe_candidates``
+    (the model, the nested ``model``, and TRL value-head wrappers, which store
+    the model under ``model.pretrained_model`` — so
+    ``critic.freeze_vision_tower`` also reaches a value-head multimodal critic).
+    Only ``nn.Module`` attribute values match, so the generic names in
+    ``VISION_TOWER_ATTRS`` cannot surface a non-module attribute.
+    """
+    for candidate in _visual_path_probe_candidates(model):
+        for attr in VISION_TOWER_ATTRS:
+            tower = getattr(candidate, attr, None)
+            if isinstance(tower, nn.Module):
+                return tower
+    return None
+
+
+def get_vlm_visual_path_modules(model: nn.Module) -> list:
+    """Return the vision tower plus its visual-path siblings, or [] if absent.
+
+    The whole list must be frozen and kept out of per-module FSDP wrapping
+    together (see VISUAL_PATH_SIBLING_ATTRS): everything in it runs only when
+    the batch carries images, so any trainable member would receive gradients
+    on image ranks only (FSDPEngine marks the tower for the dummy-forward skip
+    only when the whole path is inert). Siblings are probed over the same
+    candidate surfaces as the tower: a projector nested one level deeper than
+    the tower (Gemma3 under a value-head wrapper) must be found too, or it
+    would stay trainable outside the list while the tower is still marked.
+    """
+    tower = get_vl_model_vision_tower(model)
+    if tower is None:
+        return []
+    modules = [tower]
+    seen = {id(tower)}
+    for candidate in _visual_path_probe_candidates(model):
+        for attr in VISUAL_PATH_SIBLING_ATTRS:
+            sibling = getattr(candidate, attr, None)
+            if isinstance(sibling, nn.Module) and id(sibling) not in seen:
+                modules.append(sibling)
+                seen.add(id(sibling))
+    return modules
+
+
+def get_vlm_visual_path_params(model: nn.Module) -> list:
+    """Return the bare visual-path parameters (not submodules), or [] if absent.
+
+    Same rationale as the siblings (``VISUAL_PATH_PARAM_ATTRS``): LlavaNext's
+    top-level ``image_newline`` runs only on the image path, so it must be
+    frozen together with the tower — a trainable one receives gradients on
+    image ranks only, the FSDP1 root-unit hang. Probed over the same candidate
+    surfaces as the tower; only ``nn.Parameter`` values count.
+    """
+    params = []
+    seen = set()
+    for candidate in _visual_path_probe_candidates(model):
+        for attr in VISUAL_PATH_PARAM_ATTRS:
+            param = getattr(candidate, attr, None)
+            if isinstance(param, nn.Parameter) and id(param) not in seen:
+                params.append(param)
+                seen.add(id(param))
+    return params
+
+
+def may_skip_dummy_visual_forward(model: nn.Module) -> bool:
+    """Whether the multimodal adapters may skip the dummy visual forward for
+    ``model`` on a text-only batch.
+
+    True iff the engine marked the visual path frozen — ``freeze_vision_tower``
+    with guaranteed wrap exclusion, see ``mark_frozen_vision_tower_for_skip`` —
+    AND the whole path (tower plus visual-path siblings and bare visual-path
+    parameters) still holds no trainable params. ``requires_grad`` alone is
+    not a safe criterion: PEFT clears it on the whole non-adapter model for
+    every LoRA run, and the tower stays per-module wrapped there — skipping
+    would deadlock mixed-modality batches. The per-forward re-check is the
+    defense in depth: PEFT/QAT attach trainable params after the engine marked
+    the path, and a sibling whose requires_grad is re-enabled post-marking
+    would receive gradients on image ranks only inside the root FSDP unit (the
+    FSDP1 hang the marker's contract forbids). Shared by all VLM adapters so
+    the rule exists once.
+    """
+    path = get_vlm_visual_path_modules(model)
+    if not path:
+        return False
+    if not getattr(path[0], "_verl_frozen_vision_tower", False):
+        return False
+    if any(p.requires_grad for p in get_vlm_visual_path_params(model)):
+        return False
+    return not any(p.requires_grad for module in path for p in module.parameters())
+
+
 def print_model_size(model: nn.Module, name: str = None):
     n_params, scale = get_model_size(model, scale="auto")
     if name is None:

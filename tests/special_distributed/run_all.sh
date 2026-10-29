@@ -26,3 +26,8 @@ torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cp
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py
 # Uneven-shard CPU offload regression with queued work on the conversion stream.
 PYTHONPATH="$PWD:$PYTHONPATH" torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_model_cpu_offload.py
+# Mixed-modality FSDP2 with a frozen, wrap-excluded vision tower: rank 0 runs
+# the tower on an image batch, rank 1 skips it on a text-only batch (cf. #3496).
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_frozen_vision_tower_mixed_modality.py
+# FSDP1 mirror: class-name wrap exclusion + forced use_orig_params.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp1_frozen_vision_tower_mixed_modality.py

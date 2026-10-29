@@ -42,7 +42,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.actor.clip_ratio_high` | `0.2` | PPO 上界裁剪比例 |
 | `actor_rollout_ref.actor.tau_pos` | `1.0` | 正优势裁剪的 tau 参数 |
 | `actor_rollout_ref.actor.tau_neg` | `1.05` | 负优势裁剪的 tau 参数 |
-| `actor_rollout_ref.actor.freeze_vision_tower` | `false` | 是否冻结视觉塔（多模态模型） |
+| `actor_rollout_ref.actor.freeze_vision_tower` | `false` | 是否冻结视觉塔（多模态模型）；仅 FSDP/FSDP2 引擎实现，其他引擎设置时忽略并告警 |
 | `actor_rollout_ref.actor.clip_ratio_c` | `3.0` | 裁剪比例的上限常数 |
 | `actor_rollout_ref.actor.loss_agg_mode` | `token-mean` | 损失聚合模式，可选 token-mean 等 |
 | `actor_rollout_ref.actor.loss_scale_factor` | `null` | 损失缩放因子 |

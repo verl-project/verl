@@ -53,13 +53,19 @@ from verl.utils.fsdp_utils import (
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
+    mark_frozen_vision_tower_for_skip,
     merged_lora_context,
     normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
-from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
+from verl.utils.model import (
+    convert_weight_keys,
+    extract_multi_modal_inputs,
+    get_vlm_visual_path_modules,
+    get_vlm_visual_path_params,
+)
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
@@ -162,6 +168,12 @@ class FSDPEngine(BaseEngine):
         self._is_lora = self.model_config.lora_rank > 0
         # Set in _build_fsdp_module when FSDP2 CPUOffloadPolicy is configured (see #5995).
         self._uses_fsdp2_cpu_offload_policy = False
+        # Set in _build_model_optimizer when freeze_vision_tower applies; consumed by
+        # _build_fsdp_module to keep the frozen visual path out of per-module wrapping.
+        self._visual_path_modules = []
+        # Bare visual-path parameters (e.g. LlavaNext's image_newline), set
+        # together with _visual_path_modules; consumed by the marker gate.
+        self._visual_path_params = ()
 
         # Defaults for mixed-precision state. _build_fsdp_module overrides these when it
         # runs; subclasses that bypass _build_fsdp_module (e.g. VeOmniEngine) keep the
@@ -386,6 +398,47 @@ class FSDPEngine(BaseEngine):
 
         return module
 
+    def _freeze_visual_path(self, module):
+        """Apply ``engine_config.freeze_vision_tower``: freeze the visual path
+        (the vision tower plus any sibling modules that also run only on the
+        visual path, e.g. Mllama's ``multi_modal_projector``, plus bare
+        visual-path parameters such as LlavaNext's ``image_newline``) and
+        return the module list (used later to keep them out of per-module FSDP
+        wrapping); the bare parameters are stored on
+        ``self._visual_path_params`` for the marker gate. Returns [] when not
+        applicable. The whole path must be inert together: a trainable member
+        left in the root FSDP unit gets gradients on image ranks only, which
+        FSDP1 does not support.
+
+        With the path frozen and unwrapped, its params join the root FSDP unit,
+        which all-gathers uniformly on every rank at model forward entry — so a
+        frozen tower no longer needs the dummy visual forward on text-only
+        batches to keep FSDP grads complete or vision-tower entry counts aligned
+        across ranks (cf. #3491, #3496, #7323).
+        """
+        if not self.engine_config.freeze_vision_tower:
+            return []
+        visual_path = get_vlm_visual_path_modules(module)
+        if not visual_path:
+            logger.warning("freeze_vision_tower=True but the model has no vision tower; ignoring.")
+            return []
+        if self.engine_config.strategy not in ("fsdp", "fsdp2"):
+            logger.warning(
+                "freeze_vision_tower froze the vision tower, but strategy=%s does not implement "
+                "per-module wrap exclusion; the dummy visual forward stays enabled.",
+                self.engine_config.strategy,
+            )
+        for visual_module in visual_path:
+            visual_module.requires_grad_(False)
+        self._visual_path_params = get_vlm_visual_path_params(module)
+        for visual_param in self._visual_path_params:
+            visual_param.requires_grad_(False)
+        # print (not logger.info): this module's logger defaults to WARN, and the
+        # confirmation that the flag took effect should stay visible.
+        if self.rank == 0:
+            print("Vision tower is set to not trainable (freeze_vision_tower=True).")
+        return visual_path
+
     def _build_fsdp_module(self, module):
         # TODO(ziheng): need to improve
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
@@ -414,11 +467,10 @@ class FSDPEngine(BaseEngine):
         else:
             self.scaler = None
 
-        auto_wrap_policy = get_fsdp_wrap_policy(
-            module=module,
-            config=self.engine_config.wrap_policy,
-            is_lora=self.model_config.lora_rank > 0,
-        )
+        # Keep the frozen visual path out of per-module FSDP wrapping (both
+        # FSDP1 and FSDP2) so its params join the root FSDP unit — see
+        # _freeze_visual_path.
+        exclude_modules = list(self._visual_path_modules) or None
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh, zero3_enable=self.engine_config.reshard_after_forward)
@@ -438,6 +490,17 @@ class FSDPEngine(BaseEngine):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
 
+            # Only FSDP1 consumes the class-based policy (FSDP2 selects wrap
+            # targets itself inside apply_fsdp2); building it here would also
+            # fire the FSDP1-only min_num_params warning on fsdp2 runs, where
+            # the identity-based exclusion does apply.
+            auto_wrap_policy = get_fsdp_wrap_policy(
+                module=module,
+                config=self.engine_config.wrap_policy,
+                is_lora=self.model_config.lora_rank > 0,
+                exclude_modules=exclude_modules,
+            )
+
             module = FSDP(
                 module,
                 param_init_fn=init_fn,
@@ -448,7 +511,10 @@ class FSDPEngine(BaseEngine):
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
                 forward_prefetch=self.engine_config.forward_prefetch,
-                use_orig_params=self.engine_config.use_orig_params,
+                # A frozen tower mixes requires_grad=False params into the root
+                # FSDP1 unit, which the flat-parameter mode does not support;
+                # use_orig_params=True does (pre-0.8 fsdp_workers.py did the same).
+                use_orig_params=self.engine_config.use_orig_params or exclude_modules is not None,
                 cpu_offload=cpu_offload,
             )
         elif self.engine_config.strategy == "fsdp2":
@@ -473,10 +539,35 @@ class FSDPEngine(BaseEngine):
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
             full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.engine_config)
+            apply_fsdp2(module, fsdp_kwargs, self.engine_config, exclude_modules=exclude_modules)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
+
+        # Mark the frozen tower as safe to skip in the adapters' dummy visual
+        # forward. requires_grad alone is not a safe skip criterion — PEFT clears
+        # it on the whole non-adapter model for every LoRA run — so only this
+        # positive "frozen AND kept out of per-module FSDP units" signal may turn
+        # the dummy forward off (cf. #3491). Paths that cannot guarantee the
+        # exclusion (size-based wrap policy, strategies overriding the wrapping)
+        # never set it, and the adapters keep the dummy forward. The marker also
+        # requires no trainable params inside the tower (vision LoRA / QAT):
+        # mark_frozen_vision_tower_for_skip explains why.
+        if exclude_modules is not None:
+            # A non-zero min_num_params on FSDP1 already raised inside
+            # get_fsdp_wrap_policy (fail closed: the size policy cannot carry
+            # the exclusion); FSDP2's identity-based exclusion always applies.
+            # Trainable tower params (vision LoRA / QAT) are only safe for
+            # families whose verl adapter runs the dummy visual forward — the
+            # mark rejects the combination for everyone else.
+            from verl.models.transformers.monkey_patch import VL_DUMMY_VISUAL_FORWARD_MODEL_TYPES
+
+            model_type = getattr(self.model_config.hf_config, "model_type", None)
+            mark_frozen_vision_tower_for_skip(
+                self._visual_path_modules,
+                self._visual_path_params,
+                tower_protected_by_dummy=model_type in VL_DUMMY_VISUAL_FORWARD_MODEL_TYPES,
+            )
 
         if self.model_config.enable_activation_offload:
             enable_gradient_checkpointing = self.model_config.enable_gradient_checkpointing
@@ -598,6 +689,15 @@ class FSDPEngine(BaseEngine):
             self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
         except (TypeError, ValueError):
             self.pass_packed_cu_seqlens = False
+
+        # Restore freeze_vision_tower (dropped from the pre-0.8 fsdp_workers.py),
+        # applied before LoRA/QAT/FSDP on the whole visual path (tower + siblings
+        # that run only on images): PEFT adapters added on the tower afterwards
+        # re-enable requires_grad for their own params, so "frozen tower + vision
+        # LoRA" is a frozen base with trainable adapters — which keep the dummy
+        # visual forward (mark_frozen_vision_tower_for_skip explains why).
+        self._visual_path_modules = self._freeze_visual_path(module)
+
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
@@ -605,6 +705,23 @@ class FSDPEngine(BaseEngine):
         # Apply QAT before FSDP wrapping (training only)
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
+
+        # PEFT/QAT replace the attribute of every leaf module they target: a
+        # visual-path sibling held as a direct child (e.g. a bare nn.Linear
+        # projector) is re-parented to an adapter wrapper, so the identities
+        # collected before the transformation no longer cover the live tree
+        # (the tower container itself is never replaced — only its children
+        # are). Re-discover the path on the final module so the wrap exclusion
+        # and the marker gate see the post-adapter objects, including adapter
+        # leaves re-enabled by PEFT. The freeze above stays one-shot on
+        # purpose: re-freezing now would also freeze the adapters.
+        if self._visual_path_modules:
+            rediscovered = get_vlm_visual_path_modules(module)
+            if rediscovered:
+                self._visual_path_modules = rediscovered
+            # Bare parameters are never re-parented by PEFT/QAT (they replace
+            # modules), but re-discover for symmetry with the module list.
+            self._visual_path_params = get_vlm_visual_path_params(module)
 
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
@@ -1003,6 +1120,18 @@ class FSDPEngine(BaseEngine):
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
                 peft_config = peft_model.peft_config.get("default", None)
+                # Trainable params inside the wrap-excluded visual path (vision
+                # LoRA / QAT) sit in the root FSDP unit, which
+                # layered_summon_lora_params deliberately skips — a layered sync
+                # would silently drop them from the rollout. Fall back to a full
+                # summon for this (rare) combination.
+                if layered_summon and any(p.requires_grad for m in self._visual_path_modules for p in m.parameters()):
+                    logger.warning(
+                        "layered_summon disabled for this step: trainable params inside the wrap-excluded "
+                        "visual path (e.g. vision LoRA) live in the root FSDP unit, which the layered LoRA "
+                        "summon skips; falling back to a full summon so the rollout still sees them"
+                    )
+                    layered_summon = False
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,

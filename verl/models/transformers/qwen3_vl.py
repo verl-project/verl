@@ -25,6 +25,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
 
+from verl.utils.model import may_skip_dummy_visual_forward
 from verl.utils.transformers_compat import unpack_visual_output
 
 logger = logging.getLogger(__file__)
@@ -276,16 +277,25 @@ def _get_input_embeds(
         deepstack_visual_embeds = deepstack_video_embeds
 
     if pixel_values is None and pixel_values_videos is None:
-        config = model.config.vision_config
-        patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
-        pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds, dummy_deepstack_image_embeds = unpack_visual_output(
-            model.visual(pixel_values, grid_thw=image_grid_thw)
-        )
-        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
-        for emb in dummy_deepstack_image_embeds or []:
-            inputs_embeds = inputs_embeds + 0.0 * emb.mean()
+        # The dummy visual forward keeps vision params in the autograd graph (FSDP
+        # grad completeness) and equalizes cross-rank vision-tower entry counts
+        # (FSDP2 per-module all-gather alignment, #3496). Both concerns vanish
+        # once the visual path is fully frozen and out of per-module FSDP
+        # wrapping. may_skip_dummy_visual_forward (shared with the other VLM
+        # adapters) holds the full rule: the engine's frozen-and-excluded marker
+        # plus no trainable params anywhere in the visual path, re-checked per
+        # forward as defense in depth (PEFT/QAT attach after marking).
+        if not may_skip_dummy_visual_forward(model):
+            config = model.config.vision_config
+            patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
+            pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
+            image_embeds, dummy_deepstack_image_embeds = unpack_visual_output(
+                model.visual(pixel_values, grid_thw=image_grid_thw)
+            )
+            inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+            for emb in dummy_deepstack_image_embeds or []:
+                inputs_embeds = inputs_embeds + 0.0 * emb.mean()
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)

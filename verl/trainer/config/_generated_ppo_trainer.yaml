@@ -46,6 +46,7 @@ actor_rollout_ref:
       use_no_sync_for_gradient_accumulation: false
       pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
       pad_to_length_bucket: 1024
+      freeze_vision_tower: false
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
@@ -185,6 +186,7 @@ actor_rollout_ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
     use_torch_compile: ${oc.select:actor_rollout_ref.actor.use_torch_compile,true}
+    freeze_vision_tower: ${oc.select:actor_rollout_ref.actor.freeze_vision_tower,false}
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
@@ -254,6 +256,7 @@ actor_rollout_ref:
       use_no_sync_for_gradient_accumulation: false
       pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
       pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.fsdp_config.pad_to_length_bucket,1024}
+      freeze_vision_tower: false
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
@@ -579,6 +582,7 @@ critic:
     use_no_sync_for_gradient_accumulation: false
     pad_to_length: false
     pad_to_length_bucket: 1024
+    freeze_vision_tower: false
     forward_only: false
     strategy: fsdp
     dtype: bfloat16
@@ -621,6 +625,7 @@ critic:
   shuffle: ${oc.select:actor_rollout_ref.actor.shuffle,false}
   data_loader_seed: 42
   cliprange_value: 0.5
+  freeze_vision_tower: false
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
   loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:

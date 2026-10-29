@@ -92,6 +92,20 @@ def _plan_liger_flsce_capacity(config: DictConfig, role: str) -> Optional[tuple[
     return max(tokens), min(tp_sizes)
 
 
+def plumb_freeze_vision_tower(engine_config, value: bool, role: str):
+    """Forward a worker-level ``freeze_vision_tower`` into the engine config.
+
+    Moved to ``verl.workers.config.engine`` (next to the configs, where
+    FSDPActorConfig / FSDPCriticConfig ``__post_init__`` call it as the single
+    choke point); re-exported here for the remaining explicit call sites (the
+    ref worker below, the separation trainer's critic) and for backward
+    compatibility of imports. See the config-side docstring for semantics.
+    """
+    from verl.workers.config.engine import plumb_freeze_vision_tower as _impl
+
+    return _impl(engine_config, value, role)
+
+
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -624,6 +638,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if isinstance(ref_training_config.engine_config, McoreEngineConfig):
                 ref_training_config.engine_config._liger_flsce_capacity = liger_capacity
 
+            plumb_freeze_vision_tower(ref_training_config.engine_config, ref_config.freeze_vision_tower, role="ref")
+
             self.ref = self.ref_worker_cls(config=ref_training_config)
             self.ref.reset()
             self.set_dispatch_collect(mesh_name="ref", **self.ref.get_dispatch_collect())
@@ -670,6 +686,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
             if isinstance(actor_training_config.engine_config, McoreEngineConfig):
                 actor_training_config.engine_config._liger_flsce_capacity = liger_capacity
+
+            # freeze_vision_tower is forwarded inside FSDPActorConfig.__post_init__
+            # (omega_conf_to_dataclass above already ran it), not here.
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
