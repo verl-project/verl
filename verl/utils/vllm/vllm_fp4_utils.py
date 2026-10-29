@@ -653,7 +653,7 @@ def stage_nvfp4_moe_params_for_loading(model):
     """Stage NVFP4 W4A4 experts for a bucketed refit.
 
     Static activation scales run on FlashInfer CUTLASS, per-token ones
-    (``NVFP4_PER_TOKEN``) on FlashInfer TRT-LLM.
+    (``moe_activation=nvfp4_per_token``) on FlashInfer TRT-LLM.
     """
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 

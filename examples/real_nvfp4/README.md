@@ -3,14 +3,14 @@
 This example trains Qwen3-30B-A3B-Base with Megatron/Transformer Engine NVFP4
 and runs vLLM rollout in the matching NVFP4 precision. Training parameters stay
 BF16; each refit exports the routed experts as NVFP4 on the trainer side
-(`rollout.quantization.moe=NVFP4_PER_TOKEN`), and vLLM reloads them into the
+(`rollout.quantization.moe=NVFP4` with `moe_activation=nvfp4_per_token`), and vLLM reloads them into the
 storage its CUDA graphs captured.
 
 ## Precision and supported configuration
 
 `actor_rollout_ref.actor.megatron.override_transformer_config.fp4=e2m1` (with
 `fp4_recipe=nvfp4`) runs the routed-expert MLPs in NVFP4 with per-token activation scaling, dequantized backward, and
-adaptive 4-over-6 disabled. The `NVFP4_PER_TOKEN` rollout preset uses the same
+adaptive 4-over-6 disabled. The `nvfp4_per_token` rollout uses the same
 precision: NVFP4 expert weights and activations quantized per token by
 FlashInfer's TRT-LLM MoE kernel. Attention, router, norms, embeddings and the
 LM head remain BF16 on both sides.

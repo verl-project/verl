@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NVFP4_PER_TOKEN preset, trainer-side export and rollout checks, without vLLM."""
+"""Per-token NVFP4 rollout config, trainer-side export and rollout checks, without vLLM."""
 
 import importlib.util
 import sys
@@ -49,20 +49,21 @@ _ROLLOUT = _load_rollout_utils()
 
 
 def _config(ignore=_CARVE_IGNORE):
-    return build_compressed_tensors_config(linear=None, moe="NVFP4_PER_TOKEN", ignore=ignore, config_file=None)
+    return build_compressed_tensors_config(
+        linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=ignore, config_file=None
+    )
 
 
-def _dispatch(ignore=_CARVE_IGNORE, moe="NVFP4_PER_TOKEN", start=2, end=2, engine="vllm", hf_config=_HF):
+def _dispatch(ignore=_CARVE_IGNORE, activation="nvfp4_per_token", start=2, end=2, engine="vllm", hf_config=_HF):
+    quantization = SimpleNamespace(linear=None, moe="NVFP4", moe_activation=activation, ignore=ignore, config_file=None)
     return dispatch_rollout_weight_quantizer(
         model_config=SimpleNamespace(hf_config=hf_config, local_path=None),
-        rollout_config=SimpleNamespace(
-            name=engine, quantization=SimpleNamespace(linear=None, moe=moe, ignore=ignore, config_file=None)
-        ),
+        rollout_config=SimpleNamespace(name=engine, quantization=quantization),
         real_nvfp4_bf16_layers=(start, end),
     )
 
 
-def test_preset_is_nvfp4_weights_with_dynamic_inputs_and_moe_only():
+def test_per_token_is_nvfp4_weights_with_dynamic_inputs_and_moe_only():
     group = _config()["config_groups"]["group_moe"]
     assert group["weights"]["strategy"] == "tensor_group" and group["weights"]["group_size"] == 16
     assert group["input_activations"]["dynamic"] is True
@@ -70,8 +71,18 @@ def test_preset_is_nvfp4_weights_with_dynamic_inputs_and_moe_only():
     static = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
     group = static["config_groups"]["group_moe"]
     assert not _ROLLOUT.is_nvfp4_per_token_scheme(group["weights"], group["input_activations"])
-    with pytest.raises(ValueError, match="only for routed MoE experts"):
-        build_compressed_tensors_config(linear="NVFP4_PER_TOKEN", moe=None, ignore=[], config_file=None)
+    # The activation override needs moe=NVFP4.
+    for moe in (None, "MXFP4"):
+        with pytest.raises(ValueError, match="moe_activation='nvfp4_per_token'"):
+            build_compressed_tensors_config(
+                linear="FP8_BLOCK", moe=moe, moe_activation="nvfp4_per_token", ignore=[], config_file=None
+            )
+    with pytest.raises(ValueError, match="moe_activation='nvfp4_static'"):
+        build_compressed_tensors_config(
+            linear=None, moe="NVFP4", moe_activation="nvfp4_static", ignore=[], config_file=None
+        )
+    with pytest.raises(ValueError, match="NVFP4_PER_TOKEN"):
+        build_compressed_tensors_config(linear=None, moe="NVFP4_PER_TOKEN", ignore=[], config_file=None)
 
 
 def test_per_token_matcher_follows_the_ignore_list_for_any_expert_naming():
@@ -121,10 +132,10 @@ def test_export_checks_the_carveout_under_the_exported_names(monkeypatch):
         _export_experts(_dispatch(ignore=ignore, start=2), range(8), prefix="model.layers")
 
 
-def test_dispatch_pairs_real_nvfp4_with_the_preset():
+def test_dispatch_pairs_real_nvfp4_with_per_token_activations():
     assert isinstance(_dispatch(), NVFP4PerTokenWeightQuantizer)
-    with pytest.raises(ValueError, match="NVFP4_PER_TOKEN"):
-        _dispatch(moe="NVFP4")
+    with pytest.raises(ValueError, match="moe_activation=nvfp4_per_token"):
+        _dispatch(activation=None)
     with pytest.raises(ValueError, match="only with the vLLM rollout"):
         _dispatch(engine="sglang")
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NVFP4_PER_TOKEN rollout refit on small Qwen3-MoE and DeepSeek-V3 models.
+"""Per-token NVFP4 rollout refit on small Qwen3-MoE and DeepSeek-V3 models.
 
 The preset engine refits from the trainer-side export in place, as the rollout does.
 Its greedy logprobs must equal vLLM's online nvfp4_per_token method loading the same BF16
@@ -37,7 +37,7 @@ from verl.utils.qat.compressed_tensors import (  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
-    reason="NVFP4_PER_TOKEN rollout needs a Blackwell (SM100) GPU",
+    reason="Per-token NVFP4 rollout needs a Blackwell (SM100) GPU",
 )
 
 NUM_LAYERS = 3
@@ -213,7 +213,9 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
 
     apply_vllm_quant_patches()
     ignore = [r"re:.*layers\.(" + "|".join(map(str, carved)) + r")\.mlp\.experts\..*"]
-    config = build_compressed_tensors_config(linear=None, moe="NVFP4_PER_TOKEN", ignore=ignore, config_file=None)
+    config = build_compressed_tensors_config(
+        linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=ignore, config_file=None
+    )
 
     def refit(llm, scale):
         model = _runner(llm).get_model()

@@ -41,7 +41,7 @@ def apply_real_nvfp4_overrides(
 ) -> None:
     """Limit ``override_transformer_config.fp4`` to routed-expert GEMMs with a per-module recipe.
 
-    The rollout's ``NVFP4_PER_TOKEN`` preset quantizes routed experts only, so attention,
+    The per-token NVFP4 rollout quantizes routed experts only, so attention,
     dense MLPs and shared experts stay BF16 in training too.
     """
 

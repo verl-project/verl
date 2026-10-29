@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The trainer-side NVFP4_PER_TOKEN export equals vLLM's online nvfp4_per_token quantization."""
+"""The trainer-side per-token NVFP4 export equals vLLM's online nvfp4_per_token quantization."""
 
 import pytest
 import torch
@@ -52,7 +52,9 @@ def test_export_matches_vllm_online_quantization_bitwise(dtype):
             (f"{prefix}.{expert}.down_proj.weight", w2[expert].clone()),
             (f"{prefix}.{expert}.up_proj.weight", up.clone()),
         ]
-    config = build_compressed_tensors_config(linear=None, moe="NVFP4_PER_TOKEN", ignore=[], config_file=None)
+    config = build_compressed_tensors_config(
+        linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=[], config_file=None
+    )
     out = dict(NVFP4PerTokenWeightQuantizer(config)(stream))
 
     for stacked, projections in ((w13, ("gate_proj", "up_proj")), (w2, ("down_proj",))):

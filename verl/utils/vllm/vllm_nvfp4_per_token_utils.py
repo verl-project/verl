@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""vLLM rollout for the ``NVFP4_PER_TOKEN`` routed-expert preset.
+"""vLLM rollout for per-token NVFP4 routed experts (``moe=NVFP4``, ``moe_activation=nvfp4_per_token``).
 
 The trainer exports compressed-tensors NVFP4 expert weights; vLLM loads them and
 quantizes activations per token in FlashInfer's TRT-LLM kernel, matching
@@ -38,7 +38,7 @@ _MOE_MODULE_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts(?:\.routed_exp
 
 
 def install_nvfp4_per_token_compressed_tensors_patch():
-    """Route ``NVFP4_PER_TOKEN`` compressed-tensors experts to the per-token TRT-LLM kernel."""
+    """Route per-token NVFP4 compressed-tensors experts to the per-token TRT-LLM kernel."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend, make_nvfp4_moe_kernel
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
         CompressedTensorsMoEMethod,
@@ -58,7 +58,7 @@ def install_nvfp4_per_token_compressed_tensors_patch():
             super().__init__(selection_moe, layer_name=layer_name, use_a16=False)
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
                 raise NotImplementedError(
-                    f"NVFP4_PER_TOKEN requires the FlashInfer TRT-LLM MoE backend, got {self.nvfp4_backend}"
+                    f"Per-token NVFP4 requires the FlashInfer TRT-LLM MoE backend, got {self.nvfp4_backend}"
                 )
 
         def process_weights_after_loading(self, layer):
@@ -129,7 +129,7 @@ def install_nvfp4_per_token_compressed_tensors_patch():
 
 
 def nvfp4_per_token_quantization_config(vllm_config) -> dict | None:
-    """The rollout ``quantization_config`` when any of its config groups is ``NVFP4_PER_TOKEN``.
+    """The rollout ``quantization_config`` when any of its config groups is per-token NVFP4.
 
     Reads the config vLLM built its quantization methods from (checkpoint or ``hf_overrides``),
     falling back to the HF config before vLLM has built one.
@@ -170,7 +170,7 @@ def routed_expert_layers(model: torch.nn.Module, quantization_config: dict) -> d
         # vLLM resolves the scheme of a fused MoE from its first expert's projections.
         layers[layer] = (module, per_token(f"{module_name.removesuffix('.routed_experts')}.0.gate_proj"))
     if not any(quantized for _, quantized in layers.values()):
-        raise RuntimeError("NVFP4_PER_TOKEN rollout found no routed-expert layer to quantize")
+        raise RuntimeError("Per-token NVFP4 rollout found no routed-expert layer to quantize")
     return layers
 
 
@@ -181,9 +181,9 @@ def _attest_scale_references(module) -> None:
 
     experts = getattr(getattr(module.quant_method, "moe_kernel", None), "fused_experts", None)
     if not getattr(experts, "per_token_activation", False):
-        raise RuntimeError("NVFP4_PER_TOKEN MoE kernel does not quantize activations per token")
+        raise RuntimeError("Per-token NVFP4 MoE kernel does not quantize activations per token")
     if not isinstance(getattr(experts, "g1_scale_c", None), torch.Tensor):
-        raise RuntimeError("NVFP4_PER_TOKEN derived scale g1_scale_c is missing")
+        raise RuntimeError("Per-token NVFP4 derived scale g1_scale_c is missing")
     _attest_nvfp4_kernel_scale_references(module)
 
 
@@ -219,11 +219,11 @@ def attest_nvfp4_per_token_runtime(model: torch.nn.Module, quantization_config: 
         method = module.quant_method
         if quantized and is_nvfp4_per_token_method(method):
             if not getattr(module, "_already_called_process_weights_after_loading", False):
-                raise RuntimeError(f"NVFP4_PER_TOKEN MoE layer {layer} was not post-processed")
+                raise RuntimeError(f"Per-token NVFP4 MoE layer {layer} was not post-processed")
             _attest_scale_references(module)
         elif quantized or not isinstance(method, UnquantizedFusedMoEMethod):
             wrong.append((layer, type(method).__name__, "nvfp4_per_token" if quantized else "bf16"))
     if wrong:
         raise RuntimeError(
-            f"NVFP4_PER_TOKEN rollout has the wrong routed-expert precision (layer, method, expected): {wrong}"
+            f"Per-token NVFP4 rollout has the wrong routed-expert precision (layer, method, expected): {wrong}"
         )

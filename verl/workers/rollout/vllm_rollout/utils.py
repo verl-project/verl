@@ -161,7 +161,7 @@ class vLLMColocateWorkerExtension:
     2. Online FP8 quantization
     """
 
-    # Set per instance in __new__ when the rollout uses the NVFP4_PER_TOKEN preset.
+    # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
     _nvfp4_per_token_config = None
 
     def __new__(cls, **kwargs):

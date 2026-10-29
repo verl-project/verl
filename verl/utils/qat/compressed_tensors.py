@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MOE_TARGET",
+    "MOE_ACTIVATIONS",
     "SUPPORTED_SCHEMES",
     "CompressedTensorsWeightQuantizer",
     "Fp8ConfigWeightQuantizer",
@@ -74,10 +75,14 @@ SUPPORTED_SCHEMES: dict[str, Optional[str]] = {
     # NVFP4 is deliberately W4A4 and routed-expert-only.  Unlike MX formats,
     # its tensor-level activation scale is static and must come from QAT.
     "NVFP4": "nvfp4",
-    # NVFP4 expert weights with activations quantized per token at runtime, as
-    # Transformer Engine's row-scaled NVFP4 training does. No ModelOpt QAT mode
-    # matches it; it pairs with ``override_transformer_config.fp4`` training.
-    "NVFP4_PER_TOKEN": None,
+}
+
+# ``moe_activation`` overrides, named as vLLM's ``quantization_config.moe.activation``,
+# mapped to the ``moe`` preset each applies to. ``nvfp4_per_token`` quantizes the
+# NVFP4 expert inputs per token at runtime, as Transformer Engine's row-scaled NVFP4
+# training does; it pairs with ``override_transformer_config.fp4``, not QAT.
+MOE_ACTIVATIONS: dict[str, str] = {
+    "nvfp4_per_token": "NVFP4",
 }
 
 # Layers that stay in high precision regardless of model. Patterns must start
@@ -121,16 +126,19 @@ def _numerics(args: Optional["QuantizationArgs"]) -> Optional[dict[str, Any]]:
     return None if args is None else args.model_dump(include=_NUMERIC_FIELDS)
 
 
-def _preset_of(scheme: "QuantizationScheme") -> Optional[str]:
-    """The supported preset ``scheme`` quantizes like, ignoring observers and targets."""
+def _preset_of(scheme: "QuantizationScheme") -> Optional[tuple[str, Optional[str]]]:
+    """The supported ``(preset, moe_activation)`` ``scheme`` quantizes like, ignoring observers and targets."""
 
-    for preset in SUPPORTED_SCHEMES:
-        reference = _scheme_for_preset(preset, scheme.targets)
+    variants = [(preset, None) for preset in SUPPORTED_SCHEMES] + [
+        (preset, activation) for activation, preset in MOE_ACTIVATIONS.items()
+    ]
+    for preset, activation in variants:
+        reference = _scheme_for_preset(preset, scheme.targets, activation)
         if all(
             _numerics(getattr(scheme, kind)) == _numerics(getattr(reference, kind))
             for kind in ("weights", "input_activations", "output_activations")
         ):
-            return preset
+            return preset, activation
     return None
 
 
@@ -145,17 +153,18 @@ def _group_schemes(ct_config: Mapping[str, Any]) -> list["QuantizationScheme"]:
 
 def qat_modes_for_config(ct_config: Mapping[str, Any]) -> set[Optional[str]]:
     """ModelOpt QAT modes whose fake quant matches the config groups of a rollout ``quantization_config``."""
-    presets = {_preset_of(scheme) for scheme in _group_schemes(ct_config)}
-    if presets == {"MXFP4", "MXFP8"}:
+    variants = {_preset_of(scheme) for scheme in _group_schemes(ct_config)}
+    if variants == {("MXFP4", None), ("MXFP8", None)}:
         return {"mxfp4_mxfp8"}
-    return {SUPPORTED_SCHEMES[preset] for preset in presets}
+    # No ModelOpt QAT mode matches an activation override.
+    return {SUPPORTED_SCHEMES[preset] if activation is None else None for preset, activation in variants}
 
 
 def is_all_mxfp8_config(ct_config: Mapping[str, Any]) -> bool:
     """Whether every compressed-tensors group uses the MXFP8 preset."""
     if ct_config.get("quant_method") != "compressed-tensors" or not ct_config.get("config_groups"):
         return False
-    return all(_preset_of(scheme) == "MXFP8" for scheme in _group_schemes(ct_config))
+    return all(_preset_of(scheme) == ("MXFP8", None) for scheme in _group_schemes(ct_config))
 
 
 def _matches(name: str, targets: Iterable[str]) -> bool:
@@ -168,16 +177,15 @@ def _matches(name: str, targets: Iterable[str]) -> bool:
     return False
 
 
-def _scheme_for_preset(preset: str, targets: list[str]) -> "QuantizationScheme":
+def _scheme_for_preset(preset: str, targets: list[str], moe_activation: Optional[str] = None) -> "QuantizationScheme":
     """Resolve verl presets, including the MXFP4-weight/MXFP8-input combination."""
     from compressed_tensors.quantization import preset_name_to_scheme
 
-    if preset == "NVFP4_PER_TOKEN":
-        scheme = preset_name_to_scheme("NVFP4", targets)
+    scheme = preset_name_to_scheme(preset, targets)
+    if moe_activation == "nvfp4_per_token":
         # Fully dynamic inputs: no static global scale, the kernel derives one per token.
         inputs = scheme.input_activations.model_copy(update={"dynamic": True, "observer": None})
         return scheme.model_copy(update={"input_activations": inputs})
-    scheme = preset_name_to_scheme(preset, targets)
     if preset == "MXFP4":
         mxfp8 = preset_name_to_scheme("MXFP8", targets)
         scheme = scheme.model_copy(update={"input_activations": mxfp8.input_activations})
@@ -199,7 +207,7 @@ def _is_nvfp4_args(args: Any) -> bool:
 
 
 def is_nvfp4_per_token_scheme(weights: Any, input_activations: Any) -> bool:
-    """Whether a config group is ``NVFP4_PER_TOKEN``: NVFP4 weights and fully dynamic NVFP4 inputs."""
+    """Whether a config group is per-token NVFP4: NVFP4 weights and fully dynamic NVFP4 inputs."""
     if not (_is_nvfp4_args(weights) and _is_nvfp4_args(input_activations)):
         return False
     dynamic = (
@@ -211,7 +219,7 @@ def is_nvfp4_per_token_scheme(weights: Any, input_activations: Any) -> bool:
 
 
 def is_nvfp4_per_token_config(quantization_config: Any) -> bool:
-    """Whether a ``quantization_config`` (dict or HF config object) has an ``NVFP4_PER_TOKEN`` group."""
+    """Whether a ``quantization_config`` (dict or HF config object) has a per-token NVFP4 group."""
     if hasattr(quantization_config, "to_dict"):
         quantization_config = quantization_config.to_dict()
     if not isinstance(quantization_config, Mapping) or quantization_config.get("quant_method") != "compressed-tensors":
@@ -222,7 +230,7 @@ def is_nvfp4_per_token_config(quantization_config: Any) -> bool:
 
 def nvfp4_per_token_module_matcher(ct_config: Mapping[str, Any]) -> Callable[[str], bool]:
     """Predicate on an unfused expert projection name (``...experts.0.gate_proj``):
-    whether ``ct_config`` gives it the ``NVFP4_PER_TOKEN`` scheme.
+    whether ``ct_config`` quantizes it in per-token NVFP4.
 
     Uses the exporter's own name matching, so it covers any model the export does.
     """
@@ -235,10 +243,10 @@ def nvfp4_per_token_module_matcher(ct_config: Mapping[str, Any]) -> Callable[[st
     return matches
 
 
-def _config_group(targets: list[str], preset: str) -> dict[str, Any]:
+def _config_group(targets: list[str], preset: str, moe_activation: Optional[str] = None) -> dict[str, Any]:
     from compressed_tensors.compressors.format import infer_module_format
 
-    scheme = _scheme_for_preset(preset, targets)
+    scheme = _scheme_for_preset(preset, targets, moe_activation)
     group = scheme.model_dump(mode="json", exclude_none=True)
     group["format"] = infer_module_format(torch.nn.Linear, scheme).value
     return group
@@ -266,6 +274,7 @@ def build_compressed_tensors_config(
     ignore: Iterable[str],
     config_file: Optional[str],
     model_path: Optional[str] = None,
+    moe_activation: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build the HF compressed-tensors ``quantization_config`` for the rollout engine.
 
@@ -273,13 +282,20 @@ def build_compressed_tensors_config(
     """
     ignore = list(ignore or [])
     if config_file:
-        if linear or moe or ignore:
-            raise ValueError("rollout.quantization.config_file is exclusive with linear / moe / ignore")
+        if linear or moe or moe_activation or ignore:
+            raise ValueError(
+                "rollout.quantization.config_file is exclusive with linear / moe / moe_activation / ignore"
+            )
         return _load_config_file(config_file)
 
     linear = _check_scheme("linear", linear)
     moe = _check_scheme("moe", moe)
-    if linear in ("MXFP4", "NVFP4", "NVFP4_PER_TOKEN"):
+    if moe_activation is not None and MOE_ACTIVATIONS.get(moe_activation) != moe:
+        supported = {activation: f"moe={preset}" for activation, preset in MOE_ACTIVATIONS.items()}
+        raise ValueError(
+            f"Unsupported rollout.quantization.moe_activation={moe_activation!r} with moe={moe!r}: {supported}"
+        )
+    if linear in ("MXFP4", "NVFP4"):
         raise ValueError(f"{linear} is supported only for routed MoE experts; use BF16 or MXFP8 dense linear layers")
     if linear is None and moe is None:
         raise ValueError("rollout quantization needs at least one of `linear` / `moe`")
@@ -287,12 +303,12 @@ def build_compressed_tensors_config(
     ignore = DEFAULT_IGNORE + ignore
 
     config_groups: dict[str, Any] = {}
-    if linear == moe:
+    if linear == moe and moe_activation is None:
         config_groups["group_0"] = _config_group(["Linear"], linear)
     else:
         # A regex target wins over the class name, so experts always get the MoE scheme.
         if moe is not None:
-            config_groups["group_moe"] = _config_group([MOE_TARGET], moe)
+            config_groups["group_moe"] = _config_group([MOE_TARGET], moe, moe_activation)
         else:
             ignore.append(MOE_TARGET)
         if linear is not None:
@@ -501,7 +517,7 @@ _EXPERT_LAYER = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts\.")
 
 
 class NVFP4PerTokenWeightQuantizer(CompressedTensorsWeightQuantizer):
-    """Export routed experts for the ``NVFP4_PER_TOKEN`` preset.
+    """Export per-token NVFP4 routed experts (``moe=NVFP4``, ``moe_activation=nvfp4_per_token``).
 
     Each expert's ``gate_proj`` and ``up_proj`` share one global scale computed
     over both, since the rollout runs them as one fused GEMM. Weights are
@@ -593,7 +609,7 @@ class NVFP4PerTokenWeightQuantizer(CompressedTensorsWeightQuantizer):
                     yield from self._emit(prefix, {"gate_proj": halves["gate_proj"], "up_proj": halves["up_proj"]})
         if pending:
             unpaired = sorted(pending)
-            raise RuntimeError(f"NVFP4_PER_TOKEN export is missing gate_proj/up_proj halves for {unpaired[:4]}")
+            raise RuntimeError(f"Per-token NVFP4 export is missing gate_proj/up_proj halves for {unpaired[:4]}")
 
 
 class Fp8ConfigWeightQuantizer:
@@ -703,12 +719,13 @@ def dispatch_rollout_weight_quantizer(
     native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`. DeepSeek-V4
     still gets an FP8 quantizer object, but it passes through the private mixed
     FP8/FP4 layout already produced by Megatron-Bridge.
-    ``NVFP4_PER_TOKEN`` routed experts use :class:`NVFP4PerTokenWeightQuantizer`;
-    NVFP4 training (``real_nvfp4_bf16_layers`` set) requires that preset and the same BF16 layers.
+    Per-token NVFP4 routed experts use :class:`NVFP4PerTokenWeightQuantizer`; NVFP4 training
+    (``real_nvfp4_bf16_layers`` set) requires them and the same BF16 layers.
     """
     rollout_quantization = getattr(rollout_config, "quantization", None)
     linear = getattr(rollout_quantization, "linear", None)
     moe = getattr(rollout_quantization, "moe", None)
+    moe_activation = getattr(rollout_quantization, "moe_activation", None)
     ignore = getattr(rollout_quantization, "ignore", None) or []
     config_file = getattr(rollout_quantization, "config_file", None)
     has_override = bool(linear or moe or config_file)
@@ -721,6 +738,7 @@ def dispatch_rollout_weight_quantizer(
             ignore=ignore,
             config_file=config_file,
             model_path=model_config.local_path,
+            moe_activation=moe_activation,
         )
     else:
         native = getattr(hf_config, "quantization_config", None)
@@ -732,7 +750,10 @@ def dispatch_rollout_weight_quantizer(
     real_nvfp4 = real_nvfp4_bf16_layers is not None
     if quantization_config is None:
         if real_nvfp4:
-            raise ValueError("override_transformer_config.fp4 needs rollout.quantization.moe=NVFP4_PER_TOKEN")
+            raise ValueError(
+                "override_transformer_config.fp4 needs rollout.quantization.moe=NVFP4 "
+                "with moe_activation=nvfp4_per_token"
+            )
         if qat_mode is not None:
             raise ValueError(
                 "QAT needs a quantized rollout to sync to: use a model with a native "
@@ -746,13 +767,15 @@ def dispatch_rollout_weight_quantizer(
         for scheme in _group_schemes(quantization_config)
     )
     if per_token and getattr(rollout_config, "name", None) != "vllm":
-        raise ValueError("rollout.quantization.moe=NVFP4_PER_TOKEN is supported only with the vLLM rollout")
+        raise ValueError("rollout.quantization.moe_activation=nvfp4_per_token is supported only with the vLLM rollout")
     if per_token and qat_mode is not None:
-        raise ValueError("rollout.quantization.moe=NVFP4_PER_TOKEN pairs with override_transformer_config.fp4, not QAT")
+        raise ValueError(
+            "rollout.quantization.moe_activation=nvfp4_per_token pairs with override_transformer_config.fp4, not QAT"
+        )
     if real_nvfp4 and not per_token:
         raise ValueError(
-            "override_transformer_config.fp4 trains routed experts in the precision of the "
-            "rollout.quantization.moe=NVFP4_PER_TOKEN preset; set it for the rollout"
+            "override_transformer_config.fp4 trains routed experts in per-token NVFP4; "
+            "set rollout.quantization.moe=NVFP4 with moe_activation=nvfp4_per_token"
         )
     if quant_method == "compressed-tensors":
         qat_modes = qat_modes_for_config(quantization_config) if qat_mode is not None else set()
