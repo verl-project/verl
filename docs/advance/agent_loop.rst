@@ -11,6 +11,9 @@ Last updated: 07/17/2025.
 
 Agent Loop is designed as general interface for multi-turn rollout and agentic reinforcement learning.
 
+For optional turn-level feedback that shapes actor advantages in the v1
+TransferQueue trainer, see :doc:`process_rewards`.
+
 **Design goal**:
 
 - Plugable user defined agent loop

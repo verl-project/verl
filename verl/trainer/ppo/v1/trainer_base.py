@@ -61,6 +61,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
+from verl.trainer.ppo.process_reward import shape_process_advantages
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import (
@@ -1744,6 +1745,10 @@ class PPOTrainer(ABC):
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        process_config = self.config.algorithm.get("process_reward", {})
+        use_process_reward = process_config.get("enabled", False)
+        if use_process_reward:
+            fields.append("process_scores")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
@@ -1783,6 +1788,41 @@ class PPOTrainer(ABC):
             norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
             config=self.config.algorithm,
         )
+
+        if use_process_reward:
+            # Rollout correction may have rejected originally generated tokens.
+            # They must not receive a process update or enter process metrics.
+            data.batch["process_scores"] = data.batch["process_scores"].masked_fill(
+                data.batch["response_mask"] == 0, 0.0
+            )
+            if process_config.get("mode", "additive") == "gvpo":
+                generated = data.batch["response_mask"].bool()
+                failed = (data.batch["process_scores"] * process_config.get("weight", 1.0) < 0) & generated
+                adv = data.batch["advantages"]
+                eps = process_config.get("zero_eps", 1e-6)
+                for name, selection in (
+                    ("failed", failed),
+                    ("negative", failed & (adv < -eps)),
+                    ("zero", failed & (adv.abs() <= eps)),
+                    ("positive", failed & (adv > eps)),
+                ):
+                    metrics[f"process_reward/gvpo_{name}_token_fraction"] = (
+                        selection[generated].float().mean().item() if generated.any() else 0.0
+                    )
+            data.batch["advantages"] = shape_process_advantages(
+                data.batch["advantages"],
+                data.batch["process_scores"],
+                data.batch["response_mask"],
+                mode=process_config.get("mode", "additive"),
+                weight=process_config.get("weight", 1.0),
+                negative_scale=process_config.get("negative_scale", 0.2),
+                zero_penalty=process_config.get("zero_penalty", 0.4),
+                zero_eps=process_config.get("zero_eps", 1e-6),
+            )
+            generated = data.batch["response_mask"].bool()
+            metrics["process_reward/score_mean"] = (
+                data.batch["process_scores"][generated].mean().item() if generated.any() else 0.0
+            )
 
         # 4. write nested advantages and returns back to TransferQueue
         fields = ["advantages", "returns"]

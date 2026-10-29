@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 import verl.trainer.ppo.v1.agent_loop_tq as agent_loop_tq_module
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
+from verl.trainer.ppo.process_reward import ProcessRewardRunner
 from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session_tasks, apply_greedy_sampling_params
 
 
@@ -59,6 +60,7 @@ class _DummyWorker:
         self.rollout_config = OmegaConf.create({"topk_log_probs": topk_log_probs})
         self.processor = None
         self.reward_loop_worker_handles = None
+        self.process_reward_runner = None
 
 
 def _output(extra_fields: dict) -> AgentLoopOutput:
@@ -143,3 +145,54 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_process_rewards_survive_postprocess_and_keep_outcome_reward(monkeypatch):
+    output = AgentLoopOutput(
+        prompt_ids=[101],
+        response_ids=[11, 12, 13],
+        response_mask=[1, 0, 1],
+        reward_score=1.0,
+        metrics=AgentLoopMetrics(),
+        extra_fields={"generated_turn_spans": [(0, 1), (2, 3)], "turn_rewards": [-1.0, 0.5]},
+    )
+    worker = _DummyWorker(topk_log_probs=0)
+    worker.process_reward_runner = ProcessRewardRunner([])
+    fields = await _postprocess(monkeypatch, worker, output, validate=False)
+    torch.testing.assert_close(fields["process_scores"][0], torch.tensor([-1.0, 0.0, 0.5]))
+    torch.testing.assert_close(fields["rm_scores"][0], torch.tensor([0.0, 0.0, 1.0]))
+    assert "process_scores" not in fields["extra_fields"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate,enabled", [(True, True), (False, False)])
+async def test_process_scoring_is_skipped_on_validation_or_when_disabled(monkeypatch, validate, enabled):
+    output = _output({"turn_rewards": None})  # Invalid feedback must not be evaluated on these paths.
+    worker = _DummyWorker(topk_log_probs=0)
+    worker.process_reward_runner = ProcessRewardRunner([]) if enabled else None
+    fields = await _postprocess(monkeypatch, worker, output, validate=validate)
+    assert "process_scores" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_invalid_process_feedback_does_not_publish_a_trajectory(monkeypatch):
+    worker = _DummyWorker(topk_log_probs=0)
+    worker.process_reward_runner = ProcessRewardRunner([])
+    published = False
+
+    async def put(**kwargs):
+        nonlocal published
+        published = True
+
+    monkeypatch.setattr(agent_loop_tq_module.tq, "async_kv_batch_put", put)
+    with pytest.raises(ValueError, match="turn_rewards"):
+        await _WorkerTQ._agent_loop_postprocess(
+            worker,
+            _output({"turn_rewards": [float("nan")]}),
+            False,
+            uid="u0",
+            session_id=0,
+            global_steps=1,
+        )
+    assert not published

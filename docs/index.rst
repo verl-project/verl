@@ -158,6 +158,7 @@ verl is fast with:
    advance/rl_insight.md
    advance/skip_manager.rst
    advance/agent_loop
+   advance/process_rewards
    advance/reward_loop
    data/transfer_queue.md
    advance/grafana_prometheus.md

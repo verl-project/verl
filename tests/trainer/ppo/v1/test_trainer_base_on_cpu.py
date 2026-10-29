@@ -16,8 +16,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 
+import verl.trainer.ppo.v1.trainer_base as trainer_module
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
 
@@ -199,3 +202,85 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+@pytest.mark.parametrize(
+    "mode,enabled,expected",
+    [
+        ("additive", True, [-2.5, -0.5, 0.0, 1.5]),
+        ("gvpo", True, [-2.4, -0.4, 0.0, 0.0]),
+        ("additive", False, [-2.0, 0.0, 0.0, 2.0]),
+    ],
+)
+@pytest.mark.parametrize("reject", [False, True])
+def test_process_shaping_runs_after_estimation_and_preserves_returns(monkeypatch, mode, enabled, expected, reject):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "algorithm": {
+                "adv_estimator": "grpo",
+                "gamma": 1.0,
+                "lam": 1.0,
+                "use_kl_in_reward": False,
+                "process_reward": {"enabled": enabled, "mode": mode, "weight": 0.5},
+                "rollout_correction": {"enabled": True} if reject else None,
+            },
+            "actor_rollout_ref": {"rollout": {"n": 2}},
+        }
+    )
+    nested = lambda values: torch.nested.as_nested_tensor([torch.tensor(v) for v in values], layout=torch.jagged)
+    raw = TensorDict(
+        {
+            "uid": torch.tensor([0, 0]),
+            "response_mask": nested([[1, 1, 0, 1], [1]]),
+            "rm_scores": nested([[0.0, 0.0, 0.0, 1.0], [0.0]]),
+            "process_scores": nested([[-1.0, -1.0, 0.0, -1.0], [0.0]]),
+            "rollout_log_probs": nested([[0.0, 0.0, 0.0, 0.0], [0.0]]),
+        },
+        batch_size=[2],
+    )
+    captured = {}
+
+    def get(**kwargs):
+        assert ("process_scores" in kwargs["select_fields"]) == enabled
+        return raw.clone()
+
+    def estimate(data, **kwargs):
+        # Outcome estimation receives the original rewards, before process shaping.
+        torch.testing.assert_close(
+            data.batch["token_level_rewards"], torch.tensor([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+        )
+        data.batch["advantages"] = (
+            torch.tensor([[-2.0, 0.0, 0.0, 2.0], [1.0, 0.0, 0.0, 0.0]]) * data.batch["response_mask"]
+        )
+        data.batch["returns"] = torch.tensor([[4.0, 4.0, 0.0, 4.0], [5.0, 0.0, 0.0, 0.0]])
+        return data
+
+    def put(**kwargs):
+        captured.update(kwargs)
+        return kwargs["fields"]
+
+    def correction(data, config):
+        data.batch["response_mask"][0, 0] = 0
+        return data, {}
+
+    monkeypatch.setattr(trainer_module, "compute_rollout_correction_and_add_to_batch", correction)
+    monkeypatch.setattr(trainer_module.tq, "kv_batch_get", get)
+    monkeypatch.setattr(trainer_module.tq, "kv_batch_put", put)
+    monkeypatch.setattr(trainer_module, "compute_advantage_for_multi_trajectories", estimate)
+    batch = MagicMock(keys=["a", "b"], partition_id="train")
+    batch.__len__.return_value = 2
+    metrics = {}
+    trainer._compute_advantage(batch, metrics)
+    fields = captured["fields"]
+    expected = [0.0, *expected[1:]] if reject else expected
+    torch.testing.assert_close(fields["advantages"][0], torch.tensor(expected))
+    torch.testing.assert_close(fields["advantages"][1], torch.tensor([1.0]))
+    torch.testing.assert_close(fields["returns"][0], torch.tensor([4.0, 4.0, 0.0, 4.0]))
+    torch.testing.assert_close(fields["returns"][1], torch.tensor([5.0]))
+    assert ("process_reward/score_mean" in metrics) == enabled
+    if enabled and mode == "gvpo":
+        assert metrics["process_reward/gvpo_failed_token_fraction"] == pytest.approx(2 / 3 if reject else 0.75)
+        assert sum(
+            metrics[f"process_reward/gvpo_{branch}_token_fraction"] for branch in ["negative", "zero", "positive"]
+        ) == pytest.approx(2 / 3 if reject else 0.75)

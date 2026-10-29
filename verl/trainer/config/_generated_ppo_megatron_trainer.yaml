@@ -901,6 +901,15 @@ algorithm:
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
+  process_reward:
+    _target_: verl.trainer.config.ProcessRewardConfig
+    enabled: false
+    mode: additive
+    weight: 1.0
+    negative_scale: 0.2
+    zero_penalty: 0.4
+    zero_eps: 1.0e-06
+    scorers: []
   norm_adv_by_std_in_grpo: true
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig

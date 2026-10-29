@@ -19,6 +19,7 @@ from typing import Any
 from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
 from verl.experimental.agent_loop.tool_parser import FunctionCall, KimiToolParser
 from verl.tools.schemas import OpenAIFunctionToolSchema, ToolResponse
+from verl.utils.tokenizer.continuous_token import MergeResult
 
 
 class _FakeTokenizer:
@@ -120,7 +121,9 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
         ):
             del previous_messages, response_logprobs, tools
             captured_messages.extend(updated_messages)
-            merge_result = SimpleNamespace(token_ids=list(runtime_token_ids) + [41, 42])
+            merge_result = MergeResult(
+                token_ids=list(runtime_token_ids) + [41, 42], appended_token_count=2, kind="context"
+            )
             return merge_result, list(response_mask) + [0, 0], None
 
         loop = SimpleNamespace(
@@ -156,6 +159,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             tool_rewards=[],
             prompt_ids=[1, 2, 3],
             response_mask=[],
+            generated_turn_spans=[],
             response_logprobs=[],
             image_data=None,
             user_turns=0,
