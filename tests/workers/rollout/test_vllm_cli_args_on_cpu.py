@@ -245,7 +245,10 @@ class TestEngineKwargsManagedArgs:
     def _preprocess(engine_kwargs):
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-        server = SimpleNamespace(config=SimpleNamespace(checkpoint_engine=None))
+        server = SimpleNamespace(
+            config=SimpleNamespace(checkpoint_engine=None),
+            _mooncake_lookup_rpc_port=12345,
+        )
         vLLMHttpServer._preprocess_engine_kwargs(server, engine_kwargs)
 
     @pytest.mark.parametrize(
@@ -267,6 +270,58 @@ class TestEngineKwargsManagedArgs:
         self._preprocess(engine_kwargs)
         assert engine_kwargs["max_num_seqs"] == 8
 
+    @pytest.mark.parametrize("spelling", ["kv_transfer_config", "kv-transfer-config"])
+    def test_mooncake_store_gets_server_lookup_ipc_discriminator(self, spelling):
+        first = {
+            spelling: {
+                "kv_connector": "MooncakeStoreConnector",
+                "kv_role": "kv_both",
+            }
+        }
+        second = json.loads(json.dumps(first))
+
+        self._preprocess(first)
+        self._preprocess(second)
+
+        first_port = first[spelling]["kv_connector_extra_config"]["lookup_rpc_port"]
+        second_port = second[spelling]["kv_connector_extra_config"]["lookup_rpc_port"]
+        assert isinstance(first_port, int)
+        assert first_port > 0
+        assert second_port == first_port
+
+    def test_mooncake_store_lookup_ipc_discriminator_changes_per_server(self):
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+        def configured_port(port):
+            engine_kwargs = {
+                "kv_transfer_config": {
+                    "kv_connector": "MooncakeStoreConnector",
+                    "kv_role": "kv_both",
+                }
+            }
+            server = SimpleNamespace(
+                config=SimpleNamespace(checkpoint_engine=None),
+                _mooncake_lookup_rpc_port=port,
+            )
+            vLLMHttpServer._preprocess_engine_kwargs(server, engine_kwargs)
+            return engine_kwargs["kv_transfer_config"]["kv_connector_extra_config"]["lookup_rpc_port"]
+
+        assert configured_port(12345) != configured_port(67890)
+
+    def test_mooncake_store_preserves_explicit_lookup_rpc_port(self):
+        engine_kwargs = {
+            "kv_transfer_config": json.dumps(
+                {
+                    "kv_connector": "MooncakeStoreConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {"lookup_rpc_port": 4567},
+                }
+            )
+        }
+
+        self._preprocess(engine_kwargs)
+
+        assert engine_kwargs["kv_transfer_config"]["kv_connector_extra_config"]["lookup_rpc_port"] == 4567
 
 class TestVllmColocateZmqHandle:
     def test_dp_local_rank_offsets_tensor_parallel_rank(self):
