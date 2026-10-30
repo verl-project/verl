@@ -45,6 +45,9 @@ async def test_hccl_checkpoint_engine(
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
     model_path = os.path.expanduser(model_path)
+    sender_diagnostics = os.environ.get("VERL_CHECKPOINT_SENDER_DIAGNOSTICS", "off")
+    if sender_diagnostics not in {"off", "hash"}:
+        raise ValueError(f"Invalid VERL_CHECKPOINT_SENDER_DIAGNOSTICS: {sender_diagnostics!r}")
     ray.init(
         runtime_env={
             "env_vars": {
@@ -52,6 +55,7 @@ async def test_hccl_checkpoint_engine(
                 "HCCL_HOST_SOCKET_PORT_RANGE": "60000-60050",
                 "HCCL_NPU_SOCKET_PORT_RANGE": "61000-61050",
                 "VERL_LOGGING_LEVEL": "DEBUG",
+                "VERL_CHECKPOINT_SENDER_DIAGNOSTICS": sender_diagnostics,
             }
         }
     )
@@ -75,8 +79,14 @@ async def test_hccl_checkpoint_engine(
 
     # create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
-    for _ in range(3):
-        await checkpoint_manager.update_weights()
+    for step in range(3):
+        print(
+            f"HCCL checkpoint iteration={step} bucket_mb={bucket_size_mb} "
+            f"trainers={num_trainer} receivers={num_rollout} rebuild_group={rebuild_group} "
+            f"sender_diagnostics={sender_diagnostics}",
+            flush=True,
+        )
+        await checkpoint_manager.update_weights(global_steps=step)
         rollout.check_weights()
 
     ray.shutdown()

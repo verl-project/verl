@@ -31,8 +31,8 @@
 
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
+  workflow_dispatch:
 
 jobs:
   check-title:

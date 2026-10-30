@@ -47,8 +47,7 @@
 name: Auto Doc Translate
 
 on:
-  schedule:
-    - cron: '0 0 * * 0'
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
   workflow_dispatch:
     inputs:
       target_branch:

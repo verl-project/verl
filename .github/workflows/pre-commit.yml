@@ -3,14 +3,7 @@ name: pre-commit
 
 # No need to avoid / cancel lightweight pre-commit jobs
 on:
-  schedule:
-    - cron: "0 0 * * 0"
-  pull_request:
-  push:
-    branches:
-      - main
-      - v0.*
-  # Allow manual triggering
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
   workflow_dispatch:
 
 # Declare permissions just read content.

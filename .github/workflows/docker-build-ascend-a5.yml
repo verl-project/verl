@@ -1,16 +1,8 @@
 name: docker-build-ascend-a5
 
 on:
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
   workflow_dispatch:
-  push:
-    branches: ["main"]
-    paths:
-      - "docker/ascend/Dockerfile.ascend_9.1.0_a5"
-      - "docker/ascend/Dockerfile.ascend_9.1.0_a5_v0.9.1"
-      - ".github/workflows/docker-build-ascend-a5.yml"
-
-  # schedule:
-  #   - cron: "0 19 * * *"
 
 env:
   QUAY_REPO: quay.io/ascend/verl

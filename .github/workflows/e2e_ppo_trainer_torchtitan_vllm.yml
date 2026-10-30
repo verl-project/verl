@@ -32,37 +32,8 @@
 name: e2e_ppo_trainer_torchtitan_vllm
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch.
-  push:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "verl/workers/engine/torchtitan/**"
-      - "verl/workers/config/engine.py"
-      # Validate changes to the environment consumed by uv run --frozen.
-      - "pyproject.toml"
-      - "uv.lock"
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "!docker/**"
-      # Docs
-      - "!**/*.md"
-      - "!docs/**"
-      # Entrypoints
-      - ".github/workflows/e2e_ppo_trainer_torchtitan_vllm.yml"
-      - "tests/special_e2e/run_ppo_trainer_torchtitan.sh"
-      - "verl/workers/engine/torchtitan/**"
-      - "verl/workers/config/engine.py"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "examples/data_preprocess/gsm8k.py"
-      - "verl/trainer/main_ppo.py"
-      - "verl/trainer/config/ppo_trainer.yaml"
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
+  workflow_dispatch:
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

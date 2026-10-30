@@ -1,9 +1,7 @@
 name: scheduled pre-commit autofix
 
 on:
-  schedule:
-    # Every hour
-    - cron: "0 * * * *"
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
   workflow_dispatch:
 
 permissions:

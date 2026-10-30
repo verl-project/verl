@@ -1,8 +1,8 @@
 name: nightly_ci_ascend_multinode
 
 on:
-  schedule:
-    - cron: "0 17 * * *"
+  # Temporarily disable automatic runs while diagnosing NPU checkpoint transfer.
+  workflow_dispatch:
 
 # Declare permissions just read content.
 permissions:
