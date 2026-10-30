@@ -303,6 +303,7 @@ async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeyp
     worker = object.__new__(AgentLoopWorker)
     worker.config = OmegaConf.create({"data": {}})
     worker.llm_client = object()
+    worker.teacher_rollouts = False
     worker.tokenizer = _FakeTokenizer()
     worker.processor = None
     worker.hf_model_type = "qwen2_5_vl"

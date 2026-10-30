@@ -39,6 +39,11 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
+from verl.experimental.teacher_rollout import (
+    assign_rollout_source,
+    build_rollout_source_selector,
+    get_student_rollout_tags,
+)
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
@@ -120,6 +125,7 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        self.rollout_source_selector = build_rollout_source_selector(config)
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -1496,6 +1502,13 @@ class PPOTrainer(ABC):
 
     def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
         """Register prompts in TransferQueue and dispatch them for generation."""
+        if self.rollout_source_selector is not None:
+            assign_rollout_source(
+                batch,
+                self.rollout_source_selector,
+                global_step=self.global_steps,
+                seed=self.config.actor_rollout_ref.rollout.seed,
+            )
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
         if self.trainer_mode != "sync":
             tq.kv_batch_put(
@@ -1899,8 +1912,9 @@ class PPOTrainer(ABC):
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
-        min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
-        max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
+        student_tags = get_student_rollout_tags(self.config, batch.tags, metrics)
+        min_global_steps = np.array([tag["min_global_steps"] for tag in student_tags], dtype=int)
+        max_global_steps = np.array([tag["max_global_steps"] for tag in student_tags], dtype=int)
 
         # Only fetch speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None
@@ -1980,6 +1994,8 @@ class PPOTrainer(ABC):
         #     so the lag is a range: the freshest weights used give the lower bound
         #     (global_steps - max_global_steps) and the oldest weights the worst case
         #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
+        if not student_tags:
+            return
         trajectory_spans = max_global_steps - min_global_steps + 1
         trajectory_staleness = (global_steps - 1) - max_global_steps
         trajectory_staleness_worst = (global_steps - 1) - min_global_steps

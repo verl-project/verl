@@ -829,6 +829,10 @@ algorithm:
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
+  rollout_source_selector:
+    path: null
+    name: null
+    kwargs: {}
   distillation_loss:
     _target_: verl.workers.config.DistillationLossConfig
     loss_mode: k3

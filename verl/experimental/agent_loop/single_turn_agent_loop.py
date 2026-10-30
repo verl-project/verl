@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+from verl.experimental.teacher_rollout import is_teacher_rollout_enabled
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
@@ -45,6 +46,10 @@ class SingleTurnAgentLoop(AgentLoopBase):
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
         audios = multi_modal_data.get("audios")
+        if is_teacher_rollout_enabled(self.config) and any(
+            value is not None and len(value) > 0 for value in (images, videos, audios)
+        ):
+            raise ValueError("A rollout_source_selector supports text-only inputs.")
         mm_processor_kwargs = self._get_mm_processor_kwargs(audios)
 
         # 2. build the initial prompt with Continuous Token (the only tokenization path).
