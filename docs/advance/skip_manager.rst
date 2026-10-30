@@ -320,10 +320,12 @@ Cache-hit injection: key remapping
 
 4. **Build new keys**: ``{new_uid}_{session_id}_0`` — matching the standard TQ key format.
 
-5. **Update tags**: Each trajectory tag's ``global_steps`` / ``min_global_steps`` /
-   ``max_global_steps`` are overwritten to the **current** step so replay metrics describe the
-   current training step rather than the original cache run. The ``is_prompt`` flag is removed
-   from trajectory tags (it belongs only on prompt-level keys).
+5. **Update tags**: ``global_steps`` is set to the current trainer step. The cached
+   ``min_global_steps`` / ``max_global_steps`` model versions are shifted by the difference
+   between the current trainer step and the loaded cache step. Exact-step cache replay therefore
+   preserves the original versions, while cross-step ``repeat`` replay preserves relative
+   staleness and multi-version trajectory spans. The ``is_prompt`` flag is removed from trajectory
+   tags (it belongs only on prompt-level keys).
 
 6. **Select tensor rows**: ``index_select_tensor_dict(data, traj_indices)`` picks (and possibly
    duplicates) rows from the cached ``tensordict``. This handles both regular tensors and

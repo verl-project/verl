@@ -451,7 +451,8 @@ class RolloutTqSkip(RolloutSkip):
             step: Current training step.
             new_prompt_uids: Freshly generated uids for the current batch.
             n: Number of trajectories per prompt (``rollout.n``).
-            global_steps: Current ``global_steps``, used to override staleness tags.
+            global_steps: Current trainer step. Cached model-version tags are shifted
+                by the difference between this step and the loaded cache step.
             partition_id: TQ partition (``"train"`` or ``"val"``).
         """
         import transfer_queue as tq
@@ -520,6 +521,7 @@ class RolloutTqSkip(RolloutSkip):
         new_keys = []
         new_tags = []
         traj_indices: list[int] = []
+        version_offset = global_steps - load_step
         for prompt_idx, new_uid in enumerate(new_prompt_uids):
             group = groups[prompt_idx % num_cached_groups]
             for session_id in range(n):
@@ -528,8 +530,8 @@ class RolloutTqSkip(RolloutSkip):
                 new_keys.append(tq_schema.trajectory_key(new_uid, session_id, 0))
                 tag = dict(old_tags[traj_idx])
                 tag["global_steps"] = global_steps
-                tag["min_global_steps"] = global_steps
-                tag["max_global_steps"] = global_steps
+                for version_key in ("min_global_steps", "max_global_steps"):
+                    tag[version_key] += version_offset
                 tag.pop("is_prompt", None)
                 new_tags.append(tag)
 

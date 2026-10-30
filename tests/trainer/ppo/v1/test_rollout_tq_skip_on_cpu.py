@@ -50,7 +50,7 @@ def reset_skip_manager():
     SkipManager.config, SkipManager.step, SkipManager.skip_instances = previous
 
 
-def _config(tmp_path, *, trainer_mode="sync", steps=(1,), parameter_sync_step=1):
+def _config(tmp_path, *, trainer_mode="sync", steps=(1,), parameter_sync_step=1, action="cache"):
     return OmegaConf.create(
         {
             "skip": {
@@ -58,7 +58,7 @@ def _config(tmp_path, *, trainer_mode="sync", steps=(1,), parameter_sync_step=1)
                     "enable": True,
                     "dump_dir": str(tmp_path),
                     "steps": list(steps),
-                    "action": "cache",
+                    "action": action,
                 }
             },
             "trainer": {
@@ -86,13 +86,32 @@ def _skip(tmp_path, **kwargs):
     return RolloutTqSkip(local_config, config)
 
 
-def _write_inner(skip, step, inner_idx, *, uid="cached", values=(1.0, 2.0)):
+def _write_inner(
+    skip,
+    step,
+    inner_idx,
+    *,
+    uid="cached",
+    values=(1.0, 2.0),
+    min_global_steps=None,
+    max_global_steps=None,
+):
     directory = skip._get_v1_inner_dir(step, inner_idx)
     directory.mkdir(parents=True, exist_ok=True)
     keys = [f"{uid}_0_0", f"{uid}_1_0"]
+    min_global_steps = step - 1 if min_global_steps is None else min_global_steps
+    max_global_steps = step - 1 if max_global_steps is None else max_global_steps
     tags = [
-        {"global_steps": step, "min_global_steps": step, "max_global_steps": step},
-        {"global_steps": step, "min_global_steps": step, "max_global_steps": step},
+        {
+            "global_steps": step,
+            "min_global_steps": min_global_steps,
+            "max_global_steps": max_global_steps,
+        },
+        {
+            "global_steps": step,
+            "min_global_steps": min_global_steps,
+            "max_global_steps": max_global_steps,
+        },
     ]
     torch.save(
         {
@@ -158,6 +177,43 @@ def test_cached_sample_loads_one_inner_batch_per_call(tq_init, partition_id, tmp
     with pytest.raises(RuntimeError, match="more than 2 sample calls"):
         skip.load_v1_sample(1, ["fresh-c"], global_steps=1, partition_id=partition_id)
     tq.kv_clear(keys=[*first.keys, *second.keys], partition_id=partition_id)
+
+
+@pytest.mark.parametrize(
+    ("action", "target_step", "expected_min", "expected_max"),
+    [
+        ("cache", 2, 0, 1),
+        ("repeat", 5, 3, 4),
+    ],
+)
+def test_replay_preserves_relative_staleness_and_span(
+    tq_init,
+    partition_id,
+    tmp_path,
+    action,
+    target_step,
+    expected_min,
+    expected_max,
+):
+    skip = _skip(tmp_path, steps=(target_step,), action=action)
+    _write_inner(skip, 2, 0, min_global_steps=0, max_global_steps=1)
+
+    batch = skip.load_dump_data(
+        step=target_step,
+        new_prompt_uids=["fresh"],
+        n=2,
+        global_steps=target_step,
+        partition_id=partition_id,
+        mark_prompts_finished=False,
+    )
+
+    assert {tag["global_steps"] for tag in batch.tags} == {target_step}
+    assert {tag["min_global_steps"] for tag in batch.tags} == {expected_min}
+    assert {tag["max_global_steps"] for tag in batch.tags} == {expected_max}
+    assert {(tag["max_global_steps"] - tag["min_global_steps"] + 1) for tag in batch.tags} == {2}
+    assert {(target_step - 1 - tag["max_global_steps"]) for tag in batch.tags} == {0}
+    assert {(target_step - 1 - tag["min_global_steps"]) for tag in batch.tags} == {1}
+    tq.kv_clear(keys=batch.keys, partition_id=partition_id)
 
 
 def test_actor_sample_returns_exact_cached_batch_without_original_sampling(tq_init, tmp_path):
