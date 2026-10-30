@@ -121,6 +121,23 @@ jobs:
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
+      - name: Try reclaiming host memory before training
+        run: |
+          echo "Host memory before cache drop and compaction:"
+          free -h
+          sync
+          if echo 3 > /proc/sys/vm/drop_caches; then
+            echo "Successfully dropped host caches"
+          else
+            echo "::warning::Cannot write to /proc/sys/vm/drop_caches; continuing training"
+          fi
+          if echo 1 > /proc/sys/vm/compact_memory; then
+            echo "Successfully requested host memory compaction"
+          else
+            echo "::warning::Cannot write to /proc/sys/vm/compact_memory; continuing training"
+          fi
+          echo "Host memory after cache drop and compaction attempts:"
+          free -h
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
@@ -183,6 +200,23 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Try reclaiming host memory before training
+        run: |
+          echo "Host memory before cache drop and compaction:"
+          free -h
+          sync
+          if echo 3 > /proc/sys/vm/drop_caches; then
+            echo "Successfully dropped host caches"
+          else
+            echo "::warning::Cannot write to /proc/sys/vm/drop_caches; continuing training"
+          fi
+          if echo 1 > /proc/sys/vm/compact_memory; then
+            echo "Successfully requested host memory compaction"
+          else
+            echo "::warning::Cannot write to /proc/sys/vm/compact_memory; continuing training"
+          fi
+          echo "Host memory after cache drop and compaction attempts:"
+          free -h
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
