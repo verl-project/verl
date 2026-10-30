@@ -224,14 +224,15 @@ multi_turn:
   #   which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts.
   use_inference_chat_template: False
 
-  # Tokenization is performed turn by turn and the resulting token ids are concatenated to form the full conversation.
-  # To ensure this matches the result of tokenizing the entire conversation at once, a sanity check is run at the end of each multi-turn rollout to compare the two sets of token ids.
-  # Some models are known to produce different tokenization results when tokenizing turn by turn vs. all at once. aThis behavior has already been validated for them.
-  # To reduce excessive warnings, you can turn off the sanity check for these models if you are using their default chat template:
-  # Qwen/QwQ-32B, Qwen/Qwen3-xxB
-  # - disable: disable tokenization sanity check
-  # - strict: enable strict tokenization sanity check (default)
-  # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
+  # Multi-turn rollouts keep the generated token ids and append each tool/user turn as a token delta.
+  # When the run uses multi-turn agent loops (tools, multi_turn.enable, a custom agent loop config or a non
+  # single-turn default agent loop), each agent loop worker replays a few fixed conversations through its
+  # Continuous Token builder before the first rollout and compares every turn boundary with a single-pass
+  # chat template render.
+  # Differences confined to earlier turns (e.g. a template that drops <think> from history) only log a warning.
+  # - disable: skip the check
+  # - strict: raise on any turn boundary mismatch (default)
+  # - ignore_strippable: only warn when a turn boundary differs in whitespace alone
   tokenization_sanity_check_mode: strict
 
   # Format of the multi-turn rollout. Options: hermes, llama3_json, ...

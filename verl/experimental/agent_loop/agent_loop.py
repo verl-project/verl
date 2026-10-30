@@ -63,6 +63,7 @@ from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
     get_processor_token_id,
 )
+from verl.utils.tokenizer.continuous_token_check import verify_continuous_token_builder
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
@@ -571,6 +572,29 @@ class AgentLoopWorker:
             if self.model_config.processor is not None:
                 self.model_config.processor.chat_template = self.model_config.custom_chat_template
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
+
+        # Only agent loops that append tool/user turns merge Continuous Token context, so runs configured
+        # for them check the builder against the chat template before the first rollout.
+        multi_turn = self.rollout_config.multi_turn
+        if (
+            multi_turn.enable
+            or self.tools
+            or agent_loop_config_path
+            or self.rollout_config.agent.default_agent_loop != "single_turn_agent"
+        ):
+            builder = create_continuous_token_builder(
+                self.tokenizer,
+                hf_model_type=self.hf_model_type,
+                chat_template_kwargs=config.data.get("apply_chat_template_kwargs", {}),
+                mm_processor_kwargs=self.mm_processor_kwargs,
+                processor=self.processor,
+            )
+            verify_continuous_token_builder(
+                builder,
+                mode=multi_turn.tokenization_sanity_check_mode,
+                hf_model_type=self.hf_model_type,
+                generation_config=self.model_config.generation_config,
+            )
 
         trace_config = self.rollout_config.trace
         if trace_config.get("token2text", False):
