@@ -1532,7 +1532,7 @@ class PPOTrainer(ABC):
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
 
         # 1. read the fields required by the reward model from TransferQueue.
-        fields = ["prompts", "responses", "raw_prompt"]
+        fields = ["prompts", "responses", "response_mask", "raw_prompt"]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         prompt_lengths = data["prompts"].offsets().diff()
@@ -1542,8 +1542,9 @@ class PPOTrainer(ABC):
 
         # 2. rebuild the attention mask aligned with the [prompts | responses] layout.
         prompt_mask = self._lengths_to_mask(prompt_lengths, prompts.size(1))
-        response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
-        attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
+        response_attention_mask = self._lengths_to_mask(response_lengths, responses.size(1))
+        attention_mask = torch.cat([prompt_mask, response_attention_mask], dim=1)
+        response_mask = data["response_mask"].to_padded_tensor(padding=0)
 
         # `raw_prompt` is a non-tensor field; depending on the TransferQueue backend it
         # comes back as a tensordict LinkedList (a `list` subclass), a NonTensorStack or a
@@ -1555,7 +1556,12 @@ class PPOTrainer(ABC):
 
         rm_input = DataProto(
             batch=TensorDict(
-                {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
+                {
+                    "prompts": prompts,
+                    "responses": responses,
+                    "attention_mask": attention_mask,
+                    "response_mask": response_mask,
+                },
                 batch_size=len(batch),
             ),
             non_tensor_batch={"raw_prompt": raw_prompt_arr},

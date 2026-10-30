@@ -16,8 +16,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
+from verl import DataProto
+from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
 
@@ -199,3 +202,52 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+@pytest.mark.parametrize("partition_id", ["train", "val"])
+def test_colocated_reward_preserves_generation_mask_from_transfer_queue(partition_id):
+    """V1 must pass the generation mask through reward assembly and jagged writeback."""
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0)
+    source = {
+        "prompts": torch.nested.as_nested_tensor([torch.tensor([10, 11]), torch.tensor([12])], layout=torch.jagged),
+        "responses": torch.nested.as_nested_tensor(
+            [torch.tensor([1, 2, 3, 4, 5, 6]), torch.tensor([7, 8, 9])], layout=torch.jagged
+        ),
+        "response_mask": torch.nested.as_nested_tensor(
+            [torch.tensor([1, 1, 0, 1, 1, 0]), torch.tensor([1, 1, 0])], layout=torch.jagged
+        ),
+        "raw_prompt": [[{"role": "user", "content": "first"}], [{"role": "user", "content": "second"}]],
+    }
+    batch = MagicMock()
+    batch.keys = ["first", "second"]
+    batch.partition_id = partition_id
+    batch.__len__.return_value = 2
+
+    def read_fields(*, keys, partition_id, select_fields):
+        assert keys == batch.keys
+        assert partition_id == batch.partition_id
+        return {key: source[key] for key in select_fields}
+
+    def compute_rm_score(data):
+        torch.testing.assert_close(data.batch["response_mask"], torch.tensor([[1, 1, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0]]))
+        # The scorer still sees the template suffixes; they only leave the loss mask.
+        torch.testing.assert_close(
+            data.batch["attention_mask"], torch.tensor([[1, 1, 1, 1, 1, 1, 1, 1], [1, 0, 1, 1, 1, 0, 0, 0]])
+        )
+        return DataProto.from_dict(tensors={"rm_scores": RewardManagerBase.assemble_rm_scores(data, [2.0, -1.0])})
+
+    trainer.reward_loop_manager = SimpleNamespace(compute_rm_score=compute_rm_score)
+    with (
+        patch("verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get", side_effect=read_fields),
+        patch("verl.trainer.ppo.v1.trainer_base.tq.kv_batch_put") as write,
+    ):
+        result = trainer._compute_reward_colocate(batch)
+
+    assert result is batch
+    write.assert_called_once()
+    saved = write.call_args.kwargs["fields"]["rm_scores"]
+    assert saved.offsets().diff().tolist() == [6, 3]
+    torch.testing.assert_close(
+        saved.to_padded_tensor(0.0), torch.tensor([[0.0, 0.0, 0.0, 0.0, 2.0, 0.0], [0.0, -1.0, 0.0, 0.0, 0.0, 0.0]])
+    )
