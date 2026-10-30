@@ -13,6 +13,13 @@ fsdp_size: -1
 ulysses_parallel_size: 1
 
 expert_parallel_size: 1
+# Parallel degree for Qwen3.8 Flash Next PLE tables. Keep 1 for models without PLE.
+ple_parallel_size: 1
+# Freeze only Qwen4-Exp PLE lookup tables; both engines load the same fixed table.
+freeze_ple_embeddings: false
+# null preserves the model dtype; bfloat16 preserves the original Qwen3.8 table storage.
+frozen_ple_dtype: null
+
 
 mixed_precision: true
 # Outer AMP only. Set false for Qwen4-Exp NPU checkpointing; FSDP stays BF16.

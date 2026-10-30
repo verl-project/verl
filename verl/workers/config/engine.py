@@ -426,6 +426,9 @@ class VeOmniEngineConfig(EngineConfig):
     fsdp_size: int = -1
     ulysses_parallel_size: int = 1
     expert_parallel_size: int = 1
+    ple_parallel_size: int = 1
+    freeze_ple_embeddings: bool = False
+    frozen_ple_dtype: Optional[str] = None
     seed: int = 42
     full_determinism: bool = False
     mixed_precision: bool = False
@@ -470,6 +473,22 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+        if self.frozen_ple_dtype is not None:
+            if not self.freeze_ple_embeddings or self.frozen_ple_dtype not in ("float32", "bfloat16"):
+                raise ValueError("frozen_ple_dtype requires frozen PLE and must be float32 or bfloat16")
+        for name, size in {
+            "expert_parallel_size": self.expert_parallel_size,
+            "ple_parallel_size": self.ple_parallel_size,
+        }.items():
+            if size < 1:
+                raise ValueError(f"{name} must be positive, got {size}")
+        if self.ep_sharded_stream_load and self.broadcast_model_weights_from_rank0:
+            raise ValueError(
+                "ep_sharded_stream_load requires broadcast_model_weights_from_rank0=False "
+                "so each rank can read its own ExtraParallel checkpoint slice."
+            )
+        if self.ple_parallel_size > 1 and not self.ep_sharded_stream_load:
+            raise ValueError("ple_parallel_size > 1 requires ep_sharded_stream_load=True")
 
         if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (
             self.activation_offload_host_cache_limit_gb < 0
