@@ -119,6 +119,41 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering cannot be combined with distillation.")
 
 
+def _validate_rollout_correction_truncation(config: DictConfig) -> None:
+    """Reject rollout IS/RS correction combined with a truncated sampler.
+
+    With ``logprobs_mode='processed_logprobs'`` the rollout engine returns log-probs
+    renormalized over the top-p/top-k/min-p truncated support, while the actor's
+    ``old_log_probs`` are full-vocabulary. The ratio ``old_log_prob - rollout_log_prob``
+    then carries the truncated mass on every token, so IS weights are biased toward 0
+    and k1-style rejection bounds (e.g. ``0.999_1.001``, ``0.5_2.0``) reject every
+    sequence — the update silently receives no gradient (issue #8020).
+    """
+    rollout_correction_cfgs = [
+        config.algorithm.get("rollout_correction") or {},
+        config.actor_rollout_ref.actor.policy_loss.get("rollout_correction") or {},
+    ]
+    if not any(rc.get("rollout_is") or rc.get("rollout_rs") for rc in rollout_correction_cfgs):
+        return
+    rollout_cfg = config.actor_rollout_ref.rollout
+    truncated = (
+        rollout_cfg.get("top_p", 1.0) < 1.0 or rollout_cfg.get("top_k", -1) > 0 or rollout_cfg.get("min_p", 0.0) > 0.0
+    )
+    if not truncated or rollout_cfg.get("logprobs_mode", "processed_logprobs") != "processed_logprobs":
+        return
+    raise ValueError(
+        "algorithm.rollout_correction (rollout_is/rollout_rs) is incompatible with a truncated "
+        f"sampler: actor_rollout_ref.rollout has top_p={rollout_cfg.get('top_p')}, "
+        f"top_k={rollout_cfg.get('top_k')}, min_p={rollout_cfg.get('min_p', 0.0)} and "
+        "logprobs_mode='processed_logprobs'. Processed log-probs are renormalized over the "
+        "truncated support, so the ratio old_log_prob - rollout_log_prob carries the truncated "
+        "mass per token: IS weights are biased toward 0 and k1 rejection bounds such as "
+        "0.999_1.001 or 0.5_2.0 reject every sequence (zero gradient). Set top_p=1.0, top_k=-1 "
+        "and min_p=0, or configure the rollout engine to return raw log-probs "
+        "(logprobs_mode != 'processed_logprobs'), or disable rollout correction."
+    )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -199,6 +234,7 @@ def validate_config(
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
     _validate_router_replay_config(actor_config, config.algorithm.get("rollout_correction", None))
     _validate_score_centering_config(config)
+    _validate_rollout_correction_truncation(config)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:
