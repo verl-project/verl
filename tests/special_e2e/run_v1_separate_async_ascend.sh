@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-fsdp2}
+SKIP_DUMP_DIR=${SKIP_DUMP_DIR:-${HOME}/data/rollout_dump_v1_separate_async}
 
 export NUM_GPUS=${NUM_GPUS:-16}
 export N_GPUS_TRAINING=${N_GPUS_TRAINING:-8}
@@ -39,6 +40,10 @@ params=(
     trainer.val_before_train=True
     trainer.total_epochs=2
     trainer.log_val_generations=10
+    skip.rollout_tq.enable=True
+    skip.rollout_tq.dump_dir="${SKIP_DUMP_DIR}"
+    "skip.rollout_tq.steps=[1]"
+    skip.rollout_tq.action=cache
 )
 
 if [[ "${ACTOR_STRATEGY}" == "fsdp2" ]]; then

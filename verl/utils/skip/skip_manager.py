@@ -126,27 +126,58 @@ class SkipManager:
 
     @classmethod
     def annotate_tq(cls, role: str, phase: str):
-        """V1 TransferQueue-based skip decorator, unified across both phases.
+        """V1 TransferQueue-based skip decorator.
 
-        V1's split architecture separates "submit prompts" (``_add_batch_to_generate``)
-        from "sample trajectories" (V1 dataloader sampling).  This decorator handles
-        both, selected by *phase*:
+        The synchronous ``phase="submit"`` branch supports inject-then-sample
+        callers. Streaming dataloader actors use the asynchronous ``phase="sample"``
+        branch:
 
-        - ``phase="submit"``: decorate ``_add_batch_to_generate``.  The method must be
-          split into ``_next_train_batch`` (dataloader + uid) and ``_submit_batch_to_rollout``
-          (tag registration + generate_sequences).  The decorator always calls
-          ``_next_train_batch`` first (keeping the dataloader aligned even on cache-hit
-          steps), then checks ``meet_precondition``.  On cache-hit it injects cached data
-          into the TQ and returns; on cache-miss it calls ``_submit_batch_to_rollout``.
-
-        - ``phase="sample"``: decorate a sampling method returning ``(KVBatchMeta, metrics)``.  After the original
-          ``sample`` runs, if the skip instance says to save, persist the result to disk
-          (phase one / cache-miss).  When ``parameter_sync_step > 1`` (separate async),
-          ``sample`` is called multiple times per step; each call saves its mini-batch to
-          a separate inner sub-directory, and the full set is merged on load.
+        - Cache misses run the original ``sample`` and persist its ``KVBatchMeta``.
+        - Cache hits advance the actor-owned dataloader, inject one cached inner
+          batch under fresh uids, and return that exact batch without normal sampling.
         """
 
         def decorator(func: Callable) -> Callable:
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(self, *args, **kwargs):
+                    if phase != "sample":
+                        return await func(self, *args, **kwargs)
+                    skip_instance = cls.skip_instances.get(role)
+                    if skip_instance is None or not skip_instance.is_enabled():
+                        return await func(self, *args, **kwargs)
+
+                    call = inspect.signature(func).bind(self, *args, **kwargs)
+                    call.apply_defaults()
+                    step = call.arguments["global_steps"]
+                    partition_id = call.arguments["partition_id"]
+                    prompts = call.arguments["prompts"]
+                    if partition_id != "train" or prompts is not None or step not in skip_instance.steps:
+                        return await func(self, *args, **kwargs)
+
+                    if not skip_instance.should_load_v1_sample(step, self.trainer_mode):
+                        result = await func(self, *args, **kwargs)
+                        batch = result[0]
+                        if skip_instance.should_save(step, batch.partition_id):
+                            skip_instance.prepare_data(step=step, batch=batch, global_steps=step)
+                        return result
+
+                    cls.set_step(step)
+                    self.global_steps = step
+                    if hasattr(self, "_validation_active"):
+                        self._validation_active = False
+                    fresh_batch = self._next_train_batch(call.arguments["batch_size"])
+                    batch = skip_instance.load_v1_sample(
+                        step=step,
+                        new_prompt_uids=list(fresh_batch["uid"]),
+                        global_steps=step,
+                        partition_id=partition_id,
+                    )
+                    return batch, {}, len(batch)
+
+                return async_wrapper
+
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
                 skip_instance = cls.skip_instances.get(role)

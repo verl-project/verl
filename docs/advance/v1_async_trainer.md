@@ -152,7 +152,7 @@ Trainer code uses these actor methods:
 Model and optimizer checkpointing remain in the trainer. The latest-checkpoint marker is updated only after both the model save and the actor's dataloader/TransferQueue save succeed.
 Sync checkpoints contain only `data.pt`. Async checkpoints additionally contain the TransferQueue snapshot and reissue pending/running prompts. Async restore requires `data.pt` to keep the dataloader cursor consistent with restored TransferQueue state.
 The actor is hard-affined to the TaskRunner node so local datasets, `data.pt`, and the latest-checkpoint marker share the same filesystem view.
-`skip.rollout_tq.enable` is rejected until submit/sample cache semantics are implemented inside the actor; silently bypassing those hooks would execute real rollout during a skipped step.
+`skip.rollout_tq` replays cached train batches directly from the actor's `sample` boundary. Sync mode permits arbitrary cache steps; async modes require a fully cached or fully uncached contiguous prefix from the current fresh-training start, because streaming prefetch does not preserve a step-to-prompt correspondence.
 
 The async coordinator runs a pass on each `sample`, `count_sampleable`, `wait_sampleable`, or `load_checkpoint` call, and every `poll_interval`. A pass syncs TransferQueue metadata, evicts terminal groups, serves the pending request once enough groups are sampleable (otherwise the request waits for a later pass), and then refills prompts. Refill starts once `load_checkpoint` has restored train state, and a validation request pauses it until the next train request.
 

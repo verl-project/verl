@@ -292,6 +292,7 @@ class StreamingDataloader:
     # Trainer-facing RPCs
     # ------------------------------------------------------------------ #
 
+    @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
     async def sample(
         self,
         global_steps: int,
@@ -926,7 +927,17 @@ class StreamingDataloaderAsync(StreamingDataloader):
                     "in-flight rollout state will not be recovered"
                 )
         self.train_dataloader_it = None
-        reissued = self._reissue_inflight_prompts()
+        skip_instance = SkipManager.skip_instances.get("rollout_tq")
+        replay_cached_prefix = False
+        if skip_instance is not None and skip_instance.is_enabled():
+            replay_cached_prefix = skip_instance.configure_async_run(global_steps) == "replay"
+            train_items = (tq.kv_list(partition_id="train") or {}).get("train", {})
+            if replay_cached_prefix and train_items:
+                raise ValueError(
+                    "Async skip.rollout_tq replay requires an empty train TransferQueue at the current "
+                    "training start; checkpointed outstanding groups cannot be matched to cached steps"
+                )
+        reissued = 0 if replay_cached_prefix else self._reissue_inflight_prompts()
         self._train_state_ready = True
         self._validation_active = False
         self._ensure_coordinator()
@@ -1049,6 +1060,13 @@ class StreamingDataloaderAsync(StreamingDataloader):
         return super()._submit_batch_to_rollout(batch, partition_id)
 
     def _refill_to_watermark(self) -> int:
+        skip_instance = SkipManager.skip_instances.get("rollout_tq")
+        if (
+            skip_instance is not None
+            and skip_instance.is_enabled()
+            and skip_instance.is_async_replay_step(self.global_steps)
+        ):
+            return 0
         inflight_sessions = self.unfinished_session_count("train", self.default_rollout_n)
         free_slots = max(0, self.watermark_sessions - inflight_sessions)
         num_prompts = free_slots // self.default_rollout_n
