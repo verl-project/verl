@@ -37,6 +37,9 @@ from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_to
 
 logger = logging.getLogger(__name__)
 
+# Seed used to subsample `max_samples` rows when `data.seed` is not configured.
+DEFAULT_MAX_SAMPLES_SEED = 42
+
 
 def collate_fn(data_list: list[dict]) -> dict:
     """
@@ -184,8 +187,11 @@ class RLHFDataset(Dataset):
 
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
-                rngs_args = (self.seed,) if self.seed is not None else ()
-                rng = np.random.default_rng(*rngs_args)
+                # Fall back to a fixed seed when `data.seed` is unset: the subset is not
+                # recorded in the checkpoint, so an entropy-seeded draw would silently
+                # resume training on different rows (issue #7816).
+                seed = self.seed if self.seed is not None else DEFAULT_MAX_SAMPLES_SEED
+                rng = np.random.default_rng(seed)
                 indices = rng.choice(total, size=self.max_samples, replace=False)
             else:
                 indices = np.arange(self.max_samples)
