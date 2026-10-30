@@ -626,6 +626,34 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
     return iter(get_data())
 
 
+def make_variable_batch_iterator(tensordict: TensorDict, mini_batch_sizes: list[int], epochs: int):
+    """Yield consecutive mini-batches whose row counts may differ.
+
+    The boundaries are established by the controller and must be preserved by
+    the worker so UID groups and per-mini-batch DP balancing remain intact.
+    """
+    if not mini_batch_sizes or any(size <= 0 for size in mini_batch_sizes):
+        raise ValueError(f"mini_batch_sizes must contain positive sizes, got {mini_batch_sizes}")
+    if sum(mini_batch_sizes) != tensordict.batch_size[0]:
+        raise ValueError(
+            f"sum(mini_batch_sizes) must equal the local batch size, got "
+            f"{sum(mini_batch_sizes)} and {tensordict.batch_size[0]}"
+        )
+
+    boundaries = []
+    start = 0
+    for size in mini_batch_sizes:
+        boundaries.append((start, start + size))
+        start += size
+
+    def get_data():
+        for _ in range(epochs):
+            for start, end in boundaries:
+                yield index_select_tensor_dict(tensordict, list(range(start, end)))
+
+    return iter(get_data())
+
+
 def assert_tensordict_eq(tensordict1: TensorDict, tensordict2: TensorDict):
     """Assert that two TensorDicts are equal.
 

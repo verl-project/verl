@@ -21,7 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from verl.plugin.platform import get_platform
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.trainer.ppo.utils import need_critic, need_reference_policy, validate_minibatching_config
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
@@ -178,13 +178,15 @@ def main(config):
     auto_set_device(config)
 
     # validate config
+    use_critic = need_critic(config)
     validate_config(
         config=config,
         use_reference_policy=need_reference_policy(config),
-        use_critic=need_critic(config),
+        use_critic=use_critic,
     )
 
     if config.trainer.use_v1:
+        validate_minibatching_config(config, use_critic)
         run_ppo(config, task_runner_class=TaskRunnerV1)
     else:
         from verl.trainer.main_ppo_v0 import TaskRunner

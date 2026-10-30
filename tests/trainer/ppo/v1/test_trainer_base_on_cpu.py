@@ -194,8 +194,19 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     )
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
-    batch = SimpleNamespace(extra_info={})
+    batch = SimpleNamespace(
+        extra_info={
+            "_minibatch_layout": {
+                "unit_prompt_count": 2,
+                "unit_global_sizes": [8],
+                "unit_padding_counts": [1],
+            }
+        }
+    )
 
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+    assert batch.extra_info["global_mini_batch_sizes"] == [8]
+    assert batch.extra_info["global_mini_batch_padding_counts"] == [1]
+    assert "mini_batch_size" not in batch.extra_info

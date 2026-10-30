@@ -274,42 +274,73 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
-        """Split a batch into N mini-batches run for multiple epochs
+        """Split one train batch into optimizer mini-batches and run all PPO epochs.
 
-        Args:
-            data:
-
-        Returns:
-
+        ``global_mini_batch_sizes`` carries controller-established padded row
+        counts used for slicing. ``global_mini_batch_padding_counts`` carries the
+        number of synthetic rows excluded from loss normalization.
+        Otherwise the legacy fixed-size ``mini_batch_size`` or
+        ``num_mini_batch`` contract is used.
         """
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
         mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
         num_mini_batch = tu.pop(data, key="num_mini_batch", default=None)
+        global_mini_batch_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
+        global_mini_batch_padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
         epochs = tu.pop(data, key="epochs", default=1)
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
 
-        assert mini_batch_size is not None or num_mini_batch is not None
+        assert global_mini_batch_sizes is not None or mini_batch_size is not None or num_mini_batch is not None
 
-        if mini_batch_size is None:
-            assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
-            mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
+        if global_mini_batch_sizes is not None:
+            if mini_batch_size is not None or num_mini_batch is not None:
+                raise ValueError("global_mini_batch_sizes cannot be combined with mini_batch_size or num_mini_batch")
+            dp_size = self.engine.get_data_parallel_size()
+            if global_mini_batch_padding_counts is None:
+                raise ValueError("global_mini_batch_padding_counts is required with global_mini_batch_sizes")
+            if len(global_mini_batch_padding_counts) != len(global_mini_batch_sizes):
+                raise ValueError(
+                    "global_mini_batch_padding_counts must have the same length as global_mini_batch_sizes, "
+                    f"got {global_mini_batch_padding_counts} and {global_mini_batch_sizes}"
+                )
+            if any(
+                padding_count < 0 or padding_count >= size
+                for padding_count, size in zip(global_mini_batch_padding_counts, global_mini_batch_sizes, strict=True)
+            ):
+                raise ValueError(
+                    "Each mini-batch padding count must be non-negative and smaller than its padded size, "
+                    f"got padding={global_mini_batch_padding_counts}, padded={global_mini_batch_sizes}"
+                )
+            if any(size % dp_size != 0 for size in global_mini_batch_sizes):
+                raise ValueError(
+                    f"Every global mini-batch size must be divisible by dp_size={dp_size}, "
+                    f"got {global_mini_batch_sizes}"
+                )
+            local_mini_batch_sizes = [size // dp_size for size in global_mini_batch_sizes]
+            dataloader = tu.make_variable_batch_iterator(data, mini_batch_sizes=local_mini_batch_sizes, epochs=epochs)
+            total_num_iterations = len(global_mini_batch_sizes) * epochs
         else:
-            assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
-                f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
-            )
-            mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
+            if mini_batch_size is None:
+                assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
+                mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
+            else:
+                assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
+                    f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+                )
+                mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
 
-        # make iterator
-        dataloader = tu.make_iterator(
-            data,
-            mini_batch_size=mini_batch_size_per_gpu,
-            epochs=epochs,
-            seed=seed + self.engine.get_data_parallel_rank(),
-            dataloader_kwargs=dataloader_kwargs,
-        )
+            # make iterator
+            dataloader = tu.make_iterator(
+                data,
+                mini_batch_size=mini_batch_size_per_gpu,
+                epochs=epochs,
+                seed=seed + self.engine.get_data_parallel_rank(),
+                dataloader_kwargs=dataloader_kwargs,
+            )
+            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
@@ -317,7 +348,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         ):
             # update
             output_lst = []
-            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
                 maybe_fix_3d_position_ids(mini_batch_td)
@@ -335,6 +365,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 else:
                     global_token_num = None
 
+                if global_mini_batch_sizes is not None:
+                    layout_index = batch_idx % len(global_mini_batch_sizes)
+                    tu.assign_non_tensor_data(
+                        mini_batch_td,
+                        "global_batch_size",
+                        global_mini_batch_sizes[layout_index] - global_mini_batch_padding_counts[layout_index],
+                    )
                 tu.assign_non_tensor(
                     mini_batch_td,
                     global_token_num=NonTensorData(global_token_num),

@@ -30,7 +30,7 @@ optim:
   # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
   lr_warmup_steps: -1
 
-# PPO mini-batch size per update
+# Number of source prompts per PPO mini-batch in the V1 trainer
 ppo_mini_batch_size: ${oc.select:actor_rollout_ref.actor.ppo_mini_batch_size,256}
 
 # [Deprecated] Global micro batch size
@@ -51,7 +51,10 @@ forward_max_token_len_per_gpu: ${.ppo_max_token_len_per_gpu}
 # Number of PPO epochs per batch
 ppo_epochs: ${oc.select:actor_rollout_ref.actor.ppo_epochs,1}
 
-# Shuffle training data across PPO epochs
+# Shuffle training data before PPO updates.
+# V1 shuffles prompt/UID groups once on the trainer and requires ppo_epochs = 1.
+# The legacy trainer permits multiple epochs by balancing the full train batch,
+# then reshuffling trajectory rows independently within each DP rank for every epoch.
 shuffle: ${oc.select:actor_rollout_ref.actor.shuffle,false}
 
 # The seed used to construct mini-batch

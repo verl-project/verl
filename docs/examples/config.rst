@@ -279,9 +279,10 @@ Actor/Rollout/Reference Policy
 - ``actor_rollout_ref.actor.strategy``: fsdp or megatron. In this
   example, we use fsdp backend.
 
-- ``actor_rollout_ref.actor.ppo_mini_batch_size``: One sample is split
-  into multiple sub-batches with batch_size=ppo_mini_batch_size for PPO
-  updates. The ppo_mini_batch_size is a global num across all workers/gpus
+- ``actor_rollout_ref.actor.ppo_mini_batch_size``: Number of source prompts
+  (UID groups) in each PPO optimizer mini-batch in the V1 trainer. All training
+  rows emitted by one prompt remain in the same mini-batch. The resulting row
+  count may vary between mini-batches.
 
 - ``actor_rollout_ref.actor.ppo_micro_batch_size``: [Will be deprecated, use ppo_micro_batch_size_per_gpu] 
   Similar to gradient accumulation, the micro_batch_size_per_gpu for one forward pass,
@@ -309,8 +310,13 @@ Actor/Rollout/Reference Policy
   between cp ranks and cause misalignment between data on these ranks, so we shall manually set the seed to avoid hanging
   issue. if ``actor_rollout_ref.actor.shuffle`` is not null, this must be set.
 
-- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle data when
-  there are multiple epochs
+- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle training data
+  before constructing PPO mini-batches. The V1 trainer shuffles prompt/UID
+  groups once on the trainer and requires ``ppo_epochs = 1`` when shuffle is
+  enabled, preserving UID grouping and mini-batch-level DP balancing. The
+  legacy trainer permits multiple epochs by balancing the full train batch,
+  then reshuffling trajectory rows independently within each DP rank for
+  every epoch.
 
 - ``actor_rollout_ref.actor.optim``: Actor's optimizer parameters
 

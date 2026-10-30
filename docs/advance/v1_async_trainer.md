@@ -29,7 +29,8 @@ https://github.com/Begunner/verl-link/blob/main/v1_trainer.svg?raw=true)
 
 ## The V1 Training Loop
 
-All trainer modes process the same number of PPO mini-batches per global step:
+When every sampled prompt produces at least one trajectory, all trainer modes process the same number of PPO
+mini-batches per global step:
 
 ```text
 mini-batches per PPO epoch
@@ -37,6 +38,12 @@ mini-batches per PPO epoch
 ```
 
 The modes differ in where this split happens. `sync` and `colocate_async` sample the full training batch in one controller round, then the actor worker divides it into PPO mini-batches. `separate_async` streams one PPO mini-batch through the controller at a time, overlapping rollout with mini-batch training.
+
+The built-in sync sampler can keep failed prompt groups that produced no trajectories by setting
+`trainer.v1.sampler.sync_refill_failed_groups=false`. In that case, only materialized UID groups are trained:
+full mini-batches retain `ppo_mini_batch_size` UIDs and the final mini-batch may be smaller, so its optimizer-step
+count is `ceil(materialized UID groups / ppo_mini_batch_size)`. Setting the option to `true` replaces empty failed
+groups and preserves the fixed step count at the cost of additional synchronous rollout work.
 
 The following invariant makes that value equal to the number of PPO mini-batches in `separate_async`:
 

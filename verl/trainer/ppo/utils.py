@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import warnings
 from enum import Enum
 
@@ -105,6 +106,111 @@ def need_critic(config: DictConfig) -> bool:
             stacklevel=2,
         )
         return False
+
+
+def validate_minibatching_config(config: DictConfig, use_critic: bool) -> None:
+    """Validate settings that would break UID-grouped mini-batch boundaries."""
+    models = [("actor", config.actor_rollout_ref.actor)]
+    if use_critic:
+        models.append(("critic", config.critic))
+    for name, model in models:
+        if model.shuffle and model.ppo_epochs > 1:
+            raise ValueError(
+                f"UID-grouped mini-batching does not support {name}.shuffle=true with "
+                f"{name}.ppo_epochs={model.ppo_epochs}. Multi-epoch row shuffling would split UID groups "
+                "and invalidate per-mini-batch DP balancing. Set shuffle=false or ppo_epochs=1."
+            )
+
+
+def get_uid_balance_unit_size(config: DictConfig, use_critic: bool, update_actor: bool) -> int:
+    """Return the prompt/UID count of a balancing unit.
+
+    Optimizer mini-batches are defined in prompt/UID units, while each prompt
+    may contribute any number of training rows.
+    """
+    models = [config.critic] if use_critic else []
+    models += [config.actor_rollout_ref.actor] if update_actor else []
+    return math.gcd(*(model.ppo_mini_batch_size for model in models)) if models else 0
+
+
+def _global_micro_batch_multiple(
+    config: DictConfig,
+    *,
+    dp_size: int,
+    dynamic_key: str,
+    per_gpu_key: str,
+) -> int:
+    """Resolve one stage's required global row multiple; dynamic batching needs only DP divisibility."""
+    if config.get(dynamic_key, False):
+        return dp_size
+    per_gpu_size = config.get(per_gpu_key, None)
+    if per_gpu_size is None:
+        raise ValueError(f"Static batching requires {per_gpu_key} to be configured for {config}.")
+    return dp_size * int(per_gpu_size)
+
+
+def get_minibatch_padding_multiple(
+    config: DictConfig,
+    *,
+    dp_size: int,
+    use_critic: bool,
+    use_reference_policy: bool,
+    update_actor: bool,
+) -> int:
+    """Return the row multiple required by every stage in a training batch."""
+    multiples = [dp_size]
+    multiples.append(
+        _global_micro_batch_multiple(
+            config.actor_rollout_ref.rollout,
+            dp_size=dp_size,
+            dynamic_key="log_prob_use_dynamic_bsz",
+            per_gpu_key="log_prob_micro_batch_size_per_gpu",
+        )
+    )
+    if use_reference_policy:
+        multiples.append(
+            _global_micro_batch_multiple(
+                config.actor_rollout_ref.ref,
+                dp_size=dp_size,
+                dynamic_key="log_prob_use_dynamic_bsz",
+                per_gpu_key="log_prob_micro_batch_size_per_gpu",
+            )
+        )
+    if use_critic:
+        critic = config.critic
+        multiples.append(
+            _global_micro_batch_multiple(
+                critic,
+                dp_size=dp_size,
+                dynamic_key="use_dynamic_bsz",
+                per_gpu_key="ppo_micro_batch_size_per_gpu",
+            )
+        )
+        if critic.get("forward_micro_batch_size_per_gpu", None) is not None:
+            forward_per_gpu_key = "forward_micro_batch_size_per_gpu"
+        elif critic.get("ppo_infer_micro_batch_size_per_gpu", None) is not None:
+            forward_per_gpu_key = "ppo_infer_micro_batch_size_per_gpu"
+        else:
+            # Backends without a separate forward-only setting reuse the PPO micro-batch size.
+            forward_per_gpu_key = "ppo_micro_batch_size_per_gpu"
+        multiples.append(
+            _global_micro_batch_multiple(
+                critic,
+                dp_size=dp_size,
+                dynamic_key="use_dynamic_bsz",
+                per_gpu_key=forward_per_gpu_key,
+            )
+        )
+    if update_actor:
+        multiples.append(
+            _global_micro_batch_multiple(
+                config.actor_rollout_ref.actor,
+                dp_size=dp_size,
+                dynamic_key="use_dynamic_bsz",
+                per_gpu_key="ppo_micro_batch_size_per_gpu",
+            )
+        )
+    return math.lcm(*multiples)
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, max_samples: int = -1):
