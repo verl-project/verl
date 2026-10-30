@@ -16,6 +16,46 @@
 import re
 from typing import Optional
 
+# Markdown emphasis markers that models commonly wrap around the answer label
+# (e.g. "**Answer:** 42") or around the answer value (e.g. "Answer: **42**").
+# Ordered longest first, so that the longest wrapper is matched.
+_MARKDOWN_EMPHASIS_WRAPPERS = ("***", "___", "**", "__", "*", "_", "`")
+# Markers that are unambiguous on their own and may therefore decorate a single
+# side of the answer. Underscores are excluded: "_" is also the LaTeX subscript
+# operator, so it is only removed when it wraps the whole answer.
+_MARKDOWN_DECORATION_PATTERN = r"(?:\*\*\*|\*\*|\*|`)"
+
+
+def _strip_markdown_emphasis(text: str) -> str:
+    """Remove markdown emphasis/code markers that surround an extracted answer.
+
+    The markers are formatting, not part of the answer. Keeping them makes an
+    otherwise correct answer compare unequal to the ground truth.
+
+    Underscore emphasis is only removed when it encloses the whole answer,
+    because "_" is also the LaTeX subscript operator and answers such as "x_1"
+    must stay untouched.
+
+    Args:
+        text: The extracted answer text
+
+    Returns:
+        The answer without surrounding markdown emphasis markers
+    """
+    stripped = text.strip()
+
+    # A wrapper that encloses the whole answer, e.g. "**42**" or "__42__".
+    for wrapper in _MARKDOWN_EMPHASIS_WRAPPERS:
+        if len(stripped) > 2 * len(wrapper) and stripped.startswith(wrapper) and stripped.endswith(wrapper):
+            stripped = stripped[len(wrapper) : -len(wrapper)].strip()
+            break
+
+    # A marker that decorates one side only, e.g. "** 42" (left over from
+    # "**Answer:** 42") or "42**" (left over from "Answer: **42**").
+    stripped = re.sub(rf"^(?:{_MARKDOWN_DECORATION_PATTERN})+", "", stripped).strip()
+    stripped = re.sub(rf"(?:{_MARKDOWN_DECORATION_PATTERN})+$", "", stripped).strip()
+    return stripped
+
 
 def last_boxed_only_string(string: str) -> Optional[str]:
     """Extract the last LaTeX boxed expression from a string.
@@ -163,7 +203,10 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*(?:(?:\*\*\*|\*\*|\*|___|__|_)(?=\s|$))?\s*([^\n]+)",
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -171,7 +214,9 @@ def is_correct_minerva(
         solution_str: The solution string to check
         gt: The ground truth answer
         gt_need_extract: Whether the ground truth needs extraction
-        answer_pattern: Regex pattern to extract the answer
+        answer_pattern: Regex pattern to extract the answer. The default skips an
+            optional markdown emphasis marker placed between the label and the
+            answer, so that e.g. "**Answer:**\\n\\n42" is parsed as "42".
 
     Returns:
         Tuple of (is_correct, normalized_prediction)
@@ -179,6 +224,13 @@ def is_correct_minerva(
     # Extract answer from solution
     match = re.findall(answer_pattern, solution_str)
     extracted_answer = match[-1] if match else "[INVALID]"
+    # The label may be decorated with markdown emphasis (e.g. "**Answer:** 42")
+    # and the answer itself may be emphasized (e.g. "Answer: **42**").
+    extracted_answer = _strip_markdown_emphasis(extracted_answer)
+    if not extracted_answer:
+        # The label carried no answer (e.g. a bare "**Answer:**" line), so fall
+        # back to the `\boxed{}` answer instead of comparing against "".
+        extracted_answer = "[INVALID]"
     pred = normalize_final_answer(extracted_answer)
 
     # Process ground truth
