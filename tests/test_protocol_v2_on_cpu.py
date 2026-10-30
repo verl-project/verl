@@ -799,6 +799,27 @@ def test_concat_tensordict():
     assert output["temp"] == 1.0
 
 
+def test_concat_tensordict_keeps_the_first_metadata():
+    """The per-rank outputs of a worker group (e.g. TrainingWorker.infer_batch) carry metrics that differ between ranks
+    (the device memory of each rank). Concatenating them keeps the first rank's metrics as one dict with every
+    tensordict version; TensorDict.cat alone stacks them into a NonTensorStack from tensordict 0.11 on."""
+    metrics = [{"loss": 0.5, "perf/max_memory_allocated_gb": 17.9}, {"loss": 0.5, "perf/max_memory_allocated_gb": 18.3}]
+    nested = [torch.nested.as_nested_tensor([torch.arange(3), torch.arange(5)], layout=torch.jagged) for _ in metrics]
+    for tensor_dicts in (
+        [{"log_probs": torch.zeros(2, 4)} for _ in metrics],  # regular tensors
+        [{"input_ids": nested_tensor} for nested_tensor in nested],  # nested tensors
+    ):
+        output = tu.concat_tensordict(
+            [
+                tu.get_tensordict(tensor_dict=tensor_dict, non_tensor_dict={"metrics": rank_metrics})
+                for tensor_dict, rank_metrics in zip(tensor_dicts, metrics, strict=True)
+            ]
+        )
+        assert output.batch_size[0] == 4
+        assert isinstance(output.get("metrics"), NonTensorData)
+        assert tu.get(output, "metrics") == metrics[0]
+
+
 def test_chunk_tensordict():
     # Qwen-VL 3d position_ids
     position_ids = torch.nested.as_nested_tensor(

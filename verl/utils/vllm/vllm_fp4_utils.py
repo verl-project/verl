@@ -45,45 +45,58 @@ _NVFP4_SF_BLOCK = 16
 _NVFP4_LIVE_ATTR = "_verl_nvfp4_live_params"
 
 
+def is_deepseek_v4_model(model):
+    if model is None:
+        return False
+
+    for obj in (model, getattr(model, "config", None), getattr(model, "hf_config", None)):
+        if obj is not None and getattr(obj, "model_type", None) is not None:
+            return obj.model_type == "deepseek_v4"
+
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    return getattr(text_config, "model_type", None) == "deepseek_v4"
+
+
+# ---------------------------------------------------------------------------
+# MXFP4 experts
+# ---------------------------------------------------------------------------
+
+
 def install_mxfp4_mxfp8_compressed_tensors_patch():
-    """Teach vLLM compressed-tensors to honor MXFP8 expert activations.
+    """Route verl's compressed-tensors MXFP4 experts through DeepGEMM.
 
     vLLM 0.29 recognizes MXFP4 compressed-tensors weights but ignores their
     input-activation scheme and unconditionally constructs its W4A4 method on
-    Blackwell.  Reuse vLLM's canonical MXFP4 method so its oracle can select an
-    actual MXFP4×MXFP8 backend while retaining the compressed-tensors packed
+    Blackwell. Reuse vLLM's canonical MXFP4 method with DeepGEMM's dynamic FP8
+    group-128 activations while retaining the compressed-tensors packed
     parameter names expected by the loader.
     """
     from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-        kMxfp8Dynamic,
-        select_mxfp4_moe_backend,
-    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import select_mxfp4_moe_backend
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
         CompressedTensorsMoEMethod,
         compressed_tensors_moe_w4a4_mxfp4,
     )
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kFp8Dynamic128Sym
 
     CompressedTensorsW4A4Mxfp4MoEMethod = compressed_tensors_moe_w4a4_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod
     if getattr(CompressedTensorsMoEMethod, "_verl_mxfp4_mxfp8_patch", False):
         return
 
     class CompressedTensorsW4A8Mxfp4MoEMethod(Mxfp4MoEMethod):
-        """Compressed-tensors MXFP4 weights with dynamic MXFP8 activations."""
+        """Compressed-tensors MXFP4 weights with DeepGEMM dynamic FP8 activations."""
 
         _verl_uses_packed_checkpoint_names = True
 
         def __init__(self, moe):
             FusedMoEMethodBase.__init__(self, moe)
             self.weight_dtype = "mxfp4"
+            self.activation_key = kFp8Dynamic128Sym
+            self.is_k3_situ_aiter = False
+            self.is_k3_situ_int4_gfx942 = False
             self.group_size = _MXFP4_SF_BLOCK
-            # TRTLLM's MXFP4×MXFP8 path is numerically incorrect for Qwen3.5
-            # on vLLM 0.29, while FlashInfer CUTLASS matches the BF16 and
-            # DeepGEMM references. Keep explicit user choices intact, but make
-            # the verified backend the default for verl's MXFP4 preset.
-            selection_moe = replace(moe, moe_backend="flashinfer_cutlass") if moe.moe_backend == "auto" else moe
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(selection_moe, activation_key=kMxfp8Dynamic)
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe, activation_key=kFp8Dynamic128Sym)
             self.max_capture_size = moe.max_capture_size
             self._cache_permute_indices = {}
             self.moe_kernel = None
@@ -142,39 +155,6 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
 
     CompressedTensorsMoEMethod.get_moe_method = staticmethod(get_moe_method)
     CompressedTensorsMoEMethod._verl_mxfp4_mxfp8_patch = True
-
-
-def install_nvfp4_cutlass_compressed_tensors_patch():
-    """Make verl's NVFP4 W4A4 preset select the verified CUTLASS backend."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-        compressed_tensors_moe_w4a4_nvfp4,
-    )
-
-    CompressedTensorsW4A4Nvfp4MoEMethod = compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod
-    if getattr(CompressedTensorsW4A4Nvfp4MoEMethod, "_verl_cutlass_patch", False):
-        return
-    original_init = CompressedTensorsW4A4Nvfp4MoEMethod.__init__
-
-    def __init__(self, moe, layer_name=None, use_a16=False):
-        if use_a16:
-            raise NotImplementedError("verl supports NVFP4 only as W4A4 routed experts")
-        selection_moe = replace(moe, moe_backend="flashinfer_cutlass") if moe.moe_backend == "auto" else moe
-        original_init(self, selection_moe, layer_name=layer_name, use_a16=False)
-
-    CompressedTensorsW4A4Nvfp4MoEMethod.__init__ = __init__
-    CompressedTensorsW4A4Nvfp4MoEMethod._verl_cutlass_patch = True
-
-
-def is_deepseek_v4_model(model):
-    if model is None:
-        return False
-
-    for obj in (model, getattr(model, "config", None), getattr(model, "hf_config", None)):
-        if obj is not None and getattr(obj, "model_type", None) is not None:
-            return obj.model_type == "deepseek_v4"
-
-    text_config = getattr(getattr(model, "config", None), "text_config", None)
-    return getattr(text_config, "model_type", None) == "deepseek_v4"
 
 
 def _is_mxfp4_fused_moe_module(module):
@@ -316,6 +296,94 @@ def _replace_parameter_in_place(layer, param_name, new_data, prefer_copy=False):
     if new_data.data_ptr() != param.data_ptr():
         param.data.copy_(new_data)
     setattr(layer, param_name, param)
+
+
+def _process_mxfp4_moe_params(module):
+    from vllm.model_executor.layers.quantization import mxfp4 as vllm_mxfp4
+
+    with patch.object(vllm_mxfp4, "replace_parameter", _replace_parameter_in_place):
+        module.quant_method.process_weights_after_loading(module)
+
+    # Every staged param is consumed through the patched replace_parameter, so
+    # a leftover means post-processing took a path that assigns weights some
+    # other way and the live storage was never refreshed.
+    leftover = getattr(module, _MXFP4_LIVE_ATTR, None) or {}
+    delattr(module, _MXFP4_LIVE_ATTR)
+    if leftover:
+        raise RuntimeError(
+            f"mxfp4 refit left {sorted(leftover)} un-reinstated; every backend listed in "
+            "_refittable_mxfp4_backends is expected to route each expert param through "
+            "replace_parameter."
+        )
+
+
+def stage_mxfp4_moe_params_for_loading(model):
+    """Hand ``load_weights`` checkpoint-layout expert buffers.
+
+    Returns the staged modules for ``process_mxfp4_moe_weights_after_loading``.
+    A model with no mxfp4 experts yields an empty list, which makes this safe
+    to call unconditionally.
+    """
+    supported = _refittable_mxfp4_backends()
+    staged_modules = []
+    backends = set()
+    for module in model.modules():
+        if not _is_mxfp4_fused_moe_module(module):
+            continue
+
+        backend = getattr(module.quant_method, "mxfp4_backend", None)
+        if backend not in supported:
+            # Refusing beats skipping: an unsupported backend would quietly load
+            # checkpoint-layout data into rewritten parameters, and the rollout
+            # would drift with nothing pointing at the cause.
+            raise NotImplementedError(
+                f"mxfp4 MoE refit does not support the {backend} backend selected by "
+                f"{type(module).__name__}. Supported backends: "
+                f"{', '.join(str(b) for b in supported)}."
+            )
+
+        _stage_mxfp4_moe_params(module)
+        staged_modules.append(module)
+        backends.add(backend)
+
+    logger.info(
+        "Staged %d mxfp4 MoE modules for in-place refit (backends: %s)",
+        len(staged_modules),
+        ", ".join(sorted(str(b) for b in backends)) or "none",
+    )
+    return staged_modules
+
+
+def process_mxfp4_moe_weights_after_loading(modules):
+    """Repack the loaded experts into the kernel layout inside the live storage."""
+    for module in modules:
+        _process_mxfp4_moe_params(module)
+
+
+# ---------------------------------------------------------------------------
+# NVFP4 experts
+# ---------------------------------------------------------------------------
+
+
+def install_nvfp4_cutlass_compressed_tensors_patch():
+    """Make verl's NVFP4 W4A4 preset select the verified CUTLASS backend."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+        compressed_tensors_moe_w4a4_nvfp4,
+    )
+
+    CompressedTensorsW4A4Nvfp4MoEMethod = compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod
+    if getattr(CompressedTensorsW4A4Nvfp4MoEMethod, "_verl_cutlass_patch", False):
+        return
+    original_init = CompressedTensorsW4A4Nvfp4MoEMethod.__init__
+
+    def __init__(self, moe, layer_name=None, use_a16=False):
+        if use_a16:
+            raise NotImplementedError("verl supports NVFP4 only as W4A4 routed experts")
+        selection_moe = replace(moe, moe_backend="flashinfer_cutlass") if moe.moe_backend == "auto" else moe
+        original_init(self, selection_moe, layer_name=layer_name, use_a16=False)
+
+    CompressedTensorsW4A4Nvfp4MoEMethod.__init__ = __init__
+    CompressedTensorsW4A4Nvfp4MoEMethod._verl_cutlass_patch = True
 
 
 def _is_nvfp4_fused_moe_module(module):
@@ -567,65 +635,3 @@ def stage_nvfp4_moe_params_for_loading(model):
 def process_nvfp4_moe_weights_after_loading(modules):
     for module in modules:
         _process_nvfp4_moe_params(module)
-
-
-def _process_mxfp4_moe_params(module):
-    from vllm.model_executor.layers.quantization import mxfp4 as vllm_mxfp4
-
-    with patch.object(vllm_mxfp4, "replace_parameter", _replace_parameter_in_place):
-        module.quant_method.process_weights_after_loading(module)
-
-    # Every staged param is consumed through the patched replace_parameter, so
-    # a leftover means post-processing took a path that assigns weights some
-    # other way and the live storage was never refreshed.
-    leftover = getattr(module, _MXFP4_LIVE_ATTR, None) or {}
-    delattr(module, _MXFP4_LIVE_ATTR)
-    if leftover:
-        raise RuntimeError(
-            f"mxfp4 refit left {sorted(leftover)} un-reinstated; every backend listed in "
-            "_refittable_mxfp4_backends is expected to route each expert param through "
-            "replace_parameter."
-        )
-
-
-def stage_mxfp4_moe_params_for_loading(model):
-    """Hand ``load_weights`` checkpoint-layout expert buffers.
-
-    Returns the staged modules for ``process_mxfp4_moe_weights_after_loading``.
-    A model with no mxfp4 experts yields an empty list, which makes this safe
-    to call unconditionally.
-    """
-    supported = _refittable_mxfp4_backends()
-    staged_modules = []
-    backends = set()
-    for module in model.modules():
-        if not _is_mxfp4_fused_moe_module(module):
-            continue
-
-        backend = getattr(module.quant_method, "mxfp4_backend", None)
-        if backend not in supported:
-            # Refusing beats skipping: an unsupported backend would quietly load
-            # checkpoint-layout data into rewritten parameters, and the rollout
-            # would drift with nothing pointing at the cause.
-            raise NotImplementedError(
-                f"mxfp4 MoE refit does not support the {backend} backend selected by "
-                f"{type(module).__name__}. Supported backends: "
-                f"{', '.join(str(b) for b in supported)}."
-            )
-
-        _stage_mxfp4_moe_params(module)
-        staged_modules.append(module)
-        backends.add(backend)
-
-    logger.info(
-        "Staged %d mxfp4 MoE modules for in-place refit (backends: %s)",
-        len(staged_modules),
-        ", ".join(sorted(str(b) for b in backends)) or "none",
-    )
-    return staged_modules
-
-
-def process_mxfp4_moe_weights_after_loading(modules):
-    """Repack the loaded experts into the kernel layout inside the live storage."""
-    for module in modules:
-        _process_mxfp4_moe_params(module)

@@ -36,6 +36,7 @@ from verl.utils.qat.compressed_tensors import (
     Fp8ConfigWeightQuantizer,
     build_compressed_tensors_config,
     dispatch_rollout_weight_quantizer,
+    is_all_mxfp8_config,
     qat_modes_for_config,
 )
 from verl.utils.qat.core import (
@@ -56,5 +57,6 @@ __all__ = [
     "Fp8ConfigWeightQuantizer",
     "build_compressed_tensors_config",
     "dispatch_rollout_weight_quantizer",
+    "is_all_mxfp8_config",
     "qat_modes_for_config",
 ]

@@ -46,20 +46,23 @@ permissions:
   contents: read
 
 env:
+  # Disposable caches and locks must stay off the read-only dataset/model mounts.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+  MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
   ASCEND_RECIPE_BASELINE_URL: "https://raw.githubusercontent.com/verl-project/verl-ascend-recipe/main/baseline"
 
 jobs:
   # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
-      MODEL_PATH: /root/.cache/models/Qwen/Qwen3-8B
+      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-8B
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
@@ -86,7 +89,7 @@ jobs:
           pip list
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend
         run: |
           ray stop --force
@@ -137,7 +140,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend
         run: |
           ray stop --force
@@ -204,7 +207,7 @@ jobs:
   #         ln -s /root/.cache/modelscope/hub/models ~/models
   #     - name: Preprocess geo3k dataset
   #       run: |
-  #         python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+  #         python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
   #     - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
   #       run: |
   #         ray stop --force
@@ -224,7 +227,7 @@ jobs:
   # Test gspo qwen3-30b megatron vllm
   nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -261,10 +264,10 @@ jobs:
           clean: true
       - name: Preprocess GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend
         env:
-          MODEL_PATH: /root/.cache/models/Qwen/Qwen3-30B-A3B-Instruct-2507
+          MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_30b_megatron_npu.sh
@@ -278,7 +281,7 @@ jobs:
   # Test grpo qwen3-30b megatron sglang
   nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
@@ -315,7 +318,7 @@ jobs:
           clean: true
       - name: Running nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend
         env:
-          MODEL_PATH: /root/.cache/models/Qwen/Qwen3-30B-A3B-Instruct-2507
+          MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
@@ -329,7 +332,7 @@ jobs:
     # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -340,7 +343,7 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
-      MODEL_PATH: /root/.cache/models/Qwen/Qwen3.5-2B
+      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3.5-2B
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
@@ -363,7 +366,7 @@ jobs:
           pip list
       - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend
         run: |
           ray stop --force
@@ -372,7 +375,7 @@ jobs:
   # Test grpo qwen3_5_2b fsdp_turbo vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -383,7 +386,7 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
-      MODEL_PATH: /root/.cache/models/Qwen/Qwen3.5-2B
+      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3.5-2B
     steps:
       - name: Check npu and CANN info
         run: |
@@ -408,7 +411,7 @@ jobs:
           pip list
       - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend
         run: |
           ray stop --force
@@ -454,7 +457,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
         run: |
           ray stop --force
@@ -491,7 +494,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running quick_start_qwen3_0_6b_megatron_vllm_ascend
         run: |
           ray stop --force
@@ -528,7 +531,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running quick_start_qwen3_0_6b_megatron_sglang_ascend
         run: |
           ray stop --force
@@ -565,7 +568,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running quick_start_qwen3_0_6b_fsdp2_sglang_ascend
         run: |
           ray stop --force
@@ -574,7 +577,7 @@ jobs:
   # Test grpo qwen3-30b veomni fsdp
   nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -615,10 +618,10 @@ jobs:
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend
         run: |
           ray stop --force
@@ -658,7 +661,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend
         run: |
           ray stop --force
@@ -709,7 +712,7 @@ jobs:
   #         ln -s /root/.cache/modelscope/hub/models ~/models
   #     - name: Preprocess geo3k dataset
   #       run: |
-  #         python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+  #         python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
   #     - name: Running nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend
   #       run: |
   #         ray stop --force

@@ -37,6 +37,7 @@ from verl.trainer.ppo.rollout_corr_helper import (
     compute_offpolicy_metrics,
     compute_rollout_correction_and_rejection_mask,
 )
+from verl.utils.device import get_device_name, is_device_available
 
 
 def test_basic_rollout_correction():
@@ -45,7 +46,7 @@ def test_basic_rollout_correction():
 
     # Create test data
     batch_size, seq_length = 4, 10
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     # Create slightly different log probs (simulating BF16 vs FP32 mismatch)
     old_log_prob = torch.randn(batch_size, seq_length, device=device)
@@ -146,7 +147,7 @@ def test_each_supported_rollout_rs_option(option: str, threshold):
     assert option in SUPPORTED_ROLLOUT_RS_OPTIONS
 
     batch_size, seq_length = 3, 7
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     old_log_prob = torch.randn(batch_size, seq_length, device=device)
     rollout_log_prob = old_log_prob + torch.randn(batch_size, seq_length, device=device) * 0.15
@@ -169,7 +170,7 @@ def test_each_supported_rollout_rs_option(option: str, threshold):
 def test_rollout_rs_multiple_options():
     """Verify multiple RS options with mixed threshold formats."""
     batch_size, seq_length = 2, 6
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     old_log_prob = torch.randn(batch_size, seq_length, device=device)
     rollout_log_prob = old_log_prob + torch.randn(batch_size, seq_length, device=device) * 0.2
@@ -197,7 +198,7 @@ def test_metrics_completeness():
     print("\nTesting metrics completeness...")
 
     batch_size, seq_length = 3, 8
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     old_log_prob = torch.randn(batch_size, seq_length, device=device)
     rollout_log_prob = old_log_prob + torch.randn(batch_size, seq_length, device=device) * 0.2
@@ -257,7 +258,7 @@ def test_offpolicy_metrics():
     print("\nTesting off-policy metrics computation...")
 
     batch_size, seq_length = 4, 12
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     # Create test data with some mismatch
     old_log_prob = torch.randn(batch_size, seq_length, device=device) - 2.0  # training policy
@@ -315,7 +316,7 @@ def test_mask_mode():
 
     batch_size = 2
     seq_length = 5
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     # Sequence 0: ratio ≈ 0.37 (below 0.5, should be rejected)
     # Sequence 1: ratio ≈ 1.65 (in [0.5, 2.0], should be accepted)
@@ -368,7 +369,7 @@ def test_mask_mode():
 
 def test_exact_icepop_zeroes_weights_without_changing_mask():
     """IcePop should zero OOB IS weights while preserving response_mask."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     raw_is_weights = torch.tensor([[0.4, 0.8, 6.0]], device=device)
     old_log_prob = torch.zeros_like(raw_is_weights)
@@ -396,7 +397,7 @@ def test_exact_icepop_zeroes_weights_without_changing_mask():
 
 def test_bool_rollout_is_threshold_is_rejected():
     """Boolean thresholds should not be silently accepted via bool <: int."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
 
     old_log_prob = torch.zeros(1, 2, device=device)
     rollout_log_prob = torch.zeros(1, 2, device=device)
@@ -420,7 +421,7 @@ def test_seq_fraction_high_uses_raw_weights():
     clamped weights can never exceed the threshold. The high fraction therefore has to come
     from the raw per-sequence mean to remain a live diagnostic.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_name() if is_device_available() else "cpu"
     threshold = 2.0
 
     # Sequence 0: raw mean (1.0 + 6.0) / 2 = 3.5 > threshold, but clamped mean

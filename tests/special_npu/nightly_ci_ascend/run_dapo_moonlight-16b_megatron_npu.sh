@@ -32,8 +32,8 @@ SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
 mkdir -p $LOG_DIR
 
-TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
-TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
+TRAIN_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
+TEST_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
 
 # Algorithm
 temperature=1.0

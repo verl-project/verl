@@ -8,6 +8,7 @@ Last updated: 09/29/2026.
 
 -  2026/08/29：将 MindSpeed / Megatron-LM 从 ``core_r0.16.0`` 更新为
    ``core_r0.18.0``\ 。弃用mbridge，改用Megatron-Bridge，Megatron-Bridge 版本为 ``0.5.0``\ 。
+   torch_npu 更新为 ``2.10.0.post4``\ 。
 -  2026/08/03：将 vLLM / vLLM-Ascend 从 ``0.18.0`` 更新为 ``0.23.0``\ ，vLLM
    对应基础环境版本同步调整为 torch ``2.10.0``\ 、torch_npu ``2.10.0.post2``\ 。
 -  2026/05/13：vLLM 已按 `PR
@@ -81,7 +82,7 @@ Atlas 800T A3
 
 
 关键版本支持与依赖
-^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^
 
 ============= ======================================= ===================
 依赖          版本                                     说明
@@ -158,7 +159,7 @@ transformers版本升级5.10.4后，可能出现大量别名废弃告警，可�
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 关键版本支持与依赖
-^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^
 
 ============= ======================================= ===================
 依赖          版本                                     说明
@@ -170,7 +171,7 @@ torch         ``2.8.0``                               PyTorch 深度学习框架
 torch_npu     ``2.8.0.post2``                         NPU PyTorch 适配插件
 SGLang        ``v0.5.10``                             高性能 LLM 推理引擎
 triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_sglang_mcore_npu.sh>`_
 transformers  ``5.10.4``                               Hugging Face 大模型库，提供模型架构与预训练权重
 Megatron-LM   ``core_r0.18.0``                        大规模分布式训练框架
 MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
@@ -226,7 +227,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # USE_MEGATRON=0 bash verl/scripts/install_sglang_mcore_npu.sh
 
 SGLang 使用注意事项
-^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^
 
 当前 NPU 上支持 SGLang 后端必须添加以下环境变量：
 

@@ -291,11 +291,29 @@ class vLLMColocateWorkerExtension:
         # the bucketed transport may split one across buckets. Accumulate and
         # apply only after ``is_last``; standard base weights load per bucket.
         lora_weights: dict[str, torch.Tensor] | None = {} if (peft_config and base_sync_done) else None
+        lora_config = getattr(getattr(self.model_runner, "lora_manager", None), "lora_config", None)
+        lora_dtype = getattr(lora_config, "lora_dtype", None)
+        pin_memory = False
+        if lora_weights is not None and isinstance(lora_dtype, torch.dtype):
+            from vllm.utils.platform_utils import is_pin_memory_available
+
+            pin_memory = is_pin_memory_available()
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
             if lora_weights is not None:
-                # Clone: add_lora keeps these past the callback (reused IPC buffer, #6454).
-                lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
+                # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
+                if isinstance(lora_dtype, torch.dtype) and weights:
+                    sizes = [tensor.numel() for _, tensor in weights]
+                    block = torch.empty(sum(sizes), dtype=lora_dtype, device="cpu", pin_memory=pin_memory)
+                    parts = block.split(sizes)
+                    for part, (_, tensor) in zip(parts, weights, strict=True):
+                        part.copy_(tensor.reshape(-1))
+                    lora_weights.update(
+                        (name, part.view(tensor.shape)) for (name, tensor), part in zip(weights, parts, strict=True)
+                    )
+                else:
+                    lora_weights.update((name, tensor.clone()) for name, tensor in weights)
                 if not is_last:
                     return
                 self._update_weights(
@@ -346,9 +364,8 @@ class vLLMColocateWorkerExtension:
         base_sync_done: bool,
     ):
         if peft_config and base_sync_done:
-            # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
-            # past this callback, so views into the freed/overwritten buffer crash later (#6454).
-            weights = {name: tensor.clone() for name, tensor in weights}
+            # The caller already copied these out of the receiver's reused IPC bucket buffer (#6454).
+            weights = dict(weights)
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,

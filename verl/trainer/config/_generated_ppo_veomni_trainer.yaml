@@ -30,6 +30,7 @@ actor_rollout_ref:
       ulysses_parallel_size: 1
       expert_parallel_size: 1
       mixed_precision: true
+      low_precision_reduce_scatter_comm: false
       seed: 42
       full_determinism: false
       init_device: meta
@@ -44,6 +45,8 @@ actor_rollout_ref:
       forward_only: false
       enable_fsdp_offload: false
       enable_reentrant: false
+      broadcast_model_weights_from_rank0: true
+      ep_sharded_stream_load: false
       attn_implementation: flash_attention_2
       moe_implementation: fused
       cross_entropy_loss_implementation: eager
@@ -229,6 +232,7 @@ actor_rollout_ref:
       ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
       expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
       mixed_precision: true
+      low_precision_reduce_scatter_comm: false
       seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
       full_determinism: false
       init_device: meta
@@ -243,6 +247,8 @@ actor_rollout_ref:
       forward_only: true
       enable_fsdp_offload: false
       enable_reentrant: false
+      broadcast_model_weights_from_rank0: true
+      ep_sharded_stream_load: false
       attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
       moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
       cross_entropy_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation,eager}
@@ -544,6 +550,7 @@ critic:
     ulysses_parallel_size: 1
     expert_parallel_size: 1
     mixed_precision: true
+    low_precision_reduce_scatter_comm: false
     seed: 42
     full_determinism: false
     init_device: meta
@@ -558,6 +565,8 @@ critic:
     forward_only: false
     enable_fsdp_offload: false
     enable_reentrant: false
+    broadcast_model_weights_from_rank0: true
+    ep_sharded_stream_load: false
     attn_implementation: flash_attention_2
     moe_implementation: fused
     cross_entropy_loss_implementation: eager

@@ -66,6 +66,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+
 jobs:
   vllm_ascend:
     if: github.repository_owner == 'verl-project'
@@ -109,7 +113,7 @@ jobs:
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Test the latest vLLM Rollout async with deterministic agent loop
         env:
           PYTHONHASHSEED: "0"

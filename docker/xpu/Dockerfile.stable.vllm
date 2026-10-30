@@ -1,0 +1,219 @@
+# syntax=docker/dockerfile:1
+# Intel GPU (XPU) image for verl: vLLM rollout + FSDP/FSDP2 training.
+#
+# Build (from the verl repo root):
+#   docker build -f docker/xpu/Dockerfile.stable.vllm -t verl:xpu-vllm032 .
+# Release builds: add --no-cache so ca-certificates, pip, certifi and uv are fetched fresh, not served from a stale layer
+# (Python security notice on the eMudhra emSign CA incident, Oct 2026).
+# Pin what goes in (recommended for a release):
+#   --build-arg VERL_REF=<commit> --build-arg PLUGIN_REF=<commit>
+#
+# Stages: drivers -> runtime-base -> builder -> runtime (default, last).
+# Only the finished /opt/venv and the two checkouts are copied into `runtime`, so git, curl, uv, the driver .deb files
+# and any layer churn from the install (e.g. swapping triton for triton-xpu) never reach the image you ship.
+
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+
+# ---------------------------------------------------------------------------------------------------------------------
+# drivers: fetch the Intel GPU user-mode driver packages. Kept in its own stage so curl and the .debs are not in the image.
+# Versions match vLLM v0.32.0's docker/Dockerfile.xpu. compute-runtime >= 26.18 is required:
+# 26.09 reports free=0 from getMemoryInfo, which breaks vLLM's memory check.
+FROM ${UBUNTU_IMAGE} AS drivers
+ARG IGC_VERSION=2.38.2
+ARG IGC_BUILD=22051
+ARG COMPUTE_RUNTIME_VERSION=26.27.39122.11
+ARG IGDGMM_VERSION=22.10.0
+ARG LEVEL_ZERO_VERSION=1.32.0+u24.04
+RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /debs
+RUN set -eu; \
+    igc="https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION}"; \
+    cr="https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}"; \
+    lz="https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION%%+*}"; \
+    for u in \
+        "${igc}/intel-igc-core-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" \
+        "${igc}/intel-igc-opencl-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" \
+        "${cr}/intel-ocloc_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" \
+        "${cr}/intel-opencl-icd_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" \
+        "${cr}/libigdgmm12_${IGDGMM_VERSION}_amd64.deb" \
+        "${cr}/libze-intel-gpu1_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" \
+        "${lz}/libze1_${LEVEL_ZERO_VERSION}_amd64.deb" \
+        "${lz}/libze-dev_${LEVEL_ZERO_VERSION}_amd64.deb"; do \
+      curl -fsSLO "${u}"; \
+    done
+
+# ---------------------------------------------------------------------------------------------------------------------
+# runtime-base: what the running container needs, shared by builder and runtime so the venv's interpreter path matches.
+# No system oneAPI: torch and vLLM wheels bring their own SYCL runtime and oneCCL. Two things that look build-only are
+# not, and removing them breaks the image at runtime:
+#  - gcc + g++ + the Python headers: triton compiles its launcher stubs (C++) when a kernel first runs.
+#  - ffmpeg: torchcodec, qwen-vl-utils' first-choice video decoder, needs FFmpeg's shared libraries at run time.
+#  - libnuma-dev (not just libnuma1): an MPI library bundled in the venv dlopen()s the unversioned libnuma.so.
+#  - libze-dev: it provides the unversioned libze_loader.so, which oneCCL dlopen()s by that exact name; without it
+#    xccl fails with "ze_data was not initialized" even though torch sees the GPU.
+FROM ${UBUNTU_IMAGE} AS runtime-base
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+ARG APT_MIRROR=""
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        sed -i "s@http://.*archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
+RUN --mount=type=bind,from=drivers,source=/debs,target=/debs \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates ffmpeg g++ gcc libc6-dev libnuma-dev numactl \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-dev \
+        /debs/*.deb && \
+    rm -rf /var/lib/apt/lists/*
+# Sysman / NUMA-discovery libraries vLLM's image installs from Intel's PPA (pyzes: PCI address -> NUMA node -> CPU list).
+# The PPA tooling is removed again so only the four libraries stay.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends software-properties-common gpg-agent && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
+    add-apt-repository --remove -y ppa:kobuk-team/intel-graphics && \
+    apt-get purge -y software-properties-common gpg-agent && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------------------------------------------------
+# builder: git, uv and the whole install. Nothing from here ships except what `runtime` copies out.
+FROM runtime-base AS builder
+ARG PYTHON_VERSION=3.12
+ARG VLLM_VERSION=0.32.0
+# uv >= 0.13.4 carries the fixed CA bundle (emSign incident); the installer is fetched for this exact version.
+ARG UV_VERSION=0.13.4
+ARG PIP_INDEX_URL=https://download.pytorch.org/whl/xpu
+ARG PIP_EXTRA_INDEX_URL=https://pypi.org/simple
+ARG VERL_GIT_REPO=https://github.com/verl-project/verl.git
+ARG VERL_REF=main
+ARG PLUGIN_GIT_REPO=https://github.com/verl-project/verl-hardware-plugin.git
+ARG PLUGIN_REF=main
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN apt-get update -y && apt-get install -y --no-install-recommends curl git && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.local/bin:/opt/venv/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/venv \
+    UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_URL=${PIP_INDEX_URL} \
+    UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL} \
+    UV_INDEX_STRATEGY=unsafe-best-match \
+    UV_LINK_MODE=copy \
+    VLLM_TARGET_DEVICE=xpu
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+
+# Cloned to /opt, not /workspace, so a volume mounted at /workspace does not hide the editable installs.
+RUN git clone "${VERL_GIT_REPO}" /opt/verl && git -C /opt/verl checkout "${VERL_REF}"
+
+# - vLLM XPU wheel (the PyPI vllm wheel has no XPU kernels). --extra-index-url on the command line REPLACES
+#   UV_EXTRA_INDEX_URL, so PyPI is repeated; otherwise vllm's plain-PyPI deps do not resolve.
+# - verl's requirements.txt + the XPU overlay. --no-config: from /opt/verl, uv would read verl's pyproject
+#   [tool.uv].override-dependencies (transformers==5.16.1, kernels<0.15 for the CUDA stack) and beat the XPU pins.
+#   transformers is NOT pinned here: it comes from verl's own requirements.txt window and vLLM's (>=5.16.1), and the
+#   transformers[kernels] extra brings the matching kernels release. If the two windows stop overlapping, the build
+#   can fail. This needs a verl checkout whose requirements.txt allows transformers >= 5.16.1 (verl main since PR #8390);
+#   an older VERL_REF would downgrade transformers below vLLM's floor, which the check at the end of this stage
+#   rejects. The override is limited to pyzes (torch pins pyzes==0.1.1); an unpinned entry would also erase torch's
+#   own triton-xpu pin.
+# - XPU pins (inline): torch 2.14.0+xpu is the version vLLM 0.32.0's XPU wheel requires;
+#   pyzes>=0.1.2 because the device-memory query needs it; triton-xpu follows torch's own pin; dpctl for device probing.
+#   pip>=26.2.2 and certifi>=2026.10.19 are the first releases with the corrected CA bundle (pip loads its vendored certifi
+#   in addition to the system store, so only upgrading pip fixes it). qwen_vl_utils and mathruler are declared in verl's
+#   verl-core extra but not in requirements.txt; multimodal datasets and Geo3K scoring import them.
+# - liger-kernel pulls the CUDA triton, which shares triton/ with triton-xpu: remove it, reinstall triton-xpu.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "vllm==${VLLM_VERSION}+xpu" \
+        --extra-index-url "https://wheels.vllm.ai/${VLLM_VERSION}/xpu" \
+        --extra-index-url https://wheels.vllm.ai/xpu \
+        --extra-index-url "${PIP_EXTRA_INDEX_URL}" && \
+    echo 'pyzes>=0.1.2' > /tmp/override-pyzes.txt && \
+    uv --no-config pip install -r /opt/verl/requirements.txt \
+        "torch==2.14.0+xpu" \
+        "transformers[kernels]" \
+        dpctl "pyzes>=0.1.2" triton-xpu \
+        "pip>=26.2.2" "certifi>=2026.10.19" \
+        qwen_vl_utils mathruler \
+        --override /tmp/override-pyzes.txt && \
+    uv --no-config pip install --no-deps -e /opt/verl && \
+    TRITON_XPU="$(uv pip freeze | grep -i '^triton-xpu==')" && \
+    (uv pip uninstall triton || true) && \
+    uv pip install --reinstall --no-deps "${TRITON_XPU}" --extra-index-url https://download.pytorch.org/whl/xpu
+
+# --no-deps: the plugin declares verl>=0.9.0, which would replace /opt/verl with a PyPI release.
+RUN git clone "${PLUGIN_GIT_REPO}" /opt/verl-hardware-plugin && \
+    git -C /opt/verl-hardware-plugin checkout "${PLUGIN_REF}" && \
+    uv pip install --no-deps -e /opt/verl-hardware-plugin
+
+# The oneccl / sycl wheels ship several byte-identical full copies of the same libraries (libccl.so, .so.1, .so.1.0, ...).
+# Hardlink them; a hardlink survives the COPY into `runtime` and is stored once.
+RUN python3 - <<'PY'
+import collections, hashlib, os
+by = collections.defaultdict(list)
+for root, _, files in os.walk("/opt/venv"):
+    for f in files:
+        p = os.path.join(root, f)
+        if os.path.isfile(p) and not os.path.islink(p) and os.path.getsize(p) > (8 << 20):
+            by[os.path.getsize(p)].append(p)
+saved = 0
+for size, paths in by.items():
+    groups = collections.defaultdict(list)
+    for p in paths:
+        groups[hashlib.sha256(open(p, "rb").read()).hexdigest()].append(p)
+    for g in groups.values():
+        for p in g[1:]:
+            if os.stat(p).st_ino != os.stat(g[0]).st_ino:
+                os.remove(p)
+                os.link(g[0], p)
+                saved += size
+print(f"hardlinked duplicate libraries, saved {saved / 2**20:.0f} MiB")
+PY
+
+# Fail the build if a stale layer or index left a vulnerable TLS stack behind (see the header note on --no-cache), or if
+# the later installs moved a package out of the range vLLM's own wheel declares (uv does not re-check installed
+# packages: a stale verl checkout with an old requirements.txt would otherwise downgrade transformers silently).
+RUN python3 - <<'PY'
+import importlib.metadata as m, re, subprocess, sys
+from packaging.requirements import Requirement
+def v(x): return tuple(int(p) for p in re.findall(r"\d+", x)[:3])
+floors = {"pip": "26.2.2", "certifi": "2026.10.19"}
+bad = [f"{n} {m.version(n)} < {f}" for n, f in floors.items() if v(m.version(n)) < v(f)]
+uv = subprocess.run(["uv", "--version"], capture_output=True, text=True).stdout.split()[1]
+if v(uv) < v("0.13.4"):
+    bad.append(f"uv {uv} < 0.13.4")
+for line in m.requires("vllm") or []:
+    r = Requirement(line)
+    if r.name in ("transformers", "tokenizers", "torch") and (r.marker is None or r.marker.evaluate({"extra": ""})):
+        if not r.specifier.contains(m.version(r.name), prereleases=True):
+            bad.append(f"{r.name} {m.version(r.name)} outside vllm's requirement {r.specifier}")
+print("TLS stack: pip", m.version("pip"), "certifi", m.version("certifi"), "uv", uv)
+print("transformers", m.version("transformers"), "tokenizers", m.version("tokenizers"))
+sys.exit("incompatible stack: " + ", ".join(bad)) if bad else None
+PY
+
+# ---------------------------------------------------------------------------------------------------------------------
+# runtime: the image to ship.
+FROM runtime-base AS runtime
+ARG VERL_REF=main
+ARG PLUGIN_REF=main
+LABEL org.opencontainers.image.title="verl-xpu" \
+      org.opencontainers.image.description="verl on Intel GPU (XPU): vLLM rollout, FSDP/FSDP2 training, verl-hardware-plugin" \
+      org.opencontainers.image.source="https://github.com/verl-project/verl" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="ubuntu:24.04" \
+      ai.verl.verl-ref="${VERL_REF}" \
+      ai.verl.plugin-ref="${PLUGIN_REF}"
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/verl /opt/verl
+COPY --from=builder /opt/verl-hardware-plugin /opt/verl-hardware-plugin
+# LD_LIBRARY_PATH mirrors vLLM's image (libccl.so.1 import error without it). The TMP_BUF variables stop oneCCL 2022.0.0
+# from caching IPC handles of freed buffers, which leaked host memory on 8-GPU runs.
+ENV PATH="/opt/venv/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/venv \
+    LD_LIBRARY_PATH=/opt/venv/lib:/usr/local/lib \
+    CCL_SYCL_ALLGATHERV_TMP_BUF=1 \
+    CCL_SYCL_ALLREDUCE_TMP_BUF=1 \
+    CCL_SYCL_REDUCE_SCATTER_TMP_BUF=1 \
+    CCL_SYCL_BROADCAST_TMP_BUF=1
+WORKDIR /opt/verl
+CMD ["/bin/bash"]

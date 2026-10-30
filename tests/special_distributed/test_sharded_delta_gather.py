@@ -26,6 +26,7 @@ from verl.checkpoint_engine.delta_sync.sparse_gather import (
     gather_slot_entries_to_rank0,
     shard_delta_indices,
 )
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.workers.engine.spec import ShardSpec, derive_dtensor_placement, translate_flat_indices
 
 
@@ -91,27 +92,27 @@ def _run_case(shape, placements, mesh, dev, rank, si):
 
 
 def main():
-    dist.init_process_group("nccl")
+    dist.init_process_group(get_nccl_backend())
     rank, world = dist.get_rank(), dist.get_world_size()
-    torch.cuda.set_device(rank)
-    dev = torch.device("cuda", rank)
+    get_torch_device().set_device(rank)
+    dev = torch.device(get_device_name(), rank)
     all_ok = True
 
     # 1D FSDP mesh, Shard(0) -- uneven shapes stress the offset math.
-    mesh1d = init_device_mesh("cuda", (world,))
+    mesh1d = init_device_mesh(get_device_name(), (world,))
     for si, shape in enumerate([(4096, 1024), (7, 3), (30001, 8), (128,)]):
         all_ok = _run_case(shape, [Shard(0)], mesh1d, dev, rank, si) and all_ok
 
     # 2D FSDP x SP(replicate) mesh -- the ulysses case: weights are Shard(0) on the FSDP dim
     # and Replicate on the SP dim, so only SP-coord-0 ranks may contribute (no double-count).
     if world % 2 == 0:
-        mesh2d = init_device_mesh("cuda", (world // 2, 2), mesh_dim_names=("fsdp", "sp"))
+        mesh2d = init_device_mesh(get_device_name(), (world // 2, 2), mesh_dim_names=("fsdp", "sp"))
         for si, shape in enumerate([(4096, 1024), (7, 3), (128,)]):
             all_ok = _run_case(shape, [Shard(0), Replicate()], mesh2d, dev, rank, 50 + si) and all_ok
 
     # 2D FSDP x TP mesh: column-parallel cuts the same dim twice (_StridedShard), row-parallel a second one.
     if world % 4 == 0:
-        meshtp = init_device_mesh("cuda", (world // 2, 2), mesh_dim_names=("fsdp", "tp"))
+        meshtp = init_device_mesh(get_device_name(), (world // 2, 2), mesh_dim_names=("fsdp", "tp"))
         for si, shape in enumerate([(4096, 1024), (2048, 128), (32, 6)]):
             pl = [_StridedShard(0, split_factor=2), Shard(0)]
             all_ok = _run_case(shape, pl, meshtp, dev, rank, 100 + si) and all_ok
@@ -120,27 +121,31 @@ def main():
 
     # 2D EFSDP x EP mesh: column-parallel TP's geometry one rank higher, since both dims cut the expert dim.
     if world % 4 == 0:
-        meshep = init_device_mesh("cuda", (world // 4, 4), mesh_dim_names=("efsdp", "ep"))
+        meshep = init_device_mesh(get_device_name(), (world // 4, 4), mesh_dim_names=("efsdp", "ep"))
         for si, shape in enumerate([(64, 768, 256), (64, 256, 768), (8, 3, 5)]):
             pl = [_StridedShard(0, split_factor=4), Shard(0)]
             all_ok = _run_case(shape, pl, meshep, dev, rank, 200 + si) and all_ok
 
     # 3D HSDP x TP and HSDP x EP: same blocks, so what is under test is that the group stops at the Shard dims.
     if world % 8 == 0:
-        meshhtp = init_device_mesh("cuda", (2, world // 4, 2), mesh_dim_names=("dp_replicate", "fsdp", "tp"))
+        meshhtp = init_device_mesh(get_device_name(), (2, world // 4, 2), mesh_dim_names=("dp_replicate", "fsdp", "tp"))
         for si, shape in enumerate([(4096, 1024), (32, 6)]):
             pl = [Replicate(), _StridedShard(0, split_factor=2), Shard(0)]
             all_ok = _run_case(shape, pl, meshhtp, dev, rank, 300 + si) and all_ok
         for si, shape in enumerate([(4096, 1024), (32, 6)]):
             all_ok = _run_case(shape, [Replicate(), Shard(0), Shard(1)], meshhtp, dev, rank, 350 + si) and all_ok
 
-        meshhep = init_device_mesh("cuda", (2, world // 4, 2), mesh_dim_names=("dp_replicate", "efsdp", "ep"))
+        meshhep = init_device_mesh(
+            get_device_name(), (2, world // 4, 2), mesh_dim_names=("dp_replicate", "efsdp", "ep")
+        )
         for si, shape in enumerate([(64, 768, 256), (8, 3, 5)]):
             pl = [Replicate(), _StridedShard(0, split_factor=2), Shard(0)]
             all_ok = _run_case(shape, pl, meshhep, dev, rank, 400 + si) and all_ok
 
         # replicate degree 4 leaves rank 0's group a quarter of the mesh: the sharpest "group is not the mesh".
-        meshwide = init_device_mesh("cuda", (4, world // 8, 2), mesh_dim_names=("dp_replicate", "efsdp", "ep"))
+        meshwide = init_device_mesh(
+            get_device_name(), (4, world // 8, 2), mesh_dim_names=("dp_replicate", "efsdp", "ep")
+        )
         for si, shape in enumerate([(64, 768, 256), (8, 3, 5)]):
             pl = [Replicate(), _StridedShard(0, split_factor=2), Shard(0)]
             all_ok = _run_case(shape, pl, meshwide, dev, rank, 450 + si) and all_ok

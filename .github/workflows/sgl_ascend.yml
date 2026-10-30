@@ -120,7 +120,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name:  Prepare gsm8k dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto

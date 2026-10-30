@@ -13,7 +13,8 @@ export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
 export RAY_memory_monitor_refresh_ms=0
 export RAY_memory_usage_threshold=0.99
-export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false"
+# PROMOTE_F32 promotes sigmoid/SiLU/GELU to f32 (instead of bf16) on TPU 7x, for RL stability; a no-op on v6e.
+export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_bf16_emission_mode=PROMOTE_F32"
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
 exp_name="${EXPERIMENT_NAME:-qwen3_0.6b_fast_smoke_test}"
@@ -36,13 +37,17 @@ TOTAL_TRAINER_CHIPS=$((NNODES_TRAINER * N_CHIPS_TRAINER))
 TOTAL_ROLLOUT_CHIPS=$((NNODES_ROLLOUT * N_CHIPS_ROLLOUT))
 
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-if (( TENSOR_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHIPS % TENSOR_PARALLEL_SIZE != 0 )); then
-    echo "ERROR: TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE} must be a positive divisor of the ${TOTAL_TRAINER_CHIPS} trainer chips." >&2
+CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
+# all_gather: load-balanced KV all-gather CP with Splash Attention; ulysses: DeepSpeed-Ulysses all-to-all CP.
+CONTEXT_PARALLEL_STRATEGY="${CONTEXT_PARALLEL_STRATEGY:-all_gather}"
+if (( TENSOR_PARALLEL_SIZE < 1 || CONTEXT_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHIPS % (TENSOR_PARALLEL_SIZE * CONTEXT_PARALLEL_SIZE) != 0 )); then
+    echo "ERROR: TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE} x CONTEXT_PARALLEL_SIZE=${CONTEXT_PARALLEL_SIZE} must be a positive divisor of the ${TOTAL_TRAINER_CHIPS} trainer chips." >&2
     exit 1
 fi
-DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE))}"
+DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
 # The tpu-sync checkpoint engine supports a single rollout replica, so the rollout TP spans all rollout chips.
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
+FUSE_QKV="${FUSE_QKV:-True}"
 
 # Smoke-test training & validation parameters
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
@@ -97,9 +102,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.use_torch_compile=True \
     actor_rollout_ref.actor.torchtitan.use_torch_compile=True \
-    +actor_rollout_ref.actor.torchtitan.use_splash_attention=True \
-    +actor_rollout_ref.actor.torchtitan.tpu_eager_mode=DEFER_AND_FUSE \
-    +actor_rollout_ref.actor.torchtitan.use_simple_fsdp=True \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_splash_attention=True \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.tpu_eager_mode=DEFER_AND_FUSE \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_simple_fsdp=True \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
@@ -112,11 +118,15 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=True \
+    +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     actor_rollout_ref.ref.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.ref.torchtitan.pad_to_length=True \
     actor_rollout_ref.ref.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.actor.torchtitan.tensor_parallel_size="${TENSOR_PARALLEL_SIZE}" \
+    actor_rollout_ref.actor.torchtitan.context_parallel_size="${CONTEXT_PARALLEL_SIZE}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_strategy="${CONTEXT_PARALLEL_STRATEGY}" \
+    +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.context_parallel_strategy="${CONTEXT_PARALLEL_STRATEGY}" \
     actor_rollout_ref.actor.torchtitan.data_parallel_shard_size="${DATA_PARALLEL_SHARD_SIZE}" \
     actor_rollout_ref.actor.torchtitan.pipeline_parallel_size=1 \
     actor_rollout_ref.actor.torchtitan.attn_type=varlen \

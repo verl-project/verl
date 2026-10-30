@@ -29,6 +29,8 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+import os
+from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,6 +54,62 @@ from verl.utils.vllm.vllm_fp8_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_nvfp4_quantization(quantization_config: Mapping[str, Any]) -> bool:
+    """Whether a quantization config contains the NVFP4 format."""
+    values = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list | tuple):
+            for nested in value:
+                collect(nested)
+        elif isinstance(value, str):
+            values.append(value.lower())
+
+    collect(quantization_config)
+    return any("nvfp4" in value for value in values)
+
+
+def _uses_fp32_block_scales(quantization_config: Mapping[str, Any]) -> bool:
+    """Whether FP8 block weights use checkpoint-layout FP32 scales."""
+    for group in quantization_config.get("config_groups", {}).values():
+        weights = group.get("weights", {})
+        if weights.get("strategy") == "block" and weights.get("scale_dtype") in {None, "torch.float32"}:
+            return True
+    block_size = quantization_config.get("weight_block_size")
+    return block_size == [128, 128] and quantization_config.get("scale_fmt") not in {"ue8m0", "e8m0"}
+
+
+def _is_hopper() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_device_capability(90)
+
+
+def set_default_vllm_quantization_backends(
+    quantization_config: Mapping[str, Any] | None,
+    engine_kwargs: dict[str, Any],
+) -> None:
+    """Default non-NVFP4 quantization backends to DeepGEMM."""
+    if hasattr(quantization_config, "to_dict"):
+        quantization_config = quantization_config.to_dict()
+    if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
+        return
+    # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
+    if torch.version.hip is not None:
+        return
+    for option in ("linear_backend", "moe_backend"):
+        engine_kwargs.setdefault(option, "deep_gemm")
+    if (
+        "deep_gemm" in (engine_kwargs["linear_backend"], engine_kwargs["moe_backend"])
+        and _is_hopper()
+        and _uses_fp32_block_scales(quantization_config)
+    ):
+        os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
 
 
 def _get_vllm_version():

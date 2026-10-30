@@ -155,7 +155,9 @@ def _packed_causal_conv1d_fallback(
     return torch.cat(outputs, dim=-1)
 
 
-def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None):
+def _packed_chunk_gated_delta_rule(
+    chunk_gated_delta_rule, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None
+):
     kwargs = {
         "g": g,
         "beta": beta,
@@ -164,19 +166,19 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         "use_qk_l2norm_in_kernel": True,
     }
     if cu_seqlens is None:
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return chunk_gated_delta_rule(query, key, value, **kwargs)
 
     if cp_context is not None:
-        if not _call_accepts_kwarg(self.chunk_gated_delta_rule, "cp_context"):
+        if not _call_accepts_kwarg(chunk_gated_delta_rule, "cp_context"):
             raise NotImplementedError("Qwen3.5 Ulysses SP requires FLA chunk_gated_delta_rule cp_context support.")
         kwargs["cp_context"] = cp_context
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return chunk_gated_delta_rule(query, key, value, **kwargs)
 
-    if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens"):
+    if _call_accepts_kwarg(chunk_gated_delta_rule, "cu_seqlens"):
         kwargs["cu_seqlens"] = cu_seqlens
-        if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens_cpu"):
+        if _call_accepts_kwarg(chunk_gated_delta_rule, "cu_seqlens_cpu"):
             kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return chunk_gated_delta_rule(query, key, value, **kwargs)
 
     outputs = []
     for q_i, k_i, v_i, g_i, beta_i in _split_packed_args(
@@ -185,7 +187,7 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         split_kwargs = dict(kwargs)
         split_kwargs["g"] = g_i
         split_kwargs["beta"] = beta_i
-        out_i, _ = self.chunk_gated_delta_rule(q_i, k_i, v_i, **split_kwargs)
+        out_i, _ = chunk_gated_delta_rule(q_i, k_i, v_i, **split_kwargs)
         outputs.append(out_i)
     return torch.cat(outputs, dim=1), None
 
@@ -203,6 +205,18 @@ def qwen3_5_gated_delta_net_forward(
 
     module = import_module(self.__class__.__module__)
     hidden_states = module.apply_mask_to_padding_states(hidden_states, attention_mask)
+    causal_conv1d_fn = self.causal_conv1d_fn if hasattr(self, "causal_conv1d_fn") else module.causal_conv1d_fn
+    causal_conv1d_update = (
+        self.causal_conv1d_update if hasattr(self, "causal_conv1d_update") else module.causal_conv1d_update
+    )
+    chunk_gated_delta_rule = (
+        self.chunk_gated_delta_rule if hasattr(self, "chunk_gated_delta_rule") else module.torch_chunk_gated_delta_rule
+    )
+    recurrent_gated_delta_rule = (
+        self.recurrent_gated_delta_rule
+        if hasattr(self, "recurrent_gated_delta_rule")
+        else module.torch_recurrent_gated_delta_rule
+    )
 
     batch_size, seq_len, _ = hidden_states.shape
     cp_context = None
@@ -239,7 +253,7 @@ def qwen3_5_gated_delta_net_forward(
     a = self.in_proj_a(hidden_states)
 
     if use_precomputed_states:
-        mixed_qkv = self.causal_conv1d_update(
+        mixed_qkv = causal_conv1d_update(
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
@@ -250,7 +264,7 @@ def qwen3_5_gated_delta_net_forward(
         if cache_params is not None:
             conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
             cache_params.conv_states[self.layer_idx] = conv_state
-        if self.causal_conv1d_fn is not None:
+        if causal_conv1d_fn is not None:
             conv_prefix_len = 0
             conv_input = mixed_qkv
             if cp_context is not None:
@@ -262,10 +276,10 @@ def qwen3_5_gated_delta_net_forward(
                 if model_cu_seqlens is not None
                 else None
             )
-            conv_output = self.causal_conv1d_fn(
-                x=conv_input,
-                weight=self.conv1d.weight.squeeze(1),
-                bias=self.conv1d.bias,
+            conv_output = causal_conv1d_fn(
+                conv_input,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
                 activation=self.activation,
                 seq_idx=seq_idx,
             )
@@ -309,10 +323,18 @@ def qwen3_5_gated_delta_net_forward(
 
     if not use_precomputed_states:
         core_attn_out, last_recurrent_state = _packed_chunk_gated_delta_rule(
-            self, query, key, value, g, beta, model_cu_seqlens, model_cu_seqlens_cpu, cp_context
+            chunk_gated_delta_rule,
+            query,
+            key,
+            value,
+            g,
+            beta,
+            model_cu_seqlens,
+            model_cu_seqlens_cpu,
+            cp_context,
         )
     else:
-        core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+        core_attn_out, last_recurrent_state = recurrent_gated_delta_rule(
             query,
             key,
             value,
@@ -350,7 +372,11 @@ def qwen3_5_decoder_layer_forward(
 
     hidden_states = self.input_layernorm(hidden_states)
 
-    if self.layer_type == "linear_attention":
+    block_type = getattr(self, "block_type", None)
+    if block_type is None:
+        block_type = self.layer_type
+
+    if block_type == "linear_attention":
         hidden_states = self.linear_attn(
             hidden_states=hidden_states,
             cache_params=past_key_values,
@@ -358,7 +384,7 @@ def qwen3_5_decoder_layer_forward(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
-    elif self.layer_type == "full_attention":
+    elif block_type == "full_attention":
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
