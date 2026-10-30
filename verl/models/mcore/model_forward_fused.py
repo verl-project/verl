@@ -40,8 +40,11 @@ from torch import Tensor
 from verl.models.mcore.util import (
     get_thd_min_local_rows,
     get_thd_quant_align_size,
+    language_model_forward_kwargs,
     preprocess_thd_engine,
+    preprocess_thd_full_stream,
     preprocess_vlm_thd_engine,
+    takes_full_packed_thd_vlm_inputs,
 )
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
@@ -52,7 +55,10 @@ from .util import postprocess_thd_engine
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
 _FUSED_IMPL_BACKEND_ATTR = "_verl_fused_impl_backend"
 _HOOK_MODE = "hook"
+# The wrapper forwards only Megatron-Core's own arguments; its inner language model takes the hook.
+_LANGUAGE_MODEL_HOOK_MODE = "language_model_hook"
 _LEGACY_MODE = "legacy"
+_FUSED_FORWARD_MODES = (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE, _LEGACY_MODE)
 
 
 def _supports_output_processor_hook(patching_model: torch.nn.Module) -> bool:
@@ -70,7 +76,12 @@ def _supports_output_processor_hook(patching_model: torch.nn.Module) -> bool:
 
 
 def _resolve_fused_forward_mode(patching_model: torch.nn.Module) -> str:
-    return _HOOK_MODE if _supports_output_processor_hook(patching_model) else _LEGACY_MODE
+    if _supports_output_processor_hook(patching_model):
+        return _HOOK_MODE
+    language_model = getattr(patching_model, "language_model", None)
+    if language_model is not None and _supports_output_processor_hook(language_model):
+        return _LANGUAGE_MODEL_HOOK_MODE
+    return _LEGACY_MODE
 
 
 def _get_fused_forward_mode(model: torch.nn.Module) -> str:
@@ -78,11 +89,7 @@ def _get_fused_forward_mode(model: torch.nn.Module) -> str:
     mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
     if mode is None and hasattr(model, "language_model"):
         mode = getattr(model.language_model, _FUSED_FORWARD_MODE_ATTR, None)
-    return mode if mode in (_HOOK_MODE, _LEGACY_MODE) else _LEGACY_MODE
-
-
-def _use_output_processor_hook(model: torch.nn.Module) -> bool:
-    return _get_fused_forward_mode(model) == _HOOK_MODE
+    return mode if mode in _FUSED_FORWARD_MODES else _LEGACY_MODE
 
 
 def get_fused_impl_backend(model: torch.nn.Module) -> str:
@@ -267,7 +274,7 @@ def patch_fused_forward(
         mode = _resolve_fused_forward_mode(model)
         setattr(model, _FUSED_FORWARD_MODE_ATTR, mode)
 
-    if mode == _HOOK_MODE:
+    if mode in (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE):
         return
 
     assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
@@ -280,7 +287,7 @@ def patch_fused_forward(
 
 def unpatch_fused_forward(model: torch.nn.Module):
     model = _get_patching_model(model)
-    if model is None or _get_fused_forward_mode(model) == _HOOK_MODE:
+    if model is None or _get_fused_forward_mode(model) in (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE):
         return
     if hasattr(model, "forward_backup"):
         model.forward = model.forward_backup
@@ -339,16 +346,20 @@ def fused_forward_model_engine(vision_model: bool = False):
         if "video_grid_thw" in multi_modal_inputs:
             model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
-        labels_rmpad, _, _ = preprocess_thd_engine(
-            labels,
-            pre_process=True,
-            need_roll=True,
-            quant_align_size=quant_align_size,
-            min_local_rows=min_local_rows,
-            pad_to_length_bucket=pad_to_length_bucket,
-            cp_layout=cp_layout,
-            local_cp_size=local_cp_size,
-        )
+        if vision_model and takes_full_packed_thd_vlm_inputs(model):
+            # The model selects its CP shard of the labels together with the token stream.
+            labels_rmpad = preprocess_thd_full_stream(labels, packed_seq_params, need_roll=True)
+        else:
+            labels_rmpad, _, _ = preprocess_thd_engine(
+                labels,
+                pre_process=True,
+                need_roll=True,
+                quant_align_size=quant_align_size,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
         labels_rmpad = labels_rmpad.contiguous()
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
@@ -358,16 +369,22 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels=labels_rmpad,
             **model_kwargs,
         )
-        if _use_output_processor_hook(model):
+        fused_forward_mode = _get_fused_forward_mode(model)
+        if fused_forward_mode in (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE):
             impl_backend = get_fused_impl_backend(model)
-            output_orig: CausalLMOutputForPPO = model(
-                **forward_kwargs,
+            hook_kwargs = dict(
                 output_processor=fused_output_processor,
                 output_processor_context=FusedOutputProcessorContext(
                     temperature=temperature,
                     impl_backend=impl_backend,
                 ),
             )
+            if fused_forward_mode == _HOOK_MODE:
+                output_orig: CausalLMOutputForPPO = model(**forward_kwargs, **hook_kwargs)
+            else:
+                # The output processor needs the main head's hidden states; skip the MTP loss.
+                with language_model_forward_kwargs(model, **hook_kwargs, compute_mtp_loss=False):
+                    output_orig = model(**forward_kwargs)
         else:
             impl_backend = get_fused_impl_backend(model)
             output_orig: CausalLMOutputForPPO = model(

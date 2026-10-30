@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -25,11 +26,14 @@ from .util import (
     build_vlm_attn_mask_bshd,
     get_thd_min_local_rows,
     get_thd_quant_align_size,
+    language_model_forward_kwargs,
     postprocess_bshd_engine,
     postprocess_thd_engine,
     preprocess_bshd_engine,
     preprocess_thd_engine,
+    preprocess_thd_full_stream,
     preprocess_vlm_thd_engine,
+    takes_full_packed_thd_vlm_inputs,
 )
 
 
@@ -185,6 +189,7 @@ def gptmodel_forward_model_engine(
             images = build_deepseek_v41_image_inputs(multi_modal_inputs, input_ids_rmpad, batch_size=batch_size)
             if images is not None:
                 model_kwargs["images"] = images
+        full_stream_model = vision_model and takes_full_packed_thd_vlm_inputs(model)
         if vision_model:
             input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
                 model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
@@ -208,16 +213,19 @@ def gptmodel_forward_model_engine(
                 else:
                     v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
-                args[k] = preprocess_thd_engine(
-                    v,
-                    pre_process=True,
-                    need_roll=True,
-                    quant_align_size=quant_align_size,
-                    local_cp_size=local_cp_size,
-                    min_local_rows=thd_kwargs["min_local_rows"],
-                    pad_to_length_bucket=pad_to_length_bucket,
-                    cp_layout=cp_layout,
-                )[0]
+                if full_stream_model:
+                    args[k] = preprocess_thd_full_stream(v, packed_seq_params, need_roll=True)
+                else:
+                    args[k] = preprocess_thd_engine(
+                        v,
+                        pre_process=True,
+                        need_roll=True,
+                        quant_align_size=quant_align_size,
+                        local_cp_size=local_cp_size,
+                        min_local_rows=thd_kwargs["min_local_rows"],
+                        pad_to_length_bucket=pad_to_length_bucket,
+                        cp_layout=cp_layout,
+                    )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
@@ -230,13 +238,23 @@ def gptmodel_forward_model_engine(
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
 
-        output_orig = model(
-            input_ids=input_ids_rmpad,
-            attention_mask=attention_mask,
-            position_ids=position_ids_rmpad,
-            packed_seq_params=packed_seq_params,
-            **model_kwargs,
+        # A full-stream model computes the MTP loss only when verl trains MTP.
+        model_call = (
+            language_model_forward_kwargs(model, compute_mtp_loss=mtp_enable_train)
+            if full_stream_model
+            else nullcontext()
         )
+        with model_call:
+            output_orig = model(
+                input_ids=input_ids_rmpad,
+                attention_mask=attention_mask,
+                position_ids=position_ids_rmpad,
+                packed_seq_params=packed_seq_params,
+                **model_kwargs,
+            )
+        if full_stream_model and isinstance(output_orig, tuple):
+            # The model returns its CP-sliced loss mask alongside the output.
+            output_orig = output_orig[0]
 
         if post_process and logits_processor is not None:
             args = {
@@ -330,6 +348,8 @@ def gptmodel_forward_model_engine(
             logits_processor_args.pop("response_attention_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
+        if vision_model and takes_full_packed_thd_vlm_inputs(model):
+            raise ValueError("GLM-5.3-Flash requires data_format='thd'.")
         if vision_model:
             input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
                 input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen

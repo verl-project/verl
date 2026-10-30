@@ -17,6 +17,7 @@ import inspect
 import logging
 import math
 import os
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from typing import Literal
 
@@ -910,6 +911,78 @@ def accepts_packed_thd_vlm_inputs(model) -> bool:
     )
 
 
+def takes_full_packed_thd_vlm_inputs(model) -> bool:
+    """Whether the Megatron-Bridge VLM takes the whole packed THD stream and shards it across CP ranks itself.
+
+    GLM-5.3-Flash inserts vision features into the full stream, then selects its context-parallel
+    shard with Megatron-Core's zigzag partition. It takes a ``[1, total_tokens]`` stream, no
+    attention mask and full-stream labels.
+    """
+    from verl.utils.megatron_utils import unwrap_model
+
+    try:
+        from megatron.bridge.models.glm5next.glm53flash_bridge import GLM53FlashModel
+    except ImportError:
+        return False
+    return isinstance(unwrap_model(model), GLM53FlashModel)
+
+
+def preprocess_thd_full_stream(
+    values: torch.Tensor, packed_seq_params: PackedSeqParams, need_roll: bool = False
+) -> torch.Tensor:
+    """Place each nested sequence at its padded offset in one ``[1, total_tokens]`` row, without CP sharding.
+
+    The layout matches the ``packed_seq_params`` that ``preprocess_thd_engine`` returns. With
+    ``need_roll``, the stream shifts by one token, as ``preprocess_thd_engine`` does without CP.
+    """
+    cu_seqlens_padded = packed_seq_params.cu_seqlens_q_padded.tolist()
+    offsets = values.offsets().tolist()
+    flat = values.values()
+    stream = flat.new_zeros((cu_seqlens_padded[-1], *flat.shape[1:]))
+    for start, begin, end in zip(cu_seqlens_padded[:-1], offsets[:-1], offsets[1:], strict=True):
+        stream[start : start + end - begin] = flat[begin:end]
+    if need_roll:
+        stream = torch.roll(stream, shifts=-1, dims=0)
+    return stream.unsqueeze(0)
+
+
+def check_full_stream_cp_layout(local_cp_size: int | None = None, cp_layout: str = "zigzag", **_unused) -> None:
+    """Reject CP layouts that a model sharding the full stream itself cannot reproduce.
+
+    Such models split each sequence with Megatron-Core's zigzag partition on the static CP group.
+    """
+    if local_cp_size is not None:
+        raise ValueError("GLM-5.3-Flash does not support dynamic context parallelism (local_cp_size).")
+    if mpu.get_context_parallel_world_size() > 1 and cp_layout != "zigzag":
+        raise ValueError(f"GLM-5.3-Flash supports only the zigzag context-parallel layout, got {cp_layout!r}.")
+
+
+@contextmanager
+def language_model_forward_kwargs(model, **kwargs):
+    """Add keyword arguments to a VLM wrapper's inner language-model forward for the duration of one call.
+
+    Megatron-Bridge wrappers such as GLM-5.3-Flash pass only Megatron-Core's own arguments to
+    ``language_model.forward``. verl hands its output processor and MTP choice to the inner model this way.
+    """
+    from verl.utils.megatron_utils import unwrap_model
+
+    language_model = unwrap_model(model).language_model
+    instance_forward = vars(language_model).get("forward")
+    forward = language_model.forward
+
+    def forward_with_kwargs(*args, **call_kwargs):
+        return forward(*args, **{**call_kwargs, **kwargs})
+
+    language_model.forward = forward_with_kwargs
+    try:
+        yield
+    finally:
+        if instance_forward is None:
+            del language_model.forward
+        else:
+            language_model.forward = instance_forward
+
+
 def preprocess_vlm_thd_engine(
     model,
     input_ids: torch.Tensor,
@@ -924,8 +997,13 @@ def preprocess_vlm_thd_engine(
     ``input_ids_rmpad`` / ``packed_seq_params`` come from ``preprocess_thd_engine(input_ids,
     pre_process=True, **thd_kwargs)``. VLMs that take rank-local THD inputs get them as-is plus
     verl's ``(bsz, 4, j)`` text/t/h/w positions repacked to Bridge's ``(3, 1, T)`` t/h/w in the same
-    row layout; other VLMs get dense BSHD inputs that the model repacks itself.
+    row layout; VLMs that shard the full stream themselves (GLM-5.3-Flash) get the unsharded stream;
+    other VLMs get dense BSHD inputs that the model repacks itself.
     """
+    if takes_full_packed_thd_vlm_inputs(model):
+        check_full_stream_cp_layout(**thd_kwargs)
+        return preprocess_thd_full_stream(input_ids, packed_seq_params), None, None
+
     if accepts_packed_thd_vlm_inputs(model) and is_mrope_position_ids(position_ids):
         mrope_nested = torch.nested.nested_tensor_from_jagged(
             position_ids.values()[1:].transpose(0, 1).contiguous(), offsets=input_ids.offsets()
