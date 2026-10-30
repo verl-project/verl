@@ -879,6 +879,13 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
+    def _get_forward_autocast_context(self):
+        # Disable inherited AMP too; Qwen4-Exp checkpoint recomputation must
+        # use the same activation dtype as its original forward pass.
+        if not self.engine_config.enable_autocast:
+            return torch.autocast(device_type=get_device_name(), enabled=False)
+        return super()._get_forward_autocast_context()
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)

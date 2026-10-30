@@ -430,6 +430,8 @@ class VeOmniEngineConfig(EngineConfig):
     full_determinism: bool = False
     mixed_precision: bool = False
     low_precision_reduce_scatter_comm: bool = False
+    # Outer AMP is separate from FSDP parameter mixed precision.
+    enable_autocast: bool = True
     init_device: str = "meta"
     enable_full_shard: bool = False
     ckpt_manager: Literal["dcp"] = "dcp"
