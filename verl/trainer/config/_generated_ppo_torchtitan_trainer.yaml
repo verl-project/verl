@@ -61,8 +61,8 @@ actor_rollout_ref:
     use_dynamic_bsz: false
     ppo_max_token_len_per_gpu: 16384
     clip_ratio: 0.2
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.2
+    clip_ratio_low: null
+    clip_ratio_high: null
     tau_pos: 1.0
     tau_neg: 1.05
     freeze_vision_tower: false
@@ -841,8 +841,8 @@ distillation:
     use_policy_gradient: false
     policy_loss_mode: vanilla
     clip_ratio: 0.2
-    clip_ratio_low: 0.2
-    clip_ratio_high: 0.2
+    clip_ratio_low: null
+    clip_ratio_high: null
   n_gpus_per_node: 8
   nnodes: 0
   teacher_models:

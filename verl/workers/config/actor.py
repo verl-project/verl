@@ -115,8 +115,8 @@ class ActorConfig(BaseConfig):
         use_dynamic_bsz (bool): Whether to use dynamic batch sizing.
         ppo_max_token_len_per_gpu (int): Maximum token length per GPU for PPO training.
         clip_ratio (float): PPO clipping ratio for policy loss.
-        clip_ratio_low (float): Lower bound for PPO clipping ratio.
-        clip_ratio_high (float): Upper bound for PPO clipping ratio.
+        clip_ratio_low (Optional[float]): Lower bound for asymmetric PPO clipping. Defaults to clip_ratio.
+        clip_ratio_high (Optional[float]): Upper bound for asymmetric PPO clipping. Defaults to clip_ratio.
         policy_loss (PolicyLossConfig): Configuration for policy loss computation.
         clip_ratio_c (float): Clipping ratio for critic loss.
         loss_agg_mode (str): Loss aggregation mode, including 'token-mean', 'token-sum', and sequence modes.
@@ -155,8 +155,8 @@ class ActorConfig(BaseConfig):
     ppo_max_token_len_per_gpu: int = 16384
     ppo_infer_max_token_len_per_gpu: int = 16384
     clip_ratio: float = 0.2
-    clip_ratio_low: float = 0.2
-    clip_ratio_high: float = 0.2
+    clip_ratio_low: Optional[float] = None
+    clip_ratio_high: Optional[float] = None
     freeze_vision_tower: bool = False
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
     clip_ratio_c: float = 3.0

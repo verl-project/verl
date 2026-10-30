@@ -57,10 +57,10 @@ class DistillationLossConfig(BaseConfig):
         Name of the policy loss to use when use_policy_gradient is true.
     clip_ratio (float):
         PPO clipping ratio for policy loss.
-    clip_ratio_low (float):
-        Lower bound for PPO clipping ratio.
-    clip_ratio_high (float):
-        Upper bound for PPO clipping ratio.
+    clip_ratio_low (Optional[float]):
+        Lower bound for asymmetric PPO clipping. Defaults to clip_ratio.
+    clip_ratio_high (Optional[float]):
+        Upper bound for asymmetric PPO clipping. Defaults to clip_ratio.
     loss_settings (DistillationLossSettings, optional):
         Runtime-populated settings based on loss_mode. Not set by user.
     """
@@ -88,8 +88,8 @@ class DistillationLossConfig(BaseConfig):
     use_policy_gradient: bool = True
     policy_loss_mode: str = "vanilla"
     clip_ratio: float = 0.2
-    clip_ratio_low: float = 0.2
-    clip_ratio_high: float = 0.2
+    clip_ratio_low: Optional[float] = None
+    clip_ratio_high: Optional[float] = None
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size
