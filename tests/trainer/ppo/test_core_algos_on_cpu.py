@@ -22,6 +22,7 @@ import torch
 import verl.trainer.ppo.core_algos
 from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
+    compute_gpg_outcome_advantage,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
     compute_rloo_outcome_advantage,
@@ -332,6 +333,50 @@ def test_grpo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert ret1.shape == ret2.shape == (batch_size, seq_len)
     assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "rewards,index,expected_alpha",
+    [
+        # B=8, M=4 (the second group is all wrong)
+        pytest.param([1, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 1, 1, 1, 1], 8 / 4, id="mixed_and_all_wrong"),
+        # B=8, M=4 (the first group is all correct)
+        pytest.param([1, 1, 1, 1, 1, 0, 0, 0], [0, 0, 0, 0, 1, 1, 1, 1], 8 / 4, id="all_correct_and_mixed"),
+        # B=8, M=0: no rescaling
+        pytest.param([1, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 0, 1, 1, 1, 1], 8 / 8, id="no_identical_group"),
+        # B=8, M=4: alpha must not depend on how many rewards are exactly zero
+        pytest.param([1, -1, -1, -1, -1, -1, -1, -1], [0, 0, 0, 0, 1, 1, 1, 1], 8 / 4, id="plus_minus_one"),
+        # B=16, M=8: torch.std of eight float32 0.1 values is not exactly 0, but the group is still identical
+        pytest.param([0.5] + [0.2] * 7 + [0.1] * 8, [0] * 8 + [1] * 8, 16 / 8, id="non_binary"),
+        # B=10, M=5: singleton groups are not mean-centered, so only the zero-reward singleton counts towards M
+        pytest.param([1, 0, 1, 0, 0, 0, 0, 0, 0, 0], [0, 1, 2, 2, 2, 2, 3, 3, 3, 3], 10 / 5, id="singleton_groups"),
+        # B=4, M=2: with only singleton groups (rollout.n=1), alpha is the same as bsz / count_nonzero(scores)
+        pytest.param([1, 0, 0.5, 0], [0, 1, 2, 3], 4 / 2, id="singletons_only"),
+        # B=8, M=8: all advantages are exactly zero, so alpha is not observable; outputs must stay finite
+        pytest.param([0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 0, 0, 1, 1, 1, 1], 1.0, id="all_identical"),
+    ],
+)
+def test_gpg_advantage_alpha(rewards, index, expected_alpha):
+    """GPG scales the group-centered reward by alpha = B / (B - M) (https://arxiv.org/abs/2504.02546),
+    where B is the batch size and M is the number of samples in groups whose rewards are all identical."""
+    index = np.array(index)
+    scores = torch.tensor(rewards, dtype=torch.float32)
+    token_level_rewards = torch.zeros(len(rewards), 4)
+    token_level_rewards[:, -1] = scores
+    response_mask = torch.ones_like(token_level_rewards)
+
+    advantages, returns = compute_gpg_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    # singleton groups use a zero baseline
+    baseline = torch.tensor([scores[index == g].mean() if (index == g).sum() > 1 else 0.0 for g in index])
+    expected = (expected_alpha * (scores - baseline)).unsqueeze(-1) * response_mask
+    assert torch.isfinite(advantages).all()
+    torch.testing.assert_close(advantages, expected)
+    torch.testing.assert_close(returns, advantages)
 
 
 @pytest.mark.parametrize(
