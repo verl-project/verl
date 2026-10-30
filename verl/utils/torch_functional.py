@@ -684,7 +684,7 @@ def post_process_logits(input_ids, logits, temperature, top_k, top_p):
     return logits
 
 
-def calculate_sum_pi_squared_from_logits(logits: torch.Tensor):
+def calculate_sum_pi_squared_from_logits(logits: torch.Tensor, chunk_size: int = 2048):
     """
     Compute exact sum of squared probabilities from logits.
     Formula: Σπ² = exp(logsumexp(2*logits) - 2*logsumexp(logits))
@@ -692,13 +692,29 @@ def calculate_sum_pi_squared_from_logits(logits: torch.Tensor):
     Used for optimal baseline variance reduction as described in
     "What Matters for Model Merging at Scale?" (arXiv:2410.03617)
 
+    Rows are processed ``chunk_size`` at a time: ``2 * logits`` and the ``logsumexp`` intermediates are each as
+    large as the input, so computing them for a whole packed micro-batch at once can need several extra GB.
+
     Args:
         logits: Logits tensor (..., vocab_size).
+        chunk_size: Number of rows (positions) processed at once.
 
     Returns:
         Sum of squared probabilities tensor (...).
     """
-    return torch.exp(torch.logsumexp(2.0 * logits, dim=-1) - 2.0 * torch.logsumexp(logits, dim=-1))
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+
+    def _sum_pi_squared(x: torch.Tensor) -> torch.Tensor:
+        return torch.exp(torch.logsumexp(2.0 * x, dim=-1) - 2.0 * torch.logsumexp(x, dim=-1))
+
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    if flat_logits.shape[0] <= chunk_size:
+        return _sum_pi_squared(logits)
+    chunks = [
+        _sum_pi_squared(flat_logits[start : start + chunk_size]) for start in range(0, flat_logits.shape[0], chunk_size)
+    ]
+    return torch.cat(chunks).reshape(logits.shape[:-1])
 
 
 """
