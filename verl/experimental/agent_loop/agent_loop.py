@@ -115,7 +115,11 @@ class AgentLoopOutput(BaseModel):
     (OPD) path so an SGLang teacher receives the video instead of raw frames. None otherwise."""
 
     def as_dict(self) -> dict[str, Any]:
-        """Convert agent loop output to a dictionary."""
+        """Convert agent loop output to a dictionary.
+
+        ``rm_scores`` holds ``reward_score`` on the last token with ``response_mask`` 1. If no token has
+        ``response_mask`` 1, the score is on the last token.
+        """
         output = self.model_dump(exclude_unset=True)
 
         output["prompts"] = torch.tensor(output.pop("prompt_ids"), dtype=torch.int64)
@@ -140,11 +144,13 @@ class AgentLoopOutput(BaseModel):
             aligned[:num_rows] = routed_experts[:num_rows]
             output["routed_experts"] = aligned
 
-        # rm_scores: reward score for each token
+        # rm_scores: reward score for each token, put on the last generated token. GAE, REINFORCE++,
+        # ReMax and OTB ignore rewards on response_mask=0 tokens, such as a trailing chat-template suffix.
         reward_score = output.pop("reward_score", None)
         if reward_score is not None:
             rm_scores = torch.zeros_like(output["response_mask"], dtype=torch.float32)
-            rm_scores[-1] = reward_score
+            generated = output["response_mask"].nonzero()
+            rm_scores[generated[-1] if len(generated) else -1] = reward_score
             output["rm_scores"] = rm_scores
 
         # Mutating a default dict does not add the field to Pydantic's fields-set,
@@ -1091,7 +1097,11 @@ class AgentLoopWorker:
         input_non_tensor_batch: dict | None = None,
         validate: bool = False,
     ) -> DataProto:
-        """Process the padded outputs from _run_agent_loop and combine them into a batch."""
+        """Process the padded outputs from _run_agent_loop and combine them into a batch.
+
+        In each row of ``rm_scores``, ``reward_score`` is on the last token with ``response_mask`` 1. If a
+        row has no such token, the score is on the last valid token of the row.
+        """
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
@@ -1125,8 +1135,13 @@ class AgentLoopWorker:
         if all(score is not None for score in scores):
             prompt_length = prompt_ids.size(1)
             response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
+            # Put the score on the last generated token. GAE, REINFORCE++, ReMax and OTB ignore rewards
+            # on response_mask=0 tokens, such as a trailing chat-template suffix.
+            positions = torch.arange(response_mask.size(1))
+            last_generated = torch.where(response_mask.bool(), positions, -1).amax(dim=1)
+            score_index = torch.where(last_generated >= 0, last_generated, response_length)
             rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
-            rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(scores, dtype=torch.float32)
+            rm_scores[torch.arange(response_mask.size(0)), score_index] = torch.tensor(scores, dtype=torch.float32)
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {
