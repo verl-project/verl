@@ -17,6 +17,7 @@ import pytest
 import ray
 
 from tests.checkpoint_engine.test_utils import create_rollout_worker_group, create_trainer_worker_group
+from tests.checkpoint_engine.weight_diagnostics import diagnostic_env
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.single_controller.ray.base import (
     RayResourcePool,
@@ -27,6 +28,13 @@ from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
 
+@pytest.fixture
+def shutdown_local_ray():
+    """Release this test's local cluster even when a weight assertion fails."""
+    yield
+    ray.shutdown()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
@@ -35,6 +43,7 @@ from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutCo
 @pytest.mark.parametrize("bucket_size_mb", [3072, 128])
 @auto_await
 async def test_hccl_checkpoint_engine(
+    shutdown_local_ray,
     rebuild_group,
     num_trainer,
     num_rollout,
@@ -52,6 +61,7 @@ async def test_hccl_checkpoint_engine(
                 "HCCL_HOST_SOCKET_PORT_RANGE": "60000-60050",
                 "HCCL_NPU_SOCKET_PORT_RANGE": "61000-61050",
                 "VERL_LOGGING_LEVEL": "DEBUG",
+                **diagnostic_env(f"hccl-{bucket_size_mb}"),
             }
         }
     )
@@ -78,8 +88,6 @@ async def test_hccl_checkpoint_engine(
     for _ in range(3):
         await checkpoint_manager.update_weights()
         rollout.check_weights()
-
-    ray.shutdown()
 
 
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")

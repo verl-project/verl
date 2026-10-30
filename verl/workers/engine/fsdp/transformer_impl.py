@@ -53,6 +53,7 @@ from verl.utils.fsdp_utils import (
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
+    materialize_fsdp_dtensor,
     merged_lora_context,
     normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
@@ -1033,7 +1034,7 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = (
                 (
                     name,
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
+                    materialize_fsdp_dtensor(param, device) if isinstance(param, DTensor) else param,
                 )
                 for name, param in params.items()
             )
