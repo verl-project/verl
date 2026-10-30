@@ -1,0 +1,22 @@
+livekit-agents
+livekit-plugins-openai
+livekit-plugins-silero
+pydantic-ai
+python-dotenv
+openai
+google-api-python-client
+google-auth-oauthlib
+apscheduler
+fastapi
+livekit-plugins-deepgram
+livekit-plugins-turn-detector
+aiohttp
+mem0ai
+openai-agents-mcp
+wandb
+torch
+jsonlines
+markdown
+tqdm
+# For local editable install of atropos, if desired in requirements:
+# atropos @ file:./atropos#egg=atropos

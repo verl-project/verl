@@ -1,0 +1,597 @@
+# Atropos Library Documentation (for LLM Context)
+
+This document provides comprehensive information about the Atropos library, Nous Research's LLM RL Gym. It covers its purpose, features, usage, components, configuration, and contribution guidelines.
+
+---
+
+## 1. Introduction: Atropos - Nous Research's LLM RL Gym
+
+Atropos is an environment microservice framework for async RL with LLMs. It encompasses environments (services) and a trajectory API for data transfer between environments and trainers.
+
+**Supported Environment Types:**
+
+<div align="center">
+
+| Environment Type          | Examples                                   | Purpose                                            |
+|---------------------------|--------------------------------------------|----------------------------------------------------|
+| 📚 Dataset environments   | GSM8K, MMLU, Custom HF Datasets            | Evaluate and improve LLM performance on static data|
+| 🎮 Online environments    | Blackjack, Taxi, Text-based games          | Train LLMs through interactive game-based learning |
+| 🤖 RLAIF and RLHF         | LLM Judge/Reward Models                    | Fine-tune LLMs using human feedback and alignment  |
+| 🔄 Multi-Turn RL          | deepresearch, internal tool calling        | Train LLMs on complex multi-step interactions      |
+| 💻 Code Execution         | MBPP, HumanEval (via `coding_server.py`)   | Train LLMs to generate and execute code            |
+| 🖼️ Multimodal             | OCR VQA, Clevr (via `multimodal_dpo/`)     | Train LLMs on tasks involving vision and language  |
+
+
+</div>
+
+Atropos provides a robust, scalable framework for **Reinforcement Learning Environments with LLMs**.
+
+**Key Features:**
+
+*   **Multi-Turn & Asynchronous RL:** Efficiently supports complex, multi-turn, and asynchronous interactions, decoupling environment steps from policy updates.
+*   **Inference Agnostic:** Integrates with standard inference APIs (e.g., OpenAI, vLLM, SGLang), enabling easy switching between LLM providers and frameworks.
+*   **Trainer Independent:** Offers a standardized training interface for experimenting with different RL algorithms and frameworks without major code changes.
+*   **Scalable & Decentralized:** Easily scale by launching more environment instances (locally or across decentralized resources) that contribute rollouts to a central service.
+*   **Diverse Environment Integration:** Manages many varied environment types concurrently for heterogeneous, multi-modal training.
+
+**Goal:** Provide a flexible, scalable, and standardized platform to accelerate LLM-based RL research across diverse, interactive settings.
+
+---
+
+## 5. Navigating the Repo
+
+| Category                        | Description                                      |
+|---------------------------------|--------------------------------------------------|
+| 📁 [`atroposlib/`](atroposlib/)  | Core library containing base classes and utilities (see #10-core-library-atroposlib) |
+| 🎮 [`environments/`](environments/) | Collection of ready-to-use RL environments       |
+| 📚 [`example_trainer/`](example_trainer/) | Example training scripts and configurations    |
+
+**Key Documents:**
+
+*   **Base Environment Class:** `atroposlib/envs/README.md`
+*   **Environments Overview:** `environments/README.md`
+*   **Full Environment Config Options:** `CONFIG.md`
+*   **Example Trainer:** `example_trainer/README.md`
+*   **Slurm Guide:** `SLURM.md`
+*   **Contributing Guide:** `CONTRIBUTING.md`
+*   **License:** `LICENSE` (MIT License)
+*   **Code of Conduct:** `CODE_OF_CONDUCT.md`
+---
+
+## 6. Installation
+
+Requires Python 3.10 or later.
+
+```bash
+# Core library usage
+pip install atroposlib
+
+# For development or running examples from the repository:
+# Clone the repository first
+git clone https://github.com/NousResearch/atropos.git
+cd atropos
+
+# Core usage from local clone
+pip install -e .
+
+# Development (includes testing, linting tools)
+pip install -e .[dev]
+
+# Running examples (includes dependencies like vLLM, transformers)
+pip install -e .[examples]
+
+# Everything
+pip install -e .[all]
+```
+
+**Important for Developers:** Install pre-commit hooks to ensure code quality:
+```bash
+pre-commit install
+```
+
+---
+
+## 7. Quick Start Guide
+
+1.  **Create Your First Environment:**
+    *   Review the [Base Environment Class Documentation](atroposlib/envs/README.md) and related details in this document (#10.1-base-environment).
+    *   Examine existing environments in [`environments/`](environments/) for examples.
+
+2.  **Run an Example Environment:**
+    *   Edit the `config_init` section of the environment file you want to run (e.g., `environments/gsm8k_server.py`) to point to a running VLLM or SGLang inference server and make other [configuration changes](CONFIG.md) as needed (see also Atropos specific configurations #10.2-configuration-options-atroposlib).
+    ```bash
+    # Start the central API server (trajectory handler) in one terminal
+    run-api &
+
+    # In a separate terminal, start an environment server (e.g., GSM8K)
+    # Ensure --slurm is set appropriately for your setup (False for local)
+    python environments/gsm8k_server.py serve --openai.model_name="Qwen/Qwen2.5-1.5B-Instruct" --slurm False
+    # Alternatively, using a config file:
+    # python environments/gsm8k_server.py serve --config environments/configs/example.yaml
+    # CLI arguments can override config settings:
+    # python environments/gsm8k_server.py serve --config environments/configs/example.yaml --env.group_size 8
+    ```
+    *Note: Model names are examples. Adjust as per your inference server setup.*
+
+3.  **Grabbing Rollouts / Training Your Model:**
+    *   For just collecting rollouts without a full trainer, see the [Debugging Tools section](#11-debugging-tools) (detailed in #11-debugging-tools) (e.g., `view-run`, `atropos-sft-gen`, `process` subcommand).
+    *   For training, refer to the [Example Trainer Guide](example_trainer/README.md) (covered in #9-training-with-the-example-trainer) or integration guides for trainers like Axolotl.
+    *   Monitor progress via logging: completion lengths, eval accuracies, full rollouts/scores (WandB integration available).
+    *   Multiple environments can run concurrently, pointing to the same `run-api` server.
+
+**Logging:** Environments provide detailed logging, tracking completion lengths, eval accuracies, full rollouts, scores, etc. Supports WandB integration.
+
+---
+
+## 8. Environments
+
+The `environments/` directory contains various RL environments. See `environments/README.md` for common features and usage patterns.
+
+### 8.1. Common Features Across Environments
+
+1.  **Training/Test Split:** Typically 98% training, 2% test, with fixed random shuffling (seed 42).
+2.  **Metrics Tracking:** Includes percent correct buffer, completion lengths, Wandb integration, and rollout tracking.
+3.  **Token Management:** Maximum token length limits, statistics tracking, and optional length penalties.
+4.  **Evaluation:** Separate evaluation on the test set with comprehensive metrics logging. Supports multiple completions per prompt.
+5.  **Usage Interface:** Environments generally follow a common interface:
+    *   Initialize with `config` (BaseEnvConfig), `server_configs` (OpenAI API configs), `slurm` (bool), `testing` (bool).
+    *   Key methods: `setup()`, `get_next_item()`, `collect_trajectories()`, `score()` (often part of postprocessing), `evaluate()`, `wandb_log()`.
+6. **README files** Most environments, especially with more complexity, include detailed README.md files to provide context and instructions on use
+7. **Additional Libraries** If an environment requires specific libraries, their subdirectory will often include a `requirements.txt` for installation via `pip`, or instructions about installation in the README.md
+
+### 8.2. Available Environments
+
+#### 8.2.1. MCQA Thinking Environment (`mcqa_thinking_env.py`)
+
+Multiple Choice Question Answering (MMLU dataset) requiring systematic thought.
+
+*   **Input Format:** MMLU items (`prompt`, `answer` index, `ground_truth` letter, `options` list).
+*   **System Prompt:**
+    ```
+    You are a deep thinking AI, you may use extremely long chains of thought to deeply consider the problem and deliberate with yourself via systematic reasoning processes to help come to a correct solution prior to answering. You should enclose your thoughts and internal monologue inside <think> </think> tags, and then provide your solution or response to the problem.
+    ```
+*   **Reward Function:**
+    *   1.0 for correct letter match.
+    *   0.0 for incorrect or malformed response (e.g., bad `<think>` tags, multiple think tags).
+    *   Length penalty applied *only if all responses in a group are correct*: scales linearly from 1.0 (<=50% max length) down to 0.0 (>=100% max length).
+    *   Returns `None` if all scores in a group are identical (no training signal).
+
+#### 8.2.2. GSM8K Environment (`gsm8k_server.py` and `gsm8k_server_axolotl.py`)
+
+Mathematical reasoning (GSM8K dataset). `gsm8k_server_axolotl.py` is a variant configured for use with TRL (Transformer Reinforcement Learning), often in conjunction with Axolotl.
+
+*   **Input Format:** GSM8K items (`question`, `answer` number).
+*   **System Prompt:**
+    ```
+    You are a deep thinking AI, you may use extremely long chains of thought to deeply consider the problem and deliberate with yourself via systematic reasoning processes to help come to a correct solution prior to answering. You should enclose your thoughts and internal monologue inside <think> </think> tags, and then provide your solution or response to the problem.
+
+    You are allocated a maximum of 2048 tokens, please strive to use less.
+
+    You will then provide your answer like this: \boxed{your answer here}
+    It is important that you provide your answer in the correct format.
+    If you do not, you will not receive credit for your answer.
+    So please end your answer with \boxed{your answer here}
+    ```
+*   **Reward Function:**
+    *   1.0 if `\boxed{}` answer matches ground truth (uses LaTeX verification).
+    *   0.0 if incorrect or ground truth isn't parseable.
+    *   Length penalty applied *only if all responses in a group are correct*: scales linearly from 1.0 (<=50% max length) down to 0.0 (>=100% max length).
+    *   Returns `None` if all scores in a group are identical.
+
+#### 8.2.3. Tool Calling Environment (`tool_calling_server.py`)
+
+Training models for structured function/tool calls (ShareGPT-Hermes function call dataset).
+
+*   **Input Format:** Conversations (`system`, `human`, `gpt` roles) with expected tool calls (JSON format).
+*   **System Prompt:**
+    ```
+    You are a deep thinking AI, you may use extremely long chains of thought to deeply consider the problem and deliberate with yourself via systematic reasoning processes to help come to a correct solution prior to answering. You should enclose your thoughts and internal monologue inside <think> </think> tags, and then provide your solution or response to the problem.
+    ```
+*   **Reward Function:**
+    *   1.0 if *all* expected tool calls are present and *exactly* match (including nested JSON).
+    *   0.0 if any calls are missing, incorrect, or malformed.
+    *   Length penalty applied *only if all responses in a group are correct*: scales linearly from 1.0 (<=50% max length) down to 0.0 (>=100% max length).
+    *   Returns `None` if all scores in a group are identical.
+
+#### 8.2.4. RLAIF Server Environment (`rlaif_server.py`)
+
+Environment for Reinforcement Learning from AI Feedback (RLAIF). Used for aligning models to specific personalities or styles based on AI-generated preferences or reward signals.
+
+*   **Input Format:** Typically involves prompts for which responses are generated and then evaluated by a reward model or preference model to guide the LLM's behavior. Specifics depend on the RLAIF setup.
+*   **System Prompt:** Varies based on the desired personality/style (e.g., "Egregore," "Ascension Maze").
+*   **Reward Function:** Based on the output of an AI judge/reward model, designed to score responses according to the target alignment criteria.
+
+#### 8.2.5. Financial Fundamentals Prediction Environment (`fundamental_prediction_environment.py`)
+
+Environment for training models to predict financial fundamentals using the "NousResearch/company-fundamentals-prediction-lite" dataset.
+
+*   **Input Format:** Items include `context` (company fundamentals, news, macroeconomic data), `fundamental_metric` (e.g., revenue, EPS), and ground truth `answer` ("maintained", "raised", or "reduced") and `magnitude` (percentage change). The model analyzes the `context` to predict the `answer` and `magnitude` for the given `fundamental_metric`.
+*   **Task:** Predict directional changes and magnitude for company financial fundamentals.
+*   **Reward Function:** Based on the accuracy of predictions for both direction and magnitude.
+
+#### 8.2.6. Math Server Environment (`math_server.py`)
+
+A versatile math problem-solving environment supporting multiple datasets and operational modes.
+*   **Datasets:** Integrates `gsm8k` (various subsets), `competition_math`, `math_qa`, and `MetaMathQA`.
+*   **Operational Modes:** Supports standard problem solving, RLAIF (Reinforcement Learning from AI Feedback) for preference learning between solutions, a "judge" mode for evaluating solution correctness, and a "retry/self-correct" mode utilizing feedback on previous attempts.
+*   **Input Format:** Mathematical problems, varying slightly by operational mode (e.g., including solutions for judging/RLAIF).
+*   **System Prompt:** Dynamically constructed based on the operational mode. For standard problem solving, the prompt focuses on the problem itself. Other modes include specific instructions for judging, preference selection, or self-correction.
+*   **Reward Function:** Based on the correctness of the mathematical solution, with variations depending on the mode (e.g., preference scores in RLAIF).
+
+#### 8.2.7. Math Server Zero Environment (`math_server_zero.py`)
+
+A math problem-solving environment using the "zwhe99/DeepMath-103K" dataset, with a structured prompt format inspired by the Open-Reasoner-Zero project.
+*   **Input Format:** Mathematical problems from the "zwhe99/DeepMath-103K" dataset.
+*   **System Prompt Structure:** Utilizes a specific conversational format where the AI is instructed to first think (using `<think> </think>` tags) and then provide the answer (using `<answer> </answer>` tags, with the final numerical answer in `\boxed{}`). The overall prompt guides the model through this structured reasoning and response process.
+    *   `prompt_format = "A conversation between User and Assistant... User: {prompt}\nAssistant: <think>"`
+    *   `problem_format = "You must put your answer inside <answer> </answer> tags... This is the problem:\n{problem}"`
+*   **Reward Function:** Based on the correctness of the mathematical solution within the `<answer>` tag, verified using LaTeX parsing.
+
+#### 8.2.8. Coding Server Environment (`environments/code_execution_server/coding_server.py`)
+
+Environment for training models to generate and potentially execute code.
+
+*   **Input Format:** Coding problems or prompts (e.g., from datasets like MBPP, HumanEval).
+*   **System Prompt:** Instructs the model to generate code for a given problem.
+*   **Reward Function:** Based on correctness of the generated code, often involving execution and unit test passing. The `code_execution_server/` directory also contains a `Dockerfile`, which provides a configuration for containerized execution, enhancing safety and reproducibility for code execution tasks.
+
+#### 8.2.9. Dataset Environment (`environments/dataset_environment/dataset_env.py`)
+
+A highly configurable environment for working with Hugging Face datasets.
+
+*   **Purpose:** Allows users to easily define RL environments using existing datasets from Hugging Face Hub.
+*   **Input Format:** Defined by the chosen Hugging Face dataset (user specifies prompt and answer fields).
+*   **System Prompt:** Customizable by the user.
+*   **Reward Function:** Highly flexible, supports a registry of predefined reward functions (e.g., `accuracy`, `format`, `cosine_scaled`) and allows users to create and register custom reward functions. Multiple reward functions can be combined with weights.
+*   **Configuration:** Primarily through YAML files specifying dataset details, generation parameters, and reward functions.
+*   **Key Scripts:**
+    *   `dataset_env.py`: The main environment class.
+    *   `dataset_local_server.py`: For running the environment locally for debugging.
+    *   `launch_local_dataset_run.py`: Unified end-to-end launcher for API, environment, with the example trainer.
+
+#### 8.2.10. Multimodal DPO Environments (`environments/multimodal_dpo/`)
+
+A collection of environments for Direct Preference Optimization (DPO) with multimodal inputs.
+
+*   **Files:** `ocr_vqa.py`, `pixmo_clocks.py`, `pixmo_count.py`, `pixmo_point_explanations.py`, `clevr_cogen_a_train.py`, `clevr_complex.py`.
+*   **Purpose:** Training models on tasks that involve processing both text and images (e.g., Optical Character Recognition VQA, visual counting, interpreting complex visual scenes like Clevr).
+*   **Input Format:** Typically pairs of (image, text prompt) and corresponding preferred/dispreferred responses.
+*   **Reward Function:** Based on the DPO mechanism, implicitly learned from preference data.
+
+#### 8.2.11. Game Environments
+
+This section covers environments based on interactive games.
+
+##### 8.2.11.1. Gymnasium Taxi (`environments/game_environments/gymnasium/gym_taxi.py`)
+
+*   **Game:** Based on the classic Gymnasium Taxi-v3 environment.
+*   **Task:** The agent controls a taxi to pick up a passenger and drop them off at the correct location.
+*   **Objective:** Optimize for efficient navigation and task completion.
+
+##### 8.2.11.2. Gymnasium Blackjack (`environments/game_environments/gymnasium/blackjack/`)
+
+Two Blackjack environment implementations are provided:
+
+*   **`blackjack_env_no_thinking.py` (Standard Blackjack):**
+    *   **Gameplay:** A standard version of Blackjack where the agent plays against a dealer.
+    *   **Objective:** Achieve a hand total closer to 21 than the dealer without exceeding 21.
+    *   **Interaction:** Designed for shorter episodes without complex intermediate "thinking" steps. The agent makes decisions (hit or stand) based on the current game state.
+    *   **Use Case:** Suitable for training agents on basic Blackjack strategy and direct decision-making.
+
+*   **`blackjack_env_thinking.py` (Blackjack with Windowed Decision Making & Counterfactuals):**
+    *   **Gameplay:** A more complex version designed for agents that produce long interaction sequences, including "thinking" steps.
+    *   **Windowed Decision Making:** Breaks down long interaction sequences into manageable segments or "windows" for training. This allows the agent to generate detailed reasoning or "thinking" within each step before committing to an action.
+    *   **Local Alternative Generation:** At each decision point, the environment can prompt the LLM to generate multiple alternative continuations or lines of thought (`_sample_response` generating `G` alternatives).
+    *   **Value-Based Pruning:** An internal value function (`_estimate_value`) is used to assess the long-term quality of these alternatives, allowing the environment to select the most promising path (`select_best_index`). This helps manage the complexity of long "thinking" blocks.
+    *   **Counterfactual Data for Training (GRPO):** The environment packages the chosen path along with the discarded alternatives. This counterfactual data (what could have happened) is valuable for advanced training techniques like Generalized Rejection Policy Optimization (GRPO), enabling the model to learn from its "mistakes" or less optimal choices within its reasoning process.
+    *   **Context Management:** Implements context length truncation to manage potentially very long interaction histories generated during the thinking process.
+    *   **Use Case:** Ideal for training LLMs that engage in explicit multi-step reasoning before action, and for research into methods that leverage counterfactual reasoning paths.
+
+---
+
+## 9. Training with the Example Trainer
+
+The `example_trainer/` directory provides `grpo.py`, a script demonstrating integration with Atropos using the GRPO algorithm. The main `README.md` also mentions Axolotl integration.
+
+**Note:** `grpo.py` is a *reference example* for API integration and basic setup, *not* optimized for large-scale training. It uses `vLLM` for inference (simulated data generation) and `transformers` for training.
+
+### 9.1. Prerequisites
+
+1.  Python 3.8+ (Python 3.10+ recommended for Atropos overall).
+2.  Running Atropos API server (default: `http://localhost:8000`). Accessible via `run-api`.
+3.  Required Python packages: `torch`, `transformers`, `vllm`, `pydantic`, `numpy`, `requests`, `tenacity`, `wandb` (optional). Install via `pip install -r example_trainer/requirements.txt` or `pip install -e .[examples]`.
+4.  A running Atropos environment (e.g., `python environments/gsm8k_server.py serve --slurm False`).
+
+### 9.2. Setup
+
+1.  Clone the Atropos repository.
+2.  Install dependencies (see Prerequisites).
+3.  Start the Atropos API: `run-api`.
+4.  Start an environment connected to the API (e.g., GSM8K example above).
+
+### 9.3. Configuration (`grpo.py`)
+
+Configuration is managed via the `TrainingConfig` Pydantic model within `grpo.py`.
+
+**Key Parameters:**
+
+*   `model_name`: Hugging Face model identifier (e.g., `"Qwen/Qwen2.5-1.5B-Instruct"`).
+*   `training_steps`: Total optimization steps.
+*   `batch_size` / `gradient_accumulation_steps`: Control effective batch size.
+*   `lr`: Learning rate.
+*   `save_path`: Directory for model checkpoints (default: `./trained_model_checkpoints`).
+*   `vllm_port`: Port for the script's vLLM inference server instance.
+*   `vllm_restart_interval`: Steps between saving checkpoints and restarting vLLM with updated weights.
+*   `use_wandb`: Enable/disable Weights & Biases logging.
+*   `wandb_project`: W&B project name (required if `use_wandb=True`).
+*   `wandb_group`: Optional W&B group name.
+
+**API Endpoints:** Assumes API at `http://localhost:8000`. Modify `register_trainer` and `get_batch` functions if different.
+
+### 9.4. Running the Example
+
+Navigate to the project root and run:
+
+```bash
+python example_trainer/grpo.py
+```
+
+### 9.5. Output
+
+*   **Console Logs:** Training progress (loss, logp), vLLM status.
+*   **Checkpoints:** Saved periodically in `save_path`. `final_model` directory upon completion.
+*   **WandB:** Logs sent to W&B if enabled (link printed to console).
+*   `temp.json`: Raw data from the last fetched batch (for debugging).
+
+---
+
+## 10. Core Library (`atroposlib`)
+
+The `atroposlib/` directory contains the core framework components.
+
+### 10.1. Base Environment (`atroposlib.envs.base.BaseEnv`)
+
+This class provides the foundation for creating custom RL environments. Subclass `BaseEnv` and implement/override methods as needed.
+
+**Core Methods to Implement:**
+
+*   **`async def setup(self)`**: Called once at the start. Use for initial setup (loading data, models, etc.).
+*   **`async def get_next_item(self) -> Item`**: Returns the next data item (prompt, state) for trajectory collection. Return `None` to pause the worker if no items are ready. `Item` is typically a Pydantic model defined by the environment.
+*   **`async def collect_trajectory(self, item: Item) -> Tuple[Any | None, List[Item]]`**: Defines logic for *one* trajectory collection step based on `item`. The base class runs this in parallel (`group_size` times). Returns a tuple: `(collected_data_for_this_step, list_of_new_backlog_items)`. The collected data can be any type suitable for later processing.
+*   **`async def evaluate(self, *args, **kwargs)`**: Called periodically (`steps_per_eval`) for evaluation runs. Implement your evaluation logic here. The base class provides `self.eval_workers` for parallel tasks.
+
+**Optional Methods to Override:**
+
+*   **`async def collect_trajectories(self, item: Item) -> Tuple[Union[Optional[ScoredDataGroup], List[Optional[ScoredDataGroup]], List[Any | None]], List[Item]]`**: Override this *instead* of `collect_trajectory` for custom batch generation logic (generating the whole group at once). `ScoredDataGroup` is a structure usually containing prompts, responses, and scores.
+*   **`async def postprocess_histories(self, trajectories: Union[Optional[ScoredDataGroup], List[Optional[ScoredDataGroup]]]) -> Union[Optional[ScoredDataGroup], List[Optional[ScoredDataGroup]]]`**: Called after `collect_trajectories` and before sending data to the server. Use for final processing, scoring, filtering, or formatting of the collected group data.
+*   **`async def wandb_log(self, wandb_metrics: Optional[Dict] = None)`**: Called periodically for W&B logging. Add custom metrics to `wandb_metrics`. **Crucially, call `await super().wandb_log(wandb_metrics)`** at the end to include base metrics and rollouts.
+*   **`save_checkpoint(self, step, data=None)`**: Called automatically by the server based on `checkpoint_interval`. Saves the provided `data` dict (populated with environment state) to JSON. Override to customize *what* or *how* data is saved.
+*   **`@classmethod config_init(cls) -> Tuple[BaseEnvConfig, Union[ServerBaseline, List[APIServerConfig]]]`**: Used by CLI `serve` command setup. Returns initial `BaseEnvConfig` (#10.2.1-base-environment-config), `ServerBaseline` (#10.2.3-server-baseline-config), and server config(s) (e.g., `APIServerConfig` #10.2.4-openai-server-config). Override for custom default CLI configurations. Default returns `cls.env_config_cls(), ServerBaseline()`.
+*   **`async def cleanup(self)`**: Called after each item processing (`handle_env`). Use for per-item cleanup if needed (rarely required).
+
+**Provided Functionality:**
+
+*   **Parallel Trajectory Collection:** Base `collect_trajectories` handles running `collect_trajectory` in parallel.
+*   **Server Interaction:** Handles registration, config fetching, data sending (with retries via `handle_send_to_api`), status updates.
+*   **WandB Integration:** Setup, logging hook (`wandb_log`), rollout table helpers (`add_rollouts_for_wandb`, `create_rollout_table`).
+*   **Checkpointing:** Automatic triggering via server (`checkpoint_interval`), `save_checkpoint` method, automatic loading via `load_checkpoint(self)` on startup if `curr_step > 0`.
+*   **Worker Management:** Asynchronous task management (`add_train_workers`, `handle_env`).
+*   **Performance Monitoring:** Tracks and logs task durations, worker counts, etc.
+*   **CLI Integration:** `cli()` class method using `pydantic-cli` for easy `serve` commands. See `get_cli_serve_config_cls` and `get_cli_process_config_cls`.
+
+### 10.2. Configuration Options (`atroposlib`)
+
+Configuration is primarily managed via Pydantic models, often exposed through a CLI (`pydantic-cli`).
+
+#### 10.2.1. Base Environment Config (`atroposlib.envs.base.BaseEnvConfig`)
+
+| Parameter                        | Type                     | Default                                         | Description                                                                                                |
+| :------------------------------- | :----------------------- | :---------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| `group_size`                     | `int`                    | `4`                                             | Number of responses grouped for scoring.                                                                   |
+| `max_num_workers`                | `int`                    | `-1`                                            | Max workers. `-1` calculates from `max_num_workers_per_node`.                                              |
+| `max_eval_workers`               | `int`                    | `16`                                            | Max workers for evaluation.                                                                                |
+| `max_num_workers_per_node`       | `int`                    | `8`                                             | Max workers per node.                                                                                      |
+| `steps_per_eval`                 | `int`                    | `100`                                           | Steps between evaluations.                                                                                 |
+| `max_token_length`               | `int`                    | `2048`                                          | Max token length for generations.                                                                          |
+| `eval_handling`                  | `EvalHandlingEnum`       | `EvalHandlingEnum.STOP_TRAIN`                   | How evals affect training workers (`STOP_TRAIN`, `LIMIT_TRAIN`, `NONE`).                                     |
+| `eval_limit_ratio`               | `float`                  | `0.5`                                           | Ratio of training workers limited during evals (if `eval_handling` is `LIMIT_TRAIN`).                      |
+| `inference_weight`               | `float`                  | `1.0`                                           | Inference weight (set by trainer/policy). `-1` ignores if handled specially.                               |
+| `batch_size`                     | `int`                    | `-1`                                            | Training batch size (usually set by trainer via API).                                                      |
+| `max_batches_offpolicy`          | `int`                    | `3`                                             | Max number of off-policy batches queued.                                                                   |
+| `tokenizer_name`                 | `str`                    | `"NousResearch/DeepHermes-3-Llama-3-3B-Preview"` | Default Hugging Face tokenizer.                                                                            |
+| `use_wandb`                      | `bool`                   | `True`                                          | Enable/disable W&B logging.                                                                                |
+| `rollout_server_url`             | `str`                    | `"http://localhost:8000"`                       | URL of the central rollout server (FastAPI).                                                               |
+| `total_steps`                    | `int`                    | `1000`                                          | Total steps to run (can be overridden by trainer).                                                         |
+| `wandb_name`                     | `str | None`             | `None`                                          | W&B run name (often set automatically).                                                                    |
+| `num_rollouts_to_keep`           | `int`                    | `32`                                            | Number of full rollouts to display on W&B table.                                                           |
+| `num_rollouts_per_group_for_logging` | `int`                | `1`                                             | Rollouts per group to keep for logging. `-1` keeps all.                                                    |
+| `ensure_scores_are_not_same`     | `bool`                   | `True`                                          | Ensure scores in a group aren't identical (reject group if they are). Set `False` if identical scores are valid. |
+| `data_path_to_save_groups`       | `str | None`             | `None`                                          | If set, save generated/scored groups to this JSONL file path.                                              |
+| `min_items_sent_before_logging`  | `int`                    | `2`                                             | Min API sends before logging metrics. `<=0` logs every time.                                               |
+
+#### 10.2.2. Server Manager Config (`atroposlib.envs.server_handling.server_manager.ServerManagerConfig`)
+
+Settings for the `ServerManager` which handles inference server interactions.
+
+| Parameter | Type    | Default | Description                                       |
+| :-------- | :------ | :------ | :------------------------------------------------ |
+| `slurm`   | `bool`  | `True`  | Whether the environment is running on SLURM.      |
+| `testing` | `bool`  | `False` | If `True`, uses mock OpenAI data (for testing). |
+
+#### 10.2.3. Server Baseline Config (`atroposlib.envs.server_handling.server_manager.ServerBaseline`)
+
+Default settings used by `ServerManager` if specific `APIServerConfig` list isn't provided (e.g., for local/SLURM discovery).
+
+| Parameter                  | Type    | Default   | Description                                                                                             |
+| :------------------------- | :------ | :-------- | :------------------------------------------------------------------------------------------------------ |
+| `timeout`                  | `int`   | `1200`    | Request timeout (seconds).                                                                              |
+| `num_max_requests_at_once` | `int`   | `512`     | Max concurrent requests (training). Divide by generation `n` param.                                     |
+| `num_requests_for_eval`    | `int`   | `64`      | Max concurrent requests (evaluation).                                                                   |
+| `model_name`               | `str`   | `default` | Default model name for inference calls.                                                                 |
+| `rolling_buffer_length`    | `int`   | `1000`    | Buffer length for server metrics (timings, attempts).                                                   |
+
+#### 10.2.4. OpenAI Server Config (`atroposlib.envs.server_handling.openai_server.APIServerConfig`)
+
+Configuration for individual OpenAI-compatible API servers (official OpenAI, local vLLM/SGLang, etc.). A list of these can be passed to the environment.
+
+| Parameter                  | Type         | Default   | Description                                                                                             |
+| :------------------------- | :----------- | :-------- | :------------------------------------------------------------------------------------------------------ |
+| `api_key`                  | `str | None` | `None`    | API key. For local servers without authentication, a non-empty string (e.g., "x") can be used. If `None`|
+|                            |              |           | when targeting services like official OpenAI, the underlying client library typically attempts to use an|
+|                            |              |           | environment variable (e.g., `OPENAI_API_KEY`).                                                          |
+| `base_url`                 | `str | None` | `None`    | API endpoint URL. `None` for official OpenAI. Local: e.g., `http://localhost:9004/v1`.                  |
+| `timeout`                  | `int`        | `1200`    | Request timeout (seconds).                                                                              |
+| `num_max_requests_at_once` | `int`        | `512`     | Max concurrent requests (training). Divide by generation `n`.                                           |
+| `num_requests_for_eval`    | `int`        | `64`      | Max concurrent requests (evaluation).                                                                   |
+| `model_name`               | `str`        | `default` | **Required.** Model name for this server (e.g., `"gpt-4"`, `"NousResearch/..."`).                       |
+| `rolling_buffer_length`    | `int`        | `1000`    | Buffer length for this server's metrics.                                                                |
+
+---
+
+## 11. Debugging Tools
+
+The trajectory-handler and environment framework provide tools for local debugging and data generation:
+
+*   **Flexible Model Provider Support:** Natively supports any OpenAI API-compliant provider. Provide `base_url` and `api_key` for local testing/running.
+*   **View Run (`view-run`):** Launch a Gradio UI after starting the API (`run-api`) and an environment (e.g., `python environments/gsm8k_server.py serve`). Use `view-run` command to inspect batches of rollouts visually.
+*   **Offline Data Generation:**
+    *   `atropos-sft-gen`: Collect rollouts and format for Supervised Fine-Tuning (SFT).
+        *   Run API and environment first.
+        *   Example: `atropos-sft-gen path/to/output.jsonl --tokenizer Qwen/Qwen2.5-1.5B-Instruct`
+        *   Controls for rejection sampling available (see `atropos-sft-gen -h`).
+    *   `atropos-dpo-gen`: Collect rollouts and format for Direct Preference Optimization (DPO).
+        *   Similar usage to `atropos-sft-gen`. Check `atropos-dpo-gen -h` for options.
+*   **Server-free local testing (`process` subcommand):** For quick testing of a single environment in isolation. Saves generated rollout groups to a `.jsonl` file and generates a static HTML page for visualization.
+    *   Example: `python environments/gsm8k_server.py process --env.data_path_to_save_groups gsm8k.jsonl`
+    *   Can customize inference endpoint (e.g., for Gemini models). See `python <env_script_name>.py process --help`.
+*   **Dataset Environment Debugger:** (`python -m atroposlib.cli.dataset_env_debugger`) Allows local running of dataset environments with Hugging Face models for detailed inspection. See `environments/dataset_environment/README.md` for usage.
+
+---
+
+## 12. Contributing to Atropos
+
+We welcome contributions! Please see `CONTRIBUTING.md` for detailed guidelines.
+
+### 12.1. How We Develop
+
+*   **GitHub:** Used for hosting, issue tracking, and Pull Requests (PRs).
+*   **GitHub Flow:** Development happens via PRs merged into the `main` branch.
+
+### 12.2. Getting Started
+
+1.  **Fork the Repository:** Create your own fork of the `NousResearch/atropos` repository on GitHub.
+2.  **Clone Your Fork:**
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/atropos.git
+    cd atropos
+    ```
+3.  **Setup Dev Env:** Ensure you have Python 3.10+. Consider using a virtual environment:
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate # On Windows: .venv\Scripts\activate
+    pip install -e ".[dev]"   # Installs core + dev dependencies
+    ```
+4.  **Install Pre-commit Hooks:**
+    ```bash
+    pre-commit install
+    ```
+    (This runs linters/formatters automatically on commit)
+
+### 12.3. Running Tests
+
+Atropos uses `pytest` for testing.
+```bash
+# Ensure development dependencies are installed (pip install -e .[dev])
+pytest
+```
+Ensure all tests pass before submitting a PR.
+
+### 12.4. How to Contribute
+
+*   **Reporting Bugs:**
+    *   Use the **Bug Report** issue template on GitHub Issues.
+    *   Provide comprehensive details: a clear summary, steps to reproduce, expected vs. actual behavior, environment information (OS, Python version, Atropos version), and any relevant error messages or logs.
+
+*   **Suggesting Enhancements:**
+    *   Use the **Feature Request** issue template on GitHub Issues.
+    *   It's often a good idea to discuss the proposed enhancement in the issue before starting significant work.
+
+*   **Submitting Changes (Pull Requests):**
+    1.  **Create a Branch:** Create a new branch from `main` for your changes:
+        ```bash
+        git checkout -b your-branch-name main
+        ```
+    2.  **Make Changes:** Implement your features or bug fixes. Write clear, maintainable code.
+    3.  **Add Tests:** If you're adding new features or fixing bugs, please include relevant tests.
+    4.  **Update Documentation:** If your changes affect APIs, behavior, or require new setup steps, update relevant READMEs, docstrings, or other documentation (like this `llms.txt` file if applicable).
+    5.  **Test Your Changes:** Ensure your changes pass all tests:
+        ```bash
+        pytest
+        ```
+    6.  **Format and Lint:** Ensure your code adheres to our style guidelines. Pre-commit hooks (which run tools like `black`, `flake8`, `isort`) will run automatically on commit. You can also run them manually:
+        ```bash
+        pre-commit run --all-files
+        ```
+        Address any `flake8` errors manually if they are not automatically fixed.
+    7.  **Commit Your Changes:** Use Conventional Commits format for your messages:
+        ```bash
+        git add .
+        git commit -m "feat: Your descriptive commit message" # Examples: fix:, docs:, style:, refactor:, test:, chore:
+        ```
+    8.  **Push to Your Fork:**
+        ```bash
+        git push origin your-branch-name
+        ```
+    9.  **Open a Pull Request:** Submit a PR from your fork's branch to the `NousResearch/atropos:main` branch on GitHub.
+    10. **Follow the PR Template:** The repository has a general Pull Request template (`.github/pull_request_template.md`). Please ensure you fill out all applicable sections of this template to help reviewers understand your changes. The template includes guidance for different types of contributions, such as new RL environments or other code changes.
+    11. **Describe Your PR:** Provide a clear title and a detailed description of your changes. Link any relevant issues (e.g., "Closes #123").
+
+### 12.5. Code Style
+
+*   PEP 8 is enforced by `black`, `flake8`, `isort` via `pre-commit`.
+*   Manual check/fix:
+    ```bash
+    pre-commit run --all-files
+    ```
+*   Address `flake8` errors manually if needed.
+
+### 12.6. License for Contributions
+
+By contributing to Atropos, you agree that your contributions will be licensed under the **MIT License**, consistent with the project's overall license.
+
+### 12.7. Environment Contribution Guidelines
+
+*   **Legal and GitHub Compliance:** Ensure any contributed environment or related content is legal and complies with GitHub's Terms of Service.
+*   **Explicit Content:** Environments containing explicit content may be considered if they are clearly labeled, serve a clear research or educational purpose, and are legally compliant. Discuss such contributions via an issue first.
+*   **Game Environments:** Contributions of game environments are welcome.
+    *   Avoid reverse-engineering proprietary commercial games.
+    *   Ensure you have the rights to use any assets (graphics, sound, text). Open-source or permissively licensed assets are preferred.
+*   **Ethical Considerations:** Avoid environments that promote or glorify harm, discrimination, or illegal activities without a strong, clearly articulated educational or research justification.
+*   When in doubt, or if your environment might be controversial, please open an issue to discuss it with the maintainers *before* submitting a PR.
+
+### 12.8. Contributor Code of Conduct
+
+All contributors are expected to adhere to the project's [Contributor Code of Conduct](CODE_OF_CONDUCT.md). Please familiarize yourself with it to ensure a respectful and collaborative environment for everyone.
+
+---
+
+## 13. Citation
+
+If Atropos is helpful in your work, please cite:
+
+```latex
+@misc{atropos,
+  title = {{Atropos - An Async First Environment Rollout Controller}},
+  author = {Dakota Mahan, Roger Jin, Teknium, Shannon Sands, Artem Yatsenko, Jai Suphavadeeprasit, Karan Malhotra, Chen Guang, Joe Li},
+  url = {https://www.github.com/NousResearch/Atropos},
+  month = {4},
+  year = {2025},
+  version = {0.1},
+}
+```
+
+---
+
+## 14. License
+
+Atropos is licensed under the MIT License. See the `LICENSE` file for details.

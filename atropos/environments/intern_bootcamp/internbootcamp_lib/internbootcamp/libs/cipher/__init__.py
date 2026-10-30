@@ -1,0 +1,106 @@
+from .BaseEnvironment import *
+
+from .CeaserCipherEnvironment import *
+cipher_env_list = [CeaserCipherEnvironment]
+
+from .TrifidCipherEnvironment import *
+cipher_env_list.append(TrifidCipherEnvironment)
+
+from .Asc2Environment import *
+cipher_env_list.append(Asc2Environment)
+
+from .AtbashCipherEnvironment import *
+cipher_env_list.append(AtbashCipherEnvironment)
+
+from .DoubleCeaserEnvironment import *
+cipher_env_list.append(DoubleCeaserEnvironment)
+
+from .FourSquareCipherEnvironment import FourSquareCipherEnvironment
+cipher_env_list.append(FourSquareCipherEnvironment)
+
+from .TapCodeEnvironment import TapCodeEnvironment
+cipher_env_list.append(TapCodeEnvironment)
+
+
+### kor ###
+from .KorADFGVXCipherEnvironment import KorADFGVXCipherEnvironment
+cipher_env_list.append(KorADFGVXCipherEnvironment)
+
+from .KorAffineCipherEnvironment import KorAffineCipherEnvironment
+cipher_env_list.append(KorAffineCipherEnvironment)
+
+from .KorAlbertiCipherEnvironment import KorAlbertiCipherEnvironment
+cipher_env_list.append(KorAlbertiCipherEnvironment)
+
+from .KorBifidCipherEnvironment import KorBifidCipherEnvironment
+cipher_env_list.append(KorBifidCipherEnvironment)
+
+from .KorCollonCipherEnvironment import KorCollonCipherEnvironment
+cipher_env_list.append(KorCollonCipherEnvironment)
+
+from .KorDigrafidCipherEnviroment import KorDigrafidCipherEnviroment
+cipher_env_list.append(KorDigrafidCipherEnviroment)
+
+from .KorECCCipherEnvironment import KorECCCipherEnvironment
+cipher_env_list.append(KorECCCipherEnvironment)
+
+from .KorFourSquareCipherEnvironment import KorFourSquareCipherEnvironment
+cipher_env_list.append(KorFourSquareCipherEnvironment)
+
+from .KorInverseShiftSubstitutionCipherEnvironment import KorInverseShiftSubstitutionCipherEnvironment
+cipher_env_list.append(KorInverseShiftSubstitutionCipherEnvironment)
+
+from .KorJeffersonCipherEnvironment import KorJeffersonCipherEnvironment
+cipher_env_list.append(KorJeffersonCipherEnvironment)
+
+from .KorMorbitCipherEnvironment import KorMorbitCipherEnvironment
+cipher_env_list.append(KorMorbitCipherEnvironment)
+
+from .KorMultiTapPhoneCodeEnvironment import KorMultiTapPhoneCodeEnvironment
+cipher_env_list.append(KorMultiTapPhoneCodeEnvironment)
+
+from .KorPathCipherEnvironment import KorPathCipherEnvironment
+cipher_env_list.append(KorPathCipherEnvironment)
+
+from .KorPhillipsFigureCipherEnvironment import KorPhillipsFigureCipherEnvironment
+cipher_env_list.append(KorPhillipsFigureCipherEnvironment)
+
+from .KorPigpenMasonicCipherEnvironment import KorPigpenMasonicCipherEnvironment
+cipher_env_list.append(KorPigpenMasonicCipherEnvironment)
+
+from .KorPolybiusSquareCipherEnvironment import KorPolybiusSquareCipherEnvironment
+cipher_env_list.append(KorPolybiusSquareCipherEnvironment)
+
+from .KorPortaCipherEnvironment import KorPortaCipherEnvironment
+cipher_env_list.append(KorPortaCipherEnvironment)
+
+from .KorRedefenceFigureCipherEnvironment import KorRedefenceFigureCipherEnvironment
+cipher_env_list.append(KorRedefenceFigureCipherEnvironment)
+
+from .KorRotatingGridCipherEnvironment import KorRotatingGridCipherEnvironment
+cipher_env_list.append(KorRotatingGridCipherEnvironment)   
+
+from .KorSBOXCipherEnvironment import KorSBOXCipherEnvironment
+cipher_env_list.append(KorSBOXCipherEnvironment)
+
+from .KorSHACipherEnvironment import KorSHACipherEnvironment
+cipher_env_list.append(KorSHACipherEnvironment)
+
+from .KorSolitaireCipherEnvironment import KorSolitaireCipherEnvironment
+cipher_env_list.append(KorSolitaireCipherEnvironment)
+
+from .KorTranspositionCipherEnvironment import KorTranspositionCipherEnvironment
+cipher_env_list.append(KorTranspositionCipherEnvironment)
+
+from .KorXORCipherEnvironment import KorXORCipherEnvironment
+cipher_env_list.append(KorXORCipherEnvironment)
+
+from .KorRSACipherEnvironment import KorRSACipherEnvironment
+cipher_env_list.append(KorRSACipherEnvironment)
+
+# 过滤出KorCipher
+kor_cipher_env_list = []
+for env in cipher_env_list:
+    if 'Kor' in env.__name__:
+        kor_cipher_env_list.append(env)
+### kor ###

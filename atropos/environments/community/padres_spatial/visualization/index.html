@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MVP Spatial RL Visualization</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="info">
+        <h1>MVP Spatial RL Visualization</h1>
+        <p>Status: <span id="status">Connecting...</span></p>
+        <p>Task: <span id="taskDescription">N/A</span></p>
+    </div>
+    <div id="visualizationContainer">
+        <!-- Canvas will be inserted here by Three.js -->
+    </div>
+
+    <!-- Three.js Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Optional: OrbitControls for camera interaction -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script type="module" src="main.js"></script>
+</body>
+</html>
