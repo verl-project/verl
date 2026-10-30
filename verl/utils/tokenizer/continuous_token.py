@@ -853,6 +853,10 @@ def require_token_id(tokenizer: Any, token: str) -> int:
         token_id = token_id[0]
     if not isinstance(token_id, int) or token_id < 0:
         raise ValueError(f"Tokenizer returned invalid id for required token {token!r}: {token_id!r}")
+    # HF tokenizers that have an unk token map unknown strings to ``unk_token_id`` instead of None.
+    unk_token_id = getattr(tokenizer, "unk_token_id", None)
+    if isinstance(unk_token_id, int) and token_id == unk_token_id and token != getattr(tokenizer, "unk_token", None):
+        raise ValueError(f"Tokenizer does not define required token {token!r} (it maps to unk_token_id)")
     return token_id
 
 

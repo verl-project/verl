@@ -35,6 +35,7 @@ from .continuous_token import (
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
     VLContinuousTokenBuilder,
+    require_token_id,
 )
 from .deepseek import DeepSeekV4ContinuousTokenBuilder
 
@@ -249,6 +250,22 @@ def create_continuous_token_builder(
         hf_model_type=hf_model_type,
         has_multimodal_processor=has_mm_processor,
     )
+    if (
+        _normalize_model_family(model_family) == ContinuousTokenModelFamily.AUTO
+        and resolved_family in _CHATML_TEXT_FAMILIES
+        and not has_mm_processor
+        and not _tokenizer_defines_token(tokenizer, "<|im_end|>")
+    ):
+        # config.json model_type "qwen2" is shared by checkpoints that do not use the Qwen
+        # ChatML template (e.g. DeepSeek-R1-Distill-Qwen). Auto inference must not pick a
+        # builder the tokenizer cannot satisfy; an explicit model_family still raises.
+        logger.warning(
+            "Auto-resolved Continuous Token family %s requires '<|im_end|>' but the tokenizer does not "
+            "define it; falling back to %s.",
+            resolved_family,
+            ContinuousTokenModelFamily.DEFAULT,
+        )
+        resolved_family = ContinuousTokenModelFamily.DEFAULT
     builder_cls = get_continuous_token_builder_class(resolved_family)
 
     if has_mm_processor:
@@ -308,6 +325,24 @@ def create_continuous_token_builder(
         )
     logger.info("Creating Continuous Token builder: family=%s class=%s", resolved_family, builder_cls)
     return builder_cls(tokenizer, chat_template_kwargs=chat_template_kwargs, **builder_kwargs)
+
+
+_CHATML_TEXT_FAMILIES = frozenset(
+    {
+        ContinuousTokenModelFamily.QWEN,
+        ContinuousTokenModelFamily.QWEN25,
+        ContinuousTokenModelFamily.QWEN3,
+        ContinuousTokenModelFamily.QWEN35,
+    }
+)
+
+
+def _tokenizer_defines_token(tokenizer: Any, token: str) -> bool:
+    try:
+        require_token_id(tokenizer, token)
+    except ValueError:
+        return False
+    return True
 
 
 def _is_multimodal_processor(processor: Any | None) -> bool:
