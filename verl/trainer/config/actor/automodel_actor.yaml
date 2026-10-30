@@ -1,0 +1,26 @@
+# automodel actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+
+  # automodel optimizer config
+  - ../optim@optim: automodel
+
+  # automodel engine config
+  - ../engine@automodel: automodel
+
+  # automodel actor config, inheriting from trainer/config/actor/actor.yaml
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl.workers.config.AutomodelActorConfig
+
+# Training strategy set to 'automodel' (nemo_automodel: FSDP2/MegatronFSDP/DDP backend)
+strategy: automodel
+
+# Whether to remove padding tokens in inputs during training
+use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+
+# Whether to use the log probabilities computed by the rollout engine
+use_rollout_log_probs: false

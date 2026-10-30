@@ -14,10 +14,99 @@
 
 """Utility functions for the Automodel engine integration."""
 
+import logging
+from pathlib import Path
+
 import torch
 import torch.distributed
 
 from verl.utils.device import get_device_id, get_torch_device
+
+
+def ensure_vendored_nemo_automodel() -> bool:
+    """Make the vendored ``third_party/automodel`` checkout importable.
+
+    The training environment may not install ``nemo_automodel`` (NeMo AutoModel).
+    When the job ships the vendored checkout, put it on ``sys.path`` BEFORE the
+    automodel engine module runs its top-level ``nemo_automodel`` imports.
+
+    This is a no-op when ``nemo_automodel`` is already importable
+    (site-packages) or when the vendored checkout is absent (pip-installed
+    verl without the repo tree). Only the package itself comes from the
+    checkout; its Python dependencies (transformers, megatron-fsdp, torchao,
+    torchdata, ...) must already be installed.
+
+    Returns:
+        True if ``nemo_automodel`` is importable after this call.
+    """
+    import importlib.util
+    import sys
+
+    # Must run BEFORE the early-return below: nemo_automodel may already be
+    # importable via PYTHONPATH (the runtime_env sets it, and with a zip
+    # working_dir the relative entry resolves correctly), in which case the
+    # vendored-path insert is skipped -- but the torchao stub is still needed.
+    _ensure_torchao_stub(Path(__file__).resolve().parent)
+
+    try:
+        if importlib.util.find_spec("nemo_automodel") is not None:
+            _apply_compat_patches()
+            return True
+    except (ImportError, ValueError):
+        # Broken installation: fall through and try the vendored checkout.
+        pass
+
+    # <repo>/verl/workers/engine/automodel/utils.py -> <repo> (4 levels up).
+    # With the Ray working_dir layout this resolves to the uploaded package
+    # root regardless of the worker process cwd, unlike a relative PYTHONPATH.
+    vendored = Path(__file__).resolve().parents[4] / "third_party" / "automodel"
+    if (vendored / "nemo_automodel" / "__init__.py").is_file():
+        sys.path.insert(0, str(vendored))
+        _apply_compat_patches()
+        return True
+    return False
+
+
+def _apply_compat_patches() -> None:
+    """Apply verl-side runtime compat patches to nemo_automodel (best-effort).
+
+    The vendored automodel checkout stays upstream-clean; compatibility fixes
+    that upstream has not merged yet live in compat_patches.py (same pattern as
+    the sglang weight_sync_patches). Runs on the driver and every worker that
+    imports the automodel engine, before nemo_automodel submodules are used.
+    """
+    try:
+        from .compat_patches import apply_automodel_compat_patches
+
+        apply_automodel_compat_patches()
+    except Exception:  # pragma: no cover - never block engine startup
+        import traceback
+
+        logging.getLogger(__name__).warning("automodel compat patches failed to apply:\n%s", traceback.format_exc())
+
+
+def _ensure_torchao_stub(engine_dir: Path) -> None:
+    """Satisfy nemo_automodel's top-level torchao imports when torchao is absent.
+
+    The vendored nemo_automodel imports torchao unconditionally from
+    components/quantization/qat.py and recipes/llm/train_ft.py even when
+    QAT / Float8 training are unused. When the environment does not provide
+    torchao, fall back to the stub package shipped next to this file
+    (_torchao_stub/torchao): imports succeed, every stubbed symbol raises on
+    use, and HAVE_TORCHAO-style probes stay False because the stub never
+    provides Float8LinearConfig / convert_to_float8_training.
+    """
+    import importlib.util
+    import sys
+
+    try:
+        if importlib.util.find_spec("torchao") is not None:
+            return
+    except (ImportError, ValueError):
+        pass
+    stub_dir = engine_dir / "_torchao_stub"
+    if (stub_dir / "torchao" / "__init__.py").is_file():
+        sys.path.insert(0, str(stub_dir))
 
 
 def get_dp_rank(device_mesh, include_cp=False):
@@ -65,19 +154,32 @@ def maybe_fully_shard_optimizer(model, optimizer, distributed_config):
 
 
 def build_distributed_config_from_engine_config(engine_config, world_size):
-    """Build v5 distributed config, device_mesh, and moe_mesh from engine config.
+    """Build the automodel DistributedSetup (new sidecar API) from engine config.
+
+    Replaces the removed public ``create_device_mesh`` API (upstream #4032
+    moved parallelization into model sidecars consumed via
+    ``DistributedSetup``/``MeshContext``). Returns the setup alongside the
+    legacy triple so existing call sites can keep reading
+    distributed_config / device_mesh / moe_mesh directly.
 
     Args:
         engine_config: AutomodelEngineConfig instance.
         world_size: Total number of processes in the job.
 
     Returns:
-        Tuple of (distributed_config, device_mesh, moe_mesh).
+        Tuple of (distributed_setup, distributed_config, device_mesh, moe_mesh).
     """
-    from nemo_automodel.components.distributed.config import DDPConfig, FSDP2Config, MegatronFSDPConfig
-    from nemo_automodel.components.distributed.mesh_utils import create_device_mesh
+    from nemo_automodel.components.distributed.config import (
+        DDPConfig,
+        DistributedSetup,
+        FSDP2Config,
+        MegatronFSDPConfig,
+        MoEParallelizerConfig,
+    )
+    from nemo_automodel.components.distributed.mesh import ParallelismSizes
 
     strategy = engine_config.distributed_strategy
+    moe_parallel_config = None
 
     if strategy == "fsdp2":
         from torch.distributed.fsdp import MixedPrecisionPolicy
@@ -111,28 +213,48 @@ def build_distributed_config_from_engine_config(engine_config, world_size):
     else:
         raise ValueError(f"Unsupported distributed_strategy: {strategy}")
 
-    device_mesh, moe_mesh = create_device_mesh(
-        distributed_config,
-        tp_size=engine_config.tp_size,
-        pp_size=engine_config.pp_size,
-        cp_size=engine_config.cp_size,
-        ep_size=engine_config.ep_size,
-        dp_replicate_size=engine_config.dp_replicate_size,
+    # MoE parallelizer config lives on the DistributedSetup (upstream now
+    # rejects a separate ``moe_config=`` kwarg on from_pretrained).
+    if engine_config.ep_size > 1:
+        moe_kwargs = dict(engine_config.moe_config) if engine_config.moe_config else {}
+        if hasattr(distributed_config, "mp_policy"):
+            moe_kwargs.setdefault("mp_policy", distributed_config.mp_policy)
+
+        moe_parallel_config = MoEParallelizerConfig(**moe_kwargs)
+
+    distributed_setup = DistributedSetup.build(
+        strategy=distributed_config,
+        parallelism_sizes=ParallelismSizes(
+            tp_size=engine_config.tp_size,
+            pp_size=engine_config.pp_size,
+            cp_size=engine_config.cp_size,
+            ep_size=engine_config.ep_size,
+            dp_replicate_size=engine_config.dp_replicate_size,
+        ),
+        moe_parallel_config=moe_parallel_config,
+        activation_checkpointing=engine_config.activation_checkpointing,
         world_size=world_size,
     )
 
-    return distributed_config, device_mesh, moe_mesh
+    mesh_context = distributed_setup.mesh_context
+    return (
+        distributed_setup,
+        distributed_setup.strategy_config,
+        mesh_context.device_mesh,
+        mesh_context.moe_mesh,
+    )
 
 
-def build_automodel_model(model_config, engine_config, distributed_config, device_mesh, moe_mesh):
+def build_automodel_model(model_config, engine_config, distributed_setup):
     """Build a model using NeMoAutoModelForCausalLM.from_pretrained().
 
     Args:
         model_config: HFModelConfig with model path and settings.
         engine_config: AutomodelEngineConfig with distributed settings.
-        distributed_config: FSDP2Config, MegatronFSDPConfig, or DDPConfig instance.
-        device_mesh: Pre-created device mesh (or None for DDP).
-        moe_mesh: Pre-created MoE mesh (or None).
+        distributed_setup: Automodel DistributedSetup (mesh + strategy + AC
+            policy). Upstream removed the separate device_mesh / moe_mesh /
+            distributed_config / activation_checkpointing kwargs (#4032) and
+            now rejects them with a TypeError.
 
     Returns:
         A HuggingFace model with Automodel's distributed infrastructure applied.
@@ -144,7 +266,9 @@ def build_automodel_model(model_config, engine_config, distributed_config, devic
     if engine_config.enable_fp8:
         from nemo_automodel.components.quantization.fp8 import FP8Config
 
-        kwargs["fp8_config"] = FP8Config()
+        # NOTE: FP8Config.enabled defaults to False and apply_fp8_to_model
+        # early-returns on it -- pass enabled=True or the flag is a no-op.
+        kwargs["fp8_config"] = FP8Config(enabled=True)
 
     if engine_config.enable_compile:
         from nemo_automodel.components.utils.compile_utils import CompileConfig
@@ -165,28 +289,22 @@ def build_automodel_model(model_config, engine_config, distributed_config, devic
         backend_kwargs = dict(engine_config.backend_config)
         kwargs["backend"] = BackendConfig(**backend_kwargs)
 
-    # MoE config for MoEParallelizerConfig
-    if engine_config.ep_size > 1:
-        from nemo_automodel.components.moe.config import MoEParallelizerConfig
-
-        moe_kwargs = dict(engine_config.moe_config) if engine_config.moe_config else {}
-        if hasattr(distributed_config, "mp_policy"):
-            moe_kwargs.setdefault("mp_policy", distributed_config.mp_policy)
-
-        kwargs["moe_config"] = MoEParallelizerConfig(**moe_kwargs)
-
     kwargs["attn_implementation"] = engine_config.attn_implementation
 
     from verl.utils.torch_dtypes import PrecisionType
 
     kwargs["torch_dtype"] = PrecisionType.to_dtype(engine_config.model_dtype)
 
+    # Apply user config overrides (e.g. num_nextn_predict_layers=0 to skip
+    # building MTP modules that do not participate in RL training).  They
+    # flow through get_hf_config -> AutoConfig.from_pretrained, which applies
+    # unknown kwargs as config attributes.
+    for _k, _v in (getattr(model_config, "override_config", None) or {}).items():
+        kwargs[_k] = _v
+
     model = NeMoAutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_config.path,
-        device_mesh=device_mesh,
-        moe_mesh=moe_mesh,
-        distributed_config=distributed_config,
-        activation_checkpointing=engine_config.activation_checkpointing,
+        distributed_setup=distributed_setup,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )

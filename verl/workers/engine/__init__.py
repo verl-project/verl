@@ -43,11 +43,27 @@ except ImportError as e:
     VeOmniEngineWithLMHead = None
 
 try:
+    # The automodel engine imports nemo_automodel at module top level, and the
+    # environment may not install it. Make the vendored checkout
+    # (third_party/automodel) importable first; no-op when nemo_automodel is
+    # already installed or the checkout is absent.
+    from .automodel.utils import ensure_vendored_nemo_automodel
+
+    ensure_vendored_nemo_automodel()
     from .automodel import AutomodelEngine, AutomodelEngineWithLMHead
 
     __all__ += ["AutomodelEngine", "AutomodelEngineWithLMHead"]
-except ImportError as e:
-    warnings.warn(f"automodel engine is not available: {e!r}", stacklevel=1)
+except ImportError:
+    # Log the swallowed cause: a silent fallback would otherwise surface
+    # later as "Unknown backend: automodel" in EngineRegistry.get_engine_cls.
+    import logging
+    import traceback
+
+    logging.getLogger(__name__).warning(
+        "AutomodelEngine unavailable (nemo_automodel import failed; actor.strategy=automodel "
+        "will raise 'Unknown backend: automodel'):\n%s",
+        traceback.format_exc(),
+    )
     AutomodelEngine = None
     AutomodelEngineWithLMHead = None
 

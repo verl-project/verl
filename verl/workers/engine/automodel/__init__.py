@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .transformer_impl import AutomodelEngine, AutomodelEngineWithLMHead
+# Bootstrap the vendored nemo_automodel before the top-level import below:
+# transformer_impl imports nemo_automodel at module import time, and this
+# package's __init__ is the only place guaranteed to run first regardless of
+# which submodule gets imported.
+from .utils import ensure_vendored_nemo_automodel
+
+ensure_vendored_nemo_automodel()
+
+from .transformer_impl import AutomodelEngine, AutomodelEngineWithLMHead  # noqa: E402
 
 __all__ = [
     "AutomodelEngine",

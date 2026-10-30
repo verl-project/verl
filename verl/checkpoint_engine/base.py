@@ -575,7 +575,9 @@ async def split_weight_chunks(
         A tuple of the weight chunk metadata and the buffer.
     """
     async for name, weight in ensure_async_iterator(weights):
-        buffer = weight.view(-1).view(torch.uint8)
+        # reshape (not view): stream producers may emit non-contiguous
+        # tensors (e.g. transposed views), which .view(-1) rejects.
+        buffer = weight.reshape(-1).view(torch.uint8)
         chunk_offset = 0
         while chunk_offset < weight.nbytes:
             chunk_size = min(bucket_size, weight.nbytes - chunk_offset)
