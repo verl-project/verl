@@ -958,6 +958,7 @@ trainer:
   checkpoint_callback_class: null
   val_before_train: true
   val_only: false
+  val_bayes_at_n: false
   test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null
