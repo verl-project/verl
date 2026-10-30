@@ -20,7 +20,8 @@ import torch
 from verl.protocol import DataProto
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import compute_advantage
-from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
+from verl.trainer.ppo.v1 import tq_schema
+from verl.trainer.ppo.v1.streaming_dataloader import DAPO_FILTERED_REWARD_COUNTS_KEY
 
 
 class MetricsAggregator:
@@ -180,10 +181,10 @@ def compute_advantage_for_multi_trajectories(
     final_sessions: dict[str, tuple[int, int]] = {}
     row_session_keys = []
     for i, key in enumerate(batch_keys):
-        fields = key.rsplit("_", 2)
-        assert len(fields) == 3, f"Unexpected key format: {key}"
-        uid, session_id, index = fields[0], fields[1], int(fields[2])
-        session_key = f"{uid}_{session_id}"
+        parsed = tq_schema.parse_trajectory_key(key)
+        assert parsed is not None, f"Unexpected key format: {key}"
+        uid, session_id, index = parsed
+        session_key = tq_schema.session_key(uid, session_id)
         row_session_keys.append(session_key)
         if session_key not in final_sessions or final_sessions[session_key][0] < index:
             final_sessions[session_key] = (index, i)

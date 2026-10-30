@@ -972,9 +972,10 @@ trainer:
     trainer_mode: sync
     sync: {}
     colocate_async:
-      num_warmup_batches: 1
+      watermark_batches: 2
     separate_async:
-      num_warmup_batches: 1
+      watermark_batches: 2
+      max_outstanding_batches: 4
       parameter_sync_step: 4
       hybrid_rollout:
         _target_: verl.trainer.config.HybridRolloutSwitchConfig
@@ -989,6 +990,7 @@ trainer:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
       sync_refill_failed_groups: false
+      poll_interval: 2.0
       custom_sampler:
         path: null
         name: null

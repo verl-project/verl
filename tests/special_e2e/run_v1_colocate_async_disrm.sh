@@ -65,7 +65,7 @@ echo "Total GPUs: ${NUM_GPUS} (shared by training / rollout / reward model)"
 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
-    trainer.v1.colocate_async.num_warmup_batches=1 \
+    trainer.v1.colocate_async.watermark_batches=1 \
     transfer_queue.enable=True \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \

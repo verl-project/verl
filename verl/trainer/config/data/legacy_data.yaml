@@ -42,6 +42,8 @@ max_response_length: 512
 train_batch_size: 1024
 
 # Number of prompts fetched from the dataloader per fetch.
+# V1 async trainers and V1 sync trainers with DAPO or sync_refill_failed_groups always use 1 (other values are overridden).
+# Other V1 sync trainers require null, 1, or train_batch_size; null resolves to train_batch_size.
 gen_batch_size: null
 
 # Batch size used during validation. Can be null.

@@ -74,38 +74,43 @@ After defining MyAgentLoop, you can set the agent loop class in config:
 
 For more details, see: :doc:`Agent Loop <advance/agent_loop>`.
 
-I'm doing async training, how do I customize my own replay buffer sampling strategy?
-++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+How do I customize my own replay sampling strategy?
++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-In async training, the agent framework streams generated trajectories into ``TransferQueue``, and the
-trainer uses `ReplayBuffer <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/v1/replay_buffer.py>`_ to sample a batch from TransferQueue for training.
+In V1 training, the agent framework streams generated trajectories into ``TransferQueue``, which serves as the
+replay storage. The `StreamingDataloader <https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/v1/streaming_dataloader.py>`_
+actor owns prompt dispatch, TransferQueue bookkeeping, and sampling a batch for training.
 
 While we provide a default sampling strategy, it's very common for users to want to customize it to meet their own needs.
-To do so, inherit from ``ReplayBuffer`` and implement the ``sample`` method.
+The actor's coordinator drives polling, refill, and request handling, so inherit from the built-in dataloader
+class for your trainer mode and override only the sampling hooks:
+
+- ``sync``: inherit from ``StreamingDataloader``.
+- ``colocate_async`` / ``separate_async``: inherit from ``StreamingDataloaderAsync``.
 
 .. code:: python
 
-    class UserCustomReplayBuffer(ReplayBuffer):
-        def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
-            """Sample a batch of data from the replay buffer.
+    class UserCustomDataloader(StreamingDataloaderAsync):
+        def _terminal_eviction_reasons(self, global_steps: int, partition_id: str):
+            """Return ``(stale_uids, dapo_uids, failed_uids, dapo_counts)`` for terminal groups to evict."""
+            ...
 
-            Args:
-                global_steps (int): Global steps of the current training.
-                partition_id (str): Partition of TransferQueue, e.g. "train" or "val".
-                batch_size (int, optional): Batch size.
+        def _select_prompt_uids(self, partition_id: str, sampleable_keys: set[str], batch_size: int):
+            """Return ``(selected_uids, partition_snapshot, prompt_global_steps_snapshot)``.
 
-            Returns:
-                KVBatchMeta: A batch of data.
-                dict: Auxiliary metrics, e.g. off-policy staleness stats.
+            The default selects the groups with the smallest dispatch ``global_steps`` first.
             """
             ...
 
-After defining UserCustomReplayBuffer, you can set the custom sampler in config:
+Async dataloaders additionally expose the non-blocking ``poll_once`` and ``materialize_sampleable`` primitives
+used by the coordinator, which can be overridden for larger changes.
+
+After defining your custom dataloader, you can set it in config:
 
 .. code:: bash
 
     trainer.v1.sampler.custom_sampler.path = "path/to/your/sampler.py"
-    trainer.v1.sampler.custom_sampler.name = "UserCustomReplayBuffer"
+    trainer.v1.sampler.custom_sampler.name = "UserCustomDataloader"
 
 How do I customize sync/async trainer behavior?
 +++++++++++++++++++++++++++++++++++++++++++++++

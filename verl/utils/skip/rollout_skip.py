@@ -13,13 +13,16 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import torch
 from omegaconf import OmegaConf
 
 from verl.protocol import DataProto
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
+
+if TYPE_CHECKING:
+    from transfer_queue import KVBatchMeta
 
 
 @register_skip("rollout")
@@ -168,7 +171,7 @@ class RolloutTqSkip(RolloutSkip):
 
     Unlike V0's decorator pattern, V1's split architecture (submit prompts to TQ,
     then sample trajectories) requires direct method calls from the trainer:
-    - Phase one (no cache): trainer calls ``prepare_data`` after ``replay_buffer.sample``
+    - Phase one (no cache): trainer calls ``prepare_data`` after the V1 dataloader samples a batch
     - Phase two (cache exists): trainer calls ``load_dump_data`` in ``_add_batch_to_generate``
 
     When ``parameter_sync_step > 1`` (separate async), one global step performs multiple
@@ -190,6 +193,10 @@ class RolloutTqSkip(RolloutSkip):
                 default=1,
             )
         )
+        self._load_request_step: int | None = None
+        self._next_load_inner_idx = 0
+        self._async_run_mode: str | None = None
+        self._async_replay_end: int | None = None
 
     def _get_v1_inner_dir(self, step: int, inner_idx: int) -> Path:
         """Return the dump directory for one mini-batch within a step."""
@@ -260,6 +267,64 @@ class RolloutTqSkip(RolloutSkip):
         """
         return self._resolve_load_step_v1(step) != -1
 
+    def configure_async_run(self, start_step: int) -> str:
+        """Choose one fail-closed cache mode for an async run.
+
+        Streaming prefetch makes sparse cache hits ambiguous: prompts consumed from the
+        dataloader are not tied to the trainer step that eventually samples them. Async
+        cache steps must therefore be a contiguous prefix from ``start_step``, and that
+        prefix must be either fully cached (replay) or entirely uncached (capture).
+        """
+        steps = sorted({step for step in self.steps if step >= start_step})
+        if not steps:
+            self._async_run_mode = "disabled"
+            self._async_replay_end = None
+            return self._async_run_mode
+
+        expected = list(range(start_step, steps[-1] + 1))
+        if steps != expected:
+            raise ValueError(
+                "Async skip.rollout_tq steps must be a contiguous prefix from the current training step "
+                f"{start_step}, got {steps}"
+            )
+
+        partially_cached = any(self._has_any_v1_cache(step) and not self._check_valid_v1_step(step) for step in steps)
+        cache_hits = [self.has_v1_cache(step) for step in steps]
+        if partially_cached or (any(cache_hits) and not all(cache_hits)):
+            raise ValueError(
+                "Async skip.rollout_tq requires its contiguous step prefix to be either fully cached "
+                "or entirely uncached; partial caches and cache gaps are unsupported"
+            )
+
+        self._async_run_mode = "replay" if all(cache_hits) else "capture"
+        self._async_replay_end = steps[-1] if self._async_run_mode == "replay" else None
+        return self._async_run_mode
+
+    def _has_any_v1_cache(self, step: int) -> bool:
+        return any(
+            self._check_valid_v1_step_path(self._get_v1_inner_dir(step, inner_idx))
+            for inner_idx in range(self.parameter_sync_step)
+        )
+
+    def should_load_v1_sample(self, step: int, trainer_mode: str) -> bool:
+        if step not in self.steps:
+            return False
+        if trainer_mode == "sync":
+            return self.has_v1_cache(step)
+        if self._async_run_mode is None:
+            raise RuntimeError("Async skip.rollout_tq must be configured before sampling")
+        return (
+            self._async_run_mode == "replay" and self._async_replay_end is not None and step <= self._async_replay_end
+        )
+
+    def is_async_replay_step(self, step: int) -> bool:
+        return (
+            self._async_run_mode == "replay"
+            and self._async_replay_end is not None
+            and step in self.steps
+            and step <= self._async_replay_end
+        )
+
     def meet_precondition(self, step: int, *args, **kwargs) -> bool:
         """Phase two: whether cached data exists and should be loaded/injected."""
         return self.has_v1_cache(step)
@@ -305,7 +370,7 @@ class RolloutTqSkip(RolloutSkip):
 
         Args:
             step: Current training step (used as dump directory name).
-            batch: :class:`transfer_queue.KVBatchMeta` from ``ReplayBuffer.sample()``.
+            batch: :class:`transfer_queue.KVBatchMeta` sampled by the V1 dataloader.
             global_steps: Current ``global_steps`` for metadata.
         """
         import transfer_queue as tq
@@ -336,6 +401,35 @@ class RolloutTqSkip(RolloutSkip):
             flush=True,
         )
 
+    def load_v1_sample(
+        self,
+        step: int,
+        new_prompt_uids: list[str],
+        global_steps: int,
+        partition_id: str = "train",
+    ) -> "KVBatchMeta":
+        """Load exactly one cached inner batch for one actor ``sample`` call."""
+        if self._load_request_step != step:
+            self._load_request_step = step
+            self._next_load_inner_idx = 0
+        if self._next_load_inner_idx >= self.parameter_sync_step:
+            raise RuntimeError(
+                f"{self.print_mark}Received more than {self.parameter_sync_step} sample calls for cached step {step}"
+            )
+
+        inner_idx = self._next_load_inner_idx
+        result = self.load_dump_data(
+            step=step,
+            new_prompt_uids=new_prompt_uids,
+            n=self.n,
+            global_steps=global_steps,
+            partition_id=partition_id,
+            inner_indices=[inner_idx],
+            mark_prompts_finished=False,
+        )
+        self._next_load_inner_idx += 1
+        return result
+
     def load_dump_data(
         self,
         step: int,
@@ -343,7 +437,10 @@ class RolloutTqSkip(RolloutSkip):
         n: int,
         global_steps: int,
         partition_id: str = "train",
-    ) -> None:
+        *,
+        inner_indices: list[int] | None = None,
+        mark_prompts_finished: bool = True,
+    ) -> "KVBatchMeta":
         """Phase two: load cached data from disk and inject into TransferQueue.
 
         Maps saved trajectories to new prompt uids in order, preserving the
@@ -354,10 +451,14 @@ class RolloutTqSkip(RolloutSkip):
             step: Current training step.
             new_prompt_uids: Freshly generated uids for the current batch.
             n: Number of trajectories per prompt (``rollout.n``).
-            global_steps: Current ``global_steps``, used to override staleness tags.
+            global_steps: Current trainer step. Cached model-version tags are shifted
+                by the difference between this step and the loaded cache step.
             partition_id: TQ partition (``"train"`` or ``"val"``).
         """
         import transfer_queue as tq
+        from transfer_queue import KVBatchMeta
+
+        from verl.trainer.ppo.v1 import tq_schema
 
         load_step = self._resolve_load_step_v1(step)
         if load_step == -1:
@@ -365,11 +466,13 @@ class RolloutTqSkip(RolloutSkip):
                 f"{self.print_mark}No dump data found for step {step} under {self._get_project_dump_dir()}"
             )
 
-        # Load all inner dirs and merge (parameter_sync_step == 1 → single dir)
+        # Load all inner dirs by default; direct actor replay loads one per sample call.
+        if inner_indices is None:
+            inner_indices = list(range(self.parameter_sync_step))
         old_keys: list = []
         old_tags: list = []
         data_list: list = []
-        for inner_idx in range(self.parameter_sync_step):
+        for inner_idx in inner_indices:
             inner_dir = self._get_v1_inner_dir(load_step, inner_idx)
             payload = torch.load(inner_dir / self.tq_batch_name, weights_only=False)
             data_list.append(payload["tensordict"])
@@ -384,13 +487,11 @@ class RolloutTqSkip(RolloutSkip):
             data = data_list[0]
 
         # Group saved trajectories by parent uid.
-        # Key format: {uid}_{session_id}_{index}, uid is UUID4 (no underscores).
-        # ReplayBuffer.sample() does NOT guarantee keys are sorted by uid prefix,
+        # V1 sampling does NOT guarantee keys are sorted by uid prefix,
         # so we use a dict to group regardless of key ordering.
         uid_to_indices: dict[str, list[int]] = {}
         for idx, key in enumerate(old_keys):
-            parent_uid = key.split("_")[0]
-            uid_to_indices.setdefault(parent_uid, []).append(idx)
+            uid_to_indices.setdefault(tq_schema.uid_of(key), []).append(idx)
         groups = list(uid_to_indices.values())
 
         if not groups:
@@ -420,16 +521,17 @@ class RolloutTqSkip(RolloutSkip):
         new_keys = []
         new_tags = []
         traj_indices: list[int] = []
+        version_offset = global_steps - load_step
         for prompt_idx, new_uid in enumerate(new_prompt_uids):
             group = groups[prompt_idx % num_cached_groups]
             for session_id in range(n):
                 traj_idx = group[session_id % len(group)]
                 traj_indices.append(traj_idx)
-                new_keys.append(f"{new_uid}_{session_id}_0")
+                new_keys.append(tq_schema.trajectory_key(new_uid, session_id, 0))
                 tag = dict(old_tags[traj_idx])
                 tag["global_steps"] = global_steps
-                tag["min_global_steps"] = global_steps
-                tag["max_global_steps"] = global_steps
+                for version_key in ("min_global_steps", "max_global_steps"):
+                    tag[version_key] += version_offset
                 tag.pop("is_prompt", None)
                 new_tags.append(tag)
 
@@ -447,13 +549,14 @@ class RolloutTqSkip(RolloutSkip):
             partition_id=partition_id,
         )
 
-        # Mark prompt-level keys as finished so ReplayBuffer can pick them up immediately
-        prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
-        tq.kv_batch_put(
-            keys=new_prompt_uids,
-            partition_id=partition_id,
-            tags=prompt_tags,
-        )
+        if mark_prompts_finished:
+            # Normal sampling needs prompt markers; direct cache return does not.
+            prompt_tags = [tq_schema.prompt_tag(tq_schema.PROMPT_FINISHED, global_steps)] * len(new_prompt_uids)
+            tq.kv_batch_put(
+                keys=new_prompt_uids,
+                partition_id=partition_id,
+                tags=prompt_tags,
+            )
 
         print(
             f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
@@ -461,6 +564,7 @@ class RolloutTqSkip(RolloutSkip):
             f"into TQ partition '{partition_id}' at current step {step}\033[0m",
             flush=True,
         )
+        return KVBatchMeta(partition_id=partition_id, keys=new_keys, tags=new_tags)
 
 
 def parse_async_rollout_sample_step(sample_id: str) -> int:
