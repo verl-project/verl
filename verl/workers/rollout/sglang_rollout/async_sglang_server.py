@@ -430,6 +430,10 @@ class SGLangHttpServer:
         # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        # SGLang returns temperature-scaled log-probs unless SGLANG_RETURN_ORIGINAL_LOGPROB is set, which
+        # matches rollout.logprobs_mode="raw_logprobs". Set it before the scheduler processes start.
+        if self.config.logprobs_mode == "raw_logprobs":
+            os.environ["SGLANG_RETURN_ORIGINAL_LOGPROB"] = "1"
         server_args = ServerArgs(**args)
         self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
             server_args=server_args,

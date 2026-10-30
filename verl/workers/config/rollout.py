@@ -381,6 +381,25 @@ class RolloutConfig(BaseConfig):
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
 
+        if self.name == "sglang" and self.calculate_log_probs:
+            # SGLang returns log-probs of the temperature-scaled full-vocabulary distribution, or of the raw
+            # logits with SGLANG_RETURN_ORIGINAL_LOGPROB; it has no counterpart to vLLM's processed log-probs,
+            # which are normalised over the tokens kept by top-k / top-p.
+            if self.logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
+                raise ValueError(
+                    f"rollout.logprobs_mode={self.logprobs_mode!r} is not supported by the SGLang rollout; "
+                    "use 'processed_logprobs' or 'raw_logprobs'."
+                )
+            if self.logprobs_mode == "processed_logprobs" and (self.top_p < 1.0 or self.top_k > 0):
+                warnings.warn(
+                    "With the SGLang rollout, rollout log-probs come from the temperature-scaled full-vocabulary "
+                    f"distribution, so top_p={self.top_p} / top_k={self.top_k} truncation is not reflected in them. "
+                    "vLLM's processed_logprobs are normalised over the kept tokens instead, so rollout-correction "
+                    "weights and metrics differ between the two backends for this config.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
         if self.topk_log_probs:
             if self.name != "vllm":
                 raise ValueError("rollout.topk_log_probs is supported by the vLLM rollout only.")
