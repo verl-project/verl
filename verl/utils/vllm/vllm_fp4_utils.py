@@ -62,6 +62,21 @@ def is_deepseek_v4_model(model):
 # ---------------------------------------------------------------------------
 
 
+def _resolve_mxfp4_quant_method(module):
+    """Return the quant method backing ``module``, unwrapping LoRA.
+
+    Under verl merge=False, vLLM's ``FusedMoEWithLoRA`` swaps the layer's
+    ``quant_method`` to ``FusedMoEModularMethod`` (a forward-only wrapper that
+    stores the original as ``old_quant_method`` and hides the mxfp4 layout attrs
+    + repack). Resolve to the original method so staging, layout derivation and
+    post-load repack work like the non-LoRA path. Whether it is MXFP4 at all is
+    ``_is_mxfp4_fused_moe_module``'s call.
+    """
+    qm = module.quant_method
+    inner = getattr(qm, "old_quant_method", None)
+    return qm if inner is None else inner
+
+
 def install_mxfp4_mxfp8_compressed_tensors_patch():
     """Route verl's compressed-tensors MXFP4 experts through DeepGEMM.
 
@@ -158,10 +173,11 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
 
 
 def _is_mxfp4_fused_moe_module(module):
+    """Check whether a routed-expert module uses MXFP4, including a LoRA-wrapped quantization method."""
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 
-    return isinstance(module, RoutedExperts) and isinstance(module.quant_method, Mxfp4MoEMethod)
+    return isinstance(module, RoutedExperts) and isinstance(_resolve_mxfp4_quant_method(module), Mxfp4MoEMethod)
 
 
 def _refittable_mxfp4_backends():
@@ -197,7 +213,7 @@ def _mxfp4_checkpoint_layout(module):
     ``quant_method`` tag ``RoutedExperts.weight_loader`` dispatches on, which
     ``replace_parameter`` does not carry over and must be reattached.
     """
-    quant_method = module.quant_method
+    quant_method = _resolve_mxfp4_quant_method(module)
     num_experts = quant_method.num_experts
     intermediate = quant_method.intermediate_size
     hidden = quant_method.hidden_size
@@ -251,7 +267,7 @@ def _stage_mxfp4_moe_params(module):
     backend's conversion and folds the result back into the live storage.
     """
     live = {}
-    uses_packed_names = getattr(module.quant_method, "_verl_uses_packed_checkpoint_names", False)
+    uses_packed_names = getattr(_resolve_mxfp4_quant_method(module), "_verl_uses_packed_checkpoint_names", False)
     for name, (shape, dtype, scale_kind) in _mxfp4_checkpoint_layout(module).items():
         param = getattr(module, name, None)
         if not isinstance(param, torch.nn.Parameter):
@@ -299,10 +315,16 @@ def _replace_parameter_in_place(layer, param_name, new_data, prefer_copy=False):
 
 
 def _process_mxfp4_moe_params(module):
+    """Repack staged MXFP4 expert weights into live storage and reject any unrestored parameters."""
     from vllm.model_executor.layers.quantization import mxfp4 as vllm_mxfp4
 
+    # Use the legacy Mxfp4MoEMethod for the repack: the modular wrapper that
+    # LoRA installs (FusedMoEModularMethod) inherits a no-op
+    # process_weights_after_loading, so calling it would skip the repack and
+    # leave live storage in the checkpoint layout. See _resolve_mxfp4_quant_method.
+    quant_method = _resolve_mxfp4_quant_method(module)
     with patch.object(vllm_mxfp4, "replace_parameter", _replace_parameter_in_place):
-        module.quant_method.process_weights_after_loading(module)
+        quant_method.process_weights_after_loading(module)
 
     # Every staged param is consumed through the patched replace_parameter, so
     # a leftover means post-processing took a path that assigns weights some
@@ -331,7 +353,7 @@ def stage_mxfp4_moe_params_for_loading(model):
         if not _is_mxfp4_fused_moe_module(module):
             continue
 
-        backend = getattr(module.quant_method, "mxfp4_backend", None)
+        backend = getattr(_resolve_mxfp4_quant_method(module), "mxfp4_backend", None)
         if backend not in supported:
             # Refusing beats skipping: an unsupported backend would quietly load
             # checkpoint-layout data into rewritten parameters, and the rollout

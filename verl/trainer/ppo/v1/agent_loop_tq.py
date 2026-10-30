@@ -25,14 +25,10 @@ import torch
 import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 
-from verl.experimental.agent_loop import (
-    AgentLoopManager,
-    AgentLoopOutput,
-    AgentLoopWorker,
-    get_trajectory_info,
-)
+from verl.experimental.agent_loop import AgentLoopManager, AgentLoopOutput, AgentLoopWorker, get_trajectory_info
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.utils.tokenizer import build_multimodal_processor_inputs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -57,6 +53,48 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+
+    def _compute_multi_modal_inputs(self, output, input_ids):
+        """Build processor inputs, expanding DeepSeek V4.1 image tokens and aligning their modality types."""
+        if getattr(getattr(self.processor, "config", None), "model_type", None) != "deepseek_v41":
+            return super()._compute_multi_modal_inputs(output, input_ids)
+
+        from verl.utils.tokenizer.deepseek import expand_image_tokens
+
+        config = self.processor.config
+        inputs = build_multimodal_processor_inputs(
+            self.processor,
+            text=[self.tokenizer.decode(input_ids.reshape(-1).tolist(), skip_special_tokens=True)],
+            images=(output.multi_modal_data or {}).get("images"),
+            mm_processor_kwargs=output.mm_processor_kwargs or {},
+        )
+        inputs = dict(inputs.convert_to_tensors("pt"))
+        inputs.pop("input_ids", None)
+        inputs.pop("attention_mask", None)
+        patch_size = config.vision_config.patch_size
+        inputs.setdefault("pixel_values", torch.empty((0, 3, patch_size, patch_size), dtype=torch.bfloat16))
+        inputs.setdefault("image_grid_hws", torch.empty((0, 2), dtype=torch.long))
+        raw_ids = input_ids.reshape(-1).tolist()
+        grids = inputs["image_grid_hws"]
+        ratio = config.vision_config.downsample_ratio
+        if raw_ids.count(config.image_token_id) > len(grids):
+            # Processor-expanded spans can touch. Consume each grid's full span
+            # separately so adjacent images retain one placeholder apiece.
+            normalized_ids, cursor = [], 0
+            for height, width in grids.tolist():
+                start = raw_ids.index(config.image_token_id, cursor)
+                height, width = (height + ratio - 1) // ratio, (width + ratio - 1) // ratio
+                span_length = 2 + height * (width + 1)
+                if raw_ids[start : start + span_length] != [config.image_token_id] * span_length:
+                    raise ValueError("DeepSeek-V4.1 image-token span does not match its image grid")
+                normalized_ids.extend(raw_ids[cursor : start + 1])
+                cursor = start + span_length
+            normalized_ids.extend(raw_ids[cursor:])
+            input_ids = input_ids.new_tensor(normalized_ids)
+        inputs["_expanded_input_ids"], inputs["vision_token_types"] = expand_image_tokens(
+            input_ids, grids, config.image_token_id, ratio
+        )
+        return inputs
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
@@ -186,20 +224,55 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - index: index of agent loop output
         keys, fields, tags = [], [], []
         for i, output in enumerate(outputs):
+            rollout_routed_experts = output.routed_experts
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
             attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
             multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-            position_ids = self._compute_position_ids(
-                input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
-            ).squeeze(0)
 
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
             field.update(kwargs)
             # do not store raw image/video
             field.pop("multi_modal_data", None)
+            # Adopt the actor image expansion while preserving response token boundaries.
+            if "_expanded_input_ids" in multi_modal_inputs:
+                input_ids = multi_modal_inputs.pop("_expanded_input_ids").squeeze(0)
+                attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+                # The expanded prompt is everything except the (unchanged) responses.
+                field["prompts"] = input_ids[: input_ids.size(0) - responses.size(0)]
+                if "rollout_topk_ids" in field:
+                    from verl.trainer.ppo.score_centering import pad_rollout_topk
+
+                    response_rows = slice(prompts.size(0) - 1, prompts.size(0) - 1 + responses.size(0))
+                    field["rollout_topk_ids"], field["rollout_topk_log_probs"] = pad_rollout_topk(
+                        field["rollout_topk_ids"][response_rows],
+                        field["rollout_topk_log_probs"][response_rows],
+                        prompt_length=field["prompts"].size(0),
+                    )
+                    complete = torch.ones(input_ids.size(0), dtype=torch.bool)
+                    start = field["prompts"].size(0) - 1
+                    complete[start : start + responses.size(0)] = field["rollout_support_complete"][response_rows]
+                    field["rollout_support_complete"] = complete
+
+            # vLLM records routes against its model input, where multimodal
+            # placeholders have already expanded into their full token spans.
+            # Normalize only after adopting the actor's matching expanded
+            # input, while preserving the row count so Megatron can still
+            # recognize backends that return compact placeholder routes.
+            if rollout_routed_experts is not None:
+                experts = torch.as_tensor(rollout_routed_experts, dtype=torch.int16).detach().cpu()
+                if experts.ndim != 3:
+                    raise ValueError(
+                        f"routed_experts must have shape [sequence, layers, topk], got {tuple(experts.shape)}"
+                    )
+                field["routed_experts"] = experts[: input_ids.size(0)]
+
+            position_ids = self._compute_position_ids(
+                input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
+            ).squeeze(0)
+
             # TODO: uniform response_mask and loss_mask
             field["loss_mask"] = field["response_mask"]
             field["input_ids"] = input_ids

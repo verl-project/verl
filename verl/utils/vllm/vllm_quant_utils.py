@@ -139,9 +139,7 @@ def is_quantized_model(vllm_config):
 
 def is_compressed_tensors_model(vllm_config) -> bool:
     """Compressed-tensors rollout, whose refit weights the trainer already quantized."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
-        CompressedTensorsConfig,
-    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
 
     return isinstance(getattr(vllm_config, "quant_config", None), CompressedTensorsConfig)
 
@@ -230,9 +228,18 @@ def process_quanted_weights_after_loading(model, reload_state):
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
+    process_model_weights = getattr(model, "process_weights_after_loading", None)
+    if process_model_weights is not None:
+        process_model_weights()
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
+def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
+    """Load a trainer-quantized weight bucket into the rollout model or its MTP drafter.
+
+    When peft_config is provided, reconcile LoRA base-layer names with the
+    live namespace. Restore temporary parameter classes after loading and
+    return the names reported by the model loader.
+    """
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -242,6 +249,128 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
         )
     else:
         model = model_runner.model
+    # Reconcile LoRA ``.base_layer.`` names on the FP8/mxfp4 path too, so a
+    # merge=False base sync doesn't orphan the suffix on an unwrappable fused
+    # target (e.g. DSV4 ``compressor.fused_wkv_wgate``). Scoped to LoRA via
+    # ``peft_config``: only a LoRA base sync exports ``.base_layer.`` names.
+    if peft_config is not None:
+        from verl.utils.vllm.utils import resolve_weight_name
+
+        live_parameters = dict(model.named_parameters(remove_duplicate=False))
+        live_names = set(live_parameters)
+        live_names.update(n for n, _ in model.named_buffers())
+        routed_expert_prefixes = {
+            prefix
+            for prefix in ("mlp.experts.", "ffn.experts.")
+            if any(f"{prefix}base_layer." in n for n in live_names)
+        }
+
+        packed_modules_mapping = getattr(model, "packed_modules_mapping", None) or {}
+        weight_mapper = getattr(model, "hf_to_vllm_mapper", None)
+
+        suffix_dtypes: dict[str, set] = {}
+        for live_name, parameter in live_parameters.items():
+            segments = live_name.split(".")
+            for i in range(len(segments)):
+                suffix_dtypes.setdefault(".".join(segments[i:]), set()).add(parameter.dtype)
+
+        def match_dtype(candidate):
+            dtypes = suffix_dtypes.get(candidate, ())
+            return next(iter(dtypes)) if len(dtypes) == 1 else None
+
+        def mapped_candidates(candidate):
+            yield candidate
+            if weight_mapper is not None:
+                mapped = weight_mapper.apply_list([candidate])
+                if mapped and mapped[0] != candidate:
+                    yield mapped[0]
+
+        def live_weight_dtype(name):
+            candidates = [name]
+            if ".base_layer." in name:
+                candidates.append(name.replace(".base_layer.", ".", 1))
+            else:
+                prefix, leaf = name.rsplit(".", 1)
+                candidates.append(f"{prefix}.base_layer.{leaf}")
+
+            for candidate in candidates:
+                for mapped in mapped_candidates(candidate):
+                    dtype = match_dtype(mapped)
+                    if dtype is not None:
+                        return dtype
+
+            # LoRA exports use the checkpoint shard names (q_proj, k_proj, ...),
+            # while the live KDA/MLA module owns one packed parameter. Resolve a
+            # shard to its packed owner before deciding whether its scale is live.
+            for owner, shards in packed_modules_mapping.items():
+                for shard in shards:
+                    for candidate in candidates:
+                        for mapped_candidate in mapped_candidates(candidate):
+                            prefix, leaf = mapped_candidate.rsplit(".", 1)
+                            has_base_suffix = prefix.endswith(".base_layer")
+                            base_prefix = prefix.removesuffix(".base_layer")
+                            if not base_prefix.endswith(f".{shard}"):
+                                continue
+                            packed_prefix = base_prefix[: -len(shard)] + owner
+                            suffixes = [".base_layer"] if has_base_suffix else ["", ".base_layer"]
+                            for suffix in suffixes:
+                                dtype = match_dtype(f"{packed_prefix}{suffix}.{leaf}")
+                                if dtype is not None:
+                                    return dtype
+            return None
+
+        def dequant_fp8_block(weight, scale, block_size=128):
+            rows, cols = weight.shape
+            pad_rows, pad_cols = -rows % block_size, -cols % block_size
+            if pad_rows or pad_cols:
+                weight = torch.nn.functional.pad(weight, (0, pad_cols, 0, pad_rows))
+            scale = scale.float().repeat_interleave(block_size, 0).repeat_interleave(block_size, 1)
+            return (weight.float() * scale).to(torch.bfloat16)[:rows, :cols].contiguous()
+
+        fp8_dtypes = {torch.float8_e4m3fn, torch.float8_e5m2}
+        pending_fp8 = {}
+        normalized_weights = []
+        for name, tensor in weights:
+            resolved = resolve_weight_name(model, name, live_names, routed_expert_prefixes=routed_expert_prefixes)
+            leaf = resolved.rsplit(".", 1)[-1]
+            if leaf in {"weight", "weight_scale", "weight_scale_inv"}:
+                weight_name = resolved.rsplit(".", 1)[0] + ".weight"
+                live_dtype = live_weight_dtype(weight_name)
+                if live_dtype == torch.bfloat16 and (
+                    leaf == "weight" and tensor.dtype in fp8_dtypes or leaf in {"weight_scale", "weight_scale_inv"}
+                ):
+                    pairing_key = weight_name.replace(".base_layer.", ".")
+                    entry = pending_fp8.setdefault(pairing_key, {})
+                    entry[leaf] = tensor
+                    if leaf == "weight":
+                        entry["weight_name"] = resolved
+                    if "weight" in entry and ("weight_scale" in entry or "weight_scale_inv" in entry):
+                        normalized_weights.append(
+                            (
+                                entry["weight_name"],
+                                dequant_fp8_block(
+                                    entry["weight"],
+                                    entry.get("weight_scale", entry.get("weight_scale_inv")),
+                                ),
+                            )
+                        )
+                        del pending_fp8[pairing_key]
+                    continue
+                if (
+                    leaf in {"weight_scale", "weight_scale_inv"}
+                    and live_dtype is not None
+                    and live_dtype not in fp8_dtypes
+                ):
+                    continue
+            normalized_weights.append((resolved, tensor))
+        orphaned_weights = [
+            name
+            for name, entry in pending_fp8.items()
+            if "weight" in entry and "weight_scale" not in entry and "weight_scale_inv" not in entry
+        ]
+        if orphaned_weights:
+            raise RuntimeError("FP8 weights missing weight_scale or weight_scale_inv: " + ", ".join(orphaned_weights))
+        weights = normalized_weights
     weights = list(weights)
 
     # Monkey patch the param class to their subclass, as certain models

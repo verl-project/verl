@@ -320,7 +320,8 @@ class vLLMHttpServer:
 
         hf_overrides = self._apply_quantization()
         hf_quantization_config = getattr(self.model_config.hf_config, "quantization_config", None)
-        effective_quantization_config = hf_overrides.get("quantization_config") or hf_quantization_config
+        # An explicit ``quantization_config: null`` override is a BF16 rollout of a quantized checkpoint.
+        effective_quantization_config = hf_overrides.get("quantization_config", hf_quantization_config)
         from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
         set_default_vllm_quantization_backends(effective_quantization_config, engine_kwargs)
@@ -363,10 +364,10 @@ class vLLMHttpServer:
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
-            "hf_overrides": hf_overrides,
             "scheduling_policy": self.config.scheduling_policy,
             "compilation_config": compilation_config,
             **engine_kwargs,
+            "hf_overrides": hf_overrides,
         }
 
         # update profiler args, only on the replica that will actually be profiled: configuring
@@ -685,6 +686,7 @@ class vLLMHttpServer:
         budget_warnings = getattr(self, "_topk_budget_warnings", set())
         warn_topk_logprob_budget(sampling_params, budget_warnings)
         self._topk_budget_warnings = budget_warnings
+        actor_prompt_ids = list(prompt_ids)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
         if image_data is not None:
@@ -792,6 +794,22 @@ class vLLMHttpServer:
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
+            rollout_prompt_ids = final_res.prompt_token_ids or []
+            if (
+                getattr(getattr(self.model_config, "hf_config", None), "model_type", None) == "deepseek_v41"
+                and image_data is not None
+            ):
+                image_token_id = self.model_config.hf_config.image_token_id
+                rollout_prompt_ids, actor_prompt_ids = (
+                    [
+                        token_id
+                        for index, token_id in enumerate(prompt_token_ids)
+                        if token_id != image_token_id or index == 0 or prompt_token_ids[index - 1] != image_token_id
+                    ]
+                    for prompt_token_ids in (rollout_prompt_ids, actor_prompt_ids)
+                )
+            if rollout_prompt_ids != actor_prompt_ids:
+                raise ValueError("Rollout routing replay requires identical actor and rollout prompt tokens")
             routed_experts = final_res.outputs[0].routed_experts
 
         # Determine stop reason from finish_reason
@@ -946,9 +964,12 @@ class vLLMHttpServer:
         "sleep", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def sleep(self):
+        """Release rollout resources on the leading node according to the configured rollout and sleep modes."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        # Routing replay's AuxOutput connector requires PAUSED_ALL for cache reset.
+        # vLLM's default abort mode only pauses new requests.
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
         elif self.rollout_mode == RolloutMode.COLOCATED:
@@ -1185,7 +1206,8 @@ class vLLMHttpServer:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
-            # pause_generation in abort mode will:
+            # The legacy wait_for_inflight_requests=False and new
+            # pause_generation(mode="abort") APIs both:
             # 1. Set engine to paused state (new requests are accepted but not scheduled)
             # 2. Abort all in-flight requests
             # 3. Wait for requests to drain
@@ -1473,24 +1495,30 @@ class vLLMHttpServer:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
-            repetition_penalty=1.0,
+            repetition_penalty=self.config.repetition_penalty,
             max_new_tokens=self.config.response_length,
         )
 
     def _apply_quantization(self) -> dict:
-        """hf_overrides for a rollout quantization set in the rollout config.
+        """``engine_kwargs.vllm.hf_overrides`` plus any rollout quantization set in the rollout config.
 
         Models shipping their own ``quantization_config`` need nothing here; either way the
         workers install the refit patches from the resulting vLLM ``quant_config``.
         """
         quantization = self.config.quantization
+        vllm_engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
+        hf_overrides = vllm_engine_kwargs.get("hf_overrides", {}) or {}
+        if isinstance(hf_overrides, str):
+            hf_overrides = json.loads(hf_overrides)
+        hf_overrides = dict(hf_overrides or {})
         if not quantization.enabled:
-            return {}
+            return hf_overrides
 
         # The trainer quantizes every refit to this config; vLLM picks the method up from hf_overrides.
         quantization_config = quantization.build_quantization_config(self.model_config.local_path)
         logger.info(f"Rollout compressed-tensors quantization_config: {quantization_config}")
-        return {"quantization_config": quantization_config}
+        hf_overrides["quantization_config"] = quantization_config
+        return hf_overrides
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""

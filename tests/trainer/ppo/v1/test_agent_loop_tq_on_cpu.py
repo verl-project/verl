@@ -104,6 +104,36 @@ async def test_agent_loop_tq_postprocess_stores_unpadded_rollout_topk(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", [[101, 102, 103], [101, 129264, 129264, 129264, 129264, 103]])
+async def test_expanded_prompt_realigns_rollout_heads_and_coverage(monkeypatch, prompt):
+    """Keep response predictions at prompt_length - 1 after adopting expanded image tokens."""
+    worker = _DummyWorker(topk_log_probs=2)
+    worker._compute_multi_modal_inputs = lambda output, ids: {
+        "_expanded_input_ids": torch.tensor([prompt + output.response_ids])
+    }
+    output = _output(
+        {
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+            "response_support_complete": [True, False],
+        }
+    )
+    fields = await _postprocess(monkeypatch, worker, output, validate=False)
+    ids, log_probs, complete = (
+        fields[key][0] for key in ("rollout_topk_ids", "rollout_topk_log_probs", "rollout_support_complete")
+    )
+    start = len(prompt) - 1
+    assert ids.shape == log_probs.shape == (len(prompt) + 2, 2)
+    assert ids[start : start + 2].tolist() == [[11, 13], [12, 14]]
+    torch.testing.assert_close(log_probs[start : start + 2], torch.tensor([[-0.1, -2.0], [-0.2, -1.5]]))
+    assert complete.tolist() == [True] * start + [True, False, True]
+    assert ids[:start].tolist() == [[0, 1]] * start
+    assert ids[-1].tolist() == [0, 1]
+    assert log_probs[:start].exp().tolist() == [[0.5, 0.5]] * start
+    torch.testing.assert_close(fields["responses"][0], torch.tensor([11, 12]))
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_tq_postprocess_stores_nested_provider_coverage(monkeypatch):
     output = _output(
         {
@@ -143,3 +173,183 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+def test_deepseek_adjacent_images_keep_separate_spans():
+    """Verify adjacent image placeholders expand into distinct modality spans."""
+    import torch
+
+    from verl.utils.tokenizer.deepseek import expand_image_tokens
+
+    ids, types = expand_image_tokens(torch.tensor([10, 129264, 129264, 12]), torch.tensor([[3, 3], [3, 6]]), 129264, 3)
+    torch.testing.assert_close(ids, torch.tensor([[10] + [129264] * 9 + [12]]))
+    torch.testing.assert_close(types, torch.tensor([[-1, 0, 1, 2, 3, 0, 1, 1, 2, 3, -1]]))
+
+
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("separator", [[], [11]])
+def test_deepseek_processor_accepts_compact_and_expanded_images(monkeypatch, expanded, separator):
+    """Normalize spans by grid size while preserving text and adjacent image boundaries."""
+    from types import SimpleNamespace
+
+    from transformers import BatchFeature
+
+    worker = object.__new__(_WorkerTQ)
+    worker.processor = SimpleNamespace(
+        config=SimpleNamespace(
+            model_type="deepseek_v41",
+            image_token_id=129264,
+            vision_config=SimpleNamespace(patch_size=14, downsample_ratio=3),
+        )
+    )
+    worker.tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "image prompt")
+    monkeypatch.setattr(
+        agent_loop_tq_module,
+        "build_multimodal_processor_inputs",
+        lambda *args, **kwargs: BatchFeature({"image_grid_hws": torch.tensor([[3, 3], [3, 6]])}),
+    )
+    input_ids = [10] + [129264] * (4 if expanded else 1) + separator + [129264] * (5 if expanded else 1) + [12]
+    result = worker._compute_multi_modal_inputs(
+        SimpleNamespace(multi_modal_data={"images": [object(), object()]}, mm_processor_kwargs={}),
+        torch.tensor(input_ids),
+    )
+    assert result["_expanded_input_ids"].tolist() == [[10] + [129264] * 4 + separator + [129264] * 5 + [12]]
+    assert result["vision_token_types"].tolist() == [[-1, 0, 1, 2, 3] + [-1] * len(separator) + [0, 1, 1, 2, 3, -1]]
+
+
+def test_deepseek_text_only_processor_outputs_keep_aligned_empty_image_inputs(monkeypatch):
+    """Verify text-only samples retain aligned token types and empty image tensors compatible with BF16 batching."""
+    from types import SimpleNamespace
+
+    import torch
+    from transformers import BatchFeature
+
+    from verl.trainer.ppo.v1 import agent_loop_tq
+    from verl.utils.model import extract_multi_modal_inputs
+
+    worker = object.__new__(agent_loop_tq.AgentLoopWorkerTQ.__ray_metadata__.modified_class)
+    worker.processor = SimpleNamespace(
+        image_token_id=129264,
+        config=SimpleNamespace(
+            model_type="deepseek_v41",
+            image_token_id=129264,
+            vision_config=SimpleNamespace(patch_size=14, downsample_ratio=3),
+        ),
+    )
+    worker.tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "decoded text")
+    worker._get_mm_processor_kwargs = lambda *args: {}
+    monkeypatch.setattr(
+        agent_loop_tq,
+        "build_multimodal_processor_inputs",
+        lambda *args, **kwargs: BatchFeature({"vision_token_types": torch.tensor([[-1]])}),
+    )
+    result = worker._compute_multi_modal_inputs(
+        SimpleNamespace(multi_modal_data=None, mm_processor_kwargs={}), torch.tensor([0, 5, 6])
+    )
+    torch.testing.assert_close(result["vision_token_types"], torch.full((1, 3), -1))
+    torch.testing.assert_close(result["_expanded_input_ids"], torch.tensor([[0, 5, 6]]))
+    assert result["pixel_values"].shape == (0, 3, 14, 14)
+    assert result["image_grid_hws"].shape == (0, 2)
+    # Real processor patches are BF16; text-only rows must batch with them.
+    batch = agent_loop_tq.list_of_dict_to_tensordict(
+        [
+            {"multi_modal_inputs": {"pixel_values": result["pixel_values"]}},
+            {"multi_modal_inputs": {"pixel_values": torch.zeros((1, 3, 14, 14), dtype=torch.bfloat16)}},
+        ]
+    )
+    assert extract_multi_modal_inputs(batch["multi_modal_inputs"])["pixel_values"].dtype == torch.bfloat16
+
+
+def test_deepseek_multimodal_inputs_survive_storage_and_padding(monkeypatch):
+    """Verify image features and expert routes survive transfer-queue serialization, selection, and padding."""
+    from unittest.mock import AsyncMock
+
+    import torch
+    from transfer_queue.storage.managers.simple_storage_manager import AsyncSimpleStorageManager
+    from transfer_queue.storage.simple_storage import StorageUnitData
+    from transfer_queue.utils.serial_utils import decode, encode
+
+    from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
+    from verl.trainer.ppo import padding_utils
+    from verl.trainer.ppo.v1 import agent_loop_tq
+    from verl.utils.model import extract_multi_modal_inputs
+    from verl.utils.tokenizer.deepseek import expand_image_tokens
+
+    worker = object.__new__(agent_loop_tq.AgentLoopWorkerTQ.__ray_metadata__.modified_class)
+    worker.processor = None
+    worker._compute_score = AsyncMock()
+    worker._compute_teacher_logprobs = AsyncMock()
+    put = AsyncMock()
+    monkeypatch.setattr(agent_loop_tq.tq, "async_kv_batch_put", put)
+
+    def image_inputs(output, input_ids):
+        """Build synthetic image features and expanded token types for image-bearing or text-only prompts."""
+        has_image = 129264 in output.prompt_ids
+        grids = torch.tensor([[3, 3]]) if has_image else torch.empty((0, 2), dtype=torch.long)
+        expanded_ids, types = expand_image_tokens(input_ids, grids, 129264, 3)
+        return {
+            "pixel_values": torch.ones((9 if has_image else 0, 3, 2, 2), dtype=torch.bfloat16),
+            "image_grid_hws": grids,
+            "vision_token_types": types,
+            "_expanded_input_ids": expanded_ids,
+        }
+
+    worker._compute_multi_modal_inputs = image_inputs
+    outputs = [
+        AgentLoopOutput(
+            prompt_ids=prompt,
+            response_ids=[13, 14],
+            response_mask=[1, 0],
+            routed_experts=(
+                torch.arange(10, 17, dtype=torch.int16).view(7, 1, 1)
+                if 129264 in prompt
+                else torch.arange(20, 22, dtype=torch.int16).view(2, 1, 1)
+            ),
+            metrics=AgentLoopMetrics(),
+            extra_fields={},
+        )
+        for prompt in ([10, 129264, 12], [20])
+    ]
+    asyncio.run(worker._agent_loop_postprocess(outputs, False, uid="sample", session_id=0, global_steps=1))
+    fields = put.call_args.kwargs["fields"]
+    assert not {"pixel_values", "image_grid_hws", "vision_token_types"}.intersection(fields.keys())
+    torch.testing.assert_close(fields["responses"][0], torch.tensor([13, 14]))
+    assert fields["prompts"][0].numel() == 6
+    torch.testing.assert_close(
+        fields["routed_experts"][0].flatten(),
+        torch.tensor([10, 11, 12, 13, 14, 15, 16], dtype=torch.int16),
+    )
+    torch.testing.assert_close(
+        fields["routed_experts"][1].flatten(),
+        torch.tensor([20, 21], dtype=torch.int16),
+    )
+
+    padding, _ = padding_utils.construct_minimal_padding_template(
+        fields[0].to_dict(), put.call_args.kwargs["tags"][0], eos_token_id=0
+    )
+    samples = [fields[0].to_dict(), fields[1].to_dict(), padding]
+    batch = agent_loop_tq.list_of_dict_to_tensordict(samples)
+    # Exercise SimpleStorage's actual selection, wire encoding, and result packing.
+    positions = [2, 0, 1]
+    selected = AsyncSimpleStorageManager._select_by_positions(batch["multi_modal_inputs"], positions)
+    selected_routes = AsyncSimpleStorageManager._select_by_positions(batch["routed_experts"], positions)
+    storage = StorageUnitData(storage_size=len(samples))
+    storage.put_data(
+        decode(encode({"multi_modal_inputs": selected, "routed_experts": selected_routes})),
+        positions,
+    )
+    received = decode(encode(storage.get_data(["multi_modal_inputs", "routed_experts"], [0, 1, 2])))
+    packed = AsyncSimpleStorageManager._pack_field_values(received["multi_modal_inputs"])
+    merged = extract_multi_modal_inputs(packed)
+    packed_routes = AsyncSimpleStorageManager._pack_field_values(received["routed_experts"])
+
+    torch.testing.assert_close(merged["pixel_values"], torch.ones((9, 3, 2, 2), dtype=torch.bfloat16))
+    torch.testing.assert_close(merged["image_grid_hws"], torch.tensor([[3, 3]]))
+    expected_types = torch.full((3, padding_utils.SYNTHETIC_PADDING_SEQ_LEN), -1, dtype=torch.long)
+    expected_types[0, 1:5] = torch.tensor([0, 1, 2, 3])
+    torch.testing.assert_close(merged["vision_token_types"], expected_types)
+    route_parts = [route.flatten() for route in packed_routes.unbind()]
+    torch.testing.assert_close(route_parts[0], torch.tensor([10, 11, 12, 13, 14, 15, 16], dtype=torch.int16))
+    torch.testing.assert_close(route_parts[1], torch.tensor([20, 21], dtype=torch.int16))
+    assert route_parts[2].numel() == padding_utils.SYNTHETIC_PADDING_SEQ_LEN
+    assert torch.count_nonzero(route_parts[2]) == 0

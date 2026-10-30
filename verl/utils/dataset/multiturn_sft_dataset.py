@@ -226,10 +226,28 @@ class MultiTurnSFTDataset(Dataset):
         input_ids = inputs.pop("input_ids")[0]
         attention_mask = inputs.pop("attention_mask")[0]
 
+        # DeepSeek V4.1 returns one vision-token-type row for every token after
+        # image expansion.  Keep it aligned with this turn while removing the
+        # per-turn system prefix below; the rows are concatenated after all
+        # turns have been tokenized.
+        vision_token_types = inputs.get("vision_token_types")
+        if vision_token_types is not None:
+            vision_token_types = vision_token_types[0]
+
         # remove system prompt if exists
         if index != 0 and message["role"] != "system":
             input_ids = input_ids[len(self.system_prompt) :]
             attention_mask = attention_mask[len(self.system_prompt) :]
+            if vision_token_types is not None:
+                vision_token_types = vision_token_types[len(self.system_prompt) :]
+
+        if vision_token_types is not None:
+            if vision_token_types.shape != input_ids.shape:
+                raise ValueError(
+                    "vision_token_types must stay aligned with input_ids after per-turn system-prefix removal: "
+                    f"{vision_token_types.shape=} {input_ids.shape=}"
+                )
+            inputs["vision_token_types"] = vision_token_types
 
         if message["role"] == "assistant":
             loss_mask = torch.ones_like(attention_mask)
@@ -289,6 +307,7 @@ class MultiTurnSFTDataset(Dataset):
         return messages
 
     def __getitem__(self, item):
+        """Tokenize a conversation and align its loss mask, positions, and multimodal features after resizing."""
         row_dict: dict = self.dataframe.iloc[item].to_dict()
         messages = self._build_messages(row_dict)
         tools = self.tools[item] if self.tools is not None else None
@@ -300,6 +319,8 @@ class MultiTurnSFTDataset(Dataset):
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
+        input_id_lengths = []
+        vision_token_type_rows = []
         for i, message in enumerate(messages):
             _input_ids, _loss_mask, _attention_mask, _inputs = self._process_single_message(
                 index=i,
@@ -309,8 +330,10 @@ class MultiTurnSFTDataset(Dataset):
                 enable_thinking=enable_thinking,
             )
             input_ids.append(_input_ids)
+            input_id_lengths.append(_input_ids.shape[0])
             loss_mask.append(_loss_mask)
             attention_mask.append(_attention_mask)
+            vision_token_type_rows.append(_inputs.pop("vision_token_types", None))
             for k, v in _inputs.items():
                 multi_modal_inputs.setdefault(k, []).append(v)
 
@@ -320,6 +343,22 @@ class MultiTurnSFTDataset(Dataset):
         assert input_ids.shape == loss_mask.shape == attention_mask.shape, (
             f"Shape mismatch: {input_ids.shape}, {loss_mask.shape}, {attention_mask.shape}"
         )
+
+        # Unlike image patches and image grids, vision_token_types has one
+        # value per input token.  It therefore must be concatenated along the
+        # sequence dimension across turns instead of being filtered as a
+        # fixed-shape image tensor.
+        if any(row is not None for row in vision_token_type_rows):
+            text_type = -1
+            aligned_rows = [
+                row if row is not None else torch.full((length,), text_type, dtype=torch.long)
+                for row, length in zip(vision_token_type_rows, input_id_lengths, strict=False)
+            ]
+            if any(row.shape != (length,) for row, length in zip(aligned_rows, input_id_lengths, strict=False)):
+                raise ValueError("vision_token_types rows must match their tokenized message lengths")
+            vision_token_types = torch.cat(aligned_rows, dim=0).unsqueeze(0)
+        else:
+            vision_token_types = None
 
         print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
         self.sanity_check(input_ids, messages, tools, enable_thinking)
@@ -342,6 +381,11 @@ class MultiTurnSFTDataset(Dataset):
         for k, v in multi_modal_inputs.items():
             multi_modal_inputs[k] = torch.concat(v, dim=0)
 
+        if vision_token_types is not None and all(
+            key in multi_modal_inputs for key in ("pixel_values", "image_grid_hws")
+        ):
+            multi_modal_inputs["vision_token_types"] = vision_token_types
+
         # 2. handle position_ids for Qwen-VL series models
         if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
             image_grid_thw = multi_modal_inputs.get("image_grid_thw", None)
@@ -363,6 +407,12 @@ class MultiTurnSFTDataset(Dataset):
 
         # 3. handle padding
         sequence_length = input_ids.shape[0]
+        if (
+            sequence_length > self.max_length
+            and "vision_token_types" in multi_modal_inputs
+            and self.truncation != "error"
+        ):
+            raise ValueError("Multimodal sequences require truncation='error'")
         # Handle sequence length
         if self.pad_mode == DatasetPadMode.RIGHT:
             if sequence_length < self.max_length:
@@ -376,17 +426,31 @@ class MultiTurnSFTDataset(Dataset):
                 attention_mask = torch.cat((attention_mask, padded_attention_mask))
                 loss_mask = torch.cat((loss_mask, padded_loss_mask))
                 position_ids = F.pad(position_ids, (0, self.max_length - sequence_length), value=0)
+                if "vision_token_types" in multi_modal_inputs:
+                    multi_modal_inputs["vision_token_types"] = F.pad(
+                        multi_modal_inputs["vision_token_types"],
+                        (0, self.max_length - sequence_length),
+                        value=-1,
+                    )
             elif sequence_length > self.max_length:
                 if self.truncation == "left":
                     input_ids = input_ids[-self.max_length :]
                     attention_mask = attention_mask[-self.max_length :]
                     loss_mask = loss_mask[-self.max_length :]
                     position_ids = position_ids[..., -self.max_length :]
+                    if "vision_token_types" in multi_modal_inputs:
+                        multi_modal_inputs["vision_token_types"] = multi_modal_inputs["vision_token_types"][
+                            ..., -self.max_length :
+                        ]
                 elif self.truncation == "right":
                     input_ids = input_ids[: self.max_length]
                     attention_mask = attention_mask[: self.max_length]
                     loss_mask = loss_mask[: self.max_length]
                     position_ids = position_ids[..., : self.max_length]
+                    if "vision_token_types" in multi_modal_inputs:
+                        multi_modal_inputs["vision_token_types"] = multi_modal_inputs["vision_token_types"][
+                            ..., : self.max_length
+                        ]
                 elif self.truncation == "error":
                     raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
                 else:
@@ -409,6 +473,10 @@ class MultiTurnSFTDataset(Dataset):
                 input_ids = input_ids[: self.max_length]
                 loss_mask = loss_mask[: self.max_length]
                 position_ids = position_ids[..., : self.max_length]
+                if "vision_token_types" in multi_modal_inputs:
+                    multi_modal_inputs["vision_token_types"] = multi_modal_inputs["vision_token_types"][
+                        ..., : self.max_length
+                    ]
 
             # return nested tensor with out padding
             res = {

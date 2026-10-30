@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,6 +25,8 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
 __all__ = ["HFModelConfig", "MtpConfig"]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -146,6 +149,7 @@ class HFModelConfig(BaseConfig):
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):
+        """Load local model assets, apply tokenizer and model overrides, and validate architecture and LoRA settings."""
         import_external_libs(self.external_lib)
 
         if self.hf_config_path is None:
@@ -171,10 +175,9 @@ class HFModelConfig(BaseConfig):
             self.processor.chat_template = self.tokenizer.chat_template
 
         if self.custom_chat_template is not None:
+            self.tokenizer.chat_template = self.custom_chat_template
             if self.processor is not None:
                 self.processor.chat_template = self.custom_chat_template
-            else:
-                self.tokenizer.chat_template = self.custom_chat_template
 
         self.local_hf_config_path = copy_to_local(self.hf_config_path, use_shm=self.use_shm)
         self.generation_config = get_generation_config(
@@ -189,10 +192,8 @@ class HFModelConfig(BaseConfig):
                 trust_remote_code=self.trust_remote_code,
                 attn_implementation=attn_implementation,
             )
-        except ValueError as error:
-            lookup_error = error.__cause__ or error.__context__
-            if not isinstance(lookup_error, KeyError) or lookup_error.args != ("deepseek_v4",):
-                raise
+        except ValueError:
+            logger.warning("AutoConfig.from_pretrained failed; falling back to vLLM get_config", exc_info=True)
             from vllm.transformers_utils.config import get_config
 
             self.hf_config = get_config(

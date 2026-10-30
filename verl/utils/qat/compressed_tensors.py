@@ -152,6 +152,11 @@ def is_all_mxfp8_config(ct_config: Mapping[str, Any]) -> bool:
     return all(_preset_of(scheme) == "MXFP8" for scheme in _group_schemes(ct_config))
 
 
+def _module_name_for_quant_match(module: str) -> str:
+    """Match exported LoRA base weights against unwrapped HF FP8 exclusions."""
+    return module.removesuffix(".base_layer").removeprefix("model.")
+
+
 def _matches(name: str, targets: Iterable[str]) -> bool:
     for target in targets:
         if target.startswith("re:"):
@@ -463,13 +468,17 @@ class Fp8ConfigWeightQuantizer:
                 f"got activation_scheme={activation_scheme!r}, weight_block_size={block_size!r}, "
                 f"store_dtype={store_dtype!r}"
             )
-        self.ignore = list(fp8_config.get("ignored_layers") or fp8_config.get("modules_to_not_convert") or [])
+        self.ignore = [
+            _module_name_for_quant_match(module)
+            for module in (fp8_config.get("ignored_layers") or fp8_config.get("modules_to_not_convert") or [])
+        ]
         self.ignore_match_mode = fp8_config.get("ignored_layers_match_mode", "exact")
         if self.ignore_match_mode not in ("exact", "substring", "suffix"):
             raise ValueError(f"Unsupported ignored_layers_match_mode={self.ignore_match_mode!r}")
         self.scheme = _scheme_for_preset("FP8_BLOCK", ["Linear"])
 
     def _is_ignored(self, module: str) -> bool:
+        module = _module_name_for_quant_match(module)
         if _matches(module, DEFAULT_IGNORE):
             return True
         if self.ignore_match_mode == "exact":
@@ -526,6 +535,24 @@ def _as_quantization_config(config: Any) -> Optional[dict[str, Any]]:
     raise TypeError(f"quantization_config must be a mapping, got {type(config).__name__}")
 
 
+def _vllm_hf_overrides_quantization_config(rollout_config: Any) -> tuple[bool, Any]:
+    """``(present, value)`` of a ``quantization_config`` set in ``rollout.engine_kwargs.vllm.hf_overrides``.
+
+    vLLM applies these overrides on top of the checkpoint config, so the rollout
+    runs whatever they set. A top-level ``null`` still allows a text-level
+    quantization config; without one it selects a BF16 rollout.
+    """
+    if getattr(rollout_config, "name", None) != "vllm":
+        return False, None
+    engine_kwargs = getattr(rollout_config, "engine_kwargs", None) or {}
+    hf_overrides = (engine_kwargs.get("vllm") or {}).get("hf_overrides") or {}
+    if isinstance(hf_overrides, str):
+        hf_overrides = json.loads(hf_overrides)
+    if "quantization_config" not in hf_overrides:
+        return False, None
+    return True, hf_overrides["quantization_config"]
+
+
 def dispatch_rollout_weight_quantizer(
     *,
     model_config: Any,
@@ -535,7 +562,8 @@ def dispatch_rollout_weight_quantizer(
     """Select the trainer-side exporter for native or overridden rollout quantization.
 
     The rollout engine keeps its native ``quantization_config`` unless
-    ``rollout.quantization`` explicitly overrides it. Both native and override
+    ``rollout.quantization`` explicitly overrides it; a ``quantization_config``
+    in vLLM's ``hf_overrides`` replaces the native one. Both native and override
     compressed-tensors configs use :class:`CompressedTensorsWeightQuantizer`;
     native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`. DeepSeek-V4
     still gets an FP8 quantizer object, but it passes through the private mixed
@@ -549,9 +577,6 @@ def dispatch_rollout_weight_quantizer(
     has_override = bool(linear or moe or config_file)
 
     hf_config = model_config.hf_config
-    native = getattr(hf_config, "quantization_config", None)
-    if native is None:
-        native = getattr(getattr(hf_config, "text_config", None), "quantization_config", None)
     model_types = {
         getattr(hf_config, "model_type", None),
         getattr(getattr(hf_config, "text_config", None), "model_type", None),
@@ -571,7 +596,22 @@ def dispatch_rollout_weight_quantizer(
             model_path=model_config.local_path,
         )
     else:
+        has_hf_override, native = _vllm_hf_overrides_quantization_config(rollout_config)
+        if not has_hf_override:
+            native = getattr(hf_config, "quantization_config", None)
+        if native is None:
+            native = getattr(getattr(hf_config, "text_config", None), "quantization_config", None)
         quantization_config = _as_quantization_config(native)
+        if (
+            has_hf_override
+            and model_types & _DEEPSEEK_V4_MODEL_TYPES
+            and quantization_config is not None
+            and str(quantization_config.get("quant_method", "")).lower() == "compressed-tensors"
+        ):
+            raise NotImplementedError(
+                "hf_overrides compressed-tensors quantization overrides are not supported for DeepSeek-V4: "
+                "the trainer exports its native FP8/FP4 layout. Drop the override to sync the native quantization."
+            )
 
     qat_mode = qat_config.mode if qat_config is not None and qat_config.enable else None
     if quantization_config is None:

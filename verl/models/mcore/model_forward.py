@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -21,13 +22,18 @@ from torch.nested._internal.nested_tensor import NestedTensor
 from verl.utils.megatron_utils import unwrap_model
 
 from .util import (
+    build_deepseek_v41_image_inputs,
     build_vlm_attn_mask_bshd,
+    get_thd_min_local_rows,
     get_thd_quant_align_size,
+    language_model_forward_kwargs,
     postprocess_bshd_engine,
     postprocess_thd_engine,
     preprocess_bshd_engine,
     preprocess_thd_engine,
+    preprocess_thd_full_stream,
     preprocess_vlm_thd_engine,
+    takes_full_packed_thd_vlm_inputs,
 )
 
 
@@ -136,15 +142,18 @@ def gptmodel_forward_model_engine(
     """Default forward pass for GPT models with optional sequence packing."""
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
-    pre_process = unwrap_model(model).pre_process
-    post_process = unwrap_model(model).post_process
+    unwrapped_model = unwrap_model(model)
+    model_config = unwrapped_model.config
+    deepseek_v41_multimodal = getattr(model_config, "dsv4_version", None) == "v4.1"
+    pre_process = unwrapped_model.pre_process
+    post_process = unwrapped_model.post_process
 
-    quant_align_size = get_thd_quant_align_size(unwrap_model(model).config)
+    quant_align_size = get_thd_quant_align_size(model_config)
     # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
     use_fp8_padding = quant_align_size is not None
 
     model_kwargs = {}
-    if "pixel_values" in multi_modal_inputs:
+    if "pixel_values" in multi_modal_inputs and not deepseek_v41_multimodal:
         model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
     if "image_grid_thw" in multi_modal_inputs:
         model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
@@ -159,6 +168,7 @@ def gptmodel_forward_model_engine(
         thd_kwargs = dict(
             quant_align_size=quant_align_size,
             local_cp_size=local_cp_size,
+            min_local_rows=get_thd_min_local_rows(model_config, local_cp_size),
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
         )
@@ -167,6 +177,19 @@ def gptmodel_forward_model_engine(
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids, pre_process=True, **thd_kwargs
         )
+        if deepseek_v41_multimodal:
+            # CSA2 uses logical lengths to exclude each sequence's physical padding
+            # from compression, routing, and sparse-attention indexing.
+            logical_cu_seqlens = input_ids.offsets().to(
+                device=packed_seq_params.cu_seqlens_q_padded.device,
+                dtype=packed_seq_params.cu_seqlens_q_padded.dtype,
+            )
+            packed_seq_params.cu_seqlens_q = logical_cu_seqlens
+            packed_seq_params.cu_seqlens_kv = logical_cu_seqlens
+            images = build_deepseek_v41_image_inputs(multi_modal_inputs, input_ids_rmpad, batch_size=batch_size)
+            if images is not None:
+                model_kwargs["images"] = images
+        full_stream_model = vision_model and takes_full_packed_thd_vlm_inputs(model)
         if vision_model:
             input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
                 model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
@@ -190,15 +213,19 @@ def gptmodel_forward_model_engine(
                 else:
                     v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
-                args[k] = preprocess_thd_engine(
-                    v,
-                    pre_process=True,
-                    need_roll=True,
-                    quant_align_size=quant_align_size,
-                    local_cp_size=local_cp_size,
-                    pad_to_length_bucket=pad_to_length_bucket,
-                    cp_layout=cp_layout,
-                )[0]
+                if full_stream_model:
+                    args[k] = preprocess_thd_full_stream(v, packed_seq_params, need_roll=True)
+                else:
+                    args[k] = preprocess_thd_engine(
+                        v,
+                        pre_process=True,
+                        need_roll=True,
+                        quant_align_size=quant_align_size,
+                        local_cp_size=local_cp_size,
+                        min_local_rows=thd_kwargs["min_local_rows"],
+                        pad_to_length_bucket=pad_to_length_bucket,
+                        cp_layout=cp_layout,
+                    )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
@@ -211,13 +238,23 @@ def gptmodel_forward_model_engine(
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
 
-        output_orig = model(
-            input_ids=input_ids_rmpad,
-            attention_mask=attention_mask,
-            position_ids=position_ids_rmpad,
-            packed_seq_params=packed_seq_params,
-            **model_kwargs,
+        # A full-stream model computes the MTP loss only when verl trains MTP.
+        model_call = (
+            language_model_forward_kwargs(model, compute_mtp_loss=mtp_enable_train)
+            if full_stream_model
+            else nullcontext()
         )
+        with model_call:
+            output_orig = model(
+                input_ids=input_ids_rmpad,
+                attention_mask=attention_mask,
+                position_ids=position_ids_rmpad,
+                packed_seq_params=packed_seq_params,
+                **model_kwargs,
+            )
+        if full_stream_model and isinstance(output_orig, tuple):
+            # The model returns its CP-sliced loss mask alongside the output.
+            output_orig = output_orig[0]
 
         if post_process and logits_processor is not None:
             args = {
@@ -227,6 +264,7 @@ def gptmodel_forward_model_engine(
                     need_roll=(k == "label"),
                     quant_align_size=quant_align_size,
                     local_cp_size=local_cp_size,
+                    min_local_rows=thd_kwargs["min_local_rows"],
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )[0]
@@ -272,6 +310,14 @@ def gptmodel_forward_model_engine(
             forced_max_seqlen=forced_max_seqlen,
         )
 
+        if deepseek_v41_multimodal:
+            images = build_deepseek_v41_image_inputs(
+                multi_modal_inputs,
+                input_ids_bshd,
+            )
+            if images is not None:
+                model_kwargs["images"] = images
+
         if mtp_enable_train and post_process:
             args = {}
             # Use input_ids sequence length to ensure label and loss_mask alignment
@@ -302,10 +348,18 @@ def gptmodel_forward_model_engine(
             logits_processor_args.pop("response_attention_mask")
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
+        if vision_model and takes_full_packed_thd_vlm_inputs(model):
+            raise ValueError("GLM-5.3-Flash requires data_format='thd'.")
         if vision_model:
             input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
                 input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen
             )
+        elif deepseek_v41_multimodal:
+            # Native DeepSeek-V4.1 CSA2 accepts only the ordinary causal mask.
+            # Keep the attention mask implicit and route padded tail tokens through
+            # the model's separate padding-mask contract.
+            attention_mask = None
+            model_kwargs["padding_mask"] = ~attention_mask_bshd
         else:
             attention_mask = attention_mask_bshd
 

@@ -52,7 +52,7 @@ from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
-_VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask", "mm_token_type_ids"}
+_VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask", "mm_token_type_ids", "vision_token_types"}
 
 
 class LambdaLayer(nn.Module):
@@ -82,12 +82,18 @@ def update_model_config(module_config, override_config_kwargs):
 
 
 def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, trust_remote_code=False) -> dict:
+    """Load an actor config with a vLLM fallback for unknown models, then apply the requested overrides."""
     if override_config_kwargs is None:
         override_config_kwargs = {}
     assert isinstance(override_config_kwargs, dict), (
         f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
     )
-    module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    try:
+        module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    except ValueError:
+        from vllm.transformers_utils.config import get_config
+
+        module_config = get_config(model_name, trust_remote_code=trust_remote_code)
     update_model_config(module_config, override_config_kwargs)
 
     return module_config
@@ -546,6 +552,7 @@ def get_hf_auto_model_class(hf_config):
 
 
 def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
+    """Pad compatible tensors on their last axis and batch-concatenate, using -1 for vision token types."""
     if not values:
         raise ValueError(f"Cannot merge empty multi-modal input list for key {key!r}.")
 
@@ -575,7 +582,7 @@ def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
         if value.shape[-1] == max_len:
             padded_values.append(value)
             continue
-        padded_value = value.new_zeros((*value.shape[:-1], max_len))
+        padded_value = value.new_full((*value.shape[:-1], max_len), -1 if key == "vision_token_types" else 0)
         padded_value[..., : value.shape[-1]] = value
         padded_values.append(padded_value)
 

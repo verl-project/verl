@@ -179,6 +179,39 @@ def test_same_shape_repack_is_restaged_and_reprocessed_into_the_live_storage():
                 p.stop()
 
 
+class _LoraModularMethod:
+    """vLLM's merge=False ``FusedMoEModularMethod`` stand-in: keeps the real method, has no post-load hook."""
+
+    def __init__(self, old_quant_method):
+        self.old_quant_method = old_quant_method
+
+
+def test_lora_wrapped_moe_is_reprocessed_through_the_unwrapped_method():
+    module = _load_fp8_utils()
+    with _StubVllmFp8(_cutlass_like_process) as stub:
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            model, layer = _loaded_layer(module, stub)
+            # LoRA installs its wrapper after the initial load.
+            layer.quant_method = _LoraModularMethod(layer.quant_method)
+            live_w = layer.w13_weight
+
+            staged = module.stage_fp8_params_for_loading(model)
+            assert staged == [layer]
+            fresh = torch.randint(-6, 7, live_w.shape).to(torch.float8_e4m3fn)
+            layer.w13_weight.data.copy_(fresh)
+            module.process_fp8_weights_after_loading(staged)
+
+            assert layer._process_calls == 2, "the unwrapped Fp8MoEMethod must re-run the kernel prep"
+            assert layer.w13_weight is live_w and layer.w13_weight.data_ptr() == live_w.data_ptr()
+            assert torch.equal(layer.w13_weight.data.view(torch.uint8), _swap_halves(fresh).view(torch.uint8))
+        finally:
+            for p in patchers:
+                p.stop()
+
+
 def test_layout_keeping_backend_is_not_staged():
     module = _load_fp8_utils()
     with _StubVllmFp8(_identity_process) as stub:

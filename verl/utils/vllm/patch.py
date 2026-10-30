@@ -87,6 +87,7 @@ except ImportError:
 
 
 def patch_vllm_moe_model_weight_loader(model):
+    """Attach expert weight loaders to fused MoE parameters in supported vLLM models."""
     # this is a work around to load the weight of vllm fused moe model
     # it is from a bug from vllm 0.8.2
     # all the weights are supposed to have a weight_loader, but the moe weights
@@ -155,14 +156,6 @@ def patch_vllm_moe_model_weight_loader(model):
         experts = getattr(mlp, "experts", None)
         if not experts:
             continue
-
-        # verl syncs plain HF names, not PEFT checkpoint names, so the LoRA MoE
-        # ``lora_base_layer_prefix`` (folded into a dotted param_name that
-        # getattr can't resolve) must be cleared. Runs before the
-        # ``weight_loader`` guard so LoRA-wrapped MoE (no weight_loader) is covered.
-        routed_experts = getattr(getattr(experts, "base_layer", None), "routed_experts", None)
-        if routed_experts is not None and getattr(routed_experts, "lora_base_layer_prefix", ""):
-            routed_experts.lora_base_layer_prefix = ""
 
         if not hasattr(experts, "weight_loader"):
             continue
