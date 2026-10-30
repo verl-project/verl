@@ -25,6 +25,8 @@ ROUTED_EXPERT_PATTERNS = ("*.mlp.experts.*linear_fc1", "*.mlp.experts.*linear_fc
 
 
 def is_routed_expert_module(module_path: str) -> bool:
+    """Return whether a Megatron module path identifies a routed-expert GEMM."""
+
     return any(fnmatch.fnmatch(module_path, pattern) for pattern in ROUTED_EXPERT_PATTERNS)
 
 
@@ -176,4 +178,4 @@ def check_nvfp4_per_token_rollout(
         )
     compilation_config.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
     if compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
-        raise ValueError("Per-token NVFP4 rollout requires compilation_config.cudagraph_mode=FULL_DECODE_ONLY")
+        raise ValueError("Per-token NVFP4 rollout requires compilation_config['cudagraph_mode']=FULL_DECODE_ONLY")
