@@ -400,6 +400,98 @@ def test_lce_non_divisible_vocab_padding():
         torch.testing.assert_close(ref_ent, ker_ent, atol=1e-3, rtol=1e-3, msg=f"entropy mismatch: {desc}")
 
 
+_BACKWARD_METHODS = ["_Total_Fuse_MN", "_Total_Separate", "_Split_Dlogits_N"]
+
+
+@pytest.fixture
+def backward_method(request):
+    if not is_device_available() or get_device_name() == "npu":
+        pytest.skip("requires a non-NPU accelerator running the Triton kernel")
+    from verl.utils.kernel import kernels
+
+    original = kernels._config._backward
+    kernels.set_backward_method(getattr(kernels.BackwardEnum, request.param))
+    yield request.param
+    kernels.set_backward_method(original)
+
+
+def _fp64_logprobs_and_entropy(hidden, weight, labels, temperature):
+    """Differentiable fp64 reference: logprob -softplus(logsumexp_{j != label} - z_label), and entropy."""
+    logits = hidden.double() @ weight.double().T / temperature
+    label_logits = logits.gather(-1, labels[:, None])
+    others = logits.scatter(-1, labels[:, None], -torch.inf)
+    logprobs = -torch.nn.functional.softplus(others.logsumexp(-1, keepdim=True) - label_logits).squeeze(-1)
+    entropy = logits.logsumexp(-1) - (logits.softmax(-1) * logits).sum(-1)
+    return logprobs, entropy
+
+
+@pytest.mark.parametrize("backward_method", _BACKWARD_METHODS, indirect=True)
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_lce_confident_labels(backward_method, reduction):
+    """Labels leading the other logits by margins of up to ~70 keep their logprob and gradient.
+
+    With logsumexp over all logits, fp32 rounds p(label) to exactly 1 once the margin passes ~16.6, so the
+    logprob and the label's gradient become exactly 0 while the other logits' gradients stay nonzero.
+    """
+    num_tokens, hidden_size, vocab_size = 64, 128, 20011  # vocab is not a multiple of any split size
+    generator = torch.Generator().manual_seed(0)
+    logits = 0.1 * torch.randn(num_tokens, vocab_size, generator=generator)
+    labels = torch.randint(0, vocab_size, (num_tokens,), generator=generator)
+    logits[torch.arange(num_tokens), labels] = torch.linspace(10.0, 80.0, num_tokens)
+    # One-hot hidden states make the logits exactly the weight's (bf16) columns, and the weight gradient
+    # exactly the logit gradient
+    weight = torch.zeros(vocab_size, hidden_size, dtype=torch.bfloat16)
+    weight[:, :num_tokens] = logits.T.to(torch.bfloat16)
+    hidden = torch.eye(num_tokens, hidden_size, dtype=torch.bfloat16)
+    device = get_device_name()
+    hidden, weight, labels = hidden.to(device), weight.to(device).requires_grad_(), labels.to(device)
+
+    logprobs, _ = linear_cross_entropy(hidden, weight, labels, 1.0, reduction)
+    (d_weight,) = torch.autograd.grad(logprobs, weight, torch.ones_like(logprobs))
+
+    ref_weight = weight.detach().double().requires_grad_()
+    ref_logprobs, _ = _fp64_logprobs_and_entropy(hidden, ref_weight, labels, 1.0)
+    ref_logprobs = {"none": ref_logprobs, "sum": ref_logprobs.sum(), "mean": ref_logprobs.mean()}[reduction]
+    (ref_d_weight,) = torch.autograd.grad(ref_logprobs, ref_weight, torch.ones_like(ref_logprobs))
+
+    torch.testing.assert_close(logprobs.double(), ref_logprobs, rtol=2e-5, atol=0)
+    d_logits, ref_d_logits = d_weight[:, :num_tokens].T.double(), ref_d_weight[:, :num_tokens].T
+    label_grad = d_logits.gather(-1, labels[:, None])
+    assert torch.all(label_grad > 0)
+    torch.testing.assert_close(d_logits, ref_d_logits, rtol=1e-2, atol=0)
+    torch.testing.assert_close(label_grad, ref_d_logits.gather(-1, labels[:, None]), rtol=1e-2, atol=0)
+
+
+@pytest.mark.parametrize("backward_method", _BACKWARD_METHODS, indirect=True)
+def test_lce_matches_fp64_reference(backward_method):
+    """Ordinary logits: logprobs, entropy, and both gradients match an fp64 reference."""
+    num_tokens, hidden_size, vocab_size, temperature = 1024, 256, 32003, 1.5
+    device = get_device_name()
+    generator = torch.Generator().manual_seed(0)
+    hidden = (torch.rand(num_tokens, hidden_size, generator=generator) - 0.5).to(device, torch.bfloat16)
+    weight = (torch.rand(vocab_size, hidden_size, generator=generator) - 0.5).to(device, torch.bfloat16)
+    labels = torch.randint(0, vocab_size, (num_tokens,), generator=generator).to(device)
+    g_logprobs = (2 * torch.rand(num_tokens, generator=generator) - 1).to(device)
+    g_entropy = (torch.rand(num_tokens, generator=generator) - 0.5).to(device)
+    hidden.requires_grad_()
+    weight.requires_grad_()
+
+    logprobs, entropy = linear_cross_entropy(hidden, weight, labels, temperature)
+    d_hidden, d_weight = torch.autograd.grad((logprobs, entropy), (hidden, weight), (g_logprobs, g_entropy))
+
+    ref_hidden = hidden.detach().double().requires_grad_()
+    ref_weight = weight.detach().double().requires_grad_()
+    ref_logprobs, ref_entropy = _fp64_logprobs_and_entropy(ref_hidden, ref_weight, labels, temperature)
+    ref_d_hidden, ref_d_weight = torch.autograd.grad(
+        (ref_logprobs, ref_entropy), (ref_hidden, ref_weight), (g_logprobs.double(), g_entropy.double())
+    )
+
+    torch.testing.assert_close(logprobs.double(), ref_logprobs, atol=1e-3, rtol=2e-4)
+    torch.testing.assert_close(entropy.double(), ref_entropy, atol=5e-3, rtol=5e-4)
+    torch.testing.assert_close(d_hidden.double(), ref_d_hidden, atol=2e-2, rtol=4e-2)
+    torch.testing.assert_close(d_weight.double(), ref_d_weight, atol=2e-2, rtol=4e-2)
+
+
 if __name__ == "__main__":
     # torch.cuda.memory._record_memory_history()
 
