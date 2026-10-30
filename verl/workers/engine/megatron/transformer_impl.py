@@ -21,7 +21,6 @@ from typing import Any, Callable, ContextManager, Iterator
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
-from megatron.core.package_info import __version__
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -43,7 +42,7 @@ from verl.utils.dynamic_cp_scheduler import (
     postprocess_dynamic_cp_batch,
 )
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
-from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
+from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
@@ -70,7 +69,6 @@ from verl.utils.megatron_utils import (
     load_megatron_optimizer,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
-    patch_engine_mtp,
     register_megatron_training_hooks,
     unwrap_model,
 )
@@ -217,20 +215,10 @@ class MegatronEngine(BaseEngine):
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
         if self.enable_routing_replay:
-            apply_router_replay_patch()
             self.mini_layer_topk_idx_list = []
-        # Apply checkpoint patch for MoE models
-        from verl.utils.device import is_cuda_available, is_npu_available
+        from verl.models.mcore.compat import apply_engine_patches
 
-        if is_npu_available and __version__ >= "0.16.0":
-            from verl.models.mcore.patch import apply_mtp_inference_patch
-
-            apply_mtp_inference_patch()
-
-        if is_cuda_available:
-            from verl.models.mcore.patch import apply_patch_megatron_recomputation_backward
-
-            apply_patch_megatron_recomputation_backward()
+        apply_engine_patches(routing_replay=self.enable_routing_replay)
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
@@ -481,10 +469,10 @@ class MegatronEngine(BaseEngine):
             self.engine_config.use_fused_kernels = False
             return
 
-        from verl.models.mcore.model_forward_fused import patch_fused_forward
+        from verl.models.mcore.compat import configure_forward
 
         for model in self.module:
-            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
+            configure_forward(model, self.model_config, engine_config=self.engine_config)
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
@@ -537,16 +525,15 @@ class MegatronEngine(BaseEngine):
 
         self._maybe_enable_fused_kernels()
 
-        if self.model_config.mtp.enable:
-            patch_engine_mtp(self.module, self.model_config)
-        elif (
-            self.engine_config.forward_only
-            and self.engine_config.override_transformer_config.get("mtp_num_layers") == 0
-        ):
-            from verl.models.mcore.mtp_patch import patch_postprocess
+        from verl.models.mcore.compat import apply_model_patches
 
-            for model in self.module:
-                patch_postprocess(model)
+        apply_model_patches(
+            self.module,
+            mtp_enabled=self.model_config.mtp.enable,
+            detach_encoder=self.model_config.mtp.detach_encoder,
+            forward_only=self.engine_config.forward_only,
+            mtp_num_layers=self.engine_config.override_transformer_config.get("mtp_num_layers"),
+        )
 
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
         if self.engine_config.forward_only:
