@@ -15,7 +15,6 @@ import os
 
 import pytest
 import ray
-import torch
 
 from tests.checkpoint_engine.test_utils import create_rollout_worker_group, create_trainer_worker_group
 from verl.checkpoint_engine import CheckpointEngineManager
@@ -23,16 +22,19 @@ from verl.single_controller.ray.base import (
     RayResourcePool,
     split_resource_pool,
 )
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, get_torch_device, is_torch_npu_available
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 
-_ngpus = torch.cuda.device_count()
+_ngpus = get_torch_device().device_count()
+# HCCLCheckpointEngine (the "nccl" registry entry on NPU) has no multi_sender parameter;
+# only run that single, unparametrized case there instead of crashing on the True/False split.
+_multi_sender_cases = [False] if is_torch_npu_available(check_device=False) else [False, True]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False, True])
-@pytest.mark.parametrize("multi_sender", [False, True])
+@pytest.mark.parametrize("multi_sender", _multi_sender_cases)
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_nccl_checkpoint_engine(
@@ -59,10 +61,13 @@ async def test_nccl_checkpoint_engine(
     )
 
     # initialize config
+    nccl_engine_kwargs = {"rebuild_group": rebuild_group}
+    if not is_torch_npu_available(check_device=False):
+        nccl_engine_kwargs["multi_sender"] = multi_sender
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="nccl",
         update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"nccl": {"rebuild_group": rebuild_group, "multi_sender": multi_sender}},
+        engine_kwargs={"nccl": nccl_engine_kwargs},
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)

@@ -26,7 +26,10 @@ from vllm import LLM, SamplingParams
 from vllm.logprobs import FlatLogprobs, append_logprobs_for_next_position
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 
+from verl.utils.device import get_device_name
 from verl.workers.rollout.utils import extract_response_topk_logprobs_with_coverage
+
+DEVICE = get_device_name()
 
 MODEL_PATH = os.path.expanduser(os.getenv("VLLM_TOPK_SUPPORT_MODEL_PATH", "~/models/Qwen/Qwen2.5-0.5B-Instruct"))
 
@@ -76,8 +79,8 @@ def test_processed_topk_support_evidence(llm, top_k, top_p):
 def test_small_decode_batch_provider_support_coverage(k, expected_complete):
     # vLLM 0.29 retains both cutoff ties, while 0.32 keeps exactly top_k entries.
     # Either way, an all-finite partial head does not prove complete support.
-    logits = torch.tensor([[2.0, 1.0, 1.0, 0.0]], device="cuda")
-    logits = apply_top_k_top_p(logits, torch.tensor([2], device="cuda"), None)
+    logits = torch.tensor([[2.0, 1.0, 1.0, 0.0]], device=DEVICE)
+    logits = apply_top_k_top_p(logits, torch.tensor([2], device=DEVICE), None)
     log_probs = logits.log_softmax(-1)
     support_ids = log_probs[0].isfinite().nonzero().flatten().tolist()
     assert len(support_ids) in (2, 3)
@@ -107,7 +110,7 @@ def test_pure_top_p_overflow_scores_sample_outside_recorded_head(rule, threshold
 
     # Pure top-p has no cardinality cap: this real provider keeps all four tokens,
     # while the recording budget is two. Sample an actual nonzero-probability tail token.
-    sampler_logits = apply_top_k_top_p(torch.zeros(1, 4, device="cuda"), None, torch.tensor([0.9], device="cuda"))
+    sampler_logits = apply_top_k_top_p(torch.zeros(1, 4, device=DEVICE), None, torch.tensor([0.9], device=DEVICE))
     sampler_lp = sampler_logits.log_softmax(-1)
     assert int(sampler_lp.isfinite().sum()) == 4
     q_head, ids = sampler_lp.topk(2, -1)
@@ -123,19 +126,19 @@ def test_pure_top_p_overflow_scores_sample_outside_recorded_head(rule, threshold
     )
     q_sample, _, recorded, complete = extract_response_topk_logprobs_with_coverage(flat, 2, vocab_size=4)
     assert complete.tolist() == [False]
-    trainer = torch.tensor([[2.0, 1.0, 0.0, -1.0]], device="cuda", requires_grad=True)
+    trainer = torch.tensor([[2.0, 1.0, 0.0, -1.0]], device=DEVICE, requires_grad=True)
     lp = trainer.log_softmax(-1)
     weight = score_centering_weight_fn(rule, threshold)
     correction, shift, mass, _ = score_centering_auto_correction(
         lp.gather(-1, ids),
-        torch.as_tensor(recorded, device="cuda"),
+        torch.as_tensor(recorded, device=DEVICE),
         weight,
-        torch.as_tensor(complete, device="cuda"),
+        torch.as_tensor(complete, device=DEVICE),
     )
     assert mass.item() == pytest.approx(0.5)
     assert shift.item() == 0
     sampled = lp[:, sampled_id] - shift
-    actual_q_sample = torch.as_tensor(q_sample, device="cuda")
+    actual_q_sample = torch.as_tensor(q_sample, device=DEVICE)
     sampled_weight = weight((sampled.detach() - actual_q_sample).exp())
     loss = -(sampled_weight * sampled - correction).mean()
     assert torch.isfinite(torch.autograd.grad(loss, trainer)[0]).all()

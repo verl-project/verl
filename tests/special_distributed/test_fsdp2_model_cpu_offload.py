@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Check FSDP2 CPU offloading on CUDA and NPU, without external model weights.
+"""Check FSDP2 CPU offloading on an accelerator, without external model weights.
 
 Launch from the repository root on two or more accelerators:
     PYTHONPATH=. torchrun --standalone --nproc-per-node=2 \
@@ -28,7 +28,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import init_device_mesh
 
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_device_available
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
@@ -113,8 +113,8 @@ def _update_parameters(model, expected):
 
 @torch.no_grad()
 def main():
+    assert is_device_available(), "this regression requires an accelerator"
     device_name = get_device_name()
-    assert device_name in ("cuda", "npu"), "this regression requires CUDA or NPU"
     _, rank, world_size = initialize_global_process_group()
     try:
         assert world_size >= 2, "launch with at least two ranks to exercise uneven shards"
