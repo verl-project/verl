@@ -52,6 +52,12 @@ from verl.utils.vllm.vllm_fp8_utils import (
     process_fp8_weights_after_loading,
     stage_fp8_params_for_loading,
 )
+from verl.utils.vllm.vllm_nvfp4_per_token_utils import install_nvfp4_per_token_compressed_tensors_patch
+from verl.utils.vllm.vllm_unquant_utils import (
+    fold_unquantized_moe_params,
+    stage_unquantized_moe_params,
+    unquantized_moe_modules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +223,9 @@ def prepare_quanted_weights_for_loading(model):
         "fp8_layers": stage_fp8_params_for_loading(model),
         "mxfp4_moe_modules": stage_mxfp4_moe_params_for_loading(model),
         "nvfp4_moe_modules": stage_nvfp4_moe_params_for_loading(model),
+        # Routed experts a quantized model keeps in BF16 (e.g. its first and last layers).
+        "unquantized_moe_modules": unquantized_moe_modules(model),
+        "staged_unquantized_moe_modules": stage_unquantized_moe_params(model),
     }
     return reload_state
 
@@ -227,6 +236,11 @@ def process_quanted_weights_after_loading(model, reload_state):
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
     process_nvfp4_moe_weights_after_loading(reload_state.get("nvfp4_moe_modules") or [])
+    # Every BF16 expert layer, staged or not: a kernel prep that keeps the shape can still
+    # reorder the weights (FlashInfer CUTLASS swaps gate and up).
+    with fold_unquantized_moe_params(reload_state.get("staged_unquantized_moe_modules") or []):
+        for module in reload_state.get("unquantized_moe_modules") or []:
+            module.quant_method.process_weights_after_loading(module)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
@@ -285,6 +299,7 @@ def apply_vllm_quant_patches():
     """
     install_mxfp4_mxfp8_compressed_tensors_patch()
     install_nvfp4_cutlass_compressed_tensors_patch()
+    install_nvfp4_per_token_compressed_tensors_patch()
     if fp8_state.vllm_patches:
         logger.debug("vLLM quantization patches already applied")
         return

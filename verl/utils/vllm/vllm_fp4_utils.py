@@ -43,6 +43,8 @@ _MXFP4_SF_BLOCK = 32
 _MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
 _NVFP4_SF_BLOCK = 16
 _NVFP4_LIVE_ATTR = "_verl_nvfp4_live_params"
+# Parameters FlashInfer TRT-LLM registers afresh in each post-process; the CUDA graphs captured the first ones.
+_NVFP4_TRTLLM_DERIVED = ("g1_scale_c", "gemm1_clamp_limit", "gemm1_beta", "gemm1_alpha")
 
 
 def is_deepseek_v4_model(model):
@@ -487,6 +489,10 @@ def _stage_nvfp4_moe_params(module):
         tensor = getattr(module, name, None)
         if isinstance(tensor, torch.Tensor):
             live[name] = tensor
+    for name in _NVFP4_TRTLLM_DERIVED:
+        param = getattr(module, name, None)
+        if isinstance(param, torch.nn.Parameter):
+            live[name] = param
     setattr(module, _NVFP4_LIVE_ATTR, live)
 
 
@@ -528,6 +534,24 @@ def _restore_nvfp4_input_scales_in_place(module, converted):
     return tuple(converted)
 
 
+def _restore_nvfp4_derived_params_in_place(module):
+    """Copy the parameters TRT-LLM re-registered into the storage the CUDA graphs captured."""
+    live = getattr(module, _NVFP4_LIVE_ATTR, None) or {}
+    for name in _NVFP4_TRTLLM_DERIVED:
+        param = live.pop(name, None)
+        if param is None:
+            continue
+        new_data = getattr(module, name)
+        if new_data.shape != param.shape or new_data.dtype != param.dtype:
+            raise RuntimeError(
+                f"nvfp4 refit re-derived {name} as {tuple(new_data.shape)}/{new_data.dtype}, "
+                f"but the CUDA-graph live parameter is {tuple(param.shape)}/{param.dtype}"
+            )
+        if new_data.data_ptr() != param.data_ptr():
+            param.data.copy_(new_data)
+        module.register_parameter(name, param)
+
+
 def _attest_nvfp4_kernel_scale_references(module):
     """Verify that the retained CUDA-graph kernel sees the current refit scales."""
     method = module.quant_method
@@ -557,6 +581,18 @@ def _attest_nvfp4_kernel_scale_references(module):
             raise RuntimeError(f"nvfp4 activation scale reference missing: {config_name}/{input_name}")
         if not torch.equal(actual, 1.0 / input_scale):
             raise RuntimeError(f"nvfp4 {config_name} does not match the current activation scale")
+
+    # FlashInfer TRT-LLM derives g1_scale_c from the scales above and keeps its own reference.
+    derived = getattr(experts, "g1_scale_c", None)
+    if isinstance(derived, torch.Tensor):
+        registered = getattr(module, "g1_scale_c", None)
+        if not isinstance(registered, torch.Tensor) or derived.data_ptr() != registered.data_ptr():
+            raise RuntimeError("nvfp4 kernel has a stale g1_scale_c reference")
+        expected = config.a2_gscale
+        if experts.moe_config.is_act_and_mul:
+            expected = config.g1_alphas * config.a2_gscale
+        if not torch.equal(registered, expected):
+            raise RuntimeError("nvfp4 g1_scale_c does not match the current scales")
 
 
 def _restore_nvfp4_kernel_config_in_place(module, retained_kernel, retained_config):
@@ -605,6 +641,7 @@ def _process_nvfp4_moe_params(module):
         ),
     ):
         module.quant_method.process_weights_after_loading(module)
+    _restore_nvfp4_derived_params_in_place(module)
     _restore_nvfp4_kernel_config_in_place(module, retained_kernel, retained_config)
     leftover = getattr(module, _NVFP4_LIVE_ATTR, None) or {}
     delattr(module, _NVFP4_LIVE_ATTR)
@@ -613,17 +650,27 @@ def _process_nvfp4_moe_params(module):
 
 
 def stage_nvfp4_moe_params_for_loading(model):
-    """Stage NVFP4 W4A4 FlashInfer CUTLASS experts for a bucketed refit."""
+    """Stage NVFP4 W4A4 experts for a bucketed refit.
+
+    Static activation scales run on FlashInfer CUTLASS, per-token ones
+    (``moe_activation=nvfp4_per_token``) on FlashInfer TRT-LLM.
+    """
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    from verl.utils.vllm.vllm_nvfp4_per_token_utils import is_nvfp4_per_token_method
 
     staged = []
     for module in model.modules():
         if not _is_nvfp4_fused_moe_module(module):
             continue
         method = module.quant_method
-        if method.use_a16 or method.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_CUTLASS:
+        if is_nvfp4_per_token_method(method):
+            backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
+        else:
+            backend = NvFp4MoeBackend.FLASHINFER_CUTLASS
+        if method.use_a16 or method.nvfp4_backend != backend:
             raise NotImplementedError(
-                "NVFP4 refit supports only W4A4 FlashInfer CUTLASS routed experts; "
+                f"NVFP4 refit supports these W4A4 routed experts only on {backend}; "
                 f"got use_a16={method.use_a16}, backend={method.nvfp4_backend}"
             )
         _stage_nvfp4_moe_params(module)

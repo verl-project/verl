@@ -96,6 +96,15 @@ def test_get_thd_quant_align_size(monkeypatch):
     config.fp8_recipe = "blockwise"
     assert mcore_util.get_thd_quant_align_size(config) == 16
 
+    # NVFP4 training (fp4 set, fp8 off) pads to its 16-element scale blocks.
+    config = FakeConfig()
+    config.fp4, config.fp4_recipe = "e2m1", "nvfp4"
+    assert mcore_util.get_thd_quant_align_size(config) == 16
+    # Other FP4 recipes must define their own padding.
+    config.fp4_recipe = "custom"
+    with pytest.raises(ValueError, match="fp4_recipe='custom'"):
+        mcore_util.get_thd_quant_align_size(config)
+
 
 def _padded_seqlens(packed_seq_params) -> torch.Tensor:
     return packed_seq_params.cu_seqlens_q_padded.diff()

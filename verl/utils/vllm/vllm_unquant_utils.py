@@ -82,6 +82,16 @@ def _staging_data(param, shape, dtype):
     return staging
 
 
+def unquantized_moe_modules(model: torch.nn.Module) -> list[torch.nn.Module]:
+    """The model's unquantized fused-MoE layers."""
+    try:
+        from vllm.model_executor.layers.fused_moe import unquantized_fused_moe_method
+    except ImportError:
+        return []
+    method_cls = unquantized_fused_moe_method.UnquantizedFusedMoEMethod
+    return [layer for layer in model.modules() if isinstance(getattr(layer, "quant_method", None), method_cls)]
+
+
 def stage_unquantized_moe_params(model: torch.nn.Module) -> list[torch.nn.Module]:
     """Give ``load_weights`` checkpoint-layout expert weights where the kernel prep reshaped them.
 

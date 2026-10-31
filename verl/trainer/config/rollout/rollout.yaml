@@ -494,6 +494,9 @@ quantization:
   # compressed-tensors preset for routed experts, e.g. FP8_BLOCK
   moe: null
 
+  # activation override for the routed experts, as vLLM's quantization_config.moe.activation, e.g. nvfp4_per_token with moe=NVFP4
+  moe_activation: null
+
   # extra "re:" patterns of layers kept in high precision
   ignore: []
 

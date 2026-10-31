@@ -216,6 +216,15 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        if real_nvfp4_enabled(self.override_transformer_config):
+            if self.qat.enable:
+                raise ValueError("override_transformer_config.fp4 and ModelOpt QAT are mutually exclusive")
+            if self.dtype != "bfloat16":
+                raise ValueError("NVFP4 training currently requires dtype='bfloat16'")
+            if self.use_megatron_fsdp:
+                raise ValueError("NVFP4 training is a Megatron-DDP path and does not support Megatron-FSDP")
         if self.dynamic_context_parallel and (
             not isinstance(self.max_seqlen_per_dp_cp_rank, int)
             or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
