@@ -43,7 +43,6 @@ from verl.utils.ulysses import (
     set_ulysses_sequence_parallel_group,
     slice_input_tensor,
 )
-from verl.utils.veomni import router_replay_profile as r3prof
 from verl.utils.veomni.router_replay import RouterReplayAction, VeOmniRouterReplay
 from verl.workers.config import HFModelConfig, VeOmniEngineConfig, VeOmniOptimizerConfig
 
@@ -464,12 +463,6 @@ class VeOmniEngine(FSDPEngine):
         rr_active = self.enable_routing_replay and tu.get_non_tensor_data(data, "enable_routing_replay", default=False)
         if rr_active:
             assert self._router_replay is not None
-            r3prof.snapshot(
-                "router_replay.batch_begin",
-                mode=self._router_replay_mode,
-                forward_only=bool(forward_only),
-                num_microbatches=len(micro_batches),
-            )
             if self._router_replay_mode == "R2" and forward_only:
                 self._router_replay.begin_record()
             else:
@@ -500,15 +493,6 @@ class VeOmniEngine(FSDPEngine):
             return result
         finally:
             if rr_active:
-                # 释放路由数据前后的显存对比：clear() 会丢掉 _recorded / _targets。
-                r3prof.snapshot(
-                    "router_replay.batch_end",
-                    mode=self._router_replay_mode,
-                    recorded_layers=len(self._router_replay._recorded),
-                    target_layers=len(self._router_replay._targets),
-                    replay_calls=self._router_replay._prof_total_calls,
-                    replay_temp_mb=round(self._router_replay._prof_total_bytes / 2**20, 5),
-                )
                 self._router_replay.clear()
 
     def get_data_parallel_rank(self):
@@ -973,13 +957,6 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             )
 
         # Nested-jagged [bs, seq, L, topk] -> rmpad [total_nnz, L, topk].
-        r3prof.snapshot(
-            "router_replay.routed_experts_in",
-            routed=routed,
-            is_nested=bool(routed.is_nested),
-            pad_size=int(output_args.get("pad_size", 0)),
-            ulysses_sp=bool(self.use_ulysses_sp),
-        )
         targets = (routed.values() if routed.is_nested else routed).to(torch.int64)
         # The replay mask describes the same token axis, so it has to receive the
         # exact same pad suffix and Ulysses slice. Anything else silently shifts
@@ -997,18 +974,6 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             if valid is not None:
                 valid = slice_input_tensor(valid, dim=0, padding=False)
 
-        # 路由数据在 REPLAY 侧的真实占用：这就是每个 micro-batch 递给各层 router 的
-        # 目标张量，dtype 已被升到 int64，且已含 pad 与 SP 切分。
-        r3prof.snapshot(
-            "router_replay.replay_targets",
-            targets=targets,
-            pad_size=pad_size,
-            num_layers=int(targets.shape[1]) if targets.dim() == 3 else -1,
-            topk=int(targets.shape[2]) if targets.dim() == 3 else -1,
-            valid_rows=(int(valid.sum()) if r3prof.verbose() else -1) if valid is not None else -1,
-            total_rows=int(valid.numel()) if valid is not None else -1,
-        )
-
         rr.begin_microbatch(targets=list(targets.unbind(dim=1)), mask=valid)
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
@@ -1023,25 +988,16 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
 
         rr = self._router_replay
         if rr is not None and rr.action is RouterReplayAction.RECORD:
-            stacked = rr.take_recorded()
-            r3prof.snapshot(
-                "router_replay.recorded_stacked",
-                recorded=stacked,
-                num_layers=int(stacked.shape[1]) if stacked.dim() == 3 else -1,
-                topk=int(stacked.shape[2]) if stacked.dim() == 3 else -1,
-            )
-            recorded = self._gather_and_unpad_packed(stacked.view(torch.uint8), output_args["pad_size"])
+            recorded = self._gather_and_unpad_packed(rr.take_recorded().view(torch.uint8), output_args["pad_size"])
             model_output["routed_experts"] = torch.nested.nested_tensor_from_jagged(
                 recorded.view(torch.int16), micro_batch["input_ids"].offsets()
             )
-            # RECORD 产物：这就是要随 DataProto 传回 trainer 的路由数据，
-            # 也是 R3 下会被塞进 batch 的那份张量。引擎自己录的路由每个 token
-            # 都有效（不存在占位行），mask 全 True，让下游回放走同一条 mask 通路。
+            # Engine-recorded (R2) routes cover every token, so the mask is all True;
+            # emitting it keeps one replay path for both R2 and R3.
             model_output["routed_experts_mask"] = torch.nested.nested_tensor_from_jagged(
                 torch.ones(recorded.shape[0], dtype=torch.bool, device=recorded.device),
                 micro_batch["input_ids"].offsets(),
             )
-            r3prof.snapshot("router_replay.recorded_nested", routed_experts=model_output["routed_experts"])
         elif rr is not None and rr.action is RouterReplayAction.REPLAY:
             if rr.num_fired != rr.num_targets:
                 raise RuntimeError(
