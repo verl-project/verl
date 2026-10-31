@@ -1030,6 +1030,11 @@ class PPOTrainer(ABC):
         )
 
     def _validate(self) -> dict[str, float]:
+        validation_id = uuid.uuid4().hex
+        begin_validation = getattr(self.agent_loop_manager, "begin_validation", None)
+        if begin_validation is not None:
+            begin_validation(validation_id, global_steps=self.global_steps)
+        logger.info("Validation started: validation_id=%s global_steps=%s", validation_id, self.global_steps)
         # Lists to collect samples for the table
         sample_uids = []
         sample_inputs = []
@@ -1038,7 +1043,7 @@ class PPOTrainer(ABC):
         sample_scores = []
         sample_turns = []
         data_sources = []
-        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        reward_extra_infos_dict: dict[str, list] = defaultdict(list, {"reward": []})
         dump_all_inputs: list[str] = []
         dump_all_outputs: list[str] = []
         dump_all_keys: list[str] = []
@@ -1065,6 +1070,7 @@ class PPOTrainer(ABC):
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
+            tu.assign_non_tensor_data(batch, "validation_id", validation_id)
             # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
             # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
             tags = [
@@ -1077,6 +1083,10 @@ class PPOTrainer(ABC):
             batch, _ = self.replay_buffer.sample(
                 global_steps=self.global_steps, partition_id="val", batch_size=len(batch)
             )
+            if not batch.keys:
+                # Failed terminal prompts have no trajectory tensors. Their
+                # expected counts still contribute zero to validation below.
+                continue
 
             # 3. [OPTIONAL] compute reward score with colocated reward model
             if self.reward_loop_manager.reward_loop_worker_handles is None:
@@ -1195,13 +1205,18 @@ class PPOTrainer(ABC):
                 dump_path=val_data_dir,
             )
 
-        return self._val_metrics_update(
+        val_metrics = self._val_metrics_update(
             data_sources,
             sample_uids,
             reward_extra_infos_dict,
             sample_turns,
             expected_acc_counts=expected_acc_counts,
         )
+        publish_metrics = getattr(self.agent_loop_manager, "publish_validation_metrics", None)
+        if publish_metrics is not None:
+            publish_metrics(validation_id, val_metrics)
+        logger.info("Validation metrics ready: validation_id=%s metrics=%s", validation_id, val_metrics)
+        return val_metrics
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""

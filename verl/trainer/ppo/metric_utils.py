@@ -913,9 +913,11 @@ def process_validation_metrics(
         sample_uids: List of sample uids corresponding to each sample.
         infos_dict: Dictionary mapping variable names to lists of values for each sample.
         seed: Random seed for bootstrap sampling. Defaults to 42.
-        expected_acc_counts: Expected session count keyed by ``(data_source, uid)``. For data
-            sources that emit ``acc``, failure sessions are included with ``acc=0`` while
-            ``acc_success_only`` preserves the metric over materialized sessions.
+        expected_acc_counts: Expected session count keyed by ``(data_source, uid)``. Missing
+            canonical rewards are counted as zero. Sources that emit ``acc`` or scorer
+            ``score`` receive the same treatment for those metrics. ``*_success_only``
+            preserves statistics over materialized sessions without inventing metrics for
+            sources that do not define them.
 
     Returns:
         A nested dictionary with the structure:
@@ -953,22 +955,24 @@ def process_validation_metrics(
             var2vals[var_name].append(var_vals[sample_idx])
 
     if expected_acc_counts:
-        # Only sources that actually define acc opt into this policy; reward-only evaluators must not
-        # acquire a synthetic accuracy metric merely because another source emits one.
-        acc_data_sources = {
-            data_source
-            for data_source, uid2var2vals in data_src2uid2var2vals.items()
-            if any(value is not None for var2vals in uid2var2vals.values() for value in var2vals.get("acc", []))
-        }
-        for (data_source, uid), expected_count in expected_acc_counts.items():
-            if data_source not in acc_data_sources:
+        for variable in ("reward", "acc", "score"):
+            if variable not in infos_dict:
                 continue
-
-            var2vals = data_src2uid2var2vals[data_source][uid]
-            observed_acc = [value for value in var2vals.get("acc", []) if value is not None]
-            var2vals["acc_success_only"] = observed_acc
-            missing_count = max(expected_count - len(observed_acc), 0)
-            var2vals["acc"] = observed_acc + [0.0] * missing_count
+            defined_sources = {
+                data_source
+                for data_source, uid2var2vals in data_src2uid2var2vals.items()
+                if any(value is not None for var2vals in uid2var2vals.values() for value in var2vals.get(variable, []))
+            }
+            if variable == "reward":
+                # The trainer declares canonical reward even for an empty result batch.
+                defined_sources.update(data_source for data_source, _uid in expected_acc_counts)
+            for (data_source, uid), expected_count in expected_acc_counts.items():
+                if data_source not in defined_sources:
+                    continue
+                var2vals = data_src2uid2var2vals[data_source][uid]
+                observed = [value for value in var2vals.get(variable, []) if value is not None]
+                var2vals[f"{variable}_success_only"] = observed
+                var2vals[variable] = observed + [0.0] * max(expected_count - len(observed), 0)
 
     np_mean = np.mean
     np_std = np.std
