@@ -133,6 +133,8 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             batch, key="distillation_only", default=False
         ):
             raise NotImplementedError("Dynamic CP does not support distillation")
+        if tu.get_non_tensor_data(batch, key="score_centering", default=False):
+            raise NotImplementedError("Dynamic CP does not support score centering")
 
 
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
@@ -1158,6 +1160,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_entropy: bool,
         distillation_use_topk: bool,
         distillation_only: bool,
+        score_centering: bool,
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
@@ -1195,10 +1198,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
             logits_bak = logits
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
-        if distillation_use_topk:
+        if distillation_use_topk or score_centering:
             from verl.models.mcore.util import get_thd_quant_align_size
 
-            # the teacher's top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
+            # the top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
             ret.update(
                 logits_processor_func(
                     student_logits=logits_bak,
@@ -1210,7 +1213,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 )
             )
         if not distillation_only:
-            ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
+            # the cross entropy shifts fp32 logits in place; the score centering hook re-reads them in backward
+            ret["log_probs"] = vocab_parallel_log_probs_from_logits(
+                logits_bak.clone() if score_centering else logits_bak, label
+            )
 
         return ret
 
@@ -1232,14 +1238,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+        score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
             else None
         )
 
-        if pad_to_length_bucket is not None and distillation_use_topk:
-            raise RuntimeError("pad_to_length is not supported with top-K distillation")
+        if pad_to_length_bucket is not None and (distillation_use_topk or score_centering):
+            raise RuntimeError("pad_to_length is not supported with top-K distillation or score centering")
         if pad_to_length_bucket is not None and self.enable_routing_replay:
             raise RuntimeError("pad_to_length is not supported with router replay")
 
@@ -1247,6 +1254,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
             raise NotImplementedError(
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
+            )
+        if score_centering and use_fused_kernels:
+            raise NotImplementedError(
+                "score_centering=True is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the logits tensor score centering needs."
             )
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         temperature = batch["temperature"]
@@ -1344,6 +1356,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 distillation_use_topk=distillation_use_topk,
                 distillation_only=distillation_only,
+                score_centering=score_centering,
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
