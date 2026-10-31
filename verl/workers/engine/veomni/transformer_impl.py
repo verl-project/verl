@@ -1005,7 +1005,7 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             pad_size=pad_size,
             num_layers=int(targets.shape[1]) if targets.dim() == 3 else -1,
             topk=int(targets.shape[2]) if targets.dim() == 3 else -1,
-            valid_rows=int(valid.sum()) if valid is not None else -1,
+            valid_rows=(int(valid.sum()) if r3prof.verbose() else -1) if valid is not None else -1,
             total_rows=int(valid.numel()) if valid is not None else -1,
         )
 

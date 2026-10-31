@@ -54,6 +54,11 @@ def enabled() -> bool:
     return os.environ.get("VERL_R3_PROFILE") == "1"
 
 
+def verbose() -> bool:
+    """更细的采样：会做 ``.sum()`` 之类的设备归约，触发 GPU 同步，默认关闭。"""
+    return os.environ.get("VERL_R3_PROFILE_VERBOSE") == "1"
+
+
 def _dist_info() -> dict[str, int]:
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         return {"rank": -1, "world": -1}
