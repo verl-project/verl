@@ -16,6 +16,7 @@
 """ModelOpt fake quantization and Megatron QAT workflow helpers."""
 
 import copy
+import logging
 
 import modelopt.torch.quantization as mtq
 import torch
@@ -26,6 +27,8 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     is_registered_quant_backend,
     register_quant_backend,
 )
+
+logger = logging.getLogger(__name__)
 
 _FP8_BLOCK_BACKEND = "verl_fp8_block"
 _MXFP4_BACKEND = "verl_mxfp4"
@@ -328,6 +331,65 @@ def build_quantize_config(
     return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 
 
+class _QuantizedWeightsView:
+    """The grouped linear module as ModelOpt's functional sees it, with the expert weights already quantized."""
+
+    def __init__(self, module: nn.Module):
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    @staticmethod
+    def weight_quantizer(weight: torch.Tensor) -> torch.Tensor:
+        return weight
+
+
+def _batch_grouped_expert_weight_qdq() -> None:
+    """Fake-quantize all expert weights of a TE grouped linear in one quantizer call.
+
+    ModelOpt's ``_QuantTEGroupedLinear`` calls its weight quantizer once per expert at every forward. With MXFP4
+    that is about fifty small kernels per expert, launched from Python: on Qwen3-30B-A3B at TP2 x EP2 (64 local
+    experts), a QAT forward of one layer took 147 ms against 7 ms without QAT, with the GPU idle most of the time.
+    The MXFP4 QDQ forms each 32-element group within a row of one weight, so quantizing the stacked weights gives
+    the same values, bit for bit, as quantizing them one by one. Other weight backends keep ModelOpt's per-expert
+    loop.
+    """
+    try:
+        from modelopt.torch.quantization.plugins.transformer_engine import _QuantTEGroupedLinear
+    except ImportError:
+        return
+
+    original = _QuantTEGroupedLinear.__dict__.get("_quantized_linear_fn")
+    original_fn = getattr(original, "__func__", original)
+    if original_fn is None:
+        logger.warning(
+            "ModelOpt's _QuantTEGroupedLinear has no _quantized_linear_fn; MXFP4 expert weights stay per expert"
+        )
+        return
+    if getattr(original_fn, "_verl_batched_weight_qdq", False):
+        return
+
+    def quantized_linear_fn(package, func_name, self, *args):
+        quantizer = self.weight_quantizer
+        num_gemms = getattr(self, "num_gemms", 0)
+        batchable = getattr(quantizer, "is_enabled", False) and getattr(quantizer, "backend", None) == _MXFP4_BACKEND
+        if not batchable or num_gemms < 2 or 2 * num_gemms > len(args):
+            return original_fn(package, func_name, self, *args)
+        # *weights_and_biases is the trailing variadic of TE's _GroupedLinear: num_gemms weights, then num_gemms biases
+        start = len(args) - 2 * num_gemms
+        weights = args[start : start + num_gemms]
+        if len({(w.shape, w.dtype, w.device) for w in weights}) != 1:
+            return original_fn(package, func_name, self, *args)
+        quantized = quantizer(torch.stack(weights)).unbind(0)
+        args = (*args[:start], *quantized, *args[start + num_gemms :])
+        return original_fn(package, func_name, _QuantizedWeightsView(self), *args)
+
+    quantized_linear_fn._verl_batched_weight_qdq = True
+    _QuantTEGroupedLinear._quantized_linear_fn = staticmethod(quantized_linear_fn)
+    logger.info("QAT: TE grouped linears fake-quantize their MXFP4 expert weights in one call")
+
+
 def apply_qat(
     model: nn.Module,
     qat_mode: str,
@@ -335,6 +397,7 @@ def apply_qat(
 ) -> nn.Module:
     """Apply Quantization-Aware Training to a Megatron model."""
     config = build_quantize_config(qat_mode, ignore_patterns)
+    _batch_grouped_expert_weight_qdq()
     mtq.quantize(model, config)
     return model
 
