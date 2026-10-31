@@ -655,6 +655,7 @@ class vLLMHttpServer:
             f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
         topk_log_probs = sampling_params.pop("topk_log_probs", 0)
+        include_prompt_token = sampling_params.pop("include_prompt_token", False)
         sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
         if sampling_params["logprobs"]:
             # the top-k head is read from flat lists, see extract_response_topk_logprobs
@@ -751,6 +752,7 @@ class vLLMHttpServer:
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
             result_dict=extra_fields,
+            include_prompt_token=include_prompt_token,
         )
         token_ids = final_res.outputs[0].token_ids
         log_probs = None

@@ -531,14 +531,23 @@ def build_mtp_speculative_config(
     }
 
 
-def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):
-    """Extract prompt log probabilities from generation output."""
+def extract_prompt_logprobs(
+    output: RequestOutput,
+    num_prompt_logprobs: Optional[int],
+    result_dict: dict[str, list],
+    include_prompt_token: bool = False,
+):
+    """Extract prompt scores, optionally appending the observed token after top-k.
+
+    The final column is always the observed token, even when it is also in the
+    top-k. vLLM already returns its score, so this requires no extra inference.
+    """
     if num_prompt_logprobs is None:
         return
 
     prompt_logprobs_ls, prompt_ids_ls = [], []
     # NOTE: logprob of first prompt token is None.
-    for logprobs_dict in output.prompt_logprobs[1:]:
+    for position, logprobs_dict in enumerate(output.prompt_logprobs[1:], start=1):
         if num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob
@@ -558,10 +567,16 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
                 prompt_logprobs[rank - 1] = logprob
             prompt_logprobs_ls.append(prompt_logprobs)
             prompt_ids_ls.append(prompt_ids)
+        if include_prompt_token:
+            token_id = int(output.prompt_token_ids[position])
+            token_logprob = next(value for key, value in logprobs_dict.items() if int(key) == token_id)
+            prompt_ids_ls[-1].append(token_id)
+            prompt_logprobs_ls[-1].append(token_logprob.logprob)
 
     # NOTE: pad a dummy prompt logprob for last prompt token.
-    prompt_logprobs_ls.append([0.0] * max(num_prompt_logprobs, 1))
-    prompt_ids_ls.append([0] * max(num_prompt_logprobs, 1))
+    width = max(num_prompt_logprobs, 1) + int(include_prompt_token)
+    prompt_logprobs_ls.append([0.0] * width)
+    prompt_ids_ls.append([0] * width)
 
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
