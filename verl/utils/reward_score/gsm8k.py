@@ -17,6 +17,22 @@ import re
 _SOLUTION_CLIP_CHARS = 300
 
 
+def _normalize_answer(answer):
+    """Strip formatting from a matched number so it can be compared with the ground truth.
+
+    The answer regexes also match thousands separators and sentence punctuation, e.g. ``1,000``
+    or the ``72.`` in ``#### 72.``. Trailing decimal zeros are dropped as well (``28.00`` -> ``28``),
+    since every GSM8k ground truth is an integer. Returns None if no digit is left, e.g. for a bare
+    ``.`` or ``,``.
+    """
+    answer = answer.replace(",", "").rstrip(".")
+    if "." in answer:
+        answer = answer.rstrip("0").rstrip(".")
+    if not any(ch.isdigit() for ch in answer):
+        return None
+    return answer
+
+
 def extract_solution(solution_str, method="strict"):
     assert method in ["strict", "flexible"]
 
@@ -28,24 +44,21 @@ def extract_solution(solution_str, method="strict"):
 
     if method == "strict":
         # this also tests the formatting of the model
-        solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str)
+        # an optional currency sign is allowed after the marker, e.g. "#### $18"
+        solutions = re.findall("#### \\$?(\\-?[0-9\\.\\,]+)", solution_str)
         if len(solutions) == 0:
             final_answer = None
         else:
             # take the last solution
-            final_answer = solutions[-1].replace(",", "").replace("$", "")
+            final_answer = _normalize_answer(solutions[-1])
     elif method == "flexible":
         answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
         final_answer = None
-        if len(answer) == 0:
-            # no reward is there is no answer
-            pass
-        else:
-            invalid_str = ["", "."]
-            # find the last number that is not '.'
-            for final_answer in reversed(answer):
-                if final_answer not in invalid_str:
-                    break
+        # find the last candidate that contains a digit; a bare "." or "," is punctuation, not an answer
+        for candidate in reversed(answer):
+            final_answer = _normalize_answer(candidate)
+            if final_answer is not None:
+                break
     return final_answer
 
 
