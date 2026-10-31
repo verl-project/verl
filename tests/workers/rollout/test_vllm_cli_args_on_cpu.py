@@ -255,8 +255,10 @@ class TestEngineKwargsManagedArgs:
             ("enable-expert-parallel", "rollout.expert_parallel_size"),
             ("tensor_parallel_size", "rollout.tensor_model_parallel_size"),
             ("enable_return_routed_experts", "rollout.enable_rollout_routing_replay"),
+            ("enable_tower_connector_lora", "actor_rollout_ref.model.lora"),
+            ("enable-tower-connector-lora", "actor_rollout_ref.model.lora"),
         ],
-        ids=["ep", "ep-hyphen", "tp", "r3"],
+        ids=["ep", "ep-hyphen", "tp", "r3", "tower-connector-lora", "tower-connector-lora-hyphen"],
     )
     def test_rejects_managed_arg(self, key, points_to):
         with pytest.raises(ValueError, match=points_to):

@@ -504,6 +504,10 @@ def apply_patch():
 
 
 def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
+    """Patch async checkpoint writes for Megatron 0.12.1 with PyTorch 2.8.0 or 2.9.0.
+
+    Leave other version combinations unchanged.
+    """
     # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
     import inspect
@@ -513,8 +517,6 @@ def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
 
     import megatron.core
     import torch
-    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
-    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
     from packaging import version
     from torch import multiprocessing as mp
     from torch.distributed.checkpoint.filesystem import _write_item
@@ -524,6 +526,9 @@ def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
         or version.parse(megatron.core.__version__).base_version != "0.12.1"
     ):
         return
+
+    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
 
     WriteBucket = tuple[Path, str, tuple[list, list]]
 
