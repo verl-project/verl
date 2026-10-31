@@ -43,11 +43,13 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     monkeypatch.setattr(router_utils, "device_name", "cpu")
 
     # The route tensor reaches preprocess_thd_engine only on the replay side, and by
-    # then it is back to int16; input_ids arrive as int64.
+    # then it is back to int16; the parallel validity mask arrives as bool.
     def fake_preprocess(value, **kwargs):
         calls.append(kwargs["local_cp_size"])
         if value.dtype == torch.int16:
             value = torch.tensor([[[[1]], [[2]]]], dtype=torch.int16)
+        elif value.dtype == torch.bool:
+            value = torch.ones((1, 2), dtype=torch.bool)
         return value, object(), None
 
     # postprocess_thd_engine is dtype- and trailing-shape-preserving, so it hands
@@ -64,7 +66,13 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
 
     input_ids = _nested([torch.arange(2)])
     recorded = []
-    config = SimpleNamespace(fp8=None, num_layers=1, moe_layer_freq=1)
+    config = SimpleNamespace(
+        fp8=None,
+        num_layers=1,
+        num_moe_experts=8,
+        expert_model_parallel_size=1,
+        moe_layer_freq=1,
+    )
     router_utils.merge_router_topk_indices(None, input_ids, recorded, config, local_cp_size=2)
 
     # int16 has no NCCL datatype, so the collective must see the uint8 view while the
@@ -76,8 +84,68 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     router.set_target_indices = lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
     router_utils.set_router_replay_data(recorded[0], None, config, local_cp_size=2)
 
-    assert calls == [2, 2, 2]
+    assert calls == [2, 2, 2, 2]
     torch.testing.assert_close(target["indices"], torch.tensor([[1], [2]]))
+
+
+@pytest.mark.parametrize("capacity_factor", [None, 0.5, 1.0])
+@pytest.mark.parametrize("quant_align_size", [None, 16, 32])
+@pytest.mark.parametrize("nested", [False, True])
+def test_r2_padding_before_sequence_parallel_scatter(monkeypatch, quant_align_size, nested, capacity_factor):
+    """Balance dropless padding while preserving capacity-limited routes exactly."""
+    monkeypatch.setattr(router_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(router_utils.mpu, "get_context_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(router_utils.mpu, "get_context_parallel_rank", lambda: 0)
+    monkeypatch.setattr(router_utils, "device_name", "cpu")
+    monkeypatch.setattr(router_utils, "get_current_rank_layer_info", lambda *_args: {"start": 0, "end": 1})
+
+    target = {}
+    router = SimpleNamespace(
+        set_target_indices=lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
+    )
+    monkeypatch.setattr(router_utils.RouterReplayHelper, "get_micro_batch_router_list", lambda *_args: [router])
+    scattered = []
+    monkeypatch.setattr(
+        router_utils,
+        "scatter_to_sequence_parallel_region",
+        lambda tensor: scattered.append(tensor.clone()) or tensor,
+    )
+
+    valid_routes = torch.arange(9 * 8, dtype=torch.int16).reshape(9, 1, 8).remainder(64)
+    routes = _nested([valid_routes]) if nested else valid_routes.unsqueeze(0)
+    attention_mask = None if nested else torch.ones((1, 9), dtype=torch.bool)
+    monkeypatch.setattr(router_utils, "get_thd_quant_align_size", lambda _config: quant_align_size)
+    config = SimpleNamespace(
+        fp8=None,
+        num_layers=1,
+        num_moe_experts=64,
+        expert_model_parallel_size=32,
+        moe_layer_freq=1,
+        moe_expert_capacity_factor=capacity_factor,
+    )
+
+    router_utils.set_router_replay_data(routes, attention_mask, config, vp_rank=0)
+
+    assert len(scattered) == 1
+    pre_scatter = scattered[0]
+    num_rows = 8 if quant_align_size is None else 1024
+    assert pre_scatter.shape == (num_rows, 1, 8)
+    num_valid = 4 if quant_align_size is None else 9
+    torch.testing.assert_close(pre_scatter[:num_valid], valid_routes[:num_valid])
+    padding = pre_scatter[num_valid:, 0]
+    if capacity_factor is None:
+        rank_load = torch.bincount((padding // 2).flatten(), minlength=32)
+        assert rank_load.sum() == (num_rows - num_valid) * 8
+        assert rank_load.max() - rank_load.min() <= 1
+        assert (padding.sort(dim=-1).values.diff(dim=-1) != 0).all()
+    else:
+        # Exact pre-change dispatch input: both token-dropping policies and
+        # pad-to-capacity receive the same routes and scores as before.
+        expected = torch.zeros_like(pre_scatter)
+        expected[:num_valid] = valid_routes[:num_valid]
+        torch.testing.assert_close(pre_scatter, expected)
+    assert target["mask"] is None
+    torch.testing.assert_close(target["indices"], pre_scatter[:, 0].to(torch.int64))
 
 
 def test_r3_alignment_mask_and_dcp_collection():
