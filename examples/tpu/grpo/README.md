@@ -9,6 +9,8 @@ By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1`
 | [`run_qwen3_0_6b_torchtitan.sh`](run_qwen3_0_6b_torchtitan.sh) | 5-step smoke test (Qwen3-0.6B, 2 `v6e-1` slices / 2 chips by default) |
 | [`run_qwen3_4b_torchtitan.sh`](run_qwen3_4b_torchtitan.sh) | 100-step GRPO run (Qwen3-4B, 2 `v6e-4` slices / 8 chips) |
 | [`run_qwen3_5_torchtitan.sh`](run_qwen3_5_torchtitan.sh) | Qwen3.5 GRPO on TPU v7x (default `Qwen3.5-35B-A3B` MoE; also `Qwen3.5-0.8B`) |
+| [`run_qwen3_8b_torchtitan.sh`](run_qwen3_8b_torchtitan.sh) | GRPO run (Qwen3-8B, 2 `v6e-8` slices / 16 chips) |
+| [`run_qwen3_32b_torchtitan.sh`](run_qwen3_32b_torchtitan.sh) | GRPO run (Qwen3-32B, 2 `v6e-32` slices / 64 chips) |
 | [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | KubeRay `RayCluster`: 1 CPU head pod and 2 TPU `v6e-1` slices (configurable for `v6e-4` / `v6e-8`) |
 | [`Dockerfile`](Dockerfile) | Image of the Ray pods |
 
@@ -158,3 +160,48 @@ To scale further to **2 `v6e-8` slices (16 chips)**, create two multi-host node 
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
+
+## 8. Run Qwen3-8B on 2 `v6e-8` slices and Qwen3-32B on 2 `v6e-32` slices
+
+`run_qwen3_8b_torchtitan.sh` and `run_qwen3_32b_torchtitan.sh` follow `run_qwen3_4b_torchtitan.sh`, with the trainer on one multi-host slice (FSDP over all its chips) and one vLLM server spanning the other (TP over all its chips). To fit the larger models in the 32 GiB of HBM per chip, they train on 1 sequence per micro-batch and turn the KL-to-reference loss off (`USE_KL_LOSS=False`; the reference model would add a second copy of the weights on every trainer chip).
+
+| | Qwen3-8B | Qwen3-32B |
+|---|---|---|
+| Slices | 2 `v6e-8` (2 hosts x 4 chips each) | 2 `v6e-32` (8 hosts x 4 chips each) |
+| Node pools (one per slice) | `--machine-type ct6e-standard-4t --num-nodes 2 --tpu-topology 2x4` | `--machine-type ct6e-standard-4t --num-nodes 8 --tpu-topology 4x8` |
+| [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | `numOfHosts: 2`, `gke-tpu-topology: 2x4`, `memory: 400Gi`, `cpu: "48"`, `google.com/tpu: "4"` | `numOfHosts: 8`, `gke-tpu-topology: 4x8`, `memory: 600Gi`, `cpu: "160"`, `google.com/tpu: "4"` |
+| Trainer | FSDP8, `tpu_eager_mode=DEFER_AND_FUSE` | FSDP32, `tpu_eager_mode=DEFER_AND_FUSE` |
+| Rollout | vLLM TP=8 | vLLM TP=32 |
+| Default steps | 100 | 20 |
+
+1. **Upload the model** to your GCS bucket, as in step 3 (`Qwen/Qwen3-8B` or `Qwen/Qwen3-32B`):
+   ```bash
+   hf download Qwen/Qwen3-8B --local-dir /tmp/Qwen3-8B
+   gcloud storage cp -r /tmp/Qwen3-8B gs://<BUCKET>/assets/hf/
+   hf download Qwen/Qwen3-32B --local-dir /tmp/Qwen3-32B
+   gcloud storage cp -r /tmp/Qwen3-32B gs://<BUCKET>/assets/hf/
+   ```
+   Loading the 62 GB Qwen3-32B checkpoint through Cloud Storage FUSE is slow; to speed up start-up, copy it to the same local path on every host and point `MODEL_PATH` at it.
+
+2. **Create two multi-host node pools**, one per slice, with the flags in the table (and `--spot --disk-type hyperdisk-balanced --workload-metadata GKE_METADATA --scopes cloud-platform` as in step 4).
+
+3. **Update [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml)** with the values in the table (its comments list them too), then recreate the Ray cluster and port-forward its dashboard as in step 6.
+
+4. **Submit the job**:
+   ```bash
+   ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_8b_torchtitan.sh
+   ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_32b_torchtitan.sh
+   ```
+
+Both scripts default to `TPU_EAGER_MODE=DEFER_AND_FUSE`. On an earlier image, `update_actor` hung at 32 trainer ranks with it (the 32B script explains why); if a 32B run hangs in `update_actor`, set `TPU_EAGER_MODE=DEFER_NEVER`.
+
+Both scripts take `VERIFY_PARITY` to check the `tpu-sync` weight sync (`engine_kwargs.tpu-sync.verify_parity`):
+
+| `VERIFY_PARITY` | Check |
+|---|---|
+| `off` (default) | None |
+| `norm` | After every sync, compare the weight norms of the trainer and the rollout |
+| `exact` | On the step-0 sync, compare every received tensor bit for bit with the checkpoint vLLM loaded. |
+| `all` | `norm` and `exact` |
+
+For example, `ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- env VERIFY_PARITY=norm TOTAL_TRAINING_STEPS=10 bash examples/tpu/grpo/run_qwen3_8b_torchtitan.sh`.
