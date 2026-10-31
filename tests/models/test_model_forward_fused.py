@@ -12,352 +12,273 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
-from types import MethodType, SimpleNamespace
+"""Native output processors preserve the forward method, token order and gradients."""
+
+from types import SimpleNamespace
 
 import pytest
 import torch
-from megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
-from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.transformer.module import Float16Module
+import torch.nn.functional as F
 
+from verl.models.mcore import compat
 from verl.models.mcore import model_forward_fused as mff
+from verl.utils.megatron.native import get_language_model
 
 
-def _new_uninitialized_model(model_cls=GPTModel):
-    model = object.__new__(model_cls)
-    torch.nn.Module.__init__(model)
-    return model
+class NativeModel(torch.nn.Module):
+    def forward(self, *, output_processor=None, output_processor_context=None):
+        return output_processor_context
 
 
-def test_mcore_gpt_forward_has_native_output_processor_contract():
-    parameters = inspect.signature(GPTModel.forward).parameters
-    assert {"output_processor", "output_processor_context"}.issubset(parameters)
-
-
-def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch):
-    model = _new_uninitialized_model()
-    original_forward = model.forward.__func__
-    signature_calls = 0
-    original_signature = inspect.signature
-
-    def counted_signature(callable_):
-        nonlocal signature_calls
-        signature_calls += 1
-        return original_signature(callable_)
-
-    monkeypatch.setattr(mff.inspect, "signature", counted_signature)
-
-    mff.patch_fused_forward(model)
-    mff.patch_fused_forward(model)
-    mff.unpatch_fused_forward(model)
-    mff.unpatch_fused_forward(model)
-    mff.patch_fused_forward(model)
-
-    assert signature_calls == 1
-    assert getattr(model, mff._FUSED_FORWARD_MODE_ATTR) == mff._HOOK_MODE
-    assert model.forward.__func__ is original_forward
+def test_configure_preserves_forward_and_supports_nested_wrappers():
+    model = NativeModel()
+    wrapper = SimpleNamespace(module=SimpleNamespace(module=SimpleNamespace(language_model=model)))
+    forward = model.forward.__func__
+    mff.configure_fused_forward(wrapper)
+    mff.configure_fused_forward(wrapper)
+    assert get_language_model(wrapper) is model
+    assert model.forward.__func__ is forward
     assert not hasattr(model, "forward_backup")
 
 
-def test_legacy_fallback_patch_and_unpatch_are_idempotent():
-    class LegacyGPTModel(GPTModel):
-        def forward(self, input_ids=None):
-            return input_ids
-
-    model = _new_uninitialized_model(LegacyGPTModel)
-    original_forward = model.forward.__func__
-
-    mff.patch_fused_forward(model)
-    backup = model.forward_backup
-    mff.patch_fused_forward(model)
-
-    assert getattr(model, mff._FUSED_FORWARD_MODE_ATTR) == mff._LEGACY_MODE
-    assert model.forward.__func__ is mff._fused_GPTModel_forward
-    assert model.forward_backup is backup
-
-    mff.unpatch_fused_forward(model)
-    mff.unpatch_fused_forward(model)
-    assert model.forward.__func__ is original_forward
-    assert not hasattr(model, "forward_backup")
-
-    mff.patch_fused_forward(model)
-    assert model.forward.__func__ is mff._fused_GPTModel_forward
-    mff.unpatch_fused_forward(model)
-    assert model.forward.__func__ is original_forward
+def test_legacy_models_fail_before_training():
+    model = torch.nn.Linear(2, 2)
+    original = model.forward.__func__
+    assert not mff.configure_fused_forward(model)
+    assert model.forward.__func__ is original
 
 
-def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
-    input_ids = torch.tensor([[1, 2, 3]])
-    labels = torch.tensor([[2, 3, 4]])
-    preprocess_calls = []
+@pytest.mark.parametrize("batch_size", [1, 3])
+@pytest.mark.parametrize("tied", [False, True])
+def test_processor_preserves_batch_sequence_order_gradients_and_readiness(monkeypatch, batch_size, tied):
+    torch.manual_seed(17)
+    hidden = torch.randn(4, batch_size, 5, requires_grad=True)
+    weight = torch.nn.Parameter(torch.randn(7, 5))
+    labels = torch.arange(batch_size * 4).reshape(batch_size, 4) % 7
+    ready = []
+    monkeypatch.setattr(compat, "_readiness_api", lambda: lambda value: ready.append(value))
+    output_layer = SimpleNamespace(weight=weight, tp_group=None)
 
-    def fake_preprocess(value, **kwargs):
-        preprocess_calls.append(kwargs)
-        return value, "packed", None
+    def eager_kernel(h, w, targets, temperature, reduction, group, **kwargs):
+        assert ready, "Parameter readiness must be established before a direct weight read."
+        logits = F.linear(h, w) / temperature
+        logp = logits.log_softmax(-1)
+        entropy = -(logp.exp() * logp).sum(-1)
+        return logp.gather(-1, targets.unsqueeze(-1)).squeeze(-1).reshape(-1), entropy.reshape(-1)
 
-    monkeypatch.setattr(mff, "preprocess_thd_engine", fake_preprocess)
-
-    class Model:
-        pre_process = True
-        post_process = False
-        config = SimpleNamespace(
-            fp8="hybrid",
-            csa_window_size=64,
-            experimental_attention_variant="dsv4_hybrid",
-        )
-
-        def __init__(self, mode):
-            setattr(self, mff._FUSED_FORWARD_MODE_ATTR, mode)
-            self.calls = []
-
-        def __call__(self, **kwargs):
-            self.calls.append(kwargs)
-            return SimpleNamespace(log_probs=torch.tensor([1.0]), entropy=torch.tensor([2.0]))
-
-    hook_model = Model(mff._HOOK_MODE)
-    setattr(hook_model, mff._FUSED_IMPL_BACKEND_ATTR, "liger")
-    output = mff.fused_forward_model_engine()(hook_model, input_ids, labels, {}, 0.7, True, 0, "dualpipev")
-
-    hook_kwargs = hook_model.calls[-1]
-    assert output.log_probs.tolist() == [1.0]
-    assert "temperature" not in hook_kwargs
-    assert hook_kwargs["output_processor"] is mff.fused_output_processor
-    assert hook_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
-    assert hook_kwargs["output_processor_context"].impl_backend == "liger"
-    assert preprocess_calls == [
-        {
-            "pre_process": True,
-            "quant_align_size": 16,
-            "min_local_rows": 64,
-            "pad_to_length_bucket": None,
-            "cp_layout": "dualpipev",
-            "local_cp_size": None,
-        },
-        {
-            "pre_process": True,
-            "need_roll": True,
-            "quant_align_size": 16,
-            "min_local_rows": 64,
-            "pad_to_length_bucket": None,
-            "cp_layout": "dualpipev",
-            "local_cp_size": None,
-        },
-    ]
-
-    legacy_model = Model(mff._LEGACY_MODE)
-    setattr(legacy_model, mff._FUSED_IMPL_BACKEND_ATTR, "liger")
-    mff.fused_forward_model_engine()(legacy_model, input_ids, labels, {}, 0.5, True, 0)
-    legacy_kwargs = legacy_model.calls[-1]
-    assert legacy_kwargs["temperature"] == pytest.approx(0.5)
-    assert legacy_kwargs["impl_backend"] == "liger"
-    assert "output_processor" not in legacy_kwargs
-    assert "output_processor_context" not in legacy_kwargs
-
-
-class _OutputLayer(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.ones(4, 3))
-
-
-class _Decoder(torch.nn.Module):
-    def forward(self, *, hidden_states, **_kwargs):
-        return hidden_states
-
-
-def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
-    """Exercise the Float16Module -> DDP stack built by Megatron Bridge."""
-    model = _new_uninitialized_model()
-    model.config = SimpleNamespace(
-        fine_grained_activation_offloading=False,
-        moe_paged_stash=False,
-        mtp_num_layers=0,
-        use_mup=False,
-        sequence_parallel=False,
+    monkeypatch.setattr(mff, "linear_cross_entropy", eager_kernel)
+    output = mff.fused_output_processor(
+        hidden_states=hidden,
+        output_layer=output_layer,
+        output_weight=weight if tied else None,
+        labels=labels,
+        context=mff.FusedOutputProcessorContext(0.7),
+        config=SimpleNamespace(sequence_parallel=False, config_logger_dir=""),
     )
-    model.share_embeddings_and_output_weights = False
+    reference_logits = F.linear(hidden.transpose(0, 1), weight) / 0.7
+    reference = reference_logits.log_softmax(-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(output["log_probs"], reference)
+    grad = torch.autograd.grad(output["log_probs"].sum(), (hidden, weight), retain_graph=True)
+    expected_grad = torch.autograd.grad(reference.sum(), (hidden, weight))
+    for actual, expected in zip(grad, expected_grad, strict=True):
+        torch.testing.assert_close(actual, expected)
+    assert len(ready) == 1 and ready[0] is weight
+
+
+@pytest.mark.parametrize("backend,reduce_grad", [("triton", True), ("liger", False)])
+def test_sp_gather_uses_explicit_group_and_backend_gradient_contract(monkeypatch, backend, reduce_grad):
+    hidden = torch.randn(2, 1, 3)
+    group = object()
+    seen = []
+    monkeypatch.setattr(mff, "gather_from_sequence_parallel_region", lambda value, **kw: seen.append(kw) or value)
+    assert mff._gather_fused_hidden_states(hidden, True, backend, group) is hidden
+    assert seen == [{"tensor_parallel_output_grad": reduce_grad, "group": group}]
+
+
+@pytest.mark.parametrize("mtp_enabled", [False, True])
+def test_bshd_adapter_passes_native_mtp_controls_and_preserves_output_layout(monkeypatch, mtp_enabled):
+    from verl.models.mcore import util
+
+    for name, value in {
+        "get_tensor_model_parallel_world_size": 1,
+        "get_context_parallel_world_size": 1,
+        "get_context_parallel_rank": 0,
+        "get_context_parallel_group": None,
+    }.items():
+        monkeypatch.setattr(util.mpu, name, lambda value=value: value)
+    captured = {}
+
+    class Toy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.post_process = True
+            self.config = SimpleNamespace(fp8=None, mtp_num_layers=1)
+
+        def forward(self, input_ids, output_processor, output_processor_context, **kwargs):
+            captured.update(kwargs)
+            captured["context_labels"] = output_processor_context.labels
+            # The callback receives Core's native sequence-major hidden layout.
+            return output_processor(
+                hidden_states=input_ids.T.unsqueeze(-1).float(),
+                output_layer=None,
+                output_weight=None,
+                labels=kwargs.get("labels"),
+                context=output_processor_context,
+                config=self.config,
+            )
+
+    def processor(hidden_states, context, **kwargs):
+        return {"log_probs": hidden_states.squeeze(-1).T + context.labels.float()}
+
+    tokens = torch.nested.as_nested_tensor([torch.tensor([1, 2, 3]), torch.tensor([4, 5])], layout=torch.jagged)
+    response_mask = torch.tensor([[1, 0], [1, 0]])
+    response_attention = torch.tensor([[1, 1], [1, 0]])
+    result = mff.gptmodel_forward_model_engine(
+        Toy(),
+        tokens,
+        {},
+        logits_processor_args={
+            "label": tokens,
+            "loss_mask": response_mask,
+            "response_attention_mask": response_attention,
+        },
+        data_format="bshd",
+        mtp_enable_train=mtp_enabled,
+        mtp_loss_normalization_factor=1.75,
+        output_processor=processor,
+        output_processor_context=mff.FusedOutputProcessorContext(1.0),
+    )
+    assert "compute_mtp_loss" not in captured
+    assert "mtp_loss_normalization_factor" not in captured
+    torch.testing.assert_close(captured["context_labels"], torch.tensor([[2, 3, 1], [5, 0, 4]]))
+    if mtp_enabled:
+        torch.testing.assert_close(captured["labels"], captured["context_labels"])
+        torch.testing.assert_close(captured["loss_mask"], torch.tensor([[1, 0, 0], [1, 0, 0]]))
+    else:
+        assert "labels" not in captured
+        assert "loss_mask" not in captured
+    torch.testing.assert_close(result["log_probs"].values(), torch.tensor([3.0, 5.0, 4.0, 9.0, 5.0]))
+
+
+@pytest.mark.parametrize("layout", ["thd", "bshd"])
+def test_shared_adapter_matches_eager_values_and_gradients(monkeypatch, layout):
+    from verl.models.mcore import util
+
+    for name, value in {
+        "get_tensor_model_parallel_world_size": 1,
+        "get_context_parallel_world_size": 1,
+        "get_context_parallel_rank": 0,
+        "get_context_parallel_group": None,
+    }.items():
+        monkeypatch.setattr(util.mpu, name, lambda value=value: value)
+    inputs = torch.nested.as_nested_tensor([torch.tensor([1, 2, 3]), torch.tensor([4, 5])], layout=torch.jagged)
+
+    class Toy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.post_process = True
+            self.pre_process = True
+            self.config = SimpleNamespace(fp8=None)
+            self.scale = torch.nn.Parameter(torch.tensor(0.7))
+
+        def forward(self, input_ids, output_processor=None, output_processor_context=None, **kwargs):
+            output = input_ids.float() * self.scale
+            if output_processor is None:
+                return output
+            return output_processor(hidden_states=output.T.unsqueeze(-1), context=output_processor_context)
+
+    def processor(hidden_states, context, **kwargs):
+        return {"log_probs": hidden_states.squeeze(-1).T + context.labels}
+
+    eager, fused = Toy(), Toy()
+    expected = mff.gptmodel_forward_model_engine(
+        eager,
+        inputs,
+        {},
+        data_format=layout,
+        logits_processor=lambda output, label: {"log_probs": output + label},
+        logits_processor_args={"label": inputs},
+    )["log_probs"]
+    actual = mff.gptmodel_forward_model_engine(
+        fused,
+        inputs,
+        {},
+        data_format=layout,
+        logits_processor_args={"label": inputs},
+        output_processor=processor,
+        output_processor_context=mff.FusedOutputProcessorContext(1.0),
+    )["log_probs"]
+    torch.testing.assert_close(actual.values(), expected.values())
+    actual.values().sum().backward()
+    expected.values().sum().backward()
+    torch.testing.assert_close(fused.scale.grad, eager.scale.grad)
+
+
+def test_old_overlap_uses_eager_without_patching_forward(monkeypatch):
+    model = NativeModel()
+    wrapper = SimpleNamespace(module=model, ddp_config=SimpleNamespace(overlap_param_gather=True))
+    monkeypatch.setattr(compat, "_readiness_api", lambda: None)
+    original = model.forward.__func__
+    assert not mff.configure_fused_forward(wrapper)
+    assert model.forward.__func__ is original
+    wrapper.ddp_config.overlap_param_gather = False
+    assert mff.configure_fused_forward(wrapper)
+
+
+def test_native_readiness_wins_over_compatibility(monkeypatch):
+    from megatron.core import utils
+
+    calls = []
+    weight = object()
+    monkeypatch.setattr(utils, "ensure_params_ready", lambda params: calls.append(params), raising=False)
+    compat.ensure_output_weight_ready(weight)
+    assert calls == [[weight]]
+
+
+def test_real_core_forward_uses_callback_without_replacement():
+    from types import MethodType
+
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    model = object.__new__(GPTModel)
+    torch.nn.Module.__init__(model)
+    from megatron.core.transformer.transformer_config import TransformerConfig
+
+    model.config = TransformerConfig(num_layers=1, hidden_size=3, num_attention_heads=1, use_cpu_initialization=True)
     model.mtp_process = False
     model.post_process = True
-    model.output_layer = _OutputLayer()
-    model.decoder = _Decoder()
+    model.share_embeddings_and_output_weights = False
+    model.output_layer = torch.nn.Linear(3, 4)
     model.pg_collection = SimpleNamespace(tp=None, cp=None)
-    hidden_states = torch.ones(2, 1, 3)
+    hidden = torch.randn(2, 1, 3, requires_grad=True)
 
-    def preprocess(_self, **_kwargs):
-        return hidden_states, None, None, None, None, None
+    class Decoder(torch.nn.Module):
+        def forward(self, hidden_states, **kwargs):
+            return hidden_states
 
-    model._preprocess = MethodType(preprocess, model)
-
-    mixed_precision_wrapper = object.__new__(Float16Module)
-    torch.nn.Module.__init__(mixed_precision_wrapper)
-    mixed_precision_wrapper.module = model
-    mixed_precision_wrapper.pg_collection = SimpleNamespace(pp=SimpleNamespace(rank=lambda: 0, size=lambda: 1))
-    mixed_precision_wrapper.vp_stage = None
-    mixed_precision_wrapper.vp_size = None
-    mixed_precision_wrapper.float16_convertor = lambda value: value
-
-    ddp_wrapper = object.__new__(DistributedDataParallel)
-    torch.nn.Module.__init__(ddp_wrapper)
-    ddp_wrapper.module = mixed_precision_wrapper
-
-    seen = {}
-
-    def fake_linear_cross_entropy(hidden, weight, labels, temperature, reduction, group, **options):
-        seen.update(
-            hidden=hidden,
-            weight=weight,
-            labels=labels,
-            temperature=temperature,
-            reduction=reduction,
-            group=group,
-            options=options,
-        )
-        return torch.ones(2), torch.ones(2) * 2
-
-    monkeypatch.setattr(mff, "linear_cross_entropy", fake_linear_cross_entropy)
-    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
-
-    original_forward = model.forward.__func__
-    mff.patch_fused_forward(ddp_wrapper)
-    output = ddp_wrapper(
+    model.decoder = Decoder()
+    model._preprocess = MethodType(lambda self, **kwargs: (hidden, None, None, None, None, None), model)
+    original = model.forward.__func__
+    assert mff.configure_fused_forward(model)
+    result = model(
         input_ids=torch.tensor([[1, 2]]),
-        position_ids=torch.tensor([[0, 1]]),
+        position_ids=None,
         attention_mask=None,
-        labels=torch.tensor([1, 2]),
-        output_processor=mff.fused_output_processor,
-        output_processor_context=mff.FusedOutputProcessorContext(
-            temperature=0.7,
-            impl_backend="liger",
-        ),
-        fp32_output=False,
+        output_processor=lambda hidden_states, **kwargs: hidden_states.square().sum(),
+        output_processor_context=None,
     )
-
-    assert model.forward.__func__ is original_forward
-    assert not hasattr(model, "forward_backup")
-    assert output.log_probs.tolist() == [1.0, 1.0]
-    assert output.entropy.tolist() == [2.0, 2.0]
-    assert seen["temperature"] == pytest.approx(0.7)
-    assert seen["weight"] is model.output_layer.weight
-    assert seen["options"] == {"impl_backend": "liger"}
+    result.backward()
+    torch.testing.assert_close(hidden.grad, 2 * hidden.detach())
+    assert model.forward.__func__ is original
 
 
-def test_output_processor_preserves_config_logger_payload(monkeypatch):
-    input_ids = object()
-    position_ids = object()
-    attention_mask = object()
-    decoder_input = object()
-    log_probs = torch.tensor([1.0])
-    entropy = torch.tensor([2.0])
-    config = SimpleNamespace(sequence_parallel=False)
-    logged = {}
+def test_retained_mtp_postprocess_cannot_advertise_native_output_hooks():
+    from types import MethodType
 
-    def fake_linear_cross_entropy(*_args, **_kwargs):
-        return log_probs, entropy
+    from verl.models.mcore import mtp_patch
 
-    def fake_log_config_to_disk(config_arg, payload, prefix):
-        logged.update(config=config_arg, payload=payload, prefix=prefix)
-
-    monkeypatch.setattr(mff, "linear_cross_entropy", fake_linear_cross_entropy)
-    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
-    monkeypatch.setattr(mff, "has_config_logger_enabled", lambda config_arg: config_arg is config)
-    monkeypatch.setattr(mff, "log_config_to_disk", fake_log_config_to_disk)
-
-    mff.fused_output_processor(
-        hidden_states=torch.tensor([[1.0]]),
-        output_layer=SimpleNamespace(weight=torch.tensor([[1.0]])),
-        output_weight=None,
-        labels=torch.tensor([0]),
-        context=mff.FusedOutputProcessorContext(temperature=1.0),
-        config=config,
-        input_ids=input_ids,
-        position_ids=position_ids,
-        attention_mask=attention_mask,
-        decoder_input=decoder_input,
-    )
-
-    assert list(logged["payload"]) == [
-        "input_ids",
-        "position_ids",
-        "attention_mask",
-        "decoder_input",
-        "logprobs",
-        "entropy",
-    ]
-    assert logged["payload"]["input_ids"] is input_ids
-    assert logged["payload"]["position_ids"] is position_ids
-    assert logged["payload"]["attention_mask"] is attention_mask
-    assert logged["payload"]["decoder_input"] is decoder_input
-    assert logged["payload"]["logprobs"] is log_probs
-    assert logged["payload"]["entropy"] is entropy
-    assert logged["config"] is config
-    assert logged["prefix"] == "input_and_logits"
-
-
-@pytest.mark.parametrize(
-    ("sequence_parallel", "use_tied_weight", "impl_backend", "tensor_parallel_output_grad"),
-    [
-        (True, True, "liger", False),
-        (True, False, "triton", True),
-        (False, False, "liger", None),
-    ],
-)
-def test_output_processor_gathers_before_kernel_and_resolves_weight(
-    monkeypatch,
-    sequence_parallel,
-    use_tied_weight,
-    impl_backend,
-    tensor_parallel_output_grad,
-):
-    hidden_states = torch.tensor([[1.0]])
-    gathered_hidden_states = torch.tensor([[3.0]])
-    tied_weight = torch.tensor([[5.0]])
-    output_layer_weight = torch.tensor([[7.0]])
-    labels = torch.tensor([0])
-    events = []
-    seen = {}
-
-    def fake_gather(value, **kwargs):
-        events.append("gather")
-        assert value is hidden_states
-        assert kwargs == {"tensor_parallel_output_grad": tensor_parallel_output_grad}
-        return gathered_hidden_states
-
-    def fake_linear_cross_entropy(hidden, weight, labels_arg, temperature, reduction, group, **options):
-        events.append("linear_cross_entropy")
-        seen.update(
-            hidden=hidden,
-            weight=weight,
-            labels=labels_arg,
-            temperature=temperature,
-            options=options,
-        )
-        return torch.tensor([11.0]), torch.tensor([13.0])
-
-    monkeypatch.setattr(mff, "gather_from_sequence_parallel_region", fake_gather)
-    monkeypatch.setattr(mff, "linear_cross_entropy", fake_linear_cross_entropy)
-    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
-
-    output_weight = tied_weight if use_tied_weight else None
-    output = mff.fused_output_processor(
-        hidden_states=hidden_states,
-        output_layer=SimpleNamespace(weight=output_layer_weight),
-        output_weight=output_weight,
-        labels=labels,
-        context=mff.FusedOutputProcessorContext(
-            temperature=0.9,
-            impl_backend=impl_backend,
-        ),
-        config=SimpleNamespace(sequence_parallel=sequence_parallel),
-    )
-
-    expected_hidden = gathered_hidden_states if sequence_parallel else hidden_states
-    expected_weight = tied_weight if use_tied_weight else output_layer_weight
-    assert events == (["gather"] if sequence_parallel else []) + ["linear_cross_entropy"]
-    assert seen["hidden"] is expected_hidden
-    assert seen["weight"] is expected_weight
-    assert seen["labels"] is labels
-    assert seen["temperature"] == pytest.approx(0.9)
-    assert seen["options"] == {"impl_backend": impl_backend}
-    assert output.log_probs.tolist() == [11.0]
-    assert output.entropy.tolist() == [13.0]
+    model = NativeModel()
+    model._postprocess = MethodType(mtp_patch._megatron_gptmodel_postprocess, model)
+    original = model.forward.__func__
+    assert not mff.configure_fused_forward(model)
+    assert model.forward.__func__ is original
