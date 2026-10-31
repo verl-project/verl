@@ -958,13 +958,23 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
 
         # Nested-jagged [bs, seq, L, topk] -> rmpad [total_nnz, L, topk].
         targets = (routed.values() if routed.is_nested else routed).to(torch.int64)
+        # The replay mask describes the same token axis, so it has to receive the
+        # exact same pad suffix and Ulysses slice. Anything else silently shifts
+        # every row's validity by a few positions.
+        valid = micro_batch.get("routed_experts_mask", None)
+        if valid is not None:
+            valid = (valid.values() if valid.is_nested else valid).reshape(-1)
         pad_size = int(output_args.get("pad_size", 0))
         if pad_size:
             targets = torch.cat([targets, targets.new_zeros((pad_size, *targets.shape[1:]))])
+            if valid is not None:
+                valid = torch.cat([valid, valid.new_zeros(pad_size, dtype=torch.bool)])
         if self.use_ulysses_sp:
             targets = slice_input_tensor(targets, dim=0, padding=False)
+            if valid is not None:
+                valid = slice_input_tensor(valid, dim=0, padding=False)
 
-        rr.begin_microbatch(targets=list(targets.unbind(dim=1)))
+        rr.begin_microbatch(targets=list(targets.unbind(dim=1)), mask=valid)
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         """Attach this micro-batch's recorded MoE routing to the model output.
@@ -981,6 +991,12 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             recorded = self._gather_and_unpad_packed(rr.take_recorded().view(torch.uint8), output_args["pad_size"])
             model_output["routed_experts"] = torch.nested.nested_tensor_from_jagged(
                 recorded.view(torch.int16), micro_batch["input_ids"].offsets()
+            )
+            # Engine-recorded (R2) routes cover every token, so the mask is all True;
+            # emitting it keeps one replay path for both R2 and R3.
+            model_output["routed_experts_mask"] = torch.nested.nested_tensor_from_jagged(
+                torch.ones(recorded.shape[0], dtype=torch.bool, device=recorded.device),
+                micro_batch["input_ids"].offsets(),
             )
         elif rr is not None and rr.action is RouterReplayAction.REPLAY:
             if rr.num_fired != rr.num_targets:
