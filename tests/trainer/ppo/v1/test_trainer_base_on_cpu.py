@@ -15,17 +15,49 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 
+from verl.protocol import DataProto
+from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
-from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.trainer.ppo.v1.trainer_base import PPOTrainer, _extract_reward_extra_info, apply_greedy_sampling_params
+from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
+from verl.utils import tensordict_utils as tu
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
     params = {"top_p": 0.9, "top_k": 64, "temperature": 1.0, "topk_log_probs": 128, "logprobs": True}
     apply_greedy_sampling_params(params)
     assert params == {"top_p": 1.0, "top_k": -1, "temperature": 0, "logprobs": True}
+
+
+@pytest.mark.parametrize("estimator", ["grpo", "codapo"])
+@pytest.mark.parametrize("details", [[[1], [2, 3]], [[1, 2], [3, 4]]])
+def test_reward_metadata_preserves_per_sample_values_through_advantage(estimator, details):
+    """List-valued metadata stays one-dimensional without breaking numeric accuracy."""
+    extra = _extract_reward_extra_info(
+        [{"reward_extra_info": {"acc": float(i), "details": value}} for i, value in enumerate(details)]
+    )
+    assert extra["details"].shape == (2,)
+    assert extra["details"].tolist() == details
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": torch.tensor([[0.0], [1.0]]),
+            "response_mask": torch.ones(2, 1, dtype=torch.long),
+            "old_log_probs": torch.full((2, 1), float(np.log(0.5))),
+        },
+        non_tensors={"uid": np.array(["q", "q"], dtype=object), **extra},
+    )
+    with patch.dict(core_algos.ADV_ESTIMATOR_REGISTRY, {"codapo": core_algos.compute_codapo_outcome_advantage}):
+        result = compute_advantage_for_multi_trajectories(data, ["q_0_0", "q_1_0"], estimator)
+    assert torch.isfinite(result.batch["advantages"]).all()
+    assert result.batch["advantages"][0, 0] < 0 < result.batch["advantages"][1, 0]
+    if estimator == "codapo":
+        torch.testing.assert_close(result.batch["codapo_values"], torch.full((2,), 0.5))
 
 
 class _StubTrainer(PPOTrainer):
@@ -199,3 +231,54 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_codapo_builds_focused_batch_with_fresh_independent_uids():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"algorithm": {"codapo_top_k": 2}})
+    prompt_batch = tu.get_tensordict(
+        {
+            "uid": np.array(["q0", "q1", "q2", "q3"], dtype=object),
+            "row": torch.arange(4),
+        }
+    )
+    rollout_data = tu.get_tensordict(
+        {
+            "uid": np.repeat(np.array(["q0", "q1", "q2", "q3"], dtype=object), 2),
+            "codapo_values": torch.tensor([0.1, 0.1, 0.9, 0.9, 0.8, 0.8, 0.2, 0.2]),
+        }
+    )
+    rollout_batch = KVBatchMeta(partition_id="train", keys=[f"key-{row}" for row in range(8)], tags=[{}] * 8)
+    with patch("verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get", return_value=rollout_data):
+        focused_batch = trainer._build_codapo_resampled_batch(prompt_batch, rollout_batch, {})
+
+    focused_uids = [tu.unwrap_non_tensor_data(uid) for uid in focused_batch["uid"]]
+    assert focused_batch["row"].tolist() == [1, 2, 1, 2]
+    assert len(set(focused_uids)) == 4
+    assert set(focused_uids).isdisjoint({"q0", "q1", "q2", "q3"})
+
+
+def test_codapo_step_uses_pending_focused_batch_before_fetching_new_prompts():
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 2}})
+    trainer.parameter_sync_step = 1
+    trainer._codapo_enabled = True
+    trainer._codapo_resampled_batch = None
+    trainer.global_steps = 8  # Phase is state-driven, not tied to step parity.
+    original_batch = tu.get_tensordict({"uid": np.array(["q0", "q1"], dtype=object)})
+    focused_batch = tu.get_tensordict({"uid": np.array(["f0", "f1"], dtype=object)})
+    rollout_batch = KVBatchMeta(partition_id="train", keys=["k0", "k1"], tags=[{}, {}])
+
+    with (
+        patch.object(trainer, "_next_train_batch", return_value=original_batch) as fetch,
+        patch.object(trainer, "_submit_batch_to_rollout") as submit,
+        patch.object(trainer, "_step_once", return_value=rollout_batch),
+        patch.object(trainer, "_build_codapo_resampled_batch", return_value=focused_batch),
+    ):
+        trainer.step({}, {})
+        trainer.global_steps += 1
+        trainer.step({}, {})
+
+    fetch.assert_called_once_with()
+    assert [call.args[0] for call in submit.call_args_list] == [original_batch, focused_batch]
+    assert trainer._codapo_resampled_batch is None
