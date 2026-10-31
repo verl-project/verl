@@ -70,6 +70,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
     SuppressSignalInThread,
+    apply_deterministic_inductor_defaults,
     build_cli_args_from_config,
     build_mtp_speculative_config,
     extract_prompt_logprobs,
@@ -341,6 +342,8 @@ class vLLMHttpServer:
             compilation_config["cudagraph_mode"] = "PIECEWISE"
         if self.config.cudagraph_capture_sizes:
             compilation_config["cudagraph_capture_sizes"] = self.config.cudagraph_capture_sizes
+        if self.config.full_determinism:
+            apply_deterministic_inductor_defaults(compilation_config)
 
         compilation_config = json.dumps(compilation_config)
         args = {

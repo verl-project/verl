@@ -116,6 +116,22 @@ def get_vllm_max_lora_rank(lora_rank: int):
             return rank
 
 
+def apply_deterministic_inductor_defaults(compilation_config: dict[str, Any]) -> None:
+    """Keep vLLM's torch.compile path working under full determinism.
+
+    ``enable_full_determinism`` calls ``torch.use_deterministic_algorithms(True)``, which also sets
+    ``torch._inductor.config.deterministic``. Inductor then refuses to benchmark kernels, but vLLM before
+    v0.32 turns on ``benchmark_combo_kernel`` unconditionally on torch >= 2.9, so engine startup fails with
+    "In the deterministic mode of Inductor, we will avoid those benchmarkings ...". Mirror the upstream fix
+    (vllm-project/vllm#59074): keep combo kernels but skip their benchmarking. User-provided values win.
+    """
+    inductor_compile_config = compilation_config.setdefault("inductor_compile_config", {})
+    if "combo_kernels" in inductor_compile_config or "benchmark_combo_kernel" in inductor_compile_config:
+        return
+    inductor_compile_config["combo_kernels"] = True
+    inductor_compile_config["benchmark_combo_kernel"] = False
+
+
 # https://github.com/vllm-project/vllm/issues/13175
 def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
     """Mask the tokens the sampler must never pick.
