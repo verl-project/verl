@@ -30,9 +30,9 @@ What's covered
 * ``take_recorded`` stacking order and shape.
 * REPLAY first step (R3 case): targets must work before any RECORD has
   populated the id table.
-* REPLAY strict missing-target and shape-mismatch error paths, and the
-  duplicate-top-k fallback that guards positions with no recorded
-  routing.
+* REPLAY strict missing-target and shape-mismatch error paths.
+* Replay validity is driven by ``routed_experts_mask`` (explicit) or by
+  an all-zero row (fallback) -- never by inspecting top-k values.
 * ``begin_microbatch`` mode validation.
 * Snapshot clone semantics.
 * ``install`` / ``uninstall`` against a stubbed VeOmni hook surface.
@@ -85,12 +85,9 @@ def _scores():
 
 def _idx():
     """Return ``[_NNZ, _TOPK]`` int indices with DISTINCT entries per
-    row. Distinct-per-row matters for tests that assert REPLAY returns
-    the target verbatim — the duplicate-detection fallback in
-    ``on_router_forward`` would otherwise treat duplicate-top-k rows
-    as corrupted and return native instead. Real router top-k output
-    always picks distinct experts, so this matches production
-    semantics."""
+    row. Distinct-per-row keeps these fixtures obviously valid; the
+    controller no longer inspects top-k values, so duplicates would be
+    replayed verbatim too (see ``test_replay_all_zero_rows_fall_back_without_mask``)."""
     # Random distinct top-k per row via sampling without replacement.
     return torch.stack(
         [torch.randperm(8)[:_TOPK] for _ in range(_NNZ)],
@@ -209,50 +206,87 @@ def test_replay_strict_missing_target_pos_raises(ctrl, routers):
         ctrl.on_router_forward(routers[1], _scores(), _idx())
 
 
-def test_replay_duplicate_topk_falls_back_to_native(ctrl, routers):
-    """Rows whose target top-k contains a duplicate must fall through to
-    native routing. This is the only guard for positions that have no
-    recorded routing: the pad suffix the engine appends, and the trailing
-    rows the rollout backend leaves at zero in R3 (final generated token,
-    tool-response tokens). All of them arrive as all-zero rows.
-
-    Without the fallback, VeOmni's MoE expert dispatch silently dedupes the
-    duplicate top-k slots inside ``permute()``, while ``input_splits`` keeps
-    counting all of them — the EP all-to-all then crashes with ``Split sizes
-    doesn't match total dim 0 size`` several layers deep.
-    """
+def test_replay_all_zero_rows_fall_back_without_mask(ctrl, routers):
+    """Without an explicit mask, only an entirely-zero row is treated as
+    padding. A row whose top-k happens to repeat one expert is a perfectly
+    valid replay target and must be replayed verbatim -- the previous
+    duplicate heuristic dropped those rows back to native routing."""
     ctrl.begin_replay()
 
-    # Build a target with two corruption patterns:
-    #   row 0: all-zeros (what a pad token or an unrecorded R3 row looks like)
-    #   row 1: partial duplicate (slots 0 and 1 both expert 5)
-    # The other rows are clean (distinct top-k).
     targets = []
     for _ in routers:
         t = torch.stack(
             [torch.arange(_NNZ, dtype=torch.int64) + k for k in range(_TOPK)],
             dim=-1,
-        )  # row i: [i, i+1] — distinct
-        t[0] = 0  # all-zero row
+        )  # row i: [i, i+1] -- distinct
+        t[0] = 0  # all-zero row == padding
         t[1, 0] = 5
-        t[1, 1] = 5  # duplicate row
+        t[1, 1] = 5  # valid, but repeats one expert
         targets.append(t)
     ctrl.begin_microbatch(targets=targets)
 
     for r, t in zip(routers, targets, strict=True):
-        # Native: distinct per row, distinct per slot.
         native = torch.stack(
             [torch.arange(_NNZ, dtype=torch.int64) + 100 + k for k in range(_TOPK)],
             dim=-1,
         )
         out = ctrl.on_router_forward(r, _scores(), native)
 
-        # Corrupted rows fall back to native.
         assert torch.equal(out[0], native[0]), "all-zero row must fall back to native"
-        assert torch.equal(out[1], native[1]), "partial-duplicate row must fall back to native"
-        # Clean rows substitute normally.
+        assert torch.equal(out[1], t[1]), "repeated-expert row is still a valid target"
         for i in range(2, _NNZ):
             assert torch.equal(out[i], t[i]), f"clean row {i} must use replay target"
+
+
+def test_replay_respects_explicit_mask(ctrl, routers):
+    """An explicit mask wins over the value-based fallback: a masked-in row is
+    replayed even when it is all-zero, a masked-out row stays native even when
+    it carries plausible-looking indices."""
+    ctrl.begin_replay()
+    targets = [torch.arange(_NNZ * _TOPK, dtype=torch.int64).view(_NNZ, _TOPK) + 7 for _ in routers]
+    targets = [t.clone() for t in targets]
+    targets[0][0] = 0  # looks like padding, but the mask says it is real
+    mask = torch.ones(_NNZ, dtype=torch.bool)
+    mask[5] = False
+    ctrl.begin_microbatch(targets=targets, mask=mask)
+
+    native = torch.stack(
+        [torch.arange(_NNZ, dtype=torch.int64) + 100 + k for k in range(_TOPK)],
+        dim=-1,
+    )
+    out = ctrl.on_router_forward(routers[0], _scores(), native)
+
+    assert torch.equal(out[0], targets[0][0]), "masked-in all-zero row must be replayed"
+    assert torch.equal(out[5], native[5]), "masked-out row must stay native"
+    for i in (1, 2, 3, 4, 6, 7):
+        assert torch.equal(out[i], targets[0][i])
+
+
+def test_replay_topk_one_supported(ctrl, routers):
+    """topk=1 no longer breaks replay: padding is identified by the mask (or
+    by an all-zero row), never by a duplicate that a single slot cannot form."""
+    ctrl.begin_replay()
+    targets = [torch.full((_NNZ, 1), 3, dtype=torch.int64) for _ in routers]
+    targets[0] = targets[0].clone()
+    targets[0][0] = 0  # padding row
+    ctrl.begin_microbatch(targets=targets)
+
+    native = torch.full((_NNZ, 1), 7, dtype=torch.int64)
+    out = ctrl.on_router_forward(routers[0], _scores(), native)
+
+    assert torch.equal(out[0], native[0]), "topk=1 padding row must fall back to native"
+    assert torch.equal(out[1], targets[0][1]), "topk=1 valid row must be replayed"
+
+
+def test_replay_mask_row_count_mismatch_raises(ctrl, routers):
+    """A mask packed with a different pad/SP rule than the targets would shift
+    every row's validity; refuse instead of broadcasting silently."""
+    ctrl.begin_replay()
+    with pytest.raises(RuntimeError, match="mask has"):
+        ctrl.begin_microbatch(
+            targets=[torch.zeros(_NNZ, _TOPK, dtype=torch.int64) for _ in routers],
+            mask=torch.zeros(_NNZ + 3, dtype=torch.bool),
+        )
 
 
 def test_replay_target_row_count_mismatch_raises(ctrl, routers):

@@ -981,11 +981,21 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             ulysses_sp=bool(self.use_ulysses_sp),
         )
         targets = (routed.values() if routed.is_nested else routed).to(torch.int64)
+        # The replay mask describes the same token axis, so it has to receive the
+        # exact same pad suffix and Ulysses slice. Anything else silently shifts
+        # every row's validity by a few positions.
+        valid = micro_batch.get("routed_experts_mask", None)
+        if valid is not None:
+            valid = (valid.values() if valid.is_nested else valid).reshape(-1)
         pad_size = int(output_args.get("pad_size", 0))
         if pad_size:
             targets = torch.cat([targets, targets.new_zeros((pad_size, *targets.shape[1:]))])
+            if valid is not None:
+                valid = torch.cat([valid, valid.new_zeros(pad_size, dtype=torch.bool)])
         if self.use_ulysses_sp:
             targets = slice_input_tensor(targets, dim=0, padding=False)
+            if valid is not None:
+                valid = slice_input_tensor(valid, dim=0, padding=False)
 
         # 路由数据在 REPLAY 侧的真实占用：这就是每个 micro-batch 递给各层 router 的
         # 目标张量，dtype 已被升到 int64，且已含 pad 与 SP 切分。
@@ -995,9 +1005,11 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             pad_size=pad_size,
             num_layers=int(targets.shape[1]) if targets.dim() == 3 else -1,
             topk=int(targets.shape[2]) if targets.dim() == 3 else -1,
+            valid_rows=int(valid.sum()) if valid is not None else -1,
+            total_rows=int(valid.numel()) if valid is not None else -1,
         )
 
-        rr.begin_microbatch(targets=list(targets.unbind(dim=1)))
+        rr.begin_microbatch(targets=list(targets.unbind(dim=1)), mask=valid)
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
         """Attach this micro-batch's recorded MoE routing to the model output.
@@ -1023,7 +1035,12 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                 recorded.view(torch.int16), micro_batch["input_ids"].offsets()
             )
             # RECORD 产物：这就是要随 DataProto 传回 trainer 的路由数据，
-            # 也是 R3 下会被塞进 batch 的那份张量。
+            # 也是 R3 下会被塞进 batch 的那份张量。引擎自己录的路由每个 token
+            # 都有效（不存在占位行），mask 全 True，让下游回放走同一条 mask 通路。
+            model_output["routed_experts_mask"] = torch.nested.nested_tensor_from_jagged(
+                torch.ones(recorded.shape[0], dtype=torch.bool, device=recorded.device),
+                micro_batch["input_ids"].offsets(),
+            )
             r3prof.snapshot("router_replay.recorded_nested", routed_experts=model_output["routed_experts"])
         elif rr is not None and rr.action is RouterReplayAction.REPLAY:
             if rr.num_fired != rr.num_targets:

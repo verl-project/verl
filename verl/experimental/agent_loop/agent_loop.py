@@ -98,6 +98,13 @@ class AgentLoopOutput(BaseModel):
     """Log probabilities for the response tokens."""
     routed_experts: Optional[Any] = None
     """Routed experts for the total tokens."""
+    routed_experts_mask: Optional[Any] = None
+    """Per-token bool mask: True where routed_experts holds real rollout routing.
+
+    Rows whose routing is unknown (the final generated token, tool-response
+    tokens, and any padding) stay zero; router replay consumes only the rows
+    this mask marks True and falls back to native routing elsewhere.
+    """
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
     reward_score: Optional[float] = None
@@ -139,6 +146,12 @@ class AgentLoopOutput(BaseModel):
             num_rows = min(routed_experts.size(0), total_length)
             aligned[:num_rows] = routed_experts[:num_rows]
             output["routed_experts"] = aligned
+            # Record which rows carry real routing, so replay never has to guess it
+            # from the values (an all-zero row is indistinguishable from a token that
+            # genuinely routed to expert 0 in every slot).
+            mask = torch.zeros(total_length, dtype=torch.bool)
+            mask[:num_rows] = True
+            output["routed_experts_mask"] = mask
 
         # rm_scores: reward score for each token
         reward_score = output.pop("reward_score", None)
@@ -216,6 +229,8 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded token ids corresponding to the teacher log probabilities."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
+    routed_experts_mask: Optional[torch.Tensor] = None
+    """Padded per-token mask marking rows whose routing came from rollout."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
     """Multi-modal inputs for processors (e.g. pixel_values, image_grid_thw, video_grid_thw)."""
     extra_fields: dict[str, Any] = {}
@@ -812,6 +827,7 @@ class AgentLoopWorker:
         input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
 
         routed_experts = None
+        routed_experts_mask = None
         if output.routed_experts is not None:
             total_length = input_ids.shape[1]
             length, layer_num, topk_num = output.routed_experts.shape
@@ -838,6 +854,10 @@ class AgentLoopWorker:
                 )
 
             routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
+            # Same contract as the right-padded path: only rows actually filled with
+            # rollout routing are marked, everything else (padding, missing tail) is not.
+            routed_experts_mask = torch.zeros(1, total_length, dtype=torch.bool)
+            routed_experts_mask[:, start_pos:end_pos] = True
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(
@@ -885,6 +905,7 @@ class AgentLoopWorker:
             attention_mask=attention_mask,
             response_logprobs=response_logprobs,
             routed_experts=routed_experts,
+            routed_experts_mask=routed_experts_mask,
             multi_modal_inputs=multi_modal_inputs,
             multi_modal_data=output.multi_modal_data,
             mm_processor_kwargs=output.mm_processor_kwargs,
@@ -1104,6 +1125,10 @@ class AgentLoopWorker:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
+            if inputs[0].routed_experts_mask is not None:
+                optional_outputs["routed_experts_mask"] = torch.cat(
+                    [input.routed_experts_mask for input in inputs], dim=0
+                )
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)

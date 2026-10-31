@@ -75,11 +75,16 @@ mis-routing quietly.
 Positions without recorded routing
 ----------------------------------
 Some positions the routers are asked to route have no recorded routing:
-the pad suffix the engine appends, and the trailing rows the rollout
-backend leaves at zero in R3. They all arrive as all-zero target rows,
-and :meth:`VeOmniRouterReplay.on_router_forward` routes any row with a
-duplicate top-k natively -- which covers them without a separate mask.
-The engine rejects topk=1 models, where that check cannot fire.
+the pad suffix the engine appends, the final generated token, and
+tool-response tokens in a multi-turn trajectory. They arrive as all-zero
+target rows, and the batch carries ``routed_experts_mask`` saying exactly
+which rows are real; :meth:`VeOmniRouterReplay.on_router_forward` replays
+only those and keeps native routing elsewhere.
+
+When no mask is supplied (an older producer), replay falls back to
+treating an all-zero row as padding. Neither path inspects top-k values,
+so a token that genuinely routed every slot to one expert is still
+replayed, and topk=1 models are supported.
 """
 
 from __future__ import annotations
@@ -121,6 +126,9 @@ class VeOmniRouterReplay:
         self._recorded: list[torch.Tensor] = []
         # REPLAY: one [nnz, topk] target per layer position.
         self._targets: list[torch.Tensor] = []
+        # REPLAY: [nnz] bool, True where the target row holds real rollout routing.
+        # None means "no mask supplied" -- see on_router_forward for the fallback.
+        self._mask: torch.Tensor | None = None
         # Env-gated shape sanity check.
         self._debug: bool = os.environ.get("VERL_ROUTER_REPLAY_DEBUG") == "1"
         self._installed: bool = False
@@ -249,36 +257,27 @@ class VeOmniRouterReplay:
                 "the targets with the same rule it applies to input_ids."
             )
 
-        # Defensive duplicate-detection.
+        # Positions with no recorded routing must keep native routing. Which rows
+        # those are is known exactly by whoever zero-filled the tensor and now
+        # travels with the batch as ``routed_experts_mask``.
         #
-        # VeOmni's MoE expert dispatch (``permute()`` in
-        # ``veomni/distributed/moe/moe_utils.py``) builds the permuted
-        # tensor via ``routing_map.bool().masked_select(...)``, which
-        # collapses duplicate top-k slots within one token to a single
-        # entry. ``input_splits`` keeps counting every slot, so the two
-        # diverge whenever ANY token has duplicate top-k experts and the
-        # EP all-to-all crashes with
-        # ``RuntimeError: Split sizes doesn't match total dim 0 size``.
+        # The previous implementation inferred it from duplicate top-k values,
+        # which misclassified in both directions: a token that genuinely routed
+        # every slot to one expert looked like padding (losing replay for it), and
+        # with topk=1 padding rows can never look duplicated, so they silently
+        # routed to expert 0.
         #
-        # This is also the *only* mechanism protecting positions that have no
-        # recorded routing at all: the pad suffix the engine appends, and the
-        # trailing rows the rollout backend leaves at zero in R3 (the final
-        # generated token, tool-response tokens in a multi-turn trajectory).
-        # All of those are all-zero rows, hence duplicates. It is why the
-        # engine rejects topk=1 models, where a single slot can never be a
-        # duplicate and those rows would silently all route to expert 0.
-        #
-        # Native indices are always distinct top-k choices, so falling back to
-        # them is correct regardless of what the rollout produced.
-        sorted_target, sort_idx = target.sort(dim=-1)
-        has_duplicate = (sorted_target[:, 1:] == sorted_target[:, :-1]).any(dim=-1)
-        replayed = torch.where(has_duplicate.unsqueeze(-1), top_indices, target)
+        # Fallback (no mask in the batch, e.g. an older producer): the row is
+        # padding iff it is entirely zero. That still needs no sort and never
+        # rejects a valid row that happens to repeat an expert, unless that row
+        # is also all-zero.
+        if self._mask is not None:
+            valid = self._mask
+        else:
+            valid = target.ne(0).any(dim=-1)
+        replayed = torch.where(valid.unsqueeze(-1), target, top_indices)
         if r3prof.enabled():
-            # sort 产出值+索引，where 再产出一份，外加 bool mask。
-            per_elem = target.element_size()
-            nbytes = target.numel() * per_elem * 2  # sorted_target + replayed
-            nbytes += sort_idx.numel() * 8  # int64 索引
-            nbytes += has_duplicate.numel()  # bool
+            nbytes = target.numel() * target.element_size()
             self._prof_calls += 1
             self._prof_bytes += nbytes
             self._prof_total_calls += 1
@@ -310,8 +309,11 @@ class VeOmniRouterReplay:
         self._id_to_pos = {}
         self._recorded = []
         self._targets = []
+        self._mask = None
 
-    def begin_microbatch(self, targets: list[torch.Tensor] | None = None) -> None:
+    def begin_microbatch(
+        self, targets: list[torch.Tensor] | None = None, mask: torch.Tensor | None = None
+    ) -> None:
         """Arm the controller for one micro-batch forward.
 
         Must be called from the engine before every forward, once RECORD or
@@ -324,6 +326,12 @@ class VeOmniRouterReplay:
         order routers fire in during forward). ``nnz`` must match what the
         routers will see on this rank, i.e. the engine has already applied
         the same padding and Ulysses slicing it applied to ``input_ids``.
+
+        ``mask`` is an optional ``[nnz]`` bool tensor marking which rows of
+        ``targets`` carry real rollout routing. It must be produced by the same
+        code path (and padded / sliced identically) as ``targets``; rows marked
+        False replay native routing instead. When omitted, replay falls back to
+        treating all-zero rows as padding.
         """
         if self._action is RouterReplayAction.RECORD:
             if targets is not None:
@@ -335,6 +343,15 @@ class VeOmniRouterReplay:
             raise RuntimeError(f"begin_microbatch requires RECORD or REPLAY action, got {self._action}")
 
         self._reset_microbatch()
+        if mask is not None:
+            mask = mask.reshape(-1)
+            if targets is not None and mask.numel() != targets[0].shape[0]:
+                raise RuntimeError(
+                    "begin_microbatch: mask has "
+                    f"{mask.numel()} rows but targets carry {targets[0].shape[0]}. "
+                    "mask and targets must go through the same pad / SP-slice path."
+                )
+            self._mask = mask.to(torch.bool)
         if targets is not None:
             self._targets = list(targets)
             # 每层目标张量的排布与总字节数（REPLAY 侧）。
