@@ -78,7 +78,8 @@ def test_should_use_cann_linear_ce_cann_backend_missing_apis(monkeypatch):
 
 @pytest.mark.parametrize("temperature", [1.0, 1.5])
 @pytest.mark.parametrize("chunk_size", [32, 128, 2048])
-def test_chunked_ce_entropy_backward_matches_torch(temperature, chunk_size):
+@pytest.mark.parametrize("token_chunk_size", [7, 256])
+def test_chunked_ce_entropy_backward_matches_torch(temperature, chunk_size, token_chunk_size):
     """Hybrid CE+H path must match autograd through matmul+CE+Shannon H."""
     torch.manual_seed(0)
     num_tokens, hidden_size, vocab_size = 24, 64, 96
@@ -113,6 +114,7 @@ def test_chunked_ce_entropy_backward_matches_torch(temperature, chunk_size):
             "none",
             vocab_start=0,
             chunk_size=chunk_size,
+            token_chunk_size=token_chunk_size,
         )
 
     torch.testing.assert_close(d_h, d_ref_h, atol=1e-4, rtol=1e-4)
