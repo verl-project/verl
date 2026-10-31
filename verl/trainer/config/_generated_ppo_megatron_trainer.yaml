@@ -812,6 +812,58 @@ sandbox_fusion:
   max_concurrent: null
   memory_limit_mb: null
 reward:
+  profiler:
+    _target_: verl.utils.profiler.ProfilerConfig
+    tool: torch
+    enable: false
+    all_ranks: false
+    ranks: []
+    save_path: outputs/profile
+    ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
+    relocate_results: false
+    finish_hook_cmd: null
+    finish_hook_all_ranks: false
+    finish_hook_ranks: []
+    tool_config:
+      npu:
+        _target_: verl.utils.profiler.config.NPUToolConfig
+        contents: []
+        level: level0
+        analysis: true
+        discrete: false
+        profile_token_start: null
+        profile_token_end: null
+        name: npu
+      nsys:
+        _target_: verl.utils.profiler.config.NsightToolConfig
+        discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
+        name: nsight
+      torch:
+        _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+        contents: []
+        discrete: false
+        profile_token_start: null
+        profile_token_end: null
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
+        name: torch
+      torch_memory:
+        _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+        trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+        stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
+        name: torch_memory
+      precision_debugger:
+        _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+        config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+        steps: null
+        stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+        name: precision_debugger
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
   custom_reward_function:

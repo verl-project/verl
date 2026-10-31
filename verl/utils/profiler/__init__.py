@@ -24,8 +24,15 @@ from .config import (
     rollout_trace_dir,
     rollout_trace_local_rank,
 )
+from .nsight import (
+    build_controller_nsight_launch_options,
+    build_ray_actor_nsight_launch_options,
+    is_controller_nsys_api_control_enabled,
+    resolve_ray_actor_profiler_config,
+)
 from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
 from .profile import DistProfiler, DistProfilerExtension, ProfilerConfig, build_rollout_dist_profiler
+from .ray_profile import create_gpu_metrics_profiler
 
 _mark_start_range, _mark_end_range, _mark_annotate, _marked_timer = None, None, None, None
 
@@ -103,6 +110,11 @@ __all__ = [
     "DistProfilerExtension",
     "ProfilerConfig",
     "build_rollout_dist_profiler",
+    "build_ray_actor_nsight_launch_options",
+    "create_gpu_metrics_profiler",
+    "is_controller_nsys_api_control_enabled",
+    "build_controller_nsight_launch_options",
+    "resolve_ray_actor_profiler_config",
     "simple_timer",
     "marked_timer",
     "build_vllm_profiler_args",

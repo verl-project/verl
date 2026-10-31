@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import logging
 import os
 
@@ -28,6 +29,12 @@ from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
+from verl.utils.profiler.nsight import (
+    _ray_actor_profile_enabled,
+    build_ray_actor_nsight_launch_options,
+    resolve_ray_actor_profiler_config,
+)
+from verl.utils.profiler.ray_profile import _RayActorProfilerMixin
 from verl.utils.ray_utils import get_event_loop
 
 from .reward_model import RewardModelManager
@@ -90,7 +97,7 @@ def migrate_legacy_reward_impl(config):
     return config
 
 
-class RewardLoopWorker:
+class RewardLoopWorker(_RayActorProfilerMixin):
     """
     RewardLoopWork can tackle reward computation:
     (1) rule-based reward computation
@@ -299,7 +306,11 @@ class RewardLoopManager:
                 )
                 with open_dict(self.config):
                     rm_rollout.max_num_seqs = 1
-            self.reward_model_manager = RewardModelManager(config.reward.reward_model, rm_resource_pool)
+            reward_model_config = copy.deepcopy(config.reward.reward_model)
+            reward_model_config.rollout.profiler = resolve_ray_actor_profiler_config(
+                reward_model_config.rollout.profiler, config
+            )
+            self.reward_model_manager = RewardModelManager(reward_model_config, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
         else:
             self.reward_model_manager = None
@@ -308,6 +319,7 @@ class RewardLoopManager:
         self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self.reward_manager_cls = resolve_reward_manager_cls(config)
         self._init_reward_loop_workers()
+        self._init_reward_loop_profilers()
 
     @property
     def reward_loop_worker_handles(self) -> list[ActorHandle]:
@@ -325,20 +337,55 @@ class RewardLoopManager:
         self.reward_loop_workers = []
         num_workers = self.config.reward.num_workers
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+        profiler_config = resolve_ray_actor_profiler_config(getattr(self.config.reward, "profiler", None), self.config)
 
         for i in range(num_workers):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
 
+            actor_options = {
+                "name": f"reward_loop_worker_{i}",
+                "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=node_id,
+                    soft=True,
+                ),
+            }
+            nsight_options = build_ray_actor_nsight_launch_options(
+                profiler_config,
+                rank=i,
+                role="reward_loop",
+            )
+            if nsight_options is not None:
+                actor_options["runtime_env"] = {"nsight": nsight_options}
             self.reward_loop_workers.append(
                 self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=True,
-                    ),
+                    **actor_options,
                 ).remote(self.config, self.reward_router_address)
             )
+
+    def _init_reward_loop_profilers(self) -> None:
+        """Initialize profiling after all reward-loop workers have been created."""
+        profiler_config = resolve_ray_actor_profiler_config(getattr(self.config.reward, "profiler", None), self.config)
+        self._profile_reward_loop_workers = _ray_actor_profile_enabled(profiler_config)
+        if self._profile_reward_loop_workers:
+            ray.get(
+                [
+                    worker.init_profiler.remote(i, profiler_config, "reward_loop")
+                    for i, worker in enumerate(self.reward_loop_workers)
+                ]
+            )
+
+    def start_profile(self, **kwargs) -> None:
+        """Start profiling on every selected reward-loop worker."""
+        if not self._profile_reward_loop_workers:
+            return
+        ray.get([worker.start_profile.remote(**kwargs) for worker in self.reward_loop_workers])
+
+    def stop_profile(self, run_command: bool = True) -> None:
+        """Stop profiling on every selected reward-loop worker."""
+        if not self._profile_reward_loop_workers:
+            return
+        ray.get([worker.stop_profile.remote(run_command=run_command) for worker in self.reward_loop_workers])
 
     def compute_rm_score(self, data: DataProto) -> DataProto:
         if self.reward_model_manager is not None:

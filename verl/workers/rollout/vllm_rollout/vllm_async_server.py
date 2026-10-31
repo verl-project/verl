@@ -52,6 +52,7 @@ from verl.utils.profiler import (
     relocate_rollout_traces,
     rollout_profiler_global_ranks,
 )
+from verl.utils.profiler.nsight import _build_rollout_ray_actor_nsight_launch_options
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -195,29 +196,7 @@ class vLLMHttpServer:
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
 
-        # used for controlling vllm server profiler
-        profiler_config = self.config.profiler
-        tool_config = None
-        if profiler_config is not None:
-            if profiler_config.tool in ["torch", "npu"]:
-                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
-            else:
-                logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
-                profiler_config = None
-        # `ranks` in the rollout profiler config are global GPU ranks (as in the training roles);
-        # map them to the replica that owns them so e.g. ranks=[0, 8] with tp=8 profiles the replicas
-        # holding global ranks 0 and 8 (replicas 0 and 1), not replica indices 0 and 8.
-        self.replica_world_size = (
-            self.config.tensor_model_parallel_size
-            * self.config.data_parallel_size
-            * self.config.pipeline_model_parallel_size
-        )
-        self.profiler_controller = build_rollout_dist_profiler(
-            self.replica_rank, self.replica_world_size, config=profiler_config, tool_config=tool_config
-        )
-        # A tp>1 engine profiles its whole replica, but the user asked for specific global GPU ranks;
-        # keep only those when relocating so ranks=[0, 8] yields exactly GPU 0 and 8, not their tp-mates.
-        self.profiler_keep_global_ranks = rollout_profiler_global_ranks(profiler_config)
+        self._init_profiler()
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -234,6 +213,32 @@ class vLLMHttpServer:
             self._dp_master_port = None
 
         self._post_init(cuda_visible_devices)
+
+    def _init_profiler(self) -> None:
+        # used for controlling vllm server profiler
+        profiler_config = self.config.profiler
+        tool_config = None
+        if profiler_config is not None:
+            if profiler_config.tool in ["torch", "npu", "nsys"]:
+                tool_config = omega_conf_to_dataclass((profiler_config.tool_config or {}).get(profiler_config.tool))
+            else:
+                logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
+                profiler_config = None
+        # `ranks` in the rollout profiler config are global GPU ranks (as in the training roles);
+        # map them to the replica that owns them so e.g. ranks=[0, 8] with tp=8 profiles the replicas
+        # holding global ranks 0 and 8 (replicas 0 and 1), not replica indices 0 and 8.
+        self.replica_world_size = (
+            self.config.tensor_model_parallel_size
+            * self.config.data_parallel_size
+            * self.config.pipeline_model_parallel_size
+        )
+        self.profiler_controller = build_rollout_dist_profiler(
+            self.replica_rank, self.replica_world_size, config=profiler_config, tool_config=tool_config
+        )
+        self.profiler_controller.save_file_prefix = f"rollout_server_node_{self.node_rank}"
+        # A tp>1 engine profiles its whole replica, but the user asked for specific global GPU ranks;
+        # keep only those when relocating so ranks=[0, 8] yields exactly GPU 0 and 8, not their tp-mates.
+        self.profiler_keep_global_ranks = rollout_profiler_global_ranks(profiler_config)
 
     def get_master_address(self):
         """Get master address and port for data parallel.
@@ -1076,30 +1081,39 @@ class vLLMHttpServer:
         return (
             self.profiler_controller.check_enable()
             and self.profiler_controller.check_this_rank()
-            and self.profiler_controller.is_discrete_mode()
+            and (self.profiler_controller._tool == "nsys" or self.profiler_controller.is_discrete_mode())
         )
 
     async def start_profile(self, **kwargs):
-        if self.node_rank != 0:
-            return
-        if self._should_profile():
-            await self.engine.start_profile(**kwargs)
+        is_nsys = self.profiler_controller._tool == "nsys"
+        profile_engine = self.node_rank == 0 and self._should_profile()
+        if is_nsys:
+            self.profiler_controller.start(**kwargs)
+        try:
+            if profile_engine:
+                await self.engine.start_profile(**({} if is_nsys else kwargs))
+        except Exception:
+            if is_nsys:
+                self.profiler_controller.stop(run_command=False)
+            raise
 
     async def stop_profile(self):
-        if self.node_rank != 0:
-            return
-        if self._should_profile():
-            await self.engine.stop_profile()
-            # Relocate the engine's traces into save_path (when relocate_results is set) so the
-            # training worker's single end-of-run upload of the whole save_path picks them up. The
-            # rollout engine does not run the finish command itself: it shares save_path with the
-            # colocated training worker, so uploading here too would send the same directory twice.
-            relocate_rollout_traces(
-                self.profiler_controller.config,
-                self.replica_rank,
-                self.replica_world_size,
-                self.profiler_keep_global_ranks,
-            )
+        is_nsys = self.profiler_controller._tool == "nsys"
+        profile_engine = self.node_rank == 0 and self._should_profile()
+        try:
+            if profile_engine:
+                await self.engine.stop_profile()
+                if not is_nsys:
+                    # Collect engine traces for the training worker's end-of-run upload.
+                    relocate_rollout_traces(
+                        self.profiler_controller.config,
+                        self.replica_rank,
+                        self.replica_world_size,
+                        self.profiler_keep_global_ranks,
+                    )
+        finally:
+            if is_nsys:
+                self.profiler_controller.stop(run_command=False)
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
@@ -1572,6 +1586,24 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
+    def _build_server_runtime_env(self, node_rank: int) -> dict:
+        """Combine platform environment variables and node-local Nsight options."""
+        runtime_env = {
+            "env_vars": {
+                **{var: "1" for var in get_platform().ray_noset_envvars()},
+                **get_platform().rollout_env_vars(),
+            }
+        }
+        nsight_options = _build_rollout_ray_actor_nsight_launch_options(
+            self.config.profiler,
+            replica_rank=self.replica_rank,
+            replica_world_size=self.world_size,
+            role=f"rollout_server_node_{node_rank}",
+        )
+        if nsight_options is not None:
+            runtime_env["nsight"] = nsight_options
+        return runtime_env
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -1608,17 +1640,12 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            env_vars = {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
-            }
-
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=False,
                 ),
-                runtime_env={"env_vars": env_vars},
+                runtime_env=self._build_server_runtime_env(node_rank),
                 name=name,
                 max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(

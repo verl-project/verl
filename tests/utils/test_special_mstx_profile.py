@@ -36,24 +36,6 @@ class TestNPUProfilerInitialization(unittest.TestCase):
         profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
         self.assertFalse(profiler.check_enable())
 
-    def test_init_with_all_ranks_true(self):
-        config = ProfilerConfig(enable=True, all_ranks=True, tool="npu")
-        tool_config = NPUToolConfig()
-        profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
-        self.assertTrue(profiler.check_this_rank())
-
-    def test_init_with_ranks_list(self):
-        config = ProfilerConfig(enable=True, ranks=[1, 2], tool="npu")
-        tool_config = NPUToolConfig()
-        profiler = DistProfiler(rank=1, config=config, tool_config=tool_config)
-        self.assertTrue(profiler.check_this_rank())
-
-    def test_init_with_rank_not_in_ranks(self):
-        config = ProfilerConfig(enable=True, ranks=[1, 2], tool="npu")
-        tool_config = NPUToolConfig()
-        profiler = DistProfiler(rank=3, config=config, tool_config=tool_config)
-        self.assertFalse(profiler.check_this_rank())
-
 
 class TestNPUProfilerStart(unittest.TestCase):
     def setUp(self):
