@@ -38,6 +38,7 @@ def forward_base_model(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     cache_position: Optional[torch.LongTensor] = None,
+    **kwargs,
 ) -> CausalLMOutputWithPast:
     r"""
     Copy paste LLaMa's forward
@@ -63,6 +64,7 @@ def forward_base_model(
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
         cache_position=cache_position,
+        **kwargs,
     )
 
     return outputs
@@ -84,7 +86,7 @@ def forward_with_torch_backend(
     logits_to_keep: int | torch.Tensor = 0,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
-    **loss_kwargs,
+    **kwargs,
 ) -> tuple | CausalLMOutputForPPO:
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
@@ -99,6 +101,7 @@ def forward_with_torch_backend(
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         cache_position=cache_position,
+        **kwargs,
     )
 
     hidden_states = outputs[0]
@@ -152,7 +155,7 @@ def forward_with_triton_backend(
     logits_to_keep: int | torch.Tensor = 0,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
-    **loss_kwargs,
+    **kwargs,
 ) -> tuple | CausalLMOutputForPPO:
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
@@ -168,6 +171,7 @@ def forward_with_triton_backend(
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
         cache_position=cache_position,
+        **kwargs,
     )
 
     hidden_states = outputs[0]

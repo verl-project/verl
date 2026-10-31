@@ -75,6 +75,7 @@ from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import (
+    build_flash_attn_varlen_kwargs,
     detach_tree,
     enable_full_determinism,
     pad_packed_inputs,
@@ -87,6 +88,22 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
+
+
+_FLASH_ATTN_VARLEN_IMPLEMENTATIONS = ("flash_attention_2", "flash_attention_3")
+
+
+def _supports_flash_attn_varlen_kwargs(module) -> bool:
+    """Whether the packed boundaries can be passed to ``module`` as varlen ``FlashAttentionKwargs``.
+
+    Limited to text models on transformers' flash-attention integration, which threads the kwargs
+    from the model forward down to ``_flash_attention_forward``. VLMs are excluded: their mRoPE
+    ``position_ids`` and vision towers go through verl's own attention patches.
+    """
+    config = getattr(module, "config", None)
+    return getattr(config, "_attn_implementation", None) in _FLASH_ATTN_VARLEN_IMPLEMENTATIONS and not hasattr(
+        config, "vision_config"
+    )
 
 
 def _is_scalar_unit_temperature(temperature) -> bool:
@@ -598,6 +615,9 @@ class FSDPEngine(BaseEngine):
             self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
         except (TypeError, ValueError):
             self.pass_packed_cu_seqlens = False
+        self.pass_flash_attn_varlen_kwargs = not self.pass_packed_cu_seqlens and _supports_flash_attn_varlen_kwargs(
+            module
+        )
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
@@ -1181,6 +1201,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
         pass_packed_cu_seqlens = getattr(self, "pass_packed_cu_seqlens", False)
+        pass_flash_attn_varlen_kwargs = getattr(self, "pass_flash_attn_varlen_kwargs", False)
 
         if not isinstance(temperature, torch.Tensor):
             temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
@@ -1282,6 +1303,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     )
                 model_inputs["cu_seqlens"] = model_cu_seqlens
                 model_inputs["cu_seqlens_cpu"] = model_cu_seqlens.cpu()
+            # Under Ulysses SP the boundaries are re-derived from the all-gathered position_ids in
+            # _ulysses_flash_attention_forward, so only the unsharded path passes them explicitly.
+            if packed_cu_seqlens is not None and pass_flash_attn_varlen_kwargs and not self.use_ulysses_sp:
+                model_inputs.update(build_flash_attn_varlen_kwargs(packed_cu_seqlens, pad_size=static_pad_size))
 
         else:
             if pad_mode == DatasetPadMode.NO_PADDING:
