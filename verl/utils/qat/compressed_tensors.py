@@ -296,6 +296,35 @@ def _compress_weight(
     return compressor.compress(state_dict, scheme)
 
 
+# Compressing one expert weight per call is launch-bound on the GPU: on a B300 a call takes about 1.3 ms (59 kernels,
+# 8 host syncs), and a Qwen3-30B-A3B refit makes 18,432 of them. Under a group strategy every scale group lies within
+# one row, so the stacked rows of several experts compress in one call to the same bytes. The compressor's float
+# intermediates take about 9x the run's bytes; at this cap a Qwen3-30B-A3B refit drops from 20 s to 6 s on a B300
+# for about 0.5 GB of extra peak memory.
+_EXPERT_BATCH_BYTES = 64 * 1024 * 1024
+_EXPERT_WEIGHT = re.compile(r"(?P<prefix>.*\.experts)\.\d+\.(?P<proj>[^.]+)\.weight$")
+
+
+def _row_local(scheme: "QuantizationScheme") -> bool:
+    """Whether every weight scale of the scheme covers part of a single row (MXFP4, MXFP8)."""
+    from compressed_tensors.quantization import QuantizationStrategy
+
+    return scheme.weights.strategy == QuantizationStrategy.GROUP
+
+
+def _compress_rows(weights: list[torch.Tensor], scheme: "QuantizationScheme") -> list[dict[str, torch.Tensor]]:
+    """Compress same-shape weights of a row-local scheme as one stacked weight, split back per weight."""
+    if len(weights) == 1:
+        return [_compress_weight(weights[0], scheme)]
+    rows = weights[0].shape[0]
+    stacked = _compress_weight(torch.cat(weights), scheme)
+    if any(value.ndim == 0 or value.shape[0] != rows * len(weights) for value in stacked.values()):
+        return [_compress_weight(weight, scheme) for weight in weights]
+    parts = {key: value.split(rows) for key, value in stacked.items()}
+    # every weight gets tensors of its own, as when it is compressed alone
+    return [{key: parts[key][i].clone() for key in stacked} for i in range(len(weights))]
+
+
 # HF checkpoints that pack all routed experts into one 3D tensor (e.g. Qwen3.5 MoE).
 _PACKED_EXPERTS = re.compile(r"(?P<prefix>.*\.experts)\.(?P<proj>gate_up_proj|down_proj)(?:\.weight)?$")
 
@@ -324,6 +353,10 @@ class CompressedTensorsWeightQuantizer:
     ignored and is targeted by a config group, resolved like compressed-tensors
     does: a name / "re:" target wins over the ``Linear`` class target. Packed 3D
     experts are split per expert first. Everything else passes through unchanged.
+
+    Under a group strategy (MXFP4, MXFP8) the experts of one layer are compressed
+    one projection per call, to the same bytes as one by one, and yielded in their
+    input order.
     """
 
     def __init__(
@@ -380,6 +413,18 @@ class CompressedTensorsWeightQuantizer:
         from compressed_tensors.quantization.utils import generate_gparam
 
         unpacked = list(_unpack_experts(name, tensor))
+        if _row_local(scheme):
+            run: list[tuple[str, torch.Tensor, QuantizationScheme]] = []
+            run_bytes = 0
+            for weight_name, weight in unpacked:
+                if run and run_bytes + weight.nbytes > _EXPERT_BATCH_BYTES:
+                    yield from self._compress_experts(run)
+                    run, run_bytes = [], 0
+                run.append((weight_name, weight, scheme))
+                run_bytes += weight.nbytes
+            yield from self._compress_experts(run)
+            return
+
         shared_global_scales: dict[tuple[int, str], torch.Tensor] = {}
         if scheme.weights.strategy == QuantizationStrategy.TENSOR_GROUP:
             by_expert: dict[int, list[torch.Tensor]] = {}
@@ -402,6 +447,27 @@ class CompressedTensorsWeightQuantizer:
             if input_scale is not None:
                 yield weight_name[: -len("weight")] + "input_global_scale", input_scale
 
+    def _compress_experts(
+        self, run: list[tuple[str, torch.Tensor, "QuantizationScheme"]]
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Compress expert weights of row-local schemes, one call per projection, and yield them in input order."""
+        groups: dict[tuple, list[int]] = {}
+        for i, (name, weight, scheme) in enumerate(run):
+            key = (_EXPERT_WEIGHT.match(name)["proj"], weight.shape, weight.dtype, weight.device, id(scheme))
+            groups.setdefault(key, []).append(i)
+        compressed: list[dict[str, torch.Tensor]] = [{}] * len(run)
+        for indices in groups.values():
+            results = _compress_rows([run[i][1] for i in indices], run[indices[0]][2])
+            for i, result in zip(indices, results, strict=True):
+                compressed[i] = result
+        for (name, _, scheme), result in zip(run, compressed, strict=True):
+            prefix = name[: -len("weight")]
+            for key, value in result.items():
+                yield prefix + key, value
+            input_scale = self._input_global_scale(name[: -len(".weight")], scheme)
+            if input_scale is not None:
+                yield prefix + "input_global_scale", input_scale
+
     def _module_scheme(self, module: str) -> Optional["QuantizationScheme"]:
         if _matches(module, self.ignore):
             return None
@@ -416,13 +482,32 @@ class CompressedTensorsWeightQuantizer:
         return self._module_scheme(name[: -len(".weight")])
 
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
+        # A run holds one layer's expert weights, up to _EXPERT_BATCH_BYTES. They are copied on arrival:
+        # an exporter may yield views of a buffer it refills for the next tensors (VeOmni's expert broadcast).
+        run: list[tuple[str, torch.Tensor, QuantizationScheme]] = []
+        run_bytes = 0
         for name, tensor in weights:
             packed = _PACKED_EXPERTS.match(name) if tensor.ndim == 3 else None
             scheme = self._module_scheme(f"{packed['prefix']}.0.gate_proj") if packed else None
             if packed and scheme is not None:
+                yield from self._compress_experts(run)
+                run, run_bytes = [], 0
                 yield from self._compress_packed_experts(name, tensor, scheme)
                 continue
             scheme = self._scheme_for(name, tensor)
+            expert = _EXPERT_WEIGHT.match(name) if scheme is not None and _row_local(scheme) else None
+            if expert is not None:
+                if run and (
+                    run_bytes + tensor.nbytes > _EXPERT_BATCH_BYTES
+                    or _EXPERT_WEIGHT.match(run[0][0])["prefix"] != expert["prefix"]
+                ):
+                    yield from self._compress_experts(run)
+                    run, run_bytes = [], 0
+                run.append((name, tensor.clone(), scheme))
+                run_bytes += tensor.nbytes
+                continue
+            yield from self._compress_experts(run)
+            run, run_bytes = [], 0
             if scheme is None:
                 yield name, tensor
                 continue
@@ -432,6 +517,7 @@ class CompressedTensorsWeightQuantizer:
             input_scale = self._input_global_scale(name[: -len(".weight")], scheme)
             if input_scale is not None:
                 yield prefix + "input_global_scale", input_scale
+        yield from self._compress_experts(run)
 
 
 class Fp8ConfigWeightQuantizer:
