@@ -19,6 +19,7 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.das import DASConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
@@ -311,6 +312,8 @@ class RolloutConfig(BaseConfig):
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
+    das: DASConfig = field(default_factory=DASConfig)
+
     router_config_path: Optional[str] = None
 
     def __post_init__(self):
@@ -380,6 +383,34 @@ class RolloutConfig(BaseConfig):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
+
+        # DAS (distribution-aware speculative decoding): same dict/DictConfig coercion.
+        if isinstance(self.das, DASConfig):
+            pass
+        elif isinstance(self.das, dict):
+            object.__setattr__(self, "das", DASConfig(**self.das))
+        elif isinstance(self.das, DictConfig):
+            object.__setattr__(self, "das", DASConfig(**OmegaConf.to_container(self.das, resolve=True)))
+        else:
+            raise TypeError(f"rollout.das must be dict, DictConfig, or DASConfig; got {type(self.das).__name__}.")
+
+        if self.das.enable:
+            if self.name != "vllm":
+                raise ValueError(f"rollout.das.enable=True requires rollout.name='vllm'; got {self.name!r}.")
+            if self.data_parallel_size != 1:
+                raise ValueError(
+                    "rollout.das.enable=True requires rollout.data_parallel_size == 1 (delta delivery uses "
+                    f"collective_rpc, which reaches one DP shard); got {self.data_parallel_size}."
+                )
+            vllm_kwargs = (self.engine_kwargs or {}).get("vllm") or {}
+            spec_cfg = vllm_kwargs.get("speculative_config") or {}
+            method = spec_cfg.get("method") if hasattr(spec_cfg, "get") else None
+            if method != "suffix":
+                warnings.warn(
+                    "rollout.das.enable=True but engine_kwargs.vllm.speculative_config.method is not 'suffix'; "
+                    "DAS rides vLLM's suffix drafter and will stay inactive until it is configured.",
+                    stacklevel=2,
+                )
 
         if self.topk_log_probs:
             if self.name != "vllm":

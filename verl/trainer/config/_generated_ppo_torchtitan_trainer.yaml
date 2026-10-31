@@ -400,6 +400,24 @@ actor_rollout_ref:
       transfer_backend: nixl
       bootstrap_port: null
       ib_device: null
+    das:
+      enable: false
+      window_iterations: 8
+      fresh_iterations: 2
+      poll_interval_s: 2.0
+      max_delta_batch_tokens: 500000
+      budget_long: 24
+      budget_medium: 8
+      budget_short: 0
+      short_max_tokens: 256
+      long_min_tokens: 1024
+      max_total_tokens: 64000000
+      max_problems: 8192
+      max_seqs_per_problem: 512
+      push_batch_size: 64
+      push_flush_interval_s: 0.5
+      push_queue_capacity: 4096
+      service_name: verl_das_suffix_service
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat

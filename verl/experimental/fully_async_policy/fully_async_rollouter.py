@@ -848,7 +848,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             config=self.config,
             worker_group=self.get_hybrid_worker_group(),
         )
-        self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
+        manager_cls = FullyAsyncAgentLoopManager
+        if self.config.actor_rollout_ref.rollout.get("das", {}).get("enable", False):
+            from verl.experimental.das.agent_loop import DASFullyAsyncAgentLoopManager
+
+            manager_cls = DASFullyAsyncAgentLoopManager
+        self.async_rollout_manager = await manager_cls.create(
             config=self.config,
             llm_client=self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
             reward_loop_worker_handles=reward_loop_worker_handles,

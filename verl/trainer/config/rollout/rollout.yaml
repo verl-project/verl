@@ -526,3 +526,49 @@ disaggregation:
 
   # InfiniBand device (required for mooncake over RDMA).
   ib_device: null
+
+# DAS: distribution-aware speculative decoding (arXiv 2511.13841) on top of vLLM suffix decoding.
+# Requires rollout.name=vllm, data_parallel_size=1 and
+# engine_kwargs.vllm.speculative_config={method: suffix, num_speculative_tokens: 24, ...};
+# draft cap, tree depth, spec factor and token-probability floor come from that vLLM config.
+# See docs/advance/das.md.
+das:
+
+  # Master switch. Default off: stock verl behaviour.
+  enable: False
+
+  # Training iterations of trajectories retained in the central store.
+  window_iterations: 8
+
+  # Most recent iterations whose trajectories also carry a 2x-count shadow copy
+  # (approximates DAS recency down-weighting). 0 disables shadows.
+  fresh_iterations: 2
+
+  # Engine delta-pump poll cadence, seconds.
+  poll_interval_s: 2.0
+
+  # Max tokens per delta batch shipped to an engine.
+  max_delta_batch_tokens: 500000
+
+  # Draft-token budgets per problem length class (also capped by num_speculative_tokens).
+  budget_long: 24
+  budget_medium: 8
+  # 0 == skip speculation for Short problems; their trajectories are still collected.
+  budget_short: 0
+
+  # Generation-length thresholds (tokens) separating Short / Medium / Long problems.
+  short_max_tokens: 256
+  long_min_tokens: 1024
+
+  # Central store caps.
+  max_total_tokens: 64000000
+  max_problems: 8192
+  max_seqs_per_problem: 512
+
+  # Agent-loop worker -> store push batching.
+  push_batch_size: 64
+  push_flush_interval_s: 0.5
+  push_queue_capacity: 4096
+
+  # Ray actor name of the store (job-scoped).
+  service_name: verl_das_suffix_service

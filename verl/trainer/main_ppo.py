@@ -124,6 +124,10 @@ class TaskRunnerV1:
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
             agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        elif self.config.actor_rollout_ref.rollout.get("das", {}).get("enable", False):
+            from verl.experimental.das.agent_loop_tq import DASAgentLoopManagerTQ
+
+            agent_loop_manager_cls = DASAgentLoopManagerTQ
         else:
             agent_loop_manager_cls = AgentLoopManagerTQ
 

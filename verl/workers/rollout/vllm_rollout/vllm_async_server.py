@@ -171,6 +171,11 @@ class vLLMHttpServer:
             os.environ["VERL_SEED"] = str(rollout_seed)
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
+        if self.config.das.enable:
+            # DAS: hand the config to the TP-rank worker subprocesses, which inherit this
+            # process' environment (see verl.experimental.das.worker_extension).
+            os.environ["VERL_DAS_CONFIG"] = self.config.das.to_json()
+
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -507,6 +512,10 @@ class vLLMHttpServer:
         # 3. launch server
         if self.node_rank == 0:
             await self.run_server(server_args)
+            if self.config.das.enable:
+                from verl.experimental.das.pump import start_delta_pump
+
+                self._das_pump = start_delta_pump(self)
         else:
             await self.run_headless(server_args)
 
@@ -1494,6 +1503,8 @@ class vLLMHttpServer:
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""
+        if self.config.das.enable:
+            return "verl.experimental.das.worker_extension.vLLMDASColocateWorkerExtension"
         return "verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension"
 
     def _get_cli_modules(self) -> list:
