@@ -33,6 +33,7 @@ from torch import Tensor
 
 from verl.models.mcore.util import get_thd_quant_align_size, preprocess_thd_engine, preprocess_vlm_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+from verl.utils.megatron.param_sync import ensure_fused_weight_ready
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
@@ -127,6 +128,7 @@ def fused_output_processor(
 
     temperature = context.temperature
     hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
+    ensure_fused_weight_ready(weight)
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         weight,
@@ -486,6 +488,7 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
+    ensure_fused_weight_ready(output_weight)
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         output_weight,
