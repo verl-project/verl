@@ -317,8 +317,18 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.tensor(1.0)
             elif len(id2score[idx]) > 1:
                 scores_tensor = torch.stack(id2score[idx])
-                id2mean[idx] = torch.mean(scores_tensor)
-                id2std[idx] = torch.std(scores_tensor)
+                if (scores_tensor == scores_tensor[0]).all():
+                    # Every response in the group got the same reward, so
+                    # every advantage is exactly zero. Use the shared score
+                    # as the mean: the float32 mean of identical values can
+                    # land an ulp away from the value itself, and dividing
+                    # that residue by a near-zero std invents a small
+                    # nonzero advantage for the whole group.
+                    id2mean[idx] = scores_tensor[0]
+                    id2std[idx] = torch.tensor(1.0)
+                else:
+                    id2mean[idx] = torch.mean(scores_tensor)
+                    id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
@@ -349,11 +359,24 @@ def compute_grpo_vectorized_outcome_advantage(
     with torch.no_grad():
         scores = token_level_rewards.sum(dim=-1)
         g = as_torch_index(index, device=scores.device)
-        mean_g, std_g, _ = group_mean_std(scores, g, eps=0.0, device=scores.device)
+        mean_g, std_g, count_g = group_mean_std(scores, g, eps=0.0, device=scores.device)
         if norm_adv_by_std_in_grpo:
             scalars = (scores - mean_g[g]) / (std_g[g] + epsilon)
         else:
             scalars = scores - mean_g[g]
+        # A group whose scores are all the same carries no preference, so
+        # its advantages are exactly zero. The float32 group statistics
+        # above can leave a residue for such a group (a mean an ulp off, a
+        # std of the same size), which the division then amplifies, so
+        # zero those groups from the scores themselves.
+        num_groups = mean_g.shape[0]
+        group_max = torch.full((num_groups,), float("-inf"), device=scores.device, dtype=scores.dtype)
+        group_max.scatter_reduce_(0, g, scores, "amax", include_self=False)
+        group_min = torch.full((num_groups,), float("inf"), device=scores.device, dtype=scores.dtype)
+        group_min.scatter_reduce_(0, g, scores, "amin", include_self=False)
+        uniform = (group_max == group_min) & (count_g > 1)
+        if bool(uniform.any()):
+            scalars = torch.where(uniform[g], torch.zeros_like(scalars), scalars)
         advantages = scalars.unsqueeze(-1) * response_mask
         return advantages, advantages
 
