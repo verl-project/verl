@@ -81,6 +81,7 @@ class AgentData:
         # SGLang video payload for the initial prompt (see AgentLoopBase.build_sglang_video_payload);
         # None for text/image-only inputs or when the vLLM backend is used.
         self.mm_processor_output: Optional[list[dict[str, Any]]] = None
+        self.video_grid_thw: Optional[Any] = None
         self.response_ids: list[int] = []
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
@@ -228,6 +229,7 @@ class ToolAgentLoop(AgentLoopBase):
             mm_inputs_out=mm_inputs,
         )
         agent_data.prompt_ids = prompt_ids
+        agent_data.video_grid_thw = mm_inputs.get("video_grid_thw")
         agent_data.mm_processor_output = self.build_sglang_video_payload(agent_data.video_data, mm_inputs)
         return AgentState.GENERATING
 
@@ -250,6 +252,7 @@ class ToolAgentLoop(AgentLoopBase):
                 mm_processor_output=agent_data.mm_processor_output,
                 audio_data=agent_data.audio_data,
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
+                video_grid_thw=agent_data.video_grid_thw,
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
