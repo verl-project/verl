@@ -25,6 +25,8 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 ENTROPY_COEFF=${ENTROPY_COEFF:-0}
+# Compute the shared prompt of the ROLLOUT_N samples once in log-prob/update (same results, fewer tokens).
+PREFIX_PACKING=${PREFIX_PACKING:-False}
 
 ROLLOUT_TP=${ROLLOUT_TP:-2}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.6}
@@ -85,6 +87,7 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF}
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.actor.fsdp_config.use_prefix_packing=${PREFIX_PACKING}
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=3000
     actor_rollout_ref.actor.use_dynamic_bsz=True
 )

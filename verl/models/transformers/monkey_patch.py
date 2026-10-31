@@ -17,7 +17,7 @@ Apply monkey-patch function to models
 
 import sys
 from types import SimpleNamespace
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -35,6 +35,9 @@ from verl.utils.ulysses import (
 
 _PREFIX_GROUPER_PATCHED = False
 _PREFIX_GROUPER_SUPPORTED_ATTENTIONS = {"flash_attention_2", "flash_attention_3", "sdpa", "flex_attention", "eager"}
+
+if TYPE_CHECKING:
+    from verl.workers.utils.prefix_packing import PrefixPackingAttnMeta
 
 
 def _create_prefix_grouper_wrapper(original_fn):
@@ -111,6 +114,12 @@ def _ulysses_flash_attention_forward(
         torch.Tensor: (batch_size, seqlen/sp_size, nheads, head_dim)
 
     """
+    prefix_packing = kwargs.pop("prefix_packing", None)
+    if prefix_packing is not None:
+        return _prefix_packed_flash_attention_forward(
+            query_states, key_states, value_states, prefix_packing, *args, **kwargs
+        )
+
     ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
 
     ########## AlltoAll for Ulysses ##########
@@ -152,6 +161,43 @@ def _ulysses_flash_attention_forward(
         # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
         attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
 
+    return attn_output
+
+
+def _prefix_packed_flash_attention_forward(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    prefix_packing: "PrefixPackingAttnMeta",
+    *args,
+    **kwargs,
+) -> torch.Tensor:
+    """Attention for a shared-prefix packed row: one varlen flash-attention call per layer.
+
+    Each segment attends to the keys listed in ``prefix_packing.kv_index`` (a branch: trunk and
+    itself). ``cu_seq_lens`` are passed explicitly because branch positions do not restart at 0,
+    so boundaries derived from ``position_ids`` would merge the branches.
+    """
+    for key in ("cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k", "position_ids", "attention_mask"):
+        kwargs.pop(key, None)
+    kv_index = prefix_packing.kv_index
+    key_states = key_states.index_select(1, kv_index)
+    value_states = value_states.index_select(1, kv_index)
+    attn_output = _flash_attention_forward(
+        query_states,
+        key_states,
+        value_states,
+        None,
+        query_states.size(1),
+        *args,
+        position_ids=None,
+        cu_seq_lens_q=prefix_packing.cu_seqlens_q,
+        cu_seq_lens_k=prefix_packing.cu_seqlens_k,
+        max_length_q=prefix_packing.max_seqlen_q,
+        max_length_k=prefix_packing.max_seqlen_k,
+        **kwargs,
+    )
+    prefix_packing.record_layer()
     return attn_output
 
 

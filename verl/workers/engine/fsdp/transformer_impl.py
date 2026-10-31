@@ -59,6 +59,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
+from verl.utils.metric import AggregationType, Metric
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
@@ -71,7 +72,13 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.utils.padding import build_attention_mask_from_nested
+from verl.workers.utils.padding import build_attention_mask_from_nested, get_prompt_lens
+from verl.workers.utils.prefix_packing import (
+    build_prefix_packing_plan,
+    check_layers_seen,
+    check_prefix_packing_micro_batch,
+    check_prefix_packing_supported,
+)
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import (
@@ -109,6 +116,9 @@ class FSDPEngine(BaseEngine):
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
+
+    # Class-level default so engines built without __init__ (e.g. in unit tests) take the unpacked path.
+    use_prefix_packing: bool = False
 
     def __init__(
         self,
@@ -188,6 +198,7 @@ class FSDPEngine(BaseEngine):
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
         self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
+        self.use_prefix_packing = self.engine_config.use_prefix_packing
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -598,6 +609,14 @@ class FSDPEngine(BaseEngine):
             self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
         except (TypeError, ValueError):
             self.pass_packed_cu_seqlens = False
+        if self.use_prefix_packing:
+            check_prefix_packing_supported(
+                module.config,
+                use_remove_padding=self.use_remove_padding,
+                ulysses_sp_size=self.engine_config.ulysses_sequence_parallel_size,
+                pass_packed_cu_seqlens=self.pass_packed_cu_seqlens,
+            )
+            self.prefix_packing_num_layers = module.config.num_hidden_layers
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
@@ -728,6 +747,9 @@ class FSDPEngine(BaseEngine):
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        if self.use_prefix_packing:
+            # Lets dynamic batching keep the samples of a prompt in one micro-batch.
+            tu.assign_non_tensor(data, use_prefix_packing=True)
         return_model_output = tu.get_non_tensor_data(data=data, key="return_model_output", default=False)
 
         # compute num_tokens in global batch for loss normalization
@@ -1168,6 +1190,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        if self.use_prefix_packing:
+            check_prefix_packing_micro_batch(
+                micro_batch, distillation_use_topk=distillation_use_topk, score_centering=score_centering
+            )
         temperature = micro_batch["temperature"]
         temperature_item = temperature
         temperature_is_one = _is_scalar_unit_temperature(temperature)
@@ -1208,6 +1234,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     position_ids_rmpad = position_ids.values().unsqueeze(0)  # (1, total_nnz)
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
+
+            # Compute each shared prompt once; the roll below still yields the right labels.
+            prefix_plan = None
+            if self.use_prefix_packing:
+                prefix_plan = build_prefix_packing_plan(input_ids, get_prompt_lens(micro_batch))
+                if prefix_plan.num_packed == prefix_plan.num_unpacked:
+                    prefix_plan = None
+            if prefix_plan is not None:
+                input_ids_rmpad = input_ids_rmpad[:, prefix_plan.pack_index]
+                position_ids_rmpad = position_ids_rmpad[..., prefix_plan.pack_index]
+                temperature_rmpad = temperature_rmpad[:, prefix_plan.pack_index]
+                packed_cu_seqlens = None
 
             # for compute the log_prob
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
@@ -1257,6 +1295,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             # Total right-padding on the global packed sequence.
             output_args["pad_size"] = static_pad_size + sp_pad_size
+            if prefix_plan is not None:
+                output_args["prefix_packing_plan"] = prefix_plan
+                output_args["prefix_packing_meta"] = prefix_plan.attn.with_tail_pad(static_pad_size)
 
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
             temperature_rmpad = temperature_rmpad.squeeze(0)
@@ -1270,6 +1311,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 "attention_mask": None,
                 "position_ids": position_ids_rmpad,
             }
+            if prefix_plan is not None:
+                model_inputs["prefix_packing"] = output_args["prefix_packing_meta"]
             if packed_cu_seqlens is not None and pass_packed_cu_seqlens:
                 model_cu_seqlens = packed_cu_seqlens
                 if output_args["pad_size"]:
@@ -1457,6 +1500,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if calculate_sum_pi_squared:
                 sum_pi_squared_rmpad = self._gather_and_unpad_packed(sum_pi_squared_rmpad, pad_size)
 
+            prefix_plan = output_args.get("prefix_packing_plan", None)
+            if prefix_plan is not None:
+                check_layers_seen(output_args["prefix_packing_meta"], self.prefix_packing_num_layers)
+                if not distillation_only:
+                    log_probs = log_probs.index_select(0, prefix_plan.unpack_index)
+                if calculate_entropy:
+                    entropy_rmpad = entropy_rmpad.index_select(0, prefix_plan.unpack_index)
+                if calculate_sum_pi_squared:
+                    sum_pi_squared_rmpad = sum_pi_squared_rmpad.index_select(0, prefix_plan.unpack_index)
+
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
                 # (bsz, j1), for each sample, is the length of each sample: [real_prompt length + real_response length]
@@ -1602,6 +1655,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
+            if self.use_prefix_packing:
+                plan = output_args.get("prefix_packing_plan", None)
+                ratio = plan.num_unpacked / plan.num_packed if plan is not None else 1.0
+                metrics["prefix_packing_token_ratio"] = Metric(value=ratio, aggregation=AggregationType.MEAN)
+
             # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
             output = {
                 "model_output": detach_tree(model_output),
@@ -1636,6 +1694,11 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             values_rmpad = self._gather_and_unpad_packed(values_rmpad, output_args["pad_size"])
+
+            prefix_plan = output_args.get("prefix_packing_plan", None)
+            if prefix_plan is not None:
+                check_layers_seen(output_args["prefix_packing_meta"], self.prefix_packing_num_layers)
+                values_rmpad = values_rmpad.index_select(0, prefix_plan.unpack_index)
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()

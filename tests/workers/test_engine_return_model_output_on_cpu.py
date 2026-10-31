@@ -65,6 +65,7 @@ def test_fsdp_forward_backward_honors_return_model_output(monkeypatch, return_mo
     model_output = {"log_probs": torch.tensor([-1.25])}
     engine = SimpleNamespace(
         ulysses_sequence_parallel_size=1,
+        use_prefix_packing=False,
         scaler=None,
         get_data_parallel_group=lambda: None,
         get_data_parallel_size=lambda: 1,

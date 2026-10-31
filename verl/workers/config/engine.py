@@ -267,6 +267,8 @@ class FSDPEngineConfig(EngineConfig):
             (``max_token_len_per_gpu * ulysses_sequence_parallel_size``) collapses every
             within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
             default 1024
+        use_prefix_packing (bool): Compute the prompt shared by adjacent samples (e.g. the ``rollout.n``
+            samples of one prompt) once in the forward. See ``docs/perf/perf_tuning.rst``. default False
         qat (QATEngineConfig): QAT configuration, default disabled
     """
 
@@ -291,6 +293,7 @@ class FSDPEngineConfig(EngineConfig):
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    use_prefix_packing: bool = False
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
     turbo_config: dict[str, Any] = field(default_factory=dict)
 

@@ -55,6 +55,7 @@ from verl.trainer.ppo.utils import (
     create_rl_dataset,
     create_rl_sampler,
     need_critic,
+    need_prefix_packing,
     need_reference_policy,
     need_reward_model,
     need_teacher_policy,
@@ -66,7 +67,12 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import deprecated, load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import (
+    calculate_workload,
+    get_equal_size_group_partitions,
+    get_seqlen_balanced_partitions,
+    log_seqlen_unbalance,
+)
 from verl.utils.skip.skip_manager import SkipManager
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -365,6 +371,7 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+        self.use_prefix_packing = need_prefix_packing(self.config)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -1193,8 +1200,13 @@ class RayPPOTrainer:
         # Note: world_size may include tensor/pipeline parallel dimensions, but we only want DP
         dp_size = self._get_dp_size(self.actor_rollout_wg, "actor")
 
+        if getattr(self, "use_prefix_packing", False) and "uid" in batch.non_tensor_batch:
+            # Keep each prompt's samples on one rank so their prompt can be shared.
+            global_partition_lst = get_equal_size_group_partitions(
+                workload_lst.tolist(), group_ids=list(batch.non_tensor_batch["uid"]), k_partitions=dp_size
+            )
         # Use group-level balancing for PrefixGrouper to keep same-uid samples together
-        if getattr(self, "use_prefix_grouper", False) and "uid" in batch.non_tensor_batch:
+        elif getattr(self, "use_prefix_grouper", False) and "uid" in batch.non_tensor_batch:
             from verl.utils.seqlen_balancing import get_group_balanced_partitions
 
             uid_list = list(batch.non_tensor_batch["uid"])
@@ -1234,8 +1246,8 @@ class RayPPOTrainer:
         else:
             global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
         # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
-        # Skip reordering within partitions for PrefixGrouper to maintain uid grouping
-        if not getattr(self, "use_prefix_grouper", False):
+        # Skip reordering within partitions for PrefixGrouper / prefix packing to maintain uid grouping
+        if not (getattr(self, "use_prefix_grouper", False) or getattr(self, "use_prefix_packing", False)):
             for idx, partition in enumerate(global_partition_lst):
                 partition.sort(key=lambda x: (workload_lst[x], x))
                 ordered_partition = partition[::2] + partition[1::2][::-1]

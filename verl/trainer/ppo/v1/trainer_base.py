@@ -68,6 +68,7 @@ from verl.trainer.ppo.utils import (
     create_rl_dataset,
     create_rl_sampler,
     need_critic,
+    need_prefix_packing,
     need_reference_policy,
     need_teacher_policy,
 )
@@ -82,7 +83,12 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import (
+    calculate_workload,
+    get_equal_size_group_partitions,
+    get_seqlen_balanced_partitions,
+    log_seqlen_unbalance,
+)
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
@@ -1624,7 +1630,15 @@ class PPOTrainer(ABC):
         workload_lst = calculate_workload(global_seqlen_lst)
 
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
-        global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
+        if need_prefix_packing(self.config):
+            # Keep each prompt's samples on one rank so their prompt can be shared.
+            # Keys have format {uid}_{session_id}_{index}; split from the right in case the uid holds "_".
+            group_ids = [key.rsplit("_", 2)[0] for key in batch.keys]
+            global_partition_lst = get_equal_size_group_partitions(
+                workload_lst.tolist(), group_ids=group_ids, k_partitions=dp_size
+            )
+        else:
+            global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
         batch.reorder([j for partition in global_partition_lst for j in partition])
         global_balance_stats = log_seqlen_unbalance(
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix

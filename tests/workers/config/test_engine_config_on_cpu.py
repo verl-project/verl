@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import pytest
+from omegaconf import OmegaConf
 
 from verl.workers.config.engine import FSDPEngineConfig, McoreEngineConfig
 
@@ -70,3 +73,14 @@ class TestFSDPEngineConfigCPU:
         test_policy = {"layer_class": "TransformerBlock"}
         config = FSDPEngineConfig(wrap_policy=test_policy)
         assert config.wrap_policy == test_policy
+
+    def test_prefix_packing_default_and_round_trip(self):
+        assert FSDPEngineConfig().use_prefix_packing is False
+        assert FSDPEngineConfig(use_prefix_packing=True).use_prefix_packing is True
+
+    def test_prefix_packing_yaml_default_matches_dataclass(self):
+        yaml_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "verl", "trainer", "config", "engine", "fsdp.yaml"
+        )
+        yaml_cfg = OmegaConf.load(yaml_path)
+        assert yaml_cfg.use_prefix_packing == FSDPEngineConfig().use_prefix_packing

@@ -58,6 +58,8 @@ from verl.workers.config import (
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.padding import get_prompt_lens
+from verl.workers.utils.prefix_packing import find_prefix_groups
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -302,6 +304,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             )
             mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
 
+        # With prefix packing, shuffle whole same-prompt groups so their prompt can still be shared.
+        group_sizes = None
+        if dataloader_kwargs.get("shuffle", False) and getattr(self.engine_config, "use_prefix_packing", False):
+            group_sizes = find_prefix_groups(data["input_ids"], get_prompt_lens(data))[0]
+
         # make iterator
         dataloader = tu.make_iterator(
             data,
@@ -309,6 +316,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             epochs=epochs,
             seed=seed + self.engine.get_data_parallel_rank(),
             dataloader_kwargs=dataloader_kwargs,
+            group_sizes=group_sizes,
         )
 
         with (

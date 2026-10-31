@@ -570,7 +570,14 @@ def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> Ten
     return tensor_dict1
 
 
-def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, dataloader_kwargs=None):
+def make_iterator(
+    tensordict: TensorDict,
+    mini_batch_size,
+    epochs,
+    seed=None,
+    dataloader_kwargs=None,
+    group_sizes: list[int] | None = None,
+):
     """Create an iterator that yields mini-batches from a TensorDict.
 
     Wraps a TensorDict in a DataLoader-style iterator that yields mini-batches
@@ -584,6 +591,8 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
         seed: Optional random seed for reproducible shuffling.
         dataloader_kwargs: Optional dict of additional kwargs to pass to
             the underlying DataLoader (e.g., shuffle=True, num_workers=4).
+        group_sizes: Optional sizes of contiguous sample blocks. With ``shuffle=True``, whole blocks
+            are shuffled instead of single samples, so each block stays contiguous.
 
     Returns:
         An iterator that yields TensorDict mini-batches.
@@ -613,6 +622,18 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
     assert isinstance(dataloader_kwargs, dict)
 
     idx_lst = torch.arange(tensordict.shape[0])
+
+    if group_sizes is not None and dataloader_kwargs.get("shuffle", False):
+        assert sum(group_sizes) == len(idx_lst), f"group_sizes sum to {sum(group_sizes)}, batch has {len(idx_lst)}"
+        blocks = torch.split(idx_lst, group_sizes)
+
+        def get_grouped_data():
+            for _ in range(epochs):
+                order = torch.cat([blocks[i] for i in torch.randperm(len(blocks), generator=generator).tolist()])
+                for idx in order.split(mini_batch_size):
+                    yield index_select_tensor_dict(tensordict, idx)
+
+        return iter(get_grouped_data())
 
     train_dataloader = DataLoader(
         dataset=idx_lst, batch_size=mini_batch_size, collate_fn=lambda x: x, generator=generator, **dataloader_kwargs
