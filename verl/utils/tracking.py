@@ -79,6 +79,8 @@ class Tracking:
 
             import wandb
 
+            if "WANDB_API_KEY" in os.environ:
+                os.environ["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"].strip()
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])

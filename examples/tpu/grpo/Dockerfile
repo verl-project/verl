@@ -9,6 +9,8 @@ ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
 ARG TORCHTITAN_COMMIT=89ef29b5a0d03a6883079ab37ff1bdc498fe3485
 # Optimized Qwen3.5 (google-pytorch/torchtitan#80, last of the TPU Qwen3.5 perf series #73-#80):
 # ARG TORCHTITAN_COMMIT=3ebfb20abc89613b29b38634b464fbca0a24c96b
+# Expert parallelism (EP > 1) for Qwen3.5 MoE (e.g. Qwen3.5-397B-A17B):
+# ARG TORCHTITAN_COMMIT=a7aad99bc17dc4ae36b9d2d6920f3d71fb71e51b
 
 ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
 
@@ -43,7 +45,7 @@ pip install "torch==${torch}" "torchvision==${torchvision}" --index-url "${torch
 pip install "libtpu==${libtpu}" -f "${libtpu_links}"
 pip install --pre --no-deps "torch-tpu==${TORCH_TPU_VERSION}" "tpu-sync-torch==${TPU_SYNC_VERSION}"
 pip install typeguard==2.13.3
-pip install portpicker absl-py numpy gcsfs frozendict triton fairscale "tyro>=1.0.5" torchao==0.17.0
+pip install portpicker absl-py numpy gcsfs google-cloud-storage frozendict triton fairscale "tyro>=1.0.5" torchao==0.17.0
 pip install -r /torchtitan/requirements.txt
 
 pip install --upgrade setuptools

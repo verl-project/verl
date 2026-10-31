@@ -29,7 +29,7 @@ TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL="${TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL:-1}"
 # PROMOTE_F32: TPU 7x otherwise evaluates bf16 sigmoid/SiLU/GELU chains natively in bf16 (v6e promotes them
 # to f32), which inflates the trainer / rollout logits mismatch. Internal XLA flag, pinned with the image's libtpu;
 # the same as the Qwen3 recipes (verl-project/verl#8301).
-export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_enable_bitcast_reduce_fusion_graduation=false --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_bf16_emission_mode=PROMOTE_F32"
+export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_enable_bitcast_reduce_fusion_graduation=false --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_bf16_emission_mode=PROMOTE_F32${SCOPED_VMEM_LIMIT_KIB:+ --xla_tpu_scoped_vmem_limit_kib=${SCOPED_VMEM_LIMIT_KIB}}${TPU_DVFS_P_STATE:+ --xla_tpu_dvfs_p_state=${TPU_DVFS_P_STATE}}"
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
 MODEL_NAME="${MODEL_NAME:-Qwen3.5-35B-A3B}"
@@ -62,7 +62,8 @@ if (( TENSOR_PARALLEL_SIZE < 1 || CONTEXT_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHI
     exit 1
 fi
 DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
-# The tpu-sync checkpoint engine supports a single rollout replica, so the rollout TP spans all rollout chips.
+# Default: a single rollout replica spanning all rollout chips; set ROLLOUT_TENSOR_PARALLEL_SIZE to divide
+# TOTAL_ROLLOUT_CHIPS across multiple rollout replicas (each pinned to its own TPU slice / tpu-group-<n>).
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
 FUSE_QKV="${FUSE_QKV:-True}"
 
@@ -111,6 +112,8 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-512}"
+DATA_MAX_LENGTH="${DATA_MAX_LENGTH:-$(( MAX_MODEL_LEN > 8192 ? MAX_MODEL_LEN : 8192 ))}"
+MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-$(( MAX_MODEL_LEN * MICRO_BATCH_SIZE > 8192 ? MAX_MODEL_LEN * MICRO_BATCH_SIZE : 8192 ))}"
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
@@ -135,8 +138,8 @@ python3 -m verl.trainer.main_ppo \
     data.val_max_samples="${VAL_MAX_SAMPLES}" \
     data.max_prompt_length="${MAX_PROMPT_LEN}" \
     data.max_response_length="${MAX_RESPONSE_LEN}" \
-    +data.max_length=8192 \
-    +data.max_token_len_per_gpu=8192 \
+    +data.max_length="${DATA_MAX_LENGTH}" \
+    +data.max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
     data.filter_overlong_prompts=True \
     data.truncation=error \
     +data.pad_mode=no_padding \
@@ -165,7 +168,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.decay_type=cosine \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
     actor_rollout_ref.actor.data_loader_seed="${SEED}" \
     actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode \
     '+actor_rollout_ref.actor.policy_loss.rollout_correction=${algorithm.rollout_correction}' \
@@ -193,7 +196,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.torchtitan.pad_to_length=True \
     actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
     actor_rollout_ref.ref.torchtitan.seed="${SEED}" \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=True \
     actor_rollout_ref.ref.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
@@ -216,7 +219,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
     actor_rollout_ref.rollout.checkpoint_engine.backend=tpu-sync \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.prompt_length="${MAX_PROMPT_LEN}" \
