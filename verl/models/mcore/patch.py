@@ -699,3 +699,204 @@ def apply_patch_megatron_recomputation_backward():
         return (None, None) + grads
 
     rd.CheckpointFunction.backward = patch_backward
+
+
+# ---------------------------------------------------------------------------
+# Megatron-Core optimizer compatibility for quantized checkpoints with the
+# precision-aware optimizer (DeepSeek-V4 and similar FP8 / MXFP4 models).
+#
+# Two upstream fixes are pending; until they land, verl applies runtime
+# equivalents once per process (set VERL_MEGATRON_OPTIMIZER_COMPAT=0 to skip):
+#
+# 1. https://github.com/NVIDIA/Megatron-LM/pull/8245 -- for quantized model
+#    params without ``get_high_precision_init_val``, ``DistributedOptimizer``
+#    builds the fp32 main-param shard as ``model_param.float().view(-1)[a:b]``
+#    under autograd, i.e. a non-leaf view with ``requires_grad=True``.  The
+#    default optimizer path never validates it, but ``optimizer_cpu_offload=True``
+#    rebuilds the HybridDeviceOptimizer through ``torch.optim.Optimizer.__init__``,
+#    whose ``add_param_group`` raises ``can't optimize a non-leaf Tensor``.
+#    Building the groups under ``torch.no_grad()`` yields grad_fn-free shards;
+#    the recorded grad_fn was never used (Megatron copies grads into the main
+#    params by hand).
+# 2. https://github.com/NVIDIA/Megatron-LM/pull/7279 -- ``get_grad_norm_fp32`` /
+#    ``clip_grad_by_total_norm_fp32`` hand one list of gradients to a single
+#    multi-tensor kernel that is dispatched on the dtype of the first tensor.
+#    With ``use_precision_aware_optimizer`` + bf16 main grads, bf16 params expose
+#    bf16 decoupled grads while the model's native fp32 params (DSV4's hc
+#    alpha/bias, ape, attn_sink) keep fp32 grads: the kernel reads past the
+#    smaller elements and dies with an illegal memory access.  The replacement
+#    runs the kernel once per dtype group and combines the partial norms; a
+#    single-dtype list is forwarded to the original function unchanged.
+# ---------------------------------------------------------------------------
+
+
+def wrap_no_grad(cls, name: str, marker: str) -> bool:
+    """Wrap ``cls.<name>`` so it runs under ``torch.no_grad()``.
+
+    Handles plain functions, classmethods and staticmethods.  Returns False when
+    the attribute is missing or already wrapped (``marker`` set on ``cls``).
+    """
+    import logging
+
+    import torch
+
+    if getattr(cls, marker, False):
+        return False
+    if name not in cls.__dict__:
+        # Inherited (or renamed) upstream: nothing to wrap here.  Say so, because a silent skip would
+        # look like a successful patch to anyone reading the logs.
+        logging.getLogger(__name__).warning(
+            "%s.%s is not defined on the class itself (inherited or renamed); no-grad wrap skipped", cls.__name__, name
+        )
+        return False
+    raw = cls.__dict__[name]
+    kind = type(raw) if isinstance(raw, (classmethod, staticmethod)) else None
+    func = raw.__func__ if kind is not None else raw
+
+    def wrapped(*args, **kwargs):
+        with torch.no_grad():
+            return func(*args, **kwargs)
+
+    wrapped.__name__ = getattr(func, "__name__", name)
+    wrapped.__doc__ = getattr(func, "__doc__", None)
+    setattr(cls, name, kind(wrapped) if kind is not None else wrapped)
+    setattr(cls, marker, True)
+    return True
+
+
+def apply_distributed_optimizer_no_grad_main_params_patch() -> bool:
+    """Build ``DistributedOptimizer`` main-param groups under ``no_grad`` (Megatron-LM #8245)."""
+    import logging
+
+    try:
+        from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
+    except ImportError:
+        return False
+    applied = wrap_no_grad(
+        DistributedOptimizer, "_build_model_and_main_param_groups", "_verl_no_grad_main_params_patch"
+    )
+    if applied:
+        # WARNING on purpose: Ray workers do not surface INFO, and users need to see that the patch is live.
+        logging.getLogger(__name__).warning(
+            "Patched DistributedOptimizer._build_model_and_main_param_groups to run under no_grad "
+            "(Megatron-LM #8245: non-leaf fp32 main-param shards for quantized params)"
+        )
+    return applied
+
+
+def make_dtype_safe_grad_fns(cg):
+    """Return per-dtype-group versions of ``get_grad_norm_fp32`` / ``clip_grad_by_total_norm_fp32``.
+
+    ``cg`` is ``megatron.core.optimizer.clip_grads`` (or any object exposing the same
+    names); it is a parameter so the logic can be unit-tested without a GPU.
+    """
+    import logging
+
+    import torch
+
+    logger = logging.getLogger(__name__)
+    orig_norm = cg.get_grad_norm_fp32
+    orig_clip = cg.clip_grad_by_total_norm_fp32
+    announced = {"norm": False, "clip": False}
+
+    def _group_by_dtype(tensors):
+        groups = {}
+        for t in tensors:
+            groups.setdefault(t.dtype, []).append(t)
+        return groups
+
+    def get_grad_norm_fp32(grads_for_norm, norm_type=2, grad_stats_parallel_group=None):
+        if isinstance(grads_for_norm, torch.Tensor):
+            grads_for_norm = [grads_for_norm]
+        groups = _group_by_dtype(grads_for_norm)
+        if len(groups) <= 1 or float(norm_type) != 2.0:
+            return orig_norm(grads_for_norm, norm_type, grad_stats_parallel_group)
+        if not announced["norm"]:
+            logger.warning("dtype-safe grad norm active: groups=%s", {str(k): len(v) for k, v in groups.items()})
+            announced["norm"] = True
+        data_parallel_group = None
+        for g in grads_for_norm:
+            data_parallel_group = cg.get_data_parallel_group_if_dtensor(g, data_parallel_group)
+        total = None
+        for gs in groups.values():
+            gs = [cg.to_local_if_dtensor(g) for g in gs]
+            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=gs[0].device)
+            grad_norm, _ = cg.multi_tensor_applier(cg.l2_norm_impl, dummy_overflow_buf, [gs], False)
+            sq = grad_norm.float() ** 2.0
+            total = sq if total is None else total + sq
+        if data_parallel_group:
+            torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group)
+        torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group)
+        if cg.multi_tensor_scale_tensor_impl is not None:
+            return total.pow(0.5)
+        return total.item() ** 0.5
+
+    def clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm, use_decoupled_grad=False):
+        grads = []
+        for param in parameters:
+            if use_decoupled_grad:
+                if getattr(param, "decoupled_grad", None) is not None:
+                    assert param.decoupled_grad.dtype in (torch.float32, torch.bfloat16)
+                    grads.append(cg.to_local_if_dtensor(param.decoupled_grad).detach())
+            elif param.grad is not None:
+                grads.append(cg.to_local_if_dtensor(param.grad).detach())
+        groups = _group_by_dtype(grads)
+        if len(groups) <= 1:
+            return orig_clip(parameters, max_norm, total_norm, use_decoupled_grad)
+        if not announced["clip"]:
+            logger.warning("dtype-safe grad clip active: groups=%s", {str(k): len(v) for k, v in groups.items()})
+            announced["clip"] = True
+        clip_coeff = max_norm / (total_norm + 1.0e-6)
+        if isinstance(clip_coeff, torch.Tensor):
+            clip_coeff.clamp_max_(1.0)
+            assert cg.multi_tensor_scale_tensor_impl is not None, (
+                "clip_coeff is a tensor but multi_tensor_scale_tensor is unavailable"
+            )
+            for gs in groups.values():
+                dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=gs[0].device)
+                cg.multi_tensor_applier(cg.multi_tensor_scale_tensor_impl, dummy_overflow_buf, [gs, gs], clip_coeff)
+        elif clip_coeff < 1.0:
+            for gs in groups.values():
+                dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=gs[0].device)
+                cg.multi_tensor_applier(cg.multi_tensor_scale_impl, dummy_overflow_buf, [gs, gs], clip_coeff)
+
+    return get_grad_norm_fp32, clip_grad_by_total_norm_fp32
+
+
+def apply_dtype_safe_grad_norm_patch() -> bool:
+    """Install per-dtype-group grad norm / clipping in Megatron-Core (Megatron-LM #7279)."""
+    import logging
+
+    try:
+        from megatron.core.optimizer import clip_grads as cg
+        from megatron.core.optimizer import optimizer as opt_mod
+    except ImportError:
+        return False
+    if getattr(cg, "_verl_dtype_safe_grad_patch", False):
+        return False
+    get_grad_norm_fp32, clip_grad_by_total_norm_fp32 = make_dtype_safe_grad_fns(cg)
+    cg.get_grad_norm_fp32 = get_grad_norm_fp32
+    cg.clip_grad_by_total_norm_fp32 = clip_grad_by_total_norm_fp32
+    opt_mod.get_grad_norm_fp32 = get_grad_norm_fp32
+    opt_mod.clip_grad_by_total_norm_fp32 = clip_grad_by_total_norm_fp32
+    try:
+        from megatron.core.optimizer import layer_wise_optimizer as lwo
+
+        lwo.get_grad_norm_fp32 = get_grad_norm_fp32
+    except ImportError:
+        pass
+    cg._verl_dtype_safe_grad_patch = True
+    logging.getLogger(__name__).warning(
+        "Installed dtype-safe get_grad_norm_fp32 / clip_grad_by_total_norm_fp32 (Megatron-LM #7279)"
+    )
+    return True
+
+
+def apply_megatron_optimizer_compat_patches() -> None:
+    """Apply both optimizer compatibility patches unless VERL_MEGATRON_OPTIMIZER_COMPAT=0."""
+    import os
+
+    if os.getenv("VERL_MEGATRON_OPTIMIZER_COMPAT", "1") == "0":
+        return
+    apply_distributed_optimizer_no_grad_main_params_patch()
+    apply_dtype_safe_grad_norm_patch()

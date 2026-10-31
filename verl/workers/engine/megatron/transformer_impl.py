@@ -232,6 +232,13 @@ class MegatronEngine(BaseEngine):
 
             apply_patch_megatron_recomputation_backward()
 
+        # Quantized checkpoints with the precision-aware optimizer (DeepSeek-V4): non-leaf fp32 main-param
+        # shards and mixed-dtype grad-norm lists until Megatron-LM #8245 / #7279 land.  Must run before the
+        # optimizer is built; VERL_MEGATRON_OPTIMIZER_COMPAT=0 disables it.
+        from verl.models.mcore.patch import apply_megatron_optimizer_compat_patches
+
+        apply_megatron_optimizer_compat_patches()
+
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
         if self.engine_config.dynamic_context_parallel:
