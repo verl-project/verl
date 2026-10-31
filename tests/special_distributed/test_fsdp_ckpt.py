@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
+# flash-attn consumes FLASH_ATTENTION_DETERMINISTIC while *its own package* is being imported, and
+# importing `verl` below already imports flash-attn (verl.utils.torch_functional probes
+# flash_attn.ops.triton.cross_entropy at module scope, see also huggingface/transformers 64d14ef).
+# Setting these variables later -- as this file did, at the bottom of __main__ -- silently has no
+# effect, which is what made the bit-exact logits comparison at the end of this test flaky.
+os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 import shutil
 import tempfile
 
@@ -47,6 +56,11 @@ def create_random_input_ids(batch_size, seq_len, vocab_size):
 def test_fsdp_ckpt(strategy="fsdp"):
     assert get_torch_device().device_count() >= 2, "need at least 2 gpus for test"
     local_rank, rank, world_size = initialize_global_process_group()
+    # The last assertion compares logits from two independent optimizer steps with atol=rtol=0.
+    # That is only well defined for deterministic kernels (the embedding backward accumulates with
+    # atomics) and reproducible inputs, so pin both here rather than letting the run decide.
+    torch.use_deterministic_algorithms(True)
+    torch.manual_seed(2026)
     device_mesh = init_device_mesh(get_device_name(), mesh_shape=(world_size,), mesh_dim_names=("dp",))
 
     model_name = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B-Instruct")
@@ -113,7 +127,11 @@ def test_fsdp_ckpt(strategy="fsdp"):
     temp_dir = tempfile.mkdtemp()
     checkpoint_path = os.path.join(temp_dir, "checkpoint")
     checkpoint_manager.save_checkpoint(local_path=checkpoint_path, hdfs_path=None, global_step=0)
-    saved_state_dict = model.state_dict()
+    # Snapshot the *values* that were just written to disk. ``model.state_dict()`` hands back the
+    # live parameter tensors (FSDP1 flat params / FSDP2 DTensors), so keeping the returned dict
+    # itself makes the round-trip check below compare the model against itself: it passes no matter
+    # what ``load_checkpoint`` restored, and the only real signal left is the flaky logits compare.
+    saved_state_dict = {key: value.detach().clone() for key, value in model.state_dict().items()}
 
     # Step 2: Second update and forward pass
     outputs2 = model(input_ids=input_ids2, position_ids=position_ids2)
@@ -158,5 +176,4 @@ def test_fsdp_ckpt(strategy="fsdp"):
 
 if __name__ == "__main__":
     strategy = os.environ.get("STRATEGY", "fsdp")
-    os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
     test_fsdp_ckpt(strategy=strategy)
