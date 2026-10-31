@@ -947,6 +947,11 @@ class FSDPEngine(BaseEngine):
                 if p.is_floating_point():
                     p = p.to(torch.bfloat16, non_blocking=True)
                 local = p.to_local() if hasattr(p, "to_local") else p
+                if hasattr(torch, "npu") and torch.npu.is_available():
+                    # the non_blocking copies above enqueue on the current NPU
+                    # stream; the consumer (delta seed / full export) broadcasts
+                    # the yielded shard immediately, so never yield it mid-flight
+                    torch.npu.current_stream().synchronize()
                 yield name, local.reshape(-1), spec
 
         return _gen(), None

@@ -26,6 +26,7 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
+import json
 import logging
 import os
 import time
@@ -44,6 +45,28 @@ from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedW
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _hccl_group_update_infos(replica_rank: int, tp_size: int) -> list[dict]:
+    """Per-worker update entries for one replica: group ranks are numbered
+    replica-major / tp-minor, with the trainer's rank 0 at slot 0 (the same
+    numbering the trainer's single-sender topology assigned)."""
+    base_rank = 1 + replica_rank * tp_size
+    return [{"group_rank": base_rank + i} for i in range(tp_size)]
+
+
+def _decode_delta_rendezvous(named_tensors) -> Optional[dict]:
+    """Decode the HCCL rendezvous control item, if the flush stream is one.
+
+    The NPU rollout engine yields a single ``("__delta_rendezvous__", json)``
+    control item instead of flush payloads: the actual flushes flow from the
+    trainer straight into the vLLM workers' PyHccl broadcast group (the
+    direct-receiver geometry).
+    """
+    for name, tensor in named_tensors:
+        if name == "__delta_rendezvous__":
+            return json.loads(bytes(tensor.detach().cpu().numpy().tobytes()).decode())
+    return None
 
 
 class ServerAdapter(BaseRollout):
@@ -216,8 +239,9 @@ class ServerAdapter(BaseRollout):
     ):
         """Update rollout weights from full tensors or DeltaFlush payloads.
 
-        Full-tensor updates may fall back to shared memory; delta updates
-        require colocated CUDA IPC.
+        Full-tensor updates may fall back to shared memory; delta updates ride
+        the colocated CUDA IPC channel (GPU) or the trainer's HCCL broadcast
+        group (NPU).
         """
         if wire_format == "delta_flush":
             return await self._update_delta_weights(weights, global_steps=global_steps)
@@ -262,9 +286,6 @@ class ServerAdapter(BaseRollout):
 
         from verl.workers.rollout.utils import ensure_async_iterator
 
-        if self.use_shm:
-            raise NotImplementedError("delta_sharded with vLLM requires colocated CUDA IPC")
-
         flushes = ensure_async_iterator(weights)
         try:
             first_item = await anext(flushes)
@@ -277,6 +298,13 @@ class ServerAdapter(BaseRollout):
             return
 
         first_named_tensors, saw_last = first_item
+        rendezvous = _decode_delta_rendezvous(first_named_tensors)
+        if rendezvous is not None:
+            # NPU: the flush payloads never pass through this adapter.
+            return await self._update_delta_weights_hccl(rendezvous, flushes, global_steps=global_steps)
+
+        if self.use_shm:
+            raise NotImplementedError("delta_sharded with vLLM requires colocated CUDA IPC")
         if not self._delta_weight_transfer_engine_initialized:
             await self._execute_method(
                 "init_weight_transfer_engine",
@@ -312,6 +340,48 @@ class ServerAdapter(BaseRollout):
             raise ValueError("DeltaFlush stream ended without is_last=True")
 
         await self._execute_method("finish_weight_update")
+
+        if self._has_server:
+            await self.server_handle.clear_kv_cache.remote()
+            if global_steps is not None:
+                await self.server_handle.set_global_steps.remote(global_steps)
+
+    async def _update_delta_weights_hccl(self, rendezvous: dict, flushes, *, global_steps: int | None) -> None:
+        """Direct HCCL delta sync: the flush payloads flow trainer -> vLLM worker PyHccl group directly.
+
+        This adapter only drives the worker engines' lifecycle RPCs: init (once,
+        with the rendezvous endpoints), start, a single update whose per-worker
+        entries carry each worker's group rank, and finish. The worker engines
+        subscribe to the trainer's zmq manifest PUB socket and receive the
+        broadcasts themselves; the update RPC returns only after the session's
+        last flush is applied, so no further synchronization is needed here.
+        """
+        if not self._delta_weight_transfer_engine_initialized:
+            await self._execute_method(
+                "init_weight_transfer_engine",
+                kwargs={
+                    "init_info": {
+                        "dist_ip": rendezvous["dist_ip"],
+                        "dist_port": int(rendezvous["dist_port"]),
+                        "zmq_ip": rendezvous["zmq_ip"],
+                        "zmq_port": int(rendezvous["zmq_port"]),
+                        "topic": rendezvous.get("topic", "bucket_metadata"),
+                        "world_size": int(rendezvous["world_size"]),
+                    }
+                },
+            )
+            self._delta_weight_transfer_engine_initialized = True
+
+        await self._execute_method("start_weight_update")
+
+        update_infos = _hccl_group_update_infos(self.replica_rank, self.config.tensor_model_parallel_size)
+        await self._execute_method("update_verl_delta_weights", kwargs={"update_info": update_infos})
+
+        await self._execute_method("finish_weight_update")
+
+        # The rendezvous stream carries no further items; drain to close it.
+        async for _ in flushes:
+            pass
 
         if self._has_server:
             await self.server_handle.clear_kv_cache.remote()

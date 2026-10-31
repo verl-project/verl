@@ -129,6 +129,7 @@ jobs:
       - name: Run vllm CPU unit tests
         run: |
           $UV_RUN pytest -s -x \
+            tests/checkpoint_engine/test_delta_wire_fail_loud_on_cpu.py \
             tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
             tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
             tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \

@@ -17,16 +17,19 @@ This package holds the framework-agnostic wire schema of "send only the
 elements that changed" weight sync: the per-flush parameter spec
 (:class:`DeltaParam` / :class:`DeltaFlush`) and the payload checksum. The
 sharded engines assemble these flushes from backend-provided shard exports and
-broadcast them over NCCL; the rollout backend decodes them in place.
+broadcast them over NCCL or HCCL; the rollout backend decodes them in place.
 
 Design follows THUDM/slime's delta-sync implementation
 (``slime/backends/megatron_utils/update_weight/update_weight_from_distributed_delta.py``).
 """
 
+from .decode import DeltaPatch, decode_delta_wire
 from .encode import DeltaFlush, DeltaParam, checksum
 
 __all__ = [
     "DeltaFlush",
     "DeltaParam",
+    "DeltaPatch",
     "checksum",
+    "decode_delta_wire",
 ]
