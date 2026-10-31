@@ -301,9 +301,7 @@ class VeOmniRouterReplay:
         self._targets = []
         self._mask = None
 
-    def begin_microbatch(
-        self, targets: list[torch.Tensor] | None = None, mask: torch.Tensor | None = None
-    ) -> None:
+    def begin_microbatch(self, targets: list[torch.Tensor] | None = None, mask: torch.Tensor | None = None) -> None:
         """Arm the controller for one micro-batch forward.
 
         Must be called from the engine before every forward, once RECORD or
