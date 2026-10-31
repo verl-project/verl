@@ -636,6 +636,27 @@ class MegatronEngine(BaseEngine):
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
             chunk.zero_grad_buffer()
 
+    def scale_gradients(self, factor: float):
+        """
+        Multiply the accumulated gradients by a factor.
+        """
+        for chunk in self.module:
+            chunk.scale_gradients(factor)
+
+    def _reduce_loss_num_tokens(self, num_tokens: int | None) -> int | None:
+        # Summed over data-parallel ranks like batch_num_tokens, except under dynamic CP, whose outputs already
+        # cover the whole batch.
+        if num_tokens is not None and not self.engine_config.dynamic_context_parallel:
+            num_tokens = super()._reduce_loss_num_tokens(num_tokens)
+        if mpu.get_pipeline_model_parallel_world_size() == 1:
+            return num_tokens
+        # Only the last pipeline stage runs the loss.
+        reported = torch.tensor([num_tokens is not None, num_tokens or 0], dtype=torch.int64, device=get_device_id())
+        torch.distributed.broadcast(
+            reported, src=mpu.get_pipeline_model_parallel_last_rank(), group=mpu.get_pipeline_model_parallel_group()
+        )
+        return int(reported[1]) if reported[0] else None
+
     def optimizer_step(self):
         """
         Perform an optimization step to update model parameters based on accumulated gradients.

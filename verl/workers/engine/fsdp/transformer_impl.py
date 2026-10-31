@@ -789,6 +789,14 @@ class FSDPEngine(BaseEngine):
         """
         self.optimizer.zero_grad()
 
+    def scale_gradients(self, factor: float):
+        """
+        Multiply the accumulated gradients by a factor.
+        """
+        for param in self.module.parameters():
+            if param.grad is not None:
+                param.grad.mul_(factor)
+
     def optimizer_step(self):
         """
         Clip gradients, skip update if non-finite, and step optimizer.

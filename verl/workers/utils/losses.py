@@ -16,10 +16,16 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import (
+    agg_loss,
+    compute_bypass_mode_rollout_correction,
+    compute_value_loss,
+    get_policy_loss_fn,
+    kl_penalty,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
-from verl.utils.metric import AggregationType, Metric
+from verl.utils.metric import LOSS_NUM_TOKENS, AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
@@ -114,6 +120,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
+    # tokens the loss terms average over
+    loss_mask = response_mask
+    rollout_rs = (config.policy_loss.get("rollout_correction", None) or {}).get("rollout_rs", None)
+    if loss_mode == "bypass_mode" and rollout_rs is not None:
+        # rejection sampling drops tokens by the current log probs; every term skips them, as in decoupled mode
+        rollout_correction = compute_bypass_mode_rollout_correction(log_prob, old_log_prob, response_mask, config)
+        policy_loss_kwargs["rollout_correction"] = rollout_correction
+        _, loss_mask, _ = rollout_correction
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -162,7 +176,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     # add entropy loss
     if entropy is not None:
         entropy_loss = agg_loss(
-            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+            loss_mat=entropy, loss_mask=loss_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
@@ -174,12 +188,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
         kl_loss = agg_loss(
-            loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+            loss_mat=kld, loss_mask=loss_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
         )
 
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
+
+    if (
+        loss_mask is not response_mask
+        and loss_agg_mode == "token-mean"
+        and config.global_batch_info["batch_num_tokens"] is not None
+    ):
+        # batch_num_tokens predates the rejection: the engine divides by the kept tokens of all micro-batches instead
+        metrics[LOSS_NUM_TOKENS] = Metric(value=loss_mask.sum(), aggregation=AggregationType.SUM)
 
     return policy_loss, metrics
 

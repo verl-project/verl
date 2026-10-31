@@ -23,8 +23,9 @@ from typing import Any, Callable, ContextManager, Generator, Optional
 import torch
 from tensordict import TensorDict
 
-from verl.utils.device import get_device_name, get_vendor
-from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
+from verl.utils.device import get_device_id, get_device_name, get_vendor
+from verl.utils.metric import LOSS_NUM_TOKENS, AggregationType, Metric
+from verl.utils.tensordict_utils import get_non_tensor_data, maybe_fix_3d_position_ids
 
 
 class BaseEngine:
@@ -87,6 +88,12 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def scale_gradients(self, factor: float):
+        """
+        Multiply the accumulated gradients by a factor.
+        """
+        raise NotImplementedError
+
     def lr_scheduler_step(self):
         """
         Advance the learning rate scheduler by one step.
@@ -125,11 +132,43 @@ class BaseEngine:
 
         self.optimizer_zero_grad()
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+        self._normalize_by_loss_num_tokens(data, outputs)
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
             outputs["metrics"]["grad_norm"] = grad_norm
         return outputs
+
+    def _normalize_by_loss_num_tokens(self, data: TensorDict, outputs: Any):
+        """
+        Renormalize a token-mean loss whose tokens are only known after the forward passes.
+
+        Such a loss divides each micro-batch by batch_num_tokens, counted beforehand, and reports the tokens it
+        averaged over under LOSS_NUM_TOKENS. Once all micro-batches have run, the gradients, the loss and its summed
+        metrics are rescaled to divide by the reported total instead.
+        """
+        metrics = outputs.get("metrics") if outputs else None
+        loss_num_tokens = metrics.pop(LOSS_NUM_TOKENS, None) if metrics else None
+        num_tokens = self._reduce_loss_num_tokens(None if loss_num_tokens is None else int(loss_num_tokens.aggregate()))
+        if not num_tokens:
+            return
+        factor = get_non_tensor_data(data, key="batch_num_tokens", default=None) / num_tokens
+        self.scale_gradients(factor)
+        if metrics is not None:
+            outputs["loss"] = [loss * factor for loss in outputs["loss"]]
+            for metric in metrics.values():
+                if isinstance(metric, Metric) and metric.aggregation == AggregationType.SUM:
+                    metric.values = [value * factor for value in metric.values]
+
+    def _reduce_loss_num_tokens(self, num_tokens: Optional[int]) -> Optional[int]:
+        """
+        Sum the reported tokens over data-parallel ranks, like batch_num_tokens; None if the loss reported none.
+        """
+        if num_tokens is None:
+            return None
+        total = torch.tensor(num_tokens, dtype=torch.int64, device=get_device_id())
+        torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group())
+        return int(total.item())
 
     def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None) -> Any:
         """
