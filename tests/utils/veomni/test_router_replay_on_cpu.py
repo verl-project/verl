@@ -278,6 +278,21 @@ def test_replay_topk_one_supported(ctrl, routers):
     assert torch.equal(out[1], targets[0][1]), "topk=1 valid row must be replayed"
 
 
+def test_debug_asserts_mask_true_on_zero_row(monkeypatch, routers):
+    """A mask that marks a zero-filled row as valid would replay expert 0 and
+    feed duplicate top-k slots into VeOmni's permute(). The debug switch turns
+    that producer bug into a loud failure."""
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "1")
+    ctrl = VeOmniRouterReplay()  # __init__ reads the env var
+
+    ctrl.begin_replay()
+    targets = [torch.zeros(_NNZ, _TOPK, dtype=torch.int64) for _ in routers]
+    ctrl.begin_microbatch(targets=targets, mask=torch.ones(_NNZ, dtype=torch.bool))
+
+    with pytest.raises(AssertionError, match="marks a row valid"):
+        ctrl.on_router_forward(routers[0], _scores(), _idx())
+
+
 def test_replay_mask_row_count_mismatch_raises(ctrl, routers):
     """A mask packed with a different pad/SP rule than the targets would shift
     every row's validity; refuse instead of broadcasting silently."""

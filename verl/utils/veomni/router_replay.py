@@ -273,6 +273,17 @@ class VeOmniRouterReplay:
         # is also all-zero.
         if self._mask is not None:
             valid = self._mask
+            if self._debug:
+                # A mask that marks an all-zero row as valid would replay expert 0
+                # for that token and, worse, hand VeOmni's permute() duplicate
+                # top-k slots -- the failure the old duplicate check papered over.
+                bad = valid & ~target.ne(0).any(dim=-1)
+                if bool(bad.any()):
+                    raise AssertionError(
+                        "router_replay: routed_experts_mask marks a row valid but its "
+                        "target is all-zero. The producer must mark zero-filled rows "
+                        "(padding, final generated token, tool responses) as invalid."
+                    )
         else:
             valid = target.ne(0).any(dim=-1)
         replayed = torch.where(valid.unsqueeze(-1), target, top_indices)
