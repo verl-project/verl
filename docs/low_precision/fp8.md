@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 09/29/2026
+Last updated: 10/22/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -50,6 +50,8 @@ actor_rollout_ref.rollout.quantization.moe=FP8_BLOCK
 ```
 
 Routers, `lm_head`, embeddings, vision towers and MTP layers stay in BF16 by default, as do layers whose weight shape is not a multiple of the 128x128 block. To provide a complete compressed-tensors `quantization_config` instead, set `actor_rollout_ref.rollout.quantization.config_file=/path/to/quantization_config.json` (exclusive with `linear` / `moe` / `ignore`).
+
+On CUDA with Triton, the trainer quantizes the exported `FP8_BLOCK` weights with verl's fused Triton kernel (`verl/utils/kernel/fp8_kernel.py`) instead of compressed-tensors' eager per-tensor path, so the per-step refit of fine-grained MoE models (tens of thousands of expert weights) is not launch-bound. Set `VERL_FP8_EXPORT_FAST_PATH=0` to use the reference path.
 
 ### Experiments and Outcomes
 

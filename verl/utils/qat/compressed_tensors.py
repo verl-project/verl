@@ -31,6 +31,7 @@ compressors, so every refit ships tensors in the layout the engine loads.
 """
 
 import json
+import os
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Optional
@@ -269,6 +270,39 @@ def _weight_min_max(weight: torch.Tensor, args: "QuantizationArgs") -> tuple[tor
     raise NotImplementedError(f"Trainer-side quantization not implemented for strategy {args.strategy}")
 
 
+def _fp8_block_fast_path_applies(weight: torch.Tensor, scheme: "QuantizationScheme") -> bool:
+    """FP8 E4M3, symmetric, BLOCK strategy on a CUDA tensor: use verl's fused Triton kernel.
+
+    compressed-tensors' generic chain (block amin/amax -> calculate_qparams -> divide -> clamp -> cast ->
+    transpose-back copy) is ~15-20 eager launches per tensor and becomes launch-bound on fine-grained MoE expert
+    weights (Qwen3-30B-A3B exports 18,432 of them per refit). ``VERL_FP8_EXPORT_FAST_PATH=0`` forces the reference path.
+    """
+    from compressed_tensors.quantization import QuantizationStrategy, QuantizationType
+
+    if os.environ.get("VERL_FP8_EXPORT_FAST_PATH", "1") != "1":
+        return False
+    args = scheme.weights
+    if args is None or weight.ndim != 2 or not weight.is_cuda or weight.dtype not in _HIGH_PRECISION_DTYPES:
+        return False
+    if args.type != QuantizationType.FLOAT or args.num_bits != 8 or not args.symmetric:
+        return False
+    if args.strategy != QuantizationStrategy.BLOCK or not args.block_structure or len(args.block_structure) != 2:
+        return False
+    if getattr(args, "scale_dtype", None) not in (None, torch.float32):
+        return False
+    from verl.utils.kernel.fp8_kernel import is_triton_available
+
+    return is_triton_available()
+
+
+def _compress_weight_fp8_block(weight: torch.Tensor, scheme: "QuantizationScheme") -> dict[str, torch.Tensor]:
+    """One fused launch (block amax -> fp32 scale -> clamp -> cast); same keys and values as the eager path."""
+    from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+
+    fp8, scale = scaled_fp8_blockwise(weight, tuple(int(b) for b in scheme.weights.block_structure))
+    return {"weight": fp8, "weight_scale": scale.to(torch.float32)}
+
+
 def _compress_weight(
     weight: torch.Tensor,
     scheme: "QuantizationScheme",
@@ -276,6 +310,18 @@ def _compress_weight(
     global_scale: Optional[torch.Tensor] = None,
 ) -> dict[str, torch.Tensor]:
     """Quantize one module's weight into its compressed-tensors state dict."""
+    if global_scale is None and _fp8_block_fast_path_applies(weight, scheme):
+        return _compress_weight_fp8_block(weight, scheme)
+    return _compress_weight_eager(weight, scheme, global_scale=global_scale)
+
+
+def _compress_weight_eager(
+    weight: torch.Tensor,
+    scheme: "QuantizationScheme",
+    *,
+    global_scale: Optional[torch.Tensor] = None,
+) -> dict[str, torch.Tensor]:
+    """compressed-tensors' generic per-tensor path: the reference implementation for every scheme."""
     from compressed_tensors.compressors import BaseCompressor
     from compressed_tensors.compressors.format import infer_module_format
     from compressed_tensors.quantization import QuantizationStrategy
@@ -315,6 +361,45 @@ def _unpack_experts(name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torc
             yield f"{prefix}.{expert_id}.up_proj.weight", up
         else:
             yield f"{prefix}.{expert_id}.down_proj.weight", weight
+
+
+def _compress_packed_experts_fp8_block(
+    name: str, tensor: torch.Tensor, scheme: "QuantizationScheme"
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """All experts of one packed ``[E, R, C]`` tensor in a single fused launch.
+
+    Blocks never straddle experts because the caller checks that ``R`` (and ``R/2`` for ``gate_up_proj``) is a
+    multiple of the block rows; the per-expert outputs are views of the stacked result.
+    """
+    from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+
+    match = _PACKED_EXPERTS.match(name)
+    prefix, proj = match["prefix"], match["proj"]
+    num_experts, rows_per_expert, cols = tensor.shape
+    block_rows, block_cols = (int(b) for b in scheme.weights.block_structure)
+    fp8, scale = scaled_fp8_blockwise(tensor.reshape(num_experts * rows_per_expert, cols), (block_rows, block_cols))
+    fp8 = fp8.view(num_experts, rows_per_expert, cols)
+    scale = scale.to(torch.float32).view(num_experts, rows_per_expert // block_rows, -1)
+    for expert_id in range(num_experts):
+        if proj == "gate_up_proj":
+            half, half_blocks = rows_per_expert // 2, rows_per_expert // 2 // block_rows
+            yield f"{prefix}.{expert_id}.gate_proj.weight", fp8[expert_id, :half]
+            yield f"{prefix}.{expert_id}.gate_proj.weight_scale", scale[expert_id, :half_blocks]
+            yield f"{prefix}.{expert_id}.up_proj.weight", fp8[expert_id, half:]
+            yield f"{prefix}.{expert_id}.up_proj.weight_scale", scale[expert_id, half_blocks:]
+        else:
+            yield f"{prefix}.{expert_id}.down_proj.weight", fp8[expert_id]
+            yield f"{prefix}.{expert_id}.down_proj.weight_scale", scale[expert_id]
+
+
+def _packed_experts_fp8_block_applies(name: str, tensor: torch.Tensor, scheme: "QuantizationScheme") -> bool:
+    if tensor.ndim != 3 or not _fp8_block_fast_path_applies(tensor[0], scheme):
+        return False
+    rows_per_expert = tensor.shape[1]
+    block_rows = int(scheme.weights.block_structure[0])
+    if rows_per_expert % block_rows:
+        return False
+    return _PACKED_EXPERTS.match(name)["proj"] != "gate_up_proj" or (rows_per_expert // 2) % block_rows == 0
 
 
 class CompressedTensorsWeightQuantizer:
@@ -380,6 +465,13 @@ class CompressedTensorsWeightQuantizer:
         from compressed_tensors.quantization.utils import generate_gparam
 
         unpacked = list(_unpack_experts(name, tensor))
+        if _packed_experts_fp8_block_applies(name, tensor, scheme):
+            yield from _compress_packed_experts_fp8_block(name, tensor, scheme)
+            for weight_name, _ in unpacked:
+                input_scale = self._input_global_scale(weight_name[: -len(".weight")], scheme)
+                if input_scale is not None:
+                    yield weight_name[: -len("weight")] + "input_global_scale", input_scale
+            return
         shared_global_scales: dict[tuple[int, str], torch.Tensor] = {}
         if scheme.weights.strategy == QuantizationStrategy.TENSOR_GROUP:
             by_expert: dict[int, list[torch.Tensor]] = {}
