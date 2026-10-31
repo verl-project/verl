@@ -740,6 +740,7 @@ class vLLMHttpServer:
                 log_probs=None,
                 routed_experts=None,
                 stop_reason="aborted",
+                is_truncated=False,
                 extra_fields=extra_fields,
             )
             return self._postprocess_output(aborted, final_res, sampling_params)
@@ -831,6 +832,7 @@ class vLLMHttpServer:
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=stop_reason,
+            is_truncated=(finish_reason == "length") if finish_reason is not None else None,
             num_preempted=num_preempted,
             extra_fields=extra_fields,
         )
