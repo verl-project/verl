@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 09/28/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -78,6 +78,21 @@ Hook semantics:
   Per-rank hooks inside the FSDP/Megatron checkpoint managers are not covered.
 - Exceptions raised by the hook propagate and abort training. Wrap the hook
   body in ``try/except`` for best-effort semantics.
+
+Asynchronous save completion and retention
+------------------------------------------
+
+When PPO/GRPO uses Megatron asynchronous checkpointing, the trainer publishes
+``latest_checkpointed_iteration.txt`` only after all participating actor and critic
+writes and the trainer's auxiliary state have completed. Old actor and critic
+checkpoints are pruned after this publication, including when one role saves
+synchronously. This keeps the previously published checkpoint intact if a process
+exits before the new checkpoint is published.
+
+Consequently, ``max_actor_ckpt_to_keep`` and ``max_critic_ckpt_to_keep`` may be
+exceeded temporarily during a save. An interruption after publication but before
+cleanup can leave extra files; the newly published checkpoint remains available.
+The next save waits for the preceding save's publication and cleanup.
 
 Checkpoint Saving Directory Structure
 -------------------------------------

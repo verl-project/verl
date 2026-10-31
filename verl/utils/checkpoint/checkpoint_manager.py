@@ -186,6 +186,10 @@ class BaseCheckpointManager:
         checkpoints beyond max_ckpt_to_keep.
         """
         self.previous_saved_paths.append(new_path)
+        self.prune_checkpoints(max_ckpt_to_keep)
+
+    def prune_checkpoints(self, max_ckpt_to_keep: int):
+        """Remove excess registered checkpoints after their replacement is published."""
         if not (max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0):
             return
         if len(self.previous_saved_paths) > max_ckpt_to_keep:
