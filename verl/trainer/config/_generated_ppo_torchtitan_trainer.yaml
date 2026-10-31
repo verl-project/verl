@@ -335,6 +335,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
       update_weights_bucket_megabytes: 2048
+      update_weights_ack_timeout_seconds: 30.0
       engine_kwargs: {}
       custom_backend_module: null
     trace:
