@@ -1587,6 +1587,26 @@ class PPOTrainer(ABC):
         positions = torch.arange(width, device=lengths.device).unsqueeze(0)
         return (positions < lengths.unsqueeze(1)).to(torch.int64)
 
+    @staticmethod
+    def _pop_gdpo_rewards(data: TensorDict, gdpo_reward_keys: list[str]) -> dict[str, np.ndarray]:
+        """Pop the per-sample GDPO reward components from ``data`` as non-tensor arrays."""
+
+        def _to_list(values) -> list:
+            # NonTensorStack and numpy arrays need tolist() to yield plain values; a LinkedList is already a list.
+            return values.tolist() if hasattr(values, "tolist") else list(values)
+
+        extra_fields = data.pop("extra_fields", None)
+        if extra_fields is None:
+            return {key: np.asarray(_to_list(data.pop(key)), dtype=object) for key in gdpo_reward_keys if key in data}
+        reward_extra_infos = [
+            field.get("reward_extra_info", {}) if isinstance(field, dict) else {} for field in _to_list(extra_fields)
+        ]
+        return {
+            key: np.asarray([info[key] for info in reward_extra_infos], dtype=object)
+            for key in gdpo_reward_keys
+            if all(key in info for info in reward_extra_infos)
+        }
+
     def _get_required_batch_multiple(self, dp_size: int) -> int:
         """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
         required_multiple = dp_size
@@ -1744,12 +1764,32 @@ class PPOTrainer(ABC):
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        gdpo_reward_keys = None
+        if self.config.algorithm.adv_estimator in (core_algos.AdvantageEstimator.GDPO, "gdpo"):
+            gdpo_reward_keys = list(self.config.algorithm.get("gdpo_reward_keys", None) or [])
+            # A colocated reward model writes each reward extra key as its own field; the streaming reward
+            # path keeps them in each sample's extra_fields["reward_extra_info"].
+            if self.reward_loop_manager.reward_loop_worker_handles is None:
+                fields.extend(gdpo_reward_keys)
+            else:
+                fields.append("extra_fields")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
+        gdpo_rewards = None
+        if gdpo_reward_keys is not None:
+            gdpo_rewards = self._pop_gdpo_rewards(data, gdpo_reward_keys)
         data = DataProto(batch=data.to_padded_tensor())
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
+        if gdpo_rewards is not None:
+            data.non_tensor_batch.update(gdpo_rewards)
+            # GDPO places each reward component at the last response token, found from `prompts` and
+            # `attention_mask`. The response-only layout here has no prompt, so pass an empty prompt and
+            # a mask that covers each full response (tool tokens included, as in the v0 attention mask).
+            response_lengths = response_mask.offsets().diff()
+            data.batch["prompts"] = response_lengths.new_zeros(len(data), 0)
+            data.batch["attention_mask"] = self._lengths_to_mask(response_lengths, data.batch["response_mask"].size(1))
 
         # 1. apply kl penalty to rewards
         if self.config.algorithm.use_kl_in_reward:
