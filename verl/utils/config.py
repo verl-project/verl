@@ -119,6 +119,23 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering cannot be combined with distillation.")
 
 
+def _validate_rollout_runtime_config(config: DictConfig) -> None:
+    """Limit interpreter isolation to the first supported training topology."""
+    if not OmegaConf.select(config, "actor_rollout_ref.rollout.runtime.py_executable"):
+        return
+    if (
+        not OmegaConf.select(config, "trainer.use_v1", default=True)
+        or OmegaConf.select(config, "trainer.v1.trainer_mode") != "separate_async"
+    ):
+        raise ValueError("rollout.runtime requires the V1 separate_async trainer.")
+    if OmegaConf.select(config, "actor_rollout_ref.actor.strategy") != "fsdp2":
+        raise ValueError("rollout.runtime currently requires actor.strategy=fsdp2.")
+    if OmegaConf.select(config, "actor_rollout_ref.hybrid_engine", default=True) and OmegaConf.select(
+        config, "trainer.v1.separate_async.hybrid_rollout.enable_switch", default=True
+    ):
+        raise ValueError("rollout.runtime requires hybrid_rollout.enable_switch=False or hybrid_engine=False.")
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -131,6 +148,7 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    _validate_rollout_runtime_config(config)
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

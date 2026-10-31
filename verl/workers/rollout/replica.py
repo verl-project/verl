@@ -210,6 +210,8 @@ class RolloutReplica(ABC):
             resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
         self.resource_pool = resource_pool
 
+        await self._preflight_standalone()
+
         # create worker group for this rollout
         if self.is_reward_model:
             name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
@@ -226,9 +228,18 @@ class RolloutReplica(ABC):
             name_prefix=name_prefix,
             use_gpu=get_platform().supports_colocated_worker_groups(),
             device_name=get_device_name(),
+            worker_runtime_env=self._get_worker_runtime_env(),
         )
         self.workers = worker_group.workers
         await self.launch_servers()
+
+    async def _preflight_standalone(self):
+        """Validate optional deployment requirements before creating rollout workers."""
+        return
+
+    def _get_worker_runtime_env(self) -> dict:
+        """Return optional Ray runtime options for standalone checkpoint workers."""
+        return {}
 
     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
         """Get rollout worker actor class for colocated and standalone mode."""
@@ -328,7 +339,7 @@ class RolloutReplicaRegistry:
 
 # Loader functions for built-in types
 def _load_vllm():
-    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+    from verl.workers.rollout.vllm_replica import vLLMReplica
 
     return vLLMReplica
 

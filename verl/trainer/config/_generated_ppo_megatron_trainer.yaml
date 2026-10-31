@@ -306,6 +306,11 @@ actor_rollout_ref:
     mode: async
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+    runtime:
+      _target_: verl.workers.config.RolloutRuntimeConfig
+      py_executable: null
+      env_vars: {}
+      startup_timeout: 300.0
     temperature: 1.0
     top_k: -1
     top_p: 1

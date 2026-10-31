@@ -476,6 +476,7 @@ class RayWorkerGroup(WorkerGroup):
         self.profile_steps = kwargs.get("profile_steps", None)
         self.worker_nsight_options = kwargs.get("worker_nsight_options", None)
         self.customized_worker_env = kwargs.get("worker_env", {})
+        self.worker_runtime_env = kwargs.get("worker_runtime_env", {})
         if self.worker_nsight_options is not None and self.worker_nsight_options["capture-range-end"] is None:
             self.worker_nsight_options["capture-range-end"] = f"repeat-shutdown:{6 * len(self.profile_steps)}"
 
@@ -690,6 +691,10 @@ class RayWorkerGroup(WorkerGroup):
             }
         else:
             runtime_env = {"env_vars": env_vars}
+        if self.worker_runtime_env:
+            from verl.utils.ray_utils import merge_runtime_env
+
+            runtime_env = merge_runtime_env(self.worker_runtime_env, runtime_env)
         ray_cls_with_init.update_options({"runtime_env": runtime_env, "name": name})
 
         if detached:

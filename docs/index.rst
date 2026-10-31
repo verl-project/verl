@@ -129,6 +129,7 @@ verl is fast with:
    advance/one_step_off
    advance/delta_weight_sync
    advance/v1_async_trainer
+   advance/isolated_rollout_runtime
    advance/fully_async
    advance/async-on-policy-distill
    advance/dynamic_schedule

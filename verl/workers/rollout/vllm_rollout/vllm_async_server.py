@@ -42,10 +42,9 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 
-from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.device import get_visible_devices_keyword, is_torch_npu_available
+from verl.utils.net_utils import get_free_port
 from verl.utils.profiler import (
     build_rollout_dist_profiler,
     build_vllm_profiler_args,
@@ -54,8 +53,8 @@ from verl.utils.profiler import (
 )
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
-from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.config import HFModelConfig
+from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
@@ -1556,191 +1555,5 @@ class vLLMHttpServer:
         await self.engine.reset_encoder_cache()
 
 
-class vLLMReplica(RolloutReplica):
-    def __init__(
-        self,
-        replica_rank: int,
-        config: RolloutConfig,
-        model_config: HFModelConfig,
-        gpus_per_node: int = 8,
-        is_reward_model: bool = False,
-        is_teacher_model: bool = False,
-        name_suffix: str = "",
-    ):
-        super().__init__(
-            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
-        )
-        self.server_class = ray.remote(vLLMHttpServer)
-
-    async def launch_servers(self):
-        """Launch http server in each node."""
-        assert len(self.workers) == self.world_size, (
-            f"worker number {len(self.workers)} not equal to world size {self.world_size}"
-        )
-
-        # get (node_id, CUDA_VISIBLE_DEVICES) of all workers
-        worker_infos = await asyncio.gather(
-            *[
-                worker.__ray_call__.remote(
-                    lambda self: (
-                        ray.get_runtime_context().get_node_id(),
-                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
-                    )
-                )
-                for worker in self.workers
-            ]
-        )
-        worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
-        worker_node_ids = [worker_info[0] for worker_info in worker_infos]
-
-        # create server actor in each node with node affinity and cuda visible devices
-        nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
-        for node_rank in range(nnodes):
-            workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
-            node_cuda_visible_devices = ",".join(
-                worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
-            )
-            node_id = worker_node_ids[node_rank * gpus_per_replica_node]
-            prefix = self._get_server_name_prefix()
-            if self.is_reward_model:
-                name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            elif self.is_teacher_model:
-                name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            else:
-                name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            env_vars = {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
-            }
-
-            server = self.server_class.options(
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=node_id,
-                    soft=False,
-                ),
-                runtime_env={"env_vars": env_vars},
-                name=name,
-                max_concurrency=self.config.ray_actor_max_concurrency,
-            ).remote(
-                config=self.config,
-                model_config=self.model_config,
-                rollout_mode=self.rollout_mode,
-                workers=workers,
-                replica_rank=self.replica_rank,
-                node_rank=node_rank,
-                gpus_per_node=gpus_per_replica_node,
-                nnodes=nnodes,
-                cuda_visible_devices=node_cuda_visible_devices,
-            )
-            self.servers.append(server)
-
-        # launch http server in each node
-        master_address, master_port, dp_rpc_port = await self.servers[0].get_master_address.remote()
-        await asyncio.gather(
-            *[
-                server.launch_server.remote(
-                    master_address=master_address, master_port=master_port, dp_rpc_port=dp_rpc_port
-                )
-                for server in self.servers
-            ]
-        )
-
-        # get http server address from first server
-        server_address, server_port = await self.servers[0].get_server_address.remote()
-        self._server_handle = self.servers[0]
-        self._server_address = (
-            f"[{server_address}]:{server_port}"
-            if is_valid_ipv6_address(server_address)
-            else f"{server_address}:{server_port}"
-        )
-
-    async def sleep(self):
-        """Sleep each rollout server."""
-        # Drain DP engines for safe sleep.
-        await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
-
-    async def abort_all_requests(
-        self,
-        reject_request: bool = False,
-        reset_prefix_cache: bool = True,
-        abort_only: bool = False,
-    ) -> dict[str, Any]:
-        """Abort in-flight requests on every server.
-
-        abort_only=False (default) also closes admission. See
-        vLLMHttpServer.abort_all_requests(). reset_prefix_cache and
-        reject_request apply only when abort_only is False.
-        """
-        results = await asyncio.gather(
-            *[
-                server.abort_all_requests.remote(
-                    reject_request=reject_request,
-                    reset_prefix_cache=reset_prefix_cache,
-                    abort_only=abort_only,
-                )
-                for server in self.servers
-            ]
-        )
-
-        total_aborted = sum(r.get("aborted_count", 0) for r in results)
-        all_request_ids = []
-        for r in results:
-            all_request_ids.extend(r.get("request_ids", []))
-
-        return {
-            "aborted_count": total_aborted,
-            "request_ids": all_request_ids,
-            "server_results": results,
-        }
-
-    async def resume_generation(self):
-        """Resume the DP engines before admitting requests on any server."""
-        # KV-cache wake-up may already have resumed scheduling. Keep admission
-        # closed during this resume too: new requests could otherwise start a
-        # DP wave while only some ranks are still in the resume collective.
-        await self.servers[0].resume_engine_generation.remote()
-        await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
-
-    async def abort_request(self, request_id: str) -> dict[str, Any]:
-        """Abort a specific request. Tries all servers since we don't know which one has it.
-
-        Args:
-            request_id: The ID of the request to abort.
-
-        Returns:
-            dict[str, Any]: Abort result.
-        """
-        # TODO(petersh6): we should only abort on the server that has the request.
-        results = await asyncio.gather(*[server.abort_request.remote(request_id) for server in self.servers])
-
-        for r in results:
-            if r.get("aborted", False):
-                return r
-
-        return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
-
-    async def snapshot(self) -> dict[str, Any]:
-        """Return live KV-cache and scheduler observations from the head server.
-
-        Colocated / non-PD replicas report the head HTTP server. PD is out of
-        scope: prefill and decode engines have independent KV pools.
-        """
-        # TODO: aggregate prefill + decode snapshots for PD replicas.
-        if self.config.disaggregation.enabled:
-            raise NotImplementedError("vLLMReplica.snapshot() does not support PD disaggregation")
-        return await self.servers[0].snapshot.remote()
-
-    async def release_kv_cache(self):
-        # Drain all in-flight requests so that vLLM worker threads go idle
-        # before we touch engine.release_kv_cache()
-        await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
-
-    # -----------------------------------------------------------------------
-    # Hook methods for subclass overrides
-    # -----------------------------------------------------------------------
-
-    def _get_server_name_prefix(self) -> str:
-        """Return the Ray actor name prefix (e.g. 'vllm_')."""
-        return "vllm_"
+# Backward compatibility for replica subclasses and external imports.
+from verl.workers.rollout.vllm_replica import vLLMReplica  # noqa: E402, F401

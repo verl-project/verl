@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -33,6 +35,7 @@ __all__ = [
     "RolloutConfig",
     "RolloutQuantizationConfig",
     "CheckpointEngineConfig",
+    "RolloutRuntimeConfig",
 ]
 
 
@@ -177,6 +180,46 @@ class RolloutQuantizationConfig(BaseConfig):
 
 
 @dataclass
+class RolloutRuntimeConfig(BaseConfig):
+    """Pre-provisioned Python environment for standalone vLLM processes."""
+
+    py_executable: Optional[str] = None
+    env_vars: dict[str, str] = field(default_factory=dict)
+    startup_timeout: float = 300.0
+
+    def __post_init__(self):
+        if self.py_executable is not None and (
+            not isinstance(self.py_executable, str) or not os.path.isabs(self.py_executable)
+        ):
+            raise ValueError("rollout.runtime.py_executable must be an absolute executable path.")
+        if not math.isfinite(self.startup_timeout) or self.startup_timeout <= 0:
+            raise ValueError("rollout.runtime.startup_timeout must be finite and positive.")
+        if self.env_vars and self.py_executable is None:
+            raise ValueError("rollout.runtime.env_vars requires py_executable.")
+        protected = {
+            "RANK",
+            "LOCAL_RANK",
+            "WORLD_SIZE",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+            "WG_PREFIX",
+            "WG_BACKEND",
+            "RAY_LOCAL_WORLD_SIZE",
+            "CUDA_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "ROCR_VISIBLE_DEVICES",
+            "ASCEND_RT_VISIBLE_DEVICES",
+            "VERL_RAY_JOB_ID",
+            "VERL_REPLICA_RANK",
+        }
+        for key, value in self.env_vars.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError("rollout.runtime.env_vars keys and values must be strings.")
+            if key in protected or key.startswith("RAY_EXPERIMENTAL_NOSET_"):
+                raise ValueError(f"rollout.runtime.env_vars cannot override protected variable {key}.")
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
         "max_model_len",
@@ -195,6 +238,7 @@ class RolloutConfig(BaseConfig):
     mode: str = "async"
     nnodes: int = 0
     n_gpus_per_node: int = 8
+    runtime: RolloutRuntimeConfig = field(default_factory=RolloutRuntimeConfig)
 
     temperature: float = 1.0
     top_k: int = -1
@@ -380,6 +424,14 @@ class RolloutConfig(BaseConfig):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
+
+        if isinstance(self.runtime, dict | DictConfig):
+            object.__setattr__(self, "runtime", RolloutRuntimeConfig(**dict(self.runtime)))
+        if self.runtime.py_executable is not None:
+            if self.name != "vllm":
+                raise ValueError("rollout.runtime currently supports vllm only.")
+            if self.disaggregation.enabled:
+                raise ValueError("rollout.runtime does not support disaggregation.")
 
         if self.topk_log_probs:
             if self.name != "vllm":

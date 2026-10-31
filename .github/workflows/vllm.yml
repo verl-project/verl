@@ -190,6 +190,13 @@ jobs:
       - name: Test bucketed weight transfer
         run: |
           $UV_RUN pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+      - name: Test isolated standalone vLLM runtime
+        run: |
+          export VLLM_ISOLATED_PYTHON="${PWD}/.venv/bin/python"
+          export VLLM_ISOLATED_MODEL_PATH="${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct"
+          UV_PROJECT_ENVIRONMENT="${PWD}/.venv-runtime-train" \
+            uv run --frozen --extra fsdp pytest -svvv \
+              tests/workers/rollout/rollout_vllm/test_isolated_runtime.py
 
   cleanup:
     runs-on: ubuntu-latest
