@@ -90,6 +90,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from verl.utils.veomni import router_replay_profile as r3prof
+
 if TYPE_CHECKING:
     import torch.nn as nn
 
@@ -122,6 +124,12 @@ class VeOmniRouterReplay:
         # Env-gated shape sanity check.
         self._debug: bool = os.environ.get("VERL_ROUTER_REPLAY_DEBUG") == "1"
         self._installed: bool = False
+        # 仅作监控：REPLAY 时每层每次 forward 产生的临时分配（sort / where）。
+        self._prof_calls: int = 0
+        self._prof_bytes: int = 0
+        # 跨 micro-batch 的累计值，只在一次 forward/backward 批开始时清零。
+        self._prof_total_calls: int = 0
+        self._prof_total_bytes: int = 0
 
     @property
     def action(self) -> RouterReplayAction:
@@ -262,18 +270,33 @@ class VeOmniRouterReplay:
         #
         # Native indices are always distinct top-k choices, so falling back to
         # them is correct regardless of what the rollout produced.
-        sorted_target, _ = target.sort(dim=-1)
+        sorted_target, sort_idx = target.sort(dim=-1)
         has_duplicate = (sorted_target[:, 1:] == sorted_target[:, :-1]).any(dim=-1)
-        return torch.where(has_duplicate.unsqueeze(-1), top_indices, target)
+        replayed = torch.where(has_duplicate.unsqueeze(-1), top_indices, target)
+        if r3prof.enabled():
+            # sort 产出值+索引，where 再产出一份，外加 bool mask。
+            per_elem = target.element_size()
+            nbytes = target.numel() * per_elem * 2  # sorted_target + replayed
+            nbytes += sort_idx.numel() * 8  # int64 索引
+            nbytes += has_duplicate.numel()  # bool
+            self._prof_calls += 1
+            self._prof_bytes += nbytes
+            self._prof_total_calls += 1
+            self._prof_total_bytes += nbytes
+        return replayed
 
     def begin_record(self) -> None:
         """Enter RECORD mode for a step."""
         self._action = RouterReplayAction.RECORD
+        self._prof_total_calls = 0
+        self._prof_total_bytes = 0
         self._reset_microbatch()
 
     def begin_replay(self) -> None:
         """Enter REPLAY mode for a step."""
         self._action = RouterReplayAction.REPLAY
+        self._prof_total_calls = 0
+        self._prof_total_bytes = 0
         self._reset_microbatch()
 
     def clear(self) -> None:
@@ -282,6 +305,8 @@ class VeOmniRouterReplay:
         self._reset_microbatch()
 
     def _reset_microbatch(self) -> None:
+        self._prof_calls = 0
+        self._prof_bytes = 0
         self._id_to_pos = {}
         self._recorded = []
         self._targets = []
@@ -312,6 +337,12 @@ class VeOmniRouterReplay:
         self._reset_microbatch()
         if targets is not None:
             self._targets = list(targets)
+            # 每层目标张量的排布与总字节数（REPLAY 侧）。
+            r3prof.snapshot(
+                "controller.replay_targets_per_layer",
+                per_layer=self._targets,
+                num_layers=len(self._targets),
+            )
 
     def take_recorded(self) -> torch.Tensor:
         """Return this micro-batch's routing as ``[nnz, L, topk]``.
@@ -329,4 +360,9 @@ class VeOmniRouterReplay:
                 "Either the model has no MoE layers or its SparseMoeBlock is "
                 "not wired to `veomni.utils.moe_router_replay.maybe_replay_indices`."
             )
+        r3prof.snapshot(
+            "controller.recorded_per_layer",
+            per_layer=self._recorded,
+            num_layers=len(self._recorded),
+        )
         return torch.stack(self._recorded, dim=1)
