@@ -725,7 +725,13 @@ class FSDPEngine(BaseEngine):
         else:
             yield
 
-    def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
+    def forward_backward_batch(
+        self,
+        data: TensorDict,
+        loss_function: Callable,
+        forward_only=False,
+        micro_batch_transform: Optional[Callable] = None,
+    ) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         return_model_output = tu.get_non_tensor_data(data=data, key="return_model_output", default=False)
@@ -762,6 +768,8 @@ class FSDPEngine(BaseEngine):
             # distinguishable "micro_batch<i>" row -- nested under the update loop's "mini_batch<i>"
             # when training, or directly under the stage for log-prob.
             with ctx, sync_ctx, torch.profiler.record_function(f"micro_batch{micro_batch_idx}"):
+                if micro_batch_transform is not None:
+                    micro_batch = micro_batch_transform(micro_batch)
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:
@@ -1152,6 +1160,15 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
+    @property
+    def supports_selected_log_probs(self):
+        options = self.model_config.fused_kernel_options or {}
+        return (
+            self.model_config.use_fused_kernels
+            and self.model_config.hf_config.model_type == "qwen3_5"
+            and options.get("impl_backend", "torch") == "torch"
+        )
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
@@ -1179,6 +1196,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
+        multi_modal_inputs = {
+            key: value.to(input_ids.device) if isinstance(value, torch.Tensor) else value
+            for key, value in multi_modal_inputs.items()
+        }
         position_ids = micro_batch["position_ids"]
         pass_packed_cu_seqlens = getattr(self, "pass_packed_cu_seqlens", False)
 
@@ -1339,6 +1360,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
         model_inputs.update(multi_modal_inputs)
         model_inputs.update(extra_args)
 
+        selected_ids = micro_batch.get("selected_token_ids")
+        if selected_ids is not None:
+            if not self.supports_selected_log_probs:
+                raise NotImplementedError("This model/backend does not support selected policy probabilities")
+            if not use_fused_kernels or not use_remove_padding:
+                raise NotImplementedError("Selected policy probabilities require fused kernels and remove-padding")
+            from verl.utils.experimental.selected_log_probs import prediction_candidates
+
+            group = get_ulysses_sequence_parallel_group() if self.use_ulysses_sp else None
+            rank = torch.distributed.get_rank(group) if self.use_ulysses_sp else 0
+            size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+            model_inputs["selected_token_ids"] = prediction_candidates(
+                selected_ids.values(), pad_size=output_args["pad_size"], sp_rank=rank, sp_size=size
+            ).unsqueeze(0)
+
         return model_inputs, output_args
 
     def prepare_model_outputs(self, output, output_args, micro_batch: TensorDict, logits_processor_func):
@@ -1459,6 +1495,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
+                if "selected_token_ids" in micro_batch:
+                    candidates = getattr(output, "candidate_log_probs", None)
+                    if candidates is None:
+                        raise RuntimeError("Model did not return the requested selected policy probabilities")
+                    candidates = self._gather_and_unpad_packed(candidates.squeeze(0), pad_size)
+                    model_output["logits"] = torch.nested.nested_tensor_from_jagged(candidates, cu_seqlens)
                 # (bsz, j1), for each sample, is the length of each sample: [real_prompt length + real_response length]
                 if not distillation_only:
                     log_probs = torch.nested.nested_tensor_from_jagged(log_probs, cu_seqlens)

@@ -555,6 +555,7 @@ def qwen3_5_base_forward(
 class Qwen3_5CausalLMOutputForPPO(Qwen3_5CausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None
+    candidate_log_probs: Optional[torch.FloatTensor] = None
 
 
 def forward_with_normal_backend(
@@ -585,6 +586,7 @@ def forward_with_torch_backend(
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
+    selected_token_ids: Optional[torch.LongTensor] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
     **kwargs,
@@ -626,9 +628,15 @@ def forward_with_torch_backend(
         input_ids=rolled_labels,
         temperature=temperature,
     )
+    candidates = None
+    if selected_token_ids is not None:
+        from verl.utils.experimental.selected_log_probs import selected_log_probs
+
+        candidates = selected_log_probs(hidden_states, vocab_weights, selected_token_ids, temperature=temperature)
     return Qwen3_5CausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
+        candidate_log_probs=candidates,
         hidden_states=outputs.hidden_states,
     )
 

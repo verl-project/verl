@@ -147,6 +147,12 @@ class NCCLCheckpointEngine(CheckpointEngine):
         self.rollout_dtype = rollout_dtype
         self.multi_sender = multi_sender
 
+        # Assigned by init_process_group. Initialized here so that an engine which
+        # has not been through init_process_group reports that state instead of
+        # raising AttributeError from the reuse guard below.
+        self.rank = None
+        self.world_size = None
+
         # start zeromq server for broadcasting bucket tensor metadata
         self.is_master = is_master
         self.topic = "bucket_metadata"
@@ -298,6 +304,17 @@ class NCCLCheckpointEngine(CheckpointEngine):
             collective.init_collective_group(world_size, rank, "nccl", self.group_name)
             self.rank = rank
             self.world_size = world_size
+        elif self.rank is None:
+            # The collective group is process-global and keyed only by name, so a
+            # group this engine never created can already exist -- e.g. a second
+            # engine constructed in the same process with the default group_name.
+            # Its rank/world_size mapping is not recoverable from here, so adopting
+            # it silently could wire this engine to the wrong peers.
+            raise RuntimeError(
+                f"collective group {self.group_name!r} already exists but was not created by this "
+                f"{type(self).__name__} instance, so its rank mapping is unknown. Give each engine its "
+                "own group_name, or pass rebuild_group=True to recreate the group."
+            )
         else:
             assert self.rank == rank, f"rank {rank} is not equal to self.rank {self.rank}"
             assert self.world_size == world_size, (
