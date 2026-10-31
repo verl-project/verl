@@ -45,6 +45,7 @@ class vLLMPDReplica(vLLMReplica):
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
         name_suffix: str = "",
+        actor_strategy: Optional[str] = None,
     ):
         super().__init__(
             replica_rank,
@@ -54,6 +55,7 @@ class vLLMPDReplica(vLLMReplica):
             is_reward_model,
             is_teacher_model,
             name_suffix,
+            actor_strategy=actor_strategy,
         )
 
         disagg = self.config.disaggregation
@@ -302,4 +304,5 @@ class vLLMPDReplica(vLLMReplica):
             cuda_visible_devices=cuda_visible_devices,
             disaggregation_role=role,
             disaggregation_kv_transfer_config=kv_transfer_config,
+            actor_strategy=self.actor_strategy,
         )
