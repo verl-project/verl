@@ -262,7 +262,8 @@ def compute_rollout_rejection_mask(
     log_ratio_safe: torch.Tensor = torch.clamp(log_ratio, min=-SAFETY_BOUND, max=SAFETY_BOUND)
     token_k1: torch.Tensor = -log_ratio_safe
     token_k2: torch.Tensor = 0.5 * log_ratio_safe**2
-    token_k3: torch.Tensor = torch.exp(log_ratio_safe) - 1.0 - log_ratio_safe
+    # expm1 avoids cancellation near zero, which can otherwise change RS decisions.
+    token_k3: torch.Tensor = torch.expm1(log_ratio_safe) - log_ratio_safe
 
     response_mask_bool: torch.Tensor = response_mask.bool()
     seq_valid_mask: torch.Tensor = response_mask.sum(dim=-1) > 0
@@ -962,7 +963,7 @@ def compute_offpolicy_metrics(
         # More stable for small KL values using: E[exp(log_ratio) - log_ratio - 1]
         # Formula: KL ≈ E[r - log(r) - 1] where r = π_training/π_rollout
         log_ratio = old_log_prob - rollout_log_prob
-        k3_kl_matrix = torch.exp(log_ratio) - log_ratio - 1
+        k3_kl_matrix = torch.expm1(log_ratio) - log_ratio
         metrics["k3_kl"] = verl_F.masked_mean(k3_kl_matrix, response_mask).detach().item()
 
         # 2c. Rollout policy perplexity
