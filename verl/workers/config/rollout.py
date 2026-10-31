@@ -192,6 +192,10 @@ class RolloutConfig(BaseConfig):
     }
 
     name: Optional[str] = MISSING
+
+    # Optional namespace for Ray actors and weight-transfer IPC resources.
+    instance_id: Optional[str] = None
+
     mode: str = "async"
     nnodes: int = 0
     n_gpus_per_node: int = 8

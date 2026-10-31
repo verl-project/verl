@@ -43,6 +43,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
+from verl.single_controller.ray.instance_naming import build_vllm_server_prefix, get_instance_id
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
@@ -159,6 +160,11 @@ class vLLMHttpServer:
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
 
         self.config = self._init_config(config)
+        self.instance_id = get_instance_id(self.config)
+        if self.instance_id:
+            os.environ["VERL_INSTANCE_ID"] = self.instance_id
+        else:
+            os.environ.pop("VERL_INSTANCE_ID", None)
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
@@ -1743,4 +1749,4 @@ class vLLMReplica(RolloutReplica):
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix (e.g. 'vllm_')."""
-        return "vllm_"
+        return build_vllm_server_prefix(self.instance_id)

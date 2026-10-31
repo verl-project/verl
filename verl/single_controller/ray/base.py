@@ -29,6 +29,7 @@ from verl.plugin.platform import get_platform
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
+from verl.single_controller.ray.instance_naming import InstanceNameBuilder
 from verl.utils.device import get_device_name
 from verl.utils.py_functional import temp_env_var
 
@@ -119,6 +120,7 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        instance_name_builder: Optional[InstanceNameBuilder] = None,
     ) -> None:
         # TPU claims a chip exclusively per process, so colocating more than one
         # WorkerGroup builds a placement group that can never be satisfied.
@@ -131,14 +133,16 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
+        self.instance_name_builder = instance_name_builder or InstanceNameBuilder()
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
         if self.pgs is not None:
             return self.pgs
 
-        pg_name_prefix = (
+        logical_name = (
             name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
         )
+        pg_name_prefix = self.instance_name_builder.placement_group(logical_name)
         # print(f"pg_name_prefix = {pg_name_prefix}")
         current_platform = get_platform()
         if device_name != current_platform.device_name:
@@ -199,11 +203,14 @@ class ResourcePoolManager:
     mapping: dict[int, str]
     max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    instance_name_builder: InstanceNameBuilder | None = None
 
     def __post_init__(self):
         # Mirror the cap in RayResourcePool so the bundle CPU count matches what it creates.
         if not get_platform().supports_colocated_worker_groups():
             self.max_colocate_count = 1
+        if self.instance_name_builder is None:
+            self.instance_name_builder = InstanceNameBuilder()
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -223,6 +230,7 @@ class ResourcePoolManager:
                 use_gpu=True,
                 max_colocate_count=self.max_colocate_count,
                 name_prefix=resource_pool_name,
+                instance_name_builder=self.instance_name_builder,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -321,6 +329,7 @@ def split_resource_pool(
             use_gpu=resource_pool.use_gpu,
             name_prefix=f"{resource_pool.name_prefix}_split_{split_idx}",
             max_colocate_count=resource_pool.max_colocate_count,
+            instance_name_builder=resource_pool.instance_name_builder,
             placement_groups=placement_groups,
             start_bundle_index=start_bundle_idx_list[split_idx],
             subgroup_world_size=split_size_list[split_idx],
@@ -331,6 +340,8 @@ def split_resource_pool(
 
 
 def merge_resource_pool(rp1: RayResourcePool, rp2: RayResourcePool) -> RayResourcePool:
+    if rp1.instance_name_builder.instance_id != rp2.instance_name_builder.instance_id:
+        raise ValueError("Cannot merge resource pools belonging to different instances")
     assert rp1.use_gpu == rp2.use_gpu, "Both RayResourcePool must either use_gpu or not"
     assert rp1.max_colocate_count == rp2.max_colocate_count, "Both RayResourcePool must has the same max_colocate_count"
     assert rp1.n_gpus_per_node == rp2.n_gpus_per_node, "Both RayResourcePool must has the same n_gpus_per_node"
@@ -339,7 +350,12 @@ def merge_resource_pool(rp1: RayResourcePool, rp2: RayResourcePool) -> RayResour
     new_store = rp1.store + rp2.store
 
     merged = type(rp1)(
-        new_store, rp1.use_gpu, f"{rp1.name_prefix}_{rp2.name_prefix}", rp1.max_colocate_count, rp1.detached
+        new_store,
+        rp1.use_gpu,
+        f"{rp1.name_prefix}_{rp2.name_prefix}",
+        rp1.max_colocate_count,
+        rp1.detached,
+        instance_name_builder=rp1.instance_name_builder,
     )
     merged.pgs = rp1.get_placement_groups(device_name=get_device_name()) + rp2.get_placement_groups(
         device_name=get_device_name()
