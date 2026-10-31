@@ -283,6 +283,27 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
         yield (*entry_fn(name, spec, place, lidx, lval), pg)
 
 
+def hf_shard_export(gen, entry_fn, with_indices: bool = True):
+    """Convert complete local shards into final HF-coordinate sparse entries.
+    ``with_indices=False`` hands contributing shards to ``entry_fn`` with
+    ``lidx=None``; the entry may then return ``hf_idx=None``."""
+    from .spec import derive_dtensor_placement
+
+    for name, local, spec in gen:
+        local = local.detach().contiguous().view(-1)
+        if spec.place is not None:
+            place, contributes, pg = spec.place, spec.contributes, spec.gather_group
+        else:
+            place, contributes, pg = derive_dtensor_placement(spec)
+        if contributes:
+            lidx = torch.arange(local.numel(), dtype=torch.int64, device=local.device) if with_indices else None
+            lval = local
+        else:
+            lidx = torch.empty(0, dtype=torch.int64, device=local.device)
+            lval = torch.empty(0, dtype=local.dtype, device=local.device)
+        yield name, *entry_fn(name, spec, place, lidx, lval), pg
+
+
 def prime_delta_snapshots(gen, snaps: dict, pin: bool) -> None:
     """Snapshot each rank's current shards to CPU as the steady diff base. Run
     right after the seed's full-weight sync: weights do not move during the

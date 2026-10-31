@@ -14,7 +14,8 @@
 
 import importlib
 from abc import ABC, abstractmethod
-from typing import Generator
+from dataclasses import asdict, dataclass, field
+from typing import Generator, Optional
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
@@ -23,7 +24,53 @@ from verl import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import HFModelConfig, RolloutConfig
 
-__all__ = ["BaseRollout"]
+__all__ = ["BaseRollout", "RolloutLayout"]
+
+
+@dataclass
+class RolloutLayout:
+    """The parameters one inference worker loads, reported by its server adapter so
+    ownership-aware checkpoint engines (``sharded_nixl``) send it only those. Plain Python
+    fields: it crosses Ray calls as a dict.
+
+    * ``tp_*``, ``pp_*``, ``ep_*``: the worker's place in the inference parallel layout.
+    * ``layer_range``: ``(start, end)`` decoder layers of this pipeline stage (``None`` = all).
+    * ``local_experts``: ``{layer_idx: [global expert ids]}`` routed experts on this worker.
+    * ``wire_formats``: what ``receive_weights`` accepts: ``named_tensors`` (full HF tensors) and
+      optionally ``rank_local_named_tensors`` (each tensor arrives as its ``slices`` box).
+    * ``slices``: ``{hf_name: {"full_shape": [...], "box": [[start, len], ...]}}``; names not
+      listed arrive full.
+    * ``slice_digest``: hash of ``slices`` (empty = computed by the engine).
+    """
+
+    tp_size: int = 1
+    tp_rank: int = 0
+    pp_size: int = 1
+    pp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    layer_range: Optional[tuple[int, int]] = None
+    local_experts: dict[int, list[int]] = field(default_factory=dict)
+    wire_formats: list[str] = field(default_factory=lambda: ["named_tensors"])
+    slices: Optional[dict[str, dict]] = None
+    slice_digest: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> Optional["RolloutLayout"]:
+        if d is None:
+            return None
+        d = dict(d)
+        if d.get("layer_range") is not None:
+            d["layer_range"] = tuple(d["layer_range"])
+        d["local_experts"] = {int(k): list(v) for k, v in (d.get("local_experts") or {}).items()}
+        if d.get("wire_formats") is not None:
+            d["wire_formats"] = list(d["wire_formats"])
+        else:
+            d.pop("wire_formats", None)
+        return cls(**d)
 
 
 class BaseRollout(ABC):
@@ -73,6 +120,10 @@ class BaseRollout(ABC):
     async def release(self):
         """Release weights and kv cache in GPU memory."""
         pass
+
+    async def get_weight_ownership(self) -> Optional[RolloutLayout]:
+        """This worker's :class:`RolloutLayout`; ``None`` means it loads every parameter."""
+        return None
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Batch generate sequences in sync mode.

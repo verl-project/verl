@@ -96,6 +96,9 @@ def _nan_block(shape, dtype, device) -> torch.Tensor:
     for every param, and they are only ever READ (the transforms are functional),
     so one block per distinct shape serves the whole model for the run's
     lifetime instead of a fresh cudaMalloc+fill per param per sync."""
+    if not dtype.is_floating_point:
+        # int64 position markers (one-time run discovery): -1 is never a position; not pooled
+        return torch.full(tuple(shape), -1, dtype=dtype, device=device)
     key = (tuple(shape), dtype, str(device))
     t = _NAN_POOL.get(key)
     if t is None:
@@ -193,6 +196,9 @@ class McoreParamExport:
     # GLOBAL slot table for this directory row (set by the index-build
     # exchange): identical on every rank of the row's merge group.
     slots: Optional[list] = None
+    # full-shard ``(counts, source runs)`` discovered once by :func:`_shard_runs`;
+    # runs is None when the mapping is not a pure rearrangement (NaN probe kept).
+    shard_runs: Optional[tuple] = None
 
 
 def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -> list[McoreParamExport]:
@@ -222,10 +228,13 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_world = torch.distributed.get_world_size(group=tp_group)
     ep_size = mpu.get_expert_model_parallel_world_size()
+    edp_world = mpu.get_expert_data_parallel_world_size()
+    edp_rank = mpu.get_expert_data_parallel_rank()
     world = torch.distributed.group.WORLD
 
     tasks = bridge.get_conversion_tasks(megatron_model)
     index: list[McoreParamExport] = []
+    n_expert = 0
     for task in tasks:
         mapping = task.mapping
         param = task.param_weight
@@ -271,13 +280,25 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
         elif is_expert:
             # every rank holding a piece of this expert set contributes; the
             # engine merges their probe entries over the joint etp x ep group.
+            # Expert-dp replicas (e.g. EP=1 under TP) hold identical copies: only
+            # one replica ships each param, round-robin to spread the send, and
+            # entries merge over WORLD (as under PP>1) so rank 0 sees them all.
             spec = ShardSpec(
                 full_shape=local_shape,
                 place=0,
-                gather_group=mpu.get_expert_tensor_and_model_parallel_group(),
+                gather_group=mpu.get_expert_tensor_and_model_parallel_group() if edp_world == 1 else world,
+                contributes=n_expert % edp_world == edp_rank,
             )
+            n_expert += 1
         elif is_tp_sharded:
-            spec = ShardSpec(full_shape=local_shape, place=0, gather_group=tp_group)
+            # dp/cp replicas hold identical copies: dp rank 0 ships (global rank
+            # 0's tp group, the one the engine consumes, is on dp rank 0)
+            spec = ShardSpec(
+                full_shape=local_shape,
+                place=0,
+                gather_group=tp_group,
+                contributes=mpu.get_data_parallel_rank(with_context_parallel=True) == 0,
+            )
         else:
             # replicated: engine's pg=None path (rank 0 consumes its own entry
             # directly, replicas stay in lockstep via zero counts).
@@ -358,6 +379,49 @@ def _exchange_slot_tables(index: list[McoreParamExport], slot_cache: dict) -> No
         rec.slots = [(n, tuple(shape)) for (n, shape) in union.keys()] if union else None
 
 
+_MAX_SHARD_RUNS = 4096
+
+
+def _take_runs(lval: torch.Tensor, runs: list) -> torch.Tensor:
+    if len(runs) == 1:
+        start, length = runs[0]
+        return lval[start : start + length]
+    return torch.cat([lval[start : start + length] for start, length in runs])
+
+
+def _shard_runs(rec: McoreParamExport, lval: torch.Tensor, slot_cache: dict) -> tuple:
+    """Discover, once, the contiguous local-shard runs whose concatenation is the
+    full-shard entry's ``hf_val`` (slot-major, HF order) by pushing an int64
+    position marker through the probe, validated against the NaN probe."""
+    lidx = torch.arange(lval.numel(), dtype=torch.int64, device=lval.device)
+    _slots, _dtype, counts, hf_idx, hf_val = mcore_hf_delta_entry(rec, 0, lidx, lval, slot_cache)
+    try:
+        outs = rec.probe.megatron_to_hf(lidx.view(rec.param.shape), rec.module)
+        dst, src = [], []
+        for name, _shape in rec.slots:
+            flat = outs[name].reshape(-1) if name in outs else lidx[:0]
+            pos = (flat >= 0).nonzero(as_tuple=False).view(-1)
+            dst.append(pos)
+            src.append(flat[pos])
+        src = torch.cat(src)
+        starts = torch.cat([src.new_zeros(1), (src[1:] != src[:-1] + 1).nonzero(as_tuple=False).view(-1) + 1])
+        lengths = torch.diff(starts, append=src.new_tensor([src.numel()]))
+        runs = list(zip(src[starts].tolist(), lengths.tolist(), strict=False))
+        valid = (
+            len(runs) <= _MAX_SHARD_RUNS
+            and [d.numel() for d in dst] == counts.tolist()
+            and torch.equal(torch.cat(dst).to(hf_idx.dtype), hf_idx)
+            and torch.equal(_take_runs(lval, runs), hf_val)
+        )
+    except Exception as e:  # pragma: no cover - bridge-version dependent
+        logger.warning("%s: position-marker probe failed: %s", rec.megatron_name, e)
+        valid = False
+    if not valid:
+        logger.warning("%s: no cached HF runs, full-shard export keeps the NaN probe", rec.megatron_name)
+        runs = None
+    return counts, runs
+
+
 def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval: torch.Tensor, slot_cache: dict):
     """Probe one mcore param's shard-local delta into its final HF-coordinate
     entry ``(slots, dtype_str, counts, hf_idx, hf_val)``.
@@ -368,13 +432,24 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
     TP>1 code paths -- and extracts each output slot's surviving positions.
     The slot list is cached after the first call (the converter's output names
     are deterministic, so every rank's cache agrees and the batched gather
-    stays aligned)."""
+    stays aligned).
+
+    ``lidx=None`` means "the full shard, HF positions not needed" (the caller
+    planned its writes already): values are replayed from cached source runs,
+    ``hf_idx`` is None and no probe runs."""
     dtype_str = str(lval.dtype).replace("torch.", "")
     assert lval.numel() == 0 or lval.is_floating_point(), (
         f"{rec.megatron_name}: NaN sentinels require a floating-point param, got {lval.dtype}"
     )
 
     cached = rec.slots if rec.slots is not None else slot_cache.get(rec.megatron_name)
+    if lidx is None:
+        if rec.shard_runs is None:
+            rec.shard_runs = _shard_runs(rec, lval, slot_cache)
+        counts, runs = rec.shard_runs
+        if runs is not None:
+            return cached, dtype_str, counts, None, _take_runs(lval, runs)
+        lidx = torch.arange(lval.numel(), dtype=torch.int64, device=lval.device)
     if rec.param is None:
         # owned by another pipeline stage: pure lockstep row. The slot table
         # was pre-seeded from the owner stage (fail loud if not -- an

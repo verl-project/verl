@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import platform
+import re
 import signal
 import threading
 from collections.abc import Mapping
@@ -56,6 +57,8 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
+
+_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
 
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
@@ -392,6 +395,11 @@ class vLLMColocateWorkerExtension:
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
                 )
             else:
+                plan = getattr(self, "_rank_local_plan", None)
+                if plan is not None and param_updates:
+                    from verl.workers.rollout.vllm_rollout import rank_local_bake
+
+                    param_updates = rank_local_bake.apply(self.model_runner.model, plan, param_updates)
                 if param_updates:
                     for model in self._iter_all_models():
                         model_updates = drop_tied_alias_updates(model, param_updates)
@@ -423,6 +431,79 @@ class vLLMColocateWorkerExtension:
         trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
+
+    def get_weight_ownership(self) -> dict:
+        """This worker's parallel layout and resident experts, as a ``RolloutLayout`` dict."""
+        from vllm.distributed import parallel_state as ps
+
+        pc = self.model_runner.vllm_config.parallel_config
+        out = {
+            "tp_size": int(pc.tensor_parallel_size),
+            "tp_rank": int(ps.get_tensor_model_parallel_rank()),
+            "pp_size": int(pc.pipeline_parallel_size),
+            "pp_rank": int(ps.get_pp_group().rank_in_group) if pc.pipeline_parallel_size > 1 else 0,
+            "ep_size": 1,
+            "ep_rank": 0,
+            "layer_range": None,
+            "local_experts": {},
+        }
+        model = self.model_runner.model
+        # pipeline stage: models built with make_layers() expose start_layer/end_layer. Not set at
+        # PP=1, where (0, num_layers) would only drop layers numbered past it (MTP layers)
+        if pc.pipeline_parallel_size > 1:
+            for mod in model.modules():
+                if hasattr(mod, "start_layer") and hasattr(mod, "end_layer"):
+                    out["layer_range"] = (int(mod.start_layer), int(mod.end_layer))
+                    break
+        if getattr(pc, "enable_expert_parallel", False):
+            # expert_map: global expert id -> local slot, negative for experts on other ranks; on the
+            # MoE module or, in newer vLLM, on its expert_map_manager
+            for name, mod in model.named_modules():
+                mgr = getattr(mod, "expert_map_manager", None)
+                emap = getattr(mod, "expert_map", None)
+                if emap is None and mgr is not None:
+                    emap = getattr(mgr, "expert_map", None)
+                if emap is None:
+                    continue
+                m = _LAYER_RE.search(name + ".")
+                if m is None:
+                    continue
+                emap_cpu = emap.detach().cpu()
+                local_ids = [int(i) for i in torch.nonzero(emap_cpu >= 0).flatten().tolist()]
+                out["local_experts"][int(m.group(1))] = local_ids
+                ep_size = getattr(mod, "ep_size", None) or getattr(mgr, "ep_size", None)
+                ep_rank = getattr(mod, "ep_rank", None) or getattr(mgr, "ep_rank", None)
+                if ep_size is not None:
+                    out["ep_size"], out["ep_rank"] = int(ep_size), int(ep_rank or 0)
+        plan = self._get_rank_local_plan()
+        if plan is not None and plan.slices:
+            out["wire_formats"] = ["named_tensors", "rank_local_named_tensors"]
+            out["slices"] = plan.slices
+        return out
+
+    def _get_rank_local_plan(self):
+        """The rank-local plan, baked on the first call; ``None`` where boxes cannot be used.
+
+        Plain bf16 TP only: quantized weights are converted on load, LoRA syncs adapters, an MTP
+        drafter loads the same names again, and the bake does not handle PP. Under EP each resident
+        expert is loaded whole, so experts get no box.
+        """
+        if not hasattr(self, "_rank_local_plan"):
+            self._rank_local_plan = None
+            cfg = self.model_runner.vllm_config
+            pc = cfg.parallel_config
+            if (
+                pc.tensor_parallel_size > 1
+                and pc.pipeline_parallel_size == 1
+                and cfg.quant_config is None
+                and cfg.lora_config is None
+                and cfg.speculative_config is None
+                and os.path.isdir(cfg.model_config.model)  # hub ids are not resolved: full tensors
+            ):
+                from verl.workers.rollout.vllm_rollout import rank_local_bake
+
+                self._rank_local_plan = rank_local_bake.bake(self.model_runner.model, cfg.model_config.model)
+        return self._rank_local_plan
 
     def update_verl_delta_weights(self, update_info: dict) -> None:
         """Add this worker's IPC endpoint and forward the delta update to vLLM."""

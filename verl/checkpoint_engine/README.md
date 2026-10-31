@@ -20,6 +20,7 @@ Checkpoint Engine is an unified abstract layer to synchronize weights between va
 |nixl|NIXL|all_gather+ring p2p|Various transport backends (D2D, H2H, H2D, etc)<br>- UCX<br>- UCCL<br>- Mooncacke|Medium/High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Elastic rollout<br>- Rollout fault tolerance<br>- Heterogeneous hardware rollout
 |kimi_ckpt_engine|MOONCAKE+NCCL/HCCL|p2p+broadcast|NVIDIA/Ascend|High|Low: rebuild communication group|Off-policy training<br>- Actor/rollout disaggregated<br>- Save checkpoint each time
 |mooncake|Mooncake Transfer Engine|all_gather+ring p2p|NVIDIA/Ascend|High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Fixed clusters
+|sharded_nixl|NIXL|p2p WRITE from every trainer rank, filtered by rollout TP/EP ownership|Various transport backends (D2D, H2D, etc)<br>- UCX|High|High: peers updated per sync, buffers registered once|Off-policy training<br>- Actor/rollout disaggregated<br>- MoE with rollout EP<br>- Rollout TP
 
 ##### kimi_ckpt_engine detail:
 
@@ -51,6 +52,10 @@ In whitelist json file, you need to add IP addresses using the following format.
 ```bash
 export HCCL_INTRA_ROCE_ENABLE=1
 ```
+
+##### sharded_nixl detail:
+
+`sharded_nixl` takes the training engine in `send_weights(engine, global_steps)`: every trainer rank exports only the shards it holds and NIXL-WRITEs them into each rollout worker's registered bucket buffers, so there is no trainer-side all-gather. Each rollout worker reports its layout (`get_weight_ownership()`: TP/PP/EP ranks and resident experts) and receives only the parameters it loads; when vLLM reports its TP slices (`rank_local_named_tensors`), each TP rank receives only its slice. The bucket layout is computed once and cached, so steady-state syncs exchange no per-tensor metadata.
 
 ### Benchmark
 1. benchmark setup

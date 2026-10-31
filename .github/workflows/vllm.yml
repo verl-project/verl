@@ -190,6 +190,9 @@ jobs:
       - name: Test bucketed weight transfer
         run: |
           $UV_RUN pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+      - name: Test vLLM rank-local TP slice bake
+        run: |
+          RANK_LOCAL_TEST_MODEL=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct $UV_RUN pytest -svvv tests/workers/rollout/rollout_vllm/test_vllm_rank_local_bake.py
 
   cleanup:
     runs-on: ubuntu-latest
