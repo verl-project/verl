@@ -48,6 +48,8 @@ logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 
 class SFTTrainer:
+    """Coordinate SPMD supervised training, validation, and checkpoint recovery."""
+
     def __init__(
         self,
         config,
@@ -80,6 +82,7 @@ class SFTTrainer:
         log_gpu_memory_usage(f"rank {self.rank}: After SFTTrainer init", logger=logger)
 
     def _build_ckpt_handler(self):
+        """Bind the local engine and dataloader to SFT checkpoint and resume settings."""
         resume_mode = getattr(self.config.trainer, "resume_mode", "auto")
         resume_from_path = getattr(self.config.trainer, "resume_from_path", None)
         max_ckpt_to_keep = getattr(self.config.trainer, "max_ckpt_to_keep", None)
@@ -95,6 +98,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             lora_train_meta=lora_train_meta,
+            async_save=self.checkpoint_config.async_save,
         )
 
     def _get_lora_train_meta(self):
@@ -306,6 +310,12 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        """Train SFT batches and wait for checkpoint publication at the final configured step.
+
+        The earlier of the step and epoch limits selects the final step. Periodic
+        saves may remain asynchronous; the final save waits for all queued writes
+        and completion callbacks on every rank.
+        """
         is_logging = self.engine.is_mp_src_rank_with_outputs() and self.engine.get_data_parallel_rank() == 0
 
         # TODO: add a unified tracking
@@ -349,6 +359,8 @@ class SFTTrainer:
             "global_batch_size": self.global_batch_size,
             "pad_mode": self.config.data.pad_mode,
             "pad_token_id": self.model_config.tokenizer.pad_token_id,
+            # Let Megatron advance completed writes inside each training batch.
+            "finalize_async_checkpoint": self.checkpoint_config.async_save,
         }
 
         train_time = 0
@@ -409,7 +421,11 @@ class SFTTrainer:
                     if self.engine.get_data_parallel_rank() == 0:
                         tracking.log(data=metrics, step=global_step)
 
-                is_last_step = global_step >= self.total_training_steps
+                # Epoch exhaustion also needs the final blocking save, even
+                # when the configured step limit is larger than the dataset.
+                is_last_step = global_step >= min(
+                    self.total_training_steps, self.steps_per_epoch * self.config.trainer.total_epochs
+                )
                 is_valid_step = global_step % self.test_freq == 0
                 is_save_step = global_step % self.save_freq == 0
 
@@ -440,7 +456,7 @@ class SFTTrainer:
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
                     aggressive_empty_cache(force_sync=True)
-                    self.ckpt_handler.save_checkpoint(step=global_step)
+                    self.ckpt_handler.save_checkpoint(step=global_step, blocking=is_last_step)
 
                 if is_last_step:
                     if is_logging:

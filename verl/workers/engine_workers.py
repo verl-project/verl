@@ -115,6 +115,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
     """
 
     def __init__(self, config: TrainingWorkerConfig):
+        """Initialize distributed state and construct the configured training engine.
+
+        Async checkpointing is accepted only for the Megatron engine, which
+        implements queue progress and blocking save completion.
+        """
         Worker.__init__(self)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
@@ -140,6 +145,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # Support automatically select engine backend given model config
             self.engine_config, self.optimizer_config = self.config.auto_select_engine_optim_fn(
                 self.model_config, self.device_name
+            )
+
+        if (
+            self.checkpoint_config is not None
+            and self.checkpoint_config.async_save
+            and self.engine_config.strategy != "megatron"
+        ):
+            raise NotImplementedError(
+                f"{self.engine_config.strategy} does not support checkpoint.async_save; use the Megatron engine"
             )
 
         # we use the one defined in model
@@ -474,8 +488,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return final_output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
-        return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None, blocking=False):
+        """Save on every rank, optionally waiting for asynchronous writes to finish."""
+        return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep, blocking=blocking)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
