@@ -263,7 +263,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
     def _init_reward_loop(self):
         from verl.experimental.reward_loop import RewardLoopManager
 
-        # initalize reward loop manager
+        # initialize reward loop manager
         # reward model (colocate or standalone): get resource_pool
         # no reward model: resource_pool = None
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None

@@ -57,6 +57,6 @@ cd recipe
 git checkout main
 cd ..
 
-echo "5. May need to check other neccessary packages"
+echo "5. May need to check other necessary packages"
 pip install transformers==5.10.4 xgrammar==0.1.33
 echo "Successfully installed all packages"
