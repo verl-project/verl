@@ -24,12 +24,16 @@ from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_policy_loss_geo_mean,
+    compute_policy_loss_vanilla,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
     kl_penalty,
     register_adv_est,
 )
+from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
+from verl.workers.config.actor import ActorConfig, PolicyLossConfig
 
 
 def mock_test_fn():
@@ -379,6 +383,84 @@ def test_kl_penalty_k3_plus_uses_k2_gradient():
     (grad_k2,) = torch.autograd.grad(out_k2, logprob_k2)
 
     assert torch.allclose(grad_plus, grad_k2)
+
+
+def test_geo_mean_drops_icepop_rejected_tokens():
+    """geo_mean must drop IcePop-rejected tokens entirely (see #8406).
+
+    A token whose IcePop weight is 0 keeps no gradient, and the kept tokens
+    in its sequence keep the gradient they had without the rejection (the
+    same behaviour as the token-level losses). A fully rejected sequence
+    contributes zero loss and zero gradient.
+    """
+
+    def actor_config(loss_mode):
+        return ActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+            clip_ratio=0.2,
+            clip_ratio_low=0.2,
+            clip_ratio_high=0.2,
+            loss_agg_mode="token-mean",
+            policy_loss=PolicyLossConfig(loss_mode=loss_mode),
+        )
+
+    batch_size, seq_len, bad = 2, 16, 5
+    old_log_prob = torch.full((batch_size, seq_len), -1.0)
+    rollout_log_prob = old_log_prob.clone()
+    rollout_log_prob[1, bad] = -4.0  # old/rollout ratio e^3 ~ 20, outside IcePop's [0.5, 5.0]
+    response_mask = torch.ones(batch_size, seq_len)
+    advantages = torch.ones(batch_size, seq_len)
+
+    weights_proto, _, _ = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is="token",
+        rollout_is_threshold="0.5_5.0",
+    )
+    weights = weights_proto.batch["rollout_is_weights"]
+    assert weights[1, bad].item() == 0.0, "bad token must be rejected by IcePop"
+    assert weights[0].min().item() > 0.0, "clean sequence must keep all weights"
+
+    grads = {}
+    for loss_mode, fn in [("vanilla", compute_policy_loss_vanilla), ("geo_mean", compute_policy_loss_geo_mean)]:
+        log_prob = old_log_prob.clone().requires_grad_(True)  # on-policy
+        loss, _ = fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode="token-mean",
+            config=actor_config(loss_mode),
+            rollout_is_weights=weights,
+        )
+        loss.backward()
+        grads[loss_mode] = log_prob.grad
+
+    for loss_mode in ("vanilla", "geo_mean"):
+        g = grads[loss_mode]
+        assert g[1, bad].item() == pytest.approx(0.0, abs=1e-6), f"{loss_mode}: rejected token must have no grad"
+        kept_ratio = g[1, 0].item() / g[0, 0].item()
+        assert kept_ratio == pytest.approx(1.0, abs=1e-3), f"{loss_mode}: kept-token grad ratio {kept_ratio}"
+
+    # Fully rejected sequence: zero loss contribution, zero gradient.
+    full_reject_weights = torch.ones(batch_size, seq_len)
+    full_reject_weights[1, :] = 0.0
+    log_prob = old_log_prob.clone().requires_grad_(True)
+    loss, _ = compute_policy_loss_geo_mean(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode="token-mean",
+        config=actor_config("geo_mean"),
+        rollout_is_weights=full_reject_weights,
+    )
+    loss.backward()
+    assert loss.item() == pytest.approx(-0.5, abs=1e-6), "fully rejected sequence must contribute 0 to the batch mean"
+    assert float(log_prob.grad[1].abs().max()) == pytest.approx(0.0, abs=1e-6)
 
 
 if __name__ == "__main__":
