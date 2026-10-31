@@ -25,6 +25,9 @@ module: ``vllm_fp8_utils`` for ``Fp8LinearMethod`` / ``Fp8MoEMethod``, and
 ``vllm_fp4_utils`` for ``Mxfp4MoEMethod``. Each exposes a stage/process pair
 that returns an empty result when the model has no layer it owns, so the
 dispatch below stays unconditional.
+
+``vllm_mxfp8_refit_check`` checks after each sync that one MXFP8 linear and
+one MXFP8 MoE layer reproduce the weights the sync wrote.
 """
 
 import importlib.metadata
@@ -51,6 +54,16 @@ from verl.utils.vllm.vllm_fp8_utils import (
     build_fp8_method_patchers,
     process_fp8_weights_after_loading,
     stage_fp8_params_for_loading,
+)
+from verl.utils.vllm.vllm_mxfp8_refit_check import (
+    self_check_mxfp8_linear,
+    self_check_mxfp8_moe,
+    snapshot_mxfp8_linear_for_check,
+    snapshot_mxfp8_moe_for_check,
+)
+from verl.utils.vllm.vllm_unquant_utils import (
+    process_unquantized_moe_weights_after_loading,
+    stage_unquantized_moe_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,6 +230,9 @@ def prepare_quanted_weights_for_loading(model):
         "fp8_layers": stage_fp8_params_for_loading(model),
         "mxfp4_moe_modules": stage_mxfp4_moe_params_for_loading(model),
         "nvfp4_moe_modules": stage_nvfp4_moe_params_for_loading(model),
+        # MoE layers the quantization config leaves in BF16 (``ignore``) run vLLM's unquantized MoE method,
+        # whose kernel prep may reshape them (FlashInfer TRT-LLM): staged like the BF16 refit's.
+        "unquantized_moe_layers": stage_unquantized_moe_params(model),
     }
     return reload_state
 
@@ -224,9 +240,18 @@ def prepare_quanted_weights_for_loading(model):
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
     reload_state = reload_state or {}
+    # Canonical MXFP8 weight/scale of one layer, captured before the kernel layout is re-derived.
+    snapshot = snapshot_mxfp8_linear_for_check(model)
+    moe_snapshot = snapshot_mxfp8_moe_for_check(model)
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
     process_nvfp4_moe_weights_after_loading(reload_state.get("nvfp4_moe_modules") or [])
+    # Every unquantized MoE layer, staged or not: a same-shape prep (FlashInfer CUTLASS's gate/up swap)
+    # has to be applied again to the checkpoint-layout bytes the sync just wrote.
+    process_unquantized_moe_weights_after_loading(model, reload_state.get("unquantized_moe_layers") or [])
+    # The re-derived layout is now what the kernel reads; it must reproduce the canonical reference.
+    self_check_mxfp8_linear(snapshot)
+    self_check_mxfp8_moe(moe_snapshot)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)

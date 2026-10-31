@@ -13,6 +13,7 @@
 # limitations under the License.
 """SGLang MX low-precision config translation, weight export, and refit registration."""
 
+import logging
 import os
 from collections.abc import Iterable, Iterator, Mapping
 from copy import deepcopy
@@ -33,6 +34,10 @@ _SYNC_FP8_ATTR = "_verl_sglang_fp8_refit_staged"
 _SYNC_FP4_ATTR = "_verl_sglang_fp4_refit_staged"
 _SYNC_NVFP4_ATTR = "_verl_sglang_nvfp4_refit_staged"
 _SGLangRefitKind = Literal["mxfp8", "mxfp4", "nvfp4"]
+
+logger = logging.getLogger(__name__)
+# SGLang's scheduler processes fall back to the root WARNING level and would drop the INFO evidence lines.
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _REGEX_IGNORE_TO_SGLANG = {
     r"re:.*lm_head$": "lm_head",
@@ -64,6 +69,22 @@ def resolve_sglang_quantization_config(config: Any, model_config: Any) -> dict[s
     if not isinstance(native, Mapping):
         raise TypeError(f"quantization_config must be a mapping, got {type(native).__name__}")
     return dict(native)
+
+
+def refuse_delta_sync_if_quantized(config: Any, model_config: Any) -> None:
+    """Refuse the delta checkpoint engine for a quantized rollout, whatever its format.
+
+    The delta engine applies sparse payloads in place without the trainer-side weight quantization, so an
+    FP8/FP4 parameter would receive unscaled high-precision values. This holds for every quantized rollout,
+    from ``rollout.quantization`` or from the checkpoint's own ``quantization_config``, not only for the
+    formats on the refit loader.
+    """
+    if resolve_sglang_quantization_config(config, model_config) is not None:
+        raise ValueError(
+            "The delta checkpoint engine (wire_format='delta_flush') does not support a quantized SGLang rollout "
+            "(rollout.quantization or the checkpoint's own quantization_config): it applies its payloads in place "
+            "without the trainer-side weight quantization. Use a bucketed checkpoint engine or a BF16 rollout."
+        )
 
 
 def _translate_ignored_layers(ignored_layers: Iterable[str]) -> list[str]:
@@ -216,22 +237,34 @@ def finalize_tensors() -> list[tuple[str, torch.Tensor]]:
 
 
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
-    """Load one SGLang quantized-refit bucket and finalize kernel layouts once per sync."""
+    """Load one SGLang quantized-refit bucket and finalize kernel layouts once per sync.
+
+    Before a bucket is written, the export-vs-engine format check of the first weight sync reads it
+    (``verl.utils.sglang.sglang_sync_format_check``).
+    """
     from verl.utils.sglang.sglang_fp4_utils import stage_mxfp4_moe_params, stage_nvfp4_moe_params
-    from verl.utils.sglang.sglang_fp8_utils import stage_mxfp8_moe_scales
+    from verl.utils.sglang.sglang_fp8_utils import refuse_relaid_bf16_moe_layers, stage_mxfp8_moe_scales
+    from verl.utils.sglang.sglang_sync_format_check import sglang_sync_format_check
 
     named_tensors = list(named_tensors)
     finalize = any(name == FINALIZE_MARKER for name, _ in named_tensors)
     named_tensors = [(name, tensor) for name, tensor in named_tensors if name != FINALIZE_MARKER]
+    format_check = sglang_sync_format_check(model)
     try:
         if named_tensors:
-            if _SYNC_FP8_ATTR not in model.__dict__:
+            first_request = _SYNC_FP8_ATTR not in model.__dict__  # first request of this sync
+            if first_request:
+                format_check.begin_sync()
+            format_check.check_bucket(model, named_tensors)  # before anything is written into the engine
+            if first_request:
+                refuse_relaid_bf16_moe_layers(model)
                 model.__dict__[_SYNC_FP8_ATTR] = stage_mxfp8_moe_scales(model)
                 model.__dict__[_SYNC_FP4_ATTR] = stage_mxfp4_moe_params(model)
                 model.__dict__[_SYNC_NVFP4_ATTR] = stage_nvfp4_moe_params(model)
             model.load_weights(named_tensors)
         if finalize:
             _finish_sync(model)
+            format_check.end_sync()
     except BaseException:
         _abandon_sync(model)
         raise
@@ -254,16 +287,26 @@ def _finish_sync(model: torch.nn.Module) -> None:
         reprocess_mxfp8_layers,
         reprocess_mxfp8_moe_layers,
     )
+    from verl.utils.sglang.sglang_mxfp8_refit_check import (
+        self_check_mxfp8_linear,
+        self_check_mxfp8_moe,
+        snapshot_mxfp8_moe_for_check,
+    )
 
     if _SYNC_FP8_ATTR not in model.__dict__:
         return
     fp8_staged = model.__dict__[_SYNC_FP8_ATTR]
     fp4_staged = model.__dict__.get(_SYNC_FP4_ATTR, ())
     nvfp4_staged = model.__dict__.get(_SYNC_NVFP4_ATTR, ())
+    # Canonical expert weights and scales, copied before the MoE runner rewrites them.
+    moe_snapshot = snapshot_mxfp8_moe_for_check(model)
     reprocess_mxfp8_layers(model)
     reprocess_mxfp8_moe_layers(model, fp8_staged)
     reprocess_mxfp4_moe_layers(fp4_staged)
     reprocess_nvfp4_moe_layers(nvfp4_staged)
+    # The re-derived layouts are now what the kernels read; they must reproduce the canonical reference.
+    self_check_mxfp8_linear(model)
+    self_check_mxfp8_moe(moe_snapshot)
     del model.__dict__[_SYNC_FP8_ATTR]
     model.__dict__.pop(_SYNC_FP4_ATTR, None)
     model.__dict__.pop(_SYNC_NVFP4_ATTR, None)

@@ -40,6 +40,7 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.utils.sglang.sglang_quant_utils import (
     LOADER_FQN,
     finalize_tensors,
+    refuse_delta_sync_if_quantized,
     resolve_sglang_quantization_config,
     uses_sglang_refit_loader,
 )
@@ -142,6 +143,8 @@ class ServerAdapter(BaseRollout):
     ):
         super().__init__(config, model_config, device_mesh)
         self._engine: AsyncHttpServerAdapter = None
+        if getattr(getattr(self.config, "checkpoint_engine", None), "backend", None) == "delta_sharded":
+            refuse_delta_sync_if_quantized(self.config, self.model_config)  # before any server or sync starts
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
@@ -329,11 +332,7 @@ class ServerAdapter(BaseRollout):
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
         if wire_format == "delta_flush":
-            if use_quantized_refit:
-                raise ValueError(
-                    "SGLang MXFP8/MXFP4/NVFP4 custom refit is not supported with wire_format='delta_flush'; "
-                    "use the regular bucketed weight sync"
-                )
+            refuse_delta_sync_if_quantized(self.config, self.model_config)
             await self._update_weights_delta(weights, global_steps=global_steps)
             return
 

@@ -18,6 +18,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -299,3 +300,94 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+class _ScriptedReceiver:
+    """Stands in for BucketedWeightReceiver: hands each scripted bucket to the callback, then counts its ack.
+
+    Like the real receiver, it acks a bucket only after the callback returns, so a callback that raises leaves the
+    sender waiting for that ack.
+    """
+
+    buckets: list = []
+    acked = 0
+
+    def __init__(self, zmq_handle, device, use_shm):
+        pass
+
+    def receive_weights(self, on_bucket_received):
+        for weights, is_last in self.buckets:
+            on_bucket_received(weights, is_last)
+            type(self).acked += 1
+
+
+class _FakeFormatCheck:
+    def __init__(self, fail_on=None):
+        self.fail_on = fail_on
+        self.checked, self.ended = [], False
+
+    def begin_sync(self):
+        pass
+
+    def check_bucket(self, model, named_tensors):
+        names = [name for name, _ in named_tensors]
+        self.checked.append(names)
+        if self.fail_on in names:
+            raise RuntimeError(f"format mismatch on {self.fail_on}")
+
+    def end_sync(self):
+        self.ended = True
+
+
+def _quantized_ipc_worker(monkeypatch, format_check):
+    loaded, processed = [], []
+
+    def _load(weights, runner, is_drafter=False):
+        loaded.append([name for name, _ in weights])
+        return loaded[-1]
+
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(_vllm_rollout_utils, "load_quanted_weights", _load)
+    monkeypatch.setattr(_vllm_rollout_utils, "process_quanted_weights_after_loading", lambda m, s: processed.append(m))
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", _ScriptedReceiver)
+    monkeypatch.setattr(_ScriptedReceiver, "acked", 0)
+    monkeypatch.setattr(
+        _ScriptedReceiver,
+        "buckets",
+        [([(f"model.layers.{i}.linear.weight", torch.ones(4, 4))], i == 2) for i in range(3)],
+    )
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.model_runner = _FakeModelRunner(_ToyModel())
+    worker.model_runner.vllm_config.quant_config = None
+    worker._get_zmq_handle = lambda: "ipc:///tmp/unused.sock"
+    worker._sync_format_check = lambda: format_check
+    return worker, loaded, processed
+
+
+def test_update_weights_from_ipc_acks_every_bucket_before_raising_a_bucket_error(monkeypatch):
+    """A bucket that fails to load (here: the format check in raise mode) must not strand the sender.
+
+    The remaining buckets are acked without being loaded, and the error is raised after the last one, so the
+    trainer's ``await`` on this call fails instead of the sender waiting for an ack forever.
+    """
+    check = _FakeFormatCheck(fail_on="model.layers.0.linear.weight")
+    worker, loaded, processed = _quantized_ipc_worker(monkeypatch, check)
+
+    with pytest.raises(RuntimeError, match="format mismatch on model.layers.0.linear.weight"):
+        worker.update_weights_from_ipc()
+
+    assert _ScriptedReceiver.acked == 3
+    assert check.checked == [["model.layers.0.linear.weight"]]  # later buckets are drained unread
+    assert loaded == [] and processed == [] and not check.ended
+
+
+def test_update_weights_from_ipc_loads_every_bucket_without_errors(monkeypatch):
+    check = _FakeFormatCheck()
+    worker, loaded, processed = _quantized_ipc_worker(monkeypatch, check)
+
+    worker.update_weights_from_ipc()
+
+    assert _ScriptedReceiver.acked == 3
+    assert loaded == [[f"model.layers.{i}.linear.weight"] for i in range(3)]
+    assert len(processed) == 1 and check.ended

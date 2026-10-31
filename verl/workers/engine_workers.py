@@ -738,7 +738,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 qat_config=qat,
             )
             if weight_quantizer is not None:
+                from verl.utils.quant_layer_audit import TrainExportAudit, fp8_recipe_of
+
                 self.actor.engine.set_rollout_weight_quantizer(weight_quantizer)
+                # Training vs export; export vs engine runs in the rollout engine's weight loader.
+                self.actor.engine.set_train_export_audit(
+                    TrainExportAudit.create(
+                        rollout_quantized=True,
+                        trainer_fp8_recipe=fp8_recipe_of(getattr(self.actor.engine, "engine_config", None)),
+                        rollout_name=self.config.rollout.name,
+                    )
+                )
 
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)

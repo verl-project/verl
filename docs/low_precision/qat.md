@@ -249,6 +249,17 @@ SGLang uses the default CUDA Graph configuration):
 | Blackwell | SGLang | ❌ | NVFP4 MoE | FlashInfer CUTLASS (MoE; BF16 Linear) | 0.00946 |
 | Blackwell | SGLang | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer CUTLASS (MoE; BF16 Linear) | 0.00653 |
 
+## Format check at the first weight sync
+
+When the rollout is quantized (QAT included), the engine compares, during the first weight sync and before each
+bucket is written, every synced weight's format (quantized or high precision) with the engine parameter that
+receives it. The trainer-side exporter and the engine read the same quantization config, so a disagreement means
+the two matched a module differently, for example an `ignore` entry one side reads as a prefix and the other as an
+exact name; loading would cast the weight into a parameter of the other format. vLLM checks every quantized
+format; SGLang checks the formats of its refit loader (MXFP8, MXFP4, NVFP4), not `FP8_BLOCK`.
+`VERL_QUANT_LAYER_AUDIT` switches it: `warn` (the default) logs the disagreement, `raise` stops the sync, `0`
+turns it off. See also the [checks of the MXFP8 recipe](mxfp8.md#checks).
+
 ## Limitations
 
 - SGLang MXFP8, MXFP4 and NVFP4 custom refit requires the default bucketed

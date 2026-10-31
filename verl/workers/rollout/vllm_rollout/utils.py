@@ -245,6 +245,12 @@ class vLLMColocateWorkerExtension:
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
+    def _sync_format_check(self):
+        """Export vs engine for the main model, or ``None`` (``verl.utils.vllm.vllm_sync_format_check``)."""
+        from verl.utils.vllm.vllm_sync_format_check import vllm_sync_format_check
+
+        return vllm_sync_format_check(self.model_runner.model, self.model_runner.vllm_config.quant_config)
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         if self.device is None:
@@ -271,6 +277,9 @@ class vLLMColocateWorkerExtension:
             quant_reload_states = [
                 (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
             ]
+            format_check = self._sync_format_check()
+            if format_check is not None:
+                format_check.begin_sync()
         else:
             # TODO(wuxibin): not need anymore for newer vllm version.
             for model in self._iter_all_models():
@@ -329,7 +338,24 @@ class vLLMColocateWorkerExtension:
                 base_sync_done=base_sync_done,
             )
 
-        receiver.receive_weights(on_bucket_received=on_bucket_received)
+        # Finish the receiver handshake before reporting a bucket error, as the delta path does: the sender waits
+        # for every bucket's ack, so an error raised inside the receiver would leave it, and the trainer behind it,
+        # blocked for good. Buckets after the failed one are acked unread; the error is raised once the sender is done.
+        # Interrupts are not caught, so they still stop the worker at once.
+        bucket_error: Exception | None = None
+
+        def load_or_skip(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            nonlocal bucket_error
+            if bucket_error is not None:
+                return
+            try:
+                on_bucket_received(weights, is_last)
+            except Exception as exc:
+                bucket_error = exc
+
+        receiver.receive_weights(on_bucket_received=load_or_skip)
+        if bucket_error is not None:
+            raise bucket_error
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
@@ -337,6 +363,9 @@ class vLLMColocateWorkerExtension:
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
+            format_check = self._sync_format_check()
+            if format_check is not None:
+                format_check.end_sync()
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -381,8 +410,11 @@ class vLLMColocateWorkerExtension:
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_quantized_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
-                # Convert bf16 weights to fp8 format before loading
                 model_updates = drop_tied_alias_updates(self.model_runner.model, param_updates)
+                format_check = self._sync_format_check()
+                if format_check is not None and model_updates:
+                    # export vs engine, first sync only: before the bucket is written
+                    format_check.check_bucket(self.model_runner.model, model_updates)
                 loaded_params = load_quanted_weights(model_updates, self.model_runner) if model_updates else []
                 # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and model_updates:

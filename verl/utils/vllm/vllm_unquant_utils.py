@@ -182,3 +182,35 @@ def fold_unquantized_moe_params(layers: list[torch.nn.Module]):
             del live[name]
         if hasattr(layer, _LIVE_ATTR):
             delattr(layer, _LIVE_ATTR)
+
+
+def process_unquantized_moe_weights_after_loading(model: torch.nn.Module, staged: list[torch.nn.Module]) -> int:
+    """Re-run the kernel prep of every unquantized MoE layer of a quantized model after its refit.
+
+    A quantized model's MoE layers that the quantization config leaves out (``rollout.quantization.ignore``)
+    run vLLM's unquantized MoE method, whose kernel prep rewrites the experts after loading: FlashInfer
+    TRT-LLM into its block layout (staged by ``stage_unquantized_moe_params``), FlashInfer CUTLASS into a
+    same-shape gate/up swap that nothing stages. The quantized refit re-processes only the quantized layers
+    it staged, so without this the next forward reads checkpoint-layout bytes as the kernel layout. On a
+    weight update vLLM's ``_setup_kernel`` copies the re-derived weights into the existing parameters; the
+    staged ones are folded back into their live storage. Returns the number of layers re-processed.
+    """
+    try:
+        from vllm.model_executor.layers.fused_moe import unquantized_fused_moe_method
+    except ImportError:
+        return 0
+    layers = [
+        layer
+        for _, layer in model.named_modules()
+        if isinstance(getattr(layer, "quant_method", None), unquantized_fused_moe_method.UnquantizedFusedMoEMethod)
+    ]
+    with fold_unquantized_moe_params(staged):
+        for layer in layers:
+            layer.quant_method.process_weights_after_loading(layer)
+    if layers:
+        logger.info(
+            "Re-derived the kernel layout of %d unquantized MoE layers after the quantized refit (%d staged)",
+            len(layers),
+            len(staged),
+        )
+    return len(layers)

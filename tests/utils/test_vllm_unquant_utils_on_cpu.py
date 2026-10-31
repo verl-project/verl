@@ -378,3 +378,82 @@ def test_a_layer_left_staged_by_a_failed_refit_is_restaged_from_its_live_params(
     for name, param in live.items():
         assert getattr(layer, name) is param
         assert torch.equal(param.data, _block_layout(weights[name]))
+
+
+# ---------------------------------------------------------------------------
+# Quantized refit: MoE layers the quantization config leaves in BF16 (``ignore``)
+# ---------------------------------------------------------------------------
+
+
+def _gate_up_swap(t):
+    """FlashInfer CUTLASS's same-shape prep: w13 stored as [w3; w1]."""
+    return t.reshape(t.shape[0], 2, t.shape[1] // 2, t.shape[2]).flip(1).reshape(t.shape)
+
+
+def _quantized_refit(model, weights_by_layer):
+    """``prepare_quanted_weights_for_loading`` / load / ``process_quanted_weights_after_loading``, unquantized part."""
+    staged = unquant_utils.stage_unquantized_moe_params(model)
+    for layer, weights in weights_by_layer:
+        _load(layer, weights)
+    return staged, unquant_utils.process_unquantized_moe_weights_after_loading(model, staged)
+
+
+def test_quantized_refit_re_derives_a_reshaped_unquantized_moe_layer_into_its_live_storage(vllm):
+    layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())  # TRT-LLM block layout
+    model = _engine_init(vllm, [layer])
+    live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
+    weights = _new_weights(seed=3)
+
+    staged, processed = _quantized_refit(model, [(layer, weights)])
+
+    assert staged == [layer] and processed == 1
+    for name, param in live.items():
+        assert getattr(layer, name) is param, "the CUDA graph's parameter must stay on the layer"
+        assert torch.equal(param.data, _block_layout(weights[name]))
+
+
+def test_quantized_refit_re_applies_a_same_shape_gate_up_swap(vllm):
+    """Not staged (same shape), so only re-running the prep puts gate and up back where the kernel reads them."""
+    layer = _FakeRoutedExperts(
+        vllm.unquantized.UnquantizedFusedMoEMethod(kernel_layout=_gate_up_swap, names=("w13_weight",))
+    )
+    model = _engine_init(vllm, [layer])
+    w13 = layer.w13_weight
+    weights = {"w13_weight": _new_weights(seed=4)["w13_weight"]}
+
+    assert unquant_utils.stage_unquantized_moe_params(model) == []
+    _load(layer, weights)
+    # What the quantized refit left before this fix: checkpoint order read as [w3; w1], gate and up swapped.
+    assert torch.equal(w13.data, weights["w13_weight"])
+    assert not torch.equal(w13.data, _gate_up_swap(weights["w13_weight"]))
+
+    assert unquant_utils.process_unquantized_moe_weights_after_loading(model, []) == 1
+    assert layer.w13_weight is w13
+    assert torch.equal(w13.data, _gate_up_swap(weights["w13_weight"]))
+
+
+def test_quantized_refit_keeps_a_layout_preserving_layer_as_loaded(vllm):
+    layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod(kernel_layout=lambda t: t.clone()))
+    model = _engine_init(vllm, [layer])
+    weights = _new_weights(seed=5)
+
+    staged, processed = _quantized_refit(model, [(layer, weights)])
+
+    assert staged == [] and processed == 1
+    for name in ("w13_weight", "w2_weight"):
+        assert torch.equal(getattr(layer, name).data, weights[name])
+
+
+def test_quantized_refit_leaves_layers_of_other_quant_methods_alone(vllm):
+    class _QuantizedMethod:
+        calls = 0
+
+        def process_weights_after_loading(self, layer):
+            type(self).calls += 1
+
+    quantized = _FakeRoutedExperts(_QuantizedMethod())
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([quantized])
+
+    assert unquant_utils.process_unquantized_moe_weights_after_loading(model, []) == 0
+    assert _QuantizedMethod.calls == 0  # the quantized refit re-derives these through its own staging
