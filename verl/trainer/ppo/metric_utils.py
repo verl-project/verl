@@ -710,8 +710,9 @@ def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None
         return metrics
 
     # Compute W(τ) = Σ_t[1 - 2π_t(y_t) + Σπ²]
+    # Exact weight is ||e_y - pi_t||^2 >= 0; clamp float32 rounding noise when pi_t ~ 1
     pi_t = torch.exp(batch.batch["old_log_probs"])
-    w_per_timestep = 1 - 2 * pi_t + batch.batch["sum_pi_squared"]
+    w_per_timestep = (1 - 2 * pi_t + batch.batch["sum_pi_squared"]).clamp_min(0)
 
     # Get response mask to only consider valid tokens
     response_mask = batch.batch["response_mask"]
