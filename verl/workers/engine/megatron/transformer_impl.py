@@ -1462,9 +1462,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     raise ValueError("Dynamic CP micro-batch is missing its local token count")
                 local_num_tokens = torch.as_tensor(local_num_tokens, device=device, dtype=torch.int)
             else:
-                # Static CP replicas contain the same real tokens, so report one CP share.
-                cp_size = self.engine_config.context_parallel_size
-                local_num_tokens = (self._routed_num_tokens(data) // cp_size).to(torch.int)
+                # Static CP replicas contain the same real tokens. Preserve remainders:
+                # finalize_model_grads sums these counts across DP x CP before scaling.
+                from verl.utils.torch_functional import split_token_count
+
+                local_num_tokens = split_token_count(
+                    self._routed_num_tokens(data),
+                    self.engine_config.context_parallel_size,
+                    mpu.get_context_parallel_rank(),
+                )
             # n_i is the global routed-token count (all-reduced in forward_backward_batch);
             # scaling loss by the same value makes Sum(L_i)/Sum(n_i) recover the loss. Falls
             # back to local counts when not plumbed (single-rank / tests).

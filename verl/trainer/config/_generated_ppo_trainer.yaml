@@ -991,6 +991,9 @@ trainer:
   v1:
     trainer_mode: sync
     sync: {}
+    group_delivery:
+      poll_interval: 0.05
+      wait_for_full_batch: false
     colocate_async:
       num_warmup_batches: 1
     separate_async:

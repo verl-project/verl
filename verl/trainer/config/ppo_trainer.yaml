@@ -53,7 +53,7 @@ defaults:
 actor_rollout_ref:
 
   # Whether actor and rollout colocate on the same GPUs (hybrid engine).
-  # Set to False only with the v1 separate_async trainer: no colocated
+  # Set to False with the v1 separate_async or group_delivery trainer: no colocated
   # rollout replicas are created on the training GPUs and rollout is served
   # exclusively by the standalone rollout pool.
   # All other trainers require True.
@@ -234,11 +234,19 @@ trainer:
   # V1 trainer mode configs
   v1:
 
-    # Trainer mode: "sync", "colocate_async", "separate_async"
+    # Trainer mode: "sync", "colocate_async", "separate_async", "group_delivery"
     trainer_mode: sync
 
     # Synchronous PPO trainer
     sync: {}
+
+    # Synchronous GRPO on separate GPU pools. Backward per complete group,
+    # one optimizer step and weight sync after the entire fixed batch.
+    group_delivery:
+      # Seconds between checks for completed prompt groups.
+      poll_interval: 0.05
+      # Measurement control: delay all backward calls until the fixed rollout batch is complete.
+      wait_for_full_batch: False
 
     # Asynchronous PPO trainer with colocated trainer and rollout
     colocate_async:

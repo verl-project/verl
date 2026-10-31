@@ -1030,3 +1030,13 @@ def use_original_torch_compile():
             yield
     except Exception:
         yield
+
+
+def split_token_count(num_tokens: torch.Tensor, size: int, rank: int) -> torch.Tensor:
+    """Partition a replicated token count exactly for a later sum over parallel ranks.
+
+    Per-token gradient normalization must preserve the remainder when a micro-batch's
+    real token count is not divisible by the context-parallel degree. The returned
+    accounting shares need not describe the physical zigzag/contiguous token layout.
+    """
+    return (num_tokens // size + (num_tokens % size > rank)).to(torch.int)
