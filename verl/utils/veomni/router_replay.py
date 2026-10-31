@@ -75,16 +75,12 @@ mis-routing quietly.
 Positions without recorded routing
 ----------------------------------
 Some positions the routers are asked to route have no recorded routing:
-the pad suffix the engine appends, the final generated token, and
-tool-response tokens in a multi-turn trajectory. They arrive as all-zero
-target rows, and the batch carries ``routed_experts_mask`` saying exactly
-which rows are real; :meth:`VeOmniRouterReplay.on_router_forward` replays
-only those and keeps native routing elsewhere.
-
-When no mask is supplied (an older producer), replay falls back to
-treating an all-zero row as padding. Neither path inspects top-k values,
-so a token that genuinely routed every slot to one expert is still
-replayed, and topk=1 models are supported.
+the pad suffix the engine appends, and the trailing rows the rollout
+backend leaves at zero in R3. They all arrive as all-zero target rows,
+and :meth:`VeOmniRouterReplay.on_router_forward` routes any row with a
+duplicate top-k natively -- which covers them without a separate mask.
+An explicit all-zero check also keeps topk=1 padding rows native, where a
+duplicate cannot be formed.
 """
 
 from __future__ import annotations
@@ -249,20 +245,26 @@ class VeOmniRouterReplay:
                 "the targets with the same rule it applies to input_ids."
             )
 
-        # Positions with no recorded routing must keep native routing. Which rows
-        # those are is known exactly by whoever zero-filled the tensor and now
-        # travels with the batch as ``routed_experts_mask``.
+        # Defensive duplicate-detection.
         #
-        # The previous implementation inferred it from duplicate top-k values,
-        # which misclassified in both directions: a token that genuinely routed
-        # every slot to one expert looked like padding (losing replay for it), and
-        # with topk=1 padding rows can never look duplicated, so they silently
-        # routed to expert 0.
+        # VeOmni's MoE expert dispatch (``permute()`` in
+        # ``veomni/distributed/moe/moe_utils.py``) builds the permuted
+        # tensor via ``routing_map.bool().masked_select(...)``, which
+        # collapses duplicate top-k slots within one token to a single
+        # entry. ``input_splits`` keeps counting every slot, so the two
+        # diverge whenever ANY token has duplicate top-k experts and the
+        # EP all-to-all crashes with
+        # ``RuntimeError: Split sizes doesn't match total dim 0 size``.
+        # This is also the *only* mechanism protecting positions that have no
+        # recorded routing at all: the pad suffix the engine appends, and the
+        # trailing rows the rollout backend leaves at zero in R3 (the final
+        # generated token, tool-response tokens in a multi-turn trajectory).
+        # All of those are all-zero rows, hence duplicates. topk=1 models are
+        # covered by the explicit all-zero check, since a single slot can never
+        # look duplicated.
         #
-        # Fallback (no mask in the batch, e.g. an older producer): the row is
-        # padding iff it is entirely zero. That still needs no sort and never
-        # rejects a valid row that happens to repeat an expert, unless that row
-        # is also all-zero.
+        # Native indices are always distinct top-k choices, so falling back to
+        # them is correct regardless of what the rollout produced.
         if self._mask is not None:
             valid = self._mask
             if self._debug:
@@ -277,7 +279,13 @@ class VeOmniRouterReplay:
                         "(padding, final generated token, tool responses) as invalid."
                     )
         else:
-            valid = target.ne(0).any(dim=-1)
+            # Without a mask, replay only rows whose top-k entries are distinct
+            # and non-zero: duplicates would trip VeOmni's permute() dedup, and
+            # the all-zero check keeps padding rows of topk=1 models native,
+            # where a single slot can never look duplicated.
+            sorted_target, _ = target.sort(dim=-1)
+            has_duplicate = (sorted_target[:, 1:] == sorted_target[:, :-1]).any(dim=-1)
+            valid = ~has_duplicate & target.ne(0).any(dim=-1)
         return torch.where(valid.unsqueeze(-1), target, top_indices)
 
     def begin_record(self) -> None:
@@ -319,7 +327,9 @@ class VeOmniRouterReplay:
         ``targets`` carry real rollout routing. It must be produced by the same
         code path (and padded / sliced identically) as ``targets``; rows marked
         False replay native routing instead. When omitted, replay falls back to
-        treating all-zero rows as padding.
+        value-based validity: rows with a duplicate top-k stay native (this
+        covers zero-filled rows), and all-zero rows are native as well, which
+        keeps topk=1 padding correct.
         """
         if self._action is RouterReplayAction.RECORD:
             if targets is not None:
