@@ -291,6 +291,7 @@ Welcome to register your awesome project build with `verl` for other developers'
 - [MetaphorStar](https://metaphorstar.github.io/): **Image Metaphor** Understanding and Reasoning with End-to-End **Visual Reinforcement Learning** ![GitHub Repo stars](https://img.shields.io/github/stars/MING-ZCH/MetaphorStar)
 - [DART-GUI](https://github.com/Computer-use-agents/dart-gui): a decoupled agentic RL framework for Computer Use Agents, achieving ~2× training speedup and ~5× environment utilization! ![GitHub Repo stars](https://img.shields.io/github/stars/Computer-use-agents/dart-gui)
 - [Rethinking OPD](https://github.com/thunlp/OPD): Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe ![GitHub Repo stars](https://img.shields.io/github/stars/thunlp/OPD)
+- [Awesome-Perception-Aware-RLVR](https://github.com/zsxm1998/awesome-perception-aware-rlvr): 19 **perception-aware RLVR** and **on-policy distillation** methods for **VLMs** in one codebase built on EasyR1 (18 reproductions plus the official CGPO code), with **controlled comparisons** of most of them and one-click evaluation on 30+ benchmarks ![GitHub Repo stars](https://img.shields.io/github/stars/zsxm1998/awesome-perception-aware-rlvr)
 
 ## Contribution Guide
 
