@@ -92,6 +92,24 @@ def unpatch_postprocess(model: torch.nn.Module):
         model._postprocess = model._postprocess_backup
 
 
+def detached_output_layer(output_layer: Callable) -> Callable:
+    """Wrap the LM head so the MTP loss backpropagates into hidden states but never into its weight.
+
+    Covers both untied (``weight=None`` resolves to the module's own weight) and tied embeddings
+    (the shared weight is passed in). A non-grad weight takes Megatron's frozen-weight linear path.
+    """
+
+    def apply(hidden_states, *, weight=None, runtime_gather_output=None):
+        weight = output_layer.weight if weight is None else weight
+        return output_layer(
+            hidden_states,
+            weight=weight.detach() if weight is not None else None,
+            runtime_gather_output=runtime_gather_output,
+        )
+
+    return apply
+
+
 # copy from https://github.com/NVIDIA/Megatron-LM/blob/23e092f41ec8bc659020e401ddac9576c1cfed7e/megatron/core/models/gpt/gpt_model.py
 # patch the postprocess method of GPTModel to support advanced features like MTP, 1f1b overlap, etc.
 def _megatron_gptmodel_postprocess(
@@ -169,7 +187,7 @@ def _megatron_gptmodel_postprocess(
                 "hidden_states": hidden_states,
                 "labels": labels,
                 "loss_mask": loss_mask,
-                "output_layer": self.output_layer,
+                "output_layer": detached_output_layer(self.output_layer),
                 "output_weight": output_weight,
                 "runtime_gather_output": runtime_gather_output,
                 "is_training": self.training,
