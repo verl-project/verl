@@ -900,7 +900,7 @@ class PPOTrainer(ABC):
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
-        if self.trainer_mode != "sync":
+        if self.trainer_mode != "sync" and hasattr(tq, "load_checkpoint"):
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
@@ -994,15 +994,47 @@ class PPOTrainer(ABC):
                 critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
             )
 
-        # save dataloader state
-        local_mkdir_safe(local_global_step_folder)
+        # save dataloader state (stream directly to GCS when targeting gs:// or VERL_GCS_CKPT_BUCKET)
+        import io
+
+        def _write_ckpt_bytes(dst_path: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            gcs_target: tuple[str, str] | None = None
+            if dst_path.startswith("gs://"):
+                bkt, _, blb = dst_path[len("gs://") :].strip("/").partition("/")
+                if bkt:
+                    gcs_target = (bkt, blb)
+            else:
+                bkt = os.environ.get("VERL_GCS_CKPT_BUCKET", "").strip()
+                if bkt:
+                    mnt = os.path.normpath(os.environ.get("VERL_GCS_CKPT_MOUNT", "/gcs_ckpt"))
+                    norm_dst = os.path.normpath(dst_path)
+                    mnt_prefix = f"{mnt.rstrip('/')}/"
+                    if norm_dst == mnt or norm_dst.startswith(mnt_prefix):
+                        rel = norm_dst[len(mnt_prefix) :].lstrip("/") if norm_dst != mnt else ""
+                        pfx = os.environ.get("VERL_GCS_CKPT_PREFIX", "").strip("/")
+                        gcs_target = (bkt, f"{pfx}/{rel}".strip("/") if pfx and rel else (pfx or rel))
+
+            if gcs_target is not None:
+                from google.cloud import storage
+
+                bucket_name, blob_name = gcs_target
+                client = storage.Client()
+                client.bucket(bucket_name).blob(blob_name).upload_from_string(data, content_type=content_type)
+            else:
+                norm_dst = os.path.normpath(dst_path)
+                local_mkdir_safe(os.path.dirname(norm_dst))
+                with open(norm_dst, "wb") as out_f:
+                    out_f.write(data)
+
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
+        dl_buf = io.BytesIO()
+        torch.save(self.train_dataloader.state_dict(), dl_buf)
+        _write_ckpt_bytes(dataloader_local_path, dl_buf.getvalue())
 
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
-        if self.trainer_mode != "sync":
+        if self.trainer_mode != "sync" and hasattr(tq, "save_checkpoint"):
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
@@ -1022,8 +1054,11 @@ class PPOTrainer(ABC):
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
-        with open(local_latest_checkpointed_iteration, "w") as f:
-            f.write(str(self.global_steps))
+        _write_ckpt_bytes(
+            local_latest_checkpointed_iteration,
+            str(self.global_steps).encode("utf-8"),
+            content_type="text/plain",
+        )
 
         self.checkpoint_callback.on_save(
             trainer=self, global_step=self.global_steps, checkpoint_dir=local_global_step_folder, async_save=False
