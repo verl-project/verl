@@ -47,7 +47,7 @@ Last updated: 09/22/2026.
 依赖          版本                                               说明                                                       
 ============= ================================================= ===================
 CANN          ``9.1.0``                                         CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务 
-Python        ``3.11``                                          Python版本                                                 
+Python        ``3.12``                                          Python版本                                                 
 torch         ``2.10.0``                                        PyTorch 深度学习框架基础包                                 
 torch_npu     ``2.10.0.post4``                                  NPU PyTorch 适配插件                                       
 triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
@@ -55,8 +55,8 @@ triton-ascend ``3.2.2``                                         NPU Triton 适�
 transformers  ``5.10.4``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
 vLLM          ``0.23.0``                                        高性能 LLM 推理与服务引擎                                  
 vLLM-Ascend   ``0.23.0``                                        NPU vLLM 后端适配                                          
-Megatron-LM   ``core_r0.12.0``                                  大规模分布式训练框架                                       
-MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
+Megatron-LM   ``core_v0.18.0``                                  大规模分布式训练框架                                       
+MindSpeed     ``core_r0.18.0``                                  Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
 ============= ================================================= ===================
 
 
@@ -126,31 +126,25 @@ Megatron 训练后端支持
 
 .. code:: bash
     
-    # MindSpeed
+    # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron 相关依赖
     git clone https://gitcode.com/Ascend/MindSpeed.git
-    cd MindSpeed
-    git checkout 0c6c0ceaa523a96032dee1539a52032155e6404e
-    pip install -e .
-    cd ..
-
-    # Megatron
-    git clone https://github.com/NVIDIA/Megatron-LM.git
-    cd Megatron-LM
-    git checkout core_r0.12.0
-    pip install -e .
-    cd ..
-
-    # 配置环境变量
-    export PYTHONPATH=$PYTHONPATH:your_path/Megatron-LM
-    export PYTHONPATH=$PYTHONPATH:your_path/MindSpeed
-
-    # 安装 Megatron-Bridge
-    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
-    pip install -e Megatron-Bridge --no-build-isolation --no-deps
-
-    # 安装 MindSpeed-Bridge（仓库默认分支）
+    cd MindSpeed && git checkout core_r0.18.0 && cd ..
+    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
     git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+
+    # 安装 Megatron 及 Ascend 适配组件
+    pip install -e Megatron-LM
+    pip install -e MindSpeed
+    pip install -e MegatronAdaptor
+    pip install -e TransformerEngineNPU --no-build-isolation
+    pip install -e MindSpeed-Ops --no-build-isolation --no-deps
+    pip install -r MindSpeed-Bridge/requirements.txt
     pip install -e MindSpeed-Bridge --no-deps
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps
 
     # 安装 transformers
     pip install transformers==5.10.4
