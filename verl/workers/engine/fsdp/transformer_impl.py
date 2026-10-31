@@ -257,7 +257,7 @@ class FSDPEngine(BaseEngine):
 
     def _build_module(self):
         from verl.utils.model import get_hf_auto_model_class
-        from verl.utils.torch_dtypes import PrecisionType
+        from verl.utils.torch_dtypes import PrecisionType, cast_module_params_to_dtype
 
         torch_dtype = self.engine_config.model_dtype
 
@@ -333,8 +333,12 @@ class FSDPEngine(BaseEngine):
                 fused_kernels_backend=fused_kernels_backend,
             )
 
-            # some parameters may not in torch_dtype
-            module.to(torch_dtype)
+            # Some parameters may not be in torch_dtype. Cast the parameters
+            # explicitly instead of calling `module.to(torch_dtype)`: the
+            # latter would also downcast FP32 buffers such as
+            # RotaryEmbedding's `inv_freq`, silently changing the positional
+            # encodings even when FSDP later restores the buffers to FP32 (#8154).
+            cast_module_params_to_dtype(module, torch_dtype)
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
