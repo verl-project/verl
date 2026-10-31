@@ -21,6 +21,7 @@ import ray
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
+from ray.util.state import get_actor
 
 from verl.plugin.platform import get_platform
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
@@ -29,6 +30,64 @@ from verl.utils.device import get_device_name
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
+
+
+# Deadline for a rollout server actor to finish creation. A colocated server actor is
+# hard-pinned (NodeAffinity, soft=False) to its training worker's node; if that node has no
+# free slot the actor never schedules and the subsequent .remote() call would block forever.
+# Bounding the wait turns a silent hang into an actionable error.
+ROLLOUT_SERVER_SCHEDULE_TIMEOUT_S = 300.0
+
+
+async def wait_rollout_servers_scheduled(
+    servers: list[ActorHandle],
+    node_ids: list[str],
+    *,
+    timeout_s: float = ROLLOUT_SERVER_SCHEDULE_TIMEOUT_S,
+) -> None:
+    """Fail fast if any rollout server actor is not created within ``timeout_s``.
+
+    ``node_ids[i]`` is the node ``servers[i]`` is pinned to. Waits on ``__ray_ready__``, which
+    resolves once the actor is placed and its lightweight ``__init__`` has run; engine startup
+    happens later in ``launch_server`` and is unaffected. The first ``__init__`` failure is
+    raised without waiting for the other actors.
+    """
+    ready = {
+        asyncio.ensure_future(server.__ray_ready__.remote()): (server, node_id)
+        for server, node_id in zip(servers, node_ids, strict=True)
+    }
+    done, pending = await asyncio.wait(ready, timeout=timeout_s, return_when=asyncio.FIRST_EXCEPTION)
+    for task in pending:
+        task.cancel()
+    for task in done:
+        task.result()
+    if not pending:
+        return
+    detail = "; ".join(await asyncio.gather(*(_describe_unready_actor(*ready[task]) for task in pending)))
+    raise RuntimeError(
+        f"Rollout server actor(s) still not created after {timeout_s:.0f}s: {detail}. "
+        "A colocated rollout server is hard-pinned to its training worker's node "
+        "(NodeAffinity, soft=False); that node has no free slot for it. Check "
+        "`ray list actors` for PENDING_CREATION servers and either reduce per-node "
+        "resource requests or use a layout with >=2 usable GPUs per node for "
+        "cross-node hybrid rollout."
+    )
+
+
+async def _describe_unready_actor(server: ActorHandle, node_id: str) -> str:
+    actor_id = server._actor_id.hex()
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(get_actor, actor_id, timeout=10), timeout=15)
+    except Exception:
+        # Diagnostics only: the State API needs the dashboard, which a cluster may not run.
+        info = None
+    # The State API leaves node_id empty until the actor is placed, so report the pinned node.
+    if not info:
+        return f"{actor_id} target_node={node_id} state=unknown"
+    return (
+        f"{info.get('name') or actor_id} target_node={node_id} state={info.get('state')} "
+        f"required_resources={info.get('required_resources')}"
+    )
 
 
 class TokenOutput(BaseModel):
