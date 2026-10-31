@@ -22,6 +22,7 @@ pytest.importorskip("ray")
 pytest.importorskip("vllm")
 
 from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics
+from verl.workers.rollout.replica import RolloutMode
 from verl.workers.rollout.vllm_rollout import vllm_async_server
 
 
@@ -68,3 +69,28 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
 
     assert metrics["rollout/spec_accept_rate"] > 0.0
     assert metrics["rollout/spec_accept_length"] > 1.0
+
+
+@pytest.mark.parametrize(
+    "backend,rollout_mode,expected_level",
+    [
+        ("nccl", RolloutMode.COLOCATED, 1),
+        ("nixl", RolloutMode.COLOCATED, 1),
+        ("delta_sharded", RolloutMode.COLOCATED, 1),
+        ("naive", RolloutMode.COLOCATED, 2),
+        ("nccl", RolloutMode.HYBRID, 2),
+        ("nccl", RolloutMode.STANDALONE, 2),
+    ],
+)
+@pytest.mark.parametrize("lora", [{}, {"rank": 8, "resync_base": True}])
+def test_sleep_level_preserves_weights_until_non_naive_colocated_sync(
+    monkeypatch, backend, rollout_mode, expected_level, lora
+):
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(checkpoint_engine=SimpleNamespace(backend=backend))
+    server.model_config = SimpleNamespace(lora_rank=0, lora=lora)
+    server.rollout_mode = rollout_mode
+
+    assert server._resolve_sleep_level() == expected_level
