@@ -1018,7 +1018,7 @@ class MegatronEngine(BaseEngine):
             # QAT-trained master weights quantize to the same values the fake quant used in training.
             refresh_scales = getattr(self._rollout_weight_quantizer, "refresh_input_global_scales", None)
             if refresh_scales is not None:
-                refresh_scales(self.module)
+                refresh_scales(self.module, pp_group=mpu.get_pipeline_model_parallel_group())
             per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
 
         return per_tensor_param, peft_config
