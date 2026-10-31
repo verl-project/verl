@@ -471,10 +471,14 @@ class MegatronEngine(BaseEngine):
         if not self.engine_config.use_fused_kernels:
             return
 
-        if not self.engine_config.use_remove_padding or self.is_value_model or self.model_config.mtp.enable:
+        # mtp.enable is also set for rollout speculative decoding, which only loads
+        # and syncs draft weights. That path does not enter the training loss.
+        # Keep fused log-prob kernels unless MTP loss itself is trained.
+        mtp_train = self.model_config.mtp.enable and self.model_config.mtp.enable_train
+        if not self.engine_config.use_remove_padding or self.is_value_model or mtp_train:
             logger.warning_once(
-                "Fused kernels require remove-padding and are not supported for value models or when MTP is enabled "
-                "in Megatron engine; disabling."
+                "Fused kernels require remove-padding and are not supported for value models or when MTP "
+                "training is enabled in Megatron engine; disabling."
             )
             self.engine_config.use_fused_kernels = False
             return

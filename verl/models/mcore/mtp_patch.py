@@ -253,6 +253,30 @@ def _megatron_gptmodel_postprocess(
                     safe_num_tokens = num_tokens.clamp(min=1)
                     hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss / safe_num_tokens)
 
+    # Megatron-Core 0.18 runs fused log-prob kernels from this hook. This replacement
+    # owns _postprocess whenever MTP weights are loaded, including inference-only MTP,
+    # so the hook has to be forwarded or the fused path is dropped.
+    # Labels stay None on that path, which skips the drafter and MTP loss above.
+    if output_processor is not None:
+        return output_processor(
+            hidden_states=hidden_states,
+            output_layer=self.output_layer,
+            output_weight=output_weight,
+            labels=labels,
+            loss_mask=loss_mask,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            decoder_input=decoder_input,
+            inference_context=inference_context,
+            packed_seq_params=packed_seq_params,
+            runtime_gather_output=runtime_gather_output,
+            context=output_processor_context,
+            compute_language_model_loss=self.compute_language_model_loss,
+            scale_logits=getattr(self, "_scale_logits", None),
+            config=self.config,
+        )
+
     logits, _ = self.output_layer(hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output)
     # [s b h] => [b s h]
     return logits.transpose(0, 1).contiguous()
