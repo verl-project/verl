@@ -83,6 +83,48 @@ async def test_nccl_checkpoint_engine(
     ray.shutdown()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("num_chains, num_slots", [(1, 2), (8, 4)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
+@auto_await
+async def test_mori_checkpoint_engine(
+    num_chains,
+    num_slots,
+    num_trainer,
+    num_rollout,
+    num_nodes=1,
+    num_gpus_per_node=_ngpus,
+    bucket_size_mb=512,
+    check_allclose=True,
+    model_path="~/models/Qwen/Qwen3-8B-Base",
+):
+    pytest.importorskip("mori", reason="mori checkpoint engine needs MoRI (pip install amd-mori) and an RDMA NIC")
+    model_path = os.path.expanduser(model_path)
+    ray.init(runtime_env={"env_vars": {"VERL_LOGGING_LEVEL": "DEBUG"}})
+
+    # num_chains=1: one stripe, from trainer rank 0; 8: one stripe per trainer rank (min(8, num_trainer))
+    checkpoint_engine_config = CheckpointEngineConfig(
+        backend="mori",
+        update_weights_bucket_megabytes=bucket_size_mb,
+        engine_kwargs={"mori": {"num_chains": num_chains, "num_slots": num_slots}},
+    )
+    model_config = HFModelConfig(path=model_path, use_remove_padding=True)
+    rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
+
+    resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
+    trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
+    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+
+    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
+    for _ in range(3):
+        await checkpoint_manager.update_weights()
+        rollout.check_weights()
+
+    ray.shutdown()
+
+
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("device", ["cuda", "cpu"])

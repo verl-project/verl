@@ -20,6 +20,20 @@ Checkpoint Engine is an unified abstract layer to synchronize weights between va
 |nixl|NIXL|all_gather+ring p2p|Various transport backends (D2D, H2H, H2D, etc)<br>- UCX<br>- UCCL<br>- Mooncacke|Medium/High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Elastic rollout<br>- Rollout fault tolerance<br>- Heterogeneous hardware rollout
 |kimi_ckpt_engine|MOONCAKE+NCCL/HCCL|p2p+broadcast|NVIDIA/Ascend|High|Low: rebuild communication group|Off-policy training<br>- Actor/rollout disaggregated<br>- Save checkpoint each time
 |mooncake|Mooncake Transfer Engine|all_gather+ring p2p|NVIDIA/Ascend|High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Fixed clusters
+|mori|MoRI-IO|all_gather+p2p striped over all NICs, XGMI fan-out inside each rollout node|AMD GPU & RDMA NIC (Pollara AINIC tested)|High|High: topology rebuilt each sync|Off-policy training<br>- Actor/rollout disaggregated<br>- AMD clusters
+
+##### mori detail:
+
+`mori` pushes buckets with one-sided RDMA WRITE through [MoRI-IO](https://github.com/ROCm/mori) (`pip install amd-mori`). The model is split into stripes, one per trainer rank (up to `num_chains`, default 8), each sent by its own trainer GPU through its own NIC. On every rollout node one GPU holds each stripe (a different GPU per stripe, so all NICs of the node are used): it receives the stripe from outside and copies it to the other GPUs of the node over XGMI; the holders of a stripe on different rollout nodes form a chain. Each rollout node therefore takes one copy of the model, spread over its NICs.
+
+Each worker registers one region of `num_slots * update_weights_bucket_megabytes` (default 2 slots) once and keeps it, the QPs and the sockets across syncs; each stripe gets `update_weights_bucket_megabytes / num_chains` per slot, so larger buckets mean fewer, larger transfers. Options go in `engine_kwargs.mori` (`num_chains`, `num_slots`, `intra_node`, `qp_per_transfer`, `num_nics_per_transfer`, `timeout_s`). Buckets are allocated with cupy because MoRI cannot register PyTorch expandable-segment (VMM) memory.
+
+**Failures are fail-stop.** MoRI 1.2.4 does not guarantee that a failed or abandoned transfer has stopped touching memory (a FAILED status can leave work requests posted), and a GPU consumer may still read a slot when its sync is aborted. So a worker whose sync fails, raises, is cancelled or is closed early marks its engine unusable before anything else and tells its peers, which then fail at once. It keeps its MoRI engine, region and transfer statuses alive for the rest of the process and refuses every further call; recreate the rollout and trainer workers to continue.
+- A worker refuses `prepare`, `init_process_group` and a new sync while its previous sync is still running. `ray.get` in the manager returns on the first error, so a retry could otherwise reach a worker that is still unwinding.
+- A receiver's sync starts when `receive_weights` is called, not at its first iteration; closing the stream before the first tensor fails the sync too.
+- A receiver grants its slots to its previous hops only once it has entered the sync, so nothing is ever written into a worker that is not guarding its region.
+
+**Rollout workers that join, leave or are replaced.** Each topology gets an id that tags its messages. The engine descriptors and sockets of peers that left are released at once. MoRI 1.2.4's `deregister_remote_engine` keeps their RDMA endpoints, sessions and XGMI IPC mappings until the MoRI engine is destroyed, so once more than max(16, 2 x current peers) peers have left, the next `prepare` replaces the worker's MoRI engine (same region, re-registered).
 
 ##### kimi_ckpt_engine detail:
 
