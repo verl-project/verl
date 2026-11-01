@@ -12,19 +12,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Add the 1.5M/2M/4M DSV4.1 context profiles to a shared TOML file.
+"""Add the 1.5M/1.55M/2M/4M DSV4.1 context profiles to a shared TOML file.
 
-The script copies the existing ``sft-geo3k-cp32-ctx1m`` section and changes
-only its sequence-length field and both parquet paths. It is idempotent and
-keeps the profile file's surrounding comments and formatting. The generated
-parquet is used for both train and validation because the context probe is a
-throughput/memory stress dataset, not a held-out quality set.
+The 1.5M, 2M and 4M sections copy ``sft-geo3k-cp32-ctx1m``; the 1.55M
+section copies the generated 1.5M section. Each changes ``max_length`` and
+both parquet paths. The 1.55M profile reads
+``trainreal1_55m.parquet``, which is reproduced from ``trainreal1_5m.parquet``
+by truncating message text to the requested token budget using the measured
+0.3867 tokens/character ratio. Generate it with
+``scripts/tools/truncate_ctxprobe_parquet.py``. The 1.5M, 2M and 4M parquet
+files are supplied separately. One generated parquet is used for both train
+and validation because these are throughput/memory stress profiles, not held-out
+quality sets. Syncing is idempotent and preserves surrounding TOML formatting.
 
 Example::
 
     python scripts/tools/sync_dsv41_context_profiles.py \
         --profile /shared/dsv41_profiles.toml \
         --data-dir /shared/data/ctxprobe
+
+    python scripts/tools/truncate_ctxprobe_parquet.py \
+        --source /shared/data/ctxprobe/trainreal1_5m.parquet \
+        --target-tokens 1550000 \
+        --output /shared/data/ctxprobe/trainreal1_55m.parquet
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ from pathlib import Path
 
 TARGETS = (
     ("sft-geo3k-cp32-ctx1_5m", 1_500_000, "trainreal1_5m.parquet"),
+    ("sft-geo3k-cp32-ctx1_55m", 1_700_000, "trainreal1_55m.parquet"),
     ("sft-geo3k-cp32-ctx2m", 2_000_000, "trainreal2m.parquet"),
     ("sft-geo3k-cp32-ctx4m", 4_000_000, "trainreal4m.parquet"),
 )
@@ -58,9 +69,12 @@ def _replace_assignment(block: str, key: str, value: str) -> str:
     return block
 
 
-def _render_block(base_block: str, name: str, seq_len: int, parquet: Path) -> str:
+def _render_block(base_block: str, name: str, max_length: int, parquet: Path) -> str:
     block = re.sub(r"^\[[^\]]+\]", f"[{name}]", base_block, count=1, flags=re.MULTILINE)
-    block = _replace_assignment(block, "seq_len", str(seq_len))
+    block = _replace_assignment(block, "max_length", str(max_length))
+    lengths = re.findall(r"(?m)^max_length\s*=\s*(.*?)\s*$", block)
+    if lengths != [str(max_length)]:
+        raise AssertionError(f"profile section [{name}] max_length was not set to {max_length}")
     quoted_path = json.dumps(str(parquet))
     block = _replace_assignment(block, "train_files", quoted_path)
     block = _replace_assignment(block, "val_files", quoted_path)
@@ -72,10 +86,16 @@ def sync_profile(profile: Path, data_dir: Path, *, check_data: bool = True) -> N
     base = _section(text, BASE_PROFILE)
     if base is None:
         raise ValueError(f"profile does not contain [{BASE_PROFILE}]")
+    existing_15m = _section(text, "sft-geo3k-cp32-ctx1_5m")
+    source_15m = existing_15m.group(0) if existing_15m is not None else base.group(0)
 
-    rendered = {
-        name: _render_block(base.group(0), name, seq_len, data_dir / filename) for name, seq_len, filename in TARGETS
-    }
+    rendered = {}
+    for name, max_length, filename in TARGETS:
+        if name in {"sft-geo3k-cp32-ctx1_5m", "sft-geo3k-cp32-ctx1_55m"}:
+            source_block = source_15m
+        else:
+            source_block = base.group(0)
+        rendered[name] = _render_block(source_block, name, max_length, data_dir / filename)
     if check_data:
         missing = [path for path in (data_dir / filename for _, _, filename in TARGETS) if not path.is_file()]
         if missing:
@@ -109,7 +129,11 @@ def _parse_args() -> argparse.Namespace:
         "--data-dir",
         type=Path,
         required=True,
-        help="Directory containing trainreal1_5m.parquet, trainreal2m.parquet and trainreal4m.parquet",
+        help=(
+            "Directory containing trainreal1_5m.parquet, trainreal1_55m.parquet, trainreal2m.parquet and "
+            "trainreal4m.parquet; generate trainreal1_55m.parquet from trainreal1_5m.parquet with "
+            "scripts/tools/truncate_ctxprobe_parquet.py (1,550,000 tokens at measured 0.3867 tokens/character)"
+        ),
     )
     parser.add_argument(
         "--allow-missing-data",

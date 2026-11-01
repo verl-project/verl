@@ -20,6 +20,7 @@ import pytest
 from scripts.tools.extend_ctxprobe_parquet import extend_dataframe
 from scripts.tools.extend_ctxprobe_parquet import main as extend_ctxprobe_main
 from scripts.tools.sync_dsv41_context_profiles import TARGETS, _section, sync_profile
+from scripts.tools.truncate_ctxprobe_parquet import truncate_messages_parquet
 
 
 def test_extend_dataframe_cycles_token_aligned_columns():
@@ -144,10 +145,17 @@ def test_sync_profile_copies_ctx1m_and_updates_lengths_and_paths(tmp_path):
     profile.write_text(
         "[sft-geo3k-cp32-ctx1m]\n"
         'description = "baseline profile"\n'
-        "seq_len = 1048576\n"
+        "max_length = 1048576\n"
         'train_files = "/data/ctxprobe/trainreal1m.parquet"\n'
         'val_files = "/data/ctxprobe/valreal1m.parquet"\n'
         "train_batch_size = 1\n"
+        "\n"
+        "[sft-geo3k-cp32-ctx1_5m]\n"
+        'description = "1.5m profile"\n'
+        "max_length = 1500000\n"
+        'train_files = "/data/ctxprobe/trainreal1_5m.parquet"\n'
+        'val_files = "/data/ctxprobe/trainreal1_5m.parquet"\n'
+        "train_batch_size = 2\n"
     )
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -157,18 +165,72 @@ def test_sync_profile_copies_ctx1m_and_updates_lengths_and_paths(tmp_path):
     sync_profile(profile, data_dir)
     contents = profile.read_text()
 
-    expected_lengths = (1_500_000, 2_000_000, 4_000_000)
-    for (name, _, filename), seq_len in zip(TARGETS, expected_lengths, strict=True):
+    for name, expected_length, filename in TARGETS:
         block_match = _section(contents, name)
         assert block_match is not None
         block = block_match.group(0)
         expected_file = re.escape(str(data_dir / filename))
-        assert re.search(rf"(?m)^seq_len = {seq_len}$", block)
+        assert re.findall(r"(?m)^max_length\s*=\s*(.*?)\s*$", block) == [str(expected_length)]
         assert re.search(rf'(?m)^train_files = "{expected_file}"$', block)
         assert re.search(rf'(?m)^val_files = "{expected_file}"$', block)
-        assert 'description = "baseline profile"' in block
-        assert "train_batch_size = 1" in block
+        if name in {"sft-geo3k-cp32-ctx1_5m", "sft-geo3k-cp32-ctx1_55m"}:
+            assert 'description = "1.5m profile"' in block
+            assert "train_batch_size = 2" in block
+        else:
+            assert 'description = "baseline profile"' in block
+            assert "train_batch_size = 1" in block
 
     first_write = contents
     sync_profile(profile, data_dir)
     assert profile.read_text() == first_write
+
+
+def test_truncate_messages_parquet_honors_character_budget_and_preserves_schema(tmp_path):
+    source_path = tmp_path / "source.parquet"
+    output_path = tmp_path / "truncated.parquet"
+    pd.DataFrame(
+        {
+            "sample_id": ["first", "second"],
+            "messages": [
+                [
+                    {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "there"}]},
+                ],
+                [
+                    {"role": "user", "content": [{"type": "text", "text": "world"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "later"}]},
+                ],
+            ],
+        }
+    ).to_parquet(source_path, index=False)
+
+    truncate_messages_parquet(source_path, output_path, target_tokens=6, tokens_per_character=0.5)
+    result = pd.read_parquet(output_path)
+
+    assert result.columns.tolist() == ["sample_id", "messages"]
+    assert result["sample_id"].tolist() == ["first", "second"]
+    assert result.at[0, "messages"].tolist() == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "there"}]},
+    ]
+    assert result.at[1, "messages"].tolist() == [{"role": "user", "content": [{"type": "text", "text": "wo"}]}]
+    assert (
+        sum(len(part["text"]) for messages in result["messages"] for message in messages for part in message["content"])
+        == 12
+    )
+    assert 12 * 0.5 == 6
+
+
+def test_truncate_messages_parquet_is_idempotent(tmp_path):
+    source_path = tmp_path / "source.parquet"
+    output_path = tmp_path / "truncated.parquet"
+    pd.DataFrame(
+        {"messages": [[{"role": "user", "content": "abcdef"}, {"role": "assistant", "content": "ghijkl"}]]}
+    ).to_parquet(source_path, index=False)
+
+    truncate_messages_parquet(source_path, output_path, target_tokens=5, tokens_per_character=0.5)
+    first_result = pd.read_parquet(output_path)
+    truncate_messages_parquet(source_path, output_path, target_tokens=5, tokens_per_character=0.5)
+    second_result = pd.read_parquet(output_path)
+
+    pd.testing.assert_frame_equal(first_result, second_result)
