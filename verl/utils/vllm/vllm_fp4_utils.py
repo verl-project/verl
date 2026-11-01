@@ -36,7 +36,13 @@ from unittest.mock import patch
 
 import torch
 
+from verl.utils.vllm.vllm_fp8_utils import dsv4_fp8_linear_leaf, quantize_dsv4_fp8_linear
+
 logger = logging.getLogger(__name__)
+
+# Default FP8 weight block size for DeepSeek-V4-Flash (128x128). DeepSeek-V4.1-Flash
+# uses 32x32; pass the correct value via iter_deepseek_v4_weights(block_size=...).
+_DSV4_DEFAULT_BLOCK_SIZE = 128
 
 _MXFP4_SF_BLOCK = 32
 _MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
@@ -46,16 +52,19 @@ _NVFP4_LIVE_ATTR = "_verl_nvfp4_live_params"
 _NVFP4_TRTLLM_DERIVED = ("g1_scale_c", "gemm1_clamp_limit", "gemm1_beta", "gemm1_alpha")
 
 
+_DEEPSEEK_V4_MODEL_TYPES = ("deepseek_v4", "deepseek_v41")
+
+
 def is_deepseek_v4_model(model):
     if model is None:
         return False
 
     for obj in (model, getattr(model, "config", None), getattr(model, "hf_config", None)):
         if obj is not None and getattr(obj, "model_type", None) is not None:
-            return obj.model_type == "deepseek_v4"
+            return obj.model_type in _DEEPSEEK_V4_MODEL_TYPES
 
     text_config = getattr(getattr(model, "config", None), "text_config", None)
-    return getattr(text_config, "model_type", None) == "deepseek_v4"
+    return getattr(text_config, "model_type", None) in _DEEPSEEK_V4_MODEL_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +165,75 @@ def install_mxfp4_mxfp8_compressed_tensors_patch():
 
     CompressedTensorsMoEMethod.get_moe_method = staticmethod(get_moe_method)
     CompressedTensorsMoEMethod._verl_mxfp4_mxfp8_patch = True
+
+
+# MXFP4 quantization — inlined from Megatron-Bridge quantization_utils (no megatron import here).
+_FP4_E2M1_MAX = 6.0
+
+
+def _quantize_mxfp4_e2m1_like_scale(weight, source_scale, *, name="", block_size=_MXFP4_SF_BLOCK):
+    """Quantize a 2-D weight to packed MXFP4 E2M1 with E8M0 (uint8) scales of ``source_scale``'s geometry."""
+    if weight.ndim != 2:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(f"MXFP4 quantized export expects a 2-D weight{label}, got {weight.ndim}D")
+    rows, cols = weight.shape
+    if cols % 2 != 0 or cols % block_size != 0 or source_scale.shape != (rows, cols // block_size):
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(
+            f"Unsupported MXFP4 geometry{label}: weight={tuple(weight.shape)} scale={tuple(source_scale.shape)}"
+        )
+    weight_f32 = weight.to(torch.float32)
+    packed = torch.empty((rows, cols // 2), dtype=torch.uint8, device=weight.device)
+    scale_f32 = torch.empty(tuple(source_scale.shape), dtype=torch.float32, device=weight.device)
+    boundaries = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=torch.float32, device=weight.device)
+    max_chunk_elements = 16_000_000
+    rows_per_chunk = max(1, min(rows, max_chunk_elements // max(cols, 1)))
+    scale_cols = source_scale.shape[1]
+    for row_start in range(0, rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, rows)
+        chunk = weight_f32[row_start:row_end].reshape(-1, scale_cols, block_size)
+        chunk_amax = chunk.abs().amax(dim=-1)
+        unrounded_scale = torch.where(chunk_amax > 0, chunk_amax / _FP4_E2M1_MAX, torch.ones_like(chunk_amax))
+        chunk_scale = torch.exp2(torch.ceil(torch.log2(unrounded_scale)).clamp(min=-127, max=127))
+        scale_f32[row_start:row_end] = chunk_scale
+        normalized = chunk / chunk_scale[:, :, None]
+        codes = torch.bucketize(normalized.abs(), boundaries).to(torch.uint8)
+        codes = (codes | ((normalized < 0).to(torch.uint8) * 8)).reshape(row_end - row_start, cols)
+        lo = codes[:, 0::2].to(torch.int16)
+        hi = codes[:, 1::2].to(torch.int16)
+        packed[row_start:row_end] = (lo | (hi << 4)).to(torch.uint8)
+    output_scale = (torch.log2(scale_f32).round() + 127).clamp(min=0, max=254).to(torch.uint8)
+    return packed.contiguous().view(torch.int8), output_scale
+
+
+def _quantize_expert_to_mxfp4(weight):
+    """Quantize a 2-D bf16 expert weight to packed MXFP4 E2M1 + e8m0 scale
+    (geometry [out, in] -> scale [out, in//32])."""
+    rows, cols = weight.shape
+    scale_geom = torch.empty(rows, cols // _MXFP4_SF_BLOCK, dtype=torch.uint8, device=weight.device)
+    packed, scale = _quantize_mxfp4_e2m1_like_scale(weight, scale_geom, name="dsv4_expert")
+    return packed, scale
+
+
+def iter_deepseek_v4_weights(weights, block_size=_DSV4_DEFAULT_BLOCK_SIZE):
+    """Re-quantize a BF16 DeepSeek-V4 refit stream into the checkpoint's FP8/MXFP4 layout.
+
+    BF16 routed experts become MXFP4 + E8M0 scales and BF16 FP8-linears become
+    FP8 + E8M0 scales; already-quantized tensors pass through unchanged.
+    """
+    for name, weight in weights:
+        if ".experts." in name and name.endswith(".weight") and weight.dtype == torch.bfloat16:
+            packed, scale = _quantize_expert_to_mxfp4(weight)
+            yield name, packed
+            yield name[: -len(".weight")] + ".scale", scale
+            continue
+        fp8_leaf = dsv4_fp8_linear_leaf(name)
+        if fp8_leaf is not None and weight.dtype == torch.bfloat16:
+            fp8_weight, scale = quantize_dsv4_fp8_linear(weight, fp8_leaf, block_size=block_size)
+            yield name, fp8_weight
+            yield name[: -len(".weight")] + ".scale", scale
+            continue
+        yield name, weight
 
 
 def _is_mxfp4_fused_moe_module(module):

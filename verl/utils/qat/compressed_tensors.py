@@ -650,14 +650,20 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
     compressed-tensors' ``weight_scale``.  The quantization calculation is
     shared with the compressed-tensors FP8_BLOCK exporter.
 
-    DeepSeek-V4 uses this dispatcher entry too, but the quantizer passes through
-    its private mixed FP8/FP4 layout already exported by Megatron-Bridge.
+    DeepSeek-V4 uses this dispatcher entry too, but its private mixed FP8/FP4
+    layout bypasses the standard export: Megatron-Bridge already emits it, and
+    AutoModel's BF16 export is re-quantized into it by ``iter_deepseek_v4_weights``.
     """
 
     def __init__(self, fp8_config: Mapping[str, Any], *, model_types: Iterable[Optional[str]] = ()):
         quant_method = str(fp8_config.get("quant_method", "")).lower()
         self.passthrough = bool(_DEEPSEEK_V4_MODEL_TYPES & set(model_types))
         if self.passthrough:
+            # Square FP8 linear blocks: 128x128 for V4-Flash, 32x32 for V4.1-Flash.
+            block_size = fp8_config.get("weight_block_size")
+            if block_size is not None and (len(block_size) != 2 or block_size[0] != block_size[1]):
+                raise NotImplementedError(f"DeepSeek-V4 export expects square FP8 weight blocks, got {block_size!r}")
+            self.dsv4_block_size = None if block_size is None else int(block_size[0])
             return
         activation_scheme = fp8_config.get("activation_scheme")
         block_size = fp8_config.get("weight_block_size")
@@ -696,9 +702,19 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
 
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
         if self.passthrough:
-            # Megatron-Bridge already exported DeepSeek-V4's private FP8/FP4
-            # layout. vLLM allocated the expert bytes as uint8, so only
-            # reinterpret the packed values and E8M0 scales before transfer.
+            # Re-quantize AutoModel's BF16 experts and FP8 linears; the already
+            # quantized Megatron-Bridge stream comes through unchanged. The helper
+            # lives under ``verl.utils.vllm``, which imports vLLM, so SGLang
+            # environments (no vLLM) keep the plain passthrough.
+            try:
+                from verl.utils.vllm.vllm_fp4_utils import iter_deepseek_v4_weights
+            except ModuleNotFoundError:
+                pass
+            else:
+                kwargs = {} if self.dsv4_block_size is None else {"block_size": self.dsv4_block_size}
+                weights = iter_deepseek_v4_weights(weights, **kwargs)
+            # vLLM allocated the expert bytes as uint8, so reinterpret the packed
+            # values and E8M0 scales before transfer.
             for name, tensor in weights:
                 if ".experts." in name and tensor.dtype in (torch.int8, torch.float8_e8m0fnu):
                     tensor = tensor.view(torch.uint8)
