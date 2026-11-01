@@ -221,11 +221,27 @@ def init_megatron_optim_config(
 def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
+    lora_plus_ratio: float = 1.0,
 ):
-    # Base optimizer.
+    # LoRA+ (https://arxiv.org/abs/2402.12354): build per-group LR overrides in
+    # Megatron-Bridge when ratio != 1.0; else mcore uses standard overrides.
+    config_overrides = None
+    if lora_plus_ratio and lora_plus_ratio != 1.0:
+        from megatron.bridge.peft.lora import get_lora_plus_config_overrides
+
+        config_overrides = get_lora_plus_config_overrides(config, lora_plus_ratio)
+        print_rank_0(
+            f"LoRA+ enabled: lora_plus_ratio={lora_plus_ratio} "
+            f"(linear_in/A max_lr={config.lr}, linear_out/B max_lr={config.lr * lora_plus_ratio})"
+        )
+
+    # Base optimizer. `config_overrides` only exists in newer megatron-core, so only
+    # pass it when LoRA+ is on.
+    optimizer_kwargs = {"config_overrides": config_overrides} if config_overrides is not None else {}
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
+        **optimizer_kwargs,
     )
 
 
