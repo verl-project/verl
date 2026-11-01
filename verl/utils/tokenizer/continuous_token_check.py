@@ -69,7 +69,8 @@ _FIRST_ASSISTANT = {
     "tool_calls": [_tool_call("call_0", "Seattle")],
 }
 
-# Every assistant turn is followed by the context run an agent loop would append after it.
+# Every assistant turn is followed by the context run an agent loop would append after it. Conversations
+# with tool calls render with the tool schemas, the others without, since templates differ without tools.
 _CHECK_CONVERSATIONS: dict[str, tuple[dict[str, Any], ...]] = {
     "tool": (
         _SYSTEM,
@@ -91,6 +92,14 @@ _CHECK_CONVERSATIONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"role": "user", "content": "The weather tool is down. Answer from what you know."},
         {"role": "assistant", "content": "Boise is usually the sunniest of the three."},
         {"role": "user", "content": "Thanks. What about tomorrow?"},
+    ),
+    "chat": (
+        _SYSTEM,
+        _USER,
+        {"role": "assistant", "content": "Boise is usually the sunniest of the three."},
+        {"role": "user", "content": "Thanks. What about tomorrow?"},
+        {"role": "assistant", "content": "Boise again, with a clear sky."},
+        {"role": "user", "content": "And the day after?"},
     ),
 }
 _REASONING = "The user wants the city with the best weather."
@@ -124,10 +133,11 @@ def check_continuous_token_builder(
     """
     results = []
     for name, conversation in _check_cases():
+        tools = _TOOLS if any("tool_calls" in message for message in conversation) else None
         for start, end in _merge_boundaries(conversation):
             roles = "_".join(message["role"] for message in conversation[start:end])
             case = f"{name}.merge_at{start}.{roles}"
-            results.append(_check_boundary(builder, conversation, start, end, stop_token_ids, case))
+            results.append(_check_boundary(builder, conversation, tools, start, end, stop_token_ids, case))
     return results
 
 
@@ -178,14 +188,18 @@ def verify_continuous_token_builder(
             _format_results(history[:1]),
         )
 
-    compared = sum(result.status != "skipped" for result in results)
-    if compared == 0:
+    # A conversation is verified when its plain or its reasoning variant rendered.
+    verified = {_conversation(result) for result in results if result.status != "skipped"}
+    unverified = [result for result in results if _conversation(result) not in verified]
+    if unverified:
         logger.warning(
-            "Could not verify Continuous Token builder %s against the chat template:\n%s",
+            "Could not verify Continuous Token builder %s against the chat template for the %s conversations:\n%s",
             builder_desc,
-            _format_results(results),
+            ", ".join(sorted({_conversation(result) for result in unverified})),
+            _format_results(unverified),
         )
-    else:
+    compared = sum(result.status != "skipped" for result in results)
+    if compared:
         logger.info(
             "Checked Continuous Token builder %s against the chat template at %d multi-turn boundaries "
             "(%d exact matches, %d could not be rendered).",
@@ -214,6 +228,10 @@ def _check_cases():
         )
 
 
+def _conversation(result: BoundaryResult) -> str:
+    return result.case.split(".")[0].removesuffix("_reasoning")
+
+
 def _merge_boundaries(messages: tuple[dict[str, Any], ...]) -> list[tuple[int, int]]:
     """Return ``(start, end)`` spans of the non-assistant runs that follow an assistant turn."""
     roles = [message["role"] for message in messages]
@@ -228,6 +246,7 @@ def _merge_boundaries(messages: tuple[dict[str, Any], ...]) -> list[tuple[int, i
 def _check_boundary(
     builder: ContinuousTokenBuilder,
     conversation: tuple[dict[str, Any], ...],
+    tools: list[dict[str, Any]] | None,
     start: int,
     end: int,
     stop_token_ids: set[int],
@@ -238,11 +257,11 @@ def _check_boundary(
     try:
         # Single-pass renders go through the builder's own first-prompt path, which builders with a
         # custom encoder or processor override; only the assistant turn needs the raw template.
-        prompt_ids = builder.build_initial_tokens(messages[: start - 1], tools=_TOOLS)
-        turn_ids = builder._render_tokens(messages[:start], add_generation_prompt=False, tools=_TOOLS)
-        expected_ids = builder.build_initial_tokens(messages[:end], tools=_TOOLS)
+        prompt_ids = builder.build_initial_tokens(messages[: start - 1], tools=tools)
+        turn_ids = builder._render_tokens(messages[:start], add_generation_prompt=False, tools=tools)
+        expected_ids = builder.build_initial_tokens(messages[:end], tools=tools)
         runtime_ids = _simulate_generation(prompt_ids, turn_ids, expected_ids, stop_token_ids)
-        merge_result = builder.merge_context_tokens(messages[:start], messages[:end], runtime_ids, tools=_TOOLS)
+        merge_result = builder.merge_context_tokens(messages[:start], messages[:end], runtime_ids, tools=tools)
     except Exception as exc:
         return BoundaryResult(case, "skipped", f"{type(exc).__name__}: {exc}")
     return _classify(builder.tokenizer, case, runtime_ids, merge_result, expected_ids)

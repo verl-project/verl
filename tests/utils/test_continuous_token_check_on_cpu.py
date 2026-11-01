@@ -32,10 +32,11 @@ _LOGGER = "verl.utils.tokenizer.continuous_token_check"
 class _ChatMLTokenizer:
     """Character-level tokenizer with ChatML special tokens and a configurable template.
 
-    ``separator`` follows every ``<|im_end|>``. Assistant reasoning renders as a
-    ``<think>`` block; with ``thinking`` the last assistant turn also gets an empty one,
-    so earlier turns re-render once later messages are appended (like Qwen3).
-    ``fail_on_tools`` makes every render that passes tools raise.
+    ``separator`` follows every ``<|im_end|>`` (``tool_free_separator`` instead when no
+    tools are passed). Assistant reasoning renders as a ``<think>`` block; with
+    ``thinking`` the last assistant turn also gets an empty one, so earlier turns
+    re-render once later messages are appended (like Qwen3). ``fail_on_tools`` and
+    ``fail_without_tools`` make every render with or without tools raise.
     """
 
     name_or_path = "unit-test/chatml"
@@ -46,13 +47,17 @@ class _ChatMLTokenizer:
         self,
         *,
         separator="\n",
+        tool_free_separator=None,
         thinking=False,
         fail_on_tools=False,
+        fail_without_tools=False,
         generation_prompt="<|im_start|>assistant\n",
     ):
         self.separator = separator
+        self.tool_free_separator = separator if tool_free_separator is None else tool_free_separator
         self.thinking = thinking
         self.fail_on_tools = fail_on_tools
+        self.fail_without_tools = fail_without_tools
         self.generation_prompt = generation_prompt
 
     def convert_tokens_to_ids(self, token):
@@ -79,6 +84,9 @@ class _ChatMLTokenizer:
     ):
         if tools and self.fail_on_tools:
             raise ValueError("template does not support tools")
+        if not tools and self.fail_without_tools:
+            raise ValueError("template requires tools")
+        separator = self.separator if tools else self.tool_free_separator
         parts = []
         for index, message in enumerate(messages):
             content = message.get("content", "")
@@ -88,7 +96,7 @@ class _ChatMLTokenizer:
                     content = f"<think>{reasoning or ''}</think>{content}"
                 for call in message.get("tool_calls", []):
                     content += "<tool_call>" + json.dumps(call["function"]) + "</tool_call>"
-            parts.append(f"<|im_start|>{message['role']}\n{content}<|im_end|>{self.separator}")
+            parts.append(f"<|im_start|>{message['role']}\n{content}<|im_end|>{separator}")
         if add_generation_prompt:
             parts.append(self.generation_prompt)
         text = "".join(parts)
@@ -110,7 +118,8 @@ def test_matching_builder_passes(caplog):
     assert _statuses(tokenizer, "qwen2") == {"match"}
     with caplog.at_level(logging.INFO, logger=_LOGGER):
         _verify(tokenizer)
-    assert "at 8 multi-turn boundaries (8 exact matches, 0 could not be rendered)" in caplog.text
+    assert "Could not verify" not in caplog.text
+    assert "at 12 multi-turn boundaries (12 exact matches, 0 could not be rendered)" in caplog.text
 
 
 def test_dropped_separator_raises_in_strict_mode():
@@ -147,11 +156,39 @@ def test_history_rewrite_only_warns(caplog):
     assert "<think>" in caplog.text
 
 
+def test_tool_free_conversation_checks_template_without_tools():
+    # The template only drops the separator when no tools are passed, which the tool fixtures never render.
+    tokenizer = _ChatMLTokenizer(tool_free_separator="")
+    builder = create_continuous_token_builder(tokenizer, hf_model_type="qwen2")
+    results = check_continuous_token_builder(builder, stop_token_ids={1001})
+    statuses = {result.case: result.status for result in results}
+    assert {case for case, status in statuses.items() if status != "match"} == {
+        "chat.merge_at3.user",
+        "chat.merge_at5.user",
+        "chat_reasoning.merge_at3.user",
+        "chat_reasoning.merge_at5.user",
+    }
+    assert set(statuses.values()) == {"match", "boundary"}
+    with pytest.raises(ValueError, match="chat.merge_at3.user"):
+        _verify(tokenizer)
+
+
+def test_partially_renderable_template_warns_and_checks_the_rest(caplog):
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
+        _verify(_ChatMLTokenizer(fail_on_tools=True))
+    assert "for the tool, user conversations" in caplog.text
+    assert "template does not support tools" in caplog.text
+    assert "at 4 multi-turn boundaries (4 exact matches, 8 could not be rendered)" in caplog.text
+
+
 def test_unrenderable_template_is_skipped(caplog):
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        _verify(_ChatMLTokenizer(fail_on_tools=True))
+        _verify(_ChatMLTokenizer(fail_on_tools=True, fail_without_tools=True))
     assert "Could not verify Continuous Token builder" in caplog.text
+    assert "for the chat, tool, user conversations" in caplog.text
     assert "template does not support tools" in caplog.text
+    assert "template requires tools" in caplog.text
+    assert "Checked Continuous Token builder" not in caplog.text
 
 
 def test_unlocatable_stop_token_is_skipped():
@@ -161,7 +198,7 @@ def test_unlocatable_stop_token_is_skipped():
     builder = create_continuous_token_builder(tokenizer, hf_model_type="qwen3")
     results = check_continuous_token_builder(builder, stop_token_ids={1001})
     skipped = [result for result in results if result.status == "skipped"]
-    assert {result.case.split(".")[0] for result in skipped} == {"tool", "user"}
+    assert {result.case.split(".")[0] for result in skipped} == {"tool", "user", "chat"}
     assert all("could not locate the assistant stop token" in result.detail for result in skipped)
     assert {result.status for result in results if result not in skipped} == {"match"}
 
