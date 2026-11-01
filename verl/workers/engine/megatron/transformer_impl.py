@@ -42,6 +42,10 @@ from verl.utils.dynamic_cp_scheduler import (
     get_megatron_dynamic_cp_scheduler_cls,
     postprocess_dynamic_cp_batch,
 )
+from verl.utils.megatron.memory_profile import finish_memory_history, start_memory_history
+from verl.utils.megatron.memory_profile import log_parts as log_memory_parts
+from verl.utils.megatron.memory_profile import log_phase as log_memory_phase
+from verl.utils.megatron.memory_profile import write_snapshot as write_memory_snapshot
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
@@ -80,12 +84,13 @@ from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizer
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import detach_tree, postprocess_batch_func, prepare_micro_batches
+from .chunk_loss_mask import chunk_loss_data, reset_chunk_loss_mask_state
+from .chunk_losses import aggregate_pass_losses
+from .chunk_window import own_window_rows
 from .utils import set_random_seed
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
 
 
 def _resolve_fused_temperature(temperature: float | torch.Tensor) -> float:
@@ -549,6 +554,7 @@ class MegatronEngine(BaseEngine):
         if __import__("os").environ.get("DSV41_MEM_PROBE", "0") == "1":
             import torch as _t
             import torch.distributed as _d
+
             _gb = 1 << 30
             print(
                 f"[memprobe] rank={_d.get_rank()} after_build "
@@ -557,11 +563,11 @@ class MegatronEngine(BaseEngine):
                 f"peak={_t.cuda.max_memory_allocated() / _gb:.2f}GB "
                 f"free={_t.cuda.mem_get_info()[0] / _gb:.2f}GB "
                 f"total={_t.cuda.mem_get_info()[1] / _gb:.2f}GB "
-                f"nontorch={(_t.cuda.mem_get_info()[1] - _t.cuda.mem_get_info()[0] - _t.cuda.memory_reserved()) / _gb:.2f}GB",
+                f"nontorch="
+                f"{(_t.cuda.mem_get_info()[1] - _t.cuda.mem_get_info()[0] - _t.cuda.memory_reserved()) / _gb:.2f}GB",
                 flush=True,
             )
         # Profile-only NVTX instrumentation (DSV41_NVTX=1); no-op otherwise.
-
 
         if self._qat_enabled and not self.engine_config.forward_only:
             from verl.utils.modelopt import apply_qat_to_modules
@@ -581,6 +587,9 @@ class MegatronEngine(BaseEngine):
             for model in self.module:
                 patch_postprocess(model)
 
+        if os.environ.get("DSV41_MEM_PROFILE") == "1":
+            log_memory_phase("model_build_done")
+
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager
         if self.engine_config.forward_only:
             self.optimizer = None
@@ -590,6 +599,8 @@ class MegatronEngine(BaseEngine):
             return
 
         self.optimizer = self._build_optimizer()
+        if os.environ.get("DSV41_MEM_PROFILE") == "1":
+            log_memory_phase("optimizer_init_done")
         self.lr_scheduler = self._build_lr_scheduler()
 
         full_reshardable = self.engine_config.dist_ckpt_optim_fully_reshardable
@@ -680,7 +691,12 @@ class MegatronEngine(BaseEngine):
         # free cached blocks before grad-norm all_reduce to reduce OOM on tight VRAM.
         if getattr(self, "_distillation_use_topk_active", False):
             get_torch_device().empty_cache()
-        update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
+        try:
+            update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
+        finally:
+            # Dump even when the optimizer step raises (for example, the OOM
+            # that the history profiler is intended to diagnose).
+            finish_memory_history(os.environ.get("DSV41_MEM_HISTORY"))
 
         if update_successful:
             # allgather already execute in optimizer.step in new megatron
@@ -688,6 +704,10 @@ class MegatronEngine(BaseEngine):
         else:
             raise NotImplementedError("Megatron optimizer step failed. This should not happen")
 
+        if os.environ.get("DSV41_MEM_PROFILE") == "1":
+            log_memory_phase("step_end")
+            log_memory_parts(self.module, self.optimizer)
+            write_memory_snapshot(os.environ.get("DSV41_MEM_SNAPSHOT"))
 
         return grad_norm
 
@@ -816,9 +836,12 @@ class MegatronEngine(BaseEngine):
         return torch.tensor(input_ids.numel(), device=input_ids.device)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        if not forward_only:
+            start_memory_history(os.environ.get("DSV41_MEM_HISTORY"))
         if __import__("os").environ.get("DSV41_MEM_STEP", "0") == "1":
             import torch as _t
             import torch.distributed as _d
+
             _gb = 1 << 30
             _free, _total = _t.cuda.mem_get_info()
             _resv = _t.cuda.memory_reserved()
@@ -1332,8 +1355,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
         from verl.workers.engine.megatron.outer_chunk import run_chunked_step
 
         tape = ChunkTape(chunk_count)
-        self._dsv41_row_cursor = 0          # 每个 step 重新从 0 开始铺 mask
-        # _res only exists inside run_pass, so collect the postprocess dict's mean here.
+        # The batch is reused for prefill, grad, and replay passes. These values belong to
+        # this logical step only; never let a previous step select a later mask window.
+        reset_chunk_loss_mask_state(self)
+        # Only grad passes contribute: the no-grad scan is replayed before backward.
         _pass_losses = []
 
         _dev0 = next(unwrap_model(model).parameters()).device
@@ -1355,139 +1380,92 @@ class MegatronEngineWithLMHead(MegatronEngine):
             # loss_func returns the unnormalised sum (already scaled by num_micro_batch).
             # The schedule normalises it before backward; skipping that here would multiply
             # every gradient by ~1e8 and silently ruin the update.
-            # Measured: the post-processed log_probs already span the whole sequence
-            # (numel = 483,495), so no windowing is needed here. The shape mismatch we
-            # chased came from the mask substitution, which has been removed.
-            import os as _os5
+            # The loss closure selects this pass's mask window from the unchanged full mask.
 
-            if _os5.environ.get("DSV41_LP2_DEBUG", "0") == "1":
-                _lpv = output.get("log_probs") if isinstance(output, dict) else None
-                _n = None if _lpv is None else _lpv.numel()
-                _m = batch.get("loss_mask") if hasattr(batch, "get") else None
-                _ms = "na"
-                if _m is not None:
-                    try:
-                        _mv = _m.values() if getattr(_m, "is_nested", False) else _m
-                        _ms = f"{float(_mv.sum()):.0f}/{_mv.numel()}"
-                    except Exception as _e:
-                        _ms = f"err:{type(_e).__name__}"
-                print(f"[lp2] chunk={index} lp_numel={_n} mask_sum/numel={_ms}", flush=True)
-            # Zero the rows this pass did not compute. Each rank holds the FULL sequence
-            # (the CP gather already happened), so the pass owns
-            # [g*cp_size*total_tokens, (g+1)*cp_size*total_tokens) on every rank - the rank
-            # index is part of the gather, not of the window. Marking only this rank's 1/32
-            # left almost every rank with an all-zero loss and collapsed grad_norm to 0.
+            # Zero the rows this pass did not compute, so each pass contributes only its own
+            # window to the loss. (Marking only this rank's 1/32 left most ranks with an
+            # all-zero loss and collapsed grad_norm to 0, which is why the window spans every
+            # rank of the pass rather than one rank's block.)
+            #
+            # DSV41_OWN_WINDOW selects the window arithmetic:
+            #   keep (default) - the shipped formula, byte-identical: width = cp * (numel // cp),
+            #                    start = index * width. That width IS the whole tensor, so pass 0
+            #                    keeps everything and every later pass gets an empty window.
+            #   k              - width = numel // chunk_count, start = index * width: the K-th of
+            #                    the timeline that the virtual-CP ownership rule implies.
+            #   off            - leave log_probs untouched.
+            # The default deliberately stays the shipped behaviour; the switch lets one
+            # deployment A/B the three modes instead of spending a cluster run per guess.
             _lpk_w = None
             for _k2w in ("log_probs", "logprobs"):
                 if isinstance(output, dict) and _k2w in output:
                     _lpk_w = _k2w
                     break
-            if _lpk_w is not None and getattr(output[_lpk_w], "is_nested", False):
+            _ownw_mode = os.environ.get("DSV41_OWN_WINDOW", "k")
+            if _lpk_w is not None and getattr(output[_lpk_w], "is_nested", False) and _ownw_mode != "off":
                 _lpw = output[_lpk_w]
                 _vw = _lpw.values()
                 _tw = int(_vw.numel())
                 _cpw = torch.distributed.get_world_size(self.get_context_parallel_group())
-                _winw = _tw // _cpw
-                _gs = index * _cpw * _winw
+                _gs, _ge = own_window_rows(_tw, _cpw, chunk_count, index, _ownw_mode)
                 _ownw = torch.zeros(_tw, device=_vw.device, dtype=_vw.dtype)
-                _ownw[_gs : min(_gs + _cpw * _winw, _tw)] = 1
+                _ownw[_gs:_ge] = 1
+                _kept = _vw.reshape(-1) * _ownw
                 output[_lpk_w] = torch.nested.nested_tensor_from_jagged(
-                    _vw.reshape(-1) * _ownw,
+                    _kept,
                     offsets=_lpw.offsets(),
                     lengths=_lpw.lengths() if hasattr(_lpw, "lengths") else None,
                 )
-            # postprocess now returns ONE pass's rows, so the mask must be sliced to this
-            # pass's window; batch_num_tokens stays global so the passes sum correctly.
-            # postprocess 现在返回「一个 pass 的行」，mask 必须切到本 pass 的区间。
-            # 用长度无关的判据：只要 log_probs 比 mask 短，就切。
-            _lp_o = output.get("log_probs") if isinstance(output, dict) else None
-            _lm = batch.get("loss_mask") if hasattr(batch, "get") else None
-            if _lp_o is not None and _lm is not None and hasattr(_lm, "values"):
-                _n = int(_lp_o.numel())
-                _mv = _lm.values()
-                if not hasattr(self, "_dsv41_mask_full"):
-                    self._dsv41_mask_full = _mv.clone()
-                _full = self._dsv41_mask_full
-                if _full.numel() > _n:
-                    _gs = int(getattr(self, "_dsv41_row_cursor", 0))
-                    _this = min(_n, _full.numel() - _gs)
-                    self._dsv41_row_cursor = _gs + _this
-                    batch["loss_mask"] = torch.nested.nested_tensor(
-                        [_full[_gs : _gs + _this]], layout=torch.jagged
-                    )
-            _res = loss_func(output)
-            import os as _os4
+            # forward_step returns a closure; keep the pass context live while that closure
+            # selects its loss-mask window.
+            self._dsv41_chunk_ctx = (index, chunk_count, tape)
+            try:
+                _res = loss_func(output)
+            finally:
+                self._dsv41_chunk_ctx = None
 
-            if _os4.environ.get("DSV41_LOSS_DEBUG", "0") == "1" and isinstance(_res, tuple):
-                _d = _res[1] if len(_res) > 1 and isinstance(_res[1], dict) else {}
-                print(
-                    f"[loss2] chunk={index} t0={float(_res[0].detach()):.6f} "
-                    f"dict={_d.get('loss', 'na')} ntok={_d.get('metrics', {}) and 'has'} ",
-                    flush=True,
-                )
             _loss = _res[0]
-            if isinstance(_res, tuple) and len(_res) > 1 and isinstance(_res[-1], dict):
+            if torch.is_grad_enabled() and isinstance(_res, tuple) and len(_res) > 1 and isinstance(_res[-1], dict):
                 _pass_losses.append(float(_res[-1].get("loss", float("nan"))))
             return _loss
 
-        total_loss = run_chunked_step(
-            run_pass=run_pass,
-            tape=tape,
-            chunk_count=chunk_count,
-            backward=lambda loss: loss.backward(),
-        )
+        cp_group_size = torch.distributed.get_world_size(self.get_context_parallel_group())
+        num_microbatches = tu.get_non_tensor_data(batch, key="num_micro_batch", default=1)
+
+        def backward(loss):
+            (loss * cp_group_size / num_microbatches).backward()
+
+        chunk_step_kwargs = {
+            "run_pass": run_pass,
+            "tape": tape,
+            "chunk_count": chunk_count,
+            "backward": backward,
+        }
+        if os.environ.get("DSV41_MEM_PROFILE") == "1":
+            chunk_step_kwargs["profile_phase"] = log_memory_phase
+        total_loss = run_chunked_step(**chunk_step_kwargs)
         # Gradients are already accumulated; hand the schedule a zero loss so its own backward
         # is a no-op and the ordinary finalize_model_grads path still runs unchanged.
         # Report the real loss (detached: the gradients were already accumulated pass by pass),
         # so the schedule's own backward is a no-op and logging shows the true value.
-        import os as _os3
 
-        if _os3.environ.get("DSV41_UPD_DEBUG", "0") == "1":
-            # Probe *any* trainable parameter - do not guess adapter naming.
-            _name, _pm = next(
-                (n, q) for n, q in unwrap_model(model).named_parameters() if q.requires_grad
-            )
-            _g = getattr(_pm, "main_grad", None)
-            if _g is None:
-                _g = _pm.grad
-            _gn = "NONE" if _g is None else f"{float(_g.norm()):.4e}"
-            print(
-                f"[p] name={_name[-40:]} shape={tuple(_pm.shape)} "
-                f"p0={float(_pm.flatten()[0]):.12f} grad={_gn} "
-                f"loss={float(total_loss.detach()):.6f}",
-                flush=True,
-            )
-        import os as _os7
-
-        if _os7.environ.get("DSV41_REP_DEBUG", "0") == "1":
-            print(f"[rep] total_loss={float(total_loss.detach()):.6f}", flush=True)
         real = total_loss.detach()
         # A fresh leaf: requires_grad so the schedule's backward actually runs (it drives
         # grad scaling / aux-loss unscale / grad_norm), value 0 so it adds no gradient -
         # the real gradients were accumulated pass by pass above.
         _z = torch.zeros((), device=real.device, dtype=real.dtype, requires_grad=True)
-        seed = real.detach() * _z          # non-leaf: the schedule scales it in place
-        # Report what the loss function actually computed; the accumulated copy stayed
-        # frozen while grad_norm kept moving (0.524 -> 0.438 -> 0.387), i.e. training worked
-        # and only the reported number was stale.
-        # Each pass already ran the real loss function; run_chunked_step accumulated those
-        # values. Every pass sees the full sequence, so the trainer's normal averaging over
-        # micro-batches turns the K per-pass entries into the correct single number.
-        # sft_loss is in the per-token branch, so its return value carries a
-        # routed_num_tokens factor and is not the mean. The postprocess dict does hold the
-        # mean ({"loss": loss.detach().item()} before scaling), and the trainer averages the
-        # per-pass entries - correct here because every pass sees the whole sequence.
-        import os as _osL
+        seed = real.detach() * _z  # non-leaf: the schedule scales it in place
+        # Read the unscaled mean from each grad pass's postprocess dict. Prefill runs
+        # the same loss under no_grad but is replayed later, so it is not reported twice.
 
-        if _osL.environ.get("LOG_DEBUG", "0") == "1":
-            print(f"[log] n_collected={len(_pass_losses)} vals={_pass_losses[:4]} "
-                  f"total_loss={float(total_loss.detach()):.6f}", flush=True)
-        # 三次调用里有一次（pass 1）的 dict loss 是 per-token 缩放后的 local_sum，
-        # 量级比真均值大 ~2e5 倍；两次 pass 0（scan/replay）已经是真均值。
-        # 报告只取量级合理的条目 —— 这不影响梯度（梯度用 _res[0]，已各自 backward）。
-        _vals_l = [v for v in _pass_losses if v == v and abs(v) < 100.0]
+        # Every pass computes its loss against the SAME global loss_mask, and zeroes the
+        # rows it did not compute, so a pass that owns none of the supervised tokens
+        # contributes exactly 0. The passes are therefore disjoint contributions to one
+        # mean and must be SUMMED - averaging them divided the K=2 loss by the pass count
+        # (4.18 -> 1.39, measured) and made a correct step look broken.
+        # The no-grad scan is excluded at collection time, not by its loss magnitude.
         _logged = {
-            "loss": (sum(_vals_l) / len(_vals_l)) if _vals_l else float(total_loss.detach()),
+            "loss": aggregate_pass_losses(_pass_losses, float(total_loss.detach())),
             "metrics": {},
         }
         return seed, lambda _out: (seed, _logged)
@@ -1497,7 +1475,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
     ):
         batch: TensorDict = next(batch_iter)
 
-        _chunk_count = int(os.environ.get("DSV41_SEQ_CHUNKS", "0") or 0)
+        # Outer-sequence chunking is off unless a run asks for it: K=1 is the whole
+        # sequence in one pass, exactly the path this engine ran before the feature
+        # existed. The door is `_chunk_count > 1`, so the default below is the
+        # single pass and nothing downstream changes.
+        _chunk_count = int(os.environ.get("DSV41_SEQ_CHUNKS", "1") or 1)
         if _chunk_count > 1 and not getattr(self, "_dsv41_in_chunk", False):
             return self._dsv41_chunked_forward_step(
                 batch, model, logits_processor_func, postprocess_micro_batch_func, _chunk_count
@@ -1721,48 +1703,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         if loss_function is not None:
             # TODO(baiyan): How to support hybrid context parallel with dp_group,
             # now the dp_group is not used, so just leave it as is, but what if we need to use it?
-            # 分块时 postprocess 只返回一个 pass 的行，mask 必须同步切到本 pass 的区间。
-            # 放在这里（而不是 run_pass 里）是因为 data 就是 loss 真正读的对象；
-            # 在 run_pass 里给 batch 赋值测下来不会传到 loss。
-            try:
-                _lp_m = model_output.get("log_probs") if isinstance(model_output, dict) else None
-                _lm_d = data.get("loss_mask") if hasattr(data, "get") else None
-                if _lp_m is not None and _lm_d is not None and hasattr(_lm_d, "values"):
-                    _n_m = int(_lp_m.numel())
-                    _mv_d = _lm_d.values()
-                    if _mv_d.numel() > _n_m:
-                        if not hasattr(self, "_dsv41_mask_full"):
-                            self._dsv41_mask_full = _mv_d.clone()
-                        _full_d = self._dsv41_mask_full
-                        # 用 pass 序号定位，不用调用计数：pass0=[0,n0)，pass1=[n0,total)
-                        _ctx = getattr(self, "_dsv41_chunk_ctx", None)
-                        _idx = int(_ctx[0]) if _ctx else 0
-                        if _idx == 0:
-                            self._dsv41_n0 = _n_m
-                            _gs_d = 0
-                        else:
-                            _gs_d = int(getattr(self, "_dsv41_n0", 0))
-                        _this_d = min(_n_m, _full_d.numel() - _gs_d)
-                        data["loss_mask"] = torch.nested.nested_tensor(
-                            [_full_d[_gs_d : _gs_d + _this_d]], layout=torch.jagged
-                        )
-                        self._dsv41_row_cursor = _gs_d + _this_d   # 必须推进，否则下一个 pass 拿到同样的窗口
-            except Exception:
-                pass
-            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
-            import os as _os
+            loss_data = chunk_loss_data(self, model_output, data)
+            loss, metrics = loss_function(
+                model_output=model_output, data=loss_data, dp_group=self.get_data_parallel_group()
+            )
 
-            if _os.environ.get("DSV41_LOSS_DEBUG", "0") == "1":
-                _nmb = tu.get_non_tensor_data(data, key="num_micro_batch", default=1)
-                _bnt = tu.get_non_tensor_data(data, key="batch_num_tokens", default=-1)
-                print(
-                    f"[post] loss={float(loss.detach()):.4e} nmb={_nmb} "
-                    f"batch_num_tokens={_bnt} per_token={getattr(self.tf_config, 'calculate_per_token_loss', None)}",
-                    flush=True,
-                )
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
-            scaled_loss = loss * data["num_micro_batch"]
+            scaled_loss = loss * loss_data["num_micro_batch"]
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device)

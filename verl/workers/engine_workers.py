@@ -39,6 +39,7 @@ from verl.utils.device import get_device_name, get_torch_device, set_expandable_
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
+from verl.utils.megatron.memory_profile import finish_memory_history
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
@@ -226,9 +227,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # --- ALIGN DEBUG 2 ---
         import os as _os
+
         if _os.environ.get("ALIGN_DEBUG"):
             _raw = output.get("loss") if isinstance(output.get("loss"), list) else None
-            print(f"[ALIGN_DEBUG2] final loss={loss:.6f} raw_output_type={type(output.get('loss', 'gone'))}", flush=True)
+            print(
+                f"[ALIGN_DEBUG2] final loss={loss:.6f} raw_output_type={type(output.get('loss', 'gone'))}",
+                flush=True,
+            )
         # --- END ALIGN DEBUG 2 ---
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
@@ -443,7 +448,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         5. Exits train_mode
         """
         assert self.loss_fn is not None, "loss function can't be None when calling forward_backward_only"
-        assert not self.engine_config.forward_only, "Can't run `forward_backward_only` when forward_only is in the engine config."
+        assert not self.engine_config.forward_only, (
+            "Can't run `forward_backward_only` when forward_only is in the engine config."
+        )
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
@@ -460,6 +467,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 tu.assign_non_tensor(data, **{key: val})
 
         import time as _time
+
         _tm_enter_t0 = _time.perf_counter()
         # Enter train_mode manually — DO NOT use 'with' statement.
         # optim_step_only will call __exit__ after optimizer step.
@@ -472,7 +480,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # Forward + backward
         _fb_t0 = _time.perf_counter()
-        output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn)
+        try:
+            output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn)
+        except Exception:
+            # An OOM can abort before optimizer_step, so finish the history
+            # here while the allocator still has the failed-step events.
+            finish_memory_history(os.environ.get("DSV41_MEM_HISTORY"))
+            raise
         _fb_batch_ms = (_time.perf_counter() - _fb_t0) * 1000.0
 
         # Store timing for optim_step_only to include in metrics

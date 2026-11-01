@@ -550,6 +550,30 @@ def preprocess_thd_engine(
         return input_ids, packed_seq_params, None
 
 
+def _place_chunk_rows(rows: torch.Tensor, seq_len: int, chunk_index: int, chunk_count: int) -> torch.Tensor:
+    """Scatter one pass's rows into a full-sequence buffer at their global positions.
+
+    Each pass computes one contiguous window of the packed timeline, but everything
+    downstream (``loss_mask``, ``batch_num_tokens``) is expressed in whole-sequence
+    coordinates. Without this the pass's rows stay anchored at row 0 and the loss
+    compares them against a mask that points somewhere else entirely - shapes match,
+    values do not.
+
+    Pass 0 owns the head, the last pass owns the tail (``seq_len - n``), and any middle
+    pass starts at ``index * n``. Passes that already return the whole sequence are
+    handed back untouched.
+    """
+    n = int(rows.shape[0])
+    total = int(seq_len)
+    if chunk_count <= 1 or total <= n:
+        return rows
+    start = 0 if chunk_index <= 0 else min(chunk_index * n, total - n)
+    take = min(n, total - start)
+    full = rows.new_zeros(total)
+    full[start : start + take] = rows[:take]
+    return full
+
+
 def postprocess_thd_engine(
     output: torch.Tensor,
     packed_seq_params: PackedSeqParams,
@@ -573,6 +597,17 @@ def postprocess_thd_engine(
         raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
     if not post_process:
         return output
+    if batch_size > 1 and cp_chunk_count > 1:
+        # Both layouts place a chunked pass's rows with `_place_chunk_rows`, which takes ONE
+        # sequence length, so a chunked multi-sequence batch would leave every sequence after
+        # the first anchored at row 0 and then compare those rows against a mask expressed in
+        # whole-sequence coordinates: shapes match, values do not, silently. Guarding here
+        # rather than inside the contiguous branch covers the zigzag layout too.
+        raise NotImplementedError(
+            f"outer-sequence chunking (cp_chunk_count={cp_chunk_count}) does not support "
+            f"batch_size={batch_size}: the per-pass row placement is defined for a single "
+            "sequence"
+        )
 
     # -------------------------------------------------------------------------
     # Move the lengths and offsets needed for subsequent Python-level indexing to the CPU in advance,
@@ -599,6 +634,9 @@ def postprocess_thd_engine(
     # an explicit local_cp_size, so keeping it in the fallback branch silently skipped it and
     # every pass reassembled at the physical width (the 2-chunk read then ran past each rank's
     # data, filling the back half of the buffer with garbage).
+    # The collective stays physical; only the layout arithmetic widens. Keep the physical
+    # width so the gather can be sized to the group it actually runs over.
+    _phys_cp = cp_size
     _cc2 = int(cp_chunk_count or 1)
     if _cc2 > 1:
         _ci2 = int(cp_chunk_index or 0)
@@ -608,10 +646,23 @@ def postprocess_thd_engine(
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
-        # zeros: virtual CP leaves slots the gather does not cover
-        output_list = [torch.zeros_like(output) for _ in range(cp_size)]
-        torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
-        output_list[cp_rank] = output
+        if cp_size != _phys_cp:
+            # Chunked pass: all_gather runs over the PHYSICAL group, and its result list must
+            # be exactly that wide. Handing it a list widened to the virtual width leaves the
+            # slots no rank writes untouched - they keep whatever the allocator handed back,
+            # which is the integer garbage that reached the K=2 loss. Gather narrow, then
+            # place every physical shard at its virtual index so the unused half stays zero.
+            _gathered = [torch.zeros_like(output) for _ in range(_phys_cp)]
+            torch.distributed.all_gather(_gathered, output.detach(), group=cp_group)
+            output_list = [torch.zeros_like(output) for _ in range(cp_size)]
+            _ci3 = int(cp_chunk_index or 0)
+            for _r in range(_phys_cp):
+                output_list[_ci3 * _phys_cp + _r] = _gathered[_r]
+            output_list[cp_rank] = output
+        else:
+            output_list = [torch.zeros_like(output) for _ in range(cp_size)]
+            torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
+            output_list[cp_rank] = output
     else:
         output_list = [output]
 
@@ -627,7 +678,7 @@ def postprocess_thd_engine(
             # (logits, entropy), so the ranks drift far enough apart that the
             # following per-token all-gather hits the 600 s watchdog. Wrapping the
             # rows we already have is O(1) and produces the same jagged object.
-            rows = output_new[0]
+            rows = _place_chunk_rows(output_new[0], seq_lens_cpu[0], cp_chunk_index, cp_chunk_count)
             offsets = torch.tensor([0, rows.size(0)], dtype=torch.int64, device=rows.device)
             return torch.nested.nested_tensor_from_jagged(rows, offsets=offsets)
         return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
@@ -638,13 +689,6 @@ def postprocess_thd_engine(
             start_idx = cu_padded_cpu[i]
             output_new.append(output[0][start_idx : start_idx + s])
             continue
-        import os as _opp
-        if _opp.environ.get("PP_DEBUG", "0") == "1":
-            _ov = o.values() if hasattr(o, "values") else o
-            _ov = _ov.reshape(-1) if hasattr(_ov, "reshape") else _ov
-            print("[pp] in_numel=%s max=%s min=%s at237723=%s"
-                  % (_ov.numel(), float(_ov.max()), float(_ov.min()),
-                     float(_ov[237723]) if _ov.numel() > 237723 else "NA"), flush=True)
         s_len_padded_chunk = (cu_padded_cpu[i + 1] - cu_padded_cpu[i]) // cp_size
         half_seqlen = s_len_padded_chunk // 2
         s_len = seq_lens_cpu[i]
@@ -683,11 +727,11 @@ def postprocess_thd_engine(
         except Exception:
             _tot = _n
         _ci = int(cp_chunk_index or 0)
-        if _tot > _n:
-            _gs = 0 if _ci == 0 else max(0, _tot - _n)
-            _take = min(_n, _tot - _gs)
-            _full = _vals.new_zeros(_tot)
-            _full[_gs : _gs + _take] = _vals.reshape(-1)[:_take]
+        _ran = _tot > _n
+        _gs = 0 if _ci == 0 else max(0, _tot - _n)
+        _take = min(_n, _tot - _gs)
+        if _ran:
+            _full = _place_chunk_rows(_vals.reshape(-1), _tot, _ci, _ccs)
             output_new_tensor = torch.nested.nested_tensor([_full], layout=torch.jagged)
     return output_new_tensor
 

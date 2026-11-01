@@ -49,16 +49,19 @@ def slice_nested(nested: Tensor, start: int, length: int) -> Tensor:
 
 def run_chunked_step(
     *,
-    run_pass: Callable[[int], tuple],
+    run_pass: Callable[[int], Tensor],
     tape,
     chunk_count: int,
     backward: Callable[[Tensor], None],
+    profile_phase: Callable[[str], None] | None = None,
 ) -> torch.Tensor:
     """scan -> last pass (grad) -> reverse replay, one pass's graph alive at a time.
 
-    ``run_pass(index)`` must run that pass's forward and return ``(output, loss)``.
+    ``run_pass(index)`` must run that pass's forward and return its scalar loss.
     ``backward(loss)`` runs the backward for one loss, accumulated into the shared
     parameter gradients exactly like micro-batching does.
+    The no-grad prefill loss is ignored; only grad passes contribute to the total.
+    Callers collecting loss metrics must likewise exclude prefill invocations.
     """
     if chunk_count < 2:
         raise ValueError("chunk_count < 2 must use the ordinary path")
@@ -67,11 +70,18 @@ def run_chunked_step(
         tape.begin(index, "prefill")
         with torch.no_grad():
             run_pass(index)
+        if profile_phase is not None:
+            profile_phase(f"chunk_{index}_forward_end")
 
     tape.begin(chunk_count - 1, "grad")
     with torch.enable_grad():
         last = run_pass(chunk_count - 1)
+    if profile_phase is not None:
+        profile_phase(f"chunk_{chunk_count - 1}_forward_end")
+        profile_phase(f"chunk_{chunk_count - 1}_backward_start")
     backward(last)
+    if profile_phase is not None:
+        profile_phase(f"chunk_{chunk_count - 1}_backward_end")
     tape.collect_all_adjoints()
     total = last.detach()
 
@@ -79,7 +89,12 @@ def run_chunked_step(
         tape.begin(index, "grad")
         with torch.enable_grad():
             loss = run_pass(index)
+        if profile_phase is not None:
+            profile_phase(f"chunk_{index}_forward_end")
+            profile_phase(f"chunk_{index}_backward_start")
         backward(loss)
+        if profile_phase is not None:
+            profile_phase(f"chunk_{index}_backward_end")
         tape.collect_all_adjoints()
         total = total + loss.detach()
     return total

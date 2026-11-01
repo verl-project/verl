@@ -375,3 +375,26 @@ def test_preprocess_thd_engine_pads_short_topk_sequence_dimension(monkeypatch):
     torch.testing.assert_close(packed, torch.zeros_like(packed))
     torch.testing.assert_close(position_ids, torch.tensor([[1, 0]], dtype=torch.long))
     assert packed_seq_params.local_cp_size == 2
+
+
+def test_chunked_postprocess_refuses_a_multi_sequence_batch(monkeypatch):
+    """A chunked pass may only be placed for a single sequence.
+
+    `_place_chunk_rows` takes one sequence length, so a chunked multi-sequence batch would
+    leave every sequence after the first anchored at row 0 and then compare those rows
+    against a mask expressed in whole-sequence coordinates — shapes match, values do not.
+    The guard is the contract; this test is what keeps it from being deleted as noise.
+    """
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    rows = [torch.arange(7) + 1, torch.arange(2212) + 20]
+    input_ids = _nested_tensor(rows)
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, pad_to_length_bucket=512)
+    dense_ids, attention_mask = mcore_util.build_vlm_attn_mask_thd(
+        input_ids, pad_token_id=0, packed_seq_params=packed_seq_params
+    )
+    repacked_ids, _ = mcore_util.preprocess_packed_seqs(dense_ids, attention_mask)
+
+    with pytest.raises(NotImplementedError, match="outer-sequence chunking"):
+        mcore_util.postprocess_thd_engine(
+            repacked_ids, packed_seq_params, input_ids, batch_size=2, cp_chunk_count=2
+        )

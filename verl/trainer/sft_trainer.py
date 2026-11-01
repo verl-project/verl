@@ -22,6 +22,7 @@ os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import logging
+import time
 
 import hydra
 import torch
@@ -515,6 +516,7 @@ class SFTTrainer:
                     disable=not is_logging,
                 )
             ):
+                step_start_time = time.perf_counter()
                 global_step += 1
 
                 # construct tensordict
@@ -534,12 +536,15 @@ class SFTTrainer:
                 # the profiler here is the per-step boundary; it also drives a torch.profiler
                 # schedule when one is configured (its unit is one such training step).
                 self.training_client.step_profile()
+                step_time_s = time.perf_counter() - step_start_time
 
                 if global_step == self.end_profile_step:
                     self.training_client.stop_profile()
 
                 if self.engine.is_mp_src_rank_with_outputs():
-                    metrics = tu.get(output, "metrics")
+                    metrics = {"perf/step_time_s": step_time_s}
+                    metrics.update(tu.get(output, "metrics"))
+                    metrics["perf/step_time_s"] = step_time_s
 
                     # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
                     for k in ["loss", "grad_norm", "lr", "mfu"]:
