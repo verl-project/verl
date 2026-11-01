@@ -20,7 +20,7 @@ from setuptools import find_packages, setup
 
 version_folder = os.path.dirname(os.path.join(os.path.abspath(__file__)))
 
-with open(os.path.join(version_folder, "verl/version/version")) as f:
+with open(os.path.join(version_folder, "verl/version/version"), encodings="utf-8") as f:
     __version__ = f.read().strip()
 
 install_requires = [
@@ -77,7 +77,7 @@ extras_require = {
 
 
 this_directory = Path(__file__).parent
-long_description = (this_directory / "README.md").read_text()
+long_description = (this_directory / "README.md").read_text(encodings="utf-8")
 
 setup(
     name="verl",
