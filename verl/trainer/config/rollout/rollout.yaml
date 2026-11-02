@@ -293,12 +293,9 @@ checkpoint_engine:
   # Backend for checkpoint engine: naive, nccl, nixl, hccl
   backend: naive
 
-  # Check the weight-update path once, before training starts: snapshot the
-  # rollout weights, reset them, push the trainer's weights through the real
-  # update path, then compare against the snapshot. Verifies the update path
-  # itself, not any particular step's weights. It relies on both sides holding
-  # the same freshly loaded weights, so a resumed run (global_steps > 0) skips
-  # it. Off by default: a full pass hashes every weight on the host.
+  # Check once before training: sync, pause, snapshot, reset, sync and compare.
+  # KV memory stays resident during verification; generation resumes on success.
+  # Resumed runs (global_steps > 0) skip this optional startup diagnostic.
   check_weight_update_equal: false
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.

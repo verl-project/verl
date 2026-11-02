@@ -1431,13 +1431,10 @@ class RayPPOTrainer:
             "check_weight_update_equal", False
         )
         if check_weight_update_equal and self.global_steps > 0:
-            # The self-check compares the pushed weights against what the engines
-            # loaded at startup. A resumed run restores the trainer to step N while
-            # the engines still hold the initial checkpoint, so the two sides are
-            # not comparable and the check would fail for the wrong reason.
+            # Preserve the startup policy: resumed runs sync without the diagnostic.
             print(
                 f"Skipping weight update check on a resumed run (global_steps={self.global_steps}): "
-                "the engines hold the initial weights, the trainer holds the checkpoint's."
+                "the diagnostic is enabled only for fresh runs."
             )
             self.checkpoint_manager.update_weights(self.global_steps)
         elif check_weight_update_equal:

@@ -388,10 +388,6 @@ class PPOTrainer(ABC):
         )
         logger.info("checkpoint engine manager initialized")
 
-        # Record the weight-check baseline while the engines still hold the weights
-        # they loaded at startup; sleeping them here would release that memory.
-        self._start_update_check()
-
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
         self._load_checkpoint()
@@ -618,32 +614,12 @@ class PPOTrainer(ABC):
 
     # ------------------------------ abstract methods ------------------------------
 
-    def checkpoint_managers_for_update_check(self) -> list["CheckpointEngineManager"]:
-        """Managers whose replicas take part in the one-time update check."""
-        manager = getattr(self, "checkpoint_manager", None)
-        return [manager] if manager is not None else []
-
-    def _start_update_check(self) -> None:
-        """Record the weight-digest baseline before the replicas are slept.
-
-        Runs right after the rollout servers come up, while they still hold the
-        weights loaded at startup, which is the only point where the baseline can
-        be hashed from real weights.
-        """
-        self._update_check_baselines: dict[int, int] = {}
-        enabled = self.config.actor_rollout_ref.rollout.checkpoint_engine.get("check_weight_update_equal", False)
-        if not enabled:
-            return
-        for manager in self.checkpoint_managers_for_update_check():
-            self._update_check_baselines[id(manager)] = manager.start_update_check()["num_keys"]
-
     def sync_initial_weights(self, checkpoint_manager: Optional["CheckpointEngineManager"] = None):
         """Push the trainer's weights to the rollout engines once initialization ends.
 
-        With the weight-update check enabled on a fresh run, this transfer also
-        verifies the update path: the baseline was recorded by
-        ``_start_update_check()`` before the replicas were slept, so the transfer
-        costs nothing extra.
+        With the weight-update check enabled on a fresh run, verify the update
+        path instead of only syncing: it records the baseline from the state it
+        just wrote, then pushes the same weights again and compares.
 
         Args:
             checkpoint_manager: Manager to drive. Defaults to ``self.checkpoint_manager``;
@@ -651,24 +627,17 @@ class PPOTrainer(ABC):
         """
         checkpoint_manager = checkpoint_manager or self.checkpoint_manager
         enabled = self.config.actor_rollout_ref.rollout.checkpoint_engine.get("check_weight_update_equal", False)
-        baseline_keys = getattr(self, "_update_check_baselines", {}).pop(id(checkpoint_manager), 0)
-        if baseline_keys == 0:
-            if enabled:
-                # e.g. the standalone replicas of separate_async: their servers come up
-                # after the baseline pass, so they only get the plain transfer.
-                print("Weight update check: no baseline recorded for this manager, syncing only.")
+        if not enabled:
             checkpoint_manager.update_weights(self.global_steps)
         elif self.global_steps > 0:
-            # A resumed run restores the trainer to step N while the baseline holds
-            # the weights the engines loaded at startup, so the two are not
-            # comparable and the check would fail for the wrong reason.
+            # Preserve the startup policy: resumed runs sync without the diagnostic.
             print(
                 f"Skipping weight update check on a resumed run (global_steps={self.global_steps}): "
-                "the baseline holds the initial weights, the trainer holds the checkpoint's."
+                "the diagnostic is enabled only for fresh runs."
             )
             checkpoint_manager.update_weights(self.global_steps)
         else:
-            verified = checkpoint_manager.finish_update_check(self.global_steps)
+            verified = checkpoint_manager.verify_update_path(self.global_steps)
             print(
                 f"Weight update check passed: {verified['replicas']} replica(s), "
                 f"{verified['num_keys']} weight shard(s) matched."

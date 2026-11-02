@@ -141,9 +141,9 @@ class CheckpointEngineConfig(BaseConfig):
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
     # Check the weight-update path once, before training starts: snapshot the
-    # rollout weights, reset them, push the trainer's weights through the real
-    # update path, then compare against the snapshot. Only meaningful while both
-    # sides hold the same freshly loaded weights, so a resumed run skips it.
+    # first full transfer, pause generation, reset weights, then transfer again
+    # and compare digests before resuming. Retains KV allocations and requires
+    # full weight sync plus checksum/reset APIs covering all vLLM DP ranks.
     # Off by default: a full pass hashes every weight on the host.
     check_weight_update_equal: bool = False
 
