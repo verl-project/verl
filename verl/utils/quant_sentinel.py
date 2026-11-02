@@ -167,6 +167,10 @@ class QuantizedRolloutSentinel:
         if diff_mean is not None and (valid is None or valid >= 1.0) and not math.isfinite(diff_mean):
             problems.append(f"{_KEY_DIFF_MEAN} is {diff_mean} (rollout log-probs contain non-finite values)")
 
+        # in bypass mode, "old_log_probs" is passed and set to "rollout_log_probs". 
+        # however, when computing kl, verl uses updated actor policy's log_probs as old_log_probs to compute kl value.
+        # so, in bypass mode the metrics key is "actor/rollout_corr/kl", not "rollout_corr/kl". 
+        # what sentinel checks here is train-rollout mismatch, so we only check no-bypass mode "rollout_corr/kl".
         kl = _as_float(metrics.get(_KEY_KL))
         if kl is not None and (not math.isfinite(kl) or kl > self.kl_max):
             problems.append(
