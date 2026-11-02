@@ -227,9 +227,39 @@ def process_quanted_weights_after_loading(model, reload_state):
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
     process_nvfp4_moe_weights_after_loading(reload_state.get("nvfp4_moe_modules") or [])
+    reset_uncalibrated_kv_cache_scales(model)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
+
+
+def reset_uncalibrated_kv_cache_scales(model):
+    """Reset the q/k/v/prob attention scales to 1.0 when the quant config has no KV cache scheme.
+
+    With a compressed-tensors config, vLLM attaches a ``CompressedTensorsKVCacheMethod`` to every
+    attention layer even when ``kv_cache_scheme`` is None. ``load_format="dummy"`` fills its
+    q/k/v_scale placeholders with random values, and its ``process_weights_after_loading`` adopts
+    them as the live scales: unlike ``BaseKVCacheMethod``, it has no fallback to 1.0 for scales
+    the checkpoint did not provide. A refit sends no attention scales and re-processes only the
+    linear/MoE layers, so with ``kv_cache_dtype="fp8"`` the rollout keeps quantizing Q/K/V with
+    those random scales and produces garbage.
+
+    Configs that do carry a ``kv_cache_scheme`` are left untouched.
+    """
+    try:
+        from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+        from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    except ImportError:
+        return
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, BaseKVCacheMethod):
+            continue
+        if getattr(quant_method.quant_config, "kv_cache_scheme", None) is not None:
+            continue
+        # Older vLLM keeps the scales as the placeholder Parameters, which require grad.
+        with torch.no_grad():
+            set_default_quant_scales(module, register_buffer=False)
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
