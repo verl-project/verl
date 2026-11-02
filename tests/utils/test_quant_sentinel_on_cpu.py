@@ -68,14 +68,15 @@ def test_runaway_kl_raises():
 
 
 def test_all_truncated_needs_consecutive_steps():
-    s = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=2)
-    s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 1)  # one step: could be a hard batch
+    at_cap = {**HEALTHY, "response_length/clip_ratio": 1.0, "response_length/max": 256}
+    s = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=2, response_cap=256)
+    s.check(at_cap, 1)  # one step: could be a hard batch
     with pytest.raises(RuntimeError, match="length cap"):
-        s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 2)
-    s2 = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=2)
-    s2.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 1)
-    s2.check({**HEALTHY, "response_length/clip_ratio": 0.4}, 2)  # streak resets
-    s2.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 3)
+        s.check(at_cap, 2)
+    s2 = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=2, response_cap=256)
+    s2.check(at_cap, 1)
+    s2.check({**at_cap, "response_length/clip_ratio": 0.4}, 2)  # streak resets
+    s2.check(at_cap, 3)
 
 
 def test_unquantized_rollout_is_never_checked():
@@ -159,27 +160,28 @@ def test_by_default_a_finding_is_logged_and_the_run_goes_on(monkeypatch, caplog)
 
 
 def test_two_fully_truncated_steps_only_warn_by_default(caplog):
-    s = QuantizedRolloutSentinel("mxfp8")
+    s = QuantizedRolloutSentinel("mxfp8", response_cap=256)
+    at_cap = {**HEALTHY, "response_length/clip_ratio": 1.0, "response_length/max": 256}
     with caplog.at_level(logging.WARNING, logger="verl.utils.quant_sentinel"):
-        s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 1)
-        s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 2)
+        s.check(at_cap, 1)
+        s.check(at_cap, 2)
     assert "length cap" in caplog.text
 
 
 def test_ignore_eos_turns_the_clip_rule_off(monkeypatch):
     # Every response runs to the cap by design; the other rules still apply.
     monkeypatch.setenv("VERL_QUANT_SENTINEL", "raise")
-    s = QuantizedRolloutSentinel.from_config(_cfg("mxfp8", ignore_eos=True))
+    s = QuantizedRolloutSentinel.from_config(_cfg("mxfp8", ignore_eos=True, response_length=256))
     for step in range(1, 4):
-        s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, step)
+        s.check({**HEALTHY, "response_length/clip_ratio": 1.0, "response_length/max": 256}, step)
     with pytest.raises(RuntimeError, match="non-finite"):
         s.check({**HEALTHY, "training/rollout_probs_diff_mean": float("nan")}, 4)
 
 
 def test_zero_clip_steps_turns_the_clip_rule_off():
-    s = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=0)
+    s = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=0, response_cap=256)
     for step in range(1, 4):
-        s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, step)
+        s.check({**HEALTHY, "response_length/clip_ratio": 1.0, "response_length/max": 256}, step)
     s.check(HEALTHY, 4)
 
 
@@ -195,3 +197,25 @@ def test_clip_rule_needs_the_longest_response_at_the_cap(monkeypatch):
     s.check(at_cap, 4)
     with pytest.raises(RuntimeError, match="consecutive steps"):
         s.check(at_cap, 5)
+
+
+@pytest.mark.parametrize(
+    ("response_cap", "length_metrics"),
+    [(None, {}), (None, {"response_length/max": 256}), (256, {}), (256, {"response_length/max": None})],
+)
+def test_clip_rule_requires_complete_length_evidence(response_cap, length_metrics):
+    s = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=2, response_cap=response_cap)
+    for step in range(1, 4):
+        s.check({**HEALTHY, "response_length/clip_ratio": 1.0, **length_metrics}, step)
+    assert s._clip_streak == 0
+
+
+def test_missing_longest_response_breaks_the_clip_streak():
+    s = QuantizedRolloutSentinel("mxfp8", mode="raise", clip_steps=2, response_cap=256)
+    at_cap = {**HEALTHY, "response_length/clip_ratio": 1.0, "response_length/max": 256}
+    s.check(at_cap, 1)
+    s.check({**HEALTHY, "response_length/clip_ratio": 1.0}, 2)
+    assert s._clip_streak == 0
+    s.check(at_cap, 3)
+    with pytest.raises(RuntimeError, match="consecutive steps"):
+        s.check(at_cap, 4)

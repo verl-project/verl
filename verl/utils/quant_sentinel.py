@@ -167,9 +167,9 @@ class QuantizedRolloutSentinel:
         if diff_mean is not None and (valid is None or valid >= 1.0) and not math.isfinite(diff_mean):
             problems.append(f"{_KEY_DIFF_MEAN} is {diff_mean} (rollout log-probs contain non-finite values)")
 
-        # in bypass mode, "old_log_probs" is passed and set to "rollout_log_probs". 
+        # in bypass mode, "old_log_probs" is passed and set to "rollout_log_probs".
         # however, when computing kl, verl uses updated actor policy's log_probs as old_log_probs to compute kl value.
-        # so, in bypass mode the metrics key is "actor/rollout_corr/kl", not "rollout_corr/kl". 
+        # so, in bypass mode the metrics key is "actor/rollout_corr/kl", not "rollout_corr/kl".
         # what sentinel checks here is train-rollout mismatch, so we only check no-bypass mode "rollout_corr/kl".
         kl = _as_float(metrics.get(_KEY_KL))
         if kl is not None and (not math.isfinite(kl) or kl > self.kl_max):
@@ -182,7 +182,8 @@ class QuantizedRolloutSentinel:
             # The V1 trainer pads responses to the batch's longest, so clip_ratio 1.0 can also mean "every
             # response equally short"; count the step only if the longest response reached the cap.
             longest = _as_float(metrics.get(_KEY_LEN_MAX))
-            at_cap = self.response_cap is None or longest is None or longest >= self.response_cap
+            # Missing length evidence must not count as a confirmed cap hit.
+            at_cap = self.response_cap is not None and longest is not None and longest >= self.response_cap
             self._clip_streak = self._clip_streak + 1 if clip >= 0.999 and at_cap else 0
             if self._clip_streak >= self.clip_steps:
                 problems.append(
