@@ -84,3 +84,10 @@ def test_weight_fake_quant_matches_the_export(dtype, shape):
     packed, block_scale = quantize_nvfp4(x, global_scale)
     expected = _dequantize(packed, block_scale, 1.0 / global_scale)
     assert torch.equal(fake_quantize_nvfp4(x, global_scale), expected.to(dtype))
+
+
+def test_fake_quant_passes_empty_inputs_through():
+    # An EP rank whose experts receive no tokens in a micro-batch.
+    x = torch.empty(0, 64, device="cuda", dtype=torch.bfloat16)
+    assert fake_quantize_nvfp4_per_token(x).shape == (0, 64)
+    assert fake_quantize_nvfp4(x, torch.ones(1, device="cuda")).shape == (0, 64)

@@ -258,8 +258,8 @@ SGLang uses the default CUDA Graph configuration):
 | Blackwell | vLLM | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00140 |
 | Blackwell | SGLang | ❌ | MXFP4 MoE | DeepGEMM (MoE; BF16 Linear) | 0.00571 |
 | Blackwell | SGLang | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00200 |
-
-For NVFP4, see the [NVFP4 mismatch table](nvfp4.md#mismatch).
+| Blackwell | vLLM | ❌ | NVFP4 MoE | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00966 |
+| Blackwell | vLLM | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00766 |
 
 ## Limitations
 

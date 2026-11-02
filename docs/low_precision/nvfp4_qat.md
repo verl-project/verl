@@ -43,4 +43,4 @@ actor_rollout_ref:
   --quant-moe NVFP4 --qat-mode nvfp4
 ```
 
-Measured results are in the [NVFP4 mismatch table](nvfp4.md#mismatch).
+Measured results are in the [mismatch table](qat.md#measuring-the-mismatch).

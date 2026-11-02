@@ -235,6 +235,9 @@ def quantize_nvfp4(x: torch.Tensor, global_scale: torch.Tensor) -> tuple[torch.T
 def _fake_quantize(x: torch.Tensor, scale: torch.Tensor, *, per_token: bool, fast_math: bool) -> torch.Tensor:
     m, n = x.shape
     out = torch.empty_like(x)
+    if m == 0:
+        # An EP rank whose experts receive no tokens.
+        return out
     tile_m, blocks = 16, 16
     grid = (triton.cdiv(m, tile_m), triton.cdiv(n // _BLOCK, blocks))
     _fake_quantize_nvfp4_kernel[grid](

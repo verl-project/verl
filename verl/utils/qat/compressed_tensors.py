@@ -87,9 +87,9 @@ MOE_ACTIVATIONS: dict[str, str] = {
     "nvfp4_per_token": "NVFP4",
 }
 
-# ``moe`` presets that verl runs only with an activation override, which is also their
-# default: NVFP4 has no static activation scales.
-_REQUIRED_MOE_ACTIVATIONS: dict[str, str] = {"NVFP4": "nvfp4_per_token"}
+# Each override is the only activation scheme verl runs for its preset, and its default:
+# NVFP4 has no static activation scales.
+_REQUIRED_MOE_ACTIVATIONS: dict[str, str] = {preset: activation for activation, preset in MOE_ACTIVATIONS.items()}
 
 # Layers that stay in high precision regardless of model. Patterns must start
 # with "re:": vLLM rewrites plain dotted names through the model's
