@@ -1,0 +1,215 @@
+# Megatron-LM patch 04/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# Optional checkpoint scale rule (UE8M0 -> power-of-two) for the block-FP8
+# weight export, so the rollout loads the scales the checkpoint has.
+#
+# Upstream: prepared for ISEEKYAN/Megatron-LM ds4_vllm_align_preview, not yet proposed.
+#
+# Source commits:
+#   [mLite][DSv4] resync: optional checkpoint scale rule for block-FP8 export (B6)
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/lite/resync.py b/experimental/lite/megatron/lite/model/deepseek_v4/lite/resync.py
+index e71ef2e78..616d8b5b1 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/lite/resync.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/lite/resync.py
+@@ -13,10 +13,20 @@ from megatron.lite.model.deepseek_v4.quantization import (
+     is_release_unquantized_weight,
+     requantize_block_fp8_weight,
+ )
+-from megatron.lite.primitive.quantization.block_fp8 import quantize_block_fp8
++from megatron.lite.primitive.quantization.block_fp8 import (
++    dequantize_block_fp8,
++    quantize_block_fp8,
++)
+ from megatron.lite.primitive.quantization.mxfp4 import quantize_mxfp4
+ 
+ _EXPERT_DTYPES = {"fp4", "fp8"}
++# How re-quantized block-FP8 scales are chosen from the BF16 value:
++#   "amax":       amax / 448 (FP32 wire), the historical rule;
++#   "checkpoint": the checkpoint's own scale_fmt -- power-of-two (UE8M0-valued)
++#                 scales when quantization_config.scale_fmt == "ue8m0", still FP32
++#                 on the wire.  Re-quantizing a UE8M0 checkpoint's own values with
++#                 this rule reproduces them exactly; "amax" moves them.
++_FP8_SCALE_RULES = {"amax", "checkpoint"}
+ 
+ 
+ def _scale_name(weight_name: str) -> str:
+@@ -38,7 +48,7 @@ def _quantization_contract(
+     if not isinstance(quant_config, dict) or not quant_config:
+         raise ValueError("DeepSeek-V4 checkpoint resync requires quantization_config")
+     options = dict(resync_config or {})
+-    unsupported = sorted(options.keys() - {"expert_dtype"})
++    unsupported = sorted(options.keys() - {"expert_dtype", "fp8_scale_rule"})
+     if unsupported:
+         raise ValueError(f"unsupported DeepSeek-V4 resync_config keys: {unsupported}")
+     expert_dtype = (
+@@ -65,6 +75,58 @@ def _quantization_contract(
+     return expert_dtype, block_shape, ignored
+ 
+ 
++def _fp8_pow2_scales(config: Any, resync_config: Mapping[str, Any] | None) -> bool:
++    rule = dict(resync_config or {}).get("fp8_scale_rule", "amax")
++    if rule not in _FP8_SCALE_RULES:
++        raise ValueError(
++            f"unsupported fp8_scale_rule={rule!r}; expected one of {sorted(_FP8_SCALE_RULES)}"
++        )
++    if rule == "amax":
++        return False
++    scale_fmt = (getattr(config, "quantization_config", None) or {}).get("scale_fmt")
++    if scale_fmt not in (None, "ue8m0"):
++        raise ValueError(f"fp8_scale_rule='checkpoint' does not support scale_fmt={scale_fmt!r}")
++    return scale_fmt == "ue8m0"
++
++
++def _quantize_block_fp8_for_export(
++    tensor: torch.Tensor,
++    block_shape: tuple[int, int],
++    scale_format: str,
++    pow2_scales: bool,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    if not pow2_scales or scale_format == "e8m0":
++        return quantize_block_fp8(tensor, block_shape, scale_format=scale_format)
++    quantized, encoded = quantize_block_fp8(tensor, block_shape, scale_format="e8m0")
++    scale = torch.exp2(encoded.view(torch.uint8).float() - 127.0)
++    return quantized, scale.contiguous()
++
++
++def deployed_block_fp8_value(
++    tensor: torch.Tensor,
++    config: Any,
++    *,
++    resync_config: Mapping[str, Any] | None = None,
++) -> torch.Tensor:
++    """The value a re-quantized block-FP8 weight is served with: dequant(export(tensor)).
++
++    Uses exactly the rule :func:`export_resync_weights` applies to a weight without
++    bound source scales (block shape and scale rule from the same contract), so a
++    trainer that differentiates at the deployed value stays tied to the export.
++    """
++    expert_dtype, block_shape, _ = _quantization_contract(config, resync_config)
++    scale_format = "e8m0" if expert_dtype == "fp4" else "float32"
++    quantized, scale = _quantize_block_fp8_for_export(
++        tensor.to(torch.bfloat16),
++        block_shape,
++        scale_format,
++        _fp8_pow2_scales(config, resync_config),
++    )
++    if scale.dtype == torch.float8_e8m0fnu:
++        scale = torch.exp2(scale.view(torch.uint8).float() - 127.0)
++    return dequantize_block_fp8(quantized, scale, block_shape).to(tensor.dtype)
++
++
+ def export_resync_weights(
+     weights: Iterable[tuple[str, torch.Tensor]],
+     config: Any,
+@@ -74,6 +136,7 @@ def export_resync_weights(
+ ) -> Iterator[tuple[str, torch.Tensor]]:
+     """Convert gathered DS4 BF16 weights to original checkpoint representation."""
+     expert_dtype, block_shape, ignored = _quantization_contract(config, resync_config)
++    pow2_scales = _fp8_pow2_scales(config, resync_config)
+     # Match the serialized block-FP8 checkpoint contract on the reload wire:
+     # scales are FP32 even when scale_fmt=ue8m0 asks vLLM to cast and pack them
+     # as E8M0 during post-load processing.
+@@ -121,14 +184,15 @@ def export_resync_weights(
+         elif is_routed_expert(name) and expert_dtype == "fp4":
+             quantized, scale = quantize_mxfp4(tensor)
+         else:
+-            quantized, scale = quantize_block_fp8(
+-                tensor, block_shape, scale_format=fp8_scale_format
++            quantized, scale = _quantize_block_fp8_for_export(
++                tensor, block_shape, fp8_scale_format, pow2_scales
+             )
+         yield name, quantized
+         yield _scale_name(name), scale
+ 
+ 
+ __all__ = [
++    "deployed_block_fp8_value",
+     "export_resync_weights",
+     "is_release_unquantized_weight",
+     "is_routed_expert",
+diff --git a/experimental/lite/tests/unit/model/deepseek_v4/lite/test_resync_fp8_scale_rule_unit.py b/experimental/lite/tests/unit/model/deepseek_v4/lite/test_resync_fp8_scale_rule_unit.py
+new file mode 100644
+index 000000000..1d1291a51
+--- /dev/null
++++ b/experimental/lite/tests/unit/model/deepseek_v4/lite/test_resync_fp8_scale_rule_unit.py
+@@ -0,0 +1,79 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""DS4 block-FP8 resync: fp8_scale_rule='checkpoint' honours quantization_config.scale_fmt=ue8m0."""
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from megatron.lite.model.deepseek_v4.lite.resync import (
++    deployed_block_fp8_value,
++    export_resync_weights,
++)
++from megatron.lite.primitive.quantization.block_fp8 import (
++    dequantize_block_fp8,
++    quantize_block_fp8,
++)
++
++NAME = "layers.0.ffn.experts.0.w1.weight"
++SCALE = "layers.0.ffn.experts.0.w1.scale"
++CONFIG = SimpleNamespace(
++    expert_dtype="fp8",
++    quantization_config={"scale_fmt": "ue8m0", "weight_block_size": [128, 128]},
++)
++
++
++def _checkpoint_value() -> torch.Tensor:
++    """A BF16 value that a UE8M0 block-FP8 checkpoint represents exactly."""
++    torch.manual_seed(0)
++    source = torch.randn(256, 384) * torch.logspace(-3, 1, 384)
++    q, s = quantize_block_fp8(source, (128, 128), scale_format="e8m0")
++    scale = torch.exp2(s.view(torch.uint8).float() - 127.0)
++    value = dequantize_block_fp8(q, scale).to(torch.bfloat16)
++    assert torch.equal(value.float(), dequantize_block_fp8(q, scale))
++    return value, q, scale
++
++
++def _export(value, rule):
++    return dict(
++        export_resync_weights(
++            [(NAME, value)],
++            CONFIG,
++            resync_config={"expert_dtype": "fp8", "fp8_scale_rule": rule},
++        )
++    )
++
++
++def test_checkpoint_rule_reproduces_ue8m0_checkpoint_values():
++    # Values, not bytes: a block whose largest code is not the E4M3 maximum may come
++    # back with its power-of-two scale halved and its codes doubled -- same weights.
++    value, _, _ = _checkpoint_value()
++    out = _export(value, "checkpoint")
++    assert out[SCALE].dtype == torch.float32
++    assert torch.equal(torch.exp2(torch.log2(out[SCALE]).round()), out[SCALE])
++    assert torch.equal(dequantize_block_fp8(out[NAME], out[SCALE]), value.float())
++
++
++def test_amax_rule_is_the_default_and_moves_ue8m0_values():
++    value, _, _ = _checkpoint_value()
++    default = dict(export_resync_weights([(NAME, value)], CONFIG, resync_config={"expert_dtype": "fp8"}))
++    amax = _export(value, "amax")
++    assert torch.equal(default[SCALE], amax[SCALE])
++    assert not torch.equal(dequantize_block_fp8(amax[NAME], amax[SCALE]), value.float())
++
++
++@pytest.mark.parametrize("rule", ["amax", "checkpoint"])
++def test_deployed_value_is_dequantized_export(rule):
++    torch.manual_seed(1)
++    value = torch.randn(256, 384).to(torch.bfloat16)
++    out = _export(value, rule)
++    expected = dequantize_block_fp8(out[NAME], out[SCALE]).to(torch.bfloat16)
++    actual = deployed_block_fp8_value(
++        value, CONFIG, resync_config={"expert_dtype": "fp8", "fp8_scale_rule": rule}
++    )
++    assert torch.equal(actual, expected)
++
++
++def test_unknown_rule_is_rejected():
++    value, _, _ = _checkpoint_value()
++    with pytest.raises(ValueError, match="fp8_scale_rule"):
++        _export(value, "nearest")

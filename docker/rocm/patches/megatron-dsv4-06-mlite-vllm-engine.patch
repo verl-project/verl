@@ -1,0 +1,1700 @@
+# Megatron-LM patch 06/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# impl=vllm_engine (rollout-identical forward from an in-process vLLM engine),
+# the visible-forward / native-VJP bridge, the pinned CSA indexer selection and
+# the verl_mlite wiring. impl=vllm on ROCm imports selected_log_probs from it.
+#
+# Upstream: prepared for ISEEKYAN/Megatron-LM ds4_vllm_align_preview, not yet proposed.
+#
+# Source commits:
+#   [mLite] primitive/ops: visible-forward / native-VJP bridge (C3 1/4)
+#   [mLite][DSv4] CSA: accept a pinned indexer top-k selection (C3 2/4)
+#   [mLite][DSv4] impl=vllm_engine: rollout-identical forward from an in-process vLLM engine (C3 3/4)
+#   [verl_mlite] wire impl=vllm_engine: weight-sync observer, rollout loader, rollout facts (C3 4/4)
+#   [verl_mlite] ref config: mirror the actor's runtime_plugins by node interpolation
+#   [mLite] Free cached blocks before the optimizer step; connect grad-stats groups at build
+#   [mLite][DSv4] vllm_engine: no autograd graph for no-grad forwards
+#   [mLite][DSv4] vllm_engine: find Lite layers by class, look parameters up at use
+#   [mLite][DSv4] vllm_engine: run the visible forward under the Lite modules' FSDP2 hooks
+#   [mLite] Connect grad-stats groups only for Megatron optimizers
+#   [mLite][DSv4] vllm_engine: document optimizer=fsdp2 in the impl scope
+#   [mLite][DSv4] vllm_engine: fsdp2 with FP32 shards and uncast inputs, as impl=vllm
+#
+diff --git a/experimental/lite/examples/verl/verl_mlite/config/engine/mlite.yaml b/experimental/lite/examples/verl/verl_mlite/config/engine/mlite.yaml
+index 97331360c..7a1fdc937 100644
+--- a/experimental/lite/examples/verl/verl_mlite/config/engine/mlite.yaml
++++ b/experimental/lite/examples/verl/verl_mlite/config/engine/mlite.yaml
+@@ -29,6 +29,9 @@ attention_backend_override: flash
+ router_aux_loss_coef: null
+ impl_cfg:
+   use_thd: true
++  # Runtime plugins (e.g. dynamic_context_parallel); empty = none.  Declared
++  # here so the colocated ref can mirror the actor's mapping by node interpolation.
++  runtime_plugins: {}
+   # MLite-owned training schema: controls forward fake quantization and STE.
+   # See ../../../../QAT.md for an enabled example.
+   qat:
+diff --git a/experimental/lite/examples/verl/verl_mlite/config/ref/mlite_ref.yaml b/experimental/lite/examples/verl/verl_mlite/config/ref/mlite_ref.yaml
+index 9055d802f..0a28a6b14 100644
+--- a/experimental/lite/examples/verl/verl_mlite/config/ref/mlite_ref.yaml
++++ b/experimental/lite/examples/verl/verl_mlite/config/ref/mlite_ref.yaml
+@@ -41,4 +41,7 @@ engine:
+     use_thd: ${oc.select:actor_rollout_ref.actor.engine.impl_cfg.use_thd,true}
+     # Runtime plugins may change process-group initialization. A colocated ref
+     # must use the actor's exact plugin settings rather than building another mesh.
+-    runtime_plugins: ${oc.select:actor_rollout_ref.actor.engine.impl_cfg.runtime_plugins,{}}
++    # Node interpolation (not oc.select with a {} default): a resolver that returns
++    # a mapping cannot be stored by OmegaConf.resolve(), which verl calls on the
++    # whole config.  engine/mlite.yaml declares the actor's runtime_plugins.
++    runtime_plugins: ${actor_rollout_ref.actor.engine.impl_cfg.runtime_plugins}
+diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+index f4d3635d8..27b4c70ad 100644
+--- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
++++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+@@ -455,6 +455,11 @@ class MegatronLiteEngine(BaseEngine):
+                 weights,
+                 os.path.join(hash_dir, f"rank{rank}.sync{sync_index}.jsonl"),
+             )
++        # A model protocol may need to see exactly what the rollout receives
++        # (impl=vllm_engine refits its private engine from this stream).
++        observer = getattr(self.handle, "_extras", {}).get("weight_sync_observer")
++        if observer is not None:
++            weights = observer(weights)
+         return weights, None
+ 
+     def _export_weights_for_verl(self, export_kwargs, request_kwargs):
+@@ -783,12 +788,30 @@ class MegatronLiteEngine(BaseEngine):
+             impl_cfg["mtp_loss_scaling_factor"] = float(
+                 getattr(mtp_cfg, "mtp_loss_scaling_factor", 0.1)
+             )
++        if self.engine_config.impl == "vllm_engine":
++            self._fill_vllm_engine_impl_cfg(impl_cfg)
+         if self.engine_config.full_determinism:
+             impl_cfg.setdefault("deterministic", True)
+         if self.engine_config.forward_only:
+             impl_cfg["optimizer"] = None
+         return impl_cfg
+ 
++    def _fill_vllm_engine_impl_cfg(self, impl_cfg: dict[str, Any]) -> None:
++        """impl=vllm_engine reproduces this recipe's rollout, so take the rollout facts from here:
++        verl masks logits beyond the tokenizer at rollout, the rollout reloads weights with verl's
++        FP8 loader, and the served value follows the weight-sync export's resync_config."""
++        tokenizer = getattr(self.model_config, "tokenizer", None)
++        if tokenizer is not None:
++            impl_cfg.setdefault("rollout_vocab_size", len(tokenizer))
++        impl_cfg.setdefault("engine_weight_loader", "verl_mlite.engine.vllm_refit")
++        if self.engine_config.resync_format != "block_fp8":
++            raise ValueError("impl=vllm_engine requires resync_format=block_fp8")
++        if "resync_config" in impl_cfg and dict(impl_cfg["resync_config"]) != dict(
++            self.engine_config.resync_config
++        ):
++            raise ValueError("impl_cfg.resync_config must equal the engine's resync_config")
++        impl_cfg["resync_config"] = dict(self.engine_config.resync_config)
++
+     def _build_mlite_optimizer_config(self) -> MegatronLiteOptimizerConfig:
+         optimizer_name = self._normalize_optimizer_name(self.optimizer_config)
+         betas = tuple(getattr(self.optimizer_config, "betas", (0.9, 0.999)))
+diff --git a/experimental/lite/examples/verl/verl_mlite/engine/vllm_refit.py b/experimental/lite/examples/verl/verl_mlite/engine/vllm_refit.py
+new file mode 100644
+index 000000000..8719bd13d
+--- /dev/null
++++ b/experimental/lite/examples/verl/verl_mlite/engine/vllm_refit.py
+@@ -0,0 +1,56 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""Weight reload for mLite impl=vllm_engine's private vLLM engine, done the way verl's rollout does it.
++
++The trainer's engine must hold exactly the bytes the rollout holds after a weight sync, so it reloads through the
++same verl calls the rollout worker makes for a quantized model (``vLLMColocateWorkerExtension.update_weights_from_ipc``
++for one bucket): verl's vLLM quantization hooks installed before the engine is built, then
++``prepare_quanted_weights_for_loading`` -> ``load_quanted_weights`` (+ buffer updates) ->
++``process_quanted_weights_after_loading``. Selected with
++``impl_cfg.engine_weight_loader = "verl_mlite.engine.vllm_refit"`` (verl_mlite's default for impl=vllm_engine).
++"""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++
++import torch
++
++
++def prepare_engine() -> None:
++    from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
++
++    apply_vllm_quant_patches()
++
++
++def load_weights(llm, model, weights: Iterable[tuple[str, torch.Tensor]]) -> int:
++    from verl.utils.vllm.vllm_quant_utils import (
++        is_quantized_model,
++        load_quanted_weights,
++        prepare_quanted_weights_for_loading,
++        process_quanted_weights_after_loading,
++    )
++    from verl.workers.rollout.vllm_rollout.weight_update_utils import (
++        apply_buffer_updates,
++        drop_tied_alias_updates,
++        split_buffer_updates,
++    )
++
++    weights = list(weights)
++
++    def reload(worker) -> int:
++        runner = worker.model_runner
++        if runner.model is not model:
++            raise RuntimeError("engine worker does not hold the trainer's bound model")
++        if not is_quantized_model(runner.vllm_config):
++            raise NotImplementedError("verl_mlite.engine.vllm_refit handles quantized (FP8) models only")
++        with torch.no_grad():
++            state = prepare_quanted_weights_for_loading(model)
++            params, buffers, named_buffers = split_buffer_updates(model, weights)
++            updates = drop_tied_alias_updates(model, params)
++            loaded = load_quanted_weights(updates, runner) if updates else []
++            apply_buffer_updates(model, buffers, named_buffers=named_buffers)
++            process_quanted_weights_after_loading(model, state)
++        return len(loaded)
++
++    (count,) = llm.collective_rpc(reload)
++    return count
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py b/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py
+index 629665abc..45c75d7b7 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py
+@@ -112,7 +112,12 @@ class DeepseekV4CSAAttention(nn.Module):
+         self.self_attn = CompressedSparseAttention(config, layer_idx=layer_idx, ps=ps)
+ 
+     def forward(
+-        self, x: torch.Tensor, *, position_ids: torch.Tensor, packed_seq_params: Any = None
++        self,
++        x: torch.Tensor,
++        *,
++        position_ids: torch.Tensor,
++        packed_seq_params: Any = None,
++        pinned_indexer_topk: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         # Skeleton feeds SBHD [S, B, H]; CSA needs batch-first [B, S, H].
+         # packed_seq_params (cu_seqlens etc.) passes through unchanged: the THD
+@@ -123,6 +128,7 @@ class DeepseekV4CSAAttention(nn.Module):
+             position_ids=position_ids,
+             attention_mask=None,
+             packed_seq_params=packed_seq_params,
++            pinned_indexer_topk=pinned_indexer_topk,
+         )
+         # Back to SBHD [S, B, H] for the skeleton.
+         return out_bsh.transpose(0, 1).contiguous()
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py b/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py
+index 442d2c263..439c1565c 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py
+@@ -507,7 +507,13 @@ def build_training_backend(
+     )
+ 
+ 
+-def build_model(model_cfg: DeepseekV4Config, *, impl_cfg: ImplConfig) -> ModelBundle:
++def build_model(
++    model_cfg: DeepseekV4Config,
++    *,
++    impl_cfg: ImplConfig,
++    fsdp2_use_fp32_shards: bool = False,
++    fsdp2_cast_forward_inputs: bool = True,
++) -> ModelBundle:
+     from megatron.lite.model.deepseek_v4.lite.model import (
+         DeepseekV4Layer,
+         DeepseekV4Model,
+@@ -575,7 +581,8 @@ def build_model(model_cfg: DeepseekV4Config, *, impl_cfg: ImplConfig) -> ModelBu
+             impl_cfg,
+             ps,
+             unit_modules=(DeepseekV4Layer,),
+-            use_fp32_shards=False,
++            use_fp32_shards=fsdp2_use_fp32_shards,
++            cast_forward_inputs=fsdp2_cast_forward_inputs,
+             fsdp2_replicated_param_classifier=(
+                 lambda name, _parameter: _is_native_fp32_control(name)
+             ),
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/__init__.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/__init__.py
+new file mode 100644
+index 000000000..fa2564714
+--- /dev/null
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/__init__.py
+@@ -0,0 +1,2 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""DeepSeek-V4 trainer whose forward value is an in-process vLLM engine's (ROCm counterpart of impl=vllm)."""
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/model.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/model.py
+new file mode 100644
+index 000000000..339b889d2
+--- /dev/null
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/model.py
+@@ -0,0 +1,411 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""DeepSeek-V4 trainer forward = the rollout's vLLM forward; backward = the Lite model's native recompute.
++
++Sub-module granularity (``primitive.ops.visible_vjp``): each unit's value comes from the in-process vLLM engine's
++own module (bitwise what the rollout serves; the engine supplies attention metadata, KV cache and batch geometry),
++and its VJP from the Lite module of the same math recomputed at the unit's visible inputs on the trainer's masters:
++
++  unit                 visible (vLLM)                 native (Lite masters)
++  embedding            embed_input_ids                F.embedding
++  mHC pre / post       mhc_pre / mhc_post ops         hca.mhc_pre / hca.mhc_post (vLLM's torch semantics, FP32)
++  attn / ffn norm      RMSNorm                        Lite RMSNorm
++  attention            DeepSeek-V4 attention          Lite CSA, compressed top-k pinned to the vLLM indexer's
++  MoE                  FusedMoE                       Lite MoE, expert ids pinned (RouterReplay REPLAY_FORWARD)
++  HC head              hc_head op                     hca.mhc_head
++  final norm           RMSNorm                        Lite RMSNorm
++  LM head              compute_logits                 F.linear
++
++Quantized weights enter the native graph at the value the rollout serves (``deployed_values``): dX uses that
++value, dW reaches the BF16 master (identity STE). While the checkpoint's source scales are still bound (before the
++first update) the masters already are that value.
++
++FSDP2 masters (``optimizer=fsdp2``): the forward runs as the forward of the Lite module that owns each part's
++parameters -- the root for the whole model, each decoder layer for its units, a nested FSDP2 module (the routed
++experts) for the unit that contains it -- so FSDP2's own hooks bracket it as they bracket a native forward: unshard
++before (all-gather), reshard after, unshard again when the backward reaches its output, and reshard plus
++reduce-scatter the gradients once the backward is through its input. The native recompute (at backward) therefore
++finds its masters unsharded, and the nested experts in the pre-backward state FSDP2 keeps for activation
++checkpointing (their recompute forward neither unshards nor reshards).
++"""
++
++from __future__ import annotations
++
++from collections.abc import Callable
++from typing import Any
++
++import torch
++import torch.nn.functional as F
++from torch.distributed.fsdp import FSDPModule
++
++from megatron.lite.model.deepseek_v4.lite.model import DeepseekV4Layer, DeepseekV4MTPLayer
++from megatron.lite.primitive.modules import router_replay
++from megatron.lite.primitive.modules.attention.hca import mhc_head, mhc_post, mhc_pre
++from megatron.lite.primitive.ops.visible_vjp import deployed_values, visible_forward
++from megatron.lite.primitive.vllm_engine import RoutingCapture
++
++ARCHITECTURE = "DeepseekV4ForCausalLM"
++
++# 2-D parameters the rollout serves as block FP8.  Everything 2-D under attention / experts /
++# shared experts, except what the rollout keeps in BF16: the compressor, the indexer's
++# weights_proj, the router gate, norms and mHC.
++_QUANTIZED_KEYS = (
++    "wq_a", "wkv", "wq_b", "wo_a", "wo_b", "fc1", "fc2", "gate_up", "down", "linear_fc1", "linear_fc2",
++)
++_UNQUANTIZED_KEYS = ("compressor", "weights_proj", "mlp.gate.", "norm", "_hc.")
++
++
++def training_visible_model_class(base: type) -> type:
++    """vLLM's DeepSeek-V4 model class whose step forward a bound training forward can take over.
++
++    Registered under the same architecture name for the trainer's private engine only
++    (``primitive.vllm_engine.register_model_class``). With nothing bound it is the base class."""
++
++    class TrainingVisibleDeepseekV4ForCausalLM(base):
++        def __init__(self, *, vllm_config, prefix: str = ""):
++            super().__init__(vllm_config=vllm_config, prefix=prefix)
++            self._training_forward: Callable | None = None
++
++        def bind_training_forward(self, fn: Callable | None) -> None:
++            self._training_forward = fn
++
++        def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
++            fn = self._training_forward
++            if fn is not None:
++                hidden = fn(input_ids, positions)
++                if hidden is not None:
++                    return hidden
++            return super().forward(input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs)
++
++    TrainingVisibleDeepseekV4ForCausalLM.__qualname__ = TrainingVisibleDeepseekV4ForCausalLM.__name__
++    return TrainingVisibleDeepseekV4ForCausalLM
++
++
++def _as_forward(module: torch.nn.Module, fn: Callable, *args):
++    """``fn(*args)``; if ``module`` is FSDP2-sharded, run as ``module``'s forward so its FSDP2 hooks bracket it."""
++    if not isinstance(module, FSDPModule):
++        return fn(*args)
++    own = module.__dict__.get("forward")  # an instance-level wrapper, e.g. activation checkpointing
++    module.forward = fn
++    try:
++        return module(*args)
++    finally:
++        if own is None:
++            del module.forward
++        else:
++            module.forward = own
++
++
++def _fsdp_within(module: torch.nn.Module) -> list[torch.nn.Module]:
++    """FSDP2 modules nested in ``module`` (``module`` included), outermost first."""
++    return [m for m in module.modules() if isinstance(m, FSDPModule)]
++
++
++def _packed_seq_params(positions: torch.Tensor):
++    from megatron.core.packed_seq_params import PackedSeqParams
++
++    starts = (positions == 0).nonzero().flatten().to(torch.int32)
++    total = torch.tensor([positions.numel()], dtype=torch.int32, device=positions.device)
++    cu_seqlens = torch.cat([starts, total])
++    max_len = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
++    return PackedSeqParams(
++        qkv_format="thd",
++        cu_seqlens_q=cu_seqlens,
++        cu_seqlens_kv=cu_seqlens,
++        max_seqlen_q=max_len,
++        max_seqlen_kv=max_len,
++    )
++
++
++class VisibleDeepseekV4:
++    """Binds the engine's vLLM ``DeepseekV4ForCausalLM`` (visible) to a Lite ``DeepseekV4Model`` (masters)."""
++
++    def __init__(
++        self,
++        vllm_model,
++        lite_model: torch.nn.Module,
++        model_cfg,
++        *,
++        deployed_value: Callable[[torch.Tensor], torch.Tensor],
++        max_tokens: int,
++    ):
++        self.v = vllm_model
++        self.lite = lite_model
++        self.cfg = model_cfg
++        self.deployed_value = deployed_value
++        # By class, not name: FSDP2 (``fully_shard``) swaps a unit's class for an ``FSDP<name>`` subclass.
++        self.lite_layers = [
++            m for m in lite_model.modules()
++            if isinstance(m, DeepseekV4Layer) and not isinstance(m, DeepseekV4MTPLayer)
++        ]
++        inner = vllm_model.model
++        self.layer_ids = list(range(inner.start_layer, inner.end_layer))
++        if len(self.layer_ids) != len(self.lite_layers):
++            raise RuntimeError(
++                f"vLLM serves {len(self.layer_ids)} decoder layers, the Lite chunk has {len(self.lite_layers)}"
++            )
++        if not hasattr(lite_model, "_fp8_source_scales_valid"):
++            raise RuntimeError("Lite model has no bound FP8 source-scale state (load_hf_weights not run?)")
++
++        # Discrete state of the visible forward, consumed by the native recompute.
++        self._pins: dict[int, dict[str, torch.Tensor]] = {}
++        self._capturing = False
++        self._num_tokens = 0
++        self._routing = RoutingCapture(
++            {
++                layer: inner.layers[layer].ffn.experts.router
++                for layer in self.layer_ids
++            },
++            max_tokens=max_tokens,
++            top_k=model_cfg.num_experts_per_tok,
++            device=torch.device("cuda", torch.cuda.current_device()),
++        )
++        for layer in self.layer_ids:
++            indexer = getattr(inner.layers[layer].attn, "indexer", None)
++            if indexer is not None:
++                indexer.register_forward_hook(self._indexer_hook(layer))
++
++        # Lite RouterReplay: one instance per MoE router, mapped to its decoder layer.
++        self._n_replay = router_replay.attach_router_replay(lite_model)
++        instances = router_replay.RouterReplay.global_router_replay_instances
++        if len(instances) != self._n_replay:
++            raise RuntimeError("router-replay instance registry does not match this model")
++        position = {id(instance): i for i, instance in enumerate(instances)}
++        self._replay_index: dict[int, int] = {}
++        for index, layer in enumerate(self.lite_layers):
++            owned = [
++                position[id(m.router_replay)]
++                for m in layer.modules()
++                if getattr(m, "router_replay", None) is not None and id(m.router_replay) in position
++            ]
++            if len(owned) > 1:
++                raise RuntimeError(f"decoder layer {index} owns {len(owned)} router-replay instances")
++            if owned:
++                self._replay_index[index] = owned[0]
++
++        self._quantized = {i: self._quantized_names(layer) for i, layer in enumerate(self.lite_layers)}
++        # FSDP2 modules nested in a layer's attention / MoE (lite wiring: the routed experts, on the expert-DP mesh).
++        self._fsdp_attn = {i: _fsdp_within(layer.self_attn) for i, layer in enumerate(self.lite_layers)}
++        self._fsdp_moe = {i: _fsdp_within(layer.mlp) for i, layer in enumerate(self.lite_layers)}
++
++    # ------------------------------------------------------------------ discrete-state capture
++    def _indexer_hook(self, layer: int):
++        def hook(module, args, output):
++            if self._capturing:
++                self._pins.setdefault(layer, {})["indexer_topk"] = output[: self._num_tokens].detach().clone()
++
++        return hook
++
++    @staticmethod
++    def _quantized_names(lite_layer) -> list[str]:
++        """``.name`` within the layer of every master the rollout serves as block FP8."""
++        return [
++            "." + n
++            for n, p in lite_layer.named_parameters()
++            if p.dim() == 2
++            and any(k in n for k in _QUANTIZED_KEYS)
++            and not any(k in n for k in _UNQUANTIZED_KEYS)
++        ]
++
++    def _served(self, index: int, scope: str):
++        """Context: the layer's quantized masters under ``scope`` take their served value.
++
++        Looked up by name at use: under FSDP2 the module holds a different (unsharded) parameter while unsharded."""
++        layer = self.lite_layers[index]
++        params = [layer.get_parameter(n[1:]) for n in self._quantized[index] if scope in n]
++        return deployed_values(
++            params, self.deployed_value, active=not bool(self.lite._fp8_source_scales_valid)
++        )
++
++    def unit(self, visible: Callable, native: Callable, *inputs):
++        """One visible/native unit (overridable, e.g. to record units in tests)."""
++        return visible_forward(visible, native, *inputs)
++
++    def _owned_unit(self, owners: list[torch.nn.Module], visible: Callable, native: Callable, x):
++        """A unit run as the forward of the FSDP2 modules (outermost first) whose masters its native uses."""
++        if not owners:
++            return self.unit(visible, native, x)
++        return _as_forward(owners[0], lambda t: self._owned_unit(owners[1:], visible, native, t), x)
++
++    # ------------------------------------------------------------------ one decoder layer
++    def _layer(self, index: int, x, positions, input_ids, psp, pins):
++        layer_id = self.layer_ids[index]
++        vl, ll, cfg = self.v.model.layers[layer_id], self.lite_layers[index], self.cfg
++        tokens = x.shape[0]
++        position_ids = positions.view(1, tokens)
++
++        def hc_pre(residual, fn, scale, base, hc):
++            def visible(r):
++                return vl.mhc_pre(
++                    residual=r, fn=fn, hc_scale=scale, hc_base=base, rms_eps=vl.rms_norm_eps,
++                    hc_pre_eps=vl.hc_eps, hc_sinkhorn_eps=vl.hc_eps,
++                    hc_post_mult_value=vl.hc_post_alpha, sinkhorn_repeat=vl.hc_sinkhorn_iters,
++                )
++
++            def native(r):
++                return mhc_pre(
++                    r, hc.fn.float(), hc.scale.float(), hc.base.float(), vl.rms_norm_eps,
++                    vl.hc_eps, vl.hc_eps, vl.hc_post_alpha, vl.hc_sinkhorn_iters,
++                )
++
++            return self.unit(visible, native, residual)
++
++        def hc_post(out, residual, post, comb):
++            return self.unit(lambda *a: vl.mhc_post(*a), mhc_post, out, residual, post, comb)
++
++        # attention block
++        residual = x
++        post, comb, h = hc_pre(x, vl.hc_attn_fn, vl.hc_attn_scale, vl.hc_attn_base, ll.attn_hc)
++        h = self.unit(
++            lambda t: vl.attn_norm(t),
++            lambda t: ll.input_layernorm(t.view(tokens, 1, -1)).view(tokens, -1),
++            h,
++        )
++
++        def attention_native(t):
++            with self._served(index, ".self_attn."):
++                return ll.self_attn(
++                    t.view(tokens, 1, -1),
++                    position_ids=position_ids,
++                    packed_seq_params=psp,
++                    pinned_indexer_topk=pins.get(layer_id, {}).get("indexer_topk"),
++                ).view(tokens, -1)
++
++        h = self._owned_unit(self._fsdp_attn[index], lambda t: vl.attn(positions, t, None), attention_native, h)
++        x = hc_post(h, residual, post, comb)
++
++        # MoE block
++        residual = x
++        post, comb, h = hc_pre(x, vl.hc_ffn_fn, vl.hc_ffn_scale, vl.hc_ffn_base, ll.ffn_hc)
++        h = self.unit(
++            lambda t: vl.ffn_norm(t),
++            lambda t: ll.post_attention_layernorm(t.view(tokens, 1, -1)).view(tokens, -1),
++            h,
++        )
++
++        def moe_native(t):
++            if index not in self._replay_index:
++                raise RuntimeError(f"no router-replay instance for decoder layer {index}")
++            expert_ids = pins[layer_id]["expert_ids"]
++            replay = [
++                torch.zeros(tokens, cfg.num_experts_per_tok, dtype=torch.int64, device=t.device)
++                for _ in range(self._n_replay)
++            ]
++            replay[self._replay_index[index]] = expert_ids
++            router_replay.RouterReplay.set_replay_data(replay)
++            router_replay.RouterReplay.set_global_router_replay_action(
++                router_replay.RouterReplayAction.REPLAY_FORWARD
++            )
++            try:
++                with self._served(index, ".mlp."):
++                    return ll.mlp(t.view(tokens, 1, -1), input_ids=input_ids.view(1, tokens)).view(tokens, -1)
++            finally:
++                router_replay.RouterReplay.clear_global_state()
++
++        h = self._owned_unit(self._fsdp_moe[index], lambda t: vl.ffn(t, input_ids), moe_native, h)
++        if self._capturing:
++            pins.setdefault(layer_id, {})["expert_ids"] = self._routing.take(layer_id, tokens)
++        return hc_post(h, residual, post, comb)
++
++    # ------------------------------------------------------------------ whole model
++    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
++        """Final hidden states ``[T, hidden]`` of one packed prefill, with the autograd graph described above.
++
++        Must run inside the engine's model forward (it uses the engine's forward context)."""
++        tokens = input_ids.shape[0]
++        # A fresh dict per forward: this forward's native closures keep it until their backward.
++        pins = self._pins = {}
++        self._num_tokens = tokens
++        self._capturing = True
++        self._routing.reset()
++        try:
++            # The root owns the embedding, the final norm and the LM head (and runs FSDP2's per-forward setup).
++            return _as_forward(self.lite, lambda ids, pos: self._model(ids, pos, pins), input_ids, positions)
++        finally:
++            self._capturing = False
++
++    def _model(self, input_ids: torch.Tensor, positions: torch.Tensor, pins) -> torch.Tensor:
++        inner = self.v.model
++        tokens = input_ids.shape[0]
++        psp = _packed_seq_params(positions)
++        h = self.unit(
++            lambda ids: inner.embed_input_ids(ids),
++            lambda ids: F.embedding(ids, self._lite_param("embed_tokens", self.cfg.vocab_size)),
++            input_ids,
++        )
++        h = h.unsqueeze(-2).repeat(1, inner.hc_mult, 1)
++        for index in range(len(self.layer_ids)):
++            h = _as_forward(
++                self.lite_layers[index],
++                lambda t, index=index: self._layer(index, t, positions, input_ids, psp, pins),
++                h,
++            )
++        head = self._lite_module("hc_head")
++        h = self.unit(
++            lambda t: inner.hc_head_op(
++                t, inner.hc_head_fn, inner.hc_head_scale, inner.hc_head_base,
++                inner.rms_norm_eps, inner.hc_eps,
++            ),
++            lambda t: mhc_head(
++                t, head.hc_fn.float(), head.hc_scale.float(), head.hc_base.float(),
++                inner.rms_norm_eps, inner.hc_eps,
++            ),
++            h,
++        )
++        norm = self._lite_module("norm")
++        return self.unit(
++            lambda t: inner.norm(t),
++            lambda t: norm(t.view(tokens, 1, -1)).view(tokens, -1),
++            h,
++        )
++
++    def logits(self, hidden: torch.Tensor) -> torch.Tensor:
++        return self.unit(
++            lambda t: self.v.compute_logits(t),
++            lambda t: F.linear(t, self._lite_param("lm_head", self.cfg.vocab_size)).float(),
++            hidden,
++        )
++
++    # ------------------------------------------------------------------ Lite lookups
++    def _lite_param(self, prefix: str, rows: int) -> torch.nn.Parameter:
++        for name, param in self.lite.named_parameters():
++            if name.startswith(prefix) and name.endswith("weight") and param.shape[0] == rows:
++                return param
++        raise RuntimeError(f"Lite parameter under {prefix!r} not found")
++
++    def _lite_module(self, name: str) -> torch.nn.Module:
++        module = getattr(self.lite, name, None)
++        if module is None:
++            raise RuntimeError(f"Lite model has no {name!r} (not the last pipeline stage?)")
++        return module
++
++
++def selected_log_probs(
++    logits: torch.Tensor,
++    labels: torch.Tensor,
++    *,
++    temperature: float | torch.Tensor = 1.0,
++    vocab_limit: int | None = None,
++    calculate_entropy: bool = False,
++) -> dict[str, torch.Tensor]:
++    """Log-probabilities of ``labels`` as the rollout's sampler computes them: logits beyond ``vocab_limit``
++    masked to -inf (an integration that masks them at rollout), FP32, divided by the temperature, log-softmax."""
++    if vocab_limit is not None and vocab_limit < logits.shape[-1]:
++        logits = logits.clone()
++        logits[..., vocab_limit:] = float("-inf")
++    logits = logits.float()
++    if isinstance(temperature, torch.Tensor) or float(temperature) != 1.0:
++        logits = logits / temperature
++    log_softmax = torch.log_softmax(logits, dim=-1)
++    out = {"log_probs": log_softmax.gather(1, labels.reshape(-1, 1).long()).squeeze(1)}
++    if calculate_entropy:
++        probs = log_softmax.exp()
++        out["entropy"] = -(probs * log_softmax.masked_fill(probs == 0, 0)).sum(-1)
++    return out
++
++
++__all__ = [
++    "ARCHITECTURE",
++    "VisibleDeepseekV4",
++    "selected_log_probs",
++    "training_visible_model_class",
++]
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/protocol.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/protocol.py
+new file mode 100644
+index 000000000..b9ded4e90
+--- /dev/null
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm_engine/protocol.py
+@@ -0,0 +1,431 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""DeepSeek-V4 ``impl=vllm_engine``: rollout-identical forward from an in-process vLLM engine, Lite backward.
++
++The counterpart of ``impl=vllm`` for platforms where DeepSeek-V4's vLLM kernels cannot be called outside the vLLM
++model (ROCm): the trainer runs a private vLLM engine configured like the rollout and takes over its model forward
++for one teacher-forced prefill per micro-batch (``vllm_engine.model``), so the forward value is the rollout's own
++computation and the gradient is the Lite model's native recompute at the same discrete choices.
++
++Everything trainable is the impl=lite model: parameters, optimizer, checkpoint, export and weight sync are
++unchanged. The engine holds the served weights; after each optimizer step it is refit before its next forward,
++from the same weight-sync stream the rollout receives (or, if configured, from this trainer's own export).
++
++Scope: PP = VPP = TP = CP = 1, THD-packed micro-batches, one engine per actor rank (DP = EP engines over the
++trainer's ranks with ``engine_data_parallel_size``). Optimizer: impl=lite's, ``dist_opt`` or ``fsdp2``; with
++``fsdp2`` the visible forward runs under the Lite modules' FSDP2 hooks (``vllm_engine.model``), and export and
++weight sync read the sharded masters as impl=lite does.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import time
++from collections.abc import Iterable, Iterator, Mapping
++from dataclasses import dataclass, field
++from typing import Any
++
++import torch
++import torch.nn as nn
++
++from megatron.lite.model.deepseek_v4.config import DeepseekV4Config
++from megatron.lite.model.deepseek_v4.lite import protocol as lite
++from megatron.lite.model.deepseek_v4.lite.protocol import (  # noqa: F401  (protocol surface)
++    MODULE_MAP,
++    SUPPORTS_LOCAL_EXPERT_SHARD,
++    build_model_config,
++    export_hf_weights,
++    is_expert_param,
++    load_hf_weights,
++    pack_r3_replay_mask,
++    pack_routed_experts,
++    save_hf_weights,
++    unpack_forward_output,
++    vocab_size,
++)
++from megatron.lite.model.deepseek_v4.lite.resync import deployed_block_fp8_value
++from megatron.lite.primitive.bundle import ModelBundle
++from megatron.lite.primitive.ckpt.hf_weights import unwrap_model
++from megatron.lite.primitive.parallel.thd import parallel_state_from_model
++from megatron.lite.primitive.vllm_engine import (
++    InProcessEngineConfig,
++    build_inprocess_engine,
++    register_model_class,
++    resolve_weight_loader,
++)
++
++_REFIT_SOURCES = {"weight_sync", "export"}
++
++
++@dataclass(frozen=True)
++class ImplConfig(lite.ImplConfig):
++    # ---- the private engine; kernel-selecting settings must match the rollout's
++    engine_gpu_memory_utilization: float = 0.15
++    engine_kv_cache_memory_bytes: int | None = None
++    engine_max_model_len: int = 8192
++    engine_max_num_batched_tokens: int = 65536
++    engine_data_parallel_size: int = 1
++    engine_kv_cache_dtype: str = "fp8"
++    engine_moe_backend: str | None = "triton"
++    engine_tokenizer_mode: str | None = "deepseek_v4"
++    # How the engine reloads weights: "vllm" (vLLM reload_weights) or the import path of a
++    # loader module (primitive.vllm_engine.resolve_weight_loader); use the rollout's loader.
++    engine_weight_loader: str = "vllm"
++    # Refit source after an update: "weight_sync" (the stream sent to the rollout, observed
++    # via extras["weight_sync_observer"]) or "export" (this trainer's own export).
++    engine_refit_source: str = "weight_sync"
++    # ---- served-value contract: must equal the weight-sync export's resync_config
++    resync_config: Mapping[str, Any] = field(
++        default_factory=lambda: {"expert_dtype": "fp8", "fp8_scale_rule": "checkpoint"}
++    )
++    # Logits >= this index are -inf at rollout (e.g. verl masks ids beyond the tokenizer).
++    rollout_vocab_size: int | None = None
++    # ---- test mode (off in production): dual-path and weight-sync-vs-export checks, receipts
++    consistency_checks: bool = False
++    receipt_path: str | None = None
++
++    def __post_init__(self) -> None:
++        if self.engine_refit_source not in _REFIT_SOURCES:
++            raise ValueError(f"engine_refit_source must be one of {sorted(_REFIT_SOURCES)}")
++
++
++def _validate(model_cfg: DeepseekV4Config, impl_cfg: ImplConfig) -> None:
++    p = impl_cfg.parallel
++    unsupported = {
++        name: size
++        for name, size in (("tp", p.tp), ("pp", p.pp), ("vpp", p.vpp), ("cp", p.cp), ("etp", p.etp or 1))
++        if size > 1
++    }
++    if unsupported:
++        raise NotImplementedError(f"DeepSeek V4 impl=vllm_engine supports PP/VPP/TP/CP/ETP = 1; got {unsupported}")
++    if impl_cfg.engine_data_parallel_size > 1 and p.ep != impl_cfg.engine_data_parallel_size:
++        raise ValueError("engine_data_parallel_size > 1 requires it to equal the actor EP size")
++    if not impl_cfg.use_thd:
++        raise NotImplementedError("DeepSeek V4 impl=vllm_engine consumes THD-packed micro-batches (use_thd=True)")
++
++
++def _sha256(tensor: torch.Tensor) -> tuple[str, tuple[int, ...], str]:
++    value = tensor.detach().contiguous().cpu()
++    return str(value.dtype), tuple(value.shape), hashlib.sha256(value.view(torch.uint8).numpy()).hexdigest()
++
++
++class VisibleEngine:
++    """The private engine, the visible/native binding, and their weight-version bookkeeping."""
++
++    def __init__(self, model_cfg: DeepseekV4Config, impl_cfg: ImplConfig, chunks: list[nn.Module]):
++        self.model_cfg = model_cfg
++        self.impl_cfg = impl_cfg
++        self._chunks = chunks
++        self.llm = None
++        self.vllm_model = None
++        self.binding = None
++        self._loader, self._prepare = resolve_weight_loader(impl_cfg.engine_weight_loader)
++        self.policy_version = 0        # optimizer steps taken
++        self.engine_version = 0        # policy version the engine serves
++        self.refits = 0
++        self._pending: list[tuple[str, torch.Tensor]] | None = None
++        self._local_experts: set[int] | None = None
++        self._armed = False
++        self._expected_tokens = 0
++        self._build_graph = True
++        self._hidden = None
++        self._calls = 0
++        self._last_refit: dict[str, Any] = {}
++        self._nograd_log_probs: dict[tuple[int, str], torch.Tensor] = {}
++
++    # ------------------------------------------------------------------ construction
++    @property
++    def lite_model(self) -> nn.Module:
++        return unwrap_model(self._chunks[0])
++
++    def build(self) -> None:
++        if self.binding is not None:
++            return
++        from vllm.models.deepseek_v4 import DeepseekV4ForCausalLM
++
++        from megatron.lite.model.deepseek_v4.vllm_engine.model import (
++            ARCHITECTURE,
++            VisibleDeepseekV4,
++            training_visible_model_class,
++        )
++
++        lite_model = self.lite_model
++        if not hasattr(lite_model, "_fp8_source_scales_valid"):
++            raise RuntimeError("impl=vllm_engine: build the engine after the HF weights are loaded")
++        c = self.impl_cfg
++        if self._prepare is not None:
++            self._prepare()
++        register_model_class(ARCHITECTURE, training_visible_model_class(DeepseekV4ForCausalLM))
++        self.llm, self.vllm_model = build_inprocess_engine(
++            c.hf_path,
++            InProcessEngineConfig(
++                gpu_memory_utilization=c.engine_gpu_memory_utilization,
++                kv_cache_memory_bytes=c.engine_kv_cache_memory_bytes,
++                max_model_len=c.engine_max_model_len,
++                max_num_batched_tokens=c.engine_max_num_batched_tokens,
++                data_parallel_size=c.engine_data_parallel_size,
++                kv_cache_dtype=c.engine_kv_cache_dtype,
++                moe_backend=c.engine_moe_backend,
++                tokenizer_mode=c.engine_tokenizer_mode,
++            ),
++        )
++        resync_config = dict(c.resync_config)
++        model_cfg = self.model_cfg
++        self.binding = VisibleDeepseekV4(
++            self.vllm_model,
++            lite_model,
++            model_cfg,
++            deployed_value=lambda w: deployed_block_fp8_value(w, model_cfg, resync_config=resync_config),
++            max_tokens=c.engine_max_num_batched_tokens,
++        )
++        self.vllm_model.bind_training_forward(self._engine_forward)
++        if c.engine_data_parallel_size > 1:
++            routed = next(
++                layer.ffn.experts.routed_experts
++                for layer in self.vllm_model.model.layers
++                if getattr(getattr(getattr(layer, "ffn", None), "experts", None), "routed_experts", None) is not None
++            )
++            self._local_experts = {g for g, local in enumerate(routed._expert_map.tolist()) if local >= 0}
++
++    # ------------------------------------------------------------------ weights
++    def mark_updated(self) -> None:
++        """After an optimizer step (or checkpoint load): the engine is stale until refit."""
++        self.policy_version += 1
++        if self.lite_model._fp8_source_scales_valid:
++            raise RuntimeError("source scales still bound after an update: the served value would not move")
++
++    def _keeps(self, name: str) -> bool:
++        if self._local_experts is None:
++            return True
++        marker = ".experts."
++        if marker not in name:
++            return True
++        expert = name.split(marker, 1)[1].split(".", 1)[0]
++        return not expert.isdigit() or int(expert) in self._local_experts
++
++    def observe_weight_sync(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
++        """Pass the rollout's weight-sync stream through, keeping a CPU copy (only the tensors this engine loads)
++        for the next refit: the engine then holds exactly the bytes the rollout received."""
++        kept: list[tuple[str, torch.Tensor]] = []
++        for name, tensor in weights:
++            if self._keeps(name):
++                kept.append((name, tensor.detach().to("cpu", copy=True)))
++            yield name, tensor
++        self._pending = kept
++
++    def _own_export(self) -> Iterator[tuple[str, torch.Tensor]]:
++        ps = parallel_state_from_model(self.lite_model)
++        stream = export_hf_weights(
++            self.lite_model, self.model_cfg, ps, target="block_fp8", resync_config=dict(self.impl_cfg.resync_config)
++        )
++        return ((n, t) for n, t in stream if self._keeps(n))
++
++    def refit(self, weights: Iterable[tuple[str, torch.Tensor]], *, source: str = "explicit") -> int:
++        self.build()
++        loaded = self._loader(self.llm, self.vllm_model, weights)
++        self.engine_version = self.policy_version
++        self.refits += 1
++        self._last_refit["source"] = source
++        return loaded
++
++    def _ensure_current(self) -> None:
++        if self.engine_version == self.policy_version:
++            return
++        pending, self._pending = self._pending, None
++        if pending is not None:
++            if self.impl_cfg.consistency_checks:
++                self._check_weight_sync_vs_export(pending)
++            self.refit(pending, source="weight_sync")
++        elif self.impl_cfg.engine_refit_source == "export":
++            self.refit(self._own_export(), source="export")
++        else:
++            raise RuntimeError(
++                "impl=vllm_engine: the policy was updated but no weight sync was observed since; refusing to run a "
++                "forward on stale engine weights (engine_refit_source='export' refits from this trainer instead)"
++            )
++
++    def _check_weight_sync_vs_export(self, synced: list[tuple[str, torch.Tensor]]) -> None:
++        """Test mode: the observed weight sync must equal this trainer's own export, per tensor (block-FP8 pairs
++        compared by dequantized value: a power-of-two block may re-encode as half scale / double codes)."""
++        own = dict(self._own_export())
++        theirs = dict(synced)
++        mismatched = []
++        for name in sorted(set(own) | set(theirs)):
++            a, b = own.get(name), theirs.get(name)
++            if a is None or b is None:
++                mismatched.append(name)
++            elif _sha256(a) != _sha256(b):
++                mismatched.append(name)
++        pairs = {n[: -len(".weight")] for n in mismatched if n.endswith(".weight")} | {
++            n[: -len(".scale")] for n in mismatched if n.endswith(".scale")
++        }
++        encoding_only = set()
++        for base in pairs:
++            w, s = f"{base}.weight", f"{base}.scale"
++            if all(k in own and k in theirs for k in (w, s)) and own[w].shape == theirs[w].shape:
++                if torch.equal(_dequant(own[w], own[s]), _dequant(theirs[w], theirs[s])):
++                    encoding_only |= {w, s}
++        mismatched = [n for n in mismatched if n not in encoding_only]
++        self._last_refit["weight_sync_vs_export"] = {
++            "synced": len(theirs), "own": len(own), "mismatch": len(mismatched), "encoding_only": len(encoding_only),
++        }
++        if mismatched:
++            raise RuntimeError(f"weight sync != own export for {len(mismatched)} tensors, e.g. {mismatched[:5]}")
++
++    # ------------------------------------------------------------------ forward
++    def _engine_forward(self, input_ids: torch.Tensor, positions: torch.Tensor):
++        """Called by the engine's model forward. Not armed / a DP dummy step: None (run the plain model)."""
++        if not self._armed or input_ids.numel() != self._expected_tokens:
++            return None
++        # The engine runs the model under inference_mode; build the native graph only when the caller of
++        # hidden_states() wants gradients (the old-logprob pass does not: its graph would only hold activations).
++        with torch.inference_mode(False), torch.set_grad_enabled(self._build_graph):
++            hidden = self.binding.forward(input_ids.clone(), positions.clone())
++        self._hidden = hidden
++        self._calls += 1
++        self._ids = input_ids.clone()
++        return hidden.detach()
++
++    def hidden_states(self, sequences: list[list[int]], flat_ids: torch.Tensor) -> torch.Tensor:
++        """Final hidden states of the packed ``sequences`` (one engine prefill), with the native graph attached."""
++        from vllm import SamplingParams
++        from vllm.inputs import TokensPrompt
++
++        self.build()
++        self._ensure_current()
++        self._calls, self._expected_tokens, self._armed = 0, flat_ids.numel(), True
++        self._build_graph = torch.is_grad_enabled()
++        try:
++            self.llm.generate(
++                [TokensPrompt(prompt_token_ids=s) for s in sequences], SamplingParams(max_tokens=1), use_tqdm=False
++            )
++        finally:
++            self._armed = False
++        hidden, self._hidden = self._hidden, None
++        ids = getattr(self, "_ids", None)
++        if self._calls != 1 or hidden is None or not torch.equal(ids.to(flat_ids.device), flat_ids):
++            raise RuntimeError(
++                f"the engine did not run the micro-batch as one in-order prefill (calls={self._calls}); "
++                "engine_max_num_batched_tokens must cover the largest micro-batch"
++            )
++        return hidden
++
++    def forward(
++        self,
++        input_ids: torch.Tensor,
++        position_ids: torch.Tensor | None = None,
++        labels: torch.Tensor | None = None,
++        loss_mask: torch.Tensor | None = None,
++        temperature: float | torch.Tensor = 1.0,
++        calculate_entropy: bool = False,
++        packed_seq_params: Any = None,
++        **_: Any,
++    ) -> dict[str, torch.Tensor]:
++        """The Lite model's forward contract (THD-packed): ``{"log_probs": [1, T], "entropy": [1, T]}``."""
++        from megatron.lite.model.deepseek_v4.vllm_engine.model import selected_log_probs
++
++        if packed_seq_params is None or labels is None:
++            raise NotImplementedError("impl=vllm_engine expects THD-packed input with labels")
++        cu = packed_seq_params.cu_seqlens_q.tolist()
++        padded = getattr(packed_seq_params, "cu_seqlens_q_padded", None)
++        if padded is not None and padded.tolist() != cu:
++            raise NotImplementedError("impl=vllm_engine: padded THD packing is not supported")
++        flat_ids = input_ids.reshape(-1)
++        sequences = [flat_ids[cu[i] : cu[i + 1]].tolist() for i in range(len(cu) - 1)]
++        hidden = self.hidden_states(sequences, flat_ids)
++        with torch.inference_mode(False), torch.set_grad_enabled(torch.is_grad_enabled()):
++            out = selected_log_probs(
++                self.binding.logits(hidden),
++                labels.reshape(-1),
++                temperature=temperature,
++                vocab_limit=self.impl_cfg.rollout_vocab_size,
++                calculate_entropy=calculate_entropy,
++            )
++        result = {k: v.view(1, -1) for k, v in out.items()}
++        if self.impl_cfg.consistency_checks or self.impl_cfg.receipt_path:
++            self._test_mode_checks(sequences, cu, out["log_probs"], loss_mask)
++        return result
++
++    # ------------------------------------------------------------------ test mode
++    def _test_mode_checks(self, sequences, cu, log_probs, loss_mask) -> None:
++        """Dual-path contract: a grad-enabled forward must equal the no-grad forward of the same sequence at the same
++        policy version, bitwise (old-logprob and update forwards are different calls). Optional JSON receipts."""
++        version = self.policy_version
++        flat = log_probs.detach().float().cpu()
++        dual = {"version": version, "matched": 0, "tokens": 0, "mismatch": 0, "unmatched": 0}
++        for i, seq in enumerate(sequences):
++            key = (version, hashlib.sha1(str(seq).encode()).hexdigest())
++            value = flat[cu[i] : cu[i + 1]]
++            if not torch.is_grad_enabled():
++                self._nograd_log_probs[key] = value
++                continue
++            reference = self._nograd_log_probs.get(key)
++            if reference is None:
++                dual["unmatched"] += 1
++                continue
++            mask = (
++                loss_mask.reshape(-1)[cu[i] : cu[i + 1]].bool().cpu()
++                if loss_mask is not None
++                else torch.ones_like(value, dtype=torch.bool)
++            )
++            dual["matched"] += 1
++            dual["tokens"] += int(mask.sum())
++            dual["mismatch"] += int(((value != reference) | torch.isnan(value))[mask].sum())
++        for key in [k for k in self._nograd_log_probs if k[0] < version]:
++            del self._nograd_log_probs[key]
++        if self.impl_cfg.consistency_checks and dual["mismatch"]:
++            raise RuntimeError(f"grad-enabled forward != no-grad forward at policy version {version}: {dual}")
++        if self.impl_cfg.receipt_path:
++            with open(self.impl_cfg.receipt_path, "a") as f:
++                f.write(json.dumps({
++                    "t": time.time(), "grad": torch.is_grad_enabled(), "requires_grad": bool(log_probs.requires_grad),
++                    "seqs": len(sequences), "tokens": int(flat.numel()), "policy_version": version,
++                    "engine_version": self.engine_version, "refits": self.refits, "last_refit": self._last_refit,
++                    "dual_path": dual,
++                }) + "\n")
++
++
++def _dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
++    rows, cols = weight.shape[-2], weight.shape[-1]
++    expanded = scale.float().repeat_interleave(128, -2)[..., :rows, :].repeat_interleave(128, -1)[..., :cols]
++    return weight.float() * expanded
++
++
++def build_model(model_cfg: DeepseekV4Config, *, impl_cfg: ImplConfig) -> ModelBundle:
++    _validate(model_cfg, impl_cfg)
++    lite_cfg = lite.ImplConfig(
++        **{f: getattr(impl_cfg, f) for f in lite.ImplConfig.__dataclass_fields__}
++    )
++    # fsdp2 as impl=vllm sets it up: FP32 shards (gradients reduce and accumulate in FP32, as under dist_opt)
++    # and forward inputs left uncast. No effect under dist_opt.
++    bundle = lite.build_model(
++        model_cfg, impl_cfg=lite_cfg, fsdp2_use_fp32_shards=True, fsdp2_cast_forward_inputs=False
++    )
++    engine = VisibleEngine(model_cfg, impl_cfg, bundle.chunks)
++
++    lite_post_step = bundle.extras["post_optimizer_step_hook"]
++
++    def post_optimizer_step() -> None:
++        lite_post_step()
++        engine.mark_updated()
++
++    lite_post_load = bundle.extras.get("post_model_load_hook")
++
++    def post_model_load_hook():
++        # The runtime calls this after loading the HF weights: build the engine now (it
++        # loads the same checkpoint, so engine and masters agree at the initial policy).
++        result = lite_post_load() if lite_post_load is not None else None
++        engine.build()
++        return result
++
++    def forward_step(model: nn.Module, batch) -> dict[str, torch.Tensor]:
++        return engine.forward(**lite._prepare_model_forward_kwargs(model, batch))
++
++    bundle.forward_step = forward_step
++    bundle.extras.update(
++        post_optimizer_step_hook=post_optimizer_step,
++        post_model_load_hook=post_model_load_hook,
++        weight_sync_observer=engine.observe_weight_sync,
++        visible_engine=engine,
++    )
++    return bundle
+diff --git a/experimental/lite/megatron/lite/model/registry.py b/experimental/lite/megatron/lite/model/registry.py
+index 2630a73d3..ab3123eb6 100644
+--- a/experimental/lite/megatron/lite/model/registry.py
++++ b/experimental/lite/megatron/lite/model/registry.py
+@@ -113,6 +113,7 @@ register_model(
+     impls={
+         "lite": "megatron.lite.model.deepseek_v4.lite.protocol",
+         "vllm": "megatron.lite.model.deepseek_v4.vllm.protocol",
++        "vllm_engine": "megatron.lite.model.deepseek_v4.vllm_engine.protocol",
+     },
+ )
+ 
+diff --git a/experimental/lite/megatron/lite/primitive/modules/attention/csa.py b/experimental/lite/megatron/lite/primitive/modules/attention/csa.py
+index 063c78a75..a2a32bc8c 100644
+--- a/experimental/lite/megatron/lite/primitive/modules/attention/csa.py
++++ b/experimental/lite/megatron/lite/primitive/modules/attention/csa.py
+@@ -297,6 +297,22 @@ def _window_topk_indices(
+     return indices.unsqueeze(0).expand(batch, -1, -1).to(torch.int32)
+ 
+ 
++def _pin_indexer_topk(
++    computed: torch.Tensor, pinned: torch.Tensor, cp_size: int
++) -> torch.Tensor:
++    """The indexer selection to use: ``pinned``, in the computed tensor's layout."""
++    if cp_size != 1:
++        raise NotImplementedError("pinned_indexer_topk supports CP=1 only")
++    if pinned.shape[0] != computed.shape[0]:
++        raise ValueError(
++            f"pinned_indexer_topk has {pinned.shape[0]} rows, the indexer {computed.shape[0]}"
++        )
++    width = min(computed.shape[1], pinned.shape[1])
++    out = torch.full_like(computed, -1)
++    out[:, :width] = pinned[:, :width].to(device=computed.device, dtype=computed.dtype)
++    return out
++
++
+ def _load_dsa_kernels():
+     from megatron.lite.primitive.kernels import dsa_kernels
+ 
+@@ -390,7 +406,13 @@ class CompressedSparseAttention(nn.Module):
+         position_ids: torch.Tensor,
+         attention_mask: torch.Tensor | None = None,
+         packed_seq_params: Any = None,
++        pinned_indexer_topk: torch.Tensor | None = None,
+     ) -> torch.Tensor:
++        """``pinned_indexer_topk`` (THD, CP=1): use this compressed top-k selection
++        (``[rows, k]`` request-local compressed ids, -1 padded) instead of the
++        indexer's own.  A trainer whose forward value comes from another
++        implementation (the rollout's) differentiates at that implementation's
++        discrete selection; the selection itself has no gradient either way."""
+         # THD packed sequences take the primary DSv4 CP path. THD is the only
+         # sequence-parallel route now: the BSHD dense fallback has been removed.
+         if packed_seq_params is not None:
+@@ -399,7 +421,11 @@ class CompressedSparseAttention(nn.Module):
+                     "THD packed CSA expects attention_mask=None; masks are derived "
+                     "from cu_seqlens / position_ids."
+                 )
+-            return self._forward_thd_packed(x, position_ids, packed_seq_params)
++            return self._forward_thd_packed(
++                x, position_ids, packed_seq_params, pinned_indexer_topk=pinned_indexer_topk
++            )
++        if pinned_indexer_topk is not None:
++            raise NotImplementedError("pinned_indexer_topk requires the THD packed path")
+         if self.ps.cp_size > 1 and attention_mask is not None:
+             raise ValueError("CP expects attention_mask=None; masks are derived from position_ids.")
+         batch, seq_len, _ = x.shape
+@@ -734,6 +760,8 @@ class CompressedSparseAttention(nn.Module):
+         x: torch.Tensor,
+         position_ids: torch.Tensor,
+         packed_seq_params: Any,
++        *,
++        pinned_indexer_topk: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         """Build THD-packed q/key/x/qr, exchange boundaries, and run CP attention.
+ 
+@@ -804,7 +832,14 @@ class CompressedSparseAttention(nn.Module):
+         )
+ 
+         context = self._forward_thd_cp(
+-            query_thd, key_thd, x_thd, qr_thd, boundary_hidden, boundary_kv, packed_seq_params
++            query_thd,
++            key_thd,
++            x_thd,
++            qr_thd,
++            boundary_hidden,
++            boundary_kv,
++            packed_seq_params,
++            pinned_indexer_topk=pinned_indexer_topk,
+         )
+         # context: (total, 1, np * hn). Reshape to (1, np, total, hn) for the shared
+         # output projection (inverse RoPE + wo), then return (1, total, hidden).
+@@ -826,6 +861,8 @@ class CompressedSparseAttention(nn.Module):
+         boundary_hidden: torch.Tensor | None,
+         boundary_kv: torch.Tensor | None,
+         packed_seq_params: Any,
++        *,
++        pinned_indexer_topk: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         """THD-packed context-parallel branch (faithful port of Core
+         ``CompressedSparseAttention._forward_thd_cp``).
+@@ -944,6 +981,10 @@ class CompressedSparseAttention(nn.Module):
+                     max_seqlen_q=max_seqlen_q,
+                     use_fused=self.apply_dsa_kernel_fusion,
+                 )
++                if pinned_indexer_topk is not None:
++                    compressed_topk = _pin_indexer_topk(
++                        compressed_topk, pinned_indexer_topk, cp_size
++                    )
+ 
+             compressed_kv_local, _ = self.compressor._forward_thd(
+                 hidden_compact,
+diff --git a/experimental/lite/megatron/lite/primitive/ops/visible_vjp.py b/experimental/lite/megatron/lite/primitive/ops/visible_vjp.py
+new file mode 100644
+index 000000000..7934cc009
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/ops/visible_vjp.py
+@@ -0,0 +1,145 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""Visible forward + native VJP bridge.
++
++``visible_forward(visible, native, *inputs)`` returns ``visible(*inputs)`` -- an inference implementation (for train
++inference consistency: the rollout's own kernel, bitwise equal to what the rollout served) run without building an
++autograd graph -- and differentiates ``native(*inputs)`` instead: the training implementation of the same math,
++recomputed from the saved inputs at backward time with autograd. Backward precision and speed are ``native``'s; the
++forward value is ``visible``'s. Integer inputs (token ids, pinned discrete selections) pass through without gradient.
++
++Quantized weights: ``deployed_values(params, value_fn)`` gives each master parameter the value the rollout serves
++(``value_fn(master)``, e.g. dequant(requant(master))) for the duration of the native recompute *and its backward*, so
++dX uses the served value while dW lands on the master (identity STE). Restoring the masters is deferred until the
++recompute's backward has run because some modules (TE GroupedLinear) re-read their weight parameters in backward.
++"""
++
++from __future__ import annotations
++
++import contextlib
++from collections.abc import Callable, Iterable, Iterator
++from typing import Any
++
++import torch
++
++_DEFERRED: list[Callable[[], None]] = []
++_ANCHORS: dict[torch.device, torch.Tensor] = {}
++
++
++def run_deferred_restores() -> None:
++    """Run (and drop) the restores registered by :func:`deployed_values` since the last call.
++
++    :class:`VisibleNativeFunction` calls this after each native recompute's backward; callers that run a native
++    function and its backward themselves must call it afterwards."""
++    while _DEFERRED:
++        _DEFERRED.pop()()
++
++
++def _anchor(device: torch.device) -> torch.Tensor:
++    # A grad-requiring scalar passed to every bridge call so the output always joins the
++    # autograd graph, even when no floating-point input requires grad (embedding of token ids).
++    anchor = _ANCHORS.get(device)
++    if anchor is None:
++        anchor = _ANCHORS[device] = torch.zeros((), device=device, requires_grad=True)
++    return anchor
++
++
++class VisibleNativeFunction(torch.autograd.Function):
++    @staticmethod
++    def forward(ctx, functions, anchor, *inputs):
++        del anchor
++        visible, native = functions
++        with torch.inference_mode():
++            output = visible(*inputs)
++        is_tuple = isinstance(output, tuple)
++        # Clone out of inference mode: autograd may not save or return inference tensors.
++        outputs = tuple(
++            t.clone() if torch.is_tensor(t) else t for t in (output if is_tuple else (output,))
++        )
++        ctx.native = native
++        ctx.is_tuple = is_tuple
++        ctx.float_inputs = [torch.is_tensor(x) and x.is_floating_point() for x in inputs]
++        ctx.save_for_backward(
++            *[x.detach() if torch.is_tensor(x) else torch.empty(0) for x in inputs]
++        )
++        ctx.non_tensors = [(False, None) if torch.is_tensor(x) else (True, x) for x in inputs]
++        return outputs if is_tuple else outputs[0]
++
++    @staticmethod
++    def backward(ctx, *grad_outputs):
++        inputs = []
++        for saved, is_float, (is_other, other) in zip(
++            ctx.saved_tensors, ctx.float_inputs, ctx.non_tensors
++        ):
++            if is_other:
++                inputs.append(other)
++            else:
++                inputs.append(saved.detach().requires_grad_(True) if is_float else saved)
++        try:
++            with torch.enable_grad():
++                output = ctx.native(*inputs)
++                outputs = output if isinstance(output, tuple) else (output,)
++                pairs = [
++                    (o, g)
++                    for o, g in zip(outputs, grad_outputs)
++                    if g is not None and torch.is_tensor(o) and o.requires_grad
++                ]
++                if pairs:
++                    torch.autograd.backward(
++                        [o for o, _ in pairs], [g.to(o.dtype) for o, g in pairs]
++                    )
++        finally:
++            run_deferred_restores()
++        grads = [
++            x.grad if is_float else None for x, is_float in zip(inputs, ctx.float_inputs)
++        ]
++        return (None, None, *grads)
++
++
++def visible_forward(visible: Callable[..., Any], native: Callable[..., Any], *inputs: Any):
++    """``visible(*inputs)`` as the value, ``native(*inputs)``'s VJP as the gradient (see module docstring)."""
++    device = next(x.device for x in inputs if torch.is_tensor(x))
++    return VisibleNativeFunction.apply((visible, native), _anchor(device), *inputs)
++
++
++@contextlib.contextmanager
++def deployed_values(
++    params: Iterable[torch.nn.Parameter],
++    value_fn: Callable[[torch.Tensor], torch.Tensor],
++    *,
++    active: bool = True,
++) -> Iterator[None]:
++    """Swap each master's data for ``value_fn(master)`` until :func:`run_deferred_restores`.
++
++    ``active=False`` is the identity (e.g. while the masters still sit exactly on the served
++    checkpoint grid). The masters may be views into a contiguous parameter buffer; the restore
++    puts the original storage back and checks it."""
++    if not active:
++        yield
++        return
++    params = list(params)
++    saved: list[torch.Tensor] = []
++    try:
++        for param in params:
++            saved.append(param.data)
++            param.data = value_fn(param.data)
++    except BaseException:
++        for param, data in zip(params, saved):
++            param.data = data
++        raise
++
++    def restore() -> None:
++        for param, data in zip(params, saved):
++            param.data = data
++            if param.data.data_ptr() != data.data_ptr():
++                raise RuntimeError("master restore did not re-point into the original storage")
++
++    _DEFERRED.append(restore)
++    yield
++
++
++__all__ = [
++    "VisibleNativeFunction",
++    "deployed_values",
++    "run_deferred_restores",
++    "visible_forward",
++]
+diff --git a/experimental/lite/megatron/lite/primitive/vllm_engine.py b/experimental/lite/megatron/lite/primitive/vllm_engine.py
+new file mode 100644
+index 000000000..73413dfbf
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/vllm_engine.py
+@@ -0,0 +1,181 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""An in-process vLLM engine as the source of a trainer's visible forward.
++
++For train-inference consistency the trainer's forward value must be the rollout's: same vLLM model code, same
++kernels, same attention metadata, same FP8 KV cache. On platforms where the model's vLLM kernels cannot be called
++standalone (mLite ``impl=vllm`` builds its own metadata and calls the NVIDIA DeepSeek-V4 kernel library directly),
++the trainer instead runs a private vLLM engine on its own GPU, configured like the rollout, and takes over that
++engine's model forward for one teacher-forced prefill per micro-batch.
++
++This module holds the model-agnostic parts:
++  * :class:`InProcessEngineConfig` / :func:`build_inprocess_engine`: the engine (in this process, no engine-core
++    subprocess; DP > 1 = one DP=EP engine over the caller's ``torch.distributed`` world via ``external_launcher``);
++  * :func:`register_model_class`: install a subclass of the model's vLLM class under the same architecture name
++    (vLLM's out-of-tree model registration), so the engine builds it;
++  * :class:`RoutingCapture`: per-layer buffers bound to vLLM's FusedMoE routing-capture output, to read the expert
++    ids the visible MoE selected;
++  * :func:`resolve_weight_loader`: how the engine reloads weights after an update.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import importlib
++import os
++from collections.abc import Callable, Iterable, Iterator
++from dataclasses import dataclass
++from typing import Any
++
++import torch
++
++
++@dataclass(frozen=True)
++class InProcessEngineConfig:
++    """Engine settings. Kernel-selecting fields (KV dtype, MoE backend, eager) must match the rollout's."""
++
++    gpu_memory_utilization: float = 0.15
++    # Fixed KV-cache size instead of what gpu_memory_utilization leaves after the
++    # profile run: the engine only ever holds one micro-batch.
++    kv_cache_memory_bytes: int | None = None
++    max_model_len: int = 8192
++    # Must cover the largest micro-batch: each micro-batch runs as one prefill step.
++    max_num_batched_tokens: int = 65536
++    # > 1: one vLLM DP=EP engine spread over the caller's torch.distributed world
++    # (world size == data_parallel_size), the layout of a DP=EP rollout.
++    data_parallel_size: int = 1
++    kv_cache_dtype: str = "fp8"
++    moe_backend: str | None = "triton"
++    tokenizer_mode: str | None = None
++    seed: int = 0
++    enforce_eager: bool = True
++
++    def __post_init__(self) -> None:
++        if not 0.0 < self.gpu_memory_utilization <= 1.0:
++            raise ValueError("gpu_memory_utilization must be in (0, 1]")
++        if self.data_parallel_size < 1 or self.max_num_batched_tokens < 1:
++            raise ValueError("data_parallel_size and max_num_batched_tokens must be positive")
++
++
++@contextlib.contextmanager
++def _in_process_engine_core() -> Iterator[None]:
++    # The engine core must live in this process (the trainer drives the model forward
++    # directly); vLLM selects that with VLLM_ENABLE_V1_MULTIPROCESSING=0. Scoped to the
++    # construction so other engines in this process are unaffected.
++    previous = os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING")
++    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
++    try:
++        yield
++    finally:
++        if previous is None:
++            os.environ.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
++        else:
++            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = previous
++
++
++def register_model_class(architecture: str, model_cls: type) -> None:
++    """Make vLLM build ``model_cls`` for ``architecture`` in this process (``ModelRegistry``)."""
++    from vllm import ModelRegistry
++
++    ModelRegistry.register_model(architecture, model_cls)
++
++
++def build_inprocess_engine(model_path: str, config: InProcessEngineConfig, **llm_kwargs: Any):
++    """Build the engine; returns ``(llm, model)`` with ``model`` the engine's own ``nn.Module``."""
++    from vllm import LLM
++
++    kwargs: dict[str, Any] = dict(
++        model=model_path,
++        tensor_parallel_size=1,
++        trust_remote_code=True,
++        kv_cache_dtype=config.kv_cache_dtype,
++        max_model_len=config.max_model_len,
++        gpu_memory_utilization=config.gpu_memory_utilization,
++        enforce_eager=config.enforce_eager,
++        seed=config.seed,
++        enable_prefix_caching=False,
++        max_num_batched_tokens=config.max_num_batched_tokens,
++    )
++    if config.moe_backend is not None:
++        kwargs["moe_backend"] = config.moe_backend
++    if config.tokenizer_mode is not None:
++        kwargs["tokenizer_mode"] = config.tokenizer_mode
++    if config.kv_cache_memory_bytes is not None:
++        kwargs["kv_cache_memory_bytes"] = int(config.kv_cache_memory_bytes)
++    if config.data_parallel_size > 1:
++        kwargs.update(
++            data_parallel_size=config.data_parallel_size,
++            enable_expert_parallel=True,
++            distributed_executor_backend="external_launcher",
++        )
++    kwargs.update(llm_kwargs)
++    with _in_process_engine_core():
++        llm = LLM(**kwargs)
++    (model,) = llm.apply_model(lambda module: module)
++    return llm, model
++
++
++class RoutingCapture:
++    """Expert ids selected by vLLM FusedMoE routers, captured through their routing-replay output.
++
++    vLLM's FusedMoE router copies each step's ``topk_ids`` into ``router._routing_replay_out`` when that buffer is
++    bound (the hook vLLM's own routed-experts capture binds). One buffer per layer; ``reset`` before a forward
++    fills them with -1 so a router that did not write, or wrote a different number of rows, is detected."""
++
++    def __init__(self, routers: dict[int, Any], *, max_tokens: int, top_k: int, device):
++        self._buffers: dict[int, torch.Tensor] = {}
++        for layer, router in routers.items():
++            if not hasattr(router, "_routing_replay_out"):
++                raise RuntimeError(f"layer {layer}: vLLM router has no routing-replay output")
++            if router._routing_replay_out is not None:
++                raise RuntimeError(f"layer {layer}: routing-replay output already bound")
++            buffer = torch.full((max_tokens, top_k), -1, dtype=torch.int16, device=device)
++            router._routing_replay_out = buffer
++            self._buffers[layer] = buffer
++
++    def reset(self) -> None:
++        for buffer in self._buffers.values():
++            buffer.fill_(-1)
++
++    def take(self, layer: int, num_tokens: int) -> torch.Tensor:
++        """The ids of the last forward's first ``num_tokens`` rows, as int64 ``[num_tokens, top_k]``."""
++        buffer = self._buffers[layer]
++        if num_tokens > buffer.shape[0]:
++            raise RuntimeError(f"layer {layer}: {num_tokens} tokens > capture capacity {buffer.shape[0]}")
++        ids = buffer[:num_tokens]
++        if bool((ids < 0).any()) or (
++            num_tokens < buffer.shape[0] and bool((buffer[num_tokens] >= 0).any())
++        ):
++            raise RuntimeError(
++                f"layer {layer}: the router did not route exactly {num_tokens} tokens in this forward"
++            )
++        return ids.to(torch.int64).clone()
++
++
++WeightLoader = Callable[[Any, Any, Iterable[tuple[str, torch.Tensor]]], int]
++
++
++def _vllm_reload_weights(llm, model, weights: Iterable[tuple[str, torch.Tensor]]) -> int:
++    del model
++    weights = list(weights)
++    llm.collective_rpc("reload_weights", kwargs={"weights_iterator": iter(weights)})
++    return len(weights)
++
++
++def resolve_weight_loader(spec: str) -> tuple[WeightLoader, Callable[[], None] | None]:
++    """``"vllm"``: vLLM's in-place ``reload_weights``. Otherwise the import path of a module exposing
++    ``load_weights(llm, model, weights) -> int`` and optionally ``prepare_engine()`` (called before the engine is
++    built). The engine must reload exactly as the rollout does, so integrations whose rollout uses its own loader
++    pass that loader here."""
++    if spec == "vllm":
++        return _vllm_reload_weights, None
++    module = importlib.import_module(spec)
++    return module.load_weights, getattr(module, "prepare_engine", None)
++
++
++__all__ = [
++    "InProcessEngineConfig",
++    "RoutingCapture",
++    "build_inprocess_engine",
++    "register_model_class",
++    "resolve_weight_loader",
++]
+diff --git a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+index 0d60b087d..c9e02dd69 100644
+--- a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
++++ b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+@@ -277,6 +277,9 @@ class MegatronLiteRuntime(RuntimeBase):
+         if bundle.forward_step is None:
+             raise ValueError("Megatron Lite model bundles must provide a typed forward_step.")
+ 
++        if bundle.optimizer is not None:
++            _connect_grad_stats_groups(bundle.optimizer)
++
+         p = rt_cfg.parallel
+         model = bundle.chunks[0] if len(bundle.chunks) == 1 else bundle.chunks
+         return ModelHandle(
+@@ -620,6 +623,10 @@ class MegatronLiteRuntime(RuntimeBase):
+     def optimizer_step(self, handle: ModelHandle) -> tuple[bool, float, int | None]:
+         if handle._optimizer is None:
+             return True, 0.0, 0
++        # Return the blocks cached by the micro-batch forwards/backwards before the step
++        # stages optimizer state on the device: collectives inside step() allocate
++        # outside the caching allocator and cannot make it release them.
++        torch.cuda.empty_cache()
+         with _step_nvtx_range("optimizer/step"):
+             update_successful, grad_norm, num_zeros = handle._optimizer.step()
+         if update_successful:
+@@ -636,6 +643,24 @@ class MegatronLiteRuntime(RuntimeBase):
+         return 0.0
+ 
+ 
++def _connect_grad_stats_groups(optimizer) -> None:
++    """Run one all-reduce on each gradient-statistics group of ``optimizer``.
++
++    NCCL/RCCL set up a communicator's buffers on its first collective, with a raw
++    device allocation. For these groups that is otherwise the grad-norm all-reduce of
++    the first step, when the device is fullest; connect them while memory is free."""
++    groups = []
++    for opt in getattr(optimizer, "chained_optimizers", [optimizer]):
++        if not hasattr(opt, "get_grad_stats_parallel_group"):
++            continue  # not a Megatron optimizer (fsdp2: its groups already carry FSDP2's collectives)
++        group = opt.get_grad_stats_parallel_group()
++        if all(group is not g for g in groups):
++            groups.append(group)
++    probe = torch.zeros(1, dtype=torch.float32, device=torch.cuda.current_device())
++    for group in groups:
++        dist.all_reduce(probe, group=group)
++
++
+ # ---------------------------------------------------------------------------
+ # Context managers
+ # ---------------------------------------------------------------------------
+diff --git a/experimental/lite/tests/unit/examples/test_mlite_qat_yaml_unit.py b/experimental/lite/tests/unit/examples/test_mlite_qat_yaml_unit.py
+index 0d3d04163..a4c892abb 100644
+--- a/experimental/lite/tests/unit/examples/test_mlite_qat_yaml_unit.py
++++ b/experimental/lite/tests/unit/examples/test_mlite_qat_yaml_unit.py
+@@ -74,3 +74,29 @@ def test_colocated_ref_follows_actor_runtime_plugins() -> None:
+     )
+ 
+     assert resolved["runtime_plugins"] == actor_plugins
++
++
++def test_colocated_ref_runtime_plugins_survive_in_place_resolve() -> None:
++    """verl calls OmegaConf.resolve(config) on the whole tree; the ref's mirrored
++    mapping must be storable in place, including the default empty mapping."""
++    config_root = Path(__file__).parents[3] / "examples" / "verl" / "verl_mlite" / "config"
++    engine = OmegaConf.load(config_root / "engine" / "mlite.yaml")
++    ref = OmegaConf.load(config_root / "ref" / "mlite_ref.yaml")
++    for actor_plugins in ({}, {"dynamic_context_parallel": {"enabled": False}}):
++        actor_engine = OmegaConf.merge(
++            engine, {"impl_cfg": {"runtime_plugins": actor_plugins}}
++        )
++        root = OmegaConf.create(
++            {
++                "actor_rollout_ref": {
++                    "actor": {"engine": actor_engine},
++                    "ref": {"engine": ref.engine},
++                }
++            }
++        )
++        OmegaConf.resolve(root)
++        assert (
++            OmegaConf.to_container(root.actor_rollout_ref.ref.engine.impl_cfg.runtime_plugins)
++            == actor_plugins
++        )
++
+diff --git a/experimental/lite/tests/unit/primitive/test_visible_vjp_unit.py b/experimental/lite/tests/unit/primitive/test_visible_vjp_unit.py
+new file mode 100644
+index 000000000..7bd533711
+--- /dev/null
++++ b/experimental/lite/tests/unit/primitive/test_visible_vjp_unit.py
+@@ -0,0 +1,86 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""visible_forward: value from the visible implementation, VJP from the native recompute; deployed_values STE."""
++import torch
++import torch.nn.functional as F
++
++from megatron.lite.primitive.ops.visible_vjp import (
++    deployed_values,
++    run_deferred_restores,
++    visible_forward,
++)
++
++
++def test_value_is_visible_gradient_is_native():
++    torch.manual_seed(0)
++    x = torch.randn(4, 8, requires_grad=True)
++    w = torch.randn(3, 8, requires_grad=True)
++
++    def visible(t):
++        return (F.linear(t, w) + 1.0).detach()  # a different value, no graph
++
++    def native(t):
++        return F.linear(t, w)
++
++    y = visible_forward(visible, native, x)
++    assert torch.equal(y, F.linear(x, w).detach() + 1.0)
++    g = torch.randn_like(y)
++    y.backward(g)
++    assert torch.allclose(x.grad, g @ w.detach())
++    assert torch.allclose(w.grad, g.t() @ x.detach())
++
++
++def test_integer_and_non_tensor_inputs_pass_through():
++    table = torch.randn(10, 4, requires_grad=True)
++    ids = torch.tensor([1, 3, 3])
++
++    def native(i, scale):
++        return F.embedding(i, table) * scale
++
++    y = visible_forward(lambda i, scale: F.embedding(i, table).detach() * scale, native, ids, 2.0)
++    assert y.requires_grad  # joins the graph through the anchor even with integer input
++    y.sum().backward()
++    expected = torch.zeros_like(table)
++    expected[1] += 2.0
++    expected[3] += 4.0
++    assert torch.equal(table.grad, expected)
++
++
++def test_tuple_outputs_with_partial_gradients():
++    x = torch.randn(5, requires_grad=True)
++
++    def native(t):
++        return t * 2.0, t * 3.0
++
++    a, b = visible_forward(lambda t: (t * 2.0, t * 3.0), native, x)
++    a.sum().backward()
++    assert torch.equal(x.grad, torch.full_like(x, 2.0))
++
++
++def test_deployed_values_dx_uses_served_value_dw_reaches_master():
++    torch.manual_seed(1)
++    master = torch.nn.Parameter(torch.randn(3, 8))
++    original = master.data
++    served = (master.data * 4).round() / 4  # stand-in for dequant(quant(master))
++    x = torch.randn(2, 8, requires_grad=True)
++
++    def native(t):
++        with deployed_values([master], lambda m: (m * 4).round() / 4):
++            return F.linear(t, master)
++
++    y = visible_forward(lambda t: F.linear(t, served).detach(), native, x)
++    g = torch.randn_like(y)
++    y.backward(g)
++    assert torch.allclose(x.grad, g @ served)  # dX at the served value
++    assert torch.allclose(master.grad, g.t() @ x.detach())  # dW onto the master
++    assert master.data.data_ptr() == original.data_ptr()  # restored after the backward
++
++
++def test_deployed_values_inactive_is_identity_and_restore_is_deferred():
++    p = torch.nn.Parameter(torch.ones(2))
++    with deployed_values([p], lambda m: m * 0, active=False):
++        assert torch.equal(p.data, torch.ones(2))
++    with deployed_values([p], lambda m: m * 0):
++        pass
++    assert torch.equal(p.data, torch.zeros(2))  # still swapped: restore waits for the backward
++    run_deferred_restores()
++    assert torch.equal(p.data, torch.ones(2))

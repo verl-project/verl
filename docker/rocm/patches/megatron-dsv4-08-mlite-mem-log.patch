@@ -1,0 +1,59 @@
+# Megatron-LM patch 08/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# MLITE_MEM_LOG=1 logs device memory per micro-batch and before the optimizer
+# step. Off by default; logging only (no synchronization, no allocation).
+#
+# Upstream: debug aid, not proposed.
+#
+# Source commits:
+#   [mLite] DEBUG: MLITE_MEM_LOG=1 prints device memory per micro-batch and before the optimizer step
+#
+diff --git a/experimental/lite/megatron/lite/primitive/train_step.py b/experimental/lite/megatron/lite/primitive/train_step.py
+index f69e04652..6047a9ad7 100644
+--- a/experimental/lite/megatron/lite/primitive/train_step.py
++++ b/experimental/lite/megatron/lite/primitive/train_step.py
+@@ -30,6 +30,22 @@ def _step_nvtx_range(name: str):
+         torch.cuda.synchronize()
+ 
+ 
++def log_device_memory(tag: str) -> None:
++    """MLITE_MEM_LOG=1: one line of device-memory counters (local rank 0 of each node only)."""
++    if os.environ.get("MLITE_MEM_LOG") != "1" or not torch.cuda.is_available():
++        return
++    if int(os.environ.get("LOCAL_RANK", "0")) != 0:
++        return
++    gib = 2**30
++    free, total = torch.cuda.mem_get_info()
++    print(
++        f"[mlite-mem] rank={dist.get_rank() if dist.is_initialized() else 0} {tag} "
++        f"alloc={torch.cuda.memory_allocated() / gib:.1f} reserved={torch.cuda.memory_reserved() / gib:.1f} "
++        f"max_alloc={torch.cuda.max_memory_allocated() / gib:.1f} device_used={(total - free) / gib:.1f} GiB",
++        flush=True,
++    )
++
++
+ def run_microbatch_loop(
+     model,
+     data_iter,
+@@ -91,6 +107,7 @@ def run_microbatch_loop(
+                 with _step_nvtx_range(f"microbatch/{mb}/backward"):
+                     (out["loss"] / num_microbatches).backward()
+             last_out = out
++            log_device_memory(f"mb={mb}/{num_microbatches} forward_only={forward_only}")
+     if last_out is not None and all_metrics:
+         last_out["_loss_fn_metrics"] = all_metrics
+     return last_out
+diff --git a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+index c9e02dd69..4d0e0473f 100644
+--- a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
++++ b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+@@ -626,6 +626,9 @@ class MegatronLiteRuntime(RuntimeBase):
+         # Return the blocks cached by the micro-batch forwards/backwards before the step
+         # stages optimizer state on the device: collectives inside step() allocate
+         # outside the caching allocator and cannot make it release them.
++        from megatron.lite.primitive.train_step import log_device_memory
++
++        log_device_memory("before empty_cache/optimizer.step")
+         torch.cuda.empty_cache()
+         with _step_nvtx_range("optimizer/step"):
+             update_successful, grad_norm, num_zeros = handle._optimizer.step()
