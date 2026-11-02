@@ -590,6 +590,10 @@ class CheckpointEngineManager:
         if not self.replicas:
             raise RuntimeError("weight update check needs at least one rollout replica")
 
+        # init_workers() sleeps the replicas, and vLLM's sleep levels release the
+        # weight memory the checker hashes, so bring them back before snapshotting.
+        await self.wake_up_replicas()
+
         print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
         baseline_keys = 0
         for replica in self.replicas:
