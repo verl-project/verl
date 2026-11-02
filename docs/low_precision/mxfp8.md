@@ -68,7 +68,13 @@ When the rollout is quantized, both trainers check each step's metrics:
   rollouts read about 0.001–0.03);
 - every response hits the length cap (`response_length/clip_ratio` close to 1) on
   `VERL_QUANT_SENTINEL_CLIP_STEPS` consecutive steps (default 2; `0` turns this rule off, and it is off
-  under `rollout.ignore_eos`, where every response runs to the cap by design).
+  under `rollout.ignore_eos`, where every response runs to the cap by design). Both the configured
+  response cap and the observed maximum length must be available; missing length evidence resets
+  the consecutive-step count.
+
+The KL rule uses the pre-update `rollout_corr/kl` metric. It does not check bypass-mode
+`actor/rollout_corr/kl`, which compares the current actor with the rollout policy and can include
+policy updates. Missing metrics are skipped; this sentinel does not directly validate raw log-probs.
 
 The rollout counts as quantized when `rollout.quantization` sets `linear`, `moe` or `config_file`, or the
 model's own `config.json` (local paths only) carries a `quantization_config`. The sentinel catches gross
