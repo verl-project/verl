@@ -414,6 +414,8 @@ class CheckpointEngineManager:
     ) -> None:
         self.config = config
         self.backend = config.backend
+        if config.check_weight_update_equal and any(r.config.name != "vllm" for r in replicas):
+            raise ValueError("independent weight checking currently supports only vLLM rollout replicas")
         import_external_libs(self.config.custom_backend_module or None)
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
@@ -507,11 +509,13 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
     @auto_await
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, *, checking_weights: bool = False):
         """Update weights from actor worker group to rollout replicas.
 
         Args:
             global_steps: The global steps of the actor worker group.
+            checking_weights: Run the normal memory/transfer lifecycle but defer
+                generation resume until verification succeeds.
         """
 
         # 0. update weights for sync training with colocated actor and rollout
@@ -519,7 +523,6 @@ class CheckpointEngineManager:
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
-        # 1. abort and save all unfinished requests for partial rollout
         await self.abort_replicas()
 
         # 2. create a temporay worker group for all replicas
@@ -553,157 +556,78 @@ class CheckpointEngineManager:
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
 
-        # 7. restore kv_cache after weight sync
+        # 7. restore KV cache and unfinished requests after weight sync
         await self.resume_kv_cache_replicas()
-
-        # 8. resume all unfinished requests for partial rollout
-        await self.resume_generation_replicas()
+        if not checking_weights:
+            await self.resume_generation_replicas()
 
         return sync_metrics
 
     async def _compare_replicas_with_baseline(self) -> tuple[int, int, list[dict]]:
-        """Compare every replica against the baseline recorded by snapshot.
-
-        Returns:
-            Replicas compared, shards compared, and the per-replica failures.
-
-        Raises:
-            RuntimeError: If any replica contributed nothing, which would leave its
-                shards unverified while still looking like a pass.
-        """
+        """Return result count, digest key count and failures; reject empty replica results."""
         checked = 0
         total_keys = 0
         failures: list[dict] = []
         for replica in self.replicas:
-            for result in await replica.check_weights("compare"):
+            results = await replica.check_weights("compare")
+            if not results:
+                raise RuntimeError("weight update check received no comparison from a rollout replica")
+            for result in results:
                 checked += 1
                 total_keys += result.get("num_keys", 0)
                 if not result.get("success"):
                     failures.append(result)
 
-        if checked < len(self.replicas):
-            raise RuntimeError(
-                f"weight update check covered {checked} of {len(self.replicas)} replica(s); "
-                "a replica reported no engine, so its weights were never verified"
-            )
         return checked, total_keys, failures
 
     @auto_await
-    async def start_update_check(self) -> dict:
-        """Record the weight-digest baseline and corrupt the weights.
-
-        Call this while the rollout engines still hold the weights they loaded at
-        startup. Waiting until after ``sleep_replicas()`` does not work: vLLM's
-        hybrid sleep level 2 frees the weight memory instead of offloading it, so
-        waking the engine afterwards only re-allocates the buffers and the
-        baseline would be hashed from uninitialized memory.
-
-        Resetting here is what makes the later comparison falsifiable: without it
-        a transfer that silently did nothing would compare equal.
-
-        Returns:
-            How many replicas were recorded and how many shards they cover.
-        """
-        if not self.replicas:
-            return {"replicas": 0, "num_keys": 0}
-
-        baseline_keys = 0
-        for replica in self.replicas:
-            for result in await replica.check_weights("snapshot"):
-                baseline_keys += result.get("num_keys", 0)
-        for replica in self.replicas:
-            await replica.check_weights("reset")
-
-        print(f"Weight update check: baseline recorded, {baseline_keys} weight shard(s); weights reset")
-        return {"replicas": len(self.replicas), "num_keys": baseline_keys}
-
-    @auto_await
-    async def finish_update_check(self, global_steps: int = None) -> dict:
-        """Push the trainer's weights through the real path and compare.
-
-        The transfer is the one training performs at the same point, so the check
-        adds no extra sync. Serving stays paused from the reset until the
-        comparison: the weights are invalid in between, and EPLB moves experts
-        while serving.
-
-        Args:
-            global_steps: Passed through to ``update_weights``.
-
-        Returns:
-            How many replicas were checked.
-
-        Raises:
-            RuntimeError: If any replica reports a mismatch.
-        """
-        await self.abort_replicas()
-        try:
-            await self.update_weights(global_steps)
-            await self.abort_replicas()
-
-            print("Weight update check: comparing against the baseline")
-            checked, total_keys, failures = await self._compare_replicas_with_baseline()
-            if failures:
-                sample = failures[0].get("mismatches", [])[:5]
-                raise RuntimeError(
-                    f"weight update check failed on {len(failures)} of {checked} replica(s); "
-                    f"first mismatched keys: {sample}"
-                )
-        finally:
-            await self.resume_generation_replicas()
-
-        return {"replicas": checked, "num_keys": total_keys, "success": True}
-
-    @auto_await
     async def verify_update_path(self, global_steps: int = None) -> dict:
-        """Verify the weight-update path in one call, for the legacy trainer.
+        """Verify the first full sync against independently loaded HF weights.
 
-        The v1 trainer splits this into ``start_update_check()`` at engine
-        startup and ``finish_update_check()`` after the first transfer, which
-        needs no extra sync. This form has to transfer once before recording the
-        baseline, because by the time it runs the engines may have been slept.
-
-        Args:
-            global_steps: Passed through to ``update_weights``.
-
-        Returns:
-            How many replicas were checked.
-
-        Raises:
-            RuntimeError: If there is nothing to check, or any replica reports a
-                mismatch.
+        Capture reference digests before sleeping, then exercise normal sleep,
+        weight/KV wake-up and transfer. Resume generation only on success.
         """
         if not self.replicas:
             raise RuntimeError("weight update check needs at least one rollout replica")
+        if self.backend == "delta_sharded":
+            raise ValueError("weight update check requires full weight transfers; delta_sharded cannot restore reset weights")
 
         await self.abort_replicas()
-        try:
-            await self.update_weights(global_steps)
-            await self.abort_replicas()
+        print("Weight update check: generation paused; recording reference before sleep")
+        for replica in self.replicas:
+            results = await replica.check_weights("prepare")
+            if not results or any(not result.get("success") for result in results):
+                raise RuntimeError("weight update check could not prepare every rollout replica")
+        print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
+        baseline_keys = 0
+        for replica in self.replicas:
+            results = await replica.check_weights("snapshot")
+            if not results or any(not r.get("success") or r.get("num_keys", 0) == 0 for r in results):
+                raise RuntimeError("weight update check received no valid baseline from a rollout replica")
+            baseline_keys += sum(r["num_keys"] for r in results)
+        print(f"Weight update check: independent reference recorded, {baseline_keys} weight shard(s)")
 
-            print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
-            baseline_keys = 0
-            for replica in self.replicas:
-                for result in await replica.check_weights("snapshot"):
-                    baseline_keys += result.get("num_keys", 0)
-            print(f"Weight update check: baseline recorded, {baseline_keys} weight shard(s)")
+        for replica in self.replicas:
+            results = await replica.check_weights("reset")
+            if not results or any(not r.get("success") for r in results):
+                raise RuntimeError("weight update check failed to reset a rollout replica")
+        print("Weight update check: weights reset, syncing through the real update path")
 
-            for replica in self.replicas:
-                await replica.check_weights("reset")
-            print("Weight update check: weights reset, syncing through the real update path")
+        await self.sleep_replicas()
+        await self.update_weights(global_steps, checking_weights=True)
 
-            await self.update_weights(global_steps)
-            await self.abort_replicas()
+        print("Weight update check: comparing against independent reference")
+        checked, total_keys, failures = await self._compare_replicas_with_baseline()
+        if failures:
+            sample = failures[0].get("mismatches", [])[:5]
+            raise RuntimeError(
+                f"weight update check failed on {len(failures)} of {checked} replica(s); "
+                f"first mismatched keys: {sample}"
+            )
 
-            print("Weight update check: comparing against the baseline")
-            checked, total_keys, failures = await self._compare_replicas_with_baseline()
-            if failures:
-                sample = failures[0].get("mismatches", [])[:5]
-                raise RuntimeError(
-                    f"weight update check failed on {len(failures)} of {checked} replica(s); "
-                    f"first mismatched keys: {sample}"
-                )
-        finally:
-            await self.resume_generation_replicas()
+        for replica in self.replicas:
+            await replica.check_weights("finish")
+        await self.resume_generation_replicas()
 
         return {"replicas": checked, "num_keys": total_keys, "success": True}
 

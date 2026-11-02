@@ -21,6 +21,7 @@ import time
 import uuid
 import zlib
 from collections.abc import Mapping
+from copy import deepcopy
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -54,7 +55,7 @@ from verl.utils.profiler import (
 )
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
-from verl.utils.weight_checksum import compare_checksums, merge_worker_checksums
+from verl.utils.weight_checksum import WeightCheckEngineAdapter, compare_checksums, configure_weight_reference
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
@@ -487,6 +488,19 @@ class vLLMHttpServer:
 
         if self._disaggregation_role != "null":
             args["kv_transfer_config"] = json.dumps(self._disaggregation_kv_transfer_config)
+
+        self._weight_reference_loaded = configure_weight_reference(
+            args,
+            enabled=self.config.checkpoint_engine.check_weight_update_equal,
+            backend=self.config.checkpoint_engine.backend,
+            has_lora=bool(self.model_config.lora.get("rank", 0) or self.model_config.lora_rank),
+            has_quantization=bool(effective_quantization_config or args.get("quantization")),
+        )
+        if self._weight_reference_loaded:
+            if self._disaggregation_role != "null":
+                raise ValueError("independent weight check does not support PD disaggregation")
+            logger.info("Weight update check: load_format=%s -> safetensors", self.config.load_format)
+            print("Weight update check: loading independent safetensors reference")
 
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
@@ -999,44 +1013,43 @@ class vLLMHttpServer:
         await self.engine.reset_prefix_cache(reset_connector=True)
 
     async def check_weights(self, action: str) -> dict | None:
-        """Run one weight-checker action against this replica's engine.
+        """Run prepare/snapshot/reset/compare/finish on this replica's engine.
 
-        This drives the same engine-side checker behind vLLM's development
-        ``/weight_checker`` route, called in-process because verl owns the
-        ``AsyncLLM``. It is used to verify the weight-update path once, before
-        training starts: ``snapshot`` records the freshly loaded weights,
-        ``reset`` zeroes them, and ``compare`` checks that pushing the trainer's
-        weights restored the snapshot exactly.
-
-        Only the node-rank-0 actor owns an engine; the others return None so the
-        caller can tell "not applicable" from "passed".
-
-        Args:
-            action: One of ``snapshot``, ``reset`` or ``compare``.
-
-        Returns:
-            A dict with at least ``success``, or None on a headless actor.
-
-        Raises:
-            ValueError: If the action is unknown.
+        Prepare validates support; finish clears the baseline after normal sleep/sync.
+        Headless actors return None and do not count as successful checks.
         """
         if self.node_rank != 0 or not hasattr(self, "engine"):
             return None
 
+        checker = WeightCheckEngineAdapter(self.engine, self.config.data_parallel_size)
+        if action == "prepare":
+            if not getattr(self, "_weight_reference_loaded", False) or self.global_steps is not None:
+                raise RuntimeError("weight check requires an independent safetensors reference before the first sync")
+            if self.lora_as_adapter:
+                raise ValueError("weight update check requires full weight sync; adapter-only sync cannot restore reset weights")
+            checker.validate()
+            return {"success": True}
+
+        if action == "finish":
+            # Invalidate cached values after weight updates, retaining the pool.
+            await self.engine.reset_prefix_cache(reset_connector=True)
+            self._weight_baseline = None
+            return {"success": True}
+
         if action == "snapshot":
-            self._weight_baseline = merge_worker_checksums(await self.engine.compute_weight_checksums())
+            self._weight_baseline = await checker.checksums()
+            if not self._weight_baseline:
+                raise RuntimeError("weight update check received no weight digests")
             return {"success": True, "num_keys": len(self._weight_baseline)}
 
         if action == "reset":
-            # Same dispatch the dev route uses: every engine managed by this
-            # client resets its own workers.
-            await self.engine.collective_rpc("reset_weights")
+            await checker.reset()
             return {"success": True}
 
         if action == "compare":
             if self._weight_baseline is None:
                 return {"success": False, "mismatches": [], "message": "compare without a snapshot"}
-            current = merge_worker_checksums(await self.engine.compute_weight_checksums())
+            current = await checker.checksums()
             matched, mismatches = compare_checksums(self._weight_baseline, current)
             return {"success": matched, "mismatches": mismatches, "num_keys": len(current)}
 
@@ -1617,6 +1630,9 @@ class vLLMReplica(RolloutReplica):
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
+        if is_reward_model or is_teacher_model:
+            self.config = deepcopy(self.config)
+            self.config.checkpoint_engine.check_weight_update_equal = False
         self.server_class = ray.remote(vLLMHttpServer)
 
     async def launch_servers(self):

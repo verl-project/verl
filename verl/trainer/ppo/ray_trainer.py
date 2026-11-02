@@ -977,8 +977,9 @@ class RayPPOTrainer:
             replicas=self.llm_server_manager.get_replicas(),
         )
 
-        # sleep all replicas to load checkpoint
-        self.checkpoint_manager.sleep_replicas()
+        # Preserve the independent reference until the startup check snapshots it.
+        if not checkpoint_engine_config.check_weight_update_equal:
+            self.checkpoint_manager.sleep_replicas()
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -1050,6 +1051,7 @@ class RayPPOTrainer:
             f.write(str(self.global_steps))
 
     def _load_checkpoint(self):
+        self._restored_training_checkpoint = False
         if self.config.trainer.resume_mode == "disable":
             return 0
 
@@ -1088,6 +1090,7 @@ class RayPPOTrainer:
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
         # load actor
+        self._restored_training_checkpoint = True
         self.actor_rollout_wg.load_checkpoint(
             actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
         )
@@ -1430,15 +1433,13 @@ class RayPPOTrainer:
         check_weight_update_equal = self.config.actor_rollout_ref.rollout.checkpoint_engine.get(
             "check_weight_update_equal", False
         )
-        if check_weight_update_equal and self.global_steps > 0:
-            # The self-check compares the pushed weights against what the engines
-            # loaded at startup. A resumed run restores the trainer to step N while
-            # the engines still hold the initial checkpoint, so the two sides are
-            # not comparable and the check would fail for the wrong reason.
+        if check_weight_update_equal and (getattr(self, "_restored_training_checkpoint", False) or self.global_steps > 0):
+            # Preserve the startup policy: resumed runs sync without the diagnostic.
             print(
                 f"Skipping weight update check on a resumed run (global_steps={self.global_steps}): "
-                "the engines hold the initial weights, the trainer holds the checkpoint's."
+                "the diagnostic is enabled only for fresh runs."
             )
+            self.checkpoint_manager.sleep_replicas()
             self.checkpoint_manager.update_weights(self.global_steps)
         elif check_weight_update_equal:
             verified = self.checkpoint_manager.verify_update_path(self.global_steps)

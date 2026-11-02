@@ -239,7 +239,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # update weights after loading checkpoint
         self.sync_initial_weights(self.standalone_checkpoint_manager)
         if self._enable_hybrid_replicas:
-            self.checkpoint_manager.update_weights(self.global_steps)
+            self.sync_initial_weights()
 
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)

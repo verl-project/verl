@@ -140,10 +140,9 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
-    # Check the weight-update path once, before training starts: snapshot the
-    # rollout weights, reset them, push the trainer's weights through the real
-    # update path, then compare against the snapshot. Only meaningful while both
-    # sides hold the same freshly loaded weights, so a resumed run skips it.
+    # Verify the first trainer sync against independently loaded HF safetensors.
+    # Requires full BF16 weights and no LoRA/quantization. Record the baseline
+    # before normal sleep/wake and sync; defer generation resume until compare.
     # Off by default: a full pass hashes every weight on the host.
     check_weight_update_equal: bool = False
 

@@ -306,7 +306,7 @@ class RolloutReplica(ABC):
         out here instead of being reported as passing.
 
         Args:
-            action: One of ``snapshot``, ``reset`` or ``compare``.
+            action: One of ``prepare``, ``snapshot``, ``reset``, ``compare`` or ``finish``.
 
         Returns:
             One result per server that actually ran the action.

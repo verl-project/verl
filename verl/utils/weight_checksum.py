@@ -11,39 +11,64 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pure helpers for merging and diffing rank-qualified weight digests.
-
-The weight checker in the rollout engine reports one digest map per worker,
-keyed by a rank-qualified parameter name::
-
-    dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{parameter_name}
-
-The functions here merge those maps and diff two of them. They carry no heavy
-imports on purpose, so the logic that decides "did the weights land" stays
-unit-testable without a GPU or an inference engine.
-"""
+"""vLLM API compatibility and rank-qualified digest comparison, without GPU imports."""
 
 from typing import Iterable
 
 
+def configure_weight_reference(
+    args: dict, *, enabled: bool, backend: str, has_lora: bool, has_quantization: bool
+) -> bool:
+    """Resolve an independent BF16 reference before constructing the vLLM engine."""
+    if not enabled:
+        return False
+    if backend == "delta_sharded" or has_lora or has_quantization or args.get("speculative_config"):
+        raise ValueError("independent weight check requires full, unquantized BF16 weights without LoRA or speculation")
+    if str(args.get("dtype")) not in {"bfloat16", "bf16"}:
+        raise ValueError("independent weight check requires rollout.dtype=bfloat16")
+    if args.get("load_format") not in {"dummy", "auto", "safetensors"}:
+        raise ValueError("independent weight check requires a safetensors-compatible load_format")
+    args["load_format"] = "safetensors"
+    return True
+
+
+class WeightCheckEngineAdapter:
+    """Bridge older single-DP vLLM clients and the newer all-DP APIs."""
+
+    def __init__(self, engine, data_parallel_size: int):
+        self.engine = engine
+        self.data_parallel_size = data_parallel_size
+
+    def validate(self):
+        if self.data_parallel_size > 1:
+            for name in ("compute_weight_checksums_all", "reset_weights"):
+                if not callable(getattr(self.engine, name, None)):
+                    raise RuntimeError(f"DP>1 weight checking requires vLLM AsyncLLM.{name}()")
+        elif not callable(getattr(self.engine, "collective_rpc", None)):
+            raise RuntimeError("weight checking requires vLLM AsyncLLM.collective_rpc()")
+
+    async def checksums(self) -> dict[str, str]:
+        self.validate()
+        method = getattr(self.engine, "compute_weight_checksums_all", None)
+        if not callable(method):
+            method = getattr(self.engine, "compute_weight_checksums", None)
+        if callable(method):
+            result = await method()
+        else:
+            result = await self.engine.collective_rpc("compute_weight_checksums")
+        return merge_worker_checksums([result] if isinstance(result, dict) else result)
+
+    async def reset(self):
+        self.validate()
+        reset = getattr(self.engine, "reset_weights", None)
+        if callable(reset):
+            await reset()
+        else:
+            await self.engine.collective_rpc("reset_weights")
+
+
 def merge_worker_checksums(per_worker: Iterable[dict[str, str]]) -> dict[str, str]:
-    """Merge one digest map per worker into a single rank-qualified map.
-
-    A key carries the parallel ranks of the worker that produced it, so the
-    same parameter appears once per shard and two workers must never report the
-    same key. An overlap means a worker failed to qualify its keys, and it is
-    raised rather than resolved: silently keeping one of the two values would
-    let the later comparison pass for the wrong reason.
-
-    Args:
-        per_worker: One digest map per worker, as the engine reports them.
-
-    Returns:
-        The merged map.
-
-    Raises:
-        RuntimeError: If two workers report the same key.
-    """
+    """Merge rank-qualified digests; reject duplicate keys instead of hiding a worker."""
     merged: dict[str, str] = {}
     for worker_checksums in per_worker:
         duplicate_keys = merged.keys() & worker_checksums.keys()
@@ -55,18 +80,6 @@ def merge_worker_checksums(per_worker: Iterable[dict[str, str]]) -> dict[str, st
 
 
 def compare_checksums(baseline: dict[str, str], current: dict[str, str]) -> tuple[bool, list[str]]:
-    """Diff two digest maps, treating a one-sided key as a mismatch.
-
-    A key that only one side carries is reported: the parameter was either
-    dropped by the update or added by it, and either way the two states do not
-    describe the same weights.
-
-    Args:
-        baseline: The digests recorded before the reset.
-        current: The digests read back after the update.
-
-    Returns:
-        Whether every key matches, and the sorted keys that do not.
-    """
+    """Return equality and sorted mismatches, including keys missing on either side."""
     mismatches = sorted(key for key in baseline.keys() | current.keys() if baseline.get(key) != current.get(key))
     return not mismatches, mismatches
