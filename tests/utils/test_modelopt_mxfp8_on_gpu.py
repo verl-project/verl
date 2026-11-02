@@ -31,6 +31,8 @@ from verl.utils.qat.modelopt import (
     _assert_grouped_scale_boundaries,
     _group_fake_quant_weights,
     _patch_te_grouped_weight_fake_quant,
+    _nvfp4_input_backend,
+    _nvfp4_weight_backend,
     build_quantize_config,
 )
 from verl.utils.qat.compressed_tensors import (
@@ -542,3 +544,68 @@ def test_fp8_qat_qdq_exactly_matches_export(preset, block_shape, scale_fmt):
     exported_qdq = compressor.decompress(compressed, scheme)["weight"]
 
     torch.testing.assert_close(fake_quantized, exported_qdq.to(weight.dtype), rtol=0, atol=0)
+
+
+def test_nvfp4_rollout_is_moe_only_w4a4_per_token():
+    config = build_compressed_tensors_config(
+        linear=None,
+        moe="NVFP4",
+        moe_activation="nvfp4_per_token",
+        ignore=[],
+        config_file=None,
+    )
+
+    scheme = config["config_groups"]["group_moe"]
+    assert config["format"] == "nvfp4-pack-quantized"
+    assert scheme["weights"]["strategy"] == "tensor_group"
+    assert scheme["weights"]["group_size"] == 16
+    assert scheme["weights"]["scale_dtype"] == "torch.float8_e4m3fn"
+    assert scheme["input_activations"]["strategy"] == "tensor_group"
+    assert scheme["input_activations"]["dynamic"] is True
+    assert qat_modes_for_config(config) == {"nvfp4"}
+
+    with pytest.raises(ValueError, match="only for routed MoE experts"):
+        build_compressed_tensors_config(
+            linear="NVFP4",
+            moe=None,
+            ignore=[],
+            config_file=None,
+        )
+
+
+def test_nvfp4_qat_uses_experts_only_export_compatible_backends():
+    config = build_quantize_config("nvfp4")
+    # ModelOpt's experts-only preset names the routed experts differently across versions.
+    enabled = [entry for entry in config["quant_cfg"] if entry.get("enable", True) and entry.get("cfg")]
+    assert enabled and all(
+        "experts" in entry["quantizer_name"] or "moe" in entry["quantizer_name"] for entry in enabled
+    )
+    for entry in enabled:
+        kind = "weight" if entry["quantizer_name"].endswith("weight_quantizer") else "input"
+        assert entry["cfg"]["backend"] == f"verl_nvfp4_{kind}"
+        assert entry["cfg"]["block_sizes"][-1] == 16
+    assert config["algorithm"] is None
+    assert not any(
+        entry["quantizer_name"] == "*weight_quantizer" and entry.get("enable", True) for entry in config["quant_cfg"]
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 fake quantization runs a Triton kernel")
+def test_nvfp4_qat_backends_quantize_like_the_rollout():
+    from verl.utils.qat.nvfp4 import fake_quantize_nvfp4, fake_quantize_nvfp4_per_token, nvfp4_global_scale
+
+    # TEGroupedLinear weights: one global scale per expert, as the export computes it.
+    weight = torch.randn(3, 64, 32, device="cuda", dtype=torch.bfloat16)
+    expected = torch.stack([fake_quantize_nvfp4(expert, nvfp4_global_scale(expert)) for expert in weight])
+    assert torch.equal(_nvfp4_weight_backend(weight, None), expected)
+
+    # Inputs: one global scale per token, with no state on the quantizer.
+    quantizer = SimpleNamespace()
+    inputs = torch.randn(2, 5, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = _nvfp4_input_backend(inputs, quantizer)
+    assert torch.equal(out, fake_quantize_nvfp4_per_token(inputs.detach().reshape(-1, 64)).reshape(2, 5, 64))
+    assert vars(quantizer) == {}
+
+    # Straight-through gradient.
+    out.backward(torch.ones_like(out))
+    assert torch.equal(inputs.grad, torch.ones_like(inputs))

@@ -1,14 +1,15 @@
 # NVFP4 RL on Blackwell (experimental)
 
-Last updated: 10/28/2026
+Last updated: 11/02/2026
 
 This recipe trains the routed experts of an MoE model in real NVFP4 with Megatron and Transformer Engine,
 and serves the rollout in the same precision. Activations are quantized per token on both sides.
 Parameters stay BF16; attention, dense MLPs, shared experts, router, norms, embeddings and the LM head run
 in BF16.
 
-For NVFP4 fake-quantization training, see [NVFP4 QAT](nvfp4_qat.md). The rollout quantization interface
-shared by all formats is described in [Low-Precision Rollout and Quantization-Aware Training](qat.md).
+For NVFP4 fake-quantization training, which uses the same rollout, see [NVFP4 QAT](nvfp4_qat.md). The rollout
+quantization interface shared by all formats is described in
+[Low-Precision Rollout and Quantization-Aware Training](qat.md).
 
 ## Requirements
 
@@ -66,9 +67,9 @@ Qwen3.5-35B-A3B, EP=4 on 4 GPUs, vLLM rollout TP=1, measured with the script in
 
 | Rollout | Training | Backend | k3_kl |
 |---|---|---|---|
-| NVFP4 MoE | NVFP4 QAT | FlashInfer CUTLASS (MoE; BF16 Linear) | 0.00832 |
 | NVFP4 MoE, `nvfp4_per_token` | BF16 | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.01025 |
 | NVFP4 MoE, `nvfp4_per_token` | native NVFP4 | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00740 |
+| NVFP4 MoE, `nvfp4_per_token` | NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00759 |
 
 ## Example: Qwen3-30B-A3B-Base with DAPO
 

@@ -32,7 +32,6 @@ count, need an allocation, and those are a sixteenth of the weights.
 """
 
 import logging
-from dataclasses import replace
 from unittest.mock import patch
 
 import torch
@@ -367,27 +366,6 @@ def process_mxfp4_moe_weights_after_loading(modules):
 # ---------------------------------------------------------------------------
 
 
-def install_nvfp4_cutlass_compressed_tensors_patch():
-    """Make verl's NVFP4 W4A4 preset select the verified CUTLASS backend."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-        compressed_tensors_moe_w4a4_nvfp4,
-    )
-
-    CompressedTensorsW4A4Nvfp4MoEMethod = compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod
-    if getattr(CompressedTensorsW4A4Nvfp4MoEMethod, "_verl_cutlass_patch", False):
-        return
-    original_init = CompressedTensorsW4A4Nvfp4MoEMethod.__init__
-
-    def __init__(self, moe, layer_name=None, use_a16=False):
-        if use_a16:
-            raise NotImplementedError("verl supports NVFP4 only as W4A4 routed experts")
-        selection_moe = replace(moe, moe_backend="flashinfer_cutlass") if moe.moe_backend == "auto" else moe
-        original_init(self, selection_moe, layer_name=layer_name, use_a16=False)
-
-    CompressedTensorsW4A4Nvfp4MoEMethod.__init__ = __init__
-    CompressedTensorsW4A4Nvfp4MoEMethod._verl_cutlass_patch = True
-
-
 def _is_nvfp4_fused_moe_module(module):
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
@@ -650,29 +628,17 @@ def _process_nvfp4_moe_params(module):
 
 
 def stage_nvfp4_moe_params_for_loading(model):
-    """Stage NVFP4 W4A4 experts for a bucketed refit.
-
-    Static activation scales run on FlashInfer CUTLASS, per-token ones
-    (``moe_activation=nvfp4_per_token``) on FlashInfer TRT-LLM.
+    """Stage NVFP4 W4A4 experts, which run with per-token activations
+    (``moe_activation=nvfp4_per_token``) on FlashInfer TRT-LLM, for a bucketed refit.
     """
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
-
     from verl.utils.vllm.vllm_nvfp4_per_token_utils import is_nvfp4_per_token_method
 
     staged = []
     for module in model.modules():
         if not _is_nvfp4_fused_moe_module(module):
             continue
-        method = module.quant_method
-        if is_nvfp4_per_token_method(method):
-            backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
-        else:
-            backend = NvFp4MoeBackend.FLASHINFER_CUTLASS
-        if method.use_a16 or method.nvfp4_backend != backend:
-            raise NotImplementedError(
-                f"NVFP4 refit supports these W4A4 routed experts only on {backend}; "
-                f"got use_a16={method.use_a16}, backend={method.nvfp4_backend}"
-            )
+        if not is_nvfp4_per_token_method(module.quant_method):
+            raise NotImplementedError("NVFP4 refit supports only per-token NVFP4 W4A4 routed experts")
         _stage_nvfp4_moe_params(module)
         staged.append(module)
     logger.info("Staged %d NVFP4 W4A4 MoE modules for in-place refit", len(staged))

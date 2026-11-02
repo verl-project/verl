@@ -15,6 +15,7 @@
 """Per-token NVFP4 rollout config, trainer-side export and rollout checks, without vLLM."""
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -29,6 +30,7 @@ from verl.utils.qat.compressed_tensors import (  # noqa: E402
     build_compressed_tensors_config,
     dispatch_rollout_weight_quantizer,
     nvfp4_per_token_module_matcher,
+    qat_modes_for_config,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -68,9 +70,9 @@ def test_per_token_is_nvfp4_weights_with_dynamic_inputs_and_moe_only():
     assert group["weights"]["strategy"] == "tensor_group" and group["weights"]["group_size"] == 16
     assert group["input_activations"]["dynamic"] is True
     assert _ROLLOUT.is_nvfp4_per_token_scheme(group["weights"], group["input_activations"])
-    static = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
-    group = static["config_groups"]["group_moe"]
-    assert not _ROLLOUT.is_nvfp4_per_token_scheme(group["weights"], group["input_activations"])
+    # NVFP4 has no static activation scales.
+    with pytest.raises(ValueError, match="moe=NVFP4 needs moe_activation=nvfp4_per_token"):
+        build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
     # The activation override needs moe=NVFP4.
     for moe in (None, "MXFP4"):
         with pytest.raises(ValueError, match="moe_activation='nvfp4_per_token'"):
@@ -140,6 +142,34 @@ def test_dispatch_pairs_real_nvfp4_with_per_token_activations():
         _dispatch(engine="sglang")
 
 
+def test_dispatch_pairs_nvfp4_qat_with_per_token_activations(tmp_path):
+    quantization = SimpleNamespace(
+        linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=_CARVE_IGNORE, config_file=None
+    )
+    quantizer = dispatch_rollout_weight_quantizer(
+        model_config=SimpleNamespace(hf_config=_HF, local_path=None),
+        rollout_config=SimpleNamespace(name="vllm", quantization=quantization),
+        qat_config=SimpleNamespace(enable=True, mode="nvfp4"),
+    )
+    assert isinstance(quantizer, NVFP4PerTokenWeightQuantizer) and quantizer.bf16_expert_layers is None
+    assert qat_modes_for_config(_config()) == {"nvfp4"}
+
+    # A static NVFP4 config group is rejected wherever it comes from.
+    static = _config()
+    static["config_groups"]["group_moe"]["input_activations"].update(dynamic="local", observer="minmax")
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(static))
+    with pytest.raises(ValueError, match="NVFP4 is supported only with moe_activation=nvfp4_per_token"):
+        build_compressed_tensors_config(linear=None, moe=None, ignore=[], config_file=str(config_file))
+    native = SimpleNamespace(num_hidden_layers=8, num_experts=2, quantization_config=static)
+    with pytest.raises(ValueError, match="NVFP4 is supported only with moe_activation=nvfp4_per_token"):
+        dispatch_rollout_weight_quantizer(
+            model_config=SimpleNamespace(hf_config=native, local_path=None),
+            rollout_config=SimpleNamespace(name="vllm", quantization=None),
+            qat_config=SimpleNamespace(enable=True, mode="nvfp4"),
+        )
+
+
 def test_exporter_shares_one_global_scale_across_gate_and_up(monkeypatch):
     monkeypatch.setattr(NVFP4PerTokenWeightQuantizer, "_quantize", staticmethod(_fake_quantize))
     prefix = "model.layers.2.mlp.experts.0"
@@ -189,7 +219,7 @@ _HIDDEN, _INTERMEDIATE = 32, 16
 
 def test_worker_reads_the_quantization_config_vllm_built_its_methods_from():
     per_token = _config()
-    static = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
+    static = build_compressed_tensors_config(linear=None, moe="MXFP4", ignore=[], config_file=None)
 
     def vllm_config(built, hf):
         return SimpleNamespace(
@@ -320,7 +350,7 @@ def test_per_token_rollout_check_reads_a_config_file(tmp_path):
     assert is_nvfp4_per_token_config(built)
     # A checkpoint that ships the config is detected the same way.
     assert is_nvfp4_per_token_config(SimpleNamespace(to_dict=lambda: built))
-    static = build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
+    static = build_compressed_tensors_config(linear=None, moe="MXFP4", ignore=[], config_file=None)
     assert not is_nvfp4_per_token_config(static)
 
     rollout = SimpleNamespace(
