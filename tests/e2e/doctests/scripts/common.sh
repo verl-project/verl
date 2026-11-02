@@ -11,7 +11,7 @@ DOCTEST_PYTHON="${DOCTEST_PYTHON:-python3}"
 function run_shell_block() {
   local marker="$1"
   local block
-  block="$("${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" extract "${marker}")" || return $?
+  block="$("${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" extract --runtime "${marker}")" || return $?
   set +u
   source /dev/stdin <<<"${block}"
   set -u

@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-"""CPU tests for RST extraction, planning and the real Bash entry points."""
+"""CPU tests for RST extraction and the real Bash entry points."""
 
 import importlib.util
-import io
 import os
 import shlex
 import shutil
 import subprocess
 import sys
-from http.client import HTTPMessage
 from pathlib import Path
-from urllib.error import HTTPError
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,38 +37,36 @@ def helper():
 @pytest.mark.parametrize(
     "text, expected",
     [
-        ("plain text", None),
-        (".. doctest: demo\n\n.. code:: bash\n\n   echo ok\n\nNext section", "echo ok\n"),
+        ("plain text", []),
+        (".. code:: bash\n\n   echo ok\n\nNext section", ["echo ok\n"]),
         (
-            "  .. doctest: demo\n\n  .. code-block:: python\n     :linenos:\n\n     if True:\n       pass\n",
-            "if True:\n  pass\n",
+            "  .. code-block:: python\n     :linenos:\n\n     if True:\n       pass\n",
+            ["if True:\n  pass\n"],
         ),
     ],
 )
 def test_extract_rst(helper, text, expected):
     """Keep nested code indentation and stop at the next RST paragraph."""
-    assert helper.extract_doctest_block(text, "demo") == expected
+    assert helper.extract_rst_blocks(text) == expected
 
 
 @pytest.mark.parametrize(
     "text, message",
     [
-        (".. doctest: demo\n.. doctest: demo", "Duplicate"),
-        (".. doctest: demo\n\n.. code:: json\n\n   {}", "must precede"),
-        (".. doctest: demo\n\n.. code:: bash\n   echo ok", "Missing blank"),
-        (".. doctest: demo\n\n.. code:: bash\n\n", "Empty"),
-        (".. doctest: demo\n\n.. code:: bash\n\necho ok", "Unindented"),
-        (".. doctest: demo\n\n.. code:: bash\n\n   echo ok\n  echo bad", "Inconsistent"),
+        (".. code:: bash\n   echo ok", "Missing blank"),
+        (".. code:: bash\n\n", "Empty"),
+        (".. code:: bash\n\necho ok", "Unindented"),
+        (".. code:: bash\n\n   echo ok\n  echo bad", "Inconsistent"),
     ],
 )
 def test_reject_malformed_rst(helper, text, message):
-    """Malformed markers must fail instead of silently selecting no test."""
+    """Malformed code blocks must fail instead of silently selecting no test."""
     with pytest.raises(helper.DoctestError, match=message):
-        helper.extract_doctest_block(text, "demo")
+        helper.extract_rst_blocks(text)
 
 
 def test_repository_documents(helper):
-    """Validate all real markers and resolve every documented training script."""
+    """Resolve the original documentation without test markers or layout changes."""
     helper.validate_documents()
     for case in CASES:
         script = f"tests/special_npu/quick_start/run_qwen3_0_6b_{case}_ascend.sh"
@@ -78,140 +74,38 @@ def test_repository_documents(helper):
         assert (REPO_ROOT / script).is_file()
 
 
-def test_macros(helper):
-    """Configured scalar macros expand; missing names fail explicitly."""
-    assert helper.expand_macros("{{ image }}:{{ version }}", {"image": "repo", "version": 1}, "demo") == "repo:1"
-    with pytest.raises(helper.DoctestError, match="Unknown/non-scalar"):
-        helper.expand_macros("{{ missing }}", {}, "demo")
-
-
-def rst_document(markers, changed=None):
-    """Build two small documentation revisions for change-selection tests."""
-    return "\n".join(
-        f".. doctest: {marker}\n\n.. code:: bash\n\n   echo {'new' if marker == changed else 'old'}\n"
-        for marker in markers
+@pytest.mark.parametrize("name", ["installation-vllm", "quickstart-fsdp2_vllm"])
+def test_document_selection_rejects_duplicates(helper, name):
+    """Repeated commands must not cause the harness to execute an arbitrary match."""
+    command = helper.require_doctest_block(name)
+    document = (
+        ".. code:: bash\n\n" + "".join(f"   {line}\n" for line in command.splitlines())
+        if name.startswith("installation-")
+        else f".. list-table::\n\n   * - FSDP2\n     - {command}"
     )
+    with pytest.raises(helper.DoctestError, match="Ambiguous"):
+        helper.extract_doctest_block(document + "\n" + document, name)
+    assert helper.extract_doctest_block("Only prose remains", name) is None
 
 
-@pytest.mark.parametrize(
-    "marker, quick, install",
-    [
-        ("quickstart-environment", CASES, CASES),
-        ("quickstart-data", CASES, CASES),
-        ("quickstart-fsdp2_vllm", ("fsdp2_vllm",), ("fsdp2_vllm",)),
-        ("installation-sglang-install", (), ("fsdp2_sglang", "megatron_sglang")),
-        ("installation-checkout", (), CASES),
-    ],
-)
-def test_selection_by_rst_change(helper, monkeypatch, marker, quick, install):
-    """Only affected combinations are selected, including their install verification."""
-    monkeypatch.setattr(helper, "git", lambda *args: helper.FILE_BY_MARKER[marker])
-
-    def read(path, ref=None, allow_missing=False):
-        return rst_document(helper.MARKERS_BY_FILE[path], marker if ref == "head" else None)
-
-    monkeypatch.setattr(helper, "read_repo_text", read)
-    assert helper.select_doctests("base", "head") == {"quickstart": sorted(quick), "installation": sorted(install)}
-
-
-def test_initial_migration_selects_new_blocks(helper, monkeypatch):
-    """The base revision may predate doctest markers entirely."""
-    monkeypatch.setattr(helper, "git", lambda *args: helper.QUICK_DOC)
-    monkeypatch.setattr(
-        helper,
-        "read_repo_text",
-        lambda path, ref=None, allow_missing=False: (
-            "Old documentation without markers" if ref == "base" else rst_document(helper.MARKERS_BY_FILE[path])
-        ),
+def test_runtime_paths_preserve_other_arguments(helper, monkeypatch):
+    """Local path overrides must quote shell syntax and preserve other arguments."""
+    dataset = "/data/source 'with spaces'; $(false)"
+    output = "/data/output with spaces"
+    monkeypatch.setenv("GSM8K_DATASET_PATH", dataset)
+    monkeypatch.setenv("GSM8K_OUTPUT_DIR", output)
+    block = 'python3 examples/data_preprocess/gsm8k.py --local_dataset_path /original --other "$KEEP_ME"\n'
+    adapted = helper.adapt_runtime_block(block, "quickstart-data")
+    assert adapted == (
+        f"python3 examples/data_preprocess/gsm8k.py --local_dataset_path {shlex.quote(dataset)} "
+        f'--other "$KEEP_ME" --local_save_dir {shlex.quote(output)}\n'
     )
-    assert helper.select_doctests("base", "head") == {"quickstart": sorted(CASES), "installation": sorted(CASES)}
-
-
-@pytest.mark.parametrize(
-    "path, quick, install",
-    [
-        ("README.md", (), ()),
-        ("tests/e2e/doctests/scripts/common.sh", CASES, CASES),
-        ("tests/e2e/doctests/002-installation-test.sh", (), CASES),
-        ("scripts/install_vllm_mcore_npu.sh", (), ("fsdp2_vllm", "megatron_vllm")),
-    ],
-)
-def test_selection_by_dependency(helper, monkeypatch, path, quick, install):
-    """Shared workers and backend installers affect the expected cases."""
-    monkeypatch.setattr(helper, "git", lambda *args: path)
-    monkeypatch.setattr(
-        helper, "read_repo_text", lambda path, ref=None, allow_missing=False: rst_document(helper.MARKERS_BY_FILE[path])
+    assert "/original" in block
+    monkeypatch.setenv("CANN_ENV_SCRIPT", dataset)
+    assert (
+        helper.adapt_runtime_block("source /usr/local/Ascend/ascend-toolkit/set_env.sh\n", "quickstart-environment")
+        == f"source {shlex.quote(dataset)}\n"
     )
-    assert helper.select_doctests("base", "head") == {"quickstart": sorted(quick), "installation": sorted(install)}
-
-
-def test_profile_matrix(helper):
-    """Use real config/Dockerfiles to prevent backend and image mismatches."""
-    plan = helper.build_doctest_plan(CASES, CASES, "a3", "ubuntu")
-    assert len(plan["quickstart"]["include"]) == len(plan["installation"]["include"]) == 4
-    for entry in plan["quickstart"]["include"]:
-        assert entry["case"].endswith(entry["backend"])
-        assert f"latest-{entry['backend']}-a3-ubuntu" in entry["image"]
-    assert all("cann" in entry["image"] for entry in plan["installation"]["include"])
-    with pytest.raises(helper.DoctestError, match="No supported"):
-        helper.build_doctest_plan(["fsdp2_sglang"], [], "a2")
-
-
-def resource_plan():
-    """Use the verl entry shape, including backend/profile/case identifiers."""
-    entries = [
-        {"image": image, "backend": "vllm", "profile": "a3", "case": case}
-        for image, case in (("repo:ok", "fsdp2_vllm"), ("repo:missing", "megatron_vllm"))
-    ]
-    return {
-        "quickstart": {"include": entries},
-        "installation": {"include": []},
-        "run_quickstart": True,
-        "run_installation": False,
-        "skipped": [],
-    }
-
-
-def test_missing_images_fail_unless_explicitly_skipped(helper, monkeypatch):
-    """Resource filtering must report skips and never mutate the original plan."""
-    plan = resource_plan()
-    monkeypatch.setattr(helper, "registry_image_exists", lambda image: image.endswith(":ok"))
-    with pytest.raises(helper.DoctestError, match="missing repo:missing"):
-        helper.check_plan_resources(plan)
-    result = helper.check_plan_resources(plan, skip_missing=True)
-    assert len(result["quickstart"]["include"]) == 1
-    assert len(result["skipped"]) == 1
-    assert len(plan["quickstart"]["include"]) == 2
-
-
-def test_missing_source_refs(helper, monkeypatch):
-    """Missing source branches remove install jobs only when skipping is requested."""
-    plan = resource_plan()
-    plan["installation"]["include"] = [plan["quickstart"]["include"][0]]
-    monkeypatch.setattr(helper, "registry_image_exists", lambda image: True)
-    monkeypatch.setattr(helper, "source_refs", lambda backend: [("https://example.com/repo", "v1")])
-    monkeypatch.setattr(helper, "source_ref_exists", lambda url, ref: False)
-    result = helper.check_plan_resources(plan, skip_missing=True)
-    assert result["run_quickstart"] is True
-    assert result["run_installation"] is False
-    assert "https://example.com/repo@v1" in result["skipped"][0]
-
-
-@pytest.mark.parametrize("status", [200, 404, 500])
-def test_registry_http_status(helper, monkeypatch, status):
-    """Only 404 is a missing resource; server errors must fail the plan."""
-
-    def urlopen(request, timeout):
-        if status != 200:
-            raise HTTPError(request.full_url, status, "error", HTTPMessage(), None)
-        return io.BytesIO()
-
-    monkeypatch.setattr(helper, "urlopen", urlopen)
-    if status == 500:
-        with pytest.raises(helper.DoctestError, match="Registry check failed"):
-            helper.registry_image_exists("registry.example/project/image:v1")
-    else:
-        assert helper.registry_image_exists("registry.example/project/image:v1") is (status == 200)
 
 
 @pytest.fixture
@@ -269,7 +163,7 @@ def test_installation_check_entrypoint(run_worker):
     """The workflow's installation/check command must reach the RST helper."""
     result = run_worker("installation", "check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Validated 14 marked code blocks" in result.stdout
+    assert "Validated 8 documentation blocks" in result.stdout
 
 
 @pytest.mark.parametrize("args", [(), ("quickstart", "a2"), ("installation", "pip"), ("quickstart", "typo")])
@@ -303,7 +197,7 @@ def test_source_dry_run(run_worker, backend):
 def isolated_repo(tmp_path):
     """Copy only doctest inputs so failure injection cannot modify the user's checkout."""
     repo = tmp_path / "checkout"
-    for relative in (DOCTEST_PATH, Path("docs/ascend_tutorial/get_start"), Path("tests/special_npu/quick_start")):
+    for relative in (DOCTEST_PATH, Path("docs/ascend_tutorial/zh/get_start"), Path("tests/special_npu/quick_start")):
         shutil.copytree(REPO_ROOT / relative, repo / relative)
     return repo
 
@@ -332,6 +226,34 @@ def test_runtime_validation(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runtime.importlib, "import_module", fake_import)
     assert runtime.check_imports("vllm") is False
+
+
+def test_runtime_logs_versions(monkeypatch, capsys):
+    """Successful imports report the actual installed versions, not expected pins."""
+    runtime = load_module("verify_runtime")
+    monkeypatch.setattr(runtime.importlib, "import_module", lambda name: object())
+    monkeypatch.setattr(runtime, "version", lambda name: "1.2.3")
+    assert runtime.check_imports("sglang") is True
+    output = capsys.readouterr().out
+    assert "Python:" in output
+    assert "torch_npu: 1.2.3" in output
+    assert "sglang: 1.2.3" in output
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_device_check_requires_npu_extension(monkeypatch, available):
+    """A device query must fail when the NPU extension cannot be loaded."""
+    runtime = load_module("verify_runtime")
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(npu=SimpleNamespace(device_count=lambda: 8)))
+
+    def import_extension(name):
+        if not available:
+            raise ImportError("missing NPU extension")
+
+    monkeypatch.setattr(runtime.importlib, "import_module", import_extension)
+    failures = []
+    assert runtime.npu_device_count(failures) == (8 if available else -1)
+    assert bool(failures) is not available
 
 
 @pytest.fixture
@@ -424,3 +346,78 @@ def test_environment_failure_stops_remaining_blocks(run_worker, isolated_repo, f
     result = run_worker("quickstart", "fsdp2_vllm", repo=isolated_repo, **env)
     assert result.returncode != 0
     assert not trace.exists()
+
+
+@pytest.mark.parametrize("backend, exit_code", [("vllm", 0), ("sglang", 0), ("vllm", 17)])
+def test_source_installation_flow(run_worker, isolated_repo, fake_training_runtime, tmp_path, backend, exit_code):
+    """Run the source worker with a real local clone and stand-ins for package installation."""
+    trace, env = fake_training_runtime
+    binary_dir = tmp_path / "bin"
+    conda_base = tmp_path / "conda"
+    (conda_base / "etc/profile.d").mkdir(parents=True)
+    (conda_base / "etc/profile.d/conda.sh").write_text(
+        "conda() {\n"
+        '  if [[ "$1" == create ]]; then mkdir -p "$CONDA_ENVS_PATH/$3";\n'
+        '  elif [[ "$1" == activate ]]; then [[ -d "$CONDA_ENVS_PATH/$2" ]]; fi\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    for name, command in {
+        "conda": f"printf '%s\\n' {shlex.quote(conda_base.as_posix())}",
+        "apt-get": 'printf "prerequisites\\n" >> "$DOCTEST_TRACE"',
+    }.items():
+        executable = binary_dir / name
+        executable.write_text(f"#!/bin/bash\n{command}\n", encoding="utf-8")
+        executable.chmod(0o755)
+    python = binary_dir / "python3"
+    python.write_text(
+        python.read_text(encoding="utf-8").replace(
+            "else\n",
+            'elif [[ "$1" == */verify_runtime.py && " $* " == *" --check-imports "* ]]; then\n'
+            '  printf "imports\\n" >> "$DOCTEST_TRACE"\nelse\n',
+        ),
+        encoding="utf-8",
+    )
+    os_release = tmp_path / "os-release"
+    os_release.write_text("ID=ubuntu\n", encoding="utf-8")
+    worker = isolated_repo / DOCTEST_PATH / "002-installation-test.sh"
+    worker.write_text(
+        worker.read_text(encoding="utf-8").replace("/etc/os-release", os_release.as_posix()), encoding="utf-8"
+    )
+    (isolated_repo / "scripts").mkdir()
+    installer = isolated_repo / f"scripts/install_{backend}_mcore_npu.sh"
+    installer.write_text(
+        f'#!/bin/bash\nprintf "install:%s\\n" "$(git -C verl rev-parse HEAD)" >> "$DOCTEST_TRACE"\nexit {exit_code}\n',
+        encoding="utf-8",
+    )
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(isolated_repo), *args], text=True, stderr=subprocess.STDOUT
+        ).strip()
+
+    git("init", "-q")
+    git("add", ".")
+    identity = ("-c", "user.name=Doctest", "-c", "user.email=doctest@example.invalid")
+    git(*identity, "commit", "-qm", "fixture")
+    revision = git("rev-parse", "HEAD")
+    git(*identity, "commit", "--allow-empty", "-qm", "new head")
+    work = tmp_path / "installation work"
+    result = run_worker(
+        "installation",
+        "source",
+        repo=isolated_repo,
+        ALLOW_INSTALL="1",
+        INSTALL_BACKEND=backend,
+        VERL_REPOSITORY=isolated_repo.as_posix(),
+        VERL_REVISION=revision,
+        INSTALL_WORKDIR=work.as_posix(),
+        **env,
+    )
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    lines = trace.read_text(encoding="utf-8").splitlines()
+    assert f"install:{revision}" in lines
+    assert ("imports" in lines) is (exit_code == 0)
+    assert any(line.startswith("train:") for line in lines) is (exit_code == 0)
+    environment = "verl-vllm-npu" if backend == "vllm" else "verl-sgl-npu"
+    assert (work / "conda-envs" / environment).is_dir()

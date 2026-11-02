@@ -1,10 +1,18 @@
 name: ascend documentation doctests
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/doctest_ascend.yml
+      - tests/e2e/doctests/**
+      - tests/special_sanity/test_doctest_helper.py
+      - docs/ascend_tutorial/zh/get_start/**
+      - scripts/install_*_mcore_npu.sh
+      - tests/special_npu/quick_start/**
   workflow_dispatch:
     inputs:
       backend:
-        description: Quick Start backend to execute
+        description: Combination to install from source and verify with one GRPO step
         required: true
         default: fsdp2_vllm
         type: choice
@@ -18,39 +26,46 @@ permissions:
   contents: read
 
 jobs:
-  plan:
-    if: github.repository_owner == 'verl-project'
+  check:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
+      image: ${{ steps.image.outputs.image }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: astral-sh/setup-uv@v3
       - name: Test documentation tooling on CPU
         run: |
-          python -m pip install pytest
-          python -m pytest -q tests/special_sanity/test_doctest_helper.py
-      - name: Select the matching A3 image from doctest config
-        id: plan
+          uv venv --python 3.12
+          uv pip install pytest
+          .venv/bin/python -m pytest -q tests/special_sanity/test_doctest_helper.py
+      - name: Read the A3 CANN base image from the backend Dockerfile
+        if: github.event_name == 'workflow_dispatch'
+        id: image
         env:
           DOCTEST_CASE: ${{ inputs.backend }}
         run: |
-          python tests/e2e/doctests/scripts/doctest_helper.py plan \
-            --quickstart "$DOCTEST_CASE" --device a3 --os ubuntu > "$RUNNER_TEMP/doctest-plan.json"
-          echo "matrix=$(jq -c '.quickstart' "$RUNNER_TEMP/doctest-plan.json")" >> "$GITHUB_OUTPUT"
-  doctest:
-    needs: plan
-    if: github.repository_owner == 'verl-project'
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+          case "$DOCTEST_CASE" in
+            fsdp2_vllm|megatron_vllm) dockerfile=docker/ascend/Dockerfile.ascend_9.1.0_a3 ;;
+            fsdp2_sglang|megatron_sglang) dockerfile=docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3 ;;
+            *) exit 1 ;;
+          esac
+          image=$(awk '$1 == "FROM" {print $2; exit}' "$dockerfile")
+          [[ "$image" == swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:* ]]
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+  installation:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' && github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-800i-8
+    timeout-minutes: 180
     container:
-      image: ${{ matrix.image }}
+      image: ${{ needs.check.outputs.image }}
       options: --shm-size 16g
+    defaults:
+      run:
+        shell: bash -el {0}
     env:
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
@@ -59,17 +74,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check hardware and install current checkout
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: ""
+          auto-activate: false
+      - name: Install documented environment and run Quick Start
+        env:
+          ALLOW_INSTALL: "1"
+          NDEVICES_PER_NODE: "8"
+          INSTALL_CASE: ${{ inputs.backend }}
         run: |
           npu-smi info
-          pip install --no-deps -e .
-      - name: Validate installation guidance
-        run: bash tests/e2e/doctests/scripts/run_doctests.sh installation check
-      - name: Run documented Quick Start
-        env:
-          NDEVICES_PER_NODE: ${{ matrix.devices }}
-          DOCTEST_CASE: ${{ matrix.case }}
-        run: |
-          export MODEL_PATH="${HOME}/.cache/models/Qwen/Qwen3-0.6B"
+          export INSTALL_BACKEND="${INSTALL_CASE##*_}"
+          export MODEL_PATH="${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B"
           export GSM8K_DATASET_PATH="${HOME}/.cache/datasets/openai/gsm8k"
-          bash tests/e2e/doctests/scripts/run_doctests.sh quickstart "$DOCTEST_CASE"
+          bash tests/e2e/doctests/scripts/run_doctests.sh installation source

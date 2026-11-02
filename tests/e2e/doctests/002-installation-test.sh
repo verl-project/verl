@@ -29,15 +29,43 @@ function detect_os() {
   esac
 }
 function run_installation_check() {
-  log_info "Validating documentation markers and doctest config (read-only)..."
+  log_info "Validating documented commands (read-only)..."
   "${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" validate
-  local marker
-  for marker in installation-prerequisites-ubuntu installation-prerequisites-openeuler \
-    installation-vllm-environment installation-sglang-environment installation-checkout \
-    installation-vllm-install installation-sglang-install; do
-    check_shell_block "${marker}"
-  done
+  check_shell_block installation-vllm
+  check_shell_block installation-sglang
   log_info "Installation documentation check passed."
+}
+
+# These build tools prepare the disposable test container, not the host driver.
+function install_system_tools() {
+  case "$1" in
+    ubuntu)
+      apt-get update
+      apt-get install -y gcc g++ cmake libnuma-dev wget git curl unzip build-essential ca-certificates
+      ;;
+    openeuler)
+      yum install -y gcc gcc-c++ cmake numactl-devel wget git curl unzip make ca-certificates
+      ;;
+  esac
+}
+
+# Keep the documented clone command, but install the checkout/revision under test.
+# This function is not exported to the backend installer subprocesses.
+function git() {
+  local argument
+  for argument in "$@"; do
+    if [[ "$1" == clone && "${argument}" == https://github.com/verl-project/verl.git ]]; then
+      log_info "Redirecting the documented verl clone to the test repository."
+      command git -c "url.${VERL_REPOSITORY}.insteadOf=https://github.com/verl-project/verl.git" "$@"
+      if [[ -n "${VERL_REVISION:-}" ]]; then
+        command git -C verl checkout --detach "${VERL_REVISION}"
+        command git -C verl submodule update --init --recursive
+      fi
+      command git -C verl rev-parse HEAD
+      return
+    fi
+  done
+  command git "$@"
 }
 function run_installation_source() {
   local backend="${INSTALL_BACKEND:-vllm}"
@@ -75,16 +103,19 @@ function run_installation_source() {
   fi
   WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
   trap cleanup_installation EXIT
-  export VERL_CONDA_PREFIX="${WORK_DIR}/conda-env"
+  # Named environments from the documentation are isolated under this workdir.
+  export CONDA_ENVS_PATH="${WORK_DIR}/conda-envs"
   export VERL_REPOSITORY="${VERL_REPOSITORY:-${REPO_ROOT}}"
   if [[ "${VERL_REPOSITORY}" == "${REPO_ROOT}" ]]; then
     export VERL_REVISION="${VERL_REVISION:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}"
   fi
-  run_shell_block "installation-prerequisites-${os_name}"
+  install_system_tools "${os_name}"
+  if [[ -r /usr/local/Ascend/ascend-toolkit/latest/version.cfg ]]; then
+    log_info "CANN version information:"
+    cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg
+  fi
   pushd "${WORK_DIR}" >/dev/null
-  run_shell_block "installation-${backend}-environment"
-  run_shell_block installation-checkout
-  run_shell_block "installation-${backend}-install"
+  run_shell_block "installation-${backend}"
   python3 "${VERIFY_RUNTIME_PATH}" --check-imports --backend "${backend}"
   DOCTEST_REPO_ROOT="${WORK_DIR}/verl" bash "${DOCTEST_DIR}/001-quickstart-test.sh" "${case_name}"
   set +u

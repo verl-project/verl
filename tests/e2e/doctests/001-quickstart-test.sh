@@ -41,7 +41,6 @@ function run_quickstart() {
   require_command bash
   validate_case_selection "${case_name}"
   check_shell_block quickstart-environment
-  check_shell_block quickstart-model
   check_shell_block quickstart-data
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     log_info "DRY_RUN=1: validated selection ${case_name} without launching training."
@@ -50,9 +49,9 @@ function run_quickstart() {
   require_command python3
   export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-1}"
   export NDEVICES_PER_NODE="${NDEVICES_PER_NODE:-8}"
+  export MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen/Qwen3-0.6B}"
   pushd "${REPO_ROOT}" >/dev/null
   run_shell_block quickstart-environment
-  run_shell_block quickstart-model
   if [[ -n "${TRAIN_FILE:-}" || -n "${TEST_FILE:-}" ]]; then
     [[ -n "${TRAIN_FILE:-}" && -n "${TEST_FILE:-}" ]] || die "Set TRAIN_FILE and TEST_FILE together."
   else

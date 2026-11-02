@@ -17,12 +17,12 @@
 # limitations under the License.
 
 
-
 """Check verl Ascend doctest prerequisites without launching training."""
 
 import argparse
 import importlib
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 
@@ -59,7 +59,8 @@ def npu_device_count(failures: list[str]) -> int:
     """返回可见 NPU 数量；torch/torch_npu 不可用时返回 -1 并记录原因。"""
     try:
         import torch
-        import torch_npu
+
+        importlib.import_module("torch_npu")  # Register the NPU extension before querying devices.
     except Exception as error:
         message = f"cannot import torch/torch_npu for device check: {error}"
         failures.append(message)
@@ -75,7 +76,8 @@ def npu_device_count(failures: list[str]) -> int:
 
 
 def check_imports(backend: str = "") -> bool:
-    """检查核心包和所选 rollout 后端均可导入。"""
+    """Import core/backend packages and log their installed versions for diagnosis."""
+    print(f"Python: {sys.version.split()[0]}")
     ok = True
     modules = ["verl", "torch", "torch_npu"]
     if backend == "vllm":
@@ -84,7 +86,12 @@ def check_imports(backend: str = "") -> bool:
         modules.append("sglang")
     for module in modules:
         try:
-            importlib.import_module(module)
+            imported = importlib.import_module(module)
+            try:
+                installed = version(module.replace("_", "-"))
+            except PackageNotFoundError:
+                installed = getattr(imported, "__version__", "unknown (no package metadata)")
+            print(f"{module}: {installed}")
         except Exception as error:
             fail(f"cannot import {module}: {error}")
             ok = False
