@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+
 import megatron.core
 import torch
 from megatron.core import dist_checkpointing, mpu
@@ -32,6 +34,22 @@ def save_dist_checkpointing(
     async_save=False,
     content_metadata=None,
 ):
+    """Save sharded state with MCore's data-parallel checkpoint strategy.
+
+    Args:
+        sharded_state_dict: Local tensors and sharding metadata to persist.
+        ckpt_path: Destination directory for the distributed checkpoint.
+        async_save: Return an async request instead of waiting for sharded writes.
+        content_metadata: Optional checkpoint metadata, forwarded on supported
+            MCore versions.
+
+    Returns:
+        The MCore save result: an async request for the caller to schedule when
+        asynchronous saving is enabled, or ``None`` after a synchronous save.
+
+    Async saves select the native MCore backend when the API exposes a selector,
+    keeping returned requests compatible with the manager's ``AsyncCallsQueue``.
+    """
     validate_sharding_integrity = True
     # Get checkpointing strategies
     save_strategy = TorchDistSaveShardedStrategy(backend="torch_dist", version=1)
@@ -47,6 +65,10 @@ def save_dist_checkpointing(
         async_sharded_save=async_save,
         validate_access_integrity=validate_sharding_integrity,
     )
+    if async_save and "async_strategy" in inspect.signature(dist_checkpointing.save).parameters:
+        # Match the manager's MCore AsyncCallsQueue instead of newer MCore's
+        # optional NVRx default. Older save APIs have no backend selector.
+        save_kwargs["async_strategy"] = "mcore"
     if content_metadata is not None:
         if mcore_ge_014:
             save_kwargs["content_metadata"] = content_metadata

@@ -15,13 +15,52 @@ fi
 
 DATASET_DIR=${DATASET_DIR:-~/data/gsm8k_sft}
 TRAIN_FILES=${DATASET_DIR}/train.parquet
-VAL_FILES=${DATASET_DIR}/test.parquet
+VAL_FILES=${VAL_FILES-${DATASET_DIR}/test.parquet}
 
 backend=${BACKEND:-fsdp}
 
 project_name=verl_sft_test
 
-RESUME_MODE=disable
+RESUME_MODE=${RESUME_MODE:-disable}
+TOTAL_TRAIN_STEP=${TOTAL_TRAIN_STEP:-2}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}
+TEST_FREQ=${TEST_FREQ:-after_each_epoch}
+# Resume runs retain checkpoints unless cleanup is explicitly requested.
+if [ "${RESUME_MODE}" = "disable" ]; then
+    KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-False}
+else
+    KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-True}
+fi
+
+checkpoint_overrides=()
+if [ "${ASYNC_SAVE:-False}" = "True" ]; then
+    checkpoint_overrides+=(+checkpoint.async_save=True)
+fi
+if [ "${RESUME_MODE}" = "resume_path" ]; then
+    : "${RESUME_FROM_PATH:?RESUME_FROM_PATH is required when RESUME_MODE=resume_path}"
+    # Quote for Hydra and escape OmegaConf interpolation-shaped text literally.
+    # Before a quote or ${, N backslashes need 2N+1; trailing ones need 2N.
+    # Bash may iterate over UTF-8 bytes; do not trace incomplete characters.
+    set +x
+    resume_path_value=""
+    resume_path_backslashes=""
+    for ((resume_path_index=0; resume_path_index<${#RESUME_FROM_PATH}; resume_path_index++)); do
+        resume_path_char="${RESUME_FROM_PATH:resume_path_index:1}"
+        if [[ "$resume_path_char" == '\' ]]; then
+            resume_path_backslashes+='\'
+            continue
+        fi
+        if [[ "$resume_path_char" == '"' || "${RESUME_FROM_PATH:resume_path_index:2}" == '${' ]]; then
+            resume_path_value+="${resume_path_backslashes}${resume_path_backslashes}\\${resume_path_char}"
+        else
+            resume_path_value+="${resume_path_backslashes}${resume_path_char}"
+        fi
+        resume_path_backslashes=""
+    done
+    resume_path_value+="${resume_path_backslashes}${resume_path_backslashes}"
+    set -x
+    checkpoint_overrides+=("trainer.resume_from_path=\"${resume_path_value}\"")
+fi
 
 ckpts_home=${ckpts_home:-~/verl/test/gsm8k-sft-${backend}}
 
@@ -156,14 +195,18 @@ else
 fi
 
 mkdir -p "${ckpts_home}"
-# These comparison runs disable resume; discard stale and partial checkpoints.
-rm -rf -- "${ckpts_home:?}/"*
-trap 'rm -rf -- "${ckpts_home:?}/"*' EXIT
+# Discard stale checkpoints for fresh comparison runs, but keep resume inputs.
+if [ "${RESUME_MODE}" = "disable" ]; then
+    rm -rf -- "${ckpts_home:?}/"*
+fi
+if [ "${KEEP_CHECKPOINTS}" != "True" ]; then
+    trap 'rm -rf -- "${ckpts_home:?}/"*' EXIT
+fi
 
 $COMMAND \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
-    data.train_batch_size=128 \
+    data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.pad_mode=${PAD_MODE} \
     data.truncation=error \
     data.use_dynamic_bsz=True \
@@ -172,15 +215,16 @@ $COMMAND \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
     data.ignore_input_ids_mismatch=True \
     ${ENGINE_CONFIG} \
-    trainer.test_freq=after_each_epoch \
+    trainer.test_freq=${TEST_FREQ} \
     trainer.save_freq=-1 \
     trainer.logger=['console','file'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.total_epochs=2 \
-    trainer.total_training_steps=2 \
+    trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     trainer.default_local_dir="${ckpts_home}" \
     trainer.resume_mode=${RESUME_MODE} \
+    "${checkpoint_overrides[@]}"
 
     # trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     # trainer.checkpoint.save_contents=[model,optimizer,extra,hf_model] \

@@ -32,6 +32,7 @@ from tqdm import tqdm
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.trainer.ppo.async_checkpoint import finalize_async_checkpoint
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -337,6 +338,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 self.fit_step(batch_dict)
                 if self.is_last_step:
                     return
+        finalize_async_checkpoint(self, blocking=True)
 
     def fit_step(self, batch_dict: Any = None):
         """
@@ -380,8 +382,8 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self._fit_postprocess_step()
 
     def _fit_prepare_step(self):
-        if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
-            self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
+        """Progress pending checkpoints collectively and determine whether this is the final step."""
+        finalize_async_checkpoint(self, blocking=False)
         self.is_last_step = self.global_steps >= self.total_training_steps
 
     def _fit_start_profile(self, should_profiler=None):
@@ -753,6 +755,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             self.train_dataset.on_batch_end(batch=batch)
 
     def _fit_postprocess_step(self):
+        """Record step metrics, advance the counter, and drain pending saves at the step limit."""
         metrics = self.metrics
         timing_raw = self.timing_raw
 
@@ -764,7 +767,6 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         self.progress_bar.update(1)
         self.global_steps += 1
         if self.is_last_step:
-            if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
-                self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+            finalize_async_checkpoint(self, blocking=True)
             pprint(f"Final validation metrics: {self.last_val_metrics}")
             self.progress_bar.close()
