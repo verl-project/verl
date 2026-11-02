@@ -26,11 +26,11 @@ from verl.single_controller.ray.base import (
     RayWorkerGroup,
     split_resource_pool,
 )
-from verl.utils.device import get_device_name, get_nccl_backend
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 
 
 def get_local_gpus_num(division=1):
-    return max(1, torch.cuda.device_count() // division)
+    return max(1, get_torch_device().device_count() // division)
 
 
 @ray.remote
@@ -53,7 +53,7 @@ class Actor(Worker):
 
 def test_split_resource_pool_with_split_size():
     ray.init()
-    ngpus = torch.cuda.device_count()
+    ngpus = get_torch_device().device_count()
     half = get_local_gpus_num(2)
     # simulate 2 nodes of half GPUs each
     global_resource_pool = RayResourcePool(process_on_nodes=[half, half])
@@ -154,7 +154,7 @@ def test_split_resource_pool_with_split_size_list_cross_nodes():
 
 def test_split_resource_pool_with_split_twice():
     ray.init()
-    ngpus = torch.cuda.device_count()
+    ngpus = get_torch_device().device_count()
     quarter = get_local_gpus_num(4)
     mid = ngpus - 2 * quarter  # middle pool size
     # simulate ngpus//2 nodes of 2 GPUs each

@@ -1,5 +1,5 @@
-Profiling Data Collection Guide
-==================================================================================
+Profiling Collection Guide
+================================================================================
 
 Last updated: 07/13/2026.
 
@@ -8,31 +8,28 @@ This is a tutorial for data collection using the GRPO or DAPO algorithm based on
 Configuration
 -------------
 
-Use two levels of profile settings to control data collection
+Use two levels of profile settings to control data collection:
 
 - Global collection control: Use parameters in verl/trainer/config/ppo_trainer.yaml (FSDP) or verl/trainer/config/ppo_megatron_trainer.yaml (MindSpeed) to control the collection mode and steps.
-- Role profile control: Use parameters in each role to control various parameters.
+- Role profile control: Use parameters in each role to control collection and other parameters.
 
 Global Collection Control
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Use parameters in ppo_trainer.yaml to control the collection steps and mode:
 
 -  global_profiler: Control the ranks and mode of profiling
 
-   -  tool: The profiling tool to use, options are nsys, npu, torch,
+   -  tool: The profiling tool to use. Options are nsys, npu, torch,
       torch_memory.
 
       -  nsys: NVIDIA's official system-level performance analysis tool.
       -  npu: Huawei Ascend chip's native performance analysis tool.
       -  torch: PyTorch framework's built-in profiler.
-      -  torch_memory: PyTorch's memory trace analyzer (based on memory history snapshot functionality).
+      -  torch_memory: PyTorch's memory trace analyzer (based on the memory history snapshot functionality).
 
-   -  steps: This parameter can be set as a list that has
-      collection steps, such as [2, 4], which means it will collect steps 2
-      and 4. If set to null, no collection occurs.
-   -  save_path: The path to save the collected data. Default is
-      "outputs/profile".
+   -  steps: This parameter can be set to a list containing the collection steps, for example [2, 4], which means step 2 and step 4 will be collected. If set to null, no collection occurs.
+   -  save_path: The path to save the collected data. Default is "outputs/profile".
 
 Role Profiler Control
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -46,11 +43,11 @@ In each role's ``profiler`` field, you can control the collection mode for that 
 
 Use parameters in each role's ``profiler.tool_config.npu`` to control specific collection behavior:
 
--  level: Collection level - options are level_none, level0, level1, and level2
+-  level: Collection level -- options are level_none, level0, level1, and level2
 
    -  level_none: Disables all level-based data collection (turns off profiler_level).
-   -  level0: Collects high-level application data, underlying NPU data, and operator execution details on NPU. After balancing data volume and analytical capability, level0 is the recommended default configuration.
-   -  level1: Extends level0 by adding CANN-layer AscendCL data and AI Core performance metrics on NPU.
+   -  level0: Collects high-level application data, underlying NPU data, and operator execution details on the NPU. After balancing data volume and analytical capability, level0 is the recommended default configuration.
+   -  level1: Extends level0 by adding CANN-layer AscendCL data and AI Core performance metrics on the NPU.
    -  level2: Extends level1 by adding CANN-layer Runtime data and AI CPU metrics.
 
 -  contents: A list of options to control the collection content, for example
@@ -60,13 +57,13 @@ Use parameters in each role's ``profiler.tool_config.npu`` to control specific c
    -  cpu: Whether to collect host-side performance data.
    -  memory: Whether to enable memory analysis.
    -  shapes: Whether to record tensor shapes.
-   -  module: Whether to record framework-layer Python call stack information. Compared to stack, it is recommended to use module for recording call stack information, as it incurs lower performance overhead.
+   -  module: Whether to record framework-layer Python call stack information. Compared to stack, module is more recommended for recording call stack information because it incurs lower performance overhead.
    -  stack: Whether to record operator call stack information.
 
 -  analysis: Whether to enable automatic data parsing.
 -  discrete: Whether to use discrete mode.
--  profile_token_start: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
--  profile_token_end: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
+-  profile_token_start: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within the response length).
+-  profile_token_end: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within the response length).
 
 Examples
 --------
@@ -95,7 +92,7 @@ End-to-End Collection
                tool_config:
                   npu:
                      discrete: True
-                     contents: [npu, cpu]  # Control collection list, default cpu, npu; can configure memory, shapes, module, etc.
+                     contents: [npu, cpu]  # Control collection list, default cpu, npu; can configure memory, shapes, module, and so on
 
 Separation of Training and Inference Phases
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -136,7 +133,7 @@ Disabling Collection
 
 .. code:: bash
 
-         global_profiler.steps=null
+            global_profiler.steps=null
 
 End-to-End Collection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -149,8 +146,8 @@ End-to-End Collection
         actor_rollout_ref.actor.profiler.enable=True
         actor_rollout_ref.actor.profiler.all_ranks=False
         actor_rollout_ref.actor.profiler.ranks="[0]" # Only collect rank 0
-        actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # Discrete mode is recommended, data of each phase is stored separately
-        actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu; can configure memory, shapes, module, etc.
+        actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # Discrete mode is recommended; data of each phase is stored separately
+        actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu; can configure memory, shapes, module, and so on
         actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
         actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # Disable automatic data parsing
         # rollout & ref follow actor settings
@@ -167,54 +164,54 @@ Lightweight Collection of Inference Data
       actor_rollout_ref.actor.profiler.enable=True
       actor_rollout_ref.actor.profiler.all_ranks=False
       actor_rollout_ref.actor.profiler.ranks="[0]" # Only collect rank 0
-      actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # Discrete mode is recommended, data of each phase is stored separately
-      actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu; can configure memory, shapes, module, etc.
+      actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True # Discrete mode is recommended; data of each phase is stored separately
+      actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # Control collection list, default cpu, npu; can configure memory, shapes, module, and so on
       actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
       actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # Disable automatic data parsing
 
       actor_rollout_ref.rollout.profiler.enable=True
       actor_rollout_ref.rollout.profiler.all_ranks=False
-      actor_rollout_ref.rollout.profiler.ranks="[0]" # Only collect rank 0 data.
-      # Optional: lightweight collection of inference data, If start and stop are not set, the entire rollout phase is collected.
+      actor_rollout_ref.rollout.profiler.ranks="[0]" # Only collect rank 0
+      # Optional: lightweight collection of inference data, collecting by response token interval; when start/stop are not set, the entire rollout phase is collected
       actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_start=30
       actor_rollout_ref.rollout.profiler.tool_config.npu.profile_token_end=60
       # ref follow actor settings
 
-**Agent Loop Mode Description**:
+**Agent Loop Mode Notes**:
 
 In `Agent Loop <../../../../advance/agent_loop.rst>`_ mode, performance data for the Rollout phase **must be collected using discrete mode**. In this case, the Profiler is triggered by the inference engine backend.
 
-1. Rank Definition: ranks in the Rollout configuration are global GPU ranks (the same as the training roles). Because a rollout replica spans ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` GPUs, each listed rank is mapped to the replica that owns it (``replica = rank // world_size``) and that whole replica is profiled; e.g. with ``tp=8``, ``ranks: [0, 8]`` profiles the replicas holding global ranks 0 and 8 (replicas 0 and 1).
+1. Rank Definition: ranks in the Rollout configuration are global GPU ranks (the same as the training roles). Because each rollout replica spans ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` GPUs, each listed rank is mapped to the replica that owns it (``replica = rank // world_size``) and the whole replica is profiled; for example, with ``tp=8``, ``ranks: [0, 8]`` profiles the replicas holding global ranks 0 and 8 (that is replica 0 and replica 1).
 
 2. Inference Engine Support: Currently, vLLM and SGLang engines are supported without additional settings. Specific details are as follows:
 
-   - vLLM Engine: Automatically collects AsyncLLM scheduling stacks and inference process performance data. Does not support setting analysis (defaults to no analysis, requires offline analysis) and profiler_level (defaults to level1).
-   - SGLang Engine: Automatically collects inference process performance data. Does not support the memory option in contents. Does not support setting analysis (defaults to enabled) and profiler_level (defaults to level0).
+   - vLLM Engine: Automatically collects AsyncLLM scheduling stacks and inference process performance data. Does not support setting analysis (defaults to no parsing, requires offline parsing) and profiler_level (defaults to level1).
+   - SGLang Engine: Automatically collects inference process performance data. Does not support the memory option in contents. Does not support setting analysis (defaults to parsing enabled) and profiler_level (defaults to level0).
 
-**Fully Async Policy Mode Description**:
+**Fully Async Policy Mode Notes**:
 
-1. In `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ mode, ``global_profiler.steps`` refers to the step after each ``update_weights`` round, which is consistent with synchronous mode, not a per mini-batch step within a single training round.
+1. In `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ mode, ``global_profiler.steps`` refers to the step after each ``update_weights`` round, which is consistent with synchronous mode, rather than a per-mini-batch step within a single training round.
 
-2. Because it reuses AgentLoop collection capabilities, the notes for `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ mode are the same as for AgentLoop.
+2. Because it reuses the AgentLoop collection capabilities, the notes for `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ mode are the same as for AgentLoop.
 
 Visualization
 -------------
 
-Collected data is stored in the user-defined save_path and can be visualized using the `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/80RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ tool.
+Collected data is stored in the user-defined save_path and can be visualized using the `MindStudio Insight <https://www.hiascend.com/document/detail/en/mindstudio/latest/GUI_baseddevelopmenttool/MindStudioInsight/docs/en/install_guide/mindstudio_insight_install_guide.md>`_ tool.
 
-Additionally, in a Linux environment, the MindStudio Insight tool is provided in the form of a `JupyterLab Plugin <https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html>`_, offering a more intuitive and highly interactive user interface. The advantages of the JupyterLab plugin are as follows:
+Additionally, in a Linux environment, the MindStudio Insight tool is provided as a `JupyterLab plugin <https://www.hiascend.com/document/detail/en/mindstudio/latest/GUI_baseddevelopmenttool/MindStudioInsight/docs/en/install_guide/mindstudio_insight_install_guide.md>`_, offering a more intuitive and highly interactive operation interface. The advantages of the JupyterLab plugin are as follows:
 
-- Seamless integration: Supports running the MindStudio Insight tool directly within the Jupyter environment, eliminating the need to switch platforms or copy data from the server, enabling data to be collected and used immediately.
-- Fast startup: Allows MindStudio Insight to be launched quickly via the JupyterLab command line or graphical interface.
-- Smooth operation: In a Linux environment, launching MindStudio Insight through JupyterLab effectively resolves lag issues compared to full-package communication, significantly improving the operation experience.
-- Remote access: Supports remotely launching MindStudio Insight. Users can connect to the service via a local browser for direct visual analysis, reducing the difficulty of uploading and downloading data during large-model training or inference.
+- Seamless integration: Supports running the MindStudio Insight tool directly within the Jupyter environment, with no need to switch platforms or copy data from the server, enabling data to be collected and used immediately.
+- Fast startup: MindStudio Insight can be launched quickly through the JupyterLab command line or graphical interface.
+- Smooth operation: In a Linux environment, launching MindStudio Insight through JupyterLab effectively resolves the lag issues seen with full-package communication, significantly improving the operation experience.
+- Remote access: Supports remotely launching MindStudio Insight. You can connect to the service through a local browser for direct visual analysis, easing the difficulty of uploading and downloading data during large-model training or inference.
 
-If the analysis parameter is set to False, offline parsing is required after data collection:
+If the analysis parameter is set to False, offline parsing is required after collection:
 
 .. code:: python
 
     import torch_npu
-    # Set profiler_path to the parent directory of the "localhost.localdomain_<PID>_<timestamp>_ascend_pt" folder
+    # Set profiler_path to the parent directory of the "localhost.localdomain_<PID>_<timestamp>_ascend_pt" directory
     torch_npu.profiler.profiler.analyse(profiler_path=profiler_path)
 
 
@@ -222,35 +219,36 @@ Advanced Guide: Fine-grained Collection
 ---------------------------------------
 
 Background and Challenges
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Although the configuration-based collection method mentioned above is convenient, it faces challenges in training scenarios with **Long Context** or **Large Global Batch Size**.
+Although the configuration-based collection method described above is convenient, it faces challenges in training scenarios with **Long Context** or **Large Global Batch Size**.
 Within a complete training step (Step), model computation exhibits high-frequency and repetitive characteristics:
 
 1. Rollout phase: Sequence generation (Generate Sequence) is an autoregressive process involving thousands of forward computations of the Decoder model.
-2. Training phase: To control peak memory usage, verl typically adopts a Micro-Batch strategy, dividing large data streams into multiple micro-batches for computation.
+2. Training phase: To control peak memory usage, verl typically adopts a Micro-Batch strategy, splitting the large data stream into multiple micro-batches for computation.
 
    - compute_log_prob (Actor/Ref): Involves multiple rounds of pure forward propagation.
    - update_policy (Actor/Critic): Involves multiple rounds of forward and backward propagation.
 
-This characteristic leads to massive and repetitive operator records from full profiling. As shown in the image below:
+These characteristics cause full profiling to produce massive and repetitive operator records. As shown in the figure below:
 
 .. image:: https://raw.githubusercontent.com/mengchengTang/verl-data/master/verl_ascend_profiler.png
+   :alt: Schematic of massive repetitive operator records produced by full profiling
 
-Even with ``discrete`` mode enabled, performance data files for a single stage can still reach several TB, leading to **parsing failures** or **visualization tool lag**.
+Even with ``discrete`` mode enabled, a single stage's performance data file can still reach several TB, leading to **parsing failures** or **visualization tool lag**.
 
 Solution: Critical Path Sampling
-~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To solve the above problems, we can adopt a **Critical Path Sampling** strategy: Based on the API interface provided by `torch_npu.profiler <https://www.hiascend.com/document/detail/zh/canncommercial/80RC2/devaids/auxiliarydevtool/atlasprofiling_16_0038.html>`_ , directly modify Python source code to collect only representative data segments (such as specific Decode Steps or the first Micro-Batch).
+To address the above problems, we can adopt a **Critical Path Sampling** strategy: Based on the API provided by `torch_npu.profiler <https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/customapi/docs/en/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md>`_, directly modify the Python source code to collect only representative data segments (such as specific Decode Steps or the first Micro-Batch).
 
     **Important Notes**
 
     1. This chapter involves direct source code modification. It is recommended to back up files before modification and restore them after debugging.
     2. When using code instrumentation for collection, be sure to **disable global collection** (``global_profiler: steps: null``) in ``ppo_trainer.yaml`` or ``ppo_megatron_trainer.yaml`` to avoid Profiler conflicts.
 
-1. Add Script to Control Collection Granularity
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. Add a Script to Control Collection Granularity
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: bash
 
@@ -265,10 +263,10 @@ To solve the above problems, we can adopt a **Critical Path Sampling** strategy:
     export UPDATE_PROFILE_PATH="./outputs/update_profile"
     export ROLLOUT_PROFILE_PATH="./outputs/rollout_profile"
 
-2. Fine-grained Collection in Rollout Phase
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2. Fine-grained Collection in the Rollout Phase
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For vLLM or SGLang inference engines, we can control the ``schedule`` parameter to collect model forward propagation performance data for specific tokens.
+For vLLM or SGLang inference engines, we can control the ``schedule`` parameter to collect model forward-propagation performance data for specific tokens.
 
 **vLLM Engine**
 
@@ -281,6 +279,7 @@ For vLLM or SGLang inference engines, we can control the ``schedule`` parameter 
   
           def __init__(self, *args, **kwargs):
               # ... existing code ...
+  
   +           # Profile collection
   +           import os
   +           import torch_npu
@@ -302,17 +301,18 @@ For vLLM or SGLang inference engines, we can control the ``schedule`` parameter 
   +                   on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(os.environ.get('ROLLOUT_PROFILE_PATH'), analyse_flag=True)  # Data save path, whether to parse online
   +               )
   +               self.profiler_npu.start()
+  
               # ... existing code ...
   
           def execute_model(self, scheduler_output=None, intermediate_tensors=None, **kwargs):
               # ... existing code ...
               output = self.model_runner.execute_model(scheduler_output,
                                                   intermediate_tensors)
-
+              
   +           import os
   +           if os.environ.get('ROLLOUT_PROFILE', "false") == "true":
   +               self.profiler_npu.step()  # Drive schedule to collect partial decode steps
-
+              
               # ... existing code ...
 
 **SGLang Engine**
@@ -329,6 +329,7 @@ For vLLM or SGLang inference engines, we can control the ``schedule`` parameter 
   
           def __init__(self, *args, **kwargs):
               # ... existing init code ...
+              
   +           # Profile collection
   +           import os
   +           import torch_npu
@@ -350,6 +351,7 @@ For vLLM or SGLang inference engines, we can control the ``schedule`` parameter 
   +                   on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(os.environ.get('ROLLOUT_PROFILE_PATH'), analyse_flag=True)  # Data save path, whether to parse online
   +               )
   +               self.profiler_npu.start()
+  
           def forward(self, forward_batch, **kwargs):
               # ... existing code ...
 
@@ -359,18 +361,18 @@ For vLLM or SGLang inference engines, we can control the ``schedule`` parameter 
 
               return output
 
-3. Fine-grained Collection in update_policy (Actor & Critic) Phase
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+3. Fine-grained Collection in the update_policy (Actor & Critic) Phase
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Update phase includes forward and backward propagation. In the unified model engine, mini-batch iteration is driven by
+The Update phase includes forward and backward propagation. In the unified model engine, the mini-batch iteration is driven by
 ``TrainingWorker.train_mini_batch`` in ``verl/workers/engine_workers.py``,
 which calls ``train_batch`` for each mini-batch.
 
 **FSDP Backend**
 
-The FSDP backend supports collection at both Mini-Batch and Micro-Batch granularities.
-For Mini-Batch scope, instrument ``TrainingWorker.train_mini_batch``;
-For Micro-Batch scope, instrument the micro-batch loop inside the FSDP engine's
+The FSDP backend supports collection at both Mini-Batch and Micro-Batch granularity.
+For Mini-Batch granularity, instrument ``TrainingWorker.train_mini_batch``;
+For Micro-Batch granularity, instrument the micro-batch loop inside the FSDP engine's
 ``forward_backward_batch``.
 
 - **Modified File**: ``verl/workers/engine_workers.py``
@@ -425,27 +427,25 @@ For Micro-Batch scope, instrument the micro-batch loop inside the FSDP engine's
 
 **Megatron Backend**
 
-The Megatron backend supports collection at the Mini-Batch granularity, with the same entry point
-``TrainingWorker.train_mini_batch``: The Megatron engine internally runs Megatron
+The Megatron backend supports collection at Mini-Batch granularity, with the same entry point
+``TrainingWorker.train_mini_batch``: The Megatron engine internally runs Megatron's
 pipeline-parallel forward/backward schedule and one optimizer step.
 
 - **Modified File**: ``verl/workers/engine_workers.py``
   (``TrainingWorker.train_mini_batch``) -- identical to the FSDP snippet above;
-  it is recommended to rename the output directory (e.g. ``./outputs/megatron_actor_update_profile``)
+  it is recommended to rename the output directory (for example ``./outputs/megatron_actor_update_profile``)
   to distinguish traces from different backends.
 
+4. Fine-grained Collection in the compute_log_prob (Actor & Ref) Phase
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-4. Fine-grained Collection in compute_log_prob (Actor & Ref) Phase
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-This phase computes probability distributions for new and old policies. In the unified model engine, both actor and ref log-prob
-computation goes through ``TrainingWorker.infer_batch``, which dispatches to the corresponding backend engine
+This phase computes the probability distributions of the new and old policies. In the unified model engine, both actor and ref log-prob
+computation goes through ``TrainingWorker.infer_batch``, which dispatches to the corresponding backend engine's
 ``BaseEngine.infer_batch``.
 
 **FSDP Backend**
 
 The FSDP backend allows fine-grained control at the Micro-Batch level. Instrument the micro-batch loop inside the FSDP engine forward pass.
-
 
 - **Modified File**: ``verl/workers/engine/fsdp/transformer_impl.py``
   (``FSDPEngineWithLMHead.forward_backward_batch`` / ``forward_step``)
@@ -464,7 +464,7 @@ The FSDP backend allows fine-grained control at the Micro-Batch level. Instrumen
   +           experimental_config = torch_npu.profiler._ExperimentalConfig(...)
   +           self.prof_npu = torch_npu.profiler.profile(
   +               # ... (same configuration as above, omitted)
-  +               # wait=0, warmup=0, active=1: directly collect first micro-batch
+  +               # wait=0, warmup=0, active=1: directly collect the first micro-batch
   +               schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
   +               on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(f"./outputs/{role}_compute_log_prob", analyse_flag=True)
   +           )
@@ -489,7 +489,7 @@ The FSDP backend allows fine-grained control at the Micro-Batch level. Instrumen
 
 **Megatron Backend**
 
-The Micro-Batch scheduling in the Megatron backend is managed internally
+Micro-Batch scheduling in the Megatron backend is managed internally
 by Megatron's pipeline-parallel ``forward_backward_func`` and does not
 currently support fine-grained collection at the Micro-Batch level
 through simple code instrumentation. It is recommended to use the global

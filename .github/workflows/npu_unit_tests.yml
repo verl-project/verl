@@ -103,7 +103,8 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          uv pip install mlflow pytest-asyncio
+          # Match the GPU CI ModelOpt version and keep the shared quantization tests unchanged.
+          uv pip install mlflow pytest-asyncio "nvidia-modelopt==0.44.0"
       - name: Check final pip list
         run: |
           uv pip list
@@ -112,16 +113,75 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Run all NPU unit tests
         run: |
-          pytest -s -x --ignore-glob="*test_special_*.py" --ignore-glob="*on_cpu.py" --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob="tests/special*" --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_rvdz*" --ignore-glob="*test_ray_collectives*" --ignore-glob="*test_nvtx_profile*" --ignore-glob="tests/checkpoint_engine" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_fsdp_lora_merge*" --ignore-glob="*test_optimizer_offload_and_load.py*" tests/ -k "not test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu and not test_sender_accepts_strided_tensor"
+          # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
+          # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
+          python -c '
+          import pytest
+
+          raise SystemExit(pytest.main([
+              "-s",
+              "-x",
+              "--ignore-glob=*test_special_*.py",
+              "--ignore-glob=*on_cpu.py",
+              "--ignore-glob=*test_vllm*",
+              "--ignore-glob=*_sglang*",
+              "--ignore-glob=*_hf_rollout*",
+              "--ignore-glob=tests/models/",
+              "--ignore-glob=tests/special*",
+              "--ignore-glob=tests/experimental",
+              "--ignore-glob=tests/workers/reward_model",
+              "--ignore-glob=*test_rvdz*",
+              "--ignore-glob=*test_ray_collectives*",
+              "--ignore-glob=*test_nvtx_profile*",
+              "--ignore-glob=tests/checkpoint_engine",
+              "--ignore-glob=*test_shared_memory*",
+              "--ignore-glob=tests/workers/rollout/rollout_trtllm",
+              "--ignore-glob=*test_fsdp_lora_merge*",
+              "--ignore-glob=*test_optimizer_offload_and_load.py*",
+              "tests/",
+              "-k",
+              "not test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu and not test_sender_accepts_strided_tensor",
+          ]))
+          '
       - name: Running NPU profiling unit tests
         run: |
-          pytest -s -x tests/utils/test_special_mstx_profile.py
+          # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
+          # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
+          python -c '
+          import pytest
+
+          raise SystemExit(pytest.main([
+              "-s",
+              "-x",
+              "tests/utils/test_special_mstx_profile.py",
+          ]))
+          '
       - name: Running FSDP2 NPU model transfer regression
         run: |
           PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=2 tests/special_distributed/test_fsdp2_model_cpu_offload.py
       - name: Running NPU checkpoint_engine unit tests
         run: |
-          pytest -s -x tests/checkpoint_engine/test_correctness_on_npu.py
+          # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
+          # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
+          python -c '
+          import pytest
+
+          raise SystemExit(pytest.main([
+              "-s",
+              "-x",
+              "tests/checkpoint_engine/test_correctness_on_npu.py",
+          ]))
+          '
       - name: Running CPU checkpoint_engine unit tests
         run: |
-          pytest -s -x tests/checkpoint_engine/test_global_steps_on_cpu.py
+          # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
+          # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
+          python -c '
+          import pytest
+
+          raise SystemExit(pytest.main([
+              "-s",
+              "-x",
+              "tests/checkpoint_engine/test_global_steps_on_cpu.py",
+          ]))
+          '

@@ -370,13 +370,13 @@ jobs:
             multinode-e2e \
             /root/.cache/verl_ci/run_multinode_testing.sh \
             '["--script-path","/verl/tests/special_npu/nightly_ci_ascend/run_grpo_glm52_top16_megatron_npu_multinode.sh"]' \
-            '{}' \
+            '{"HCCL_INTER_HCCS_DISABLE":"TRUE"}' \
             '[
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},
-              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"512Gi"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"1536Gi"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/huawei.com~1ascend-1980","value":"16"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/cpu","value":"64"},
-              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/memory","value":"512Gi"},
+              {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/memory","value":"1536Gi"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/limits/huawei.com~1ascend-1980","value":"16"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/volumes/1/emptyDir/sizeLimit","value":"128Gi"}
             ]'

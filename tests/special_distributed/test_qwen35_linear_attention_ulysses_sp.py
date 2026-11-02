@@ -25,6 +25,7 @@ import torch
 import torch.distributed as dist
 
 from verl.models.transformers.qwen3_5 import qwen3_5_decoder_layer_forward, qwen3_5_gated_delta_net_forward
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_device_available
 from verl.utils.ulysses import set_ulysses_sequence_parallel_group
 
 pytest.importorskip("fla")
@@ -170,13 +171,13 @@ def _run_case(case_name: str, lengths: list[int], layer: Qwen3_5DecoderLayer, de
     ids=["causal_conv1d_fn", "torch_conv1d_fallback"],
 )
 def test_qwen35_linear_attention_matches_full_forward_under_ulysses_sp(use_causal_conv1d_fn: bool):
-    assert torch.cuda.is_available(), "CUDA is required"
+    assert is_device_available(), "An accelerator device is required"
     if not dist.is_initialized():
-        dist.init_process_group("nccl")
+        dist.init_process_group(get_nccl_backend())
 
     local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device("cuda", local_rank)
-    torch.cuda.set_device(device)
+    device = torch.device(get_device_name(), local_rank)
+    get_torch_device().set_device(device)
 
     Qwen3_5DecoderLayer.forward = qwen3_5_decoder_layer_forward
     Qwen3_5GatedDeltaNet.forward = qwen3_5_gated_delta_net_forward

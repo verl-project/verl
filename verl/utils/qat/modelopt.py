@@ -28,62 +28,53 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
 )
 
 _FP8_BLOCK_BACKEND = "verl_fp8_block"
+_MXFP8_BACKEND = "verl_mxfp8"
 _MXFP4_BACKEND = "verl_mxfp4"
 _NVFP4_WEIGHT_BACKEND = "verl_nvfp4_weight"
 _NVFP4_INPUT_BACKEND = "verl_nvfp4_input"
-_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
-class _FP8BlockFakeQuant(torch.autograd.Function):
-    """Dynamic FP8 E4M3 fake quantization over blocks of the last two dims, with straight-through grad."""
+class _Fp8FakeQuant(torch.autograd.Function):
+    """TileLang FP8 fake quantization over blocks of the last two dimensions."""
 
     @staticmethod
-    def forward(ctx, x: torch.Tensor, block_rows: int, block_cols: int) -> torch.Tensor:
-        shape = x.shape
-        x2d = x.reshape(-1, shape[-1]).float()
-        rows, cols = x2d.shape
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        block_rows: int,
+        block_cols: int,
+        scale_fmt: str | None,
+    ) -> torch.Tensor:
+        from verl.utils.qat.fp8 import fp8_quant
+
+        rows, cols = x.shape[-2:]
         pad_rows, pad_cols = -rows % block_rows, -cols % block_cols
-        xp = F.pad(x2d, (0, pad_cols, 0, pad_rows))
-        blocks = xp.reshape(xp.shape[0] // block_rows, block_rows, xp.shape[1] // block_cols, block_cols)
-        scale = blocks.abs().amax(dim=(1, 3), keepdim=True).clamp_min(1e-12) / _FP8_MAX
-        dq = (blocks / scale).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn).float() * scale
-        dq = dq.reshape(xp.shape)[:rows, :cols]
-        return dq.reshape(shape).to(x.dtype)
+        padded = F.pad(x, (0, pad_cols, 0, pad_rows)) if pad_rows or pad_cols else x
+        dq = fp8_quant(padded.detach(), (block_rows, block_cols), scale_fmt=scale_fmt, dequant=True)
+        return dq[..., :rows, :cols]
 
     @staticmethod
     def backward(ctx, grad):
-        return grad, None, None
+        return grad, None, None, None
 
 
 def _fp8_block_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     block_rows, block_cols = quantizer.backend_extra_args["block_sizes"]
-    return _FP8BlockFakeQuant.apply(inputs, block_rows, block_cols)
+    return _Fp8FakeQuant.apply(inputs, block_rows, block_cols, None)
+
+
+def _mxfp8_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
+    return _Fp8FakeQuant.apply(inputs, 1, 32, "e8m0")
 
 
 class _Mxfp4FakeQuant(torch.autograd.Function):
-    """compressed-tensors-compatible MXFP4 fake quantization with STE."""
+    """TileLang MXFP4 fake quantization with STE."""
 
     @staticmethod
     def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        from compressed_tensors.quantization import QuantizationArgs
-        from compressed_tensors.quantization.lifecycle.forward import fake_quantize
-        from compressed_tensors.quantization.utils import calculate_qparams
+        from verl.utils.qat.fp4 import fp4_quant
 
-        args = QuantizationArgs(
-            num_bits=4,
-            type="float",
-            symmetric=True,
-            group_size=32,
-            strategy="group",
-            dynamic=False,
-            scale_dtype="torch.uint8",
-        )
-        shape = x.shape
-        x2d = x.reshape(-1, shape[-1])
-        groups = x2d.unflatten(-1, (-1, 32))
-        min_vals, max_vals = groups.amin(dim=-1), groups.amax(dim=-1)
-        scale, zero_point = calculate_qparams(min_vals.float(), max_vals.float(), args)
-        return fake_quantize(x2d, scale, zero_point, args).reshape(shape).to(x.dtype)
+        return fp4_quant(x.detach(), dequant=True)
 
     @staticmethod
     def backward(ctx, grad):
@@ -173,6 +164,8 @@ def _nvfp4_input_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
 
 if not is_registered_quant_backend(_FP8_BLOCK_BACKEND):
     register_quant_backend(_FP8_BLOCK_BACKEND, _fp8_block_backend)
+if not is_registered_quant_backend(_MXFP8_BACKEND):
+    register_quant_backend(_MXFP8_BACKEND, _mxfp8_backend)
 if not is_registered_quant_backend(_MXFP4_BACKEND):
     register_quant_backend(_MXFP4_BACKEND, _mxfp4_backend)
 if not is_registered_quant_backend(_NVFP4_WEIGHT_BACKEND):
@@ -215,6 +208,16 @@ def _modelopt_quantizer_cfg(preset: dict, quantizer_name: str) -> dict:
     return copy.deepcopy(next(entry["cfg"] for entry in entries if entry["quantizer_name"] == quantizer_name))
 
 
+def _mxfp8_quantize_config() -> tuple[list[dict], None]:
+    """ModelOpt MXFP8 numerics executed by verl's export-shared TileLang kernel."""
+    quant_cfg = mtq.normalize_quant_cfg_list(copy.deepcopy(mtq.MXFP8_DEFAULT_CFG["quant_cfg"]))
+    for entry in quant_cfg:
+        cfg = entry.get("cfg")
+        if cfg is not None and entry.get("enable", True):
+            cfg["backend"] = _MXFP8_BACKEND
+    return quant_cfg, None
+
+
 def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
     """MXFP4 routed-expert weights with MXFP8 activations.
 
@@ -223,15 +226,14 @@ def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
     from the former with the input numerics from the latter.
     """
     if dense_mxfp8:
-        quant_cfg = mtq.normalize_quant_cfg_list(copy.deepcopy(mtq.MXFP8_DEFAULT_CFG["quant_cfg"]))
+        quant_cfg, _ = _mxfp8_quantize_config()
     else:
         quant_cfg = [{"quantizer_name": "*", "enable": False}]
 
     weight_cfg = _modelopt_quantizer_cfg(mtq.MXFP4_DEFAULT_CFG, "*weight_quantizer")
-    # ModelOpt and compressed-tensors use different E2M1 tie handling for a
-    # small subset of values. Export is compressed-tensors, so QAT must use the
-    # same QDQ implementation to remain numerically identical.
     weight_cfg["backend"] = _MXFP4_BACKEND
+    input_cfg = _modelopt_quantizer_cfg(mtq.MXFP8_DEFAULT_CFG, "*input_quantizer")
+    input_cfg["backend"] = _MXFP8_BACKEND
     quant_cfg.extend(
         [
             {
@@ -240,7 +242,7 @@ def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
             },
             {
                 "quantizer_name": _ROUTED_EXPERT_INPUT_QUANTIZER,
-                "cfg": _modelopt_quantizer_cfg(mtq.MXFP8_DEFAULT_CFG, "*input_quantizer"),
+                "cfg": input_cfg,
             },
         ]
     )
@@ -288,6 +290,9 @@ def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> list[dict]:
     for pattern in ignore_patterns:
         key = mapping.get(pattern, pattern)
         cfg.append({"quantizer_name": key, "enable": False})
+        # Module patterns must also match their child quantizers. Keep the
+        # original rule for callers that already name quantizers explicitly.
+        cfg.append({"quantizer_name": f"{key}.*", "enable": False})
     return cfg
 
 
@@ -305,11 +310,7 @@ def build_quantize_config(
     ignore_cfg = _ignore_patterns_to_quant_cfg(ignore_patterns)
 
     if qat_mode == "mxfp8":
-        # ModelOpt's native preset is exactly the compressed-tensors MXFP8
-        # numerics: dynamic groups of 32, E4M3 values and E8M0 scales.
-        modelopt_config = copy.deepcopy(mtq.MXFP8_DEFAULT_CFG)
-        quant_cfg = mtq.normalize_quant_cfg_list(modelopt_config["quant_cfg"])
-        algorithm = modelopt_config["algorithm"]
+        quant_cfg, algorithm = _mxfp8_quantize_config()
     elif qat_mode in ("mxfp4", "mxfp4_mxfp8"):
         quant_cfg, algorithm = _mxfp4_quantize_config(dense_mxfp8=qat_mode == "mxfp4_mxfp8")
     elif qat_mode == "nvfp4":

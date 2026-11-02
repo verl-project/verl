@@ -154,6 +154,9 @@ class RolloutQuantizationConfig(BaseConfig):
     linear: Optional[str] = None
     # Preset for routed experts, e.g. FP8_BLOCK.
     moe: Optional[str] = None
+    # Activation override for the routed experts, as vLLM's quantization_config.moe.activation,
+    # e.g. nvfp4_per_token with moe=NVFP4.
+    moe_activation: Optional[str] = None
     # Extra "re:" patterns kept in high precision.
     ignore: list[str] = field(default_factory=list)
     # compressed-tensors quantization_config JSON, used as is; exclusive with the fields above.
@@ -173,6 +176,7 @@ class RolloutQuantizationConfig(BaseConfig):
             ignore=self.ignore,
             config_file=self.config_file,
             model_path=model_path,
+            moe_activation=self.moe_activation,
         )
 
 

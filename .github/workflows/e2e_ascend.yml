@@ -67,6 +67,11 @@ concurrency:
 permissions:
   contents: read
  
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+  MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
+
 jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
@@ -115,7 +120,7 @@ jobs:
           uv pip list
       - name: Preprocess gsm8k dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
@@ -177,7 +182,7 @@ jobs:
           pip list
       - name: Preprocess geo3k dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force

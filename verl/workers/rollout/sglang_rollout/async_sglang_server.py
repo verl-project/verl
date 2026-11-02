@@ -52,6 +52,12 @@ from verl.utils.profiler import (
     relocate_rollout_traces,
     rollout_profiler_global_ranks,
 )
+from verl.utils.sglang.sglang_quant_utils import (
+    prepare_sglang_quantization,
+    resolve_sglang_quantization_config,
+    set_default_sglang_quantization_backends,
+    uses_sglang_refit_loader,
+)
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -301,13 +307,21 @@ class SGLangHttpServer:
         # Leave None to let sglang's VisionAttention auto-pick per device
         # (triton_attn on Ada, fa3 on Hopper, fa4 on Blackwell).
         model_override_args = {}
-        quantization_config = None
-        if self.config.quantization.enabled:
+        quantization_config = resolve_sglang_quantization_config(self.config, self.model_config)
+        if quantization_config is not None and (
+            self.config.quantization.enabled or uses_sglang_refit_loader(quantization_config)
+        ):
             # The trainer quantizes every refit to this config. On Hopper the block-FP8 linear/MoE methods keep
             # weights in checkpoint layout after loading, so update_weights_from_tensor can write refits in place.
-            quantization_config = self.config.quantization.build_quantization_config(self.model_config.local_path)
+            quantization_config = prepare_sglang_quantization(
+                quantization_config,
+                custom_weight_loader,
+                engine_kwargs,
+            )
             model_override_args["quantization_config"] = quantization_config
-            logger.info(f"Rollout compressed-tensors quantization_config: {quantization_config}")
+            logger.info(f"Rollout quantization_config: {quantization_config}")
+
+        set_default_sglang_quantization_backends(quantization_config, engine_kwargs)
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -452,6 +466,9 @@ class SGLangHttpServer:
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
 
+    @RLInsightLogger.trace_state_decorator(
+        "wake_up", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def wake_up(self):
         if self.node_rank != 0:
             return
@@ -476,6 +493,9 @@ class SGLangHttpServer:
         """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
         return lora_served_as_adapter(self.model_config)
 
+    @RLInsightLogger.trace_state_decorator(
+        "sleep", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -499,10 +519,16 @@ class SGLangHttpServer:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
             await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    @RLInsightLogger.trace_state_decorator(
+        "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -510,6 +536,9 @@ class SGLangHttpServer:
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "resume_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:

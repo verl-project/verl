@@ -29,6 +29,8 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+import os
+from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -50,8 +52,70 @@ from verl.utils.vllm.vllm_fp8_utils import (
     process_fp8_weights_after_loading,
     stage_fp8_params_for_loading,
 )
+from verl.utils.vllm.vllm_nvfp4_per_token_utils import install_nvfp4_per_token_compressed_tensors_patch
+from verl.utils.vllm.vllm_unquant_utils import (
+    fold_unquantized_moe_params,
+    stage_unquantized_moe_params,
+    unquantized_moe_modules,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _is_nvfp4_quantization(quantization_config: Mapping[str, Any]) -> bool:
+    """Whether a quantization config contains the NVFP4 format."""
+    values = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list | tuple):
+            for nested in value:
+                collect(nested)
+        elif isinstance(value, str):
+            values.append(value.lower())
+
+    collect(quantization_config)
+    return any("nvfp4" in value for value in values)
+
+
+def _uses_fp32_block_scales(quantization_config: Mapping[str, Any]) -> bool:
+    """Whether FP8 block weights use checkpoint-layout FP32 scales."""
+    for group in quantization_config.get("config_groups", {}).values():
+        weights = group.get("weights", {})
+        if weights.get("strategy") == "block" and weights.get("scale_dtype") in {None, "torch.float32"}:
+            return True
+    block_size = quantization_config.get("weight_block_size")
+    return block_size == [128, 128] and quantization_config.get("scale_fmt") not in {"ue8m0", "e8m0"}
+
+
+def _is_hopper() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_device_capability(90)
+
+
+def set_default_vllm_quantization_backends(
+    quantization_config: Mapping[str, Any] | None,
+    engine_kwargs: dict[str, Any],
+) -> None:
+    """Default non-NVFP4 quantization backends to DeepGEMM."""
+    if hasattr(quantization_config, "to_dict"):
+        quantization_config = quantization_config.to_dict()
+    if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
+        return
+    # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
+    if torch.version.hip is not None:
+        return
+    for option in ("linear_backend", "moe_backend"):
+        engine_kwargs.setdefault(option, "deep_gemm")
+    if (
+        "deep_gemm" in (engine_kwargs["linear_backend"], engine_kwargs["moe_backend"])
+        and _is_hopper()
+        and _uses_fp32_block_scales(quantization_config)
+    ):
+        os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
 
 
 def _get_vllm_version():
@@ -159,6 +223,9 @@ def prepare_quanted_weights_for_loading(model):
         "fp8_layers": stage_fp8_params_for_loading(model),
         "mxfp4_moe_modules": stage_mxfp4_moe_params_for_loading(model),
         "nvfp4_moe_modules": stage_nvfp4_moe_params_for_loading(model),
+        # Routed experts a quantized model keeps in BF16 (e.g. its first and last layers).
+        "unquantized_moe_modules": unquantized_moe_modules(model),
+        "staged_unquantized_moe_modules": stage_unquantized_moe_params(model),
     }
     return reload_state
 
@@ -169,9 +236,44 @@ def process_quanted_weights_after_loading(model, reload_state):
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
     process_nvfp4_moe_weights_after_loading(reload_state.get("nvfp4_moe_modules") or [])
+    # Every BF16 expert layer, staged or not: a kernel prep that keeps the shape can still
+    # reorder the weights (FlashInfer CUTLASS swaps gate and up).
+    with fold_unquantized_moe_params(reload_state.get("staged_unquantized_moe_modules") or []):
+        for module in reload_state.get("unquantized_moe_modules") or []:
+            module.quant_method.process_weights_after_loading(module)
+    reset_uncalibrated_kv_cache_scales(model)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
+
+
+def reset_uncalibrated_kv_cache_scales(model):
+    """Reset the q/k/v/prob attention scales to 1.0 when the quant config has no KV cache scheme.
+
+    With a compressed-tensors config, vLLM attaches a ``CompressedTensorsKVCacheMethod`` to every
+    attention layer even when ``kv_cache_scheme`` is None. ``load_format="dummy"`` fills its
+    q/k/v_scale placeholders with random values, and its ``process_weights_after_loading`` adopts
+    them as the live scales: unlike ``BaseKVCacheMethod``, it has no fallback to 1.0 for scales
+    the checkpoint did not provide. A refit sends no attention scales and re-processes only the
+    linear/MoE layers, so with ``kv_cache_dtype="fp8"`` the rollout keeps quantizing Q/K/V with
+    those random scales and produces garbage.
+
+    Configs that do carry a ``kv_cache_scheme`` are left untouched.
+    """
+    try:
+        from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+        from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    except ImportError:
+        return
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, BaseKVCacheMethod):
+            continue
+        if getattr(quant_method.quant_config, "kv_cache_scheme", None) is not None:
+            continue
+        # Older vLLM keeps the scales as the placeholder Parameters, which require grad.
+        with torch.no_grad():
+            set_default_quant_scales(module, register_buffer=False)
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
@@ -227,6 +329,7 @@ def apply_vllm_quant_patches():
     """
     install_mxfp4_mxfp8_compressed_tensors_patch()
     install_nvfp4_cutlass_compressed_tensors_patch()
+    install_nvfp4_per_token_compressed_tensors_patch()
     if fp8_state.vllm_patches:
         logger.debug("vLLM quantization patches already applied")
         return

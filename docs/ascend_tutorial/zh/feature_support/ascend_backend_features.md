@@ -93,7 +93,6 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | `actor_rollout_ref.actor.fsdp_config.optimizer_offload` |是否卸载优化器状态到CPU，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.reshard_after_forward` |控制前向计算后的参数行为，平衡内存与通信。默认值为True：前向后重新分片参数，反向时重新全收集|
 | `actor_rollout_ref.actor.fsdp_config.fsdp_size` | 每个FSDP分片组中的NPU数量；默认值-1表示自动。|
-
 | `actor_rollout_ref.actor.fsdp_config.forward_prefetch`  |在前向计算完成前预取下一次前向传播的 all-gather，仅用于FSDP1，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.use_orig_params` | FSDP是否会使用module的原始参数来初始化，仅用于FSDP1，默认值为False|
 | `actor_rollout_ref.actor.ulysses_sequence_parallel_size`|Ulysses序列并行大小|
@@ -371,7 +370,7 @@ Checkpoint Engine 是 verl 用于在训练侧与推理侧之间同步权重的�
 
 昇腾 NPU 上同样支持配置 `actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake`，基于 Mooncake Transfer Engine 以 p2p 方式同步权重。NPU 上需通过 engine_kwargs 将 device 指定为 npu，此时 Transfer Engine 使用 `ascend_direct` 传输协议。
 
-注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)。
+注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/transport/ascend_direct_transport.md)。
 
 #### 参数特性支持
 

@@ -71,6 +71,8 @@ permissions:
   contents: read
 
 env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
   # shared e2e scripts must launch with ambient python instead of `uv run`.
   VERL_USE_UV: 0
@@ -119,7 +121,7 @@ jobs:
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+          python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
       # Function RM
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
@@ -209,7 +211,7 @@ jobs:
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
       - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
