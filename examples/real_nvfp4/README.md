@@ -1,4 +1,4 @@
-# Native NVFP4 training and rollout (experimental)
+# Native NVFP4 training and rollout
 
 This example trains Qwen3-30B-A3B-Base with Megatron/Transformer Engine NVFP4
 and runs vLLM rollout in the matching NVFP4 precision. Training parameters stay

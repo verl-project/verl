@@ -1,4 +1,4 @@
-# NVFP4 RL on Blackwell (experimental)
+# NVFP4 RL on Blackwell
 
 Last updated: 11/02/2026
 
