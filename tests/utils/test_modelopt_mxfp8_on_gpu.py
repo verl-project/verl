@@ -29,9 +29,12 @@ from verl.utils.qat.modelopt import (
     _Fp8FakeQuant,
     _Mxfp4FakeQuant,
     _Nvfp4FakeQuant,
+    _assert_grouped_scale_boundaries,
+    _group_fake_quant_weights,
     _nvfp4_global_scale,
     _nvfp4_input_backend,
     _nvfp4_weight_backend,
+    _patch_te_grouped_weight_fake_quant,
     build_quantize_config,
 )
 from verl.utils.qat.compressed_tensors import (
@@ -151,11 +154,15 @@ def test_tilelang_qat_backend_runs_linear_forward_and_backward(mode):
     assert model.projection.weight.grad is not None
 
 
-def test_modelopt_qat_runs_te_grouped_linear_forward_and_backward():
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8", "mxfp4"])
+def test_modelopt_qat_uses_grouped_kernel_for_te_expert_weight_fake_quant(mode):
     import transformer_engine.pytorch as te
 
+    _patch_te_grouped_weight_fake_quant()
     model = torch.nn.Module()
-    model.projection = te.GroupedLinear(
+    model.mlp = torch.nn.Module()
+    model.mlp.experts = torch.nn.Module()
+    model.mlp.experts.projection = te.GroupedLinear(
         2,
         256,
         256,
@@ -163,15 +170,65 @@ def test_modelopt_qat_runs_te_grouped_linear_forward_and_backward():
         params_dtype=torch.bfloat16,
         device="cuda",
     )
-    mtq.quantize(model, build_quantize_config("mxfp8"))
+    mtq.quantize(model, build_quantize_config(mode))
+    projection = model.mlp.experts.projection
+    weight_calls = [[], []]
+    hooks = [
+        quantizer.register_forward_hook(
+            lambda module, inputs, output, expert=expert: weight_calls[expert].append(inputs[0].shape)
+        )
+        for expert, quantizer in enumerate(projection.weight_quantizer)
+    ]
     inputs = torch.randn(16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    output = model.projection(inputs, torch.tensor([7, 9], dtype=torch.int64))
+    output = projection(inputs, torch.tensor([7, 9], dtype=torch.int64))
     output.float().square().mean().backward()
+    for hook in hooks:
+        hook.remove()
 
+    # The pointer-table kernel bypasses the per-expert quantizer modules.
+    assert weight_calls == [[], []]
     assert inputs.grad is not None
-    assert model.projection.weight0.grad is not None
-    assert model.projection.weight1.grad is not None
+    assert projection.weight0.grad is not None
+    assert projection.weight1.grad is not None
+
+
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8", "mxfp4"])
+def test_grouped_expert_weight_fake_quant_matches_per_expert(mode):
+    import transformer_engine.pytorch as te
+
+    model = torch.nn.Module()
+    model.mlp = torch.nn.Module()
+    model.mlp.experts = torch.nn.Module()
+    model.mlp.experts.projection = te.GroupedLinear(
+        3,
+        256,
+        256,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    )
+    mtq.quantize(model, build_quantize_config(mode))
+    projection = model.mlp.experts.projection
+    quantizers = projection.weight_quantizer
+    weights = tuple(getattr(projection, f"weight{i}") for i in range(3))
+
+    expected = tuple(quantizer(weight) for quantizer, weight in zip(quantizers, weights, strict=True))
+    actual = _group_fake_quant_weights(weights, quantizers)
+
+    for grouped, per_expert in zip(actual, expected, strict=True):
+        torch.testing.assert_close(grouped, per_expert, rtol=0, atol=0)
+
+
+def test_grouped_fp8_weight_fake_quant_rejects_cross_expert_scale_blocks():
+    quantizer = SimpleNamespace(
+        backend="verl_fp8_block",
+        backend_extra_args={"block_sizes": [128, 128]},
+    )
+    weights = (torch.empty(192, 256), torch.empty(192, 256))
+
+    with pytest.raises(AssertionError, match="cross an expert boundary"):
+        _assert_grouped_scale_boundaries(weights, quantizer)
 
 
 def test_mxfp8_rollout_requires_explicit_shape_ignore():
