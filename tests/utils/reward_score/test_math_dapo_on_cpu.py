@@ -36,6 +36,14 @@ class TestMarkdownEmphasisMinerva:
         result = compute_score("Let me solve it.\n\n*Answer:* 42", "42")
         assert result["acc"] is True
 
+    def test_bold_answer_colon_outside(self):
+        result = compute_score("Let me solve it.\n\n**Answer**: 42", "42")
+        assert result["acc"] is True
+
+    def test_italic_answer_colon_outside(self):
+        result = compute_score("Let me solve it.\n\n*Answer*: 42", "42")
+        assert result["acc"] is True
+
     def test_plain_still_works(self):
         result = compute_score("Let me solve it.\n\nAnswer: 42", "42")
         assert result["acc"] is True
@@ -44,6 +52,10 @@ class TestMarkdownEmphasisMinerva:
         correct, pred = is_correct_minerva("Answer: x_1", "x_1")
         assert correct is True
         assert "x_1" in pred or pred == "x1"
+
+    def test_math_asterisk_preserved(self):
+        correct, pred = is_correct_minerva("Answer: x^*", "x^*")
+        assert correct is True
 
     def test_bold_only_answer_falls_through(self):
         """If the extracted answer is only markdown markers, fall through
