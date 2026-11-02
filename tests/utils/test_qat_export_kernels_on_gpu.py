@@ -33,8 +33,6 @@ pytestmark = pytest.mark.skipif(
     ("preset", "shape"),
     [
         ("FP8_BLOCK", (130, 257)),
-        ("MXFP8", (64, 64)),
-        ("MXFP4", (64, 64)),
     ],
 )
 def test_export_kernel_matches_compressed_tensors_bitwise(preset, shape):
@@ -52,6 +50,30 @@ def test_export_kernel_matches_compressed_tensors_bitwise(preset, shape):
         assert actual[key].shape == expected[key].shape
         assert actual[key].dtype == expected[key].dtype
         assert torch.equal(actual[key].view(torch.uint8), expected[key].view(torch.uint8))
+
+
+@pytest.mark.parametrize(
+    ("preset", "scale_name", "expected_scale_bytes"),
+    [
+        ("MXFP8", "weight_scale", (127, 127, 128, 129)),
+        ("MXFP4", "weight_scale", (134, 134, 134, 135)),
+    ],
+)
+def test_mx_export_kernel_uses_deepseek_rounding(preset, scale_name, expected_scale_bytes):
+    weight = (
+        torch.tensor((400.0, 448.0, 500.0, 1000.0), device="cuda", dtype=torch.bfloat16)
+        .unsqueeze(-1)
+        .expand(-1, 32)
+        .contiguous()
+    )
+    scheme = _scheme_for_preset(preset, ["Linear"])
+
+    actual = _compress_weight(weight, scheme)
+
+    assert torch.equal(
+        actual[scale_name].reshape(-1),
+        torch.tensor(expected_scale_bytes, device="cuda", dtype=torch.uint8),
+    )
 
 
 def test_nvfp4_export_keeps_compressed_tensors_path(monkeypatch):

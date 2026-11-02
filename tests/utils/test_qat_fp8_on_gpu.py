@@ -29,7 +29,6 @@ def _reference(
     block_shape: tuple[int, int],
     *,
     round_scale: bool,
-    eps: float = 1e-12,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     block_rows, block_cols = block_shape
     rows, cols = x.shape[-2:]
@@ -43,13 +42,9 @@ def _reference(
         block_cols,
     )
     amax = blocks.abs().amax(dim=(-3, -1))
+    scales = amax.clamp_min(1e-4) / 448.0
     if round_scale:
-        bits = amax.view(torch.int32)
-        scales = ((bits + (1 << 21)) & 0xFF800000).view(torch.float32) * (2.0**-8)
-        scales = scales.clamp_min(2.0**-127)
-    else:
-        scales = amax.clamp_min(eps) / 448.0
-        scales = torch.where(amax == 0, torch.full_like(scales, 2.0**-23), scales)
+        scales = torch.pow(2.0, torch.ceil(torch.log2(scales)))
     quantized = (
         (blocks / scales.unsqueeze(-1).unsqueeze(-3))
         .clamp(-448.0, 448.0)
@@ -99,3 +94,40 @@ def test_fp8_quant_e8m0_scale_and_fused_dequant_match_reference():
     assert torch.equal(scales.float(), expected_scales)
     assert torch.equal(quantized.view(torch.uint8), expected_quantized.view(torch.uint8))
     assert torch.equal(dequantized, expected_dequantized)
+
+
+@pytest.mark.parametrize("scale_fmt", ["e8m0", "ue8m0"])
+def test_fp8_quant_e8m0_uses_deepseek_rounding(scale_fmt):
+    x = torch.tensor((400.0, 448.0, 500.0, 1000.0), device="cuda").unsqueeze(-1).expand(-1, 32).contiguous()
+
+    _, scales = fp8_quant(
+        x,
+        (1, 32),
+        scale_dtype=torch.float8_e8m0fnu,
+        scale_fmt=scale_fmt,
+    )
+
+    assert torch.equal(scales.float(), torch.tensor(((1.0,), (1.0,), (2.0,), (4.0,)), device="cuda"))
+
+
+def test_fp8_quant_ue8m0_matches_deepseek_scale_recipe():
+    x = torch.stack(
+        [
+            torch.zeros(128),
+            torch.full((128,), 1e-8),
+            torch.linspace(-3.0, 3.0, 128),
+        ]
+    ).to(device="cuda", dtype=torch.bfloat16)
+
+    quantized, scales = fp8_quant(
+        x,
+        (1, 128),
+        scale_dtype=torch.float8_e8m0fnu,
+        scale_fmt="ue8m0",
+    )
+    amax = x.float().abs().amax(dim=-1, keepdim=True).clamp_min(1e-4)
+    expected_scales = torch.pow(2.0, torch.ceil(torch.log2(amax / 448.0)))
+    expected_quantized = (x.float() / expected_scales).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+
+    assert torch.equal(scales.float(), expected_scales)
+    assert torch.equal(quantized.view(torch.uint8), expected_quantized.view(torch.uint8))

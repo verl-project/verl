@@ -184,9 +184,10 @@ gradients; parameter export invokes the same kernels without dequantization,
 making their quantized values and scales bit-exact by construction. NVFP4 keeps
 its compressed-tensors-compatible QDQ backend because its local E4M3 scales
 depend on an observed tensor-level global scale. Both FP4 modes apply only to
-routed experts. MXFP4 expert activations use the MXFP8 1x32 kernel rather than
-FP4. Use `mxfp4_mxfp8` for the vLLM combination where dense linear layers also
-use MXFP8.
+routed experts. MXFP8 and MXFP4 generate E8M0 scales with DeepSeek's upward
+power-of-two rounding recipe. MXFP4 expert activations use the MXFP8 1x32 kernel
+rather than FP4. Use `mxfp4_mxfp8` for the vLLM combination where dense linear
+layers also use MXFP8.
 Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them aligned with the rollout ignore list; for Qwen3.5 MXFP8, add `*linear_attn.in_proj_a` and `*linear_attn.in_proj_b`.
 
 ### Engine notes

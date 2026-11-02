@@ -39,13 +39,19 @@ _TORCH_TO_TILELANG_DTYPE = {
 }
 
 
+def _round_up_to_power_of_two(value):
+    """Round a positive FP32 value upward to the nearest power of two."""
+    bits = T.reinterpret(value, "uint32")
+    exponent = (bits >> 23) & 0xFF
+    mantissa = bits & ((1 << 23) - 1)
+    ceil_exponent = T.Cast("int32", exponent - 127 + T.if_then_else(mantissa != 0, 1, 0))
+    return T.reinterpret((ceil_exponent + 127) << 23, "float32")
+
+
 def _mxfp4_scale(amax):
-    """Generate the standard MXFP4 scale from a block maximum."""
-    bits = T.reinterpret(amax, "uint32")
-    rounded_bits = (bits + (1 << 21)) & 0xFF800000
-    rounded_amax = T.reinterpret(rounded_bits, "float32")
-    scale = rounded_amax * 0.25
-    return T.max(scale, 2.0**-127)
+    """Match DeepSeek-V4's FP4 UE8M0 scale recipe."""
+    scale = T.max(amax, 6.0 * (2.0**-126)) * (1.0 / 6.0)
+    return _round_up_to_power_of_two(scale)
 
 
 @cache

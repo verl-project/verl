@@ -14,7 +14,6 @@
 
 """FP8 E4M3 block quantization shared by QAT and weight export."""
 
-import math
 from collections.abc import Sequence
 from functools import cache
 from typing import Literal
@@ -50,24 +49,11 @@ def _round_up_to_power_of_two(value):
     return T.reinterpret((ceil_exponent + 127) << 23, "float32")
 
 
-def _mx_scale(amax, elem_offset: int):
-    """Generate a standard MX scale from a block maximum."""
-    bits = T.reinterpret(amax, "uint32")
-    rounded_bits = (bits + (1 << 21)) & 0xFF800000
-    rounded_amax = T.reinterpret(rounded_bits, "float32")
-    scale = rounded_amax * (2.0 ** (-elem_offset))
-    return T.max(scale, 2.0**-127)
-
-
-def _fp8_scale(amax, scale_fmt: ScaleFormat | None, eps: float):
-    safe_amax = T.max(amax, eps)
-    if scale_fmt == "e8m0":
-        return T.if_then_else(amax == 0, 2.0**-127, _mx_scale(safe_amax, 8))
-    scale = safe_amax * (1.0 / 448.0)
-    if scale_fmt == "ue8m0":
+def _fp8_scale(amax, scale_fmt: ScaleFormat | None):
+    """Match DeepSeek-V4's FP8 scale recipe."""
+    scale = T.max(amax, 1e-4) * (1.0 / 448.0)
+    if scale_fmt is not None:
         scale = _round_up_to_power_of_two(scale)
-    if scale_fmt is None:
-        scale = T.if_then_else(amax == 0, 2.0**-23, scale)
     return scale
 
 
@@ -79,7 +65,6 @@ def _row_quant_kernel(
     scale_dtype: str,
     scale_fmt: ScaleFormat | None,
     dequant: bool,
-    eps: float,
 ):
     """Compile row-wise quantization with several independent rows per CTA."""
     rows = T.dynamic("rows")
@@ -106,7 +91,7 @@ def _row_quant_kernel(
                 T.copy(X[pid_m * cta_rows, pid_n * block_cols], x_shared, disable_tma=True)
                 T.reduce_absmax(x_shared, amax_rows, dim=1)
                 for i in T.Parallel(cta_rows):
-                    scale_local[i] = _fp8_scale(amax_rows[i], scale_fmt, eps)
+                    scale_local[i] = _fp8_scale(amax_rows[i], scale_fmt)
                 T.copy(scale_local, scale_shared, disable_tma=True)
 
                 for i, j in T.Parallel(cta_rows, block_cols):
@@ -136,7 +121,6 @@ def _block_quant_kernel(
     scale_dtype: str,
     scale_fmt: ScaleFormat | None,
     dequant: bool,
-    eps: float,
 ):
     """Compile two-dimensional quantization with one independently scaled block per CTA."""
     rows = T.dynamic("rows")
@@ -163,7 +147,7 @@ def _block_quant_kernel(
                 T.copy(X[pid_m * block_rows, pid_n * block_cols], x_shared, disable_tma=True)
                 T.reduce_absmax(x_shared, amax_rows, dim=1)
                 T.reduce_absmax(amax_rows, scale_local, dim=0)
-                scale_local[0] = _fp8_scale(scale_local[0], scale_fmt, eps)
+                scale_local[0] = _fp8_scale(scale_local[0], scale_fmt)
                 T.copy(scale_local, scale_shared, disable_tma=True)
 
                 for i, j in T.Parallel(block_rows, block_cols):
@@ -198,7 +182,6 @@ def fp8_quant(
     scale_dtype: torch.dtype = torch.float32,
     scale_fmt: ScaleFormat | None = None,
     dequant: bool = False,
-    eps: float = 1e-12,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Quantize the last two dimensions of a tensor in independent FP8 blocks.
 
@@ -211,12 +194,10 @@ def fp8_quant(
             ``(128, 128)`` for FP8 weights, ``(1, 128)`` for FP8 activations,
             and ``(1, 32)`` for MXFP8 operands.
         scale_dtype: Scale storage dtype, either FP32 or E8M0.
-        scale_fmt: ``None`` keeps the exact FP32 scale. ``"e8m0"`` and
-            ``"ue8m0"`` round it upward to a power of two.
+        scale_fmt: ``None`` keeps the FP32 scale. ``"e8m0"`` and ``"ue8m0"``
+            both select DeepSeek's upward power-of-two rounding recipe.
         dequant: Return the fused quantize-dequantize result in ``x.dtype``.
             Otherwise return the FP8 tensor and its scales.
-        eps: Lower bound applied to each block's absolute maximum.
-
     Returns:
         If ``dequant`` is false, ``(quantized, scales)``. The scale shape is
         ``x.shape[:-2] + (ceil(rows / block_rows), ceil(cols / block_cols))``.
@@ -230,8 +211,6 @@ def fp8_quant(
         raise TypeError(f"fp8_quant supports BF16, FP16, and FP32 inputs, got {x.dtype}")
     if x.shape[-2] == 0 or x.shape[-1] == 0:
         raise ValueError(f"fp8_quant does not support empty matrix dimensions, got shape {tuple(x.shape)}")
-    if not math.isfinite(eps) or eps <= 0:
-        raise ValueError(f"eps must be finite and positive, got {eps}")
     if scale_fmt not in (None, "e8m0", "ue8m0"):
         raise ValueError(f"scale_fmt must be None, 'e8m0', or 'ue8m0', got {scale_fmt!r}")
     if scale_dtype not in (torch.float32, torch.float8_e8m0fnu):
@@ -261,7 +240,6 @@ def fp8_quant(
             tl_scale_dtype,
             scale_fmt,
             dequant,
-            eps,
         )
     else:
         kernel = _block_quant_kernel(
@@ -272,7 +250,6 @@ def fp8_quant(
             tl_scale_dtype,
             scale_fmt,
             dequant,
-            eps,
         )
     kernel(
         x.view(-1, cols),

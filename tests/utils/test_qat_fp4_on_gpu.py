@@ -42,9 +42,8 @@ def _reference(x: torch.Tensor, dequant: bool):
     cols = x.shape[-1]
     blocks = x.float().reshape(-1, cols // 32, 32)
     amax = blocks.abs().amax(dim=-1, keepdim=True)
-    bits = amax.view(torch.int32)
-    scales = ((bits + (1 << 21)) & 0xFF800000).view(torch.float32) * 0.25
-    scales = scales.clamp_min(2.0**-127)
+    scales = amax.clamp_min(6.0 * (2.0**-126)) / 6.0
+    scales = torch.pow(2.0, torch.ceil(torch.log2(scales)))
     codes = _encode_e2m1((blocks / scales).clamp(-6.0, 6.0))
     logical = _FP4_LEVELS.to(x.device)[(codes & 0x7).long()]
     logical = torch.where((codes & 0x8) != 0, -logical, logical)
