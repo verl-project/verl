@@ -30,12 +30,13 @@ We recommend using `docker/Dockerfile.stable.trtllm <https://github.com/verl-pro
 
 Alternatively, refer to the `TensorRT-LLM installation guide <https://nvidia.github.io/TensorRT-LLM/installation/index.html>`_ for compatible environments if you want to build your own.
 
-Install verl with TensorRT-LLM:
+Install verl in the TensorRT-LLM environment. TensorRT-LLM is installed
+separately; the recommended Docker image already includes it:
 
 .. code-block:: bash
 
     pip install --upgrade pip
-    pip install -e ".[trtllm]"
+    pip install -e .
 
 .. note::
 
