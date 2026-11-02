@@ -27,8 +27,17 @@ DEFAULT_TIMEOUT = 10  # Default compile and run timeout
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 1
 API_TIMEOUT = 10
+# HTTP status codes that indicate an overloaded or unavailable sandbox service rather than a property of the code
+RETRYABLE_HTTP_STATUS = (500, 502, 503, 504)
 
 logger = logging.getLogger(__name__)
+
+
+class SandboxInfraErrorMessage(str):
+    """Error message returned by ``call_sandbox_api`` when the sandbox service failed (HTTP 500/502/503/504,
+    connection error, timeout). A plain ``str`` error (e.g. HTTP 4xx, which can be caused by the submitted code)
+    is not an infrastructure failure."""
+
 
 # Define supported languages list (optional, for documentation or validation)
 SUPPORTED_LANGUAGES = [
@@ -74,7 +83,8 @@ def call_sandbox_api(
     language: str = "python",
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:  # <-- Remove request_id parameter
     """
-    Calls the remote sandbox API to execute code with retry logic for Gateway Timeout,
+    Calls the remote sandbox API to execute code with retry logic for infrastructure failures
+    (HTTP 500/502/503/504, connection errors and SandboxError responses),
     using increasing delay between retries. Logs internal calls with a unique ID.
 
     Args:
@@ -115,6 +125,8 @@ def call_sandbox_api(
     request_timeout = compile_timeout + run_timeout + API_TIMEOUT
 
     last_error = None  # Store the last error encountered
+    last_error_is_infra = False
+    last_sandbox_error_response = None
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -128,47 +140,76 @@ def call_sandbox_api(
                 timeout=request_timeout,  # Use the calculated timeout
             )
 
-            # Check for Gateway Timeout (504) specifically for retrying
-            if response.status_code == 504:
+            # Overload / gateway errors (e.g. 503 from an overloaded server, 504 from a gateway) are retryable
+            if response.status_code in RETRYABLE_HTTP_STATUS:
                 last_error = (
-                    f"{log_prefix}API Request Error: Gateway Timeout (504) on attempt "
+                    f"{log_prefix}API Request Error: HTTP {response.status_code} on attempt "
                     f"{attempt + 1}/{MAX_RETRIES}"
                 )  # <-- Use internal log_prefix
+                last_error_is_infra = True
                 logger.warning(last_error)
-                if attempt < MAX_RETRIES - 1:  # Don't sleep after the last attempt
-                    # Calculate increasing delay (e.g., 1s, 2s, 4s, ...) or (1s, 2s, 3s, ...)
-                    # Simple linear increase: delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                    # Exponential backoff: delay = INITIAL_RETRY_DELAY * (2 ** attempt)
-                    delay = INITIAL_RETRY_DELAY * (attempt + 1)  # Using linear increase for simplicity
-                    logger.info(f"{log_prefix}Retrying after {delay} seconds...")  # <-- Use internal log_prefix
-                    time.sleep(delay)
-                continue  # Go to the next retry attempt
+            else:
+                # Check for other HTTP errors (e.g., 4xx)
+                response.raise_for_status()
+                response_json = response.json()
+                # SandboxError means the sandbox itself failed (e.g. EMFILE when the server is overloaded), not that
+                # the program is wrong: retry, and if it persists return it so the caller marks an infra error.
+                if isinstance(response_json, dict) and response_json.get("status") == "SandboxError":
+                    last_error = None
+                    last_sandbox_error_response = response_json
+                    logger.warning(f"{log_prefix}Sandbox returned SandboxError on attempt {attempt + 1}/{MAX_RETRIES}")
+                else:
+                    # If successful (status code 2xx)
+                    logger.info(
+                        f"{log_prefix}Sandbox API call successful on attempt {attempt + 1}"
+                    )  # <-- Use internal log_prefix
+                    return response_json, None
 
-            # Check for other HTTP errors (e.g., 4xx, other 5xx)
-            response.raise_for_status()
-
-            # If successful (status code 2xx)
-            logger.info(
-                f"{log_prefix}Sandbox API call successful on attempt {attempt + 1}"
-            )  # <-- Use internal log_prefix
-            return response.json(), None
-
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.ConnectionError as e:
+            # Connection refused/reset or connect timeout: the service is down or overloaded, retry
             last_error = f"{log_prefix}API Request Error: {e}"  # <-- Use internal log_prefix
-            break  # Exit retry loop on non-504 request errors
-        except json.JSONDecodeError as e:
+            last_error_is_infra = True
+            logger.warning(last_error)
+        except requests.exceptions.JSONDecodeError as e:
+            # Caught before RequestException, which it subclasses. A non-JSON success body (e.g. a gateway's HTML
+            # page) means the service failed to answer, not a verdict on the code.
             raw_response_text = response.text if "response" in locals() else "N/A"
             last_error = f"{log_prefix}API Response JSON Decode Error: {e}"  # <-- Use internal log_prefix
+            last_error_is_infra = True
             break  # Exit retry loop on JSON decode errors
+        except requests.exceptions.RequestException as e:
+            last_error = f"{log_prefix}API Request Error: {e}"  # <-- Use internal log_prefix
+            # A read timeout is the service failing to answer, not a verdict on the code (which has its own
+            # run_timeout); it is still not retried, as the server may keep running the abandoned request.
+            last_error_is_infra = isinstance(e, requests.exceptions.Timeout)
+            break  # Exit retry loop on non-retryable request errors
         except Exception as e:
             last_error = f"{log_prefix}Unexpected Error: {e}"  # <-- Use internal log_prefix
+            last_error_is_infra = False
             break  # Exit retry loop on other unexpected errors
+
+        if attempt < MAX_RETRIES - 1:  # Don't sleep after the last attempt
+            # Simple linear increase: delay = INITIAL_RETRY_DELAY * (attempt + 1)
+            delay = INITIAL_RETRY_DELAY * (attempt + 1)
+            logger.info(f"{log_prefix}Retrying after {delay} seconds...")  # <-- Use internal log_prefix
+            time.sleep(delay)
+
+    if last_error is None and last_sandbox_error_response is not None:
+        # Retries exhausted on SandboxError: return the response so the caller records status "sandbox_error"
+        logger.error(f"{log_prefix}Sandbox kept returning SandboxError after {MAX_RETRIES} attempts")
+        return last_sandbox_error_response, None
 
     # If loop finishes without returning success, return the last recorded error
     logger.error(f"{log_prefix}Sandbox API call failed. Last error: {last_error}")  # <-- Use internal log_prefix
     # Return the error message without the prefix, as the caller doesn't need the internal ID
     # Ensure API call failure returns error message, leading to -1 in check_correctness
-    return None, last_error.replace(log_prefix, "API Call Failed: ") if last_error else "API Call Failed after retries"
+    error_msg = last_error.replace(log_prefix, "API Call Failed: ") if last_error else "API Call Failed after retries"
+    return None, SandboxInfraErrorMessage(error_msg) if last_error_is_infra else error_msg
+
+
+def is_infra_error(metadata: Optional[dict[str, Any]]) -> bool:
+    """True if a test case could not be judged because the sandbox service failed (not a verdict on the code)."""
+    return isinstance(metadata, dict) and bool(metadata.get("infra_error"))
 
 
 def _process_single_case(
@@ -326,6 +367,8 @@ if __name__ == '__main__':
         "input": stdin,
         "expected_output": str(expected_output) if expected_output else None,
         "api_request_error": error_msg,
+        # True if the case could not be judged because the sandbox service failed (see is_infra_error)
+        "infra_error": isinstance(error_msg, SandboxInfraErrorMessage),
         "api_response": None,
         "status": "unknown",
         "stdout": None,
@@ -375,6 +418,7 @@ if __name__ == '__main__':
 
         if api_status == "SandboxError":
             metadata["status"] = "sandbox_error"
+            metadata["infra_error"] = True
             result_status = -1  # Internal sandbox error
         elif api_status == "Failed":
             # --- Add debug logging ---
@@ -550,6 +594,7 @@ def check_correctness(
                     "input": str(inputs[index]),
                     "expected_output": str(expected_outputs[index]) if expected_outputs[index] else None,
                     "api_request_error": f"Internal execution error: {exc}",
+                    "infra_error": True,
                     "status": "internal_error",
                 }
 

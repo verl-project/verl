@@ -11,16 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import multiprocessing
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
+
+from verl.utils.reward_score import sandbox_fusion
 
 # Import the function to be tested
-from verl.utils.reward_score.sandbox_fusion.utils import check_correctness
+from verl.utils.reward_score.sandbox_fusion.utils import (
+    MAX_RETRIES,
+    SandboxInfraErrorMessage,
+    call_sandbox_api,
+    check_correctness,
+    is_infra_error,
+)
 
 # Get SANDBOX_URL from environment variable
 SANDBOX_URL = os.environ.get("SANDBOX_FUSION_URL")
@@ -745,3 +755,135 @@ def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     assert metadata_list[2].get("status") != "success"
     assert metadata_list[2].get("expected_output") is None
     assert metadata_list[2].get("status") == "runtime_error"
+
+
+# --- Infrastructure failures of the sandbox service (mocked HTTP, no server) ---
+
+POST = "verl.utils.reward_score.sandbox_fusion.utils.requests.post"
+SLEEP = "verl.utils.reward_score.sandbox_fusion.utils.time.sleep"
+
+COMPLETION = "```python\nprint(input())\n```"
+TEST_CASES = {"inputs": ["a", "b"], "outputs": ["a", "b"]}
+
+# What SandboxFusion returns (HTTP 200) when the server ran out of file descriptors under load
+EMFILE_BODY = {
+    "status": "SandboxError",
+    "message": "exception on running command python /tmp/x.py: [Errno 24] Too many open files",
+    "compile_result": None,
+    "run_result": {"status": "Error", "stderr": "[Errno 24] Too many open files"},
+}
+
+
+def _resp(status_code=200, body=None):
+    r = MagicMock()
+    r.status_code = status_code
+    r.json.return_value = body
+    if status_code >= 400:
+        r.raise_for_status.side_effect = requests.exceptions.HTTPError(f"{status_code} error")
+    else:
+        r.raise_for_status.return_value = None
+    return r
+
+
+def _echo_success(*args, **kwargs):
+    stdin = json.loads(kwargs["data"])["stdin"]
+    return _resp(200, {"status": "Success", "run_result": {"status": "Finished", "stdout": stdin, "return_code": 0}})
+
+
+def _call():
+    return call_sandbox_api("http://sf/run_code", "print(1)", None, 10, 10, 1024, "python")
+
+
+@pytest.mark.parametrize("first_failure", [_resp(503), _resp(200, EMFILE_BODY), requests.exceptions.ConnectionError()])
+@patch(SLEEP)
+@patch(POST)
+def test_transient_failure_is_retried(mock_post, mock_sleep, first_failure):
+    mock_post.side_effect = [first_failure, _echo_success(data='{"stdin": "x"}')]
+    body, err = _call()
+    assert err is None and body["status"] == "Success"
+    assert mock_post.call_count == 2
+
+
+@patch(SLEEP)
+@patch(POST)
+def test_persistent_5xx_returns_infra_error(mock_post, mock_sleep):
+    mock_post.return_value = _resp(503)
+    body, err = _call()
+    assert body is None and isinstance(err, SandboxInfraErrorMessage)
+    assert mock_post.call_count == MAX_RETRIES
+
+
+@patch(SLEEP)
+@patch(POST)
+def test_read_timeout_is_infra_but_not_retried(mock_post, mock_sleep):
+    mock_post.side_effect = requests.exceptions.ReadTimeout("read timed out")
+    body, err = _call()
+    assert body is None and isinstance(err, SandboxInfraErrorMessage)
+    assert mock_post.call_count == 1
+
+
+@pytest.mark.parametrize("status_code", [400, 413, 422])
+@patch(SLEEP)
+@patch(POST)
+def test_client_error_is_not_retried_and_not_infra(mock_post, mock_sleep, status_code):
+    # A 4xx can be caused by the model's output, so it is not an infrastructure failure
+    mock_post.return_value = _resp(status_code)
+    body, err = _call()
+    assert body is None and str(status_code) in err and not isinstance(err, SandboxInfraErrorMessage)
+    assert mock_post.call_count == 1
+    _, metadata = sandbox_fusion.compute_score("http://sf/run_code", None, 1024, COMPLETION, TEST_CASES)
+    assert all(m["status"] == "api_error" and not is_infra_error(m) for m in metadata)
+
+
+@patch(SLEEP)
+@patch(POST)
+def test_overloaded_server_is_marked_infra_error(mock_post, mock_sleep, caplog):
+    mock_post.return_value = _resp(200, EMFILE_BODY)
+    score, metadata = sandbox_fusion.compute_score("http://sf/run_code", None, 1024, COMPLETION, TEST_CASES)
+    assert mock_post.call_count == 2 * MAX_RETRIES
+    assert score == 0.0  # still counted as not passed, but marked and logged
+    assert all(m["status"] == "sandbox_error" and is_infra_error(m) for m in metadata)
+    assert "failed in the sandbox service" in caplog.text
+
+
+def test_internal_error_is_infra():
+    with patch("verl.utils.reward_score.sandbox_fusion.utils._process_single_case", side_effect=RuntimeError("boom")):
+        results, metadata = check_correctness("http://sf/run_code", TEST_CASES, "print(input())")
+    assert results == [-1, -1]
+    assert all(m["status"] == "internal_error" and is_infra_error(m) for m in metadata)
+
+
+@patch(SLEEP)
+@patch(POST)
+def test_wrong_answer_is_not_infra(mock_post, mock_sleep):
+    mock_post.return_value = _resp(
+        200, {"status": "Success", "run_result": {"status": "Finished", "stdout": "nope", "return_code": 0}}
+    )
+    score, metadata = sandbox_fusion.compute_score("http://sf/run_code", None, 1024, COMPLETION, TEST_CASES)
+    assert score == 0.0 and all(m["status"] == "wrong_answer" and not is_infra_error(m) for m in metadata)
+
+
+@patch(SLEEP)
+@patch(POST)
+def test_non_json_success_response_is_infra_error(mock_post, mock_sleep):
+    # e.g. a gateway answering 200 with an HTML page; requests' JSONDecodeError is also a RequestException
+    r = _resp(200)
+    r.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "<html>", 0)
+    mock_post.return_value = r
+    body, err = _call()
+    assert body is None and isinstance(err, SandboxInfraErrorMessage)
+    assert mock_post.call_count == 1
+
+
+def test_compile_error_override_keeps_infra_flag():
+    # Each case submits its own program (generation + assert_case), so case 0's compile error does not
+    # mean case 1 was judged: its sandbox failure must stay flagged.
+    def fake_case(case_index, *args, **kwargs):
+        if case_index == 0:
+            return -4, {"case_index": 0, "status": "compile_error", "infra_error": False}
+        return -1, {"case_index": 1, "status": "sandbox_error", "infra_error": True}
+
+    with patch("verl.utils.reward_score.sandbox_fusion.utils._process_single_case", side_effect=fake_case):
+        results, metadata = check_correctness("http://sf/run_code", TEST_CASES, "print(input())")
+    assert results == [-4, -4]
+    assert metadata[1]["status"] == "compile_error_skipped" and is_infra_error(metadata[1])

@@ -15,7 +15,7 @@ import json
 import logging
 import traceback
 
-from .utils import check_correctness
+from .utils import check_correctness, is_infra_error
 
 """
 Verify code correctness using the Sandbox Fusion (https://github.com/bytedance/SandboxFusion).
@@ -92,6 +92,15 @@ def compute_score(
         # Calculate score
         if not res_list:  # If there are no results (e.g., invalid input)
             return 0.0, metadata_list
+
+        # Cases the sandbox could not judge are not wrong answers: still scored as not passed, but not silently
+        scored_metadata = metadata_list[: min(len(res_list), 10)] if continuous else metadata_list
+        num_infra_errors = sum(1 for m in scored_metadata if is_infra_error(m))
+        if num_infra_errors:
+            logger.warning(
+                f"{num_infra_errors}/{len(scored_metadata)} scored test cases failed in the sandbox service "
+                f"(not a verdict on the code) and are counted as not passed"
+            )
 
         if continuous:
             # Calculate pass rate for the first N (e.g., 10) test cases
