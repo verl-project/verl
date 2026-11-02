@@ -49,6 +49,7 @@ from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedW
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
     drop_tied_alias_updates,
+    refresh_weight_caches,
     split_buffer_updates,
 )
 
@@ -323,6 +324,17 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    def _post_process_adapter_sync(self) -> int:
+        """Refresh safe model runtime layouts after an adapter-only refit."""
+        processed = 0
+        for model, _ in self._iter_all_models_with_config():
+            process = getattr(model, "process_weights_after_loading", None)
+            if process is None:
+                continue
+            process()
+            processed += 1
+        return processed
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV and other illegal tokens
@@ -431,7 +443,8 @@ class vLLMColocateWorkerExtension:
 
         # =========================== step 3: process weights after loading ===========================
         if peft_config and base_sync_done:
-            logger.info("LoRA adapter sync, no post-process needed")
+            processed = self._post_process_adapter_sync()
+            logger.info("LoRA adapter sync: ran model post-process for %d model(s)", processed)
         elif is_npu_available:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -448,6 +461,12 @@ class vLLMColocateWorkerExtension:
                 for model in self._iter_all_models():
                     reset_uncalibrated_kv_cache_scales(model)
                     refresh_rocm_attention_weight_caches(model)
+
+        if not (peft_config and base_sync_done):
+            for model in self._iter_all_models():
+                refreshed = refresh_weight_caches(model)
+                if refreshed:
+                    logger.info("Refreshed %d weight caches", refreshed)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.

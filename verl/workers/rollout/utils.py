@@ -112,7 +112,7 @@ def dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate image tokens in prompt_ids, since vLLM will expand each image placeholder by image_data.
     For example,
     ```
-    Qwen2-VL, Qwen2.5-VL and Qwen3-VL (the same for <|video_pad|>):
+    Qwen2-VL, Qwen2.5-VL, Qwen3-VL and GLM-5.3-Flash (the same for <|video_pad|>):
     <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
     =>
     <|vision_start|><|image_pad|><|vision_end|>
@@ -124,11 +124,11 @@ def dedup_image_tokens(prompt_ids: list[int], processor):
     ```
     """
     match processor.__class__.__name__:
-        case "Qwen2VLProcessor" | "Qwen2_5_VLProcessor" | "Qwen3VLProcessor":
+        case "Qwen2VLProcessor" | "Qwen2_5_VLProcessor" | "Qwen3VLProcessor" | "Glm5NextProcessor":
             prompt_ids = np.array(prompt_ids)
             mask = np.ones(len(prompt_ids), dtype=bool)
             is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-            mask[1:] &= ~(is_value[1:] & is_value[:-1])
+            mask[1:] &= ~(is_value[1:] & (prompt_ids[1:] == prompt_ids[:-1]))
             return prompt_ids[mask].tolist()
         case "Gemma4Processor":
             prompt_ids = np.array(prompt_ids)

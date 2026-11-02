@@ -87,7 +87,12 @@ def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, t
     assert isinstance(override_config_kwargs, dict), (
         f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
     )
-    module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    try:
+        module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    except ValueError:
+        from vllm.transformers_utils.config import get_config
+
+        module_config = get_config(model_name, trust_remote_code=trust_remote_code)
     update_model_config(module_config, override_config_kwargs)
 
     return module_config
@@ -575,7 +580,7 @@ def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
         if value.shape[-1] == max_len:
             padded_values.append(value)
             continue
-        padded_value = value.new_zeros((*value.shape[:-1], max_len))
+        padded_value = value.new_full((*value.shape[:-1], max_len), -1 if key == "vision_token_types" else 0)
         padded_value[..., : value.shape[-1]] = value
         padded_values.append(padded_value)
 
@@ -621,6 +626,15 @@ def extract_multi_modal_inputs(
     for key, values in multi_modal_inputs_collected.items():
         if has_image_bound:  # minicpm-o logic
             multi_modal_inputs[key] = values
+        elif key == "vision_token_types":
+            # One row per sample: text-only samples may omit it, so give them an all -1 (text) row
+            # to keep rows in batch order for DeepSeek-V4.1 image placement.
+            rows = []
+            for inputs in selected_batch_data:
+                inputs = inputs.data if isinstance(inputs, NonTensorData) else inputs
+                value = None if inputs is None else inputs.get(key)
+                rows.append(value if value is not None else values[0].new_full((1, 0), -1))
+            multi_modal_inputs[key] = _pad_last_dim_and_cat(rows, key)
         elif key in _VARLEN_MULTI_MODAL_KEYS:
             # some multi-modal keys with variable length are put in non-tensor batch,
             # so we need to pad them manually.

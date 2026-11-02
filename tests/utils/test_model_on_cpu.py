@@ -15,8 +15,9 @@
 from types import SimpleNamespace  # Or use a mock object library
 
 import pytest
+import torch
 
-from verl.utils.model import update_model_config
+from verl.utils.model import extract_multi_modal_inputs, update_model_config
 
 
 # Parametrize with different override scenarios
@@ -50,3 +51,14 @@ def test_update_model_config(override_kwargs):
         assert mock_config.nested_params.sub_param_x == "original_x", "Nested sub_param_x should be unchanged"
         assert mock_config.nested_params.sub_param_y == 100, "Nested sub_param_y should be unchanged"
         assert not hasattr(mock_config.nested_params, "sub_param_z"), "Nested sub_param_z should not exist"
+
+
+def test_vision_token_types_keep_one_row_per_sample():
+    """A text-only sample without vision_token_types still gets its own all -1 row, in batch order."""
+    batch = [
+        {},
+        {"vision_token_types": torch.tensor([[-1, 0, 1, 3]])},
+        None,
+    ]
+    merged = extract_multi_modal_inputs(batch)
+    assert merged["vision_token_types"].tolist() == [[-1, -1, -1, -1], [-1, 0, 1, 3], [-1, -1, -1, -1]]

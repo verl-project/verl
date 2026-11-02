@@ -150,6 +150,30 @@ def test_r3_replay_uses_transformer_engine_padding_for_nvfp4(monkeypatch):
     assert not target["mask"][95:].any()
 
 
+def test_r3_alignment_expands_deepseek_v41_compact_image_routes():
+    """DeepSeek-V4.1: compact rollout routes expand around actor image spans, which replay masks out."""
+    input_ids = _nested([torch.arange(9)])
+    routes = _nested(
+        [
+            torch.arange(10, 15, dtype=torch.int16).reshape(5, 1, 1),
+        ]
+    )
+    multimodal = {
+        "vision_token_types": torch.tensor([[-1, -1, 0, 1, 2, 3, -1, -1, -1]], dtype=torch.int64),
+    }
+
+    aligned = router_utils.align_r3_router_replay_data(routes, input_ids, multimodal)
+    aligned_part = aligned.unbind()[0].squeeze(-1).squeeze(-1).tolist()
+    assert aligned_part == [10, 11, 0, 0, 0, 0, 13, 14, 0]
+
+    mask = router_utils.build_r3_replay_mask(
+        input_ids,
+        torch.tensor([[1, 1, 1]], dtype=torch.bool),
+        multimodal,
+    )
+    assert mask.unbind()[0].tolist() == [True, True, False, False, False, False, True, True, False]
+
+
 def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     # The nested branch rides all_gather_object, which pickles the tensor, so int16
     # needs no uint8 reinterpretation here.

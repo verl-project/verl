@@ -29,7 +29,7 @@ import importlib.util
 import pytest
 import torch
 
-from verl.utils.qat.compressed_tensors import DEFAULT_IGNORE, _matches
+from verl.utils.qat.compressed_tensors import DEFAULT_IGNORE, Fp8ConfigWeightQuantizer, _matches
 
 requires_ct = pytest.mark.skipif(
     importlib.util.find_spec("compressed_tensors") is None, reason="compressed-tensors is not installed"
@@ -50,6 +50,33 @@ def test_default_ignore_keeps_routers_but_not_gate_up_proj():
     assert not _matches("model.layers.0.mlp.gate_up_proj", DEFAULT_IGNORE)
     assert not _matches("model.layers.0.mlp.gate_proj", DEFAULT_IGNORE)
     assert not _matches("model.layers.0.mlp.shared_expert.gate_proj", DEFAULT_IGNORE)
+
+
+@requires_ct
+def test_native_fp8_ignore_matches_unwrapped_lora_base_name():
+    quantizer = Fp8ConfigWeightQuantizer(
+        {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+            "modules_to_not_convert": ["model.layers.0.self_attn.fused_qkvbfg_a_proj"],
+        }
+    )
+    ignored = torch.zeros(128, 128, dtype=torch.bfloat16)
+    quantized = torch.ones(128, 128, dtype=torch.bfloat16)
+
+    result = dict(
+        quantizer(
+            [
+                ("model.layers.0.self_attn.fused_qkvbfg_a_proj.base_layer.weight", ignored),
+                ("model.layers.1.self_attn.fused_qkvbfg_a_proj.base_layer.weight", quantized),
+            ]
+        )
+    )
+
+    assert result["model.layers.0.self_attn.fused_qkvbfg_a_proj.base_layer.weight"] is ignored
+    assert "model.layers.0.self_attn.fused_qkvbfg_a_proj.base_layer.weight_scale_inv" not in result
+    assert result["model.layers.1.self_attn.fused_qkvbfg_a_proj.base_layer.weight"].dtype == torch.float8_e4m3fn
 
 
 @requires_ct

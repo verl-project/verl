@@ -105,6 +105,7 @@ def _megatron_gptmodel_postprocess(
     rotary_pos_sin,
     mtp_in_postprocess=None,
     loss_mask=None,
+    mtp_input_mask=None,
     decoder_input=None,
     attention_mask=None,
     padding_mask=None,
@@ -150,6 +151,7 @@ def _megatron_gptmodel_postprocess(
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
             embedding=self.embedding,
+            mtp_input_mask=mtp_input_mask,
             **mtp_kwargs,
         )
 
@@ -179,6 +181,7 @@ def _megatron_gptmodel_postprocess(
                 "packed_seq_params": packed_seq_params,
                 "scale_logits_fn": scale_logits_fn,
                 "input_ids": input_ids,
+                "mtp_input_mask": mtp_input_mask,
             }
             if "tp_group" in _PROCESS_MTP_LOSS_PARAMS:
                 process_mtp_loss_kwargs["tp_group"] = getattr(self, "tp_group", None) or (
