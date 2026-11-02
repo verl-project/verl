@@ -1,0 +1,109 @@
+# vLLM v0.26.0 patch 04/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Batch-invariant 16-bit GEMM overrides on ROCm (aten::mm, addmm, mm.dtype).
+#
+# enable_batch_invariant_mode() installed the persistent Triton matmul overrides
+# only for CUDA SM80 and XPU. On ROCm, BF16/FP16 GEMMs went to hipBLASLt, whose
+# algorithm depends on the problem shape. Registers aten::mm / aten::addmm /
+# aten::mm.dtype for 16-bit operands on matmul_persistent (which gains an
+# out_dtype argument). FP32/FP64 GEMMs stay on the native library.
+#
+# Why BI needs it: the DeepSeek-V4 compressor's bf16 x bf16 -> fp32 score
+# projection differed by ~1e-7 between decode (M=1) and prefill rows and flipped
+# an FP8-quantized compressed block.
+#
+# Upstream: the ROCm overrides are covered on main by vllm-project/vllm#52231;
+# the aten::mm.dtype part is the same change as open vllm-project/vllm#60047.
+# Note that #52231 also routes FP32 mm/addmm to Triton on ROCm; this patch keeps
+# them on hipBLASLt, as the validated run did.
+#
+# Source commits:
+#   [ROCm][BI] Batch-invariant 16-bit GEMM overrides on ROCm
+#
+diff --git a/vllm/model_executor/layers/batch_invariant.py b/vllm/model_executor/layers/batch_invariant.py
+index defca7c2c0..cd9adcc953 100644
+--- a/vllm/model_executor/layers/batch_invariant.py
++++ b/vllm/model_executor/layers/batch_invariant.py
+@@ -130,7 +130,10 @@ def matmul_kernel_persistent(
+ 
+ 
+ def matmul_persistent(
+-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
++    a: torch.Tensor,
++    b: torch.Tensor,
++    bias: torch.Tensor | None = None,
++    out_dtype: torch.dtype | None = None,
+ ):
+     # Check constraints.
+     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+@@ -142,8 +145,10 @@ def matmul_persistent(
+     M, K = a.shape
+     K, N = b.shape
+     dtype = a.dtype
+-    # Allocates output.
+-    c = torch.empty((M, N), device=a.device, dtype=dtype)
++    # Allocates output. The kernel accumulates in fp32 and rounds once to the
++    # output dtype (``out_dtype`` defaults to the input dtype); the tile
++    # config is chosen by the input dtype only.
++    c = torch.empty((M, N), device=a.device, dtype=out_dtype or dtype)
+ 
+     # 1D launch kernel where each block gets its own program.
+     def grid(META):
+@@ -731,6 +736,40 @@ def addmm_batch_invariant(bias, a, b):
+     return matmul_persistent(a, b, bias=bias)
+ 
+ 
++# ROCm: hipBLASLt picks its GEMM algorithm (tiling / split-K) by problem
++# shape, so a row's result depends on how many rows share the call. Only the
++# 16-bit leaf GEMMs go to the persistent Triton kernel; FP32/FP64 GEMMs stay
++# on the native library through the (not overridden) ``out=`` overloads, as
++# on SM90/SM100 where batch-invariant mode leaves GEMMs on cuBLAS.
++_ROCM_BI_MM_DTYPES = (torch.float16, torch.bfloat16)
++
++
++def _mm_batch_invariant_rocm(a, b):
++    if a.dtype not in _ROCM_BI_MM_DTYPES:
++        return torch.mm(a, b, out=a.new_empty((a.shape[0], b.shape[1])))
++    return matmul_persistent(a, b)
++
++
++def _addmm_batch_invariant_rocm(bias, a, b, *, beta=1, alpha=1):
++    if a.dtype not in _ROCM_BI_MM_DTYPES:
++        return torch.addmm(
++            bias,
++            a,
++            b,
++            beta=beta,
++            alpha=alpha,
++            out=a.new_empty((a.shape[0], b.shape[1])),
++        )
++    return addmm_batch_invariant(bias, a, b)
++
++
++def _mm_dtype_batch_invariant_rocm(a, b, out_dtype):
++    # aten::mm.dtype: 16-bit operands with a wider output (e.g. the
++    # DeepSeek-V4 compressor's bf16 x bf16 -> fp32 score projection).
++    assert a.dtype in _ROCM_BI_MM_DTYPES, f"mm.dtype with {a.dtype} inputs"
++    return matmul_persistent(a, b, out_dtype=out_dtype)
++
++
+ def _log_softmax_batch_invariant(input, dim, _half_to_float):
+     if _half_to_float:
+         return log_softmax(input.float(), dim=dim)
+@@ -927,6 +966,16 @@ def enable_batch_invariant_mode():
+             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+ 
+         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
++    elif current_platform.is_rocm():
++        # Leaf GEMMs only: aten::linear / aten::matmul are CompositeImplicit
++        # and decompose into mm / addmm, so they reach these overrides too;
++        # overriding them at the backend key would make autograd ask for
++        # aten::linear_backward, which has no GPU kernel.
++        _batch_invariant_LIB.impl("aten::mm", _mm_batch_invariant_rocm, key)
++        _batch_invariant_LIB.impl("aten::addmm", _addmm_batch_invariant_rocm, key)
++        _batch_invariant_LIB.impl(
++            "aten::mm.dtype", _mm_dtype_batch_invariant_rocm, key
++        )
+     elif current_platform.is_xpu():
+         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
