@@ -89,6 +89,34 @@ DOCKER_BUILDKIT=1 docker build \
     -t verl-rocm:mi300 .
 ```
 
+## DeepSeek-V4-Flash true on-policy (MI355X)
+
+[`Dockerfile.rocm.deepseek-v4.true-on-policy`](Dockerfile.rocm.deepseek-v4.true-on-policy) builds the image for
+[`examples/grpo_trainer/run_deepseek_v4_flash_true_on_policy_rocm.sh`](../../examples/grpo_trainer/run_deepseek_v4_flash_true_on_policy_rocm.sh):
+GRPO on DeepSeek-V4-Flash (FP8) where the vLLM rollout log-probs and the trainer log-probs of the same tokens are
+bitwise equal (`rollout_probs_diff_max` = 0).
+
+- Base `vllm/vllm-openai-rocm:v0.26.0`, pinned by digest; Transformer Engine, apex, libhsa, Megatron-Bridge and
+  mbridge as in `Dockerfile.rocm.deepseek-v4`.
+- vLLM: the four DeepSeek-V4 patches of `Dockerfile.rocm.deepseek-v4`, then `patches/vllm-bi-*.patch`
+  (batch-invariant kernels and collectives for DeepSeek-V4 on ROCm). Each patch header states what it fixes and
+  its upstream status.
+- Megatron-LM: `ISEEKYAN/Megatron-LM` `ds4_vllm_align_preview` plus `patches/megatron-dsv4-*.patch` (mLite's
+  vLLM-aligned DeepSeek-V4 implementation, `impl=vllm`, on ROCm).
+- The build checks every patched file against `patches/deepseek-v4-true-on-policy.sha256`.
+
+```sh
+DOCKER_BUILDKIT=1 docker build \
+    -f docker/rocm/Dockerfile.rocm.deepseek-v4.true-on-policy \
+    -t verl-rocm:deepseek-v4-true-on-policy .
+```
+
+The recipe selects the arm with `VLLM_BATCH_INVARIANT` (1: batch-invariant rollout + mLite `impl=vllm` actor;
+0: default vLLM kernels + Megatron-Core actor with FP8 QAT). The full profile is 4 nodes x 8 GPUs: actor
+CP4 x EP32 with FSDP2, rollout TP1 x DP8 x EP8 per node. Multi-node runs need an existing Ray cluster whose
+workers run this image, and containers started with `--ulimit nofile=1048576:1048576` (the default open-file
+limit ran out in gloo after ~26 steps).
+
 ## Release History
 
 - 2026/07/20: ROCm 7.14 stack — torch==2.12.0, triton==3.7.0, vLLM @`18d87a87d`,   SGLang @`0801cc05ed`, 
