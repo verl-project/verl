@@ -79,9 +79,9 @@ flash-attn-cu130torch213 = ["flash-attn==2.8.3"]
 
 # Pins cupy once for the fsdp / megatron parents. Two unrelated consumers, both
 # on the training side: `ray.util.collective`'s NCCL backend is cupy-based, so
-# every disaggregated weight-sync engine (nccl / nixl / delta_sharded) imports
-# it; and Megatron MoE all-to-all uses it directly. Without it the engine module
-# fails to import and the backend never reaches CheckpointEngineRegistry.
+# the nixl and delta_sharded weight-sync engines import it; Megatron MoE
+# all-to-all also uses it directly. Without it those engine modules fail to
+# import and their backends never reach CheckpointEngineRegistry.
 cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 
 # ---- inference backends ----------------------------------------------------
