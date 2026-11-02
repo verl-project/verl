@@ -73,6 +73,10 @@ class TestMarkdownEmphasisMinerva:
         correct, pred = is_correct_minerva("Answer: *x^**", "x^*")
         assert correct is True
 
+    def test_bold_wraps_full_answer_line(self):
+        result = compute_score("**Answer: 42**", "42")
+        assert result["acc"] is True
+
     def test_bold_only_answer_falls_through(self):
         """If the extracted answer is only markdown markers, fall through
         to the boxed fallback."""

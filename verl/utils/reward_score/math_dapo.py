@@ -176,11 +176,9 @@ def is_correct_minerva(
     Returns:
         Tuple of (is_correct, normalized_prediction)
     """
-    # Strip markdown bold/italic wrapping around the "Answer:" label so the
-    # extraction regex matches decorated variants like **Answer:** / *Answer:*
-    # as well as **Answer**: / *Answer*: (emphasis closing before the colon).
-    # Only consume trailing markers immediately after the colon (no \s* gap)
-    # to avoid eating the value's own emphasis (e.g. **Answer**: **42**).
+    # Strip paired emphasis wrapping the full answer construct (**Answer: 42**)
+    solution_str = re.sub(r"(\*{1,3})(Answer\s*:.+?)\1", r"\2", solution_str, flags=re.IGNORECASE)
+    # Strip emphasis around just the label: **Answer:** / *Answer*: / etc.
     solution_str = re.sub(r"\*{1,3}(Answer)\*{0,3}(\s*:)\*{0,3}", r"\1\2", solution_str, flags=re.IGNORECASE)
 
     # Extract answer from solution
