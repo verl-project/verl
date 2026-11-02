@@ -251,6 +251,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     wire_format = "delta_flush"
 
     def prepare(self) -> WorkerMetadata:
+        if self.collective_backend != "ray_nccl":
+            raise ValueError("delta_sharded currently supports only collective_backend='ray_nccl'")
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
         # 2 * bucket_size fixed buffers. Still hand back the master zmq endpoint
         # that build_topology() distributes to the rollout workers.

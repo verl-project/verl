@@ -307,7 +307,9 @@ checkpoint_engine:
   # when using Tensor Parallelism (TP) >= 8.
   update_weights_bucket_megabytes: 2048
 
-  # Additional keyword arguments to pass to the checkpoint engine constructor
+  # Additional keyword arguments to pass to the checkpoint engine constructor.
+  # The nccl engine accepts collective_backend=ray_nccl (default) or torch_nccl.
+  # Example: {nccl: {collective_backend: torch_nccl, collective_backend_kwargs: {timeout_s: 300}}}
   engine_kwargs: {}
 
   # If set, this Python module is imported on every worker process before the

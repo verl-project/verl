@@ -77,11 +77,10 @@ verl-core = [
 # Don't install alone — needs the parent extra's torch / cuDNN pins.
 flash-attn-cu130torch213 = ["flash-attn==2.8.3"]
 
-# Pins cupy once for the fsdp / megatron parents. Two unrelated consumers, both
-# on the training side: `ray.util.collective`'s NCCL backend is cupy-based, so
-# every disaggregated weight-sync engine (nccl / nixl / delta_sharded) imports
-# it; and Megatron MoE all-to-all uses it directly. Without it the engine module
-# fails to import and the backend never reaches CheckpointEngineRegistry.
+# Pins cupy once for the fsdp / megatron parents. The default NCCL checkpoint
+# transport uses Ray's CuPy-based backend; nixl and delta_sharded also require
+# it, and Megatron MoE all-to-all uses it directly. The optional torch_nccl
+# transport is the only NCCL checkpoint path that does not require CuPy.
 cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 
 # ---- inference backends ----------------------------------------------------
