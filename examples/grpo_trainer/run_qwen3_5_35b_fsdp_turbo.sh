@@ -31,7 +31,8 @@ RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 ########################### derived defaults ###########################
 n_devices_per_node=${NDEVICES_PER_NODE:-8}
 fsdp_size=${FSDP_SIZE:-8}
-ep_dispatcher=eager
+ep_dispatcher=all2all
+ep_use_fused_ops=False
 
 case "${DEVICE}" in
     gpu)
@@ -44,7 +45,7 @@ case "${DEVICE}" in
         n_devices_per_node=16
         fsdp_size=16
         EP_SIZE=16
-        ep_dispatcher=fused
+        ep_use_fused_ops=True
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -121,6 +122,7 @@ ACTOR=(
     "+${ACTOR_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
     "+${ACTOR_TURBO}.distributed.ep_plan.apply_modules=${EXPERT_APPLY_MODULES}"
     "+${ACTOR_TURBO}.distributed.ep_plan.dispatcher=${ep_dispatcher}"
+    "++${ACTOR_TURBO}.distributed.ep_plan.use_fused_ops=${ep_use_fused_ops}"
     "+${ACTOR_TURBO}.memory.recompute=True"
     "+${ACTOR_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
     actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
@@ -142,6 +144,7 @@ REF=(
     "+${REF_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
     "+${REF_TURBO}.distributed.ep_plan.apply_modules=${EXPERT_APPLY_MODULES}"
     "+${REF_TURBO}.distributed.ep_plan.dispatcher=${ep_dispatcher}"
+    "++${REF_TURBO}.distributed.ep_plan.use_fused_ops=${ep_use_fused_ops}"
     "+${REF_TURBO}.memory.recompute=True"
     "+${REF_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
     actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
