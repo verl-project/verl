@@ -138,6 +138,11 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Print system memory before training
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend
         run: |
           ray stop --force
