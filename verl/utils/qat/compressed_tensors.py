@@ -349,7 +349,7 @@ def _weight_min_max(weight: torch.Tensor, args: "QuantizationArgs") -> tuple[tor
     raise NotImplementedError(f"Trainer-side quantization not implemented for strategy {args.strategy}")
 
 
-def _compress_weight(
+def _compress_weight_with_compressed_tensors(
     weight: torch.Tensor,
     scheme: "QuantizationScheme",
     *,
@@ -374,6 +374,55 @@ def _compress_weight(
         state_dict["weight_zero_point"] = zero_point
     compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
     return compressor.compress(state_dict, scheme)
+
+
+def _compress_weight(
+    weight: torch.Tensor,
+    scheme: "QuantizationScheme",
+    *,
+    global_scale: Optional[torch.Tensor] = None,
+) -> dict[str, torch.Tensor]:
+    """Quantize one module's weight into its compressed-tensors wire format.
+
+    FP8_BLOCK, MXFP8, and MXFP4 CUDA weights use the shared TileLang export/QAT
+    kernels. NVFP4, unsupported schemes, and CPU tensors retain the
+    compressed-tensors implementation.
+    """
+    preset = _preset_of(scheme)
+    if weight.is_cuda and preset == ("FP8_BLOCK", None):
+        import torch.nn.functional as F
+
+        from verl.utils.qat.fp8 import fp8_quant
+
+        rows, cols = scheme.weights.block_structure
+        pad_rows, pad_cols = -weight.shape[0] % rows, -weight.shape[1] % cols
+        padded = F.pad(weight, (0, pad_cols, 0, pad_rows)) if pad_rows or pad_cols else weight
+        quantized, scale = fp8_quant(padded, (rows, cols))
+        if pad_rows or pad_cols:
+            quantized = quantized[: weight.shape[0], : weight.shape[1]].contiguous()
+        return {"weight_scale": scale, "weight": quantized}
+
+    if weight.is_cuda and preset == ("MXFP8", None):
+        from verl.utils.qat.fp8 import fp8_quant
+
+        quantized, scale = fp8_quant(
+            weight,
+            (1, scheme.weights.group_size),
+            scale_dtype=torch.float8_e8m0fnu,
+            scale_fmt="e8m0",
+        )
+        return {"weight_scale": scale.view(torch.uint8), "weight": quantized}
+
+    if weight.is_cuda and preset == ("MXFP4", None):
+        from verl.utils.qat.fp4 import fp4_quant
+
+        quantized, scale = fp4_quant(weight)
+        return {
+            "weight_packed": quantized.view(torch.uint8),
+            "weight_scale": scale.view(torch.uint8),
+        }
+
+    return _compress_weight_with_compressed_tensors(weight, scheme, global_scale=global_scale)
 
 
 # HF checkpoints that pack all routed experts into one 3D tensor (e.g. Qwen3.5 MoE).

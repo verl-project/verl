@@ -26,6 +26,7 @@ pytest.importorskip("modelopt")
 import verl.models.mcore  # noqa: F401
 import modelopt.torch.quantization as mtq
 from verl.utils.qat.modelopt import (
+    _Fp8FakeQuant,
     _Mxfp4FakeQuant,
     _Nvfp4FakeQuant,
     _nvfp4_global_scale,
@@ -49,16 +50,16 @@ def _entry(config: dict, name: str):
     return next(entry for entry in config["quant_cfg"] if entry["quantizer_name"] == name)
 
 
-def test_mxfp8_qat_uses_modelopt_native_preset():
+def test_mxfp8_qat_uses_tilelang_backend_with_modelopt_numerics():
     config = build_quantize_config("mxfp8")
-    expected = mtq.normalize_quant_cfg_list(mtq.MXFP8_DEFAULT_CFG["quant_cfg"])
 
-    assert config["quant_cfg"] == expected
     assert config["algorithm"] is None
     weight_cfg = _entry(config, "*weight_quantizer")["cfg"]
+    input_cfg = _entry(config, "*input_quantizer")["cfg"]
     assert weight_cfg["num_bits"] == (4, 3)
     assert weight_cfg["block_sizes"] == {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
-    assert weight_cfg.get("backend") is None
+    assert weight_cfg["backend"] == "verl_mxfp8"
+    assert input_cfg["backend"] == "verl_mxfp8"
 
 
 def test_mxfp8_qat_appends_user_ignores_without_mutating_modelopt_preset():
@@ -129,6 +130,19 @@ def test_fp8_ignored_module_preserves_forward_and_backward():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     torch.testing.assert_close(model.projection.weight.grad, reference.weight.grad, rtol=0, atol=0)
     torch.testing.assert_close(inputs.grad, reference_inputs.grad, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8"])
+def test_tilelang_qat_backend_runs_linear_forward_and_backward(mode):
+    model = torch.nn.Module()
+    model.projection = torch.nn.Linear(256, 256, bias=False, device="cuda", dtype=torch.bfloat16)
+    mtq.quantize(model, build_quantize_config(mode))
+    inputs = torch.randn(8, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    model.projection(inputs).float().square().mean().backward()
+
+    assert inputs.grad is not None
+    assert model.projection.weight.grad is not None
 
 
 def test_mxfp8_rollout_requires_explicit_shape_ignore():
@@ -385,6 +399,7 @@ def test_mxfp4_qat_combines_mxfp4_weights_with_mxfp8_inputs(qat_mode, dense_mxfp
     assert weight_cfg["backend"] == "verl_mxfp4"
     assert input_cfg["num_bits"] == (4, 3)
     assert input_cfg["block_sizes"] == {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+    assert input_cfg["backend"] == "verl_mxfp8"
     assert config["algorithm"] is None
 
     generic_weight_entries = [entry for entry in config["quant_cfg"] if entry["quantizer_name"] == "*weight_quantizer"]
@@ -395,14 +410,35 @@ def test_mxfp4_qat_weight_qdq_exactly_matches_export():
     from compressed_tensors.compressors import BaseCompressor
     from compressed_tensors.compressors.format import infer_module_format
 
-    weight = torch.randn(64, 64, dtype=torch.bfloat16)
+    weight = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     fake_quantized = _Mxfp4FakeQuant.apply(weight)
     scheme = _scheme_for_preset("MXFP4", ["Linear"])
     compressed = _compress_weight(weight, scheme)
     compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
     exported_qdq = compressor.decompress(compressed, scheme)["weight"]
 
-    torch.testing.assert_close(fake_quantized, exported_qdq, rtol=0, atol=0)
+    torch.testing.assert_close(fake_quantized, exported_qdq.to(weight.dtype), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("preset", "block_shape", "scale_fmt"),
+    [
+        ("FP8_BLOCK", (128, 128), None),
+        ("MXFP8", (1, 32), "e8m0"),
+    ],
+)
+def test_fp8_qat_qdq_exactly_matches_export(preset, block_shape, scale_fmt):
+    from compressed_tensors.compressors import BaseCompressor
+    from compressed_tensors.compressors.format import infer_module_format
+
+    weight = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+    fake_quantized = _Fp8FakeQuant.apply(weight, *block_shape, scale_fmt)
+    scheme = _scheme_for_preset(preset, ["Linear"])
+    compressed = _compress_weight(weight, scheme)
+    compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
+    exported_qdq = compressor.decompress(compressed, scheme)["weight"]
+
+    torch.testing.assert_close(fake_quantized, exported_qdq.to(weight.dtype), rtol=0, atol=0)
 
 
 def test_nvfp4_rollout_is_moe_only_w4a4():
