@@ -68,3 +68,39 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
 
     assert metrics["rollout/spec_accept_rate"] > 0.0
     assert metrics["rollout/spec_accept_length"] > 1.0
+
+
+@pytest.mark.parametrize("lora,expected_level", [({"rank": 8}, 1), ({"rank": 8, "resync_base": True}, 2)])
+def test_lora_adapter_sleep_level_follows_resync_base(monkeypatch, lora, expected_level):
+    """Adapter mode keeps the base (level 1) unless lora.resync_base re-syncs it on every update."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace()
+    server.model_config = SimpleNamespace(lora_rank=0, lora=lora)
+
+    assert server._resolve_sleep_level() == expected_level
+
+
+def test_kv_cache_release_keeps_adapter_weights_with_resync_base(monkeypatch):
+    """The non-naive sync path does not re-send adapters, so releasing the KV cache must not discard them."""
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    sleep_levels = []
+
+    class Engine:
+        async def sleep(self, level):
+            sleep_levels.append(level)
+
+        async def wake_up(self, tags):
+            pass
+
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(free_cache_engine=True)
+    server.model_config = SimpleNamespace(lora_rank=0, lora={"rank": 8, "resync_base": True})
+    server.node_rank = 0
+    server.rollout_mode = vllm_async_server.RolloutMode.HYBRID
+    server.engine = Engine()
+
+    asyncio.run(server.release_kv_cache())
+
+    assert sleep_levels == [1]

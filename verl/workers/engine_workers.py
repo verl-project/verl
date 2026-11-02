@@ -719,6 +719,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
+            # resync_base only applies to an active, unmerged LoRA adapter.
+            lora_active = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
+            self.lora_resync_base: bool = (
+                bool(model_config.lora.get("resync_base", False)) and lora_active and not self.peft_merge
+            )
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -817,6 +822,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
+            if getattr(self, "lora_resync_base", False):
+                raise ValueError(
+                    f"model.lora.resync_base needs the naive weight sync, got {effective_mode!r}: other modes never "
+                    "re-send the LoRA adapter, so discarding the rollout weights on sleep would lose it."
+                )
             if effective_mode == "delta_sharded":
                 # the delta engine owns the sync state machine (seed vs steady,
                 # snapshot prime), so it drives the training engine itself.
@@ -852,11 +862,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
-            self.rollout.sleep_level = 1
-            do_lora_base_sync = not self.base_sync_done
+            resync_base = self.lora_resync_base
+            self.rollout.sleep_level = 2 if resync_base else 1
+            do_lora_base_sync = resync_base or not self.base_sync_done
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
+            # The FSDP exporter rejects layered_summon for a base export; Megatron ignores the flag.
             per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=False
             )
