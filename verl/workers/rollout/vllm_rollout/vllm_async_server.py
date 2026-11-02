@@ -57,6 +57,7 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
+    deterministic_request_seed,
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
@@ -664,9 +665,11 @@ class vLLMHttpServer:
             sampling_params["flat_logprobs"] = True
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
-        # Inject per-request seed for deterministic sampling when full_determinism is enabled.
+        # Inject a per-request seed for deterministic sampling when full_determinism is enabled.
+        # The seed is derived from the request id, not from the replica: one seed per replica made
+        # all n samples of a GRPO group (same prompt, same replica) identical.
         if self.config.full_determinism:
-            sampling_params.setdefault("seed", self.replica_rank + self.config.seed)
+            sampling_params.setdefault("seed", deterministic_request_seed(self.config.seed, request_id))
 
         if kv_transfer_params is not None:
             extra_args = dict(sampling_params.pop("extra_args", None) or {})
