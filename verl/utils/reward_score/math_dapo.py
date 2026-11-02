@@ -176,9 +176,25 @@ def is_correct_minerva(
     Returns:
         Tuple of (is_correct, normalized_prediction)
     """
+    # Strip markdown bold/italic wrapping around the "Answer:" label so the
+    # regex matches decorated variants like **Answer:** or *Answer:*.
+    # This also lets \s* in the pattern span the newline in **Answer:**\n\n42.
+    solution_str = re.sub(r"\*{1,2}(Answer\s*:)\s*\*{0,2}", r"\1", solution_str, flags=re.IGNORECASE)
+
     # Extract answer from solution
     match = re.findall(answer_pattern, solution_str)
     extracted_answer = match[-1] if match else "[INVALID]"
+
+    # Strip markdown bold/italic wrapping from the answer value itself
+    # (e.g. Answer: **42** -> 42). Only strip leading/trailing * to avoid
+    # destroying LaTeX content like x_1.
+    if extracted_answer != "[INVALID]":
+        stripped = extracted_answer.strip().strip("*").strip()
+        if not stripped:
+            extracted_answer = "[INVALID]"
+        else:
+            extracted_answer = stripped
+
     pred = normalize_final_answer(extracted_answer)
 
     # Process ground truth
