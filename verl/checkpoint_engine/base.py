@@ -605,6 +605,10 @@ class CheckpointEngineManager:
             await replica.check_weights("reset")
         print("Weight update check: weights reset, syncing through the real update path")
 
+        # update_weights() expects the replicas asleep: the naive path resumes the
+        # weights itself, and the other backends sleep and wake around the transfer.
+        await self.sleep_replicas()
+
         await self.update_weights(global_steps)
 
         print("Weight update check: comparing against the baseline")
