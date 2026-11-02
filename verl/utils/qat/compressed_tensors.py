@@ -75,7 +75,7 @@ SUPPORTED_SCHEMES: dict[str, Optional[str]] = {
     # preset.
     "MXFP4": "mxfp4",
     # NVFP4 is deliberately W4A4 and routed-expert-only, and always runs with
-    # ``moe_activation=nvfp4_per_token``.
+    # per-token activations (``moe_activation=nvfp4_per_token``, the default).
     "NVFP4": "nvfp4",
 }
 
@@ -87,8 +87,8 @@ MOE_ACTIVATIONS: dict[str, str] = {
     "nvfp4_per_token": "NVFP4",
 }
 
-# ``moe`` presets that verl runs only with an activation override: NVFP4 has no static
-# activation scales.
+# ``moe`` presets that verl runs only with an activation override, which is also their
+# default: NVFP4 has no static activation scales.
 _REQUIRED_MOE_ACTIVATIONS: dict[str, str] = {"NVFP4": "nvfp4_per_token"}
 
 # Layers that stay in high precision regardless of model. Patterns must start
@@ -308,14 +308,13 @@ def build_compressed_tensors_config(
 
     linear = _check_scheme("linear", linear)
     moe = _check_scheme("moe", moe)
+    if moe_activation is None:
+        moe_activation = _REQUIRED_MOE_ACTIVATIONS.get(moe)
     if moe_activation is not None and MOE_ACTIVATIONS.get(moe_activation) != moe:
         supported = {activation: f"moe={preset}" for activation, preset in MOE_ACTIVATIONS.items()}
         raise ValueError(
             f"Unsupported rollout.quantization.moe_activation={moe_activation!r} with moe={moe!r}: {supported}"
         )
-    required = _REQUIRED_MOE_ACTIVATIONS.get(moe)
-    if required is not None and moe_activation != required:
-        raise ValueError(f"rollout.quantization.moe={moe} needs moe_activation={required}")
     if linear in ("MXFP4", "NVFP4"):
         raise ValueError(f"{linear} is supported only for routed MoE experts; use BF16 or MXFP8 dense linear layers")
     if linear is None and moe is None:
@@ -775,10 +774,7 @@ def dispatch_rollout_weight_quantizer(
     real_nvfp4 = real_nvfp4_bf16_layers is not None
     if quantization_config is None:
         if real_nvfp4:
-            raise ValueError(
-                "override_transformer_config.fp4 needs rollout.quantization.moe=NVFP4 "
-                "with moe_activation=nvfp4_per_token"
-            )
+            raise ValueError("override_transformer_config.fp4 needs rollout.quantization.moe=NVFP4")
         if qat_mode is not None:
             raise ValueError(
                 "QAT needs a quantized rollout to sync to: use a model with a native "
@@ -801,7 +797,7 @@ def dispatch_rollout_weight_quantizer(
     if real_nvfp4 and not per_token:
         raise ValueError(
             "override_transformer_config.fp4 trains routed experts in per-token NVFP4; "
-            "set rollout.quantization.moe=NVFP4 with moe_activation=nvfp4_per_token"
+            "set rollout.quantization.moe=NVFP4"
         )
     if quant_method == "compressed-tensors":
         _check_required_activations(quantization_config, "rollout quantization_config")

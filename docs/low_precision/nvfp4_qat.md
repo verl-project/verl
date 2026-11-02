@@ -23,8 +23,7 @@ actor_rollout_ref:
   rollout:
     quantization:
       linear: null
-      moe: NVFP4
-      moe_activation: nvfp4_per_token
+      moe: NVFP4   # per-token activations
 ```
 
 - Weights: E2M1 values in groups of 16 with E4M3 scales and one global scale per expert matrix; `gate_proj`
@@ -41,7 +40,7 @@ actor_rollout_ref:
 ```bash
 .venv-vllm/bin/python scripts/rollout_logprob_diff.py \
   --model-path /mnt/efs/model/Qwen/Qwen3.5-35B-A3B --ep 8 \
-  --quant-moe NVFP4 --quant-moe-activation nvfp4_per_token --qat-mode nvfp4
+  --quant-moe NVFP4 --qat-mode nvfp4
 ```
 
 Measured results are in the [NVFP4 mismatch table](nvfp4.md#mismatch).

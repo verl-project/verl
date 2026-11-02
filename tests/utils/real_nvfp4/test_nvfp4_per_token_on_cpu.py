@@ -70,9 +70,10 @@ def test_per_token_is_nvfp4_weights_with_dynamic_inputs_and_moe_only():
     assert group["weights"]["strategy"] == "tensor_group" and group["weights"]["group_size"] == 16
     assert group["input_activations"]["dynamic"] is True
     assert _ROLLOUT.is_nvfp4_per_token_scheme(group["weights"], group["input_activations"])
-    # NVFP4 has no static activation scales.
-    with pytest.raises(ValueError, match="moe=NVFP4 needs moe_activation=nvfp4_per_token"):
-        build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=[], config_file=None)
+    # NVFP4 has no static activation scales, so its activations default to per token.
+    assert (
+        build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=_CARVE_IGNORE, config_file=None) == _config()
+    )
     # The activation override needs moe=NVFP4.
     for moe in (None, "MXFP4"):
         with pytest.raises(ValueError, match="moe_activation='nvfp4_per_token'"):
@@ -136,15 +137,14 @@ def test_export_checks_the_carveout_under_the_exported_names(monkeypatch):
 
 def test_dispatch_pairs_real_nvfp4_with_per_token_activations():
     assert isinstance(_dispatch(), NVFP4PerTokenWeightQuantizer)
-    with pytest.raises(ValueError, match="moe_activation=nvfp4_per_token"):
-        _dispatch(activation=None)
+    assert isinstance(_dispatch(activation=None), NVFP4PerTokenWeightQuantizer)
     with pytest.raises(ValueError, match="only with the vLLM rollout"):
         _dispatch(engine="sglang")
 
 
 def test_dispatch_pairs_nvfp4_qat_with_per_token_activations(tmp_path):
     quantization = SimpleNamespace(
-        linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=_CARVE_IGNORE, config_file=None
+        linear=None, moe="NVFP4", moe_activation=None, ignore=_CARVE_IGNORE, config_file=None
     )
     quantizer = dispatch_rollout_weight_quantizer(
         model_config=SimpleNamespace(hf_config=_HF, local_path=None),

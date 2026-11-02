@@ -82,7 +82,7 @@ DeepGEMM implementation.
 | FP8 block (E4M3, 128x128 weight blocks, dynamic 1x128 activations) | `FP8_BLOCK` | `fp8` | Hopper / Blackwell | `W8A8Fp8`<br>`linear_backend=deep_gemm`² | `W8A8Fp8MoE`<br>`moe_backend=deep_gemm` | `W8A8Fp8`<br>`fp8_gemm_runner_backend=deep_gemm` | `W8A8Fp8MoE`<br>`moe_runner_backend=deep_gemm` | ✅ Hopper / Blackwell² | ✅ Hopper |
 | MXFP8 | `MXFP8` | `mxfp8` | Blackwell | `W8A8Mxfp8`<br>FlashInfer CuteDSL¹ | `W8A8Mxfp8MoE`<br>`moe_backend=deep_gemm` | native `quant_method=mxfp8`<br>`fp8_gemm_runner_backend=deep_gemm` | native `quant_method=mxfp8`<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell | ✅ Blackwell |
 | MXFP4 (MoE only) | `MXFP4` | `mxfp4` / `mxfp4_mxfp8` | Blackwell | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_backend=deep_gemm` | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell (MoE only) | ✅ Blackwell (MoE only) |
-| NVFP4 (MoE only, per-token activations) | `NVFP4` + `moe_activation: nvfp4_per_token` | `nvfp4` | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_trtllm)` | ❌ | ❌ | ✅ Blackwell (MoE only) | ❌ |
+| NVFP4 (MoE only, per-token activations) | `NVFP4` | `nvfp4` | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_trtllm)` | ❌ | ❌ | ✅ Blackwell (MoE only) | ❌ |
 
 MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset has no such fallback: its MXFP4-weight × FP8-activation experts are served only by vLLM's DeepGEMM FP4 MoE kernel (SM100/SM120), and Marlin and Triton reject the FP8 1x128 activation scheme, so on Hopper the rollout fails at engine start.
 
@@ -113,7 +113,7 @@ actor_rollout_ref:
 
 - When `linear`, `moe` and `config_file` are all `null` (the default), the rollout runs in the model's native precision.
 - `linear` and `moe` can be set independently. Setting one of them to `null` keeps those layers in BF16, e.g. `linear: null, moe: FP8_BLOCK` quantizes only the routed experts.
-- `MXFP4` and `NVFP4` are valid only for `moe`. Use `linear: null` for BF16 dense layers. `NVFP4` needs `moe_activation: nvfp4_per_token` (see [NVFP4 QAT](nvfp4_qat.md)). vLLM also supports `linear: MXFP8, moe: MXFP4`; that mixed override is not supported by SGLang.
+- `MXFP4` and `NVFP4` are valid only for `moe`. Use `linear: null` for BF16 dense layers. `NVFP4` always quantizes expert activations per token (`moe_activation: nvfp4_per_token`, the default). vLLM also supports `linear: MXFP8, moe: MXFP4`; that mixed override is not supported by SGLang.
 - The following layers are always kept in BF16: `lm_head`, embeddings, MoE routers (`mlp.gate`, `shared_expert_gate`), vision towers and MTP layers.
 - `ignore` adds more layers on top of these, using HuggingFace layer names. Layers incompatible with the selected scheme are not detected automatically: list them explicitly. For example, MXFP8 on Qwen3.5 requires `["re:.*linear_attn\\.in_proj_[ab]$"]` because these projections are too small for the vLLM kernel.
 - For an all-MXFP8 SGLang rollout, regex ignores must have a known SGLang module-name translation. Use an exact SGLang module name for other ignores; unsupported regex patterns are rejected before launch.

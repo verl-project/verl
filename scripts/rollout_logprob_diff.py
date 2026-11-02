@@ -34,7 +34,7 @@ Examples (8 GPUs):
         --quant-moe MXFP4 --qat-mode mxfp4 --r3-router-replay
     # NVFP4 W4A4 experts with per-token activations on FlashInfer TRT-LLM
     .venv-vllm/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
-        --quant-moe NVFP4 --quant-moe-activation nvfp4_per_token --qat-mode nvfp4
+        --quant-moe NVFP4 --qat-mode nvfp4
     # same, with Megatron ModelOpt QAT fake-quantizing to the rollout scheme
     .venv/bin/python scripts/rollout_logprob_diff.py --model-path ~/models/Qwen3.5-35B-A3B --ep 8 \\
         --quant-linear FP8_BLOCK --quant-moe FP8_BLOCK --qat-mode fp8
@@ -104,11 +104,6 @@ def parse_args() -> argparse.Namespace:
         help="rollout.quantization.moe preset: FP8_BLOCK, MXFP8, MXFP4, or NVFP4",
     )
     parser.add_argument(
-        "--quant-moe-activation",
-        default=None,
-        help="rollout.quantization.moe_activation: nvfp4_per_token, required with NVFP4",
-    )
-    parser.add_argument(
         "--quant-ignore",
         action="append",
         default=[],
@@ -175,7 +170,6 @@ def build_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     config.actor_rollout_ref.rollout.quantization.linear = args.quant_linear
     config.actor_rollout_ref.rollout.quantization.moe = args.quant_moe
-    config.actor_rollout_ref.rollout.quantization.moe_activation = args.quant_moe_activation
     config.actor_rollout_ref.rollout.quantization.ignore = args.quant_ignore
     if args.qat_mode:
         config.actor_rollout_ref.actor.megatron.qat.enable = True
