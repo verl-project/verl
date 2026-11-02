@@ -62,12 +62,14 @@ def quant_utils(monkeypatch):
     attention.set_default_quant_scales = _set_default_quant_scales
     kv_cache = types.ModuleType("vllm.model_executor.layers.quantization.kv_cache")
     kv_cache.BaseKVCacheMethod = _BaseKVCacheMethod
+    weight_utils = types.ModuleType("vllm.model_executor.model_loader.weight_utils")
     # A bare package stub, so ``verl.utils.vllm.vllm_fp*_utils`` load from their files without
     # running ``verl/utils/vllm/__init__.py``, which imports vLLM.
     package = types.ModuleType("verl.utils.vllm")
     package.__path__ = [str(_REPO_ROOT / "verl/utils/vllm")]
     monkeypatch.setitem(sys.modules, attention.__name__, attention)
     monkeypatch.setitem(sys.modules, kv_cache.__name__, kv_cache)
+    monkeypatch.setitem(sys.modules, weight_utils.__name__, weight_utils)
     monkeypatch.setitem(sys.modules, package.__name__, package)
 
     before = set(sys.modules)
@@ -146,3 +148,36 @@ def test_refit_post_processing_resets_the_scales(quant_utils):
     quant_utils.process_quanted_weights_after_loading(model, reload_state={})
 
     assert _scales(model["attn"]) == [1.0] * 8
+
+
+@pytest.mark.parametrize("has_finalizer", [True, False], ids=["native", "legacy"])
+def test_refit_finalizes_model_weights_once(quant_utils, has_finalizer):
+    child = nn.Linear(1, 1, bias=False)
+    model = nn.Sequential(nn.Sequential(child))
+    with torch.inference_mode():
+        child.register_buffer("derived", child.weight.detach().clone())
+        child.weight.fill_(7)
+    calls = []
+
+    def finalize_child():
+        child.derived.copy_(child.weight)
+        calls.append("child")
+
+    child.process_weights_after_loading = finalize_child
+    model.process_weights_after_loading = lambda: calls.append("root")
+    if has_finalizer:
+
+        def finalize_model_weights(root):
+            assert root is model
+            root[0][0].process_weights_after_loading()
+            root.process_weights_after_loading()
+
+        sys.modules["vllm.model_executor.model_loader.weight_utils"].finalize_model_weights = finalize_model_weights
+
+    quant_utils.process_quanted_weights_after_loading(model, reload_state={})
+
+    if has_finalizer:
+        assert calls == ["child", "root"]
+        torch.testing.assert_close(child.derived, child.weight)
+    else:
+        assert calls == ["root"]

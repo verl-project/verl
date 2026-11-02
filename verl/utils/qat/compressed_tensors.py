@@ -184,6 +184,11 @@ def is_all_mxfp8_config(ct_config: Mapping[str, Any]) -> bool:
     return all(_preset_of(scheme) == ("MXFP8", None) for scheme in _group_schemes(ct_config))
 
 
+def _module_name_for_quant_match(module: str) -> str:
+    """Match exported LoRA base weights against unwrapped HF FP8 exclusions."""
+    return module.removesuffix(".base_layer").removeprefix("model.")
+
+
 def _matches(name: str, targets: Iterable[str]) -> bool:
     for target in targets:
         if target.startswith("re:"):
@@ -671,7 +676,10 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
                 f"got activation_scheme={activation_scheme!r}, weight_block_size={block_size!r}, "
                 f"store_dtype={store_dtype!r}"
             )
-        self.ignore = list(fp8_config.get("ignored_layers") or fp8_config.get("modules_to_not_convert") or [])
+        self.ignore = [
+            _module_name_for_quant_match(module)
+            for module in (fp8_config.get("ignored_layers") or fp8_config.get("modules_to_not_convert") or [])
+        ]
         self.ignore_match_mode = fp8_config.get("ignored_layers_match_mode", "exact")
         if self.ignore_match_mode not in ("exact", "substring", "suffix"):
             raise ValueError(f"Unsupported ignored_layers_match_mode={self.ignore_match_mode!r}")
@@ -680,6 +688,7 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
         self.linear_scheme = self.scheme
 
     def _is_ignored(self, module: str) -> bool:
+        module = _module_name_for_quant_match(module)
         if _matches(module, DEFAULT_IGNORE):
             return True
         if self.ignore_match_mode == "exact":
@@ -717,6 +726,59 @@ def _as_quantization_config(config: Any) -> Optional[dict[str, Any]]:
     raise TypeError(f"quantization_config must be a mapping, got {type(config).__name__}")
 
 
+def _vllm_hf_overrides(rollout_config: Any) -> Mapping[str, Any]:
+    """``rollout.engine_kwargs.vllm.hf_overrides`` as a mapping; empty for other rollouts."""
+    if getattr(rollout_config, "name", None) != "vllm":
+        return {}
+    engine_kwargs = getattr(rollout_config, "engine_kwargs", None) or {}
+    hf_overrides = (engine_kwargs.get("vllm") or {}).get("hf_overrides") or {}
+    if isinstance(hf_overrides, str):
+        hf_overrides = json.loads(hf_overrides)
+    return hf_overrides
+
+
+def _merge_nested(base: Mapping[str, Any], updates: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge ``updates`` into a copy of ``base`` key by key, recursing into mappings."""
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _merge_nested(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _rollout_quantization_config(hf_config: Any, rollout_config: Any) -> tuple[bool, Any]:
+    """``(overridden, config)``: the ``quantization_config`` the rollout serves after vLLM's ``hf_overrides``."""
+    return _resolve_quantization_config(hf_config, _vllm_hf_overrides(rollout_config))
+
+
+def _resolve_quantization_config(hf_config: Any, hf_overrides: Mapping[str, Any]) -> tuple[bool, Any]:
+    """``(overridden, config)``: the ``quantization_config`` vLLM serves once ``hf_overrides`` apply.
+
+    Follows vLLM: a top-level ``quantization_config`` override replaces the checkpoint's, and
+    ``null`` clears it. A ``text_config.quantization_config`` override updates the text config,
+    merged key by key into the checkpoint's mapping, or replaced outright when it is ``null``.
+    vLLM uses the top-level config and falls back to the text config's only when that is ``None``.
+    """
+    overridden = "quantization_config" in hf_overrides
+    config = hf_overrides["quantization_config"] if overridden else getattr(hf_config, "quantization_config", None)
+    if config is not None:
+        return overridden, config
+
+    text_config = getattr(hf_config, "text_config", None)
+    if text_config is None:
+        return overridden, None
+    config = getattr(text_config, "quantization_config", None)
+    text_overrides = hf_overrides.get("text_config")
+    if isinstance(text_overrides, Mapping) and "quantization_config" in text_overrides:
+        override = text_overrides["quantization_config"]
+        if isinstance(override, Mapping) and config is not None:
+            override = _merge_nested(_as_quantization_config(config), override)
+        return True, override
+    return overridden, config
+
+
 def dispatch_rollout_weight_quantizer(
     *,
     model_config: Any,
@@ -727,7 +789,8 @@ def dispatch_rollout_weight_quantizer(
     """Select the trainer-side exporter for native or overridden rollout quantization.
 
     The rollout engine keeps its native ``quantization_config`` unless
-    ``rollout.quantization`` explicitly overrides it. Both native and override
+    ``rollout.quantization`` explicitly overrides it; a ``quantization_config``
+    in vLLM's ``hf_overrides`` replaces the native one. Both native and override
     compressed-tensors configs use :class:`CompressedTensorsWeightQuantizer`;
     native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`. DeepSeek-V4
     still gets an FP8 quantizer object, but it passes through the private mixed
@@ -745,9 +808,6 @@ def dispatch_rollout_weight_quantizer(
     has_override = bool(linear or moe or config_file)
 
     hf_config = model_config.hf_config
-    native = getattr(hf_config, "quantization_config", None)
-    if native is None:
-        native = getattr(getattr(hf_config, "text_config", None), "quantization_config", None)
     model_types = {
         getattr(hf_config, "model_type", None),
         getattr(getattr(hf_config, "text_config", None), "model_type", None),
@@ -768,7 +828,25 @@ def dispatch_rollout_weight_quantizer(
             moe_activation=moe_activation,
         )
     else:
+        has_hf_override, native = _rollout_quantization_config(hf_config, rollout_config)
         quantization_config = _as_quantization_config(native)
+        # Megatron-Bridge always exports DeepSeek-V4 in the checkpoint's FP8/FP4 layout, which only the
+        # checkpoint's own quantization_config loads: clearing it, switching to compressed-tensors or
+        # changing a field such as weight_block_size or scale_fmt changes the tensors vLLM expects.
+        if has_hf_override and model_types & _DEEPSEEK_V4_MODEL_TYPES:
+            checkpoint = _as_quantization_config(_resolve_quantization_config(hf_config, {})[1])
+            if quantization_config != checkpoint:
+                if quantization_config is None:
+                    change = "cleared it"
+                else:
+                    old, new = checkpoint or {}, quantization_config
+                    changed = sorted(key for key in old.keys() | new.keys() if old.get(key) != new.get(key))
+                    change = "changed " + ", ".join(changed)
+                raise NotImplementedError(
+                    f"hf_overrides may not change DeepSeek-V4's quantization_config ({change}): the trainer exports "
+                    "the checkpoint's native FP8/FP4 layout, which only that quantization_config loads. Drop the "
+                    "override to sync the native quantization."
+                )
 
     qat_mode = qat_config.mode if qat_config is not None and qat_config.enable else None
     real_nvfp4 = real_nvfp4_bf16_layers is not None

@@ -104,6 +104,36 @@ async def test_agent_loop_tq_postprocess_stores_unpadded_rollout_topk(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_expanded_prompt_realigns_rollout_heads_and_coverage(monkeypatch):
+    """Response predictions stay at prompt_length - 1 after adopting the expanded image prompt."""
+    prompt = [101, 129264, 129264, 129264, 129264, 103]
+    worker = _DummyWorker(topk_log_probs=2)
+    worker._compute_multi_modal_inputs = lambda output, ids: {
+        "_expanded_input_ids": torch.tensor([prompt + output.response_ids])
+    }
+    output = _output(
+        {
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+            "response_support_complete": [True, False],
+        }
+    )
+    fields = await _postprocess(monkeypatch, worker, output, validate=False)
+    ids, log_probs, complete = (
+        fields[key][0] for key in ("rollout_topk_ids", "rollout_topk_log_probs", "rollout_support_complete")
+    )
+    start = len(prompt) - 1
+    assert ids.shape == log_probs.shape == (len(prompt) + 2, 2)
+    assert ids[start : start + 2].tolist() == [[11, 13], [12, 14]]
+    torch.testing.assert_close(log_probs[start : start + 2], torch.tensor([[-0.1, -2.0], [-0.2, -1.5]]))
+    assert complete.tolist() == [True] * start + [True, False, True]
+    assert ids[:start].tolist() == [[0, 1]] * start
+    assert ids[-1].tolist() == [0, 1]
+    assert log_probs[:start].exp().tolist() == [[0.5, 0.5]] * start
+    torch.testing.assert_close(fields["responses"][0], torch.tensor([11, 12]))
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_tq_postprocess_stores_nested_provider_coverage(monkeypatch):
     output = _output(
         {
@@ -143,3 +173,33 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+@pytest.mark.parametrize("expanded", [False, True])
+def test_deepseek_processor_accepts_compact_and_expanded_images(monkeypatch, expanded):
+    """DeepSeek-V4.1 prompts with one placeholder or a full span per image expand to the same tokens."""
+    from types import SimpleNamespace
+
+    from transformers import BatchFeature
+
+    worker = object.__new__(_WorkerTQ)
+    worker.processor = SimpleNamespace(
+        config=SimpleNamespace(
+            model_type="deepseek_v41",
+            image_token_id=129264,
+            vision_config=SimpleNamespace(patch_size=14, downsample_ratio=3),
+        )
+    )
+    worker.tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "image prompt")
+    monkeypatch.setattr(
+        agent_loop_tq_module,
+        "build_multimodal_processor_inputs",
+        lambda *args, **kwargs: BatchFeature({"image_grid_hws": torch.tensor([[3, 3], [3, 6]])}),
+    )
+    input_ids = [10] + [129264] * (4 if expanded else 1) + [129264] * (5 if expanded else 1) + [12]
+    result = worker._compute_multi_modal_inputs(
+        SimpleNamespace(multi_modal_data={"images": [object(), object()]}, mm_processor_kwargs={}),
+        torch.tensor(input_ids),
+    )
+    assert result["_expanded_input_ids"].tolist() == [[10] + [129264] * 9 + [12]]
+    assert result["vision_token_types"].tolist() == [[-1, 0, 1, 2, 3, 0, 1, 1, 2, 3, -1]]
