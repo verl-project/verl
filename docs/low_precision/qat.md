@@ -188,8 +188,11 @@ Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them 
   Triton kernels.
   MXFP4 routed experts (native DeepSeek-V4 `expert_dtype: fp4`, compressed-tensors
   MXFP4) keep vLLM's own MoE selection on Hopper, where vLLM has no DeepGEMM
-  MXFP4 kernel and uses Marlin. `VERL_ROLLOUT_USE_DEEP_GEMM=0` leaves every
-  backend to vLLM's automatic selection.
+  MXFP4 kernel. For native DeepSeek-V4 experts vLLM 0.29 selects Marlin
+  (W4A16); the compressed-tensors `MXFP4` preset has no Hopper backend in
+  vLLM 0.29 and fails at engine start, as described under MXFP4 support above.
+  `VERL_ROLLOUT_USE_DEEP_GEMM=0` leaves every backend to vLLM's automatic
+  selection.
 - **SGLang**: quantized FP8/MXFP8/MXFP4 rollouts similarly default
   `fp8_gemm_runner_backend` and `moe_runner_backend` to `deep_gemm`. Explicit
   values under `engine_kwargs.sglang` take precedence.
