@@ -1306,6 +1306,7 @@ class RayPPOTrainer:
         entropy = tu.get(output, "entropy")
         log_probs = tu.get(output, "log_probs")
         routed_experts = tu.get(output, "routed_experts")
+        routed_experts_mask = tu.get(output, "routed_experts_mask")
         sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
         old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
@@ -1318,6 +1319,11 @@ class RayPPOTrainer:
         result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
         if routed_experts is not None:
             result["routed_experts"] = routed_experts
+        # Carry the engine's all-true validity mask with the recorded routes; without
+        # it replay falls back to value-based validity and cannot distinguish a
+        # recorded topk=1 expert-0 route from an unrecorded all-zero row.
+        if routed_experts_mask is not None:
+            result["routed_experts_mask"] = routed_experts_mask
         if sum_pi_squared is not None:
             result["sum_pi_squared"] = sum_pi_squared.float()
         old_log_prob = tu.get_tensordict(result)

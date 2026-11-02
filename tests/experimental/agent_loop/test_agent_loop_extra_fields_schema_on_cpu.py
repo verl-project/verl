@@ -146,6 +146,36 @@ def test_agent_loop_output_as_dict_preserves_mutated_default_extra_fields():
     assert fields["extra_fields"] == {"raw_prompt": [{"role": "user", "content": "hello"}]}
 
 
+def test_agent_loop_output_as_dict_preserves_supplied_routed_experts_mask():
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12, 13],
+        response_mask=[1, 1, 1],
+        metrics=AgentLoopMetrics(),
+        routed_experts=np.zeros((2, 1, 2), dtype=np.int32),
+        routed_experts_mask=[True, False],
+    )
+
+    fields = output.as_dict()
+
+    assert fields["routed_experts"].shape == (5, 1, 2)
+    assert fields["routed_experts_mask"].tolist() == [True, False, False, False, False]
+
+
+def test_agent_loop_output_as_dict_rejects_mismatched_routed_experts_mask():
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12, 13],
+        response_mask=[1, 1, 1],
+        metrics=AgentLoopMetrics(),
+        routed_experts=np.zeros((2, 1, 2), dtype=np.int32),
+        routed_experts_mask=[True, False, True],
+    )
+
+    with pytest.raises(ValueError, match="routed_experts_mask has 3 rows"):
+        output.as_dict()
+
+
 def test_agent_loop_output_as_dict_promotes_teacher_fields_without_mutating_model():
     output = _make_agent_loop_output()
     output.extra_fields.update(
@@ -518,6 +548,62 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+    # The backend supplied no mask, so none may be synthesized: replay must fall
+    # back to value-based validity rather than trust an all-true prefix mask.
+    assert internal.routed_experts_mask is None
+
+
+def _make_internal_agent_loop_output(routed_experts=None, routed_experts_mask=None):
+    return _InternalAgentLoopOutput(
+        prompt_ids=torch.zeros(1, 2, dtype=torch.int64),
+        response_ids=torch.zeros(1, 2, dtype=torch.int64),
+        input_ids=torch.zeros(1, 4, dtype=torch.int64),
+        position_ids=torch.zeros(1, 4, dtype=torch.int64),
+        response_mask=torch.zeros(1, 2, dtype=torch.int64),
+        attention_mask=torch.ones(1, 4, dtype=torch.int64),
+        routed_experts=routed_experts,
+        routed_experts_mask=routed_experts_mask,
+        reward_score=0.0,
+        num_turns=1,
+        metrics=AgentLoopMetrics(),
+    )
+
+
+def _distinct_routed_experts(seq=4, layers=2, topk=2):
+    rows = torch.arange(seq, dtype=torch.int16).view(seq, 1, 1) * 10 + torch.arange(topk, dtype=torch.int16)
+    return rows.expand(seq, layers, topk).unsqueeze(0).clone()
+
+
+def test_agent_loop_postprocess_normalizes_mixed_routed_experts():
+    class _DummyWorker:
+        reward_loop_worker_handles = None
+
+    masked = _distinct_routed_experts()
+    maskless = _distinct_routed_experts()
+    maskless[0, 2] = 0  # all-zero row: no recorded routing
+    maskless[0, 3, 0, :] = 5  # repeated expert breaks VeOmni's permute()
+    mask = torch.ones(1, 4, dtype=torch.bool)
+
+    inputs = [
+        _make_internal_agent_loop_output(masked, mask),
+        _make_internal_agent_loop_output(maskless, None),
+        _make_internal_agent_loop_output(None, None),
+    ]
+    batch = AgentLoopWorker._postprocess(_DummyWorker(), inputs).batch
+
+    assert batch["routed_experts"].shape == (3, 4, 2, 2)
+    assert batch["routed_experts_mask"].shape == (3, 4, 2)
+    assert batch["routed_experts_mask"][0].all(), "supplied mask must be kept"
+    # Maskless routes keep the controller's per-layer fallback instead of being
+    # disabled: clean rows replay, zero/duplicate rows stay native per layer.
+    assert batch["routed_experts_mask"][1].tolist() == [
+        [True, True],
+        [True, True],
+        [False, False],
+        [False, True],
+    ]
+    assert not batch["routed_experts_mask"][2].any(), "routingless sample must be invalid"
+    assert torch.count_nonzero(batch["routed_experts"][2]) == 0, "routingless sample must be zero-filled"
 
 
 class _FakeTokenizerCustomPad:

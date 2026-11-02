@@ -104,6 +104,15 @@ def construct_minimal_padding_template(
     routed_experts = build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
 
     sequence_length = input_ids.size(0)
+    # The mask is cloned from the template sample, so its leading dimension still
+    # describes that sample's sequence, not the synthetic one. Rebuild it at the
+    # synthetic length to keep it aligned with `routed_experts` (all rows marked
+    # invalid: a synthetic sample has no recorded routing).
+    routed_experts_mask = template_sample.get("routed_experts_mask")
+    if isinstance(routed_experts_mask, torch.Tensor) and routed_experts_mask.dim() > 0:
+        template_sample["routed_experts_mask"] = routed_experts_mask.new_zeros(
+            (sequence_length, *routed_experts_mask.shape[1:])
+        )
     teacher_ids = template_sample.get("teacher_ids")
     if teacher_ids is not None:
         template_sample["teacher_ids"] = teacher_ids.new_full((sequence_length, *teacher_ids.shape[1:]), eos_token_id)
@@ -139,6 +148,7 @@ def construct_minimal_padding_template(
         template_sample["routed_experts"] = routed_experts
     else:
         template_sample.pop("routed_experts", None)
+        template_sample.pop("routed_experts_mask", None)
 
     # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
     template_tag.update(

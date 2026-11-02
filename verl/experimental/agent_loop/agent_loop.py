@@ -98,6 +98,13 @@ class AgentLoopOutput(BaseModel):
     """Log probabilities for the response tokens."""
     routed_experts: Optional[Any] = None
     """Routed experts for the total tokens."""
+    routed_experts_mask: Optional[Any] = None
+    """Per-token bool mask: True where routed_experts holds real rollout routing.
+
+    Rows whose routing is unknown (the final generated token, tool-response
+    tokens, and any padding) stay zero; router replay consumes only the rows
+    this mask marks True and falls back to native routing elsewhere.
+    """
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
     reward_score: Optional[float] = None
@@ -127,6 +134,7 @@ class AgentLoopOutput(BaseModel):
             output["rollout_log_probs"] = torch.tensor(response_logprobs, dtype=torch.float32)
 
         routed_experts = output.pop("routed_experts", None)
+        supplied_mask = output.pop("routed_experts_mask", None)
         if routed_experts is not None:
             routed_experts = torch.tensor(routed_experts, dtype=torch.int16)
             # Router replay indexes this field by absolute token position, so it must
@@ -139,6 +147,23 @@ class AgentLoopOutput(BaseModel):
             num_rows = min(routed_experts.size(0), total_length)
             aligned[:num_rows] = routed_experts[:num_rows]
             output["routed_experts"] = aligned
+            # Record which rows carry real routing, so replay never has to guess it
+            # from the values (an all-zero row is indistinguishable from a token that
+            # genuinely routed to expert 0 in every slot). A mask supplied by the
+            # producer is authoritative and must survive this alignment; only outputs
+            # without one get a prefix mask.
+            mask = torch.zeros(total_length, dtype=torch.bool)
+            if supplied_mask is not None:
+                supplied_mask = torch.as_tensor(supplied_mask, dtype=torch.bool).reshape(-1)
+                if supplied_mask.numel() != routed_experts.size(0):
+                    raise ValueError(
+                        f"routed_experts_mask has {supplied_mask.numel()} rows but "
+                        f"routed_experts has {routed_experts.size(0)}."
+                    )
+                mask[:num_rows] = supplied_mask[:num_rows]
+            else:
+                mask[:num_rows] = True
+            output["routed_experts_mask"] = mask
 
         # rm_scores: reward score for each token
         reward_score = output.pop("reward_score", None)
@@ -216,10 +241,30 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded token ids corresponding to the teacher log probabilities."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
+    routed_experts_mask: Optional[torch.Tensor] = None
+    """Padded per-token mask marking rows whose routing came from rollout."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
     """Multi-modal inputs for processors (e.g. pixel_values, image_grid_thw, video_grid_thw)."""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+
+
+def _validity_mask_from_routed_experts(routed_experts: torch.Tensor) -> torch.Tensor:
+    """Per-layer replay validity for routes that came without an explicit mask.
+
+    Mirrors ``VeOmniRouterReplay``'s maskless fallback for every layer: a target
+    row is replayable when its top-k is distinct (duplicates break VeOmni's
+    expert-parallel dispatch) and not entirely zero (topk=1 padding).
+
+    Returns a ``[1, seq, layers]`` bool tensor so it can be concatenated with
+    masks produced by other agent loops; the controller reads one column per
+    layer.
+    """
+    per_layer = routed_experts[0]  # [seq, layers, topk]
+    sorted_ids = per_layer.sort(dim=-1).values
+    duplicated = (sorted_ids[..., 1:] == sorted_ids[..., :-1]).any(dim=-1)  # [seq, layers]
+    non_zero = (per_layer != 0).any(dim=-1)  # [seq, layers]
+    return (~duplicated & non_zero).unsqueeze(0)
 
 
 class DictConfigWrap:
@@ -812,6 +857,7 @@ class AgentLoopWorker:
         input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
 
         routed_experts = None
+        routed_experts_mask = None
         if output.routed_experts is not None:
             total_length = input_ids.shape[1]
             length, layer_num, topk_num = output.routed_experts.shape
@@ -838,6 +884,21 @@ class AgentLoopWorker:
                 )
 
             routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
+            # A producer-supplied mask is authoritative. When it is absent, leave
+            # the mask unset: rollout backends emit zero-filled rows for positions
+            # they did not record (the final generated token, tool responses), and
+            # synthesizing an all-true prefix mask would make replay treat those as
+            # genuine routes. The controller's value-based fallback handles them.
+            routed_experts_mask = None
+            if output.routed_experts_mask is not None:
+                supplied_mask = torch.as_tensor(output.routed_experts_mask, dtype=torch.bool).reshape(-1)
+                if supplied_mask.numel() != length:
+                    raise ValueError(
+                        f"routed_experts_mask has {supplied_mask.numel()} rows but routed_experts has {length}."
+                    )
+                routed_experts_mask = torch.zeros(1, total_length, dtype=torch.bool)
+                num_filled = end_pos - start_pos
+                routed_experts_mask[:, start_pos:end_pos] = supplied_mask[:num_filled]
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(
@@ -885,6 +946,7 @@ class AgentLoopWorker:
             attention_mask=attention_mask,
             response_logprobs=response_logprobs,
             routed_experts=routed_experts,
+            routed_experts_mask=routed_experts_mask,
             multi_modal_inputs=multi_modal_inputs,
             multi_modal_data=output.multi_modal_data,
             mm_processor_kwargs=output.mm_processor_kwargs,
@@ -1102,8 +1164,38 @@ class AgentLoopWorker:
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
-        if inputs[0].routed_experts is not None:
-            optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
+        if any(input.routed_experts is not None for input in inputs):
+            # Normalize per sample: an agent loop that did not emit routing still
+            # needs placeholder rows so the batch stays rectangular. Gate on
+            # "any" rather than "first", otherwise one maskless sample silently
+            # drops the routing (or mask) another sample did provide.
+            routed_template = next(input.routed_experts for input in inputs if input.routed_experts is not None)
+            optional_outputs["routed_experts"] = torch.cat(
+                [
+                    input.routed_experts if input.routed_experts is not None else torch.zeros_like(routed_template)
+                    for input in inputs
+                ],
+                dim=0,
+            )
+            masks = []
+            num_layers = routed_template.shape[2]
+            for input_item in inputs:
+                if input_item.routed_experts_mask is not None:
+                    # A supplied mask is per token; the controller consumes one
+                    # validity entry per layer, so broadcast it over the layer axis.
+                    masks.append(input_item.routed_experts_mask.unsqueeze(-1).expand(-1, -1, num_layers))
+                elif input_item.routed_experts is not None:
+                    # Routes without validity metadata: reproduce the controller's
+                    # per-layer maskless fallback instead of disabling replay.
+                    masks.append(_validity_mask_from_routed_experts(input_item.routed_experts))
+                else:
+                    masks.append(None)
+            if any(mask is not None for mask in masks):
+                mask_template = next(mask for mask in masks if mask is not None)
+                optional_outputs["routed_experts_mask"] = torch.cat(
+                    [mask if mask is not None else torch.zeros_like(mask_template, dtype=torch.bool) for mask in masks],
+                    dim=0,
+                )
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)

@@ -240,3 +240,17 @@ def test_synthetic_padding_support_evidence_matches_its_complete_dummy_heads():
     assert evidence.shape == padded["input_ids"].shape and evidence.dtype == torch.bool
     assert evidence.all()
     assert padded["response_mask"].sum() == 0
+
+
+def test_synthetic_padding_resizes_routed_experts_mask():
+    from verl.trainer.ppo.padding_utils import construct_minimal_padding_template
+
+    source = {
+        "routed_experts": torch.zeros(6, 2, 2, dtype=torch.int16),
+        "routed_experts_mask": torch.ones(6, dtype=torch.bool),
+    }
+    padded, _ = construct_minimal_padding_template(source, {}, eos_token_id=1)
+    seq_len = padded["input_ids"].shape[0]
+    assert padded["routed_experts"].shape[0] == seq_len
+    assert padded["routed_experts_mask"].shape == (seq_len,)
+    assert not padded["routed_experts_mask"].any()
