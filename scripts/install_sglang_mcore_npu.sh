@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eo pipefail
+set -e
 USE_MEGATRON=${USE_MEGATRON:-1}
 export MAX_JOBS=32
 
@@ -25,6 +25,7 @@ pip install sgl_kernel_npu*.whl
 pip install deep_ep*.whl
 cd "$(pip show deep-ep | grep -E '^Location:' | awk '{print $2}')" && ln -s deep_ep/deep_ep_cpp*.so && cd -
 python -c "import deep_ep; print(deep_ep.__path__)"
+cd ..
 
 if [ $USE_MEGATRON -eq 1 ]; then
     echo "4. install Megatron & MindSpeed"
