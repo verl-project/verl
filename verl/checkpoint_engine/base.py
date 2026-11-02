@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Generator
@@ -29,8 +28,6 @@ from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 from verl.workers.rollout.utils import ensure_async_iterator
-
-logger = logging.getLogger(__file__)
 
 
 @dataclass
@@ -593,14 +590,20 @@ class CheckpointEngineManager:
         if not self.replicas:
             raise RuntimeError("weight update check needs at least one rollout replica")
 
-        logger.info("Verifying the weight-update path on %d rollout replica(s)", len(self.replicas))
+        print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
+        baseline_keys = 0
         for replica in self.replicas:
-            await replica.check_weights("snapshot")
+            for result in await replica.check_weights("snapshot"):
+                baseline_keys += result.get("num_keys", 0)
+        print(f"Weight update check: baseline recorded, {baseline_keys} weight shard(s)")
+
         for replica in self.replicas:
             await replica.check_weights("reset")
+        print("Weight update check: weights reset, syncing through the real update path")
 
         await self.update_weights(global_steps)
 
+        print("Weight update check: comparing against the baseline")
         checked = 0
         total_keys = 0
         failures: list[dict] = []
@@ -627,7 +630,6 @@ class CheckpointEngineManager:
                 f"first mismatched keys: {sample}"
             )
 
-        logger.info("Weight-update path verified: %d replica(s), %d weight shard(s) matched", checked, total_keys)
         return {"replicas": checked, "num_keys": total_keys, "success": True}
 
 
