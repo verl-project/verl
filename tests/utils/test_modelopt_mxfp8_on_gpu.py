@@ -281,7 +281,7 @@ def test_mxfp4_rollout_quantizes_packed_experts():
         config_file=None,
     )
     quantizer = CompressedTensorsWeightQuantizer(config)
-    weights = torch.linspace(-1, 1, 2 * 64 * 32, dtype=torch.bfloat16).reshape(2, 64, 32)
+    weights = torch.linspace(-1, 1, 2 * 64 * 32, device="cuda", dtype=torch.bfloat16).reshape(2, 64, 32)
 
     result = dict(quantizer([("model.layers.0.mlp.experts.gate_up_proj", weights)]))
 
@@ -310,13 +310,15 @@ def test_native_fp8_config_export_uses_vllm_scale_names():
             "modules_to_not_convert": ["model.layers.0.mlp.gate"],
         }
     )
-    weight = torch.linspace(-1, 1, 256 * 256, dtype=torch.bfloat16).reshape(256, 256)
+    weight = torch.linspace(-1, 1, 256 * 256, device="cuda", dtype=torch.bfloat16).reshape(256, 256)
+    expert = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn(16, 256, dtype=torch.bfloat16)
 
     result = dict(
         quantizer(
             [
                 ("model.layers.0.self_attn.q_proj.weight", weight),
+                ("model.layers.0.block_sparse_moe.experts.0.w1.weight", expert),
                 ("model.layers.0.mlp.gate.weight", gate),
             ]
         )
@@ -325,10 +327,13 @@ def test_native_fp8_config_export_uses_vllm_scale_names():
     assert set(result) == {
         "model.layers.0.self_attn.q_proj.weight",
         "model.layers.0.self_attn.q_proj.weight_scale_inv",
+        "model.layers.0.block_sparse_moe.experts.0.w1.weight",
+        "model.layers.0.block_sparse_moe.experts.0.w1.weight_scale_inv",
         "model.layers.0.mlp.gate.weight",
     }
     assert result["model.layers.0.self_attn.q_proj.weight"].dtype == torch.float8_e4m3fn
     assert result["model.layers.0.self_attn.q_proj.weight_scale_inv"].shape == (2, 2)
+    assert result["model.layers.0.block_sparse_moe.experts.0.w1.weight"].dtype == torch.float8_e4m3fn
     assert result["model.layers.0.mlp.gate.weight"] is gate
 
 
@@ -371,15 +376,31 @@ def test_native_fp8_config_export_unpacks_fused_experts():
             "weight_block_size": [128, 128],
         }
     )
-    weights = torch.randn(2, 256, 128, dtype=torch.bfloat16)
+    down = torch.randn(2, 256, 128, device="cuda", dtype=torch.bfloat16)
+    gate_up = torch.randn(2, 256, 128, device="cuda", dtype=torch.bfloat16)
 
-    result = dict(quantizer([("model.layers.0.mlp.experts.down_proj", weights)]))
+    result = dict(
+        quantizer(
+            [
+                ("model.layers.0.mlp.experts.down_proj", down),
+                ("model.layers.0.mlp.experts.gate_up_proj", gate_up),
+            ]
+        )
+    )
 
     assert set(result) == {
         "model.layers.0.mlp.experts.0.down_proj.weight",
         "model.layers.0.mlp.experts.0.down_proj.weight_scale_inv",
         "model.layers.0.mlp.experts.1.down_proj.weight",
         "model.layers.0.mlp.experts.1.down_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.0.up_proj.weight",
+        "model.layers.0.mlp.experts.0.up_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.1.gate_proj.weight",
+        "model.layers.0.mlp.experts.1.gate_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.1.up_proj.weight",
+        "model.layers.0.mlp.experts.1.up_proj.weight_scale_inv",
     }
     assert result["model.layers.0.mlp.experts.0.down_proj.weight"].dtype == torch.float8_e4m3fn
 
