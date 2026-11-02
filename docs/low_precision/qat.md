@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 10/25/2026
+Last updated: 11/2/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -22,7 +22,7 @@ HuggingFace checkpoints come in two flavors:
 | [Qwen/Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B/blob/main/config.json) | 92 layers, 512 experts, top-10 | none | BF16 | BF16 | - |
 | [zai-org/GLM-5.2](https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json) | 78 layers, 256 experts, top-8, first 3 dense | none | BF16 | BF16 | - |
 | [zai-org/GLM-5.3](https://huggingface.co/zai-org/GLM-5.3/blob/main/config.json) | same as GLM-5.2 | `fp8` | FP8 E4M3, 128x128 block, FP32 scale (`weight_scale_inv`), dynamic activation | same as linear | router `mlp.gate`, `indexers_proj`, `embed_tokens`, `lm_head`, MTP `eh_proj`, norms (`modules_to_not_convert`) |
-| [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json) | 93 layers, 896 experts, first layer dense | `compressed-tensors` | BF16 | MXFP4 W4A16: FP4 E2M1, 1x32 group, UE8M0 scale (`weight_packed` + `weight_scale`) | `self_attn`, `shared_experts`, dense `mlp`, `lm_head`, `vision_tower`, `mm_projector` (`ignore` regex) |
+| [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json) | 93 layers, 896 experts, first layer dense | `compressed-tensors` | BF16 | MXFP4 W4A16: FP4 E2M1, 1x32 group, standard MX E8M0 scale (`weight_packed` + `weight_scale`) | `self_attn`, `shared_experts`, dense `mlp`, `lm_head`, `vision_tower`, `mm_projector` (`ignore` regex) |
 | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/config.json) | 40 layers, 384 experts, top-6 | `fp8` | FP8 E4M3, 32x32 block (`wo_a` may be 128x128), UE8M0 scale (`scale_fmt: ue8m0`) | FP4 E2M1, 1x32 group, UE8M0 scale (`expert_dtype: fp4`), same layout as MXFP4 | router `ffn.gate`, indexer `wk`/`weights_proj`, `compressor` |
 
 - GLM-5.3 uses the standard HF FineGrainedFP8 format (same as DeepSeek-V3), which both vLLM and SGLang parse.
@@ -43,7 +43,9 @@ The trainer always trains in high precision; low-precision checkpoints are dequa
   `quantization_config`, converts each sync bucket into exactly the checkpoint tensors
   expected by the rollout engine. Standard native FP8 is quantized to the `Fp8Config`
   layout; native and overridden compressed-tensors configs use the same
-  compressed-tensors exporter. DeepSeek-V4 is already quantized by Megatron-Bridge, so its
+  compressed-tensors exporter. FP8_BLOCK, MXFP8 and MXFP4 use the same TileLang
+  quantize/pack kernels as QAT, while NVFP4 retains its global-scale-aware
+  compressed-tensors path. DeepSeek-V4 is already quantized by Megatron-Bridge, so its
   exporter only normalizes the packed byte dtype. The rollout worker therefore loads
   pre-quantized tensors and is not responsible for quantization.
 
@@ -172,7 +174,20 @@ actor_rollout_ref:
         mode: fp8   # FP8_BLOCK -> fp8, MXFP8 -> mxfp8, MXFP4 -> mxfp4, NVFP4 -> nvfp4
 ```
 
-QAT requires a quantized rollout: set `rollout.quantization` or use a checkpoint with a native `quantization_config` that verl supports for export and refit. verl checks at startup that the QAT mode matches the effective rollout configuration. Megatron QAT uses [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer) for fake quantization. MXFP8 uses ModelOpt's native `MXFP8_DEFAULT_CFG`; FP8_BLOCK uses a verl backend because ModelOpt's `FP8_DEFAULT_CFG` is per-tensor and its 2D-block preset is weight-only. MXFP4 and NVFP4 use compressed-tensors-compatible QDQ backends so fake quantization is bit-exact with the exported checkpoint format. Both FP4 modes apply only to routed experts. Use `mxfp4_mxfp8` for the vLLM combination where dense linear layers also use MXFP8.
+QAT requires a quantized rollout: set `rollout.quantization` or use a checkpoint
+with a native `quantization_config` that verl supports for export and refit. verl
+checks at startup that the QAT mode matches the effective rollout configuration.
+Megatron QAT uses [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer) to
+install and dispatch fake quantizers. FP8_BLOCK, MXFP8 and MXFP4 dispatch to
+verl's TileLang kernels with fused quantize-dequantize and straight-through
+gradients; parameter export invokes the same kernels without dequantization,
+making their quantized values and scales bit-exact by construction. NVFP4 keeps
+its compressed-tensors-compatible QDQ backend because its local E4M3 scales
+depend on an observed tensor-level global scale. Both FP4 modes apply only to
+routed experts. MXFP8 and MXFP4 generate E8M0 scales with DeepSeek's upward
+power-of-two rounding recipe. MXFP4 expert activations use the MXFP8 1x32 kernel
+rather than FP4. Use `mxfp4_mxfp8` for the vLLM combination where dense linear
+layers also use MXFP8.
 Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them aligned with the rollout ignore list; for Qwen3.5 MXFP8, add `*linear_attn.in_proj_a` and `*linear_attn.in_proj_b`.
 
 ### Engine notes
