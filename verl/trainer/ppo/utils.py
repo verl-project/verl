@@ -24,6 +24,10 @@ from verl.trainer.ppo.core_algos import AdvantageEstimator
 
 WorkerType = type[Worker]
 
+MINI_BATCH_MODE_FIXED_ROWS = "fixed_rows"
+MINI_BATCH_MODE_FIXED_COUNT = "fixed_count"
+MINI_BATCH_MODES = (MINI_BATCH_MODE_FIXED_ROWS, MINI_BATCH_MODE_FIXED_COUNT)
+
 
 class Role(Enum):
     """
@@ -109,28 +113,41 @@ def need_critic(config: DictConfig) -> bool:
 
 
 def validate_minibatching_config(config: DictConfig, use_critic: bool) -> None:
-    """Validate settings that would break UID-grouped mini-batch boundaries."""
+    """Validate the V1 optimizer mini-batch mode and its shuffle constraints."""
+    mode = config.trainer.v1.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_ROWS)
+    if mode not in MINI_BATCH_MODES:
+        raise ValueError(f"trainer.v1.mini_batch_mode must be one of {MINI_BATCH_MODES}, got {mode!r}")
+    if mode == MINI_BATCH_MODE_FIXED_ROWS:
+        return
+
     models = [("actor", config.actor_rollout_ref.actor)]
     if use_critic:
         models.append(("critic", config.critic))
     for name, model in models:
         if model.shuffle and model.ppo_epochs > 1:
             raise ValueError(
-                f"UID-grouped mini-batching does not support {name}.shuffle=true with "
+                f"fixed_count mini-batching does not support {name}.shuffle=true with "
                 f"{name}.ppo_epochs={model.ppo_epochs}. Multi-epoch row shuffling would split UID groups "
                 "and invalidate per-mini-batch DP balancing. Set shuffle=false or ppo_epochs=1."
             )
 
 
-def get_uid_balance_unit_size(config: DictConfig, use_critic: bool, update_actor: bool) -> int:
-    """Return the prompt/UID count of a balancing unit.
+def get_balance_unit_size(
+    config: DictConfig,
+    *,
+    use_critic: bool,
+    update_actor: bool,
+    mini_batch_mode: str,
+) -> int:
+    """Return the shared actor/critic balancing-unit size.
 
-    Optimizer mini-batches are defined in prompt/UID units, while each prompt
-    may contribute any number of training rows.
+    The unit is measured in trajectory rows for ``fixed_rows`` and source
+    prompt/UID groups for ``fixed_count``.
     """
     models = [config.critic] if use_critic else []
     models += [config.actor_rollout_ref.actor] if update_actor else []
-    return math.gcd(*(model.ppo_mini_batch_size for model in models)) if models else 0
+    scale = config.actor_rollout_ref.rollout.n if mini_batch_mode == MINI_BATCH_MODE_FIXED_ROWS else 1
+    return math.gcd(*(model.ppo_mini_batch_size * scale for model in models)) if models else 0
 
 
 def _global_micro_batch_multiple(

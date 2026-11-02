@@ -183,7 +183,8 @@ def test_update_actor_passes_score_centering_flag(score_centering):
                     "policy_loss": {"rollout_correction": {"score_centering": score_centering}},
                 },
                 "rollout": {"n": 4, "temperature": 1.0},
-            }
+            },
+            "trainer": {"v1": {"mini_batch_mode": "fixed_count"}},
         }
     )
     trainer.actor_rollout_wg = MagicMock()
@@ -191,7 +192,7 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     batch = SimpleNamespace(
         extra_info={
             "_minibatch_layout": {
-                "unit_prompt_count": 2,
+                "unit_count": 2,
                 "unit_global_sizes": [8],
                 "unit_padding_counts": [1],
             }

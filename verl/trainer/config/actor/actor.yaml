@@ -14,7 +14,9 @@ rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
 # fsdp, fsdp2 or megatron. must be set.
 strategy: ???
 
-# Number of source prompts per PPO mini-batch in the V1 trainer
+# Base size of one global PPO optimizer mini-batch.
+# V1 fixed_rows targets ppo_mini_batch_size * rollout.n trajectory rows.
+# V1 fixed_count uses ppo_mini_batch_size source-prompt/UID groups.
 ppo_mini_batch_size: 256
 
 # [Deprecated] Global micro batch size
@@ -119,9 +121,10 @@ kl_loss_type: low_var_kl
 ppo_epochs: 1
 
 # Shuffle training data before PPO updates.
-# V1 shuffles prompt/UID groups once on the trainer and requires ppo_epochs = 1.
-# The legacy trainer permits multiple epochs by balancing the full train batch,
-# then reshuffling trajectory rows independently within each DP rank for every epoch.
+# V1 fixed_count shuffles UID groups on the trainer and requires ppo_epochs = 1.
+# V1 fixed_rows with multiple epochs falls back to whole-batch DP balancing and
+# reshuffles trajectory rows independently within each DP rank for every epoch.
+# V0 shuffles trajectory rows independently within each DP rank for every epoch.
 shuffle: false
 
 # The seed used to construct mini-batch

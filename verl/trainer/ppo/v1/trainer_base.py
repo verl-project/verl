@@ -60,15 +60,16 @@ from verl.trainer.ppo.metric_utils import (
     get_metric_data_with_optional_routed_experts,
     process_validation_metrics,
 )
-from verl.trainer.ppo.padding_utils import append_padding_samples
+from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY, append_padding_samples
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import (
+    MINI_BATCH_MODE_FIXED_ROWS,
     Role,
     create_rl_dataset,
     create_rl_sampler,
+    get_balance_unit_size,
     get_minibatch_padding_multiple,
-    get_uid_balance_unit_size,
     need_critic,
     need_reference_policy,
     need_teacher_policy,
@@ -577,8 +578,7 @@ class PPOTrainer(ABC):
         """Process one train batch through rollout post-processing and PPO updates.
 
         The batch contains up to ``sample_batch_size`` materialized prompt/UID groups.
-        Each model performs one optimizer update per full or final partial UID
-        mini-batch in every PPO epoch.
+        Optimizer mini-batches follow ``trainer.v1.mini_batch_mode``.
         """
         # 1. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
@@ -601,7 +601,7 @@ class PPOTrainer(ABC):
         batch = self._balance_batch(batch, metrics=metrics)
         # TransferQueue writes can rebuild KVBatchMeta and drop caller-owned extra_info.
         # Keep the controller-computed layout locally so optimizer updates can restore it.
-        mini_batch_layout = batch.extra_info[_MINIBATCH_LAYOUT_KEY]
+        mini_batch_layout = batch.extra_info.get(_MINIBATCH_LAYOUT_KEY)
 
         # 4. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -624,13 +624,15 @@ class PPOTrainer(ABC):
         # 8. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
-                batch.extra_info.setdefault(_MINIBATCH_LAYOUT_KEY, mini_batch_layout)
+                if mini_batch_layout is not None:
+                    batch.extra_info.setdefault(_MINIBATCH_LAYOUT_KEY, mini_batch_layout)
                 batch = self._update_critic(batch, metrics=metrics)
 
         # 9. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
-                batch.extra_info.setdefault(_MINIBATCH_LAYOUT_KEY, mini_batch_layout)
+                if mini_batch_layout is not None:
+                    batch.extra_info.setdefault(_MINIBATCH_LAYOUT_KEY, mini_batch_layout)
                 batch = self._update_actor(batch, metrics=metrics)
 
         return batch
@@ -1620,25 +1622,56 @@ class PPOTrainer(ABC):
             update_actor=self.config.trainer.critic_warmup <= self.global_steps,
         )
 
-    def _get_uid_balance_unit_size(self) -> int:
-        """Prompt/UID count balanced across DP ranks at a time."""
-        return get_uid_balance_unit_size(
+    def _get_mini_batch_mode(self) -> str:
+        """Return the configured V1 optimizer mini-batch split mode."""
+        return self.config.trainer.v1.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_ROWS)
+
+    def _get_active_model_configs(self) -> list[DictConfig]:
+        """Return model configs that perform optimizer updates in the current step."""
+        models = []
+        if self.config.trainer.critic_warmup <= self.global_steps:
+            models.append(self.config.actor_rollout_ref.actor)
+        if self.use_critic:
+            models.append(self.config.critic)
+        return models
+
+    def _get_balance_unit_size(self) -> int:
+        """Return the row or UID count balanced across DP ranks at a time."""
+        return get_balance_unit_size(
             self.config,
             use_critic=self.use_critic,
             update_actor=self.config.trainer.critic_warmup <= self.global_steps,
+            mini_batch_mode=self._get_mini_batch_mode(),
         )
 
+    def _get_model_mini_batch_size(self, model_config: DictConfig) -> int:
+        """Resolve one model's mini-batch size in the configured mode's unit."""
+        size = model_config.ppo_mini_batch_size
+        if self._get_mini_batch_mode() == MINI_BATCH_MODE_FIXED_ROWS:
+            size *= self.config.actor_rollout_ref.rollout.n
+        return size
+
+    def _use_worker_side_shuffle(self) -> bool:
+        """Whether fixed-row mini-batches must be reshuffled by workers each epoch."""
+        return self._get_mini_batch_mode() == MINI_BATCH_MODE_FIXED_ROWS and any(
+            model.shuffle and model.ppo_epochs > 1 for model in self._get_active_model_configs()
+        )
+
+    def _get_shuffle_seed(self) -> list[int] | None:
+        """Build a deterministic seed shared by all controller-balanced models."""
+        seeds = [model.data_loader_seed for model in self._get_active_model_configs() if model.shuffle]
+        return [*seeds, self.global_steps, self.local_trigger_step] if seeds else None
+
     @staticmethod
-    def _get_global_mini_batch_layout(batch: KVBatchMeta, prompt_mini_batch_size: int) -> dict[str, list[int]]:
+    def _get_global_mini_batch_layout(batch: KVBatchMeta, mini_batch_size: int) -> dict[str, list[int]]:
         """Coalesce balancing units into full or final partial optimizer mini-batches."""
         layout = batch.extra_info[_MINIBATCH_LAYOUT_KEY]
-        unit_prompt_count = layout["unit_prompt_count"]
-        if prompt_mini_batch_size % unit_prompt_count != 0:
+        unit_count = layout["unit_count"]
+        if mini_batch_size % unit_count != 0:
             raise ValueError(
-                f"ppo_mini_batch_size={prompt_mini_batch_size} must be divisible by "
-                f"unit_prompt_count={unit_prompt_count}"
+                f"mini_batch_size={mini_batch_size} must be divisible by balancing unit_count={unit_count}"
             )
-        units_per_mini_batch = prompt_mini_batch_size // unit_prompt_count
+        units_per_mini_batch = mini_batch_size // unit_count
 
         def coalesce(unit_sizes: list[int]) -> list[int]:
             return [
@@ -1652,7 +1685,7 @@ class PPOTrainer(ABC):
         }
 
     def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen"):
-        """Build UID-grouped mini-batches, pad each one, and balance it across DP ranks."""
+        """Construct configured optimizer mini-batches and balance their workloads across DP ranks."""
         # get actor dp size
         role, worker_group = "actor", self.actor_rollout_wg
         if role not in worker_group._dispatch_info:
@@ -1662,42 +1695,74 @@ class PPOTrainer(ABC):
             dp_rank_mapping = worker_group._dispatch_info[role]
         dp_size = max(dp_rank_mapping) + 1
 
-        uid_to_indices = defaultdict(list)
-        for index, key in enumerate(batch.keys):
-            fields = key.rsplit("_", 2)
-            if len(fields) != 3:
-                raise ValueError(f"Unexpected trajectory key format: {key}")
-            uid_to_indices[fields[0]].append(index)
+        mode = self._get_mini_batch_mode()
+        unit_count = self._get_balance_unit_size()
+        shuffle_seed = self._get_shuffle_seed()
 
-        uids = list(uid_to_indices)
-        update_actor = self.config.trainer.critic_warmup <= self.global_steps
-        if not uids:
-            raise ValueError("The sampled train batch contains no materialized UID groups")
-        unit_prompt_count = self._get_uid_balance_unit_size() or len(uids)
-        shuffle_seeds = []
-        if update_actor and self.config.actor_rollout_ref.actor.shuffle:
-            shuffle_seeds.append(self.config.actor_rollout_ref.actor.data_loader_seed)
-        if self.use_critic and self.config.critic.shuffle:
-            shuffle_seeds.append(self.config.critic.data_loader_seed)
-        if shuffle_seeds:
-            seed = [*shuffle_seeds, self.global_steps, self.local_trigger_step]
-            order = np.random.default_rng(seed).permutation(len(uids))
-            uids = [uids[index] for index in order]
+        if mode == MINI_BATCH_MODE_FIXED_ROWS:
+            mini_batch_sizes = [self._get_model_mini_batch_size(model) for model in self._get_active_model_configs()]
+            batch_multiple = math.lcm(dp_size, *mini_batch_sizes)
+            pad_size = (-len(batch)) % batch_multiple
+            batch = append_padding_samples(batch, pad_size, self.tokenizer.eos_token_id)
 
-        units = []
-        for start in range(0, len(uids), unit_prompt_count):
-            unit_uids = uids[start : start + unit_prompt_count]
-            units.append([index for uid in unit_uids for index in uid_to_indices[uid]])
+            if self._use_worker_side_shuffle():
+                batch.extra_info.pop(_MINIBATCH_LAYOUT_KEY, None)
+                global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
+                workload_lst = calculate_workload(global_seqlen_lst)
+                global_partition_lst = get_seqlen_balanced_partitions(
+                    workload_lst, k_partitions=dp_size, equal_size=True
+                )
+                batch.reorder([index for partition in global_partition_lst for index in partition])
+                metrics.update(
+                    log_seqlen_unbalance(
+                        seqlen_list=global_seqlen_lst.tolist(),
+                        partitions=global_partition_lst,
+                        prefix=logging_prefix,
+                    )
+                )
+                return batch
 
-        batch_multiple = self._get_minibatch_padding_multiple(dp_size)
-        pad_sizes = [(-len(unit)) % batch_multiple for unit in units]
-        original_batch_size = len(batch)
-        total_pad_size = sum(pad_sizes)
-        batch = append_padding_samples(batch, total_pad_size, self.tokenizer.eos_token_id)
-        next_padding_index = original_batch_size
-        for unit, pad_size in zip(units, pad_sizes, strict=True):
-            unit.extend(range(next_padding_index, next_padding_index + pad_size))
-            next_padding_index += pad_size
+            unit_count = unit_count or len(batch)
+            if unit_count % dp_size != 0:
+                raise ValueError(
+                    f"fixed_rows balancing unit size {unit_count} must be divisible by actor dp_size={dp_size}"
+                )
+            order = (
+                np.random.default_rng(shuffle_seed).permutation(len(batch)).tolist()
+                if shuffle_seed is not None
+                else list(range(len(batch)))
+            )
+            units = [order[start : start + unit_count] for start in range(0, len(order), unit_count)]
+            pad_sizes = [sum(bool(batch.tags[index].get("is_padding", False)) for index in unit) for unit in units]
+        else:
+            uid_to_indices = defaultdict(list)
+            for index, key in enumerate(batch.keys):
+                fields = key.rsplit("_", 2)
+                if len(fields) != 3:
+                    raise ValueError(f"Unexpected trajectory key format: {key}")
+                uid_to_indices[fields[0]].append(index)
+
+            uids = list(uid_to_indices)
+            if not uids:
+                raise ValueError("The sampled train batch contains no materialized UID groups")
+            unit_count = unit_count or len(uids)
+            if shuffle_seed is not None:
+                order = np.random.default_rng(shuffle_seed).permutation(len(uids))
+                uids = [uids[index] for index in order]
+
+            units = []
+            for start in range(0, len(uids), unit_count):
+                unit_uids = uids[start : start + unit_count]
+                units.append([index for uid in unit_uids for index in uid_to_indices[uid]])
+
+            batch_multiple = self._get_minibatch_padding_multiple(dp_size)
+            pad_sizes = [(-len(unit)) % batch_multiple for unit in units]
+            original_batch_size = len(batch)
+            batch = append_padding_samples(batch, sum(pad_sizes), self.tokenizer.eos_token_id)
+            next_padding_index = original_batch_size
+            for unit, pad_size in zip(units, pad_sizes, strict=True):
+                unit.extend(range(next_padding_index, next_padding_index + pad_size))
+                next_padding_index += pad_size
 
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
@@ -1713,7 +1778,7 @@ class PPOTrainer(ABC):
                 global_partition_lst[rank].extend(share[::2] + share[1::2][::-1])
 
         batch.extra_info[_MINIBATCH_LAYOUT_KEY] = {
-            "unit_prompt_count": unit_prompt_count,
+            "unit_count": unit_count,
             "unit_global_sizes": [len(unit) for unit in units],
             "unit_padding_counts": pad_sizes,
         }
@@ -1900,14 +1965,27 @@ class PPOTrainer(ABC):
 
         return batch
 
+    def _get_update_minibatching_info(self, batch: KVBatchMeta, model_config: DictConfig) -> dict[str, Any]:
+        """Build the worker mini-batch contract for one actor or critic update."""
+        mini_batch_size = self._get_model_mini_batch_size(model_config)
+        if self._use_worker_side_shuffle():
+            return {
+                "global_batch_size": mini_batch_size,
+                "mini_batch_size": mini_batch_size,
+                "dataloader_kwargs": {"shuffle": model_config.shuffle},
+                PADDING_MASK_KEY: [bool(tag.get("is_padding", False)) for tag in batch.tags],
+            }
+        return {
+            **self._get_global_mini_batch_layout(batch, mini_batch_size),
+            "dataloader_kwargs": {"shuffle": False},
+        }
+
     def _update_critic(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the critic network."""
-        ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
         extra_info = {
-            **self._get_global_mini_batch_layout(batch, ppo_mini_batch_size),
+            **self._get_update_minibatching_info(batch, self.config.critic),
             "epochs": self.config.critic.ppo_epochs,
             "seed": self.config.critic.data_loader_seed,
-            "dataloader_kwargs": {"shuffle": False},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
@@ -1923,7 +2001,6 @@ class PPOTrainer(ABC):
 
     def _update_actor(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Update the actor network."""
-        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
@@ -1948,10 +2025,9 @@ class PPOTrainer(ABC):
             "distillation_use_topk": distillation_use_topk,
             "distillation_only": distillation_only,
             "score_centering": score_centering,
-            **self._get_global_mini_batch_layout(batch, ppo_mini_batch_size),
+            **self._get_update_minibatching_info(batch, self.config.actor_rollout_ref.actor),
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
-            "dataloader_kwargs": {"shuffle": False},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)

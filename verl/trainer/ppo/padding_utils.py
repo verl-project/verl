@@ -41,6 +41,7 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 logger = logging.getLogger(__name__)
 
 SYNTHETIC_PADDING_SEQ_LEN = 128
+PADDING_MASK_KEY = "_verl_is_padding"
 
 
 def build_padding_position_ids(source_position_ids: Any, attention_mask: torch.Tensor) -> torch.Tensor:

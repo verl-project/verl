@@ -29,6 +29,7 @@ from unittest.mock import MagicMock
 import torch
 from tensordict import TensorDict
 
+from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.utils import tensordict_utils as tu
 from verl.workers.engine_workers import TrainingWorker
 
@@ -122,6 +123,64 @@ def test_variable_size_update_loop_excludes_padding_from_loss_normalization(monk
     ]
     assert names == ["mini_batch0", "mini_batch1", "mini_batch2", "mini_batch3"]
     assert worker.profiler.step.call_count == 4
+
+
+def test_fixed_size_update_loop_counts_non_padding_rows_after_shuffle():
+    worker = _worker(_engine())
+    seen_batches = []
+
+    def train_batch(batch):
+        seen_batches.append((batch["row"].tolist(), tu.get(batch, "global_batch_size")))
+        return {}
+
+    worker.train_batch = train_batch
+    data = TensorDict(
+        {"row": torch.arange(4), "loss_mask": torch.zeros((4, 2), dtype=torch.int64)},
+        batch_size=[4],
+    )
+    tu.assign_non_tensor(
+        data,
+        mini_batch_size=2,
+        global_batch_size=2,
+        dataloader_kwargs={"shuffle": True},
+    )
+    tu.assign_non_tensor_data(data, PADDING_MASK_KEY, [False, True, False, False])
+
+    assert TrainingWorker.train_mini_batch(worker, data) is None
+    assert len(seen_batches) == 2
+    assert sum(global_batch_size for _, global_batch_size in seen_batches) == 3
+    for rows, global_batch_size in seen_batches:
+        assert global_batch_size == sum(row != 1 for row in rows)
+
+
+def test_fixed_size_valid_row_count_is_aggregated_across_dp(monkeypatch):
+    data = TensorDict(
+        {"loss_mask": torch.zeros((2, 2), dtype=torch.int64)},
+        batch_size=[2],
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group: 2)
+
+    def all_gather_object(output, local_valid_rows, group):
+        output[:] = [local_valid_rows, 2]
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+    worker = _worker(
+        _engine(
+            get_data_parallel_size=lambda: 2,
+            get_data_parallel_group=lambda: object(),
+        )
+    )
+    seen_global_batch_sizes = []
+    worker.train_batch = lambda batch: seen_global_batch_sizes.append(tu.get(batch, "global_batch_size")) or {}
+    tu.assign_non_tensor(
+        data,
+        mini_batch_size=4,
+        global_batch_size=4,
+    )
+    tu.assign_non_tensor_data(data, PADDING_MASK_KEY, [False, True, False, False])
+
+    assert TrainingWorker.train_mini_batch(worker, data) is None
+    assert seen_global_batch_sizes == [3]
 
 
 def test_forward_only_stage_is_not_a_profiler_step():

@@ -32,6 +32,7 @@ from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
+from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
@@ -248,7 +249,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
         counts used for slicing. ``global_mini_batch_padding_counts`` carries the
         number of synthetic rows excluded from loss normalization.
         Otherwise the legacy fixed-size ``mini_batch_size`` or
-        ``num_mini_batch`` contract is used.
+        ``num_mini_batch`` contract is used. The optional global padding mask
+        keeps sequence-level normalization padding-aware when workers shuffle rows.
         """
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
@@ -257,6 +259,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         num_mini_batch = tu.pop(data, key="num_mini_batch", default=None)
         global_mini_batch_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
         global_mini_batch_padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
+        global_padding_mask = tu.pop(data, key=PADDING_MASK_KEY, default=None)
         epochs = tu.pop(data, key="epochs", default=1)
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
@@ -266,6 +269,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if global_mini_batch_sizes is not None:
             if mini_batch_size is not None or num_mini_batch is not None:
                 raise ValueError("global_mini_batch_sizes cannot be combined with mini_batch_size or num_mini_batch")
+            if global_padding_mask is not None:
+                raise ValueError(f"{PADDING_MASK_KEY} cannot be combined with global_mini_batch_sizes")
             dp_size = self.engine.get_data_parallel_size()
             if global_mini_batch_padding_counts is None:
                 raise ValueError("global_mini_batch_padding_counts is required with global_mini_batch_sizes")
@@ -275,11 +280,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     f"got {global_mini_batch_padding_counts} and {global_mini_batch_sizes}"
                 )
             if any(
-                padding_count < 0 or padding_count >= size
+                padding_count < 0 or padding_count > size
                 for padding_count, size in zip(global_mini_batch_padding_counts, global_mini_batch_sizes, strict=True)
             ):
                 raise ValueError(
-                    "Each mini-batch padding count must be non-negative and smaller than its padded size, "
+                    "Each mini-batch padding count must be between zero and its padded size, "
                     f"got padding={global_mini_batch_padding_counts}, padded={global_mini_batch_sizes}"
                 )
             if any(size % dp_size != 0 for size in global_mini_batch_sizes):
@@ -310,6 +315,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
             )
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
+        if global_padding_mask is not None:
+            dp_size = self.engine.get_data_parallel_size()
+            if len(global_padding_mask) != batch_size_per_dp * dp_size:
+                raise ValueError(
+                    f"{PADDING_MASK_KEY} must describe the global batch, got "
+                    f"{len(global_padding_mask)} rows for local_batch_size={batch_size_per_dp} and dp_size={dp_size}"
+                )
+            dp_rank = self.engine.get_data_parallel_rank()
+            start = dp_rank * batch_size_per_dp
+            data[PADDING_MASK_KEY] = torch.as_tensor(
+                global_padding_mask[start : start + batch_size_per_dp], dtype=torch.bool
+            )
+
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
@@ -338,8 +356,22 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     tu.assign_non_tensor_data(
                         mini_batch_td,
                         "global_batch_size",
-                        global_mini_batch_sizes[layout_index] - global_mini_batch_padding_counts[layout_index],
+                        max(
+                            1,
+                            global_mini_batch_sizes[layout_index] - global_mini_batch_padding_counts[layout_index],
+                        ),
                     )
+                elif PADDING_MASK_KEY in mini_batch_td:
+                    local_padding_mask = mini_batch_td.pop(PADDING_MASK_KEY)
+                    local_valid_rows = int((~local_padding_mask).sum().item())
+                    if self.engine.get_data_parallel_size() > 1:
+                        dp_group = self.engine.get_data_parallel_group()
+                        valid_row_counts = [0] * torch.distributed.get_world_size(dp_group)
+                        torch.distributed.all_gather_object(valid_row_counts, local_valid_rows, dp_group)
+                        global_valid_rows = sum(valid_row_counts)
+                    else:
+                        global_valid_rows = local_valid_rows
+                    tu.assign_non_tensor_data(mini_batch_td, "global_batch_size", max(1, global_valid_rows))
                 tu.assign_non_tensor(
                     mini_batch_td,
                     global_token_num=NonTensorData(global_token_num),

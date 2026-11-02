@@ -18,6 +18,7 @@ import pytest
 from omegaconf import OmegaConf
 from transfer_queue import KVBatchMeta
 
+from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.trainer.ppo.utils import (
     get_minibatch_padding_multiple,
     validate_minibatching_config,
@@ -33,7 +34,18 @@ class _StubTrainer(PPOTrainer):
         pass
 
 
-def _minibatching_config(*, dynamic=True, shuffle=False, epochs=1):
+def _fake_append_padding_samples(batch, pad_size, eos_token_id):
+    del eos_token_id
+    pad_keys = [f"pad{i}_0_0" for i in range(pad_size)]
+    return KVBatchMeta(
+        partition_id=batch.partition_id,
+        keys=batch.keys + pad_keys,
+        tags=batch.tags + [{"seq_len": 128, "is_padding": True} for _ in pad_keys],
+        extra_info=batch.extra_info,
+    )
+
+
+def _minibatching_config(*, mode="fixed_count", dynamic=True, shuffle=False, epochs=1):
     return OmegaConf.create(
         {
             "actor_rollout_ref": {
@@ -64,7 +76,7 @@ def _minibatching_config(*, dynamic=True, shuffle=False, epochs=1):
                 "shuffle": False,
                 "ppo_epochs": 1,
             },
-            "trainer": {"critic_warmup": 0},
+            "trainer": {"critic_warmup": 0, "v1": {"mini_batch_mode": mode}},
         }
     )
 
@@ -99,14 +111,117 @@ def test_dynamic_padding_only_requires_dp_divisibility():
     )
 
 
-def test_multi_epoch_shuffle_is_rejected():
+def test_fixed_count_multi_epoch_shuffle_is_rejected():
     config = _minibatching_config(shuffle=True, epochs=2)
 
     with pytest.raises(ValueError, match="does not support actor.shuffle=true"):
         validate_minibatching_config(config, use_critic=False)
 
 
-def test_balance_batch_allows_partial_final_uid_minibatches(monkeypatch):
+def test_fixed_rows_multi_epoch_shuffle_is_allowed():
+    config = _minibatching_config(mode="fixed_rows", shuffle=True, epochs=2)
+
+    validate_minibatching_config(config, use_critic=True)
+
+
+def test_missing_mode_defaults_to_fixed_rows():
+    config = _minibatching_config()
+    del config.trainer.v1.mini_batch_mode
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = config
+
+    assert trainer._get_mini_batch_mode() == "fixed_rows"
+
+
+def test_invalid_mini_batch_mode_is_rejected():
+    config = _minibatching_config(mode="unknown")
+
+    with pytest.raises(ValueError, match="trainer.v1.mini_batch_mode"):
+        validate_minibatching_config(config, use_critic=False)
+
+
+def test_fixed_rows_balances_fixed_trajectory_minibatches(monkeypatch):
+    config = _minibatching_config(mode="fixed_rows", dynamic=True)
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = config
+    trainer.use_critic = True
+    trainer.use_reference_policy = False
+    trainer.global_steps = 1
+    trainer.local_trigger_step = 0
+    trainer.tokenizer = SimpleNamespace(eos_token_id=0)
+    trainer.actor_rollout_wg = SimpleNamespace(_dispatch_info={"actor": [0, 1]})
+
+    output_counts = {"p0": 6, "p1": 1, "p2": 3, "p3": 2, "p4": 3}
+    keys = [
+        f"{uid}_0_{output_index}" for uid, output_count in output_counts.items() for output_index in range(output_count)
+    ]
+    batch = KVBatchMeta(
+        partition_id="test",
+        keys=keys,
+        tags=[{"seq_len": index + 1} for index in range(len(keys))],
+        extra_info={},
+    )
+    monkeypatch.setattr(
+        "verl.trainer.ppo.v1.trainer_base.append_padding_samples",
+        _fake_append_padding_samples,
+    )
+
+    result = trainer._balance_batch(batch, metrics={})
+
+    assert result.extra_info["_minibatch_layout"] == {
+        "unit_count": 4,
+        "unit_global_sizes": [4, 4, 4, 4],
+        "unit_padding_counts": [0, 0, 0, 1],
+    }
+    assert trainer._get_global_mini_batch_layout(result, 8) == {
+        "global_mini_batch_sizes": [8, 8],
+        "global_mini_batch_padding_counts": [0, 1],
+    }
+    assert trainer._get_global_mini_batch_layout(result, 4) == {
+        "global_mini_batch_sizes": [4, 4, 4, 4],
+        "global_mini_batch_padding_counts": [0, 0, 0, 1],
+    }
+
+    shards = [result.keys[:8], result.keys[8:]]
+    critic_minibatches = [[key for shard in shards for key in shard[offset : offset + 2]] for offset in range(0, 8, 2)]
+    assert any(key.startswith("p0_") for key in critic_minibatches[0])
+    assert any(key.startswith("p0_") for key in critic_minibatches[1])
+
+
+def test_fixed_rows_multi_epoch_shuffle_uses_whole_batch_fallback(monkeypatch):
+    config = _minibatching_config(mode="fixed_rows", dynamic=True, shuffle=True, epochs=2)
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = config
+    trainer.use_critic = False
+    trainer.use_reference_policy = False
+    trainer.global_steps = 1
+    trainer.local_trigger_step = 0
+    trainer.tokenizer = SimpleNamespace(eos_token_id=0)
+    trainer.actor_rollout_wg = SimpleNamespace(_dispatch_info={"actor": [0, 1]})
+    batch = KVBatchMeta(
+        partition_id="test",
+        keys=[f"row{index}" for index in range(5)],
+        tags=[{"seq_len": index + 1} for index in range(5)],
+        extra_info={},
+    )
+    monkeypatch.setattr(
+        "verl.trainer.ppo.v1.trainer_base.append_padding_samples",
+        _fake_append_padding_samples,
+    )
+
+    result = trainer._balance_batch(batch, metrics={})
+    batching_info = trainer._get_update_minibatching_info(result, config.actor_rollout_ref.actor)
+
+    assert "_minibatch_layout" not in result.extra_info
+    assert batching_info == {
+        "global_batch_size": 8,
+        "mini_batch_size": 8,
+        "dataloader_kwargs": {"shuffle": True},
+        PADDING_MASK_KEY: [bool(tag.get("is_padding", False)) for tag in result.tags],
+    }
+
+
+def test_fixed_count_allows_partial_final_uid_minibatches(monkeypatch):
     config = _minibatching_config(dynamic=True)
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.config = config
@@ -130,26 +245,16 @@ def test_balance_batch_allows_partial_final_uid_minibatches(monkeypatch):
         extra_info={},
     )
 
-    def fake_append_padding_samples(batch, pad_size, eos_token_id):
-        del eos_token_id
-        pad_keys = [f"pad{i}_0_0" for i in range(pad_size)]
-        return KVBatchMeta(
-            partition_id=batch.partition_id,
-            keys=batch.keys + pad_keys,
-            tags=batch.tags + [{"seq_len": 128, "is_padding": True} for _ in pad_keys],
-            extra_info=batch.extra_info,
-        )
-
     monkeypatch.setattr(
         "verl.trainer.ppo.v1.trainer_base.append_padding_samples",
-        fake_append_padding_samples,
+        _fake_append_padding_samples,
     )
 
     result = trainer._balance_batch(batch, metrics={})
 
     layout = result.extra_info["_minibatch_layout"]
     assert layout == {
-        "unit_prompt_count": 2,
+        "unit_count": 2,
         "unit_global_sizes": [4, 6, 6, 2],
         "unit_padding_counts": [1, 1, 1, 0],
     }
@@ -195,7 +300,7 @@ def test_step_restores_minibatch_layout_after_metadata_rebuild():
     trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=object())
 
     layout = {
-        "unit_prompt_count": 2,
+        "unit_count": 2,
         "unit_global_sizes": [4],
         "unit_padding_counts": [0],
     }

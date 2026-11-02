@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 10/30/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -30,23 +30,42 @@ https://github.com/Begunner/verl-link/blob/main/v1_trainer.svg?raw=true)
 
 ## The V1 Training Loop
 
-When every sampled prompt produces at least one trajectory, all trainer modes process the same number of PPO
-mini-batches per global step:
+Choose how optimizer mini-batches are formed with `trainer.v1.mini_batch_mode`:
 
-```text
-mini-batches per PPO epoch
-  = data.train_batch_size / actor_rollout_ref.actor.ppo_mini_batch_size
-```
+- `fixed_rows` (default) uses fixed trajectory-row boundaries. A full mini-batch targets
+  `actor_rollout_ref.actor.ppo_mini_batch_size * actor_rollout_ref.rollout.n`
+  trajectory rows, and a UID may cross a boundary. Let `T` be the materialized
+  row count and `L` the least common multiple of the DP size and all active
+  actor/critic row mini-batch sizes. The shared batch is padded to
+  `P = ceil(T / L) * L`; each model performs `P / its row mini-batch size`
+  optimizer updates per PPO epoch. Actor and critic mini-batch sizes may differ.
+- `fixed_count` treats `ppo_mini_batch_size` as a source-prompt/UID count. All
+  trajectories from one UID stay in the same mini-batch, so row counts vary. If
+  `R` sampled UID groups materialize at least one trajectory, the actor performs
+  `ceil(R / ppo_mini_batch_size)` optimizer updates per PPO epoch.
 
-The modes differ in where this split happens. `sync` and `colocate_async` sample the full training batch in one controller round, then the actor worker divides it into PPO mini-batches. `separate_async` streams one PPO mini-batch through the controller at a time, overlapping rollout with mini-batch training.
+Synthetic rows used to align actor, critic, and DP boundaries are excluded
+from sequence-level loss normalization.
+
+Both modes balance preserved optimizer mini-batches across data-parallel ranks.
+`fixed_count` supports trainer-side UID shuffle only for one PPO epoch; combining
+`shuffle=true` with `ppo_epochs > 1` is rejected. `fixed_rows` supports multiple
+shuffled epochs by falling back to whole-train-batch DP balancing and letting
+workers reshuffle trajectory rows independently for every epoch.
 
 The built-in sync sampler can keep failed prompt groups that produced no trajectories by setting
-`trainer.v1.sampler.sync_refill_failed_groups=false`. In that case, only materialized UID groups are trained:
-full mini-batches retain `ppo_mini_batch_size` UIDs and the final mini-batch may be smaller, so its optimizer-step
-count is `ceil(materialized UID groups / ppo_mini_batch_size)`. Setting the option to `true` replaces empty failed
-groups and preserves the fixed step count at the cost of additional synchronous rollout work.
+`trainer.v1.sampler.sync_refill_failed_groups=false`. Under `fixed_count`, only
+materialized UID groups are trained and the final UID mini-batch may be smaller.
+Setting the option to `true` replaces empty failed groups and preserves the
+configured UID count at the cost of additional synchronous rollout work. Under
+`fixed_rows`, failures and multi-output expansion instead change the materialized
+trajectory-row count; refilling empty groups does not guarantee a fixed optimizer
+step count when prompts emit different numbers of rows.
 
-The following invariant makes that value equal to the number of PPO mini-batches in `separate_async`:
+`sync` and `colocate_async` sample a full controller train batch at a time.
+`separate_async` streams `ppo_mini_batch_size` source prompts through the
+controller at a time and overlaps rollout with training. Its configuration keeps
+the prompt-level invariant:
 
 ```text
 data.train_batch_size
@@ -54,7 +73,12 @@ data.train_batch_size
   × actor_rollout_ref.actor.ppo_mini_batch_size
 ```
 
-For example, a train batch of 64 with a PPO mini-batch of 16 requires `parameter_sync_step=4`.
+For example, a train batch of 64 with a PPO mini-batch of 16 requires
+`parameter_sync_step=4`. With `fixed_count`, each controller batch normally
+corresponds to one UID-count optimizer update. With `fixed_rows`, variable-output
+expansion can produce more than one row-count optimizer update inside that
+controller batch; parameter synchronization still follows
+`parameter_sync_step`.
 
 ## Partial Rollout and Staleness
 
