@@ -614,7 +614,7 @@ class PPOTrainer(ABC):
 
     # ------------------------------ abstract methods ------------------------------
 
-    def sync_initial_weights(self, checkpoint_manager: "CheckpointEngineManager" | None = None):
+    def sync_initial_weights(self, checkpoint_manager: Optional["CheckpointEngineManager"] = None):
         """Push the trainer's weights to the rollout engines once initialization ends.
 
         With the weight-update check enabled on a fresh run, verify the update
