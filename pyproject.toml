@@ -158,7 +158,7 @@ megatron = [
     "torchaudio==2.11.0",
     "nvidia-mathdx",
     "apex",
-    "transformer-engine",
+    "transformer-engine==2.20.2",
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",

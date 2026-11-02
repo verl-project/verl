@@ -213,6 +213,16 @@ class MegatronEngine(BaseEngine):
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
         self._rollout_weight_quantizer = None
 
+        # override_transformer_config.fp4 trains the routed experts in NVFP4.
+        from verl.utils.megatron.low_precision import bf16_layers_at_start_end
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        overrides = self.engine_config.override_transformer_config
+        self._real_nvfp4_enabled = real_nvfp4_enabled(overrides)
+        self._real_nvfp4_bf16_layers = bf16_layers_at_start_end(overrides)
+        if self._real_nvfp4_enabled:
+            logger.info("NVFP4 routed-expert training: BF16 layers at start/end=%d/%d", *self._real_nvfp4_bf16_layers)
+
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
@@ -289,6 +299,15 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import apply_real_nvfp4_overrides
+
+            apply_real_nvfp4_overrides(
+                override_transformer_config,
+                self.model_config.hf_config,
+                pipeline_size=self.engine_config.pipeline_model_parallel_size,
+                virtual_pipeline_size=self.engine_config.virtual_pipeline_model_parallel_size,
+            )
         if self.is_value_model:
             # A value head cannot share weights with the vocabulary embedding. Force the HF
             # flag off and record it for the checkpoint manager. Apply the
@@ -529,6 +548,18 @@ class MegatronEngine(BaseEngine):
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
 
         self.module = self._build_megatron_module()
+
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import attest_real_nvfp4_runtime, finish_real_nvfp4_module_init
+
+            models = [unwrap_model(model_chunk) for model_chunk in self.module]
+            finish_real_nvfp4_module_init(models)
+            attest_real_nvfp4_runtime(
+                models,
+                self.tf_config,
+                self.model_config.hf_config,
+                *self._real_nvfp4_bf16_layers,
+            )
 
         if self._qat_enabled and not self.engine_config.forward_only:
             from verl.utils.qat.modelopt import apply_qat_to_modules
