@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import ray
 from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
@@ -34,11 +35,13 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking
 
 logger = logging.getLogger(__name__)
@@ -71,6 +74,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
         self.config = config
+        SkipManager.init(config)
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert not self.hybrid_engine
@@ -141,6 +145,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.processed_samples = 0
         self.stale_trajectory_processed = 0
         self.current_param_version = 0
+        self._old_log_prob_param_version = None
         self.total_train_steps = None
         self.progress_bar = None
         self.trigger_parameter_sync_step = config.async_training.trigger_parameter_sync_step
@@ -438,7 +443,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
         # Assemble batch - now working directly with RolloutSample objects
-        if self.config.trainer.balance_batch:
+        if self.config.trainer.balance_batch and not SkipManager.is_active("train", scope="train_compute"):
             batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
         else:
             batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
@@ -511,6 +516,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.max_steps_duration = 0
 
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
 
         self.prev_step_profile = False
         self.curr_step_profile = False
@@ -526,12 +532,21 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 break
 
         self.progress_bar.close()
-        if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
+        if (
+            self.config.trainer.test_freq <= 0
+            or self.current_param_version % self.config.trainer.test_freq != 0
+            or self.local_trigger_step > 1
+        ):
             rollout_reset_timing_raw = await self._fit_update_weights()
             if rollout_reset_timing_raw is not None:
                 self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
             await self._fit_validate()
+        # A terminal partial cycle still consumed real batches. Report its metrics
+        # without introducing an extra synchronization or advancing the parameter version.
+        if self.metrics_aggregator.step_count > 0:
+            self._fit_log_aggregated_training_metrics({}, partial_cycle=True)
         self._fit_save_checkpoint(force=True)
+        self._shutdown_dump_executor()
 
     async def fit_step(self, batch_dict: dict = None):
         """
@@ -545,7 +560,18 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         Args:
             batch_dict: Raw data dictionary
         """
-        self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
+        SkipManager.set_step(self.global_steps)
+        self.metrics = {
+            "training/global_step": self.global_steps,
+            "training/epoch": self.epoch,
+        }
+        if SkipManager.is_enabled("train"):
+            self.metrics.update(
+                {
+                    "training/skip_train": int(SkipManager.is_active("train")),
+                    "training/skip_train_compute": int(SkipManager.is_active("train", scope="train_compute")),
+                }
+            )
         self.timing_raw = {}
         # reward message
         self.future_reward = None
@@ -584,12 +610,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             _allocated_start = time.time()
             batch = await self._fit_generate(None)
             batch = self._fit_compute_reward(batch)
-            batch = self._fit_compute_log_prob(batch)
-            batch = self._fit_compute_ref_log_prob(batch)
-            batch = self._fit_compute_critic(batch)
-            batch = self._fit_compute_advantage(batch)
-            batch = self._fit_update_critic(batch)
-            batch = self._fit_update_actor(batch)
+            batch = self._fit_train_batch(batch)
             self._fit_update_local_step()
             rollout_reset_timing_raw = await self._fit_update_weights()
             self._fit_dump_data(batch)
@@ -599,9 +620,46 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self._fit_save_checkpoint()
         self._fit_stop_profile(should_profiler=should_profile)
         self._fit_collect_metrics(batch)
+        # Include this micro-step before emitting/resetting the completed sync cycle.
+        self._fit_postprocess_step()
         if rollout_reset_timing_raw is not None:
             self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
-        self._fit_postprocess_step()
+
+    def _fit_compute_reward(self, batch: DataProto) -> DataProto:
+        """Keep raw reward evaluation available even when advantage computation is skipped."""
+        batch = super()._fit_compute_reward(batch)
+        batch.batch["token_level_scores"] = self.reward_tensor
+        if self.reward_extra_infos_dict:
+            batch.non_tensor_batch.update({key: np.array(value) for key, value in self.reward_extra_infos_dict.items()})
+        return batch
+
+    @SkipManager.annotate(role="train", scope="train_compute")
+    def _fit_train_batch(self, batch: DataProto) -> DataProto:
+        """Compute training inputs while keeping queue, reward, and replica management outside."""
+        batch = self._fit_compute_log_prob(batch)
+        batch = self._fit_compute_ref_log_prob(batch)
+        batch = self._fit_compute_critic(batch)
+        batch = self._fit_compute_advantage(batch)
+        return self._fit_update_train_batch(batch)
+
+    @SkipManager.annotate(role="train", scope="updates")
+    def _fit_update_train_batch(self, batch: DataProto) -> DataProto:
+        """Run complete actor/critic update calls."""
+        batch = self._fit_update_critic(batch)
+        batch = self._fit_update_actor(batch)
+        return batch
+
+    def _fit_collect_metrics(self, batch: DataProto):
+        """Collect rollout-only metrics when the training fields were never computed."""
+        if not SkipManager.is_active("train", scope="train_compute"):
+            return super()._fit_collect_metrics(batch)
+        self.metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic, include_training=False))
+        self.metrics.update(compute_timing_metrics(batch=batch, timing_raw=self.timing_raw))
+        self.metrics.update(
+            compute_throughout_metrics(
+                batch=batch, timing_raw=self.timing_raw, n_gpus=self.resource_pool_manager.get_n_gpus()
+            )
+        )
 
     # Timing-raw keys that represent actual training-GPU compute, from
     # _fit_compute_reward() through _fit_update_actor(). Some keys may be
@@ -661,16 +719,25 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         If local_trigger_step == 2, 3, ..., restore the parameters of version 1 to calculate the old_log_prob,
         then restore the parameters of the current version.
+
+        If earlier micro-steps skipped training computation, initialize the cycle-start
+        snapshot on the first real forward; their model parameters have not changed.
         """
-        if self.local_trigger_step == 1:
+        if self.local_trigger_step == 1 or self._old_log_prob_param_version != self.current_param_version:
+            # A skipped first micro-step leaves the cycle-start model unchanged. Create
+            # its snapshot lazily on the first real forward instead of restoring a
+            # nonexistent (or previous-cycle) snapshot at a later micro-step.
             self.actor_rollout_wg.save_model_to_cpu(1)
+            self._old_log_prob_param_version = self.current_param_version
             old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
         else:
             self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
             self.actor_rollout_wg.restore_model_from_cpu(1)
-            old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
-            self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
-            self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
+            try:
+                old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
+            finally:
+                self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
+                self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
         return old_log_prob, old_log_prob_mfu
 
     def _fit_update_local_step(self):
@@ -787,8 +854,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         return timing_raw
 
-    def _fit_log_aggregated_training_metrics(self, rollout_reset_timing_raw: dict):
-        """Log aggregated training metrics for the sync cycle just finished.
+    def _fit_log_aggregated_training_metrics(self, rollout_reset_timing_raw: dict, *, partial_cycle: bool = False):
+        """Log a completed sync cycle or the terminal partial cycle.
 
         Args:
             rollout_reset_timing_raw: timing_raw dict returned by _fit_update_weights()
@@ -798,14 +865,19 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 dynamic_resource/train_resource_utilization into
                 dynamic_resource/resource_utilization -- see
                 MetricsAggregator._special_metrics_aggergate().
+            partial_cycle: The terminal cycle ended before weight synchronization.
+                Use the next cycle's log step without advancing current_param_version,
+                so these metrics do not overwrite the previous completed cycle.
         """
         aggregated_metrics = self.metrics_aggregator.get_aggregated_metrics(
             rollout_resource_utilization=rollout_reset_timing_raw.get("dynamic_resource/rollout_resource_utilization"),
         )
         if aggregated_metrics:
+            aggregated_metrics["training/partial_sync_cycle"] = int(partial_cycle)
+            aggregated_metrics["training/sync_cycle_micro_steps"] = self.metrics_aggregator.step_count
             self.logger.log(
                 data=aggregated_metrics,
-                step=self.current_param_version,
+                step=self.current_param_version + int(partial_cycle),
             )
         self.metrics_aggregator.reset()
 
@@ -1008,7 +1080,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         print(f"[FullyAsyncTrainer] Load from checkpoint folder: {global_step_folder}")
         # set global step
         self.current_param_version = int(global_step_folder.split("global_step_")[-1])
-        self.global_steps = self.current_param_version * self.trigger_parameter_sync_step + 1
+        # fit() advances once before its first micro-step, just as on a fresh run.
+        self.global_steps = self.current_param_version * self.trigger_parameter_sync_step
+        self._old_log_prob_param_version = None
         self.last_ckpt_version = self.current_param_version
         print(
             f"[FullyAsyncTrainer] Setting global step to {self.global_steps}, "

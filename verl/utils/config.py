@@ -131,6 +131,11 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    # Validate training-skip options before initializing workers.
+    from verl.utils.skip.config import TrainSkipConfig
+
+    omega_conf_to_dataclass(OmegaConf.select(config, "skip.train"), TrainSkipConfig)
+
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

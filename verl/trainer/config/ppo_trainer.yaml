@@ -460,6 +460,21 @@ skip:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.skip.SkipManagerConfig
 
+  # Training skip for V0, V1, and fully async: keep real rollout and the surrounding lifecycle.
+  train:
+
+    # Whether to enable training skip.
+    enable: False
+
+    # updates: skip actor/critic updates; train_compute: also skip training forwards/advantages.
+    scope: updates
+
+    # null selects all trainer steps; [] selects none; [1, 3] selects individual steps.
+    steps: null
+
+    # Training skip passes through the batch without caching results.
+    action: empty
+
   # configs for RolloutSkip 
   rollout:
 

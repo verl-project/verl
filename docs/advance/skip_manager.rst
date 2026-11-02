@@ -1,7 +1,7 @@
 SkipManager: Skip everything in the RL pipeline.
 ===========
 
-Last updated: 2026-07-08
+Last updated: 2026-11-02
 
 .. contents:: :local:
    :depth: 1
@@ -18,8 +18,8 @@ Skip behavior is centralized under the top-level Hydra key ``skip``. Modules reg
 (for example ``"rollout"``, ``"rollout_tq"``, or ``"async_rollout"``) and are attached with
 @SkipManager.annotate(role=...) (or ``@SkipManager.annotate_tq(role=..., phase=...)`` for the
 V1 two-phase path). Each role declares which integer **steps** in config are eligible for skip
-logic. **Today only rollout-related roles are implemented**; the same mechanism can be extended to
-other pipeline stages (see section 6).
+logic. Rollout roles replay cached generation results; the ``train`` role bypasses training
+work while retaining real generation and the surrounding trainer lifecycle.
 
 Typical use cases
 ~~~~~~~~~~~~~~~~~
@@ -47,14 +47,72 @@ Supported entry points today
      - Skip role / config
      - Status
    * - ``main_ppo.py`` with trainer.use_v1=False (``RayPPOTrainer``)
-     - ``skip.rollout``
+     - ``skip.rollout``, ``skip.train``
      - **Supported**
    * - main_ppo.py with trainer.use_v1=True (V1 PPOTrainer + TransferQueue)
-     - ``skip.rollout_tq
-     - **Supported** (see section 4)
-   * - ``fully_async_main`` (``FullyAsyncRollouter``)
-     - ``skip.async_rollout``
+     - ``skip.rollout_tq``, ``skip.train``
+     - **Supported** in all three V1 modes (see section 4)
+   * - ``fully_async_main`` (``FullyAsyncRollouter`` + ``FullyAsyncTrainer``)
+     - ``skip.async_rollout``, ``skip.train``
      - **Supported**
+
+
+Training skip for inference debugging (``skip.train``)
+-----------------------------------------------------
+
+Use ``skip.train`` to debug inference with real generation while bypassing training work.
+It supports V0, all three V1 modes, and ``fully_async_main``. Models and workers are still
+initialized normally. Keep the rollout skip roles disabled to avoid replaying cached generation.
+
+.. code-block:: yaml
+
+   skip:
+     train:
+       enable: true
+       scope: train_compute
+       steps: null
+       action: empty
+
+- ``enable`` defaults to ``false``.
+- ``scope=updates`` (default) skips the complete actor/critic update calls, including training
+  forward/backward passes, optimizer steps, and scheduler steps. Training input computation remains.
+- ``scope=train_compute`` additionally skips training batch balancing, old/reference log
+  probabilities, critic values, advantages/returns, training reward shaping, and rollout correction.
+  Reward evaluation and sampler filtering still run; rollout-side log probabilities are unaffected.
+- ``steps=null`` selects all training steps; ``steps=[]`` selects none; ``steps=[2,3]`` selects
+  only steps 2 and 3. Steps are positive **trainer global steps**, including after checkpoint resume.
+  In V1, all mini-batches within the selected ``parameter_sync_step`` cycle are skipped.
+  In fully async, selection applies to individual queue-consumption/training micro-steps, not
+  parameter versions or rollout sample IDs. ``trigger_parameter_sync_step`` controls the number
+  of micro-steps per parameter version. Rollout skip roles still require explicit step lists.
+- ``action=empty`` is the only supported action: return the input batch without caching or
+  fabricating training results.
+
+Both scopes preserve rollout, reward evaluation, queue handling, async warmup, worker sleep/wake,
+weight synchronization, validation/checkpoint cadence, and step progression. Sync/version counters
+can advance without optimizer updates. Validation follows the existing validation configuration.
+
+Append these overrides to an existing training command:
+
+.. code-block:: bash
+
+   skip.train.enable=True \
+   skip.train.scope=train_compute \
+   'skip.train.steps=[2,3]'
+
+Steps 1 and 4 train normally; steps 2 and 3 retain generation and reward evaluation while skipping
+training computation. Use ``skip.train.steps=null`` to skip all steps.
+
+When enabled, the existing metric logger includes ``training/skip_train`` and
+``training/skip_train_compute``. Aggregated metrics report the fraction of mini-batches/micro-steps
+skipped in each logging cycle. No additional per-request or per-step diagnostic logs are emitted.
+Skipped stages do not fabricate loss or gradient metrics; ``train_compute`` metrics do not require
+absent advantages, returns, or values.
+
+Fully async metrics are logged per synchronization cycle. A terminal partial cycle uses a separate
+log step (``current_param_version + 1``) without advancing the parameter version or adding a weight
+synchronization. ``training/partial_sync_cycle`` identifies this tail, and
+``training/sync_cycle_micro_steps`` records the number of included micro-steps.
 
 
 2. Configuration (``skip.rollout`` / ``skip.rollout_tq`` / ``skip.async_rollout``)

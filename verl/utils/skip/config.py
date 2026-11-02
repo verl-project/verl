@@ -69,9 +69,32 @@ class RolloutTqSkipConfig(BaseConfig):
 
 
 @dataclass
+class TrainSkipConfig(BaseConfig):
+    """Skip training work on selected trainer steps without caching results."""
+
+    enable: bool = False
+    scope: str = "updates"
+    steps: list[int] | None = None
+    action: str = "empty"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enable, bool):
+            raise ValueError("skip.train.enable must be bool")
+        if self.scope not in {"updates", "train_compute"}:
+            raise ValueError("skip.train.scope must be updates or train_compute")
+        if self.action != "empty":
+            raise ValueError("skip.train.action must be empty; training results cannot be cached")
+        if self.steps is not None and (
+            not isinstance(self.steps, list) or any(type(step) is not int or step < 1 for step in self.steps)
+        ):
+            raise ValueError("skip.train.steps must be null or a list of positive trainer steps")
+
+
+@dataclass
 class SkipManagerConfig(BaseConfig):
     """Top-level config for skip modules."""
 
     rollout: RolloutSkipConfig = field(default_factory=RolloutSkipConfig)
     async_rollout: AsyncRolloutSkipConfig = field(default_factory=AsyncRolloutSkipConfig)
     rollout_tq: RolloutTqSkipConfig = field(default_factory=RolloutTqSkipConfig)
+    train: TrainSkipConfig = field(default_factory=TrainSkipConfig)

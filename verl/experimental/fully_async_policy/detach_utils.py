@@ -395,9 +395,8 @@ class MetricsAggregator:
         #
         # dynamic_resource/train_resource_utilization is only available once the aggregator
         # has collected at least one micro-step's dynamic_resource/train_{compute,allocated}_time_s
-        # (see add_step_metrics()/_record_train_resource_utilization()) — this never holds on
-        # the very first sync cycle, since the sync-triggering micro-step's own values are
-        # only recorded *after* this method's caller (_fit_update_weights()) returns. To keep
+        # (see add_step_metrics()/_record_train_resource_utilization()). The trainer records
+        # the sync-triggering micro-step before aggregating, including the first cycle. To keep
         # "dynamic_resource/rollout_resource_utilization" and "dynamic_resource/resource_utilization"
         # appearing together (rather than the former appearing one cycle earlier), the former is
         # only added to the output once the latter can also be computed.

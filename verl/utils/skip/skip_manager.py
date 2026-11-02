@@ -51,6 +51,18 @@ class SkipManager:
     def set_step(cls, step: int):
         cls.step = step
 
+    @classmethod
+    def is_enabled(cls, role: str) -> bool:
+        """Whether a role is configured, independently of the current step or scope."""
+        instance = cls.skip_instances.get(role)
+        return instance is not None and instance.is_enabled()
+
+    @classmethod
+    def is_active(cls, role: str, *, step: int | None = None, **kwargs) -> bool:
+        """Check step/scope selection without loading data or executing skipped work."""
+        instance = cls.skip_instances.get(role)
+        return instance is not None and instance.is_active(cls.step if step is None else step, **kwargs)
+
     @staticmethod
     def _get_prompts_batch(args, kwargs):
         """Resolve ``DataProto`` from decorated ``generate_sequences(self, prompts, ...)`` calls."""
@@ -91,7 +103,7 @@ class SkipManager:
                         step = skip_instance.extract_step(*args, **kwargs_inner)
                     else:
                         step = cls.step
-                    if step not in skip_instance.steps:
+                    if not skip_instance.is_active(step, **kwargs_outer):
                         return await func(*args, **kwargs_inner)
                     if skip_instance.meet_precondition(step, func, *args, **kwargs_inner):
                         return skip_instance.warp_function(step, func, *args, **kwargs_inner)
@@ -112,7 +124,7 @@ class SkipManager:
                     step = skip_instance.extract_step(*args, **kwargs_inner)
                 else:
                     step = cls.step
-                if step not in skip_instance.steps:
+                if not skip_instance.is_active(step, **kwargs_outer):
                     return func(*args, **kwargs_inner)
                 if skip_instance.meet_precondition(step, func, *args, **kwargs_inner):
                     return skip_instance.warp_function(step, func, *args, **kwargs_inner)
@@ -153,7 +165,7 @@ class SkipManager:
                 if skip_instance is None or not skip_instance.is_enabled():
                     return func(self, *args, **kwargs)
                 step = cls.step
-                if step not in skip_instance.steps:
+                if not skip_instance.is_active(step):
                     return func(self, *args, **kwargs)
 
                 if phase == "submit":

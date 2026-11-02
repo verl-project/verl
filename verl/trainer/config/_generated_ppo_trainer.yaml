@@ -1053,6 +1053,11 @@ global_profiler:
       strict: false
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
+  train:
+    enable: false
+    scope: updates
+    steps: null
+    action: empty
   rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump

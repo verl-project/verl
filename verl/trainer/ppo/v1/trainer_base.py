@@ -579,6 +579,19 @@ class PPOTrainer(ABC):
             with marked_timer("reward", timing_raw, color="yellow"):
                 batch = self._compute_reward_colocate(batch, metrics=metrics)
 
+        if SkipManager.is_enabled("train"):
+            metrics.update(
+                {
+                    "training/skip_train": int(SkipManager.is_active("train")),
+                    "training/skip_train_compute": int(SkipManager.is_active("train", scope="train_compute")),
+                }
+            )
+        batch = self._train_batch(batch, metrics, timing_raw)
+        return batch
+
+    @SkipManager.annotate(role="train", scope="train_compute")
+    def _train_batch(self, batch: KVBatchMeta, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        """Compute training inputs and update models, outside rollout and lifecycle hooks."""
         # 3. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
 
@@ -600,6 +613,11 @@ class PPOTrainer(ABC):
         with marked_timer("adv", timing_raw, color="brown"):
             batch = self._compute_advantage(batch, metrics=metrics)
 
+        return self._update_train_batch(batch, metrics, timing_raw)
+
+    @SkipManager.annotate(role="train", scope="updates")
+    def _update_train_batch(self, batch: KVBatchMeta, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        """Update models and collect only metrics produced by actual update calls."""
         # 8. [OPTIONAL] update critic
         if self.use_critic:
             with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1872,18 +1890,19 @@ class PPOTrainer(ABC):
 
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
+        include_training = not SkipManager.is_active("train", step=global_steps, scope="train_compute")
         non_padding_mask = np.array([not tag.get("is_padding", False) for tag in batch.tags], dtype=bool)
         fields = [
             "prompts",
             "responses",
             "response_mask",
-            "values",
-            "advantages",
-            "returns",
             "rm_scores",
-            "token_level_rewards",
             "num_turns",
         ]
+        if include_training:
+            fields.extend(["advantages", "returns", "token_level_rewards"])
+            if self.use_critic:
+                fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
@@ -1923,7 +1942,7 @@ class PPOTrainer(ABC):
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
-        if "token_level_rewards" not in data:
+        if include_training and "token_level_rewards" not in data:
             data["token_level_rewards"] = data["rm_scores"]
         data["prompt_length"] = prompt_length.float()
         data["response_length"] = response_length.float()
@@ -1946,7 +1965,9 @@ class PPOTrainer(ABC):
                 accumulator=self._rollout_moe_lb_metrics_accumulator,
             )
         )
-        metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
+        metrics.update(
+            compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic, include_training=include_training)
+        )
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))

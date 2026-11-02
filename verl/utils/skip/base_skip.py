@@ -45,7 +45,7 @@ class BaseSkip:
     def __init__(self, local_config, global_config):
         self.action = SkipAction(local_config.action)
         self.enable = local_config.enable
-        self.dump_dir = local_config.dump_dir
+        self.dump_dir = getattr(local_config, "dump_dir", None)
         self.steps = local_config.steps
         self.global_config = global_config
         if self.action not in self.support_actions:
@@ -53,6 +53,10 @@ class BaseSkip:
 
     def is_enabled(self) -> bool:
         return self.enable
+
+    def is_active(self, step: int, **kwargs) -> bool:
+        """Whether this call is selected; null steps select every initialized step."""
+        return self.enable and (step >= 0 if self.steps is None else step in self.steps)
 
     def meet_precondition(self, step: int, func: Callable, *args, **kwargs) -> bool:
         raise NotImplementedError("meet_precondition is not implemented")
