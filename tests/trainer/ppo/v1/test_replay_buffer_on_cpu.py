@@ -60,6 +60,7 @@ def _make_rb(
     gen_batch_size: int = 1,
     max_inflight_gen_batches: int = 1,
     sync_refill_failed_groups: bool = False,
+    wait_observer=None,
 ) -> ReplayBuffer:
     """Construct a ReplayBuffer with defaults that keep generic samples on-policy."""
     replay_buffer_cls = ReplayBuffer if trainer_mode == "sync" else ReplayBufferAsync
@@ -76,6 +77,7 @@ def _make_rb(
         gen_batch_size=gen_batch_size,
         max_inflight_gen_batches=max_inflight_gen_batches,
         sync_refill_failed_groups=sync_refill_failed_groups,
+        wait_observer=wait_observer,
     )
 
 
@@ -1261,6 +1263,60 @@ def test_wait_for_sampleable_blocks_below_the_target(tq_init, partition_id):
         assert waiter.metrics_or_raise() == {}
     finally:
         waiter.join(timeout=10.0)
+        _clear_partition(partition_id)
+
+
+def test_async_wait_reports_poll_progress(tq_init, partition_id):
+    ready = PromptSpec(uid=_uid(), status="finished", sessions=1)
+    pending = PromptSpec(uid=_uid(), status="running", sessions=1)
+    _produce(partition_id, [ready, pending]).join_and_check()
+    states = []
+
+    rb = _make_rb(trainer_mode="colocate_async", wait_observer=states.append)
+    waiter = WaitConsumer(rb, partition_id, target_count=2, global_steps=3)
+    try:
+        waiter.start()
+        time.sleep(POLL_INTERVAL * 5)
+        _set_prompt_status(partition_id, pending.uid, "finished", global_steps=3)
+        waiter.metrics_or_raise()
+
+        assert states
+        assert states[-1].trainer_mode == "colocate_async"
+        assert states[-1].global_step == 3
+        assert states[-1].required == 2
+        assert states[-1].available == 1
+        assert states[-1].running == 1
+        assert states[-1].poll_count >= 1
+        assert states[-1].elapsed_seconds >= 0
+    finally:
+        waiter.join(timeout=10.0)
+        _clear_partition(partition_id)
+
+
+def test_sync_sample_reports_poll_progress(tq_init, partition_id):
+    ready = PromptSpec(uid=_uid(), status="finished", sessions=1)
+    pending = PromptSpec(uid=_uid(), status="running", sessions=1)
+    _produce(partition_id, [ready, pending]).join_and_check()
+    states = []
+
+    rb = _make_rb(trainer_mode="sync", wait_observer=states.append)
+    consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=4)
+    try:
+        consumer.start()
+        time.sleep(POLL_INTERVAL * 5)
+        _set_prompt_status(partition_id, pending.uid, "finished", global_steps=4)
+        consumer.result_or_raise()
+
+        assert states
+        assert states[-1].trainer_mode == "sync"
+        assert states[-1].global_step == 4
+        assert states[-1].required == 2
+        assert states[-1].available == 1
+        assert states[-1].running == 1
+        assert states[-1].poll_count >= 1
+        assert states[-1].elapsed_seconds >= 0
+    finally:
+        consumer.join(timeout=10.0)
         _clear_partition(partition_id)
 
 

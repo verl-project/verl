@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.trainer.runtime_extension import RuntimeCapability, RuntimeExtensionRegistry
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
@@ -39,6 +40,35 @@ class _StubTrainer(PPOTrainer):
 class _CustomSampler:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+
+
+def _trainer_without_extensions() -> _StubTrainer:
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.runtime_extensions = RuntimeExtensionRegistry(
+        capabilities=(RuntimeCapability.EVENTS, RuntimeCapability.SAFE_POINTS)
+    )
+    return trainer
+
+
+def test_fit_without_extensions_delegates_directly():
+    trainer = _trainer_without_extensions()
+    result = object()
+    agent_loop_manager = object()
+    trainer._fit = MagicMock(return_value=result)
+
+    assert trainer.fit(agent_loop_manager) is result
+    trainer._fit.assert_called_once_with(agent_loop_manager)
+
+
+def test_fit_without_extensions_preserves_original_exception():
+    trainer = _trainer_without_extensions()
+    error = RuntimeError("training failed")
+    trainer._fit = MagicMock(side_effect=error)
+
+    with pytest.raises(RuntimeError) as raised:
+        trainer.fit(object())
+
+    assert raised.value is error
 
 
 def _trainer_with_filter_groups(filter_groups: dict, trainer_mode: str = "sync") -> _StubTrainer:
