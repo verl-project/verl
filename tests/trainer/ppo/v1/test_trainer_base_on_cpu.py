@@ -36,6 +36,10 @@ class _StubTrainer(PPOTrainer):
         pass
 
 
+class _StopAfterTransferQueueRead(Exception):
+    pass
+
+
 class _CustomSampler:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -171,6 +175,81 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
         "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
         10,
     )
+
+
+@pytest.mark.parametrize(
+    ("use_critic", "expected_fields"),
+    [
+        (False, ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]),
+        (True, ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]),
+    ],
+)
+def test_compute_advantage_requests_values_only_with_critic(use_critic, expected_fields):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.use_critic = use_critic
+    batch = SimpleNamespace(keys=["key"], partition_id=0)
+
+    with (
+        patch(
+            "verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get",
+            side_effect=_StopAfterTransferQueueRead,
+        ) as kv_batch_get,
+        pytest.raises(_StopAfterTransferQueueRead),
+    ):
+        trainer._compute_advantage(batch, {})
+
+    assert kv_batch_get.call_args.kwargs["select_fields"] == expected_fields
+
+
+@pytest.mark.parametrize(
+    ("use_critic", "expected_fields"),
+    [
+        (
+            False,
+            [
+                "prompts",
+                "responses",
+                "response_mask",
+                "advantages",
+                "returns",
+                "rm_scores",
+                "token_level_rewards",
+                "num_turns",
+            ],
+        ),
+        (
+            True,
+            [
+                "prompts",
+                "responses",
+                "response_mask",
+                "advantages",
+                "returns",
+                "rm_scores",
+                "token_level_rewards",
+                "num_turns",
+                "values",
+            ],
+        ),
+    ],
+)
+def test_compute_metrics_requests_values_only_with_critic(use_critic, expected_fields):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.use_critic = use_critic
+    trainer.config = SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout={}))
+    trainer._rollout_moe_lb_metrics_accumulator = None
+    batch = SimpleNamespace(keys=["key"], partition_id=0, tags=[{"is_padding": False}])
+
+    with (
+        patch(
+            "verl.trainer.ppo.v1.trainer_base.get_metric_data_with_optional_routed_experts",
+            side_effect=_StopAfterTransferQueueRead,
+        ) as get_metric_data,
+        pytest.raises(_StopAfterTransferQueueRead),
+    ):
+        trainer._compute_metrics(batch, {}, {}, global_steps=1, epoch=1)
+
+    assert get_metric_data.call_args.kwargs["fields"] == expected_fields
 
 
 @pytest.mark.parametrize("score_centering", [True, False])
