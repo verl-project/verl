@@ -179,7 +179,9 @@ def is_correct_minerva(
     # Strip markdown bold/italic wrapping around the "Answer:" label so the
     # extraction regex matches decorated variants like **Answer:** / *Answer:*
     # as well as **Answer**: / *Answer*: (emphasis closing before the colon).
-    solution_str = re.sub(r"\*{1,2}(Answer)\*{0,2}(\s*:\s*)\*{0,2}", r"\1\2", solution_str, flags=re.IGNORECASE)
+    # Only consume trailing markers immediately after the colon (no \s* gap)
+    # to avoid eating the value's own emphasis (e.g. **Answer**: **42**).
+    solution_str = re.sub(r"\*{1,3}(Answer)\*{0,3}(\s*:)\*{0,3}", r"\1\2", solution_str, flags=re.IGNORECASE)
 
     # Extract answer from solution
     match = re.findall(answer_pattern, solution_str)
@@ -189,7 +191,7 @@ def is_correct_minerva(
     # while preserving unpaired mathematical asterisks (e.g. x^*).
     if extracted_answer != "[INVALID]":
         stripped = extracted_answer.strip()
-        stripped = re.sub(r"^\*{1,2}(.+?)\*{1,2}$", r"\1", stripped).strip()
+        stripped = re.sub(r"^(\*{1,3})(.+?)\1$", r"\2", stripped).strip()
         if not stripped or re.fullmatch(r"\*+", stripped):
             extracted_answer = "[INVALID]"
         else:

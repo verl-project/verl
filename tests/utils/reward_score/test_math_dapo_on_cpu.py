@@ -57,6 +57,22 @@ class TestMarkdownEmphasisMinerva:
         correct, pred = is_correct_minerva("Answer: x^*", "x^*")
         assert correct is True
 
+    def test_bold_answer_bold_value(self):
+        result = compute_score("**Answer**: **42**", "42")
+        assert result["acc"] is True
+
+    def test_triple_emphasis_label(self):
+        result = compute_score("***Answer:*** 42", "42")
+        assert result["acc"] is True
+
+    def test_triple_emphasis_value(self):
+        result = compute_score("Answer: ***42***", "42")
+        assert result["acc"] is True
+
+    def test_italic_wrapped_math_asterisk(self):
+        correct, pred = is_correct_minerva("Answer: *x^**", "x^*")
+        assert correct is True
+
     def test_bold_only_answer_falls_through(self):
         """If the extracted answer is only markdown markers, fall through
         to the boxed fallback."""
