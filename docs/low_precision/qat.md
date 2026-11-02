@@ -183,7 +183,9 @@ Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them 
   independently. MXFP8 Linear falls back as noted above, while the MXFP4 preset
   has BF16 dense layers.
   Hopper FP8 block configs with FP32 scales explicitly disable DeepGEMM E8M0;
-  all other cases retain vLLM's architecture-specific default.
+  all other cases retain vLLM's architecture-specific default. On AMD ROCm,
+  which has no DeepGEMM, verl sets neither option and vLLM selects its AITER or
+  Triton kernels.
   MXFP4 routed experts (native DeepSeek-V4 `expert_dtype: fp4`, compressed-tensors
   MXFP4) keep vLLM's own MoE selection on Hopper, where vLLM has no DeepGEMM
   MXFP4 kernel and uses Marlin. `VERL_ROLLOUT_USE_DEEP_GEMM=0` leaves every

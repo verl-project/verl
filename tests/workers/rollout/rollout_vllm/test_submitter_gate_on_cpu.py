@@ -56,13 +56,28 @@ class _FakeEngine:
         self.reset_prefix_calls = 0
         self.outputs = []
         self.sampling_params = []
+        self.closed = 0
 
-    async def generate(
-        self, prompt, sampling_params, request_id, lora_request=None, priority=0, data_parallel_rank=None
-    ):
-        self.sampling_params.append(sampling_params)
-        for output in self.outputs:
-            yield output
+    async def add_request(self, request_id, prompt, params, lora_request=None, priority=0, data_parallel_rank=None):
+        """Like AsyncLLM.add_request(): returns a collector that yields ``outputs``, the last one finished."""
+        self.sampling_params.append(params)
+        pending = list(self.outputs)
+        for i, output in enumerate(pending):
+            output.finished = i == len(pending) - 1
+
+        engine = self
+
+        class _Collector:
+            def get_nowait(self_inner):
+                return pending.pop(0) if pending else None
+
+            async def get(self_inner):
+                return pending.pop(0)
+
+            def close(self_inner):
+                engine.closed += 1
+
+        return _Collector()
 
     async def pause_generation(self, **kwargs):
         self.pause_calls += 1
@@ -357,6 +372,103 @@ def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch):
         assert server.engine.sampling_params[0].logprob_token_ids is None
         assert output.token_ids == [5, 9] and output.stop_reason == "completed"
         assert output.extra_fields == {"global_steps": 7, "num_cached_tokens": 0}
+        assert server.engine.closed == 1
+        assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+class _QueuedEngine(_FakeEngine):
+    """Engine whose requests land in the (fake) scheduler but are never scheduled.
+
+    Models a request stuck in vLLM's WAITING queue because the batch is larger than
+    max_num_seqs: add_request() returns immediately, but no output is ever produced
+    until pause_generation(abort) finishes the request.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.queues: dict[str, asyncio.Queue] = {}
+        self.aborted: list[str] = []
+        self.engine_aborts: list[tuple[str, bool]] = []
+
+    async def add_request(self, request_id, prompt, params, **kwargs):
+        q = asyncio.Queue()
+        self.queues[request_id] = q
+        self.output_processor.request_states[request_id] = object()
+
+        engine = self
+        internal_id = f"{request_id}-internal"  # vLLM's internal request id, which differs from the caller's
+
+        class _Collector:
+            request_id = internal_id
+
+            def get_nowait(self_inner):
+                try:
+                    return q.get_nowait()
+                except asyncio.QueueEmpty:
+                    return None
+
+            async def get(self_inner):
+                return await q.get()
+
+            def close(self_inner):
+                engine.closed += 1
+
+        return _Collector()
+
+    async def pause_generation(self, **kwargs):
+        await super().pause_generation(**kwargs)
+        # abort mode: every in-flight request finishes with an empty output.
+        for rid, q in self.queues.items():
+            self.aborted.append(rid)
+            q.put_nowait(SimpleNamespace(finished=True, outputs=[]))
+        self.output_processor.request_states.clear()
+
+    async def abort(self, request_id, internal=False):
+        self.engine_aborts.append((request_id, internal))
+
+
+def _make_queued_server():
+    server = _make_server()
+    server.engine = _QueuedEngine()
+    server.engine.server = server
+    return server
+
+
+def test_abort_is_not_blocked_by_requests_waiting_for_their_first_token():
+    # Regression: the barrier used to be released on the first *token*, so requests parked
+    # in the scheduler's WAITING queue held _admitting > 0 and abort_all_requests() could
+    # not pause the engine until every one of them had been scheduled and prefilled.
+    async def main():
+        server = _make_queued_server()
+
+        async def submit(rid):
+            assert await server._park_until_admitted(rid) is None
+            return await server._generate_admitted(
+                prompt={"prompt_token_ids": [1]},
+                sampling_params=SimpleNamespace(),
+                request_id=rid,
+                lora_request=None,
+                priority=0,
+            )
+
+        tasks = [asyncio.create_task(submit(f"r{i}")) for i in range(8)]
+        await asyncio.sleep(0.05)
+
+        assert server._admitting == 0, "barrier must be released once add_request returns"
+        assert len(server.engine.queues) == 8, "all requests reached the engine"
+        assert not any(t.done() for t in tasks), "requests are still waiting for tokens"
+
+        await asyncio.wait_for(server.abort_all_requests(), timeout=1)
+
+        assert server.engine.pause_calls == 1
+        assert server.engine.admitting_at_pause == 0
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        assert all(r.finished and r.outputs == [] for r in results), "aborted requests return empty"
+        assert sorted(server.engine.aborted) == sorted(f"r{i}" for i in range(8))
+        # Requests that finish normally close their collectors and are not aborted again.
+        assert server.engine.closed == 8 and server.engine.engine_aborts == []
         assert server._admitting == 0
 
     asyncio.run(main())
@@ -399,6 +511,34 @@ def test_output_hook_runs_for_requests_aborted_with_empty_outputs(monkeypatch):
 
         assert output.stop_reason == "aborted" and output.token_ids == []
         assert output.extra_fields["selected_logprobs"] == []
+        assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def test_cancelled_request_releases_barrier_and_aborts_in_engine():
+    async def main():
+        server = _make_queued_server()
+        assert await server._park_until_admitted("r1") is None
+        task = asyncio.create_task(
+            server._generate_admitted(
+                prompt={"prompt_token_ids": [1]},
+                sampling_params=SimpleNamespace(),
+                request_id="r1",
+                lora_request=None,
+                priority=0,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert server._admitting == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Aborted by vLLM's internal id, as AsyncLLM.generate() does, and the collector is closed.
+        assert server.engine.engine_aborts == [("r1-internal", True)], "cancellation must drop the request"
+        assert server.engine.closed == 1
         assert server._admitting == 0
 
     asyncio.run(main())

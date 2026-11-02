@@ -86,6 +86,8 @@ DEFAULT_IGNORE = [
 
 
 _HIGH_PRECISION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+# Trainers export these checkpoints under their own names, in their mixed FP8/FP4 layout.
+_DEEPSEEK_V4_MODEL_TYPES = frozenset({"deepseek_v4", "deepseek_v41"})
 
 
 def _check_scheme(kind: str, scheme: Optional[str]) -> Optional[str]:
@@ -446,7 +448,7 @@ class Fp8ConfigWeightQuantizer:
 
     def __init__(self, fp8_config: Mapping[str, Any], *, model_types: Iterable[Optional[str]] = ()):
         quant_method = str(fp8_config.get("quant_method", "")).lower()
-        self.passthrough = bool({"deepseek_v4", "deepseek_v41"} & set(model_types))
+        self.passthrough = bool(_DEEPSEEK_V4_MODEL_TYPES & set(model_types))
         if self.passthrough:
             return
         activation_scheme = fp8_config.get("activation_scheme")
@@ -547,7 +549,20 @@ def dispatch_rollout_weight_quantizer(
     has_override = bool(linear or moe or config_file)
 
     hf_config = model_config.hf_config
+    native = getattr(hf_config, "quantization_config", None)
+    if native is None:
+        native = getattr(getattr(hf_config, "text_config", None), "quantization_config", None)
+    model_types = {
+        getattr(hf_config, "model_type", None),
+        getattr(getattr(hf_config, "text_config", None), "model_type", None),
+    }
     if has_override:
+        if model_types & _DEEPSEEK_V4_MODEL_TYPES:
+            raise NotImplementedError(
+                "rollout.quantization overrides are not supported for DeepSeek-V4: the trainer exports its "
+                "checkpoint names (e.g. ffn.experts) and its own FP8/FP4 layout, which the override's "
+                "compressed-tensors targets do not match. Drop the override to sync the native quantization."
+            )
         quantization_config = build_compressed_tensors_config(
             linear=linear,
             moe=moe,
@@ -556,9 +571,6 @@ def dispatch_rollout_weight_quantizer(
             model_path=model_config.local_path,
         )
     else:
-        native = getattr(hf_config, "quantization_config", None)
-        if native is None:
-            native = getattr(getattr(hf_config, "text_config", None), "quantization_config", None)
         quantization_config = _as_quantization_config(native)
 
     qat_mode = qat_config.mode if qat_config is not None and qat_config.enable else None
@@ -569,6 +581,11 @@ def dispatch_rollout_weight_quantizer(
                 "quantization_config or set rollout.quantization.linear / moe / config_file"
             )
         return None
+    if getattr(getattr(rollout_config, "checkpoint_engine", None), "backend", None) == "delta_sharded":
+        raise NotImplementedError(
+            "checkpoint_engine.backend='delta_sharded' does not support quantized rollouts: its steady-state "
+            "deltas bypass the trainer-side rollout weight quantizer"
+        )
 
     quant_method = str(quantization_config.get("quant_method", "")).lower()
     if quant_method == "compressed-tensors":
@@ -581,10 +598,6 @@ def dispatch_rollout_weight_quantizer(
             quantizer = CompressedTensorsWeightQuantizer(quantization_config)
     elif "fp8" in quant_method:
         qat_modes = {"fp8"}
-        model_types = {
-            getattr(hf_config, "model_type", None),
-            getattr(getattr(hf_config, "text_config", None), "model_type", None),
-        }
         quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)
     else:
         raise NotImplementedError(
