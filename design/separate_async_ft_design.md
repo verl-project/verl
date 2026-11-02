@@ -310,7 +310,7 @@ sequenceDiagram
     D->>E: active check_health confirmation + debounce
     D->>D: triage — fault domain within the engine domain? otherwise fail-closed
     D->>D: fence — remove the faulty replica from the LB
-    D->>CE: restart_replica — swap the engine process; CE and resource pools untouched
+    D->>CE: restart_replica — swap the engine process, CE and resource pools untouched
     D->>D: weight-group disposition — §5.3: provably skippable if all four conditions hold, else G+1
     alt main path — default
         S-->>E: canonical θ directory cold start — 1-2 min, TP re-sharding done by the engine itself
@@ -320,7 +320,7 @@ sequenceDiagram
     D->>E: health check — check_health + parameter fingerprint
     D->>E: re-attach to the LB — hard constraint: must be the last step
     C->>E: bounded replay / token-prefix continuation — restore in-flight requests
-    Note over T: never restarted; the clock pauses only if the buffer runs dry
+    Note over T: never restarted — the clock pauses only if the buffer runs dry
 ```
 
 **Slow path (CE worker implicated — R6, same-card collateral)**: the CE worker respawns in the same pool (existing mechanism, `replica.py:195-244` — the engine process is untouched) + the weight group is **forced to G+1** (the skip predicate is necessarily false) + pending bookkeeping is lost → client bounded-replay fallback — the only state difference from the fast path. Every increment is bounded: fast path + seconds-scale G+1 + seconds-scale respawn.
@@ -356,7 +356,7 @@ sequenceDiagram
     Note over T: OOM / process crash / hang
     D->>D: detect — Ray death notification, seconds
     D->>D: triage — process-level and topology intact? otherwise fail-closed
-    D->>T: pause the clock — training side only; E keeps generating, the buffer absorbs
+    D->>T: pause the clock — training side only, E keeps generating, the buffer absorbs
     D->>T: teardown — kill the full trainer actor group
     D->>CE: bounded teardown of the old weight group — abort + destroy, §5.3
     par rebuild — dominant term of same-node RTO
@@ -366,7 +366,7 @@ sequenceDiagram
         T->>T: same node: read local staging @N directly — seconds
         T->>S: cross-node: parallel GET of store sealed @N(-1) — ~7 min @10GbE
     end
-    T->>T: inject θ + m/v + extra — manifest check; RNG / step re-derived from the driver ledger
+    T->>T: inject θ + m/v + extra — manifest check, RNG / step re-derived from the driver ledger
     D->>T: health check — parameter fingerprint + version continuity + comm smoke test
     D->>T: re-enter — redo in-flight batches, resume normal training
     Note over E: never restarted, never interrupted
