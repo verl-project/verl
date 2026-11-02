@@ -381,25 +381,29 @@ class TestGetRouterHandlePrecedence:
 
 class TestFullDeterminismRouting:
     """Validate that GlobalRequestLoadBalancer full_determinism routing is
-    cross-process reproducible (independent of PYTHONHASHSEED) and invariant
-    to server dictionary insertion order."""
+    cross-process reproducible (independent of PYTHONHASHSEED) and stable in
+    replica rank when ephemeral ports are redrawn between runs."""
 
-    def test_full_determinism_insertion_order_invariant(self):
-        """Routing under full_determinism must not depend on dictionary insertion order."""
-        servers_order1 = {"s0": "h0", "s1": "h1", "s2": "h2", "s3": "h3"}
-        servers_order2 = {"s3": "h3", "s1": "h1", "s0": "h0", "s2": "h2"}
-        servers_order3 = {"s2": "h2", "s0": "h0", "s3": "h3", "s1": "h1"}
+    def test_full_determinism_replica_rank_stable_when_ports_redrawn(self):
+        """The request to replica-rank map must not depend on ephemeral ports.
 
-        lb1 = GlobalRequestLoadBalancer(servers=servers_order1, full_determinism=True)
-        lb2 = GlobalRequestLoadBalancer(servers=servers_order2, full_determinism=True)
-        lb3 = GlobalRequestLoadBalancer(servers=servers_order3, full_determinism=True)
+        Servers register in replica rank order, so each list below is indexed
+        by rank. The second run redraws every port, which permutes the
+        lexicographic order of the address strings without changing any rank.
+        """
+        rank_addresses_run1 = ["10.0.0.1:5001", "10.0.0.1:5002", "10.0.0.2:5003", "10.0.0.2:5004"]
+        rank_addresses_run2 = ["10.0.0.1:6004", "10.0.0.1:6003", "10.0.0.2:6002", "10.0.0.2:6001"]
 
-        for i in range(50):
+        lb1 = GlobalRequestLoadBalancer(servers={addr: None for addr in rank_addresses_run1}, full_determinism=True)
+        lb2 = GlobalRequestLoadBalancer(servers={addr: None for addr in rank_addresses_run2}, full_determinism=True)
+
+        for i in range(64):
             req_id = f"det-{i}"
             s1, _ = lb1.acquire_server(req_id)
             s2, _ = lb2.acquire_server(req_id)
-            s3, _ = lb3.acquire_server(req_id)
-            assert s1 == s2 == s3, f"Mismatch for {req_id}: {s1} vs {s2} vs {s3}"
+            rank1 = rank_addresses_run1.index(s1)
+            rank2 = rank_addresses_run2.index(s2)
+            assert rank1 == rank2, f"Rank mismatch for {req_id}: run1 rank {rank1} ({s1}) vs run2 rank {rank2} ({s2})"
 
     def test_full_determinism_cross_process_reproducibility(self):
         """Different Python processes with different PYTHONHASHSEED must compute
