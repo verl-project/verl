@@ -9,8 +9,8 @@ on:
       - "docker/ascend/Dockerfile.ascend_9.1.0_a5_v0.9.1"
       - ".github/workflows/docker-build-ascend-a5.yml"
 
-  # schedule:
-  #   - cron: "0 19 * * *"
+  schedule:
+    - cron: "0 19 * * *"
 
 env:
   QUAY_REPO: quay.io/ascend/verl
