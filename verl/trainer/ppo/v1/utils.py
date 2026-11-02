@@ -156,16 +156,16 @@ def compute_advantage_for_multi_trajectories(
     norm_adv_by_std_in_grpo: bool = True,
     config: Any = None,
 ) -> DataProto:
-    """Compute GRPO advantages from each session's final output. For non-GRPO
+    """Compute GRPO and GDPO advantages from each session's final output. Other
     estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
 
-    For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
-    in advantage computation, and the result is broadcast to the other outputs in
-    the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
-    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
+    For GRPO and GDPO, only the final output in each ``{uid}_{session_id}`` group
+    participates in advantage computation, and the result is broadcast to the other
+    outputs in the same session. Sessions whose AgentLoop returns ``None`` simply do
+    not appear in ``batch_keys``. Other estimators, such as GAE, are delegated to the
     original ``compute_advantage()`` unchanged.
     """
-    if adv_estimator != core_algos.AdvantageEstimator.GRPO:
+    if adv_estimator not in (core_algos.AdvantageEstimator.GRPO, core_algos.AdvantageEstimator.GDPO):
         return compute_advantage(
             data,
             adv_estimator=adv_estimator,
