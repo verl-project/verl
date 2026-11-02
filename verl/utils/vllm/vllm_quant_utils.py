@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 import importlib.metadata
 import logging
 import os
+import re
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -77,6 +78,33 @@ def _is_nvfp4_quantization(quantization_config: Mapping[str, Any]) -> bool:
     return any("nvfp4" in value for value in _collect_strings(quantization_config))
 
 
+# compressed-tensors resolves fused MoE layers through their unfused expert names.
+_EXPERT_PROBE_NAME = "model.layers.0.mlp.experts.0.gate_proj"
+
+
+def _covers_experts(targets: Any) -> bool:
+    """Whether a compressed-tensors ``targets`` / ``ignore`` list reaches the routed experts' Linear modules."""
+    if isinstance(targets, str):
+        targets = [targets]
+    for target in targets or ():
+        if not isinstance(target, str):
+            continue
+        if target.startswith("re:"):
+            if re.match(target[3:], _EXPERT_PROBE_NAME):
+                return True
+        elif target in ("Linear", _EXPERT_PROBE_NAME):
+            return True
+    return False
+
+
+def _is_mxfp4_group(group: Mapping[str, Any]) -> bool:
+    weights = group.get("weights") or {}
+    if isinstance(weights, Mapping) and weights.get("num_bits") == 4:
+        if str(weights.get("type", "")).lower() == "float":
+            return True
+    return any("mxfp4" in value for value in _collect_strings(group))
+
+
 def _has_mxfp4_experts(quantization_config: Mapping[str, Any], hf_config: Any = None) -> bool:
     """Whether the routed experts are stored in MXFP4.
 
@@ -84,7 +112,10 @@ def _has_mxfp4_experts(quantization_config: Mapping[str, Any], hf_config: Any = 
     ``quantization_config`` and declare the expert format as ``expert_dtype``
     (top-level in V4, inside ``quantization_config`` in V4.1); the ``-Base``
     checkpoints say ``fp8`` there and keep DeepGEMM on every architecture.
-    Compressed-tensors checkpoints name the scheme inside ``quantization_config``.
+    Compressed-tensors configs are judged by the group that governs the
+    experts: an ``ignore`` pattern covering them wins, then a group targeting
+    them by name or regex, then a plain ``Linear`` group; MXFP4 elsewhere
+    (another group's metadata) does not count.
     """
     expert_dtypes = (
         getattr(hf_config, "expert_dtype", None),
@@ -92,7 +123,15 @@ def _has_mxfp4_experts(quantization_config: Mapping[str, Any], hf_config: Any = 
     )
     if any(str(dtype or "").lower() in {"fp4", "mxfp4"} for dtype in expert_dtypes):
         return True
-    return any("mxfp4" in value for value in _collect_strings(quantization_config))
+    groups = quantization_config.get("config_groups")
+    if not isinstance(groups, Mapping) or not groups:
+        return any("mxfp4" in value for value in _collect_strings(quantization_config))
+    if _covers_experts(quantization_config.get("ignore")):
+        return False
+    groups = [group for group in groups.values() if isinstance(group, Mapping)]
+    named = [group for group in groups if _covers_experts([t for t in group.get("targets") or () if t != "Linear"])]
+    expert_groups = named or [group for group in groups if _covers_experts(group.get("targets") or ["Linear"])]
+    return any(_is_mxfp4_group(group) for group in expert_groups)
 
 
 def _uses_fp32_block_scales(quantization_config: Mapping[str, Any]) -> bool:

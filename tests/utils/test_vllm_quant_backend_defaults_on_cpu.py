@@ -33,11 +33,51 @@ _DSV4_HF = SimpleNamespace(model_type="deepseek_v4", expert_dtype="fp4")
 # DeepSeek-V4.1 nests the expert format inside quantization_config; the -Base checkpoints have FP8 experts.
 _DSV41_QUANT = {"quant_method": "fp8", "weight_block_size": [32, 32], "scale_fmt": "ue8m0", "expert_dtype": "fp4"}
 _DSV4_BASE_HF = SimpleNamespace(model_type="deepseek_v4", expert_dtype="fp8")
-# compressed-tensors MXFP4 experts name the scheme inside the quantization config.
+# compressed-tensors configs are judged by the group that governs the routed experts (verl's MOE_TARGET regex).
+_MOE_TARGET = r"re:.*mlp\.experts\..*"
+_CT_MXFP4_WEIGHTS = {"type": "float", "num_bits": 4, "strategy": "group", "group_size": 32}
+_CT_FP8_BLOCK_WEIGHTS = {"type": "float", "num_bits": 8, "strategy": "block", "block_structure": [128, 128]}
+_CT_MXFP8_WEIGHTS = {"type": "float", "num_bits": 8, "strategy": "group", "group_size": 32}
+# `rollout.quantization.moe=MXFP4` with BF16 dense layers, as build_compressed_tensors_config emits it.
 _CT_MXFP4_QUANT = {
     "quant_method": "compressed-tensors",
     "format": "mxfp4-pack-quantized",
-    "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 4, "strategy": "group"}}},
+    "config_groups": {"group_moe": {"targets": [_MOE_TARGET], "weights": _CT_MXFP4_WEIGHTS}},
+    "ignore": ["re:.*lm_head"],
+}
+# `linear=MXFP8, moe=MXFP4`: the experts' group carries the MXFP4 format, the top-level format does not.
+_CT_MXFP8_LINEAR_MXFP4_MOE_QUANT = {
+    "quant_method": "compressed-tensors",
+    "format": "mixed-precision",
+    "config_groups": {
+        "group_moe": {"targets": [_MOE_TARGET], "weights": _CT_MXFP4_WEIGHTS, "format": "mxfp4-pack-quantized"},
+        "group_linear": {"targets": ["Linear"], "weights": _CT_MXFP8_WEIGHTS, "format": "mxfp8-pack-quantized"},
+    },
+    "ignore": ["re:.*lm_head"],
+}
+# A single MXFP4 `Linear` group reaches the experts too (no regex group, experts not ignored).
+_CT_MXFP4_LINEAR_QUANT = {
+    "quant_method": "compressed-tensors",
+    "format": "mxfp4-pack-quantized",
+    "config_groups": {"group_0": {"targets": ["Linear"], "weights": _CT_MXFP4_WEIGHTS}},
+    "ignore": ["re:.*lm_head"],
+}
+# MXFP4 metadata outside the experts' group must not count: FP8 block experts under an MXFP4 `Linear` group …
+_CT_MXFP4_LINEAR_FP8_MOE_QUANT = {
+    "quant_method": "compressed-tensors",
+    "format": "mixed-precision",
+    "config_groups": {
+        "group_linear": {"targets": ["Linear"], "weights": _CT_MXFP4_WEIGHTS, "format": "mxfp4-pack-quantized"},
+        "group_moe": {"targets": [_MOE_TARGET], "weights": _CT_FP8_BLOCK_WEIGHTS, "format": "float-quantized"},
+    },
+    "ignore": ["re:.*lm_head"],
+}
+# … and experts kept in high precision by `ignore` (rollout.quantization.moe unset) under an MXFP4 `Linear` group.
+_CT_MXFP4_LINEAR_EXPERTS_IGNORED_QUANT = {
+    "quant_method": "compressed-tensors",
+    "format": "mxfp4-pack-quantized",
+    "config_groups": {"group_linear": {"targets": ["Linear"], "weights": _CT_MXFP4_WEIGHTS}},
+    "ignore": ["re:.*lm_head", _MOE_TARGET],
 }
 _FP8_QUANT = {"quant_method": "fp8", "fmt": "e4m3", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"}
 _NVFP4_QUANT = {"quant_method": "modelopt", "quant_algo": "NVFP4"}
@@ -102,7 +142,14 @@ def defaults(quant_utils, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "quantization_config, hf_config", [(_DSV4_QUANT, _DSV4_HF), (_DSV41_QUANT, None), (_CT_MXFP4_QUANT, None)]
+    "quantization_config, hf_config",
+    [
+        (_DSV4_QUANT, _DSV4_HF),
+        (_DSV41_QUANT, None),
+        (_CT_MXFP4_QUANT, None),
+        (_CT_MXFP8_LINEAR_MXFP4_MOE_QUANT, None),
+        (_CT_MXFP4_LINEAR_QUANT, None),
+    ],
 )
 def test_mxfp4_experts_keep_vllm_moe_selection_on_hopper(defaults, quantization_config, hf_config, caplog):
     with caplog.at_level("INFO"):
@@ -121,6 +168,15 @@ def test_mxfp4_experts_default_to_deep_gemm_on_blackwell(defaults, quantization_
 @pytest.mark.parametrize("hf_config", [SimpleNamespace(model_type="deepseek_v3"), _DSV4_BASE_HF])
 def test_fp8_moe_still_defaults_to_deep_gemm(defaults, hopper, hf_config):
     kwargs = defaults(_FP8_QUANT, hf_config, hopper=hopper)
+    assert kwargs == {"linear_backend": "deep_gemm", "moe_backend": "deep_gemm"}
+
+
+@pytest.mark.parametrize("hopper", [True, False])
+@pytest.mark.parametrize(
+    "quantization_config", [_CT_MXFP4_LINEAR_FP8_MOE_QUANT, _CT_MXFP4_LINEAR_EXPERTS_IGNORED_QUANT]
+)
+def test_mxfp4_outside_the_experts_group_keeps_deep_gemm(defaults, hopper, quantization_config):
+    kwargs = defaults(quantization_config, None, hopper=hopper)
     assert kwargs == {"linear_backend": "deep_gemm", "moe_backend": "deep_gemm"}
 
 
