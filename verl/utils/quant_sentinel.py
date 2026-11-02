@@ -176,7 +176,9 @@ class QuantizedRolloutSentinel:
             )
 
         clip = _as_float(metrics.get(_KEY_CLIP))
-        if clip is not None and self.clip_steps > 0:
+        if clip is None:
+            self._clip_streak = 0
+        elif self.clip_steps > 0:
             # The V1 trainer pads responses to the batch's longest, so clip_ratio 1.0 can also mean "every
             # response equally short"; count the step only if the longest response reached the cap.
             longest = _as_float(metrics.get(_KEY_LEN_MAX))
