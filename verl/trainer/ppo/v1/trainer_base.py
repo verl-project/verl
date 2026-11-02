@@ -484,6 +484,8 @@ class PPOTrainer(ABC):
 
         self.on_train_begin()
         last_val_metrics = None
+        last_completed_step = None
+        source_exhausted = False
         while (
             current_epoch is None or current_epoch < self.config.trainer.total_epochs
         ) and self.global_steps <= self.total_training_steps:
@@ -500,9 +502,11 @@ class PPOTrainer(ABC):
                     batch = self.step(metrics, self.timing_raw)
                 except DataLoaderExhausted:
                     logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
+                    source_exhausted = True
                     break
                 finally:
                     self._stop_profiling()
+                last_completed_step = self.global_steps
 
                 # 2. save checkpoint
                 if self.config.trainer.save_freq > 0 and (
@@ -556,6 +560,23 @@ class PPOTrainer(ABC):
                 return
 
         progress_bar.close()
+        if source_exhausted and last_completed_step is not None:
+            # EOF is discovered on the next fetch, after the last completed step's normal finalization.
+            next_step, self.global_steps = self.global_steps, last_completed_step
+            try:
+                SkipManager.set_step(self.global_steps)
+                if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq != 0:
+                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                        self._save_checkpoint()
+                if self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq != 0:
+                    with marked_timer("testing", self.timing_raw, color="green"):
+                        self.on_validate_begin()
+                        last_val_metrics = self._validate()
+                        self.on_validate_end()
+                    self.logger.log(data=last_val_metrics, step=self.global_steps)
+            finally:
+                self.global_steps = next_step
+                SkipManager.set_step(self.global_steps)
         self.on_train_end()
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
@@ -678,9 +699,9 @@ class PPOTrainer(ABC):
             )
             return
 
-        self._add_prompts_to_generate(missing_prompts)
+        submitted_prompts = self._add_prompts_to_generate(missing_prompts)
         logger.info(
-            f"Added {missing_prompts} warmup prompts after restoring {restored_prompts} of "
+            f"Added {submitted_prompts} warmup prompts after restoring {restored_prompts} of "
             f"{target_prompts} target prompt groups"
         )
 
@@ -766,8 +787,9 @@ class PPOTrainer(ABC):
 
     def _init_custom_dataloaders(self):
         """Create independent role instances without requiring a dataset or file paths."""
-        if self.trainer_mode != "sync":
-            raise ValueError("data.custom_dataloader currently supports only V1 synchronous PPO.")
+        if self.trainer_mode != "sync" and not isinstance(self.replay_buffer, ReplayBufferAsync):
+            raise ValueError("Async custom dataloaders require a ReplayBufferAsync sampler for source draining.")
+        self.replay_buffer.input_exhausted = False
         self.train_dataloader = self.val_dataloader = None
         self.train_dataloader_it = None
         train_batch_size = self.config.data.train_batch_size
@@ -1595,12 +1617,17 @@ class PPOTrainer(ABC):
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""
+        custom_loader = self.config.data.get("custom_dataloader") is not None
+        if custom_loader and self.replay_buffer.input_exhausted:
+            raise DataLoaderExhausted
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
         except StopIteration:
-            if self.config.data.get("custom_dataloader") is not None and self.steps_per_epoch is None:
+            if custom_loader:
+                self.replay_buffer.input_exhausted = True
+                logger.info("Custom training source exhausted; the loader owns repetition.")
                 raise DataLoaderExhausted from None
             self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
@@ -1623,7 +1650,22 @@ class PPOTrainer(ABC):
                 f"({gen_batch_size}); it is submitted in whole gen_batch_size dataloader fetches."
             )
 
-        chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
+        chunks = []
+        for _ in range(num_prompts // gen_batch_size):
+            try:
+                chunks.append(self._fetch_one_gen_batch())
+            except DataLoaderExhausted:
+                if self.trainer_mode == "sync":
+                    if chunks:
+                        logger.info(
+                            "Discarding %s prompts from an incomplete synchronous training batch.",
+                            len(chunks) * gen_batch_size,
+                        )
+                    raise
+                if not chunks:
+                    raise
+                # Async warmup/refill may consume the source tail; submit it before draining.
+                break
         batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         return batch
@@ -1647,18 +1689,28 @@ class PPOTrainer(ABC):
         return len(batch)
 
     def _add_prompts_to_generate(self, num_prompts: int) -> int:
-        """Add an exact number of prompts to the AgentLoopManager."""
-        batch = self._next_train_batch(num_prompts)
+        """Submit requested prompts, or the remaining custom-source tail in async mode."""
+        try:
+            batch = self._next_train_batch(num_prompts)
+        except DataLoaderExhausted:
+            if self.trainer_mode == "sync":
+                raise
+            return 0
         return self._submit_batch_to_rollout(batch)
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
         """Add one training batch to the AgentLoopManager."""
-        batch = self._next_train_batch()
-        self._submit_batch_to_rollout(batch)
+        self._add_prompts_to_generate(self.config.data.train_batch_size)
 
     def prepare_step(self) -> dict:
         self._add_batch_to_generate()
+        if self.config.data.get("custom_dataloader") is not None and self.trainer_mode != "sync":
+            # Ensure EOF/refill cannot interrupt a parameter-sync cycle after weights have changed.
+            _, metrics = self.replay_buffer.wait_for_sampleable(
+                self.global_steps, "train", self.config.data.train_batch_size
+            )
+            return metrics
         return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:

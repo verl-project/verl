@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 10/01/2026.
+Last updated: 11/02/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -36,6 +36,7 @@ Data
      custom_cls:
         path: null
         name: null
+     custom_dataloader: null
 
 - ``data.train_files``: Training set parquet. Can be a list or a single
   file. The program will read all files into memory, so it can't be too
@@ -87,7 +88,7 @@ Data
 Customized Dataset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Customized dataset extension is implemented for the SFT trainer and can be extended to other trainers with similar changes.
+``data.custom_cls`` selects a custom dataset class; the trainer still constructs its dataloader.
 
 .. code:: yaml
 
@@ -97,6 +98,72 @@ Customized dataset extension is implemented for the SFT trainer and can be exten
 
 - ``data.custom_cls.path``: The path to the file containing your customized dataset class. If not specified, pre-implemented dataset will be used.
 - ``data.custom_cls.name``: The name of the dataset class within the specified file.
+
+.. _custom-ppo-dataloader:
+
+Custom Dataloader
+~~~~~~~~~~~~~~~~~
+
+V1 PPO (``sync``, ``colocate_async``, or ``separate_async``) can use a complete
+loading pipeline instead of the default dataset, sampler, and dataloader.
+The existing path is unchanged when
+``data.custom_dataloader`` is unset.
+
+.. code:: yaml
+
+   data:
+     custom_dataloader:
+       _target_: my_project.StreamingLoader
+       arg1: value1
+       arg2:
+         arg2_1: value2
+   trainer:
+     total_training_steps: 1000
+
+Additional fields are user-defined constructor arguments; nested mappings such as
+``arg2`` are passed intact. Verl constructs independent train/validation instances
+and supplies these reserved arguments: ``_split`` (``"train"`` or ``"val"``),
+``_batch_size`` (effective fetch size), ``_data_config`` (read-only data context),
+``_tokenizer``, ``_processor``, and ``_collate_fn``. Nested ``_target_`` values remain
+configuration rather than being recursively instantiated.
+
+The loader must implement ``__iter__()`` and yield collated dictionaries with a
+batched ``raw_prompt`` field, plus the reward/multimodal fields needed by the task.
+All fields must have the same leading batch dimension. Training batches must
+contain exactly ``_batch_size`` prompts; validation may retain a shorter tail and
+must support fresh, finite iterations. No specific base class is required.
+Async trainers request ``_batch_size=1`` for exact refill; the trainer combines
+these fetches into training batches.
+
+Optional methods are ``close()`` for completion/failure cleanup, ``__len__()`` for
+fetch-batch counts in epoch-based scheduling, and the paired ``state_dict()`` /
+``load_state_dict(state)`` methods for training resume. Without checkpoint methods,
+model/optimizer saving still works, but full training resume fails explicitly.
+Async resume also uses Verl's existing TransferQueue checkpoint for already-fetched
+prompts and trajectories.
+
+Unsized streams require a positive ``trainer.total_training_steps``. This selects
+step-based training without querying length or using ``total_epochs`` as a stopping
+condition. In both step- and epoch-based scheduling, the training loader owns
+repetition: cycle internally to repeat data, or end iteration to stop. Verl never
+recreates the custom training iterator at EOF or probes whether it is restartable.
+
+Async trainers drain submitted rollouts into complete updates at EOF, subject to
+the existing staleness/failure/filtering policies. They wait for a full
+``train_batch_size`` before beginning a parameter-sync cycle, so exhaustion cannot
+interrupt that cycle after a local optimizer update. An insufficient final
+remainder is discarded and its size is logged. Async custom samplers must inherit
+``ReplayBufferAsync`` and preserve its draining behavior.
+
+After early exhaustion and completed updates,
+enabled checkpoint saving and validation finalize the last completed step unless
+the corresponding interval already handled it. With no completed updates, there
+is no final save or validation; exhaustion during a partial PPO update remains an error.
+
+Do not combine this option with ``data.custom_cls``. ``train_files`` and
+``val_files`` are unnecessary unless the loader uses them. Validation is constructed
+only when requested by ``val_before_train``, ``val_only``, or a positive ``test_freq``.
+The legacy trainer is not supported by this hook.
 
 Actor/Rollout/Reference Policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -376,7 +376,7 @@ class RayPPOTrainer:
         Creates the train and validation dataloaders.
         """
         if self.config.data.get("custom_dataloader") is not None:
-            raise ValueError("data.custom_dataloader currently supports only V1 synchronous PPO.")
+            raise ValueError("data.custom_dataloader requires the V1 PPO trainer.")
         if train_dataset is None:
             train_dataset = create_rl_dataset(
                 self.config.data.train_files,

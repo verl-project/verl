@@ -18,9 +18,12 @@ import ast
 import contextlib
 import importlib.util
 import logging
+import math
 import os
 import sys
 import uuid
+from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,6 +88,13 @@ class SizedLoader(FixtureLoader):
 class IterableOnly(FixtureLoader):
     state_dict = None
     load_state_dict = None
+
+
+class RepeatingLoader(IterableOnly):
+    def __iter__(self):
+        while True:
+            self.cursor = 0
+            yield from super().__iter__()
 
 
 class SaveOnly(FixtureLoader):
@@ -194,6 +204,24 @@ def test_unknown_user_argument_is_not_silently_discarded():
         make_loader(cfg)
 
 
+@pytest.mark.parametrize("mode", ["sync", "colocate_async", "separate_async"])
+def test_config_validation_accepts_all_v1_modes_but_not_legacy(mode, monkeypatch):
+    module_spec = importlib.util.spec_from_file_location("config_validation", ROOT / "verl/utils/config.py")
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "omega_conf_to_dataclass", lambda cfg: SimpleNamespace(validate=lambda *args: None))
+    cfg = config()
+    cfg.trainer.update(n_gpus_per_node=1, nnodes=1)
+    cfg.trainer.v1.trainer_mode = mode
+    cfg.actor_rollout_ref.actor.update(use_dynamic_bsz=True, policy_loss={})
+    cfg.actor_rollout_ref.update(model={}, rollout={"val_kwargs": {"do_sample": False}})
+    module.validate_config(cfg, use_reference_policy=False, use_critic=False)
+
+    cfg.trainer.use_v1 = False
+    with pytest.raises(ValueError, match="requires the V1"):
+        module.validate_config(cfg, use_reference_policy=False, use_critic=False)
+
+
 def test_training_and_validation_accept_iteration_without_checkpoint_methods():
     cfg = config(IterableOnly)
     train, val = make_loader(cfg), make_loader(cfg, split="val")
@@ -264,8 +292,77 @@ def test_cleanup_failure_does_not_replace_the_training_error(caplog):
     assert "Custom dataloader cleanup failed" in caplog.text
 
 
+class Batch(dict):
+    def __len__(self):
+        return len(self["raw_prompt"])
+
+    def select(self, *keys):
+        return Batch({key: self[key] for key in keys})
+
+
+class MemoryQueue:
+    """Only the TransferQueue I/O boundary is faked; replay decisions use production code."""
+
+    def __init__(self):
+        self.tags = defaultdict(dict)
+        self.fields = defaultdict(dict)
+        self.checkpoints = {}
+
+    def kv_list(self, partition_id=None):
+        return deepcopy(self.tags if partition_id is None else {partition_id: self.tags[partition_id]})
+
+    def kv_batch_put(self, *, keys, partition_id, tags, fields=None):
+        for index, (key, tag) in enumerate(zip(keys, tags, strict=True)):
+            self.tags[partition_id][key] = tag
+            if fields is not None:
+                self.fields[partition_id][key] = {name: values[index] for name, values in fields.items()}
+
+    def kv_clear(self, *, keys, partition_id):
+        for key in keys:
+            self.tags[partition_id].pop(key, None)
+            self.fields[partition_id].pop(key, None)
+
+    def kv_batch_get(self, *, keys, partition_id, select_fields=None):
+        rows = [self.fields[partition_id][key] for key in keys]
+        return Batch({name: [row[name] for row in rows] for name in (select_fields or rows[0])})
+
+    def save_checkpoint(self, path, **kwargs):
+        Path(path).mkdir(parents=True, exist_ok=True)
+        self.checkpoints[path] = deepcopy((self.tags, self.fields))
+
+    def load_checkpoint(self, path):
+        self.tags, self.fields = deepcopy(self.checkpoints[path])
+
+
 @pytest.fixture
-def trainer_class():
+def replay_types():
+    path = ROOT / "verl/trainer/ppo/v1/replay_buffer.py"
+    tree = ast.parse(path.read_text())
+    tree.body = [node for node in tree.body if not isinstance(node, ast.Import | ast.ImportFrom)]
+    tree.body.insert(0, ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0))
+    queue = MemoryQueue()
+    namespace = {
+        "__name__": __name__,
+        "logging": logging,
+        "os": os,
+        "time": SimpleNamespace(
+            time=lambda: 0,
+            sleep=Mock(side_effect=AssertionError("Unexpected polling without a producer")),
+        ),
+        "Counter": Counter,
+        "defaultdict": defaultdict,
+        "np": np,
+        "tq": queue,
+        "KVBatchMeta": SimpleNamespace,
+        "DataLoaderExhausted": bridge.DataLoaderExhausted,
+        "SkipManager": SimpleNamespace(annotate_tq=lambda **kwargs: lambda fn: fn),
+    }
+    exec(compile(ast.fix_missing_locations(tree), str(path), "exec"), namespace)
+    return namespace
+
+
+@pytest.fixture
+def trainer_class(replay_types):
     # Compile unchanged method bodies; isolate Ray/worker imports rather than mocking the bridge.
     path = ROOT / "verl/trainer/ppo/v1/trainer_base.py"
     source = ast.parse(path.read_text())
@@ -276,6 +373,13 @@ def trainer_class():
         "_init_builtin_dataloaders",
         "_resolve_gen_batch_size",
         "_fetch_one_gen_batch",
+        "_next_train_batch",
+        "_submit_batch_to_rollout",
+        "_add_prompts_to_generate",
+        "_add_batch_to_generate",
+        "_add_async_warmup_batches",
+        "_reissue_inflight_prompts",
+        "prepare_step",
         "close_dataloaders",
         "fit",
         "_fit",
@@ -298,6 +402,7 @@ def trainer_class():
         "open_dict": open_dict,
         "np": np,
         "uuid": uuid,
+        "math": math,
         "os": os,
         "torch": torch,
         "find_latest_ckpt_path": Mock(return_value=None),
@@ -308,22 +413,68 @@ def trainer_class():
         "validate_custom_batch": bridge.validate_custom_batch,
         "close_dataloaders": bridge.close_dataloaders,
         "DataLoaderExhausted": bridge.DataLoaderExhausted,
+        "ReplayBufferAsync": replay_types["ReplayBufferAsync"],
+        "NonTensorData": type("NonTensorData", (), {}),
+        "KVBatchMeta": SimpleNamespace,
         "create_rl_dataset": Mock(side_effect=[list(range(16)), list(range(3))]),
         "create_rl_sampler": Mock(),
         "StatefulDataLoader": Mock(),
-        "tu": SimpleNamespace(get_tensordict=lambda batch: batch),
+        "tu": SimpleNamespace(
+            get_tensordict=Batch,
+            concat_tensordict=lambda chunks: Batch(
+                {key: [item for chunk in chunks for item in chunk[key]] for key in chunks[0]}
+            ),
+            assign_non_tensor_data=lambda *args: None,
+        ),
         "Tracking": Mock(),
         "ValidationGenerationsLogger": Mock(),
         "DapoFilteredRewardTableLogger": Mock(),
-        "SkipManager": Mock(),
-        "tq": Mock(),
+        "SkipManager": Mock(annotate_tq=lambda **kwargs: lambda fn: fn),
+        "tq": replay_types["tq"],
+        "_count_tq_prompt_groups": lambda: sum(
+            tag.get("is_prompt", False) for tag in replay_types["tq"].tags["train"].values()
+        ),
         "tqdm": Mock(),
         "pprint": Mock(),
         "marked_timer": lambda *args, **kwargs: contextlib.nullcontext(),
-        "MetricsAggregator": Mock(),
-        "DAPO_FILTERED_REWARD_COUNTS_KEY": "filtered_counts",
+        "Counter": Counter,
+        "defaultdict": defaultdict,
+        "DAPO_FILTERED_REWARD_COUNTS_KEY": replay_types["DAPO_FILTERED_REWARD_COUNTS_KEY"],
     }
     exec(compile(ast.fix_missing_locations(tree), str(path), "exec"), namespace)
+    metrics_path = ROOT / "verl/trainer/ppo/v1/utils.py"
+    metrics_class = next(
+        node
+        for node in ast.parse(metrics_path.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "MetricsAggregator"
+    )
+    metrics_tree = ast.Module(
+        body=[
+            ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+            metrics_class,
+        ],
+        type_ignores=[],
+    )
+    exec(compile(ast.fix_missing_locations(metrics_tree), str(metrics_path), "exec"), namespace)
+    namespace["trainer_classes"] = {}
+    namespace["PPOTrainer"] = namespace["Trainer"]
+    namespace["HybridEngineMode"] = SimpleNamespace(ROLLOUT="rollout", TRAINER="trainer")
+    for mode, name in (
+        ("colocate_async", "PPOTrainerColocateAsync"),
+        ("separate_async", "PPOTrainerSeparateAsync"),
+    ):
+        subclass_path = ROOT / f"verl/trainer/ppo/v1/trainer_{mode}.py"
+        subclass_tree = ast.parse(subclass_path.read_text())
+        subclass = next(node for node in subclass_tree.body if isinstance(node, ast.ClassDef) and node.name == name)
+        subclass.decorator_list = []
+        subclass.body = [
+            node
+            for node in subclass.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in ("on_train_begin", "prepare_step", "_wait_for_sampleable_and_switch")
+        ]
+        exec(compile(ast.Module(body=[subclass], type_ignores=[]), str(subclass_path), "exec"), namespace)
+        namespace["trainer_classes"][mode] = namespace[name]
     return namespace["Trainer"], namespace
 
 
@@ -334,6 +485,14 @@ def trainer_instance(trainer_class, cfg=None):
     trainer.trainer_mode = trainer.config.trainer.v1.trainer_mode
     trainer.parameter_sync_step = 2
     trainer.tokenizer = trainer.processor = None
+    trainer.replay_buffer = namespace["ReplayBufferAsync"](
+        trainer_mode=trainer.trainer_mode,
+        trainer_config={},
+        max_off_policy_threshold=None,
+        max_off_policy_strategy="drop",
+        sampler_kwargs={},
+        refill_fn=trainer._add_prompts_to_generate,
+    )
     return trainer, namespace
 
 
@@ -372,17 +531,35 @@ def test_sized_loader_epoch_budget_uses_fetch_size_not_fetch_count(trainer_class
 
 
 @pytest.mark.parametrize("total_steps", [None, 10])
-def test_sized_source_rewinds_only_in_epoch_mode(trainer_class, total_steps):
+def test_sized_source_never_rewinds_in_either_scheduling_mode(trainer_class, total_steps):
     trainer, _ = trainer_instance(trainer_class, config(SizedLoader))
     trainer.config.trainer.total_training_steps = total_steps
     trainer._init_dataloader()
     for _ in range(6):
         trainer._fetch_one_gen_batch()
-    if total_steps is None:
-        assert trainer._fetch_one_gen_batch()["extra_info"][0]["position"] == 0
-    else:
-        with pytest.raises(bridge.DataLoaderExhausted):
-            trainer._fetch_one_gen_batch()
+    with pytest.raises(bridge.DataLoaderExhausted):
+        trainer._fetch_one_gen_batch()
+    with pytest.raises(bridge.DataLoaderExhausted):
+        trainer._fetch_one_gen_batch()
+    assert trainer.train_dataloader.cursor == 6
+
+
+def test_custom_loader_can_repeat_internally(trainer_class):
+    trainer, _ = trainer_instance(trainer_class, config(RepeatingLoader))
+    trainer._init_dataloader()
+    positions = [trainer._fetch_one_gen_batch()["extra_info"][0]["position"] for _ in range(14)]
+    assert positions == list(range(6)) * 2 + [0, 1]
+    assert not trainer.replay_buffer.input_exhausted
+
+
+def test_builtin_loader_still_restarts_at_eof(trainer_class):
+    trainer, _ = trainer_instance(trainer_class)
+    trainer.config.data.custom_dataloader = None
+    trainer.train_dataloader = [{"raw_prompt": [["hello"]]}]
+    trainer.train_dataloader_it = None
+    for _ in range(3):
+        assert trainer._fetch_one_gen_batch()["raw_prompt"] == [["hello"]]
+    assert not trainer.replay_buffer.input_exhausted
 
 
 def test_forced_fetch_size_reaches_custom_constructor(trainer_class):
@@ -431,10 +608,19 @@ def test_init_failure_closes_the_successfully_constructed_loader(trainer_class):
 
 
 @pytest.mark.parametrize("mode", ["colocate_async", "separate_async"])
-def test_unsupported_modes_fail_before_loader_construction(trainer_class, mode):
+def test_async_modes_use_the_effective_fetch_size(trainer_class, mode):
     trainer, _ = trainer_instance(trainer_class)
     trainer.trainer_mode = mode
-    with pytest.raises(ValueError, match="synchronous"):
+    trainer._init_dataloader()
+    assert trainer.train_dataloader.batch_size == 1
+    assert trainer.train_dataloader.context.gen_batch_size == 1
+
+
+def test_async_custom_sampler_must_support_draining(trainer_class):
+    trainer, _ = trainer_instance(trainer_class)
+    trainer.trainer_mode = "separate_async"
+    trainer.replay_buffer = object()
+    with pytest.raises(ValueError, match="ReplayBufferAsync"):
         trainer._init_dataloader()
 
 
@@ -457,14 +643,27 @@ def test_default_loaders_are_not_closed_by_custom_lifecycle(trainer_class):
     loader.close.assert_not_called()
 
 
-@pytest.mark.parametrize("batches,expected_steps", [(6, 3), (2, 1)])
-def test_step_mode_ignores_epochs_and_stops_cleanly_without_rewinding(trainer_class, batches, expected_steps):
-    trainer, _ = trainer_instance(trainer_class)
+def streaming_fit_trainer(
+    trainer_class,
+    *,
+    batches,
+    initial_step=0,
+    save_freq=-1,
+    test_freq=-1,
+    val_before_train=False,
+    loader_class=FixtureLoader,
+):
+    trainer, _ = trainer_instance(trainer_class, config(loader_class))
     trainer.config.trainer.total_epochs = 0
+    trainer.config.trainer.total_training_steps = initial_step + 3
+    trainer.config.trainer.save_freq = save_freq
+    trainer.config.trainer.test_freq = test_freq
+    trainer.config.trainer.val_before_train = val_before_train
     trainer.config.data.custom_dataloader.arg2.batches = batches
     trainer._init_dataloader()
     loader = trainer.train_dataloader
-    trainer.global_steps = 0
+    trainer.global_steps = initial_step
+    events = []
     for name in (
         "_reissue_inflight_prompts",
         "on_train_begin",
@@ -475,9 +674,19 @@ def test_step_mode_ignores_epochs_and_stops_cleanly_without_rewinding(trainer_cl
         "_stop_profiling",
         "_compute_metrics",
         "_shutdown_dump_executor",
+        "on_validate_begin",
+        "on_validate_end",
     ):
         setattr(trainer, name, Mock())
+    trainer._stop_profiling.side_effect = lambda: events.append(("profile-stop", trainer.global_steps))
     trainer._consume_sync_metrics = Mock(return_value={})
+    trainer._save_checkpoint = Mock(side_effect=lambda: events.append(("save", trainer.global_steps)))
+
+    def validate():
+        events.append(("validate", trainer.global_steps))
+        return {"validation/score": 1.0}
+
+    trainer._validate = Mock(side_effect=validate)
 
     def step(*args):
         for _ in range(trainer.config.data.train_batch_size // loader.batch_size):
@@ -485,11 +694,147 @@ def test_step_mode_ignores_epochs_and_stops_cleanly_without_rewinding(trainer_cl
         return SimpleNamespace(keys=[], partition_id="train")
 
     trainer.step = step
+    return trainer, loader, events
+
+
+@pytest.mark.parametrize("batches,expected_steps", [(6, 3), (2, 1)])
+def test_step_mode_ignores_epochs_and_stops_cleanly_without_rewinding(trainer_class, batches, expected_steps):
+    trainer, loader, _ = streaming_fit_trainer(trainer_class, batches=batches)
     trainer.fit(None)
     assert trainer._compute_metrics.call_count == expected_steps
     assert all(call.kwargs["epoch"] is None for call in trainer._compute_metrics.call_args_list)
     assert loader.cursor == batches
     assert loader.closed == 1
+
+
+@pytest.mark.parametrize(
+    "save_freq,test_freq,initial_step,saved,validated",
+    [
+        (10, 10, 0, [2], [2]),
+        (2, 2, 0, [2], [2]),
+        (1, 1, 0, [1, 2], [1, 2]),
+        (1, 10, 0, [1, 2], [2]),
+        (10, 1, 0, [2], [1, 2]),
+        (-1, -1, 0, [], []),
+        (0, 0, 0, [], []),
+        (10, 10, 5, [7], [7]),
+        (3, 3, 5, [6, 7], [6, 7]),
+    ],
+)
+def test_early_exhaustion_finalizes_only_unhandled_completed_steps(
+    trainer_class, save_freq, test_freq, initial_step, saved, validated
+):
+    trainer, loader, events = streaming_fit_trainer(
+        trainer_class, batches=4, initial_step=initial_step, save_freq=save_freq, test_freq=test_freq
+    )
+    trainer.fit(None)
+    assert [step for event, step in events if event == "save"] == saved
+    assert [step for event, step in events if event == "validate"] == validated
+    assert trainer.global_steps == initial_step + 3
+    assert loader.cursor == 4 and loader.closed == 1
+    assert trainer._compute_metrics.call_count == 2
+    trainer.on_train_end.assert_called_once()
+    if save_freq == 10:
+        assert events.index(("profile-stop", initial_step + 3)) < events.index(("save", initial_step + 2))
+    if test_freq == 10:
+        assert events.index(("profile-stop", initial_step + 3)) < events.index(("validate", initial_step + 2))
+        assert trainer.logger.log.call_args.kwargs == {
+            "data": {"validation/score": 1.0},
+            "step": initial_step + 2,
+        }
+
+
+@pytest.mark.parametrize("initial_step", [0, 5])
+@pytest.mark.parametrize("val_before_train", [False, True])
+def test_empty_source_does_not_finalize_an_unperformed_update(trainer_class, initial_step, val_before_train):
+    trainer, loader, events = streaming_fit_trainer(
+        trainer_class,
+        batches=0,
+        initial_step=initial_step,
+        save_freq=10,
+        test_freq=10,
+        val_before_train=val_before_train,
+    )
+    trainer.fit(None)
+    trainer._save_checkpoint.assert_not_called()
+    assert [step for event, step in events if event == "validate"] == ([initial_step] if val_before_train else [])
+    trainer._compute_metrics.assert_not_called()
+    assert loader.closed == 1
+
+
+@pytest.mark.parametrize("operation", ["save", "validate"])
+def test_early_finalization_failure_restores_step_and_closes_loaders(trainer_class, operation):
+    trainer, loader, events = streaming_fit_trainer(trainer_class, batches=2, save_freq=10, test_freq=10)
+    val_loader = trainer.val_dataloader
+
+    def fail():
+        assert trainer.global_steps == 1
+        raise RuntimeError(f"{operation} failed")
+
+    getattr(trainer, "_save_checkpoint" if operation == "save" else "_validate").side_effect = fail
+    with pytest.raises(RuntimeError, match=f"{operation} failed"):
+        trainer.fit(None)
+    assert trainer.global_steps == 2
+    assert trainer_class[1]["SkipManager"].set_step.call_args.args == (2,)
+    assert loader.closed == val_loader.closed == 1
+    trainer.on_train_end.assert_not_called()
+
+
+def test_partial_ppo_update_failure_does_not_trigger_final_checkpoint(trainer_class):
+    trainer, loader, _ = streaming_fit_trainer(trainer_class, batches=2, save_freq=10, test_freq=10)
+    trainer.step = type(trainer).step.__get__(trainer)
+    trainer.prepare_step = Mock(return_value={})
+    trainer._step_once = Mock(
+        side_effect=[
+            SimpleNamespace(keys=["first"], tags=[{}], partition_id="train"),
+            bridge.DataLoaderExhausted(),
+        ]
+    )
+    with pytest.raises(RuntimeError, match="during PPO update/refill"):
+        trainer.fit(None)
+    trainer._save_checkpoint.assert_not_called()
+    trainer._validate.assert_not_called()
+    assert loader.closed == 1
+
+
+def test_step_budget_finalization_does_not_probe_or_repeat(trainer_class):
+    trainer, loader, events = streaming_fit_trainer(trainer_class, batches=8, save_freq=10, test_freq=10)
+    trainer.fit(None)
+    assert [step for event, step in events if event == "save"] == [3]
+    assert [step for event, step in events if event == "validate"] == [3]
+    assert loader.cursor == 6 and loader.closed == 1
+
+
+@pytest.mark.parametrize("loader_class", [FixtureLoader, IterableOnly])
+def test_early_exhaustion_writes_the_completed_checkpoint_directory(trainer_class, tmp_path, monkeypatch, loader_class):
+    trainer, _, _ = streaming_fit_trainer(trainer_class, batches=2, save_freq=10, loader_class=loader_class)
+    with open_dict(trainer.config.trainer):
+        trainer.config.trainer.update(default_local_dir=str(tmp_path), default_hdfs_dir=None)
+    trainer.use_critic = False
+    trainer.actor_rollout_wg = Mock()
+    trainer.checkpoint_callback = Mock()
+    monkeypatch.setitem(
+        sys.modules,
+        "verl.utils.fs",
+        SimpleNamespace(local_mkdir_safe=lambda path: Path(path).mkdir(parents=True, exist_ok=True)),
+    )
+    trainer._save_checkpoint = type(trainer)._save_checkpoint.__get__(trainer)
+    trainer.fit(None)
+    assert (tmp_path / "global_step_1").is_dir()
+    assert (tmp_path / "global_step_1" / "data.pt").is_file() == (loader_class is FixtureLoader)
+    assert not (tmp_path / "global_step_2").exists()
+    assert (tmp_path / "latest_checkpointed_iteration.txt").read_text() == "1"
+    assert trainer.actor_rollout_wg.save_checkpoint.call_args.args[2] == 1
+
+
+def test_documentation_links_to_the_existing_configuration_guide():
+    config_doc = (ROOT / "docs/examples/config.rst").read_text()
+    assert ".. _custom-ppo-dataloader:" in config_doc
+    assert "_target_: my_project.StreamingLoader" in config_doc
+    assert (
+        ":ref:`custom dataloader <custom-ppo-dataloader>`" in (ROOT / "docs/preparation/prepare_data.rst").read_text()
+    )
+    assert "advance/custom_dataloader" not in (ROOT / "docs/index.rst").read_text()
 
 
 def test_fit_failure_closes_custom_loaders(trainer_class):
@@ -515,8 +860,191 @@ def test_exhaustion_during_a_partial_update_is_not_success(trainer_class):
         trainer.step({}, {})
 
 
-def checkpoint_trainer(trainer_class, tmp_path, monkeypatch, loader_class):
-    trainer, namespace = trainer_instance(trainer_class, config(loader_class))
+def finish_prompt(queue, uid, *, status="finished"):
+    tag = queue.tags["train"][uid]
+    tag["status"] = status
+    if status == "finished":
+        queue.tags["train"][f"{uid}_0_0"] = {"is_prompt": False, "global_steps": tag["global_steps"]}
+
+
+def async_fit_trainer(trainer_class, *, mode, batches, warmup=1, sync_steps=2):
+    subclass = trainer_class[1]["trainer_classes"][mode]
+    trainer, loader, events = streaming_fit_trainer(
+        (subclass, trainer_class[1]), batches=batches, save_freq=10, test_freq=10
+    )
+    trainer.trainer_mode = mode
+    trainer.parameter_sync_step = sync_steps
+    with open_dict(trainer.config):
+        trainer.config.trainer.v1.trainer_mode = mode
+        trainer.config.trainer.v1[mode] = {"num_warmup_batches": warmup}
+        trainer.config.skip = {"rollout_tq": {"enable": False}}
+    # Construct with the async effective fetch size, before any reads.
+    trainer.close_dataloaders()
+    trainer._init_dataloader()
+    loader = trainer.train_dataloader
+    trainer._restored_tq_prompt_count = 0
+    trainer.timing_raw = {}
+    trainer.step = type(trainer).step.__get__(trainer)
+    trainer.on_train_begin = subclass.on_train_begin.__get__(trainer)
+    trainer.current_mode = "rollout"
+    trainer._step_threshold = 2
+    trainer._timed_switch_to_trainer = lambda: setattr(trainer, "current_mode", "trainer")
+    queue = trainer_class[1]["tq"]
+    submitted = []
+    trained = []
+
+    def generate(batch):
+        submitted.extend(batch["uid"])
+        for uid in batch["uid"]:
+            finish_prompt(queue, uid)
+
+    def update(metrics, timing, batch_size):
+        batch, replay_metrics = trainer.replay_buffer.sample(trainer.global_steps, "train", batch_size)
+        metrics.update(replay_metrics)
+        trained.extend(key.split("_")[0] for key in batch.keys)
+        return batch
+
+    trainer._step_once = update
+    manager = SimpleNamespace(generate_sequences=generate)
+    return trainer, loader, manager, submitted, trained, events
+
+
+@pytest.mark.parametrize("mode", ["colocate_async", "separate_async"])
+@pytest.mark.parametrize("warmup", [0, 2])
+@pytest.mark.parametrize("sync_steps", [1, 4])
+@pytest.mark.parametrize("batches", [0, 3, 4, 5, 9, 20])
+def test_async_drains_full_cycles_without_partial_updates(trainer_class, mode, warmup, sync_steps, batches, caplog):
+    trainer, loader, manager, submitted, trained, events = async_fit_trainer(
+        trainer_class, mode=mode, batches=batches, warmup=warmup, sync_steps=sync_steps
+    )
+    with caplog.at_level(logging.INFO):
+        trainer.fit(manager)
+
+    expected_steps = min(3, batches // 4)
+    assert trainer._compute_metrics.call_count == expected_steps
+    assert len(trained) == len(set(trained)) == expected_steps * 4
+    assert set(trained) <= set(submitted)
+    assert len(submitted) == loader.cursor
+    assert loader.closed == 1
+    assert [step for event, step in events if event == "save"] == ([expected_steps] if expected_steps else [])
+    assert [step for event, step in events if event == "validate"] == ([expected_steps] if expected_steps else [])
+    if batches < 12:
+        assert not trainer_class[1]["tq"].tags["train"]
+        assert f"discarding {batches % 4} remaining prompt groups" in caplog.text
+
+
+@pytest.mark.parametrize("status", ["finished", "failure"])
+@pytest.mark.parametrize("strategy", ["drop", "wait"])
+def test_async_eof_waits_for_inflight_groups_before_deciding_to_stop(trainer_class, replay_types, status, strategy):
+    trainer, _, manager, _, trained, _ = async_fit_trainer(trainer_class, mode="colocate_async", batches=4, warmup=2)
+    trainer.agent_loop_manager = manager
+    trainer.global_steps = 1
+    trainer._add_async_warmup_batches(2)
+    assert trainer.replay_buffer.input_exhausted
+    queue = trainer_class[1]["tq"]
+    uid = next(key for key, tag in queue.tags["train"].items() if tag["is_prompt"])
+    queue.kv_clear(keys=[f"{uid}_0_0"], partition_id="train")
+    queue.tags["train"][uid]["status"] = "running"
+    trainer.replay_buffer.max_off_policy_threshold = 1
+    trainer.replay_buffer.max_off_policy_strategy = strategy
+    replay_types["time"].sleep.side_effect = lambda _: finish_prompt(queue, uid, status=status)
+
+    if status == "finished":
+        trainer.step({}, {})
+        assert len(trained) == 4
+    else:
+        with pytest.raises(bridge.DataLoaderExhausted):
+            trainer.step({}, {})
+        assert trained == []
+        assert queue.tags["train"] == {}
+    replay_types["time"].sleep.assert_called_once()
+
+
+@pytest.mark.parametrize("reason", ["stale", "failure", "filtered"])
+def test_async_eof_evictions_do_not_refetch_or_wait_forever(trainer_class, reason):
+    trainer, loader, manager, _, trained, _ = async_fit_trainer(
+        trainer_class, mode="separate_async", batches=5, warmup=2
+    )
+    trainer.agent_loop_manager = manager
+    trainer.global_steps = 1
+    trainer._add_async_warmup_batches(2)
+    assert trainer.replay_buffer.input_exhausted
+    queue = trainer_class[1]["tq"]
+    uids = [key for key, tag in queue.tags["train"].items() if tag["is_prompt"]]
+    for uid in uids[:2]:
+        if reason == "stale":
+            queue.tags["train"][uid]["global_steps"] = 0
+            trainer.replay_buffer.max_off_policy_threshold = 1
+        elif reason == "failure":
+            queue.tags["train"][uid]["status"] = "failure"
+    if reason == "filtered":
+        trainer.replay_buffer.filter_groups_metric = "reward"
+        for index, uid in enumerate(uids):
+            for session, reward in enumerate([1.0, 1.0 if index < 2 else 0.0]):
+                key = f"{uid}_{session}_0"
+                queue.tags["train"][key] = {"is_prompt": False}
+                queue.fields["train"][key] = {"rm_scores": np.array([reward])}
+
+    with pytest.raises(bridge.DataLoaderExhausted):
+        trainer.step({}, {})
+    assert trained == []
+    assert loader.cursor == 5
+    assert queue.tags["train"] == {}
+
+
+def test_async_partial_refill_submits_the_tail_and_trains_a_full_cycle(trainer_class):
+    trainer, loader, manager, submitted, trained, _ = async_fit_trainer(
+        trainer_class, mode="separate_async", batches=6, warmup=0
+    )
+    trainer.agent_loop_manager = manager
+    trainer.global_steps = 1
+    trainer._add_prompts_to_generate(5)
+    queue = trainer_class[1]["tq"]
+    for uid in submitted[:2]:
+        queue.tags["train"][uid]["status"] = "failure"
+    sampleable, metrics = trainer.replay_buffer.wait_for_sampleable(1, "train", 4)
+    assert len(sampleable) == 4
+    assert metrics["training/rollout_failure/evicted_samples"] == 2
+    assert trainer.replay_buffer.input_exhausted
+    assert loader.cursor == 6
+    assert len(submitted) == 6
+
+    trainer.step({}, {})
+    assert len(trained) == 4
+    assert submitted[-1] in trained
+    assert not set(submitted[:2]) & set(trained)
+
+
+def test_training_eof_does_not_end_validation_sampling(trainer_class, replay_types):
+    trainer, _ = trainer_instance(trainer_class)
+    trainer.replay_buffer.input_exhausted = True
+    queue = trainer_class[1]["tq"]
+    queue.tags["val"]["first"] = {"is_prompt": True, "status": "finished", "global_steps": 1}
+    replay_types["time"].sleep.side_effect = lambda _: queue.tags["val"].update(
+        second={"is_prompt": True, "status": "finished", "global_steps": 1}
+    )
+    sampleable, _ = trainer.replay_buffer.wait_for_sampleable(1, "val", 2)
+    assert sampleable == {"first", "second"}
+
+
+def test_async_loader_errors_propagate_and_close(trainer_class):
+    trainer, loader, manager, _, _, _ = async_fit_trainer(trainer_class, mode="separate_async", batches=10, warmup=0)
+
+    def failing_source():
+        yield next(iter(loader))
+        raise ValueError("source disconnected")
+
+    trainer.train_dataloader_it = failing_source()
+    with pytest.raises(ValueError, match="source disconnected"):
+        trainer.fit(manager)
+    assert not trainer.replay_buffer.input_exhausted
+    assert loader.closed == 1
+
+
+def checkpoint_trainer(trainer_class, tmp_path, monkeypatch, loader_class, mode="sync"):
+    cfg = config(loader_class)
+    cfg.trainer.v1.trainer_mode = mode
+    trainer, namespace = trainer_instance(trainer_class, cfg)
     trainer.config.trainer.update(
         default_local_dir=str(tmp_path),
         default_hdfs_dir=None,
@@ -538,8 +1066,9 @@ def checkpoint_trainer(trainer_class, tmp_path, monkeypatch, loader_class):
     return trainer, namespace
 
 
-def test_nonresumable_loader_saves_model_and_removes_stale_data_state(trainer_class, tmp_path, monkeypatch):
-    trainer, _ = checkpoint_trainer(trainer_class, tmp_path, monkeypatch, IterableOnly)
+@pytest.mark.parametrize("mode", ["sync", "colocate_async", "separate_async"])
+def test_nonresumable_loader_saves_model_and_removes_stale_data_state(trainer_class, tmp_path, monkeypatch, mode):
+    trainer, _ = checkpoint_trainer(trainer_class, tmp_path, monkeypatch, IterableOnly, mode)
     checkpoint = tmp_path / "global_step_1"
     checkpoint.mkdir()
     (checkpoint / "data.pt").write_text("stale state from an earlier run")
@@ -552,8 +1081,11 @@ def test_nonresumable_loader_saves_model_and_removes_stale_data_state(trainer_cl
 
 
 @pytest.mark.parametrize("resume_mode", ["auto", "resume_path"])
-def test_nonresumable_loader_rejects_restore_before_loading_weights(trainer_class, tmp_path, monkeypatch, resume_mode):
-    trainer, namespace = checkpoint_trainer(trainer_class, tmp_path, monkeypatch, IterableOnly)
+@pytest.mark.parametrize("mode", ["sync", "colocate_async", "separate_async"])
+def test_nonresumable_loader_rejects_restore_before_loading_weights(
+    trainer_class, tmp_path, monkeypatch, resume_mode, mode
+):
+    trainer, namespace = checkpoint_trainer(trainer_class, tmp_path, monkeypatch, IterableOnly, mode)
     checkpoint = str(tmp_path / "global_step_1")
     trainer.config.trainer.resume_mode = resume_mode
     trainer.config.trainer.resume_from_path = checkpoint
@@ -592,3 +1124,39 @@ def test_stateful_loader_still_rejects_missing_state(trainer_class, tmp_path, mo
     namespace["find_latest_ckpt_path"].return_value = str(tmp_path / "global_step_1")
     with pytest.raises(FileNotFoundError, match="missing"):
         trainer._load_checkpoint()
+
+
+@pytest.mark.parametrize("mode", ["colocate_async", "separate_async"])
+def test_async_resume_restores_cursor_and_inflight_prompts_without_duplicate_warmup(
+    trainer_class, tmp_path, monkeypatch, mode
+):
+    trainer, namespace = checkpoint_trainer(trainer_class, tmp_path, monkeypatch, FixtureLoader, mode)
+    with open_dict(trainer.config):
+        trainer.config.skip = {"rollout_tq": {"enable": False}}
+    trainer.agent_loop_manager = Mock()
+    trainer._add_prompts_to_generate(3)
+    queue = namespace["tq"]
+    uids = set(queue.tags["train"])
+    finish_prompt(queue, next(iter(uids)))
+    trainer._save_checkpoint()
+    checkpoint = str(tmp_path / "global_step_1")
+
+    # A fresh trainer restores both components before reissuing queued work.
+    restored, _ = trainer_instance(trainer_class, trainer.config)
+    restored._init_dataloader()
+    restored.use_critic = False
+    restored.actor_rollout_wg = Mock()
+    restored.agent_loop_manager = Mock()
+    namespace["find_latest_ckpt_path"].return_value = checkpoint
+    restored._load_checkpoint()
+    assert restored._restored_tq_prompt_count == 3
+    assert restored.train_dataloader.cursor == 3
+    assert restored._reissue_inflight_prompts() == 2
+    restored._add_async_warmup_batches(1)
+    assert restored.train_dataloader.cursor == 4
+    assert sum(tag.get("is_prompt", False) for tag in queue.tags["train"].values()) == 4
+    calls = restored.agent_loop_manager.generate_sequences.call_args_list
+    assert len(calls) == 2
+    assert set(calls[0].args[0]["uid"]) < uids
+    assert calls[1].args[0]["extra_info"][0]["position"] == 3
+    assert restored._fetch_one_gen_batch()["extra_info"][0]["position"] == 4

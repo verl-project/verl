@@ -30,7 +30,7 @@ RUNTIME_ARGUMENTS = frozenset({"_data_config", "_split", "_batch_size", "_tokeni
 
 
 class PromptDataLoader(Protocol):
-    """Collated prompt batches; validation needs repeatable, finite iteration."""
+    """Collated batches; the training loader owns repetition, validation needs fresh finite iterations."""
 
     def __iter__(self) -> Iterator[dict[str, Any]]: ...
 
@@ -44,7 +44,7 @@ class StatefulPromptDataLoader(PromptDataLoader, Protocol):
 
 
 class DataLoaderExhausted(Exception):
-    """A custom training source ended in step-based mode."""
+    """A custom training source cannot supply another complete update."""
 
 
 def create_custom_dataloader(

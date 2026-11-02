@@ -147,7 +147,6 @@ verl is fast with:
    :caption: Advanced Features
 
    advance/checkpoint
-   advance/custom_dataloader
    advance/rope
    advance/attention_implementation
    advance/ppo_lora.rst

@@ -132,8 +132,8 @@ def validate_config(
         use_critic (bool): is critic needed
     """
     if config.data.get("custom_dataloader") is not None:
-        if not config.trainer.get("use_v1", True) or config.trainer.v1.trainer_mode != "sync":
-            raise ValueError("data.custom_dataloader currently supports only V1 synchronous PPO.")
+        if not config.trainer.get("use_v1", True):
+            raise ValueError("data.custom_dataloader requires the V1 PPO trainer.")
 
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
