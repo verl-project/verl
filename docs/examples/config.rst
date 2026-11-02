@@ -123,7 +123,8 @@ Custom Dataloader
 - Verl creates separate train/validation instances and supplies ``_split``,
   ``_batch_size``, ``_data_config``, ``_tokenizer``, ``_processor``, and ``_collate_fn``.
   Implement ``__iter__()`` yielding collated batches containing ``raw_prompt``;
-  the loader owns repetition. See the `loader contract <https://github.com/verl-project/verl/blob/main/verl/utils/dataset/dataloader.py>`_.
+  only the training loader may repeat. Each validation iteration must start fresh
+  and terminate. See the `loader contract <https://github.com/verl-project/verl/blob/main/verl/utils/dataset/dataloader.py>`_.
 - Unsized loaders require ``trainer.total_training_steps``. Resume requires paired
   ``state_dict()`` / ``load_state_dict()`` methods; model-only saving does not.
 
