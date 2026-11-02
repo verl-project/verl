@@ -57,6 +57,11 @@ def enable_full_determinism(seed: int):
     device_manual_seed(seed)
     device_manual_seed_all(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
+    # use_deterministic_algorithms also fills every torch.empty / empty_like output (NaN for floats),
+    # so that a read of uninitialized memory is reproducible. That is one fill kernel per allocation,
+    # tens of thousands per micro-batch for large MoE models, and it changes no result of a kernel that
+    # writes its whole output.
+    torch.utils.deterministic.fill_uninitialized_memory = False
     # Enable CUDNN deterministic mode
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
