@@ -309,8 +309,15 @@ def preprocess_thd_engine(
     cp_chunk_index: int = 0,
     cp_chunk_count: int = 1,
     chunk_tape: object = None,
+    pad_value: float | int | None = None,
 ) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
+
+    ``pad_value`` fills the rows this function ADDS for alignment. Zero is right for
+    a token or a mask; it is wrong for a payload whose rows are (id, log q) pairs,
+    because a zero-filled row reads as "token 0 with log q = 0" — a live entry with
+    probability 1. A caller that passes such a payload states its own sentinel
+    (``-inf`` logprobs) so padding stays inert.
 
     ``zigzag`` is the default causal-attention layout: each rank receives a
     chunk from both ends of every sequence. ``contiguous`` assigns each rank
@@ -401,7 +408,11 @@ def preprocess_thd_engine(
     shape = list(input_ids.shape[1:])
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
     if pre_process:
-        input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
+        input_ids_rmpad = (
+            torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
+            if pad_value is None
+            else torch.full(shape, pad_value, dtype=input_ids.dtype, device=input_ids.device)
+        )
         position_ids_rmpad = torch.zeros(shape[0], dtype=torch.long, device=input_ids.device)
         if need_roll:
             saved_roll_dict = {}

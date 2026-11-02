@@ -136,10 +136,16 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             raise NotImplementedError("Dynamic CP router replay requires moe_router_fusion=False")
 
     if batch is not None:
-        if tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False) or tu.get_non_tensor_data(
-            batch, key="distillation_only", default=False
+        if (
+            tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
+            or tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+            or tu.get_non_tensor_data(batch, key="needs_vocab_logits", default=False)
         ):
-            raise NotImplementedError("Dynamic CP does not support distillation")
+            # Same constraint for both entries: both keep per-position vocab tensors resident
+            # past the forward, and the dynamic-CP reshuffle would move rows out from under them.
+            raise NotImplementedError(
+                "Dynamic CP does not support distillation or any other resident-vocab-logits loss"
+            )
 
 
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
@@ -687,9 +693,10 @@ class MegatronEngine(BaseEngine):
         Returns:
             grad_norm (float): The norm of the gradients before clipping or update.
         """
-        # forward_kl_topk leaves large fp32 vocab tensors until backward ends;
+        # The logits-processor loss entries (top-k distillation and any other
+        # resident-vocab-logits loss) leave large fp32 vocab tensors until backward ends;
         # free cached blocks before grad-norm all_reduce to reduce OOM on tight VRAM.
-        if getattr(self, "_distillation_use_topk_active", False):
+        if getattr(self, "_vocab_logits_active", False):
             get_torch_device().empty_cache()
         try:
             update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
@@ -881,7 +888,11 @@ class MegatronEngine(BaseEngine):
                 if not getattr(_t.cuda, "_dsv41_sampler", None):
                     _t.cuda._dsv41_sampler = _th.Thread(target=_sample, daemon=True)
                     _t.cuda._dsv41_sampler.start()
-        self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
+        # Any loss entry that is computed from the vocab logits keeps them resident until
+        # backward ends (see optimizer_step), so both flags arm the same cache flush.
+        self._vocab_logits_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False) or (
+            tu.get_non_tensor_data(data, key="needs_vocab_logits", default=False)
+        )
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
         _check_dcp_unsupported_features(self.engine_config, self.model_config, batch=data)
@@ -1257,6 +1268,97 @@ class EngineTrainModeCtx(BaseEngineCtx):
         super().__exit__(exc_type, exc_value, traceback)
 
 
+# A micro-batch carries at most one resident top-k payload, and it enters the forward under a
+# single pair of slot names (see forward_step). The teacher payload has two spellings: this
+# fork's batch format uses `teacher_topk_*`, the distillation trainer's uses `teacher_*`. The
+# sampler payload has one.
+_TEACHER_PAYLOAD_KEYS = ("teacher_topk_token_ids", "teacher_topk_logprobs")
+_TEACHER_PAYLOAD_ALIASES = ("teacher_ids", "teacher_logprobs")
+_SAMPLER_PAYLOAD_KEYS = ("sampler_topk_token_ids", "sampler_topk_logprobs")
+
+
+def _declares_keyword(func, name: str) -> bool:
+    """Whether ``func`` can be called with ``name=``.
+
+    The loss callable is a boundary to code this engine does not own (mint's closures, a
+    user's loss, the distillation entries). Passing an argument a consumer's signature does
+    not declare is a TypeError at the call site — after the forward has already run — so the
+    capability is checked here rather than assumed. A callable that takes ``**kwargs``
+    accepts it by definition.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):  # builtins and some C callables expose no signature
+        return False
+    if name not in parameters:
+        return False
+    # A consumer that merely swallows `**kwargs` has not opted IN: a wrapper could forward
+    # the value somewhere that treats it as supervision, or drop it silently, and neither
+    # shows up as an error. Only an explicitly declared keyword counts.
+    return parameters[name].kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def _resident_logits_payload(batch, *, distillation_use_topk: bool, needs_vocab_logits: bool):
+    """Pick the top-k payload that arms this micro-batch's logits processor.
+
+    `distillation_use_topk` asks for the teacher's top-k; `needs_vocab_logits` asks for whatever
+    distribution the loss prices against (a sampler's, for score centering). A micro-batch
+    carries only one payload, so the distillation contract wins when both flags are set.
+
+    Returns:
+        ``(ids, logprobs)``, or ``None`` when neither flag is armed.
+    """
+    if distillation_use_topk:
+        flag, spellings = "distillation_use_topk", (_TEACHER_PAYLOAD_KEYS, _TEACHER_PAYLOAD_ALIASES)
+    elif needs_vocab_logits:
+        flag, spellings = "needs_vocab_logits", (_SAMPLER_PAYLOAD_KEYS,)
+    else:
+        # No flag: whatever the batch carries is not this engine's payload, and it is not
+        # ambiguous either — the batch builder is free to carry both for its own reasons.
+        return None
+
+    # A micro-batch carrying BOTH a teacher and a sampler top-k is ambiguous, and the two
+    # mean different things to a consumer: one is a target distribution, the other is the
+    # distribution the loss prices against. Preferring one silently would hand a consumer
+    # the wrong KIND under a name it trusts, so the ambiguity is refused instead.
+    def _first_present(keys):
+        for key in keys:
+            if batch.get(key, None) is not None:
+                return key
+        return None
+
+    sampler_key = _first_present(_SAMPLER_PAYLOAD_KEYS[:1])
+    # BOTH teacher spellings: the canonical one AND the alias. Checking only the canonical
+    # key let a batch carrying `teacher_ids` next to a sampler payload through, which is the
+    # same ambiguity under a different name.
+    teacher_key = _first_present((*_TEACHER_PAYLOAD_KEYS[:1], *_TEACHER_PAYLOAD_ALIASES[:1]))
+    if sampler_key is not None and teacher_key is not None:
+        raise RuntimeError(
+            f"the micro-batch carries BOTH a teacher top-k ({teacher_key}) and a sampler "
+            f"top-k ({sampler_key}); this engine "
+            "has one payload slot and the two are different distributions (teacher = target, "
+            "sampler = the one the loss prices against). Arm one of them: send the batch "
+            "with a single payload, or split it into two steps"
+        )
+
+    for ids_key, logprobs_key in spellings:
+        ids = batch.get(ids_key, None)
+        if ids is None:
+            continue
+        logprobs = batch.get(logprobs_key, None)
+        if logprobs is None:
+            raise RuntimeError(f"{flag} is set but the micro-batch carries {ids_key} without {logprobs_key}")
+        return ids, logprobs
+
+    expected = " or ".join(f"{ids_key}/{logprobs_key}" for ids_key, logprobs_key in spellings)
+    raise RuntimeError(f"{flag} is set but the micro-batch carries no top-k payload (expected {expected})")
+
+
 @EngineRegistry.register(model_type="language_model", backend="megatron")
 class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
@@ -1290,6 +1392,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        needs_vocab_logits: bool = False,
+        teacher_topk_ids: torch.Tensor | None = None,
+        teacher_topk_logprobs: torch.Tensor | None = None,
     ):
         if logits.shape[:2] != label.shape[:2]:
             # A bare assert hides which side is wrong; these are the two facts that matter.
@@ -1328,8 +1433,40 @@ class MegatronEngineWithLMHead(MegatronEngine):
             logits_bak = logits
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
-        if distillation_use_topk:
-            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+        if distillation_use_topk or needs_vocab_logits:
+            # The payload arrives ALREADY sharded by gptmodel_forward_model_engine with the
+            # label's cp_layout / use_fp8_padding / local_cp_size (it rode
+            # logits_processor_args, see forward_step). Re-deriving the shard inside the loss is
+            # the divergence this replaces: those three values are derived from the model config
+            # inside the forward and are unreachable from the loss closure.
+            processor_kwargs = {}
+            if teacher_topk_ids is not None and teacher_topk_logprobs is not None:
+                # Only advertise the slot when the batch actually armed a payload: a loss entry
+                # that takes no payload keeps its existing signature.
+                processor_kwargs["teacher_topk_ids"] = teacher_topk_ids
+                processor_kwargs["teacher_topk_logprobs"] = teacher_topk_logprobs
+            if (
+                needs_vocab_logits
+                and not distillation_use_topk
+                and teacher_topk_ids is not None  # this lane armed a sampler payload
+                and label is not None
+                and _declares_keyword(logits_processor_func, "target_ids")
+            ):
+                # The SAMPLER-head lane (`needs_vocab_logits` without the distillation flag).
+                # `label` here is the sharded, padded label that `logits` was built against,
+                # which is the only copy a consumer can compare a head against: the batch's
+                # own labels are unsharded and 32x the rows at CP=32. A loss that wants to
+                # prove its head is aligned with the supervised position (rather than
+                # correlating with it by accident) needs exactly this.
+                processor_kwargs["target_ids"] = label
+            ret.update(
+                logits_processor_func(
+                    student_logits=logits_bak,
+                    data=batch,
+                    data_format=data_format,
+                    **processor_kwargs,
+                )
+            )
         if not distillation_only:
             ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
 
@@ -1498,14 +1635,17 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+        needs_vocab_logits = tu.get_non_tensor_data(batch, key="needs_vocab_logits", default=False)
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
             else None
         )
 
-        if pad_to_length_bucket is not None and distillation_use_topk:
-            raise RuntimeError("pad_to_length is not supported with top-K distillation")
+        if pad_to_length_bucket is not None and (distillation_use_topk or needs_vocab_logits):
+            raise RuntimeError(
+                "pad_to_length is not supported with top-K distillation or any other resident-vocab-logits loss"
+            )
         if pad_to_length_bucket is not None and self.enable_routing_replay:
             raise RuntimeError("pad_to_length is not supported with router replay")
 
@@ -1620,6 +1760,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 distillation_use_topk=distillation_use_topk,
                 distillation_only=distillation_only,
+                needs_vocab_logits=needs_vocab_logits,
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
@@ -1634,6 +1775,19 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "loss_mask": loss_mask,
                 "response_attention_mask": response_attention_mask,
             }
+            # Every value of this dict is sharded by gptmodel_forward_model_engine
+            # (verl/models/mcore/model_forward.py) with the forward's own cp_layout /
+            # use_fp8_padding / local_cp_size, i.e. exactly like input_ids and label. Putting the
+            # payload here is therefore the whole feature: no sharding code is added, and
+            # need_roll=(k == "label") keeps it unrolled, which is the contract (row t is the
+            # distribution for the token row t predicts).
+            payload = _resident_logits_payload(
+                batch, distillation_use_topk=distillation_use_topk, needs_vocab_logits=needs_vocab_logits
+            )
+            if payload is not None:
+                # `teacher_topk_*` is the slot name the logits processor sees for whichever
+                # payload armed this micro-batch (distillation_use_topk or needs_vocab_logits).
+                logits_processor_args["teacher_topk_ids"], logits_processor_args["teacher_topk_logprobs"] = payload
 
             mtp_loss_normalization_factor = None
             if (

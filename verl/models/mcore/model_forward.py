@@ -233,6 +233,12 @@ def gptmodel_forward_model_engine(
         )
 
         if post_process and logits_processor is not None:
+            # A top-k payload's rows are (id, log q) pairs, so a zero-filled alignment
+            # row would read as "token 0, log q = 0" — a live entry with probability 1,
+            # which the loss cannot tell from data. Its ids may stay 0 (every consumer
+            # reads them under the logprob's liveness), but the logprobs must pad with
+            # the -inf sentinel the contract already uses inside k.
+            pad_values = {"teacher_topk_logprobs": float("-inf")}
             args = {
                 k: preprocess_thd_engine(
                     v,
@@ -245,6 +251,7 @@ def gptmodel_forward_model_engine(
                     cp_chunk_index=cp_chunk_index,
                     cp_chunk_count=cp_chunk_count,
                     chunk_tape=chunk_tape,
+                    pad_value=pad_values.get(k),
                 )[0]
                 for k, v in logits_processor_args.items()
             }

@@ -126,8 +126,18 @@ def compute_topk_loss(
     data: TensorDict,
     student_logits: torch.Tensor,
     data_format: str,
+    teacher_topk_ids: torch.Tensor = None,
+    teacher_topk_logprobs: torch.Tensor = None,
 ) -> torch.Tensor:
     """Compute the topk loss in logit processor.
+
+    Args:
+        teacher_topk_ids: accepted for ABI compatibility with the engine forward's logits
+            processor call, which now hands the payload over already sharded (verl megatron
+            engine). Unused here: this entry point still reads the nested
+            ``data["teacher_ids"]`` / ``data["teacher_logprobs"]`` stream and lets the loss
+            shard it, so the behaviour of verl's own distillation trainer is unchanged.
+        teacher_topk_logprobs: see ``teacher_topk_ids``.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -170,6 +180,8 @@ def distillation_ppo_loss(
     dp_group=None,
     student_logits: torch.Tensor = None,
     data_format: str = "thd",
+    teacher_topk_ids: torch.Tensor = None,
+    teacher_topk_logprobs: torch.Tensor = None,
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -194,6 +206,11 @@ def distillation_ppo_loss(
           - teacher_ids: (bsz, seqlen, topk)
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+        teacher_topk_ids: the forward's already-sharded teacher top-k ids
+            ``(1, seqlen/cp_size, topk)`` when the megatron engine armed this loss through
+            ``logits_processor_args``. Accepted for ABI compatibility; the top-k losses keep
+            reading ``data["teacher_ids"]`` (see ``compute_topk_loss``).
+        teacher_topk_logprobs: see ``teacher_topk_ids``.
 
     Returns:
     - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
@@ -202,7 +219,15 @@ def distillation_ppo_loss(
 
     # Called as logits processor
     if student_logits is not None:
-        return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
+        return compute_topk_loss(
+            config,
+            distillation_config,
+            data,
+            student_logits,
+            data_format,
+            teacher_topk_ids=teacher_topk_ids,
+            teacher_topk_logprobs=teacher_topk_logprobs,
+        )
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
