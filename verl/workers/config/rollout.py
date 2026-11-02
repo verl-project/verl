@@ -339,6 +339,9 @@ class RolloutConfig(BaseConfig):
                 stacklevel=2,
             )
 
+        if self.prefix_cache_mode not in ("versioned", "shared"):
+            raise ValueError(f"prefix_cache_mode must be 'versioned' or 'shared', got {self.prefix_cache_mode!r}")
+
         if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"

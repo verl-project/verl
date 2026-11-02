@@ -44,6 +44,7 @@ def test_weight_sync_lifecycle(monkeypatch, mode, prefix_caching, multimodal, pr
         server = object.__new__(vLLMHttpServer)
         server.node_rank = 0
         server.engine = SimpleNamespace(pause_generation=AsyncMock(), resume_generation=AsyncMock())
+        server.close_submission_gate = AsyncMock()
         server.open_submission_gate = AsyncMock()
         handle = SimpleNamespace(
             pause_generation=SimpleNamespace(remote=server.pause_generation),

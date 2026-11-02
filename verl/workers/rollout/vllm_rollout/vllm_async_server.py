@@ -1188,11 +1188,8 @@ class vLLMHttpServer:
 
         try:
             # Close the gate first, then let admissions already past it land, so the pause
-            # below actually covers them. Closing the gate and declaring how late arrivals
-            # are handled happen together, so no request can observe one without the other.
-            self._submission_paused = True
-            self._rejecting = reject_request
-            self._resume_event.clear()
+            # below actually covers them.
+            await self.close_submission_gate(reject_request)
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
                 if time.monotonic() > deadline:
@@ -1234,7 +1231,8 @@ class vLLMHttpServer:
             raise
 
     async def pause_generation(self):
-        """Pause scheduling while retaining in-flight requests and their KV cache."""
+        """Close admission, then pause scheduling while retaining in-flight requests and their KV cache."""
+        await self.close_submission_gate()
         if self.node_rank == 0:
             await self.engine.pause_generation(mode="keep", clear_cache=False)
 
@@ -1242,6 +1240,16 @@ class vLLMHttpServer:
         """Resume the DP engines while request admission remains closed."""
         if self.node_rank == 0:
             await self.engine.resume_generation()
+
+    async def close_submission_gate(self, reject_request: bool = False):
+        """Park (or reject) new requests until the replica reopens the gate.
+
+        Closing the gate and declaring how late arrivals are handled happen together,
+        so no request can observe one without the other.
+        """
+        self._submission_paused = True
+        self._rejecting = reject_request
+        self._resume_event.clear()
 
     async def open_submission_gate(self):
         """Admit requests after the replica has finished resuming its engines."""
@@ -1726,8 +1734,8 @@ class vLLMReplica(RolloutReplica):
         }
 
     async def pause_generation(self):
-        """Pause all DP engines through the replica engine owner."""
-        await self.servers[0].pause_generation.remote()
+        """Close every server's gate and pause the DP engines through the engine owner."""
+        await asyncio.gather(*[server.pause_generation.remote() for server in self.servers])
 
     async def resume_generation(self):
         """Resume the DP engines before admitting requests on any server."""
