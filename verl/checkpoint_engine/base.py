@@ -565,17 +565,22 @@ class CheckpointEngineManager:
     async def verify_update_path(self, global_steps: int = None) -> dict:
         """Verify, once, that the weight-update path writes weights correctly.
 
-        Run this before training starts, while the trainer and the rollout
-        engines hold the same freshly loaded checkpoint: the engine's current
-        weights are then a known-good reference. Snapshot them, reset them,
-        push the trainer's weights through the path training uses, then compare.
+        Follows vLLM's weight-checker flow: pause serving, record a checksum
+        baseline, reset the weights, transfer the trainer's weights through the
+        path training uses, then compare against the baseline. Serving resumes
+        before this returns.
 
-        The reset is what makes the check falsifiable. Without it, an update
-        that silently did nothing would compare equal, because the old weights
-        are still there.
+        The first transfer is not part of the check. The rollout engines start
+        with their weights discarded (vLLM hybrid sleep level 2 frees the weight
+        memory instead of offloading it), so they hold no valid weights until the
+        first sync; that sync both delivers the initial weights and gives the
+        baseline something meaningful to record.
 
-        It calls ``update_weights`` itself, so callers must not also push
-        weights for the same step.
+        The reset is what makes the check falsifiable: without it, an update that
+        silently did nothing would compare equal.
+
+        It calls ``update_weights`` twice, so callers must not sync for the same
+        step again.
 
         Args:
             global_steps: Passed through to ``update_weights``.
@@ -590,53 +595,57 @@ class CheckpointEngineManager:
         if not self.replicas:
             raise RuntimeError("weight update check needs at least one rollout replica")
 
-        # init_workers() sleeps the replicas, and vLLM's sleep levels release the
-        # weight memory the checker hashes, so bring them back before snapshotting.
-        await self.wake_up_replicas()
+        # Stay paused until the comparison: the weights are invalid between reset
+        # and the transfer, and EPLB moves experts while serving.
+        await self.abort_replicas()
+        try:
+            # Give the engines valid weights so the baseline is real, and keep
+            # serving paused afterwards since update_weights resumes it.
+            await self.update_weights(global_steps)
+            await self.abort_replicas()
 
-        print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
-        baseline_keys = 0
-        for replica in self.replicas:
-            for result in await replica.check_weights("snapshot"):
-                baseline_keys += result.get("num_keys", 0)
-        print(f"Weight update check: baseline recorded, {baseline_keys} weight shard(s)")
+            print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
+            baseline_keys = 0
+            for replica in self.replicas:
+                for result in await replica.check_weights("snapshot"):
+                    baseline_keys += result.get("num_keys", 0)
+            print(f"Weight update check: baseline recorded, {baseline_keys} weight shard(s)")
 
-        for replica in self.replicas:
-            await replica.check_weights("reset")
-        print("Weight update check: weights reset, syncing through the real update path")
+            for replica in self.replicas:
+                await replica.check_weights("reset")
+            print("Weight update check: weights reset, syncing through the real update path")
 
-        # update_weights() expects the replicas asleep: the naive path resumes the
-        # weights itself, and the other backends sleep and wake around the transfer.
-        await self.sleep_replicas()
+            await self.update_weights(global_steps)
+            await self.abort_replicas()
 
-        await self.update_weights(global_steps)
+            print("Weight update check: comparing against the baseline")
+            checked = 0
+            total_keys = 0
+            failures: list[dict] = []
+            for replica in self.replicas:
+                for result in await replica.check_weights("compare"):
+                    checked += 1
+                    total_keys += result.get("num_keys", 0)
+                    if not result.get("success"):
+                        failures.append(result)
 
-        print("Weight update check: comparing against the baseline")
-        checked = 0
-        total_keys = 0
-        failures: list[dict] = []
-        for replica in self.replicas:
-            for result in await replica.check_weights("compare"):
-                checked += 1
-                total_keys += result.get("num_keys", 0)
-                if not result.get("success"):
-                    failures.append(result)
+            # A replica whose server owns no engine answers nothing, and a partial
+            # answer would silently leave those shards unverified while still
+            # looking like a pass. Every replica must contribute at least one result.
+            if checked < len(self.replicas):
+                raise RuntimeError(
+                    f"weight update check covered {checked} of {len(self.replicas)} replica(s); "
+                    "a replica reported no engine, so its weights were never verified"
+                )
 
-        # A replica whose server owns no engine answers nothing, and a partial
-        # answer would silently leave those shards unverified while still
-        # looking like a pass. Every replica must contribute at least one result.
-        if checked < len(self.replicas):
-            raise RuntimeError(
-                f"weight update check covered {checked} of {len(self.replicas)} replica(s); "
-                "a replica reported no engine, so its weights were never verified"
-            )
-
-        if failures:
-            sample = failures[0].get("mismatches", [])[:5]
-            raise RuntimeError(
-                f"weight update check failed on {len(failures)} of {checked} replica(s); "
-                f"first mismatched keys: {sample}"
-            )
+            if failures:
+                sample = failures[0].get("mismatches", [])[:5]
+                raise RuntimeError(
+                    f"weight update check failed on {len(failures)} of {checked} replica(s); "
+                    f"first mismatched keys: {sample}"
+                )
+        finally:
+            await self.resume_generation_replicas()
 
         return {"replicas": checked, "num_keys": total_keys, "success": True}
 
