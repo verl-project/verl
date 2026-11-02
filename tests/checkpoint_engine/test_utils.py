@@ -41,6 +41,9 @@ class TrainingWorkerTest(TrainingWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
+        if getattr(self.checkpoint_engine, "consumes_training_engine", False):  # sharded export, e.g. mori "shard"
+            await self.checkpoint_engine.send_weights(self.engine, global_steps=global_steps)
+            return
         per_tensor_param, _ = self.engine.get_per_tensor_param()
         await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
 

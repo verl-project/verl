@@ -84,10 +84,11 @@ async def test_nccl_checkpoint_engine(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("num_chains, num_slots", [(1, 2), (8, 4)])
+@pytest.mark.parametrize("export, num_chains, num_slots", [("full", 1, 2), ("full", 8, 4), ("shard", 8, 4)])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_mori_checkpoint_engine(
+    export,
     num_chains,
     num_slots,
     num_trainer,
@@ -102,11 +103,12 @@ async def test_mori_checkpoint_engine(
     model_path = os.path.expanduser(model_path)
     ray.init(runtime_env={"env_vars": {"VERL_LOGGING_LEVEL": "DEBUG"}})
 
-    # num_chains=1: one stripe, from trainer rank 0; 8: one stripe per trainer rank (min(8, num_trainer))
+    # num_chains=1: one stripe, from trainer rank 0; 8: one stripe per trainer rank (min(8, num_trainer));
+    # export="shard": every trainer rank sends its own FSDP shards, no all-gather
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="mori",
         update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"mori": {"num_chains": num_chains, "num_slots": num_slots}},
+        engine_kwargs={"mori": {"num_chains": num_chains, "num_slots": num_slots, "export": export}},
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)

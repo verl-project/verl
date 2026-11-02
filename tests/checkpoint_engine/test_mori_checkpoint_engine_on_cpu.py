@@ -52,6 +52,7 @@ def _fake_mori():
         "threads": [],
         "node_of": {},  # engine key -> node, filled by _wire after prepare(); same node + XGMI on both = XGMI
         "delay": 0.003,  # max seconds a write takes
+        "delay_of": {},  # engine key -> max seconds its writes take (overrides "delay")
         "inflight": 0,  # writes submitted and not yet landed
         "fail_writes": 0,  # the next N writes report FAILED at once while their copy still runs (orphaned WRs)
     }
@@ -134,7 +135,7 @@ def _fake_mori():
             node = fab["node_of"].get(self.key)
             # like MoRI's XGMI backend, a same-node XGMI copy raises no notification at the target
             xgmi = self.xgmi and target.xgmi and node is not None and node == fab["node_of"].get(owner)
-            delay, st = random.uniform(0, fab["delay"]), Status()
+            delay, st = random.uniform(0, fab["delay_of"].get(self.key, fab["delay"])), Status()
             self.endpoints.add(owner)
             with fab["lock"]:
                 fab["inflight"] += 1
@@ -360,6 +361,225 @@ def test_every_rollout_gets_every_tensor(mori_env, n_actors, nodes, num_chains, 
                 e.finalize()
 
     asyncio.run(run())
+
+
+class _ShardedTrainerRank:
+    """One rank of a trainer whose parameters are cut along dim 0 into `world` shards (torch.chunk, as FSDP2
+    Shard(0)); exposes get_per_tensor_param_shard() like verl's training engines: (name, flat local shard, spec)."""
+
+    per_tensor_param_shard_is_hf = True  # as the FSDP engine declares
+
+    def __init__(self, rank, world, weights, replicated=(), model_type=None, drop=()):
+        self.rank, self.world, self.weights, self.replicated = rank, world, weights, set(replicated)
+        self.drop = set(drop)  # tensors this rank wrongly leaves out (a broken exporter)
+        self.model_config = types.SimpleNamespace(hf_config=types.SimpleNamespace(model_type=model_type))
+
+    def get_per_tensor_param_shard(self):
+        def gen():
+            for name, w in self.weights:
+                if name in self.replicated or w.dim() == 0:  # whole tensor on every rank: rank 0 sends it
+                    yield (
+                        name,
+                        w.reshape(-1),
+                        types.SimpleNamespace(full_shape=tuple(w.shape), place=0, contributes=self.rank == 0),
+                    )
+                    continue
+                if name in self.drop:
+                    continue
+                parts = list(torch.chunk(w, self.world, dim=0))  # can be fewer than world: the last ranks get none
+                local = parts[self.rank] if self.rank < len(parts) else w[:0]
+                first_row = sum(p.shape[0] for p in parts[: self.rank])
+                row = w[0].numel() if w.shape[0] else 0
+                yield (
+                    name,
+                    local.reshape(-1),
+                    types.SimpleNamespace(full_shape=tuple(w.shape), place=first_row * row, contributes=True),
+                )
+
+        return gen(), None
+
+
+def _moe_weights(seed):
+    """_make_weights plus Transformers-5 packed MoE experts, an empty and a 0-dim tensor."""
+    g = torch.Generator().manual_seed(seed + 100)
+    ws = _make_weights(seed)
+    ws.append(("model.layers.0.mlp.experts.gate_up_proj", torch.randn(5, 6, 8, generator=g).to(torch.bfloat16)))
+    ws.append(("model.layers.0.mlp.experts.down_proj", torch.randn(5, 8, 3, generator=g).to(torch.bfloat16)))
+    ws.append(("model.layers.0.mlp.gate.weight", torch.randn(5, 8, generator=g)))
+    ws.append(("empty.w", torch.empty(0, 5)))
+    ws.append(("scalar", torch.tensor(1.5)))
+    return ws
+
+
+def _unfused(ws):
+    """What the rollout must receive: packed experts under their per-expert checkpoint names."""
+    out = []
+    for name, w in ws:
+        if name.endswith(".mlp.experts.gate_up_proj"):
+            gate, up = w.chunk(2, dim=1)
+            base = name.removesuffix(".gate_up_proj")
+            for e in range(w.shape[0]):
+                out += [(f"{base}.{e}.gate_proj.weight", gate[e]), (f"{base}.{e}.up_proj.weight", up[e])]
+        elif name.endswith(".mlp.experts.down_proj"):
+            base = name.removesuffix(".down_proj")
+            out += [(f"{base}.{e}.down_proj.weight", w[e]) for e in range(w.shape[0])]
+        else:
+            out.append((name, w))
+    return out
+
+
+@pytest.mark.parametrize(
+    "n_actors, nodes, num_slots",
+    [(2, [3], 2), (4, [3, 3], 2), (8, [4, 4], 2), (3, [2, 2], 3), (8, [2, 2, 2], 2)],
+    ids=["1-node", "2-nodes", "2-nodes-8-ranks", "uneven-shards-3-slots", "3-nodes-stripes-wrap-gpus"],
+)
+def test_shard_export_assembles_full_tensors(mori_env, n_actors, nodes, num_slots):
+    """export="shard": every trainer rank sends only its own dim-0 shards (stripe = rank); every rollout worker must
+    assemble every full tensor bit-exact, with packed MoE experts split into per-expert names."""
+    mod, fab = mori_env
+    kw = dict(export="shard", num_slots=num_slots)
+    actors = [_new(mod, 8, node="trainer", is_master=(i == 0), **kw) for i in range(n_actors)]
+    rollouts = [_new(mod, 8, node=f"r{ni}", **kw) for ni, size in enumerate(nodes) for _ in range(size)]
+    assert all(e.consumes_training_engine for e in actors)
+
+    async def run():
+        for step in range(2):
+            _wire(actors, rollouts, fab)
+            ws = _moe_weights(step)
+            ranks = [_ShardedTrainerRank(i, n_actors, ws, ["embed"], "qwen3_moe") for i in range(n_actors)]
+            fab["writes"].clear()
+            res = await asyncio.gather(
+                *[a.send_weights(r, global_steps=step) for a, r in zip(actors, ranks, strict=True)],
+                *[_consume(r, step, 0.002 if i == 1 else 0) for i, r in enumerate(rollouts)],
+            )
+            want = _unfused(ws)
+            for got in res[n_actors:]:
+                assert set(got) == {n for n, _ in want}
+                for n, w in want:
+                    assert _same(got[n], w), n
+            assert actors[0]._P == n_actors
+            _check_traffic(fab, actors, rollouts, nodes, n_actors)
+            for e in actors + rollouts:
+                e.finalize()
+
+    asyncio.run(run())
+
+
+def test_shard_export_needs_a_stripe_per_rank(mori_env):
+    mod, _ = mori_env
+    actors = [_new(mod, 2, node="trainer", export="shard") for _ in range(4)]
+    rollouts = [_new(mod, 2, node="r0", export="shard") for _ in range(2)]
+    with pytest.raises(AssertionError, match="num_chains >= trainer world size"):
+        _wire(actors, rollouts)
+
+
+def test_shard_assembly_is_bounded_when_stripes_run_apart(mori_env):
+    """One stripe much slower than the others: receivers must not keep starting full tensors for the fast stripes
+    while the slow one lags (memory stays within about num_slots * bucket_size), and the sync still completes."""
+    mod, fab = mori_env
+    g = torch.Generator().manual_seed(5)
+    ws = [(f"layer{i}.w", torch.randn(64, 64, generator=g)) for i in range(96)]  # 16 KiB each, 1.5 MiB in total
+    actors = [_new(mod, 4, node="trainer", is_master=(i == 0), export="shard") for i in range(4)]
+    rollouts = [_new(mod, 4, node="r0", export="shard") for _ in range(2)]
+    ranks = [_ShardedTrainerRank(i, 4, ws) for i in range(4)]
+
+    async def run():
+        _wire(actors, rollouts, fab)
+        fab["delay_of"][actors[3]._key] = 0.02  # stripe 3 crawls
+        res = await asyncio.gather(
+            *[a.send_weights(r, global_steps=0) for a, r in zip(actors, ranks, strict=True)],
+            *[_consume(r, 0) for r in rollouts],
+        )
+        for got in res[4:]:
+            assert all(_same(got[n], w) for n, w in ws)
+        bound = 2 * BUCKET + 64 * 64 * 4  # num_slots * bucket_size, plus the oldest tensor let in over it
+        for r in rollouts:  # unbounded, the fast stripes start most of the 1.5 MiB model
+            assert r._assembly.peak <= bound, (r._assembly.peak, bound)
+
+    asyncio.run(run())
+
+
+def test_shard_assembly_bound_with_empty_shards_and_oversized_tensors(mori_env):
+    """Ranks with empty shards start on different tensors, and every tensor is larger than the assembly limit: at
+    most one tensor may be held over the limit (limit + largest tensor), and the data must still be exact."""
+    mod, fab = mori_env
+    g = torch.Generator().manual_seed(9)
+    # 192 KiB each (limit is 2 * 64 KiB); cut 4 ways along dim 0 of size 2 / 3 / 4, so rank 3 starts on tensor 2,
+    # rank 2 on tensor 1, ranks 0 and 1 on tensor 0
+    ws = [(f"w{i}", torch.randn(rows, 196608 // 4 // rows, generator=g)) for i, rows in enumerate((2, 3, 4))]
+    actors = [_new(mod, 4, node="trainer", is_master=(i == 0), export="shard") for i in range(4)]
+    rollouts = [_new(mod, 4, node="r0", export="shard") for _ in range(2)]
+    ranks = [_ShardedTrainerRank(i, 4, ws) for i in range(4)]
+
+    async def run():
+        _wire(actors, rollouts, fab)
+        fab["delay_of"][actors[0]._key] = 0.05  # rank 0 (which completes tensor 0) is late
+        res = await asyncio.gather(
+            *[a.send_weights(r, global_steps=0) for a, r in zip(actors, ranks, strict=True)],
+            *[_consume(r, 0) for r in rollouts],
+        )
+        for got in res[4:]:
+            assert all(_same(got[n], w) for n, w in ws)
+        for r in rollouts:
+            assert r._assembly.peak <= 2 * BUCKET + 196608, r._assembly.peak
+
+    asyncio.run(run())
+
+
+def test_shard_export_fails_if_a_tensor_stays_incomplete(mori_env):
+    """A rank that leaves out its shard of a tensor: the receivers must fail the sync, not report success. (The model
+    here fits the assembly window; with a full window the missing piece surfaces as a timeout instead.)"""
+    mod, fab = mori_env
+    g = torch.Generator().manual_seed(3)
+    ws = [(f"layer{i}.w", torch.randn(16, 8, generator=g)) for i in range(8)]
+    actors = [_new(mod, 2, node="trainer", is_master=(i == 0), export="shard") for i in range(2)]
+    rollouts = [_new(mod, 2, node="r0", export="shard") for _ in range(2)]
+    ranks = [_ShardedTrainerRank(i, 2, ws, drop=["layer3.w"] if i == 1 else ()) for i in range(2)]
+
+    async def run():
+        _wire(actors, rollouts, fab)
+        return await asyncio.gather(
+            *[a.send_weights(r, global_steps=0) for a, r in zip(actors, ranks, strict=True)],
+            *[_consume(r, 0) for r in rollouts],
+            return_exceptions=True,
+        )
+
+    res = asyncio.run(run())
+    assert all(isinstance(x, RuntimeError) and "incomplete" in str(x) for x in res[2:]), res
+
+
+@pytest.mark.parametrize("case", ["not-an-engine", "not-hf-layout", "lora", "qat", "to-hf-spec"])
+def test_shard_export_refuses_what_it_cannot_reproduce(mori_env, case):
+    """Shard export sends raw shards; it must refuse sources whose full export would convert them first."""
+    mod, fab = mori_env
+    ws = [("w", torch.randn(8, 4))]
+    rank = _ShardedTrainerRank(0, 1, ws, model_type="qwen3")
+    if case == "not-an-engine":
+        rank = iter([("w", ws[0][1], types.SimpleNamespace(full_shape=(8, 4), place=0, contributes=True))])
+    elif case == "not-hf-layout":  # e.g. Megatron: MCore names, local TP slices with full_shape == local shape
+        rank.per_tensor_param_shard_is_hf = False
+    elif case == "lora":
+        rank.model_config.lora_rank = 8
+    elif case == "qat":
+        rank._qat_enabled = True
+    else:
+        gen, _ = rank.get_per_tensor_param_shard()
+        spec = next(gen)[2]
+        spec.to_hf_chunk = lambda start, segment: []
+        rank.get_per_tensor_param_shard = lambda: (iter([("w", ws[0][1].reshape(-1), spec)]), None)
+    actor = _new(mod, 1, node="trainer", is_master=True, export="shard")
+    rollout = _new(mod, 1, node="r0", export="shard")
+    _wire([actor], [rollout], fab)
+
+    async def run():
+        return await asyncio.gather(
+            actor.send_weights(rank, global_steps=0), _consume(rollout, 0), return_exceptions=True
+        )
+
+    sent, received = asyncio.run(run())
+    want = TypeError if case == "not-an-engine" else NotImplementedError
+    assert isinstance(sent, want), sent
+    assert isinstance(received, RuntimeError), received
 
 
 def test_version_mismatch_fails_everyone_fast(mori_env):

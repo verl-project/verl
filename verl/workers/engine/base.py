@@ -35,6 +35,12 @@ class BaseEngine:
     Engine implementations must subclass BaseEngine and provide concrete behavior for all methods.
     """
 
+    #: True when :meth:`get_per_tensor_param_shard` yields parameters under their HF checkpoint names, cut in HF
+    #: coordinates, so that putting the shards together gives what :meth:`get_per_tensor_param` exports before its
+    #: optional conversions (LoRA, QAT, MoE unfusing). Checkpoint engines that ship raw shards to the rollout (mori
+    #: ``export: shard``) require it.
+    per_tensor_param_shard_is_hf: bool = False
+
     def initialize(self):
         """
         Instantiate or load the model, optimizer, and learning rate scheduler.

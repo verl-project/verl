@@ -18,7 +18,8 @@ Topology: P = min(num_chains, actor world size) stripes. Actor rank c sends stri
 with the fewest bytes so far; all actor ranks iterate the same generator, so they agree without talking). On every
 rollout node one GPU holds stripe c (local GPU c % n): it receives the stripe from outside and copies it to the other
 GPUs of its node (over XGMI when available). The holders of a stripe form a chain across rollout nodes, so each node
-receives one copy of the model, spread over all its NICs.
+receives one copy of the model, spread over all its NICs. With export="shard", stripe r carries trainer rank r's own
+shards of every tensor (no all-gather on the trainer) and receivers put full tensors together from all stripes.
 
 Every worker registers ONE device region once (first `prepare`) and keeps it, the QPs and the ZMQ sockets across
 syncs: num_slots slots of bucket_size / num_chains bytes per stripe. Bucket k of a stripe uses slot k % num_slots.
@@ -46,6 +47,13 @@ Args (engine_kwargs["mori"]):
     num_chains (int): Max stripes. Default 8.
     num_slots (int): Buckets in flight per stripe and hop (>= 2); costs num_slots * bucket_size of device memory per
         worker. Default 2.
+    export (str): "full" (default): stripes come from the trainer's full-tensor generator (`get_per_tensor_param`).
+        "shard": every trainer rank sends its own shards from `get_per_tensor_param_shard()` (bf16); needs
+        num_chains >= trainer world size and shards that are one flat range of the full tensor (FSDP2 Shard(0)).
+        Only training engines that declare their shard export to be in HF layout (`per_tensor_param_shard_is_hf`,
+        FSDP); LoRA, QAT and specs that need a to-HF conversion are refused (use "full"). The trainer worker hands
+        its training engine to `send_weights` (`consumes_training_engine`). Receivers hold at most
+        num_slots * bucket_size + the largest tensor of partly assembled tensors.
     intra_node (str): "xgmi" (default) copies within a node over XGMI; "rdma" keeps it on the NIC.
     node_id (str): Node identity used to group rollout workers. Default: the Ray node id.
     qp_per_transfer (int), num_nics_per_transfer (int), enable_chunking (bool): MoRI RDMA settings (4, 1, True).
@@ -123,6 +131,26 @@ def _alloc_region(nbytes: int, device: str) -> tuple[torch.Tensor, object]:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
 
+def _shard_flat_offset(spec) -> tuple[int, bool]:
+    """(element offset of this rank's local shard in the flattened full tensor, whether this rank sends it) for a
+    `verl.workers.engine.spec.ShardSpec`. Only shards that are one flat range of the full tensor are supported (only
+    dim 0 is cut, e.g. FSDP2 Shard(0)); replicated / unsharded tensors are sent by the first replica only."""
+    if spec.place is not None:  # explicit exporter override
+        place, contributes = spec.place, spec.contributes
+    else:
+        from verl.workers.engine.spec import derive_dtensor_placement
+
+        place, contributes, _ = derive_dtensor_placement(spec)
+    if isinstance(place, int):
+        return place, contributes
+    if not place.is_flat_contiguous:
+        raise NotImplementedError(
+            f"mori export='shard' needs shards that are one flat range of the full tensor (only dim 0 cut); got local "
+            f"shape {place.local_shape} at offset {place.global_offset} of {place.full_shape}. Use export='full'."
+        )
+    return place.flat_offset, contributes
+
+
 def _node_ip() -> str:
     try:
         import ray
@@ -194,6 +222,7 @@ class MoriCheckpointEngine(CheckpointEngine):
         device: str = "cuda",
         intra_node: str = "xgmi",
         node_id: str | None = None,
+        export: str = "full",
     ):
         self.bucket_size = bucket_size
         self.is_master = is_master
@@ -210,6 +239,15 @@ class MoriCheckpointEngine(CheckpointEngine):
         assert intra_node in ("xgmi", "rdma"), f"intra_node must be xgmi or rdma, got {intra_node!r}"
         self.intra_node = intra_node
         self.node_id = node_id
+        assert export in ("full", "shard"), f"export must be full or shard, got {export!r}"
+        self.export = export
+        self._unfuse_moe_params = None
+        self._send_model_type = self._recv_model_type = None
+        if export == "shard":
+            # imported now rather than on the first received tensor: importing verl's engine package takes seconds
+            from verl.workers.engine.fsdp.utils import unfuse_moe_params
+
+            self._unfuse_moe_params = unfuse_moe_params
         self._chain_rank = None  # last position, kept for logs after finalize
 
         # created once, on first prepare(), and kept across syncs
@@ -238,6 +276,12 @@ class MoriCheckpointEngine(CheckpointEngine):
         self.rank: int | None = None
         self._P = 0
         self._roles: dict[int, SimpleNamespace] = {}  # chain -> SimpleNamespace(prev, next)
+
+    @property
+    def consumes_training_engine(self) -> bool:
+        """With export="shard" the trainer hands its training engine to `send_weights` (not a full-tensor generator):
+        every rank sends its own shards from `get_per_tensor_param_shard()`, so the trainer never all-gathers."""
+        return self.export == "shard"
 
     def _off(self, c: int, j: int) -> int:
         return (self.num_slots * c + j) * self.chain_bucket
@@ -325,6 +369,7 @@ class MoriCheckpointEngine(CheckpointEngine):
             "num_chains": self.num_chains,
             "chain_bucket": self.chain_bucket,
             "num_slots": self.num_slots,
+            "export": self.export,
             "node": self._node(),
             "xgmi": self._xgmi,
         }
@@ -348,10 +393,16 @@ class MoriCheckpointEngine(CheckpointEngine):
         A, R = metadata[:actor_wg_world_size], metadata[actor_wg_world_size:]
         N = rollout_world_size
         assert len(R) == N and N > 0
-        assert len({(m["chain_bucket"], m["num_slots"]) for m in metadata}) == 1, (
-            "all workers need the same bucket size, num_chains and num_slots"
+        assert len({(m["chain_bucket"], m["num_slots"], m["export"]) for m in metadata}) == 1, (
+            "all workers need the same bucket size, num_chains, num_slots and export"
         )
-        P = min(min(m["num_chains"] for m in metadata), actor_wg_world_size)
+        if metadata[0]["export"] == "shard":  # every trainer rank sends its own shards: one stripe per rank
+            P = actor_wg_world_size
+            assert min(m["num_chains"] for m in metadata) >= P, (
+                f"export='shard' needs num_chains >= trainer world size ({P}): each rank's shards form a stripe"
+            )
+        else:
+            P = min(min(m["num_chains"] for m in metadata), actor_wg_world_size)
         nodes: dict[str, list[int]] = {}
         for r, m in enumerate(R):
             nodes.setdefault(m["node"], []).append(r)
@@ -601,7 +652,7 @@ class MoriCheckpointEngine(CheckpointEngine):
         if st.Failed():
             raise RuntimeError(f"mori: {what} reported failure: {st.Message()}")
 
-    async def _write_next(self, seq, c, k, j, metas, used, is_last, steps, ready=None):
+    async def _write_next(self, seq, c, k, j, metas, used, is_last, steps, ready=None, extra=None):
         """Write my slot (c, j) into the same slot of every next hop (in parallel) and announce it to each.
 
         `ready` is a device event recorded after the packing copies; the NIC must not read the slot before it."""
@@ -618,6 +669,7 @@ class MoriCheckpointEngine(CheckpointEngine):
             "used": used,
             "is_last": is_last,
             "global_steps": steps,
+            **(extra or {}),  # export="shard": "index" of each piece's tensor, "model_type"
         }
 
         async def one(nxt):
@@ -674,14 +726,18 @@ class MoriCheckpointEngine(CheckpointEngine):
         weights: Generator[tuple[str, torch.Tensor], None, None],
         global_steps: int | None = None,
     ):
-        """Every actor rank must iterate all weights (the trainer's collectives run inside the generator); the leader
-        of stripe c packs and pushes the tensors assigned to stripe c."""
+        """export="full": every actor rank must iterate all weights (the trainer's collectives run inside the
+        generator); the leader of stripe c packs and pushes the tensors assigned to stripe c. export="shard": `weights`
+        is the training engine (see `_shard_source`); every rank pushes its own shards."""
         assert self.rank is not None, "init_process_group was not called"
         self._check_usable()
         self._busy = True
         self._round += 1
         try:
-            if not self._roles:  # not leading a stripe: only drive the generator
+            if self.export == "shard":
+                # refusals raise inside _push_stripe, so peers are told
+                await self._push_stripe(self._shard_pieces(weights), global_steps)
+            elif not self._roles:  # not leading a stripe: only drive the generator
                 async for _ in ensure_async_iterator(weights):
                     pass
             else:
@@ -691,7 +747,7 @@ class MoriCheckpointEngine(CheckpointEngine):
             raise
         self._busy = False
 
-    async def _stripe_pieces(self, weights) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    async def _stripe_pieces(self, weights) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor, None], None]:
         """Chunks of the tensors of my stripe. Each tensor goes to the least-loaded stripe so far; every actor rank sees
         the same tensors in the same order, so all compute the same assignment."""
         (c,) = self._roles.keys()
@@ -702,7 +758,66 @@ class MoriCheckpointEngine(CheckpointEngine):
                 loads[to] += tensor_meta.shape.numel() * tensor_meta.dtype.itemsize
                 mine = to == c
             if mine:
-                yield tensor_meta, chunk
+                yield tensor_meta, chunk, None
+
+    @staticmethod
+    def _shard_source(engine):
+        """export="shard": (generator of (name, local shard, ShardSpec), HF model type) from a verl training engine.
+        Only for engines that declare their shards to be in HF layout (`per_tensor_param_shard_is_hf`, e.g. FSDP; a
+        Megatron shard is an MCore-named local TP slice) and only without the conversions the full export would apply
+        on top: LoRA (the full export merges or extracts adapters) and QAT (it quantizes) are refused, and so are
+        specs that need a to-HF conversion (`_shard_pieces`)."""
+        if not hasattr(engine, "get_per_tensor_param_shard"):
+            raise TypeError(f"mori export='shard' needs the training engine, got {type(engine).__name__}")
+        if not getattr(engine, "per_tensor_param_shard_is_hf", False):
+            raise NotImplementedError(
+                f"mori export='shard' needs a training engine whose shard export is in HF layout "
+                f"(per_tensor_param_shard_is_hf, e.g. FSDP); {type(engine).__name__} does not declare it; "
+                f"use export='full'"
+            )
+        mc = getattr(engine, "model_config", None)
+        module = getattr(engine, "module", None)
+        lora = (
+            getattr(mc, "lora_rank", 0) > 0
+            or getattr(mc, "lora_adapter_path", None)
+            or (getattr(mc, "lora", None) or {}).get("rank", 0) > 0
+            or hasattr(getattr(module, "_fsdp_wrapped_module", module), "peft_config")
+        )
+        if lora:
+            raise NotImplementedError("mori export='shard' does not support LoRA; use export='full'")
+        if getattr(engine, "_qat_enabled", False):  # set by the FSDP and Megatron engines
+            raise NotImplementedError("mori export='shard' does not support QAT; use export='full'")
+        gen, _ = engine.get_per_tensor_param_shard()
+        return gen, getattr(getattr(mc, "hf_config", None), "model_type", None)
+
+    async def _shard_pieces(self, engine) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor, int], None]:
+        """export="shard": chunks of my own local shards, with the index of their tensor in the export order (the same
+        on every rank). TensorMeta.shape / dtype describe the full tensor and chunk_offset is the chunk's byte offset
+        in it, so receivers assemble full tensors from every rank's pieces."""
+        gen, self._send_model_type = self._shard_source(engine)
+        cb = self.chain_bucket
+        index = -1
+        async for name, local, spec in ensure_async_iterator(gen):
+            index += 1
+            full_shape = torch.Size(spec.full_shape)
+            itemsize = local.dtype.itemsize
+            if full_shape.numel() == 0:  # nothing to send, but the receivers must still get the (empty) tensor
+                if self.rank == 0:
+                    empty = TensorMeta(name, full_shape, local.dtype, 0, 0, None)
+                    yield empty, local.reshape(-1).view(torch.uint8), index
+                continue
+            if getattr(spec, "to_hf_chunk", None) is not None or getattr(spec, "hf_slots", None) is not None:
+                raise NotImplementedError(f"mori export='shard': {name} needs a to-HF conversion; use export='full'")
+            first, contributes = _shard_flat_offset(spec)
+            if not contributes or local.numel() == 0:
+                continue
+            buf = local.contiguous().reshape(-1).view(torch.uint8)
+            pos = 0
+            while pos < buf.numel():
+                n = min(cb, buf.numel() - pos)
+                meta = TensorMeta(name, full_shape, local.dtype, first * itemsize + pos, n, None)
+                yield meta, buf[pos : pos + n], index
+                pos += n
 
     async def _push_stripe(self, pieces, global_steps):
         """Pack the pieces of my stripe into my slots and push each full bucket down the stripe."""
@@ -712,26 +827,33 @@ class MoriCheckpointEngine(CheckpointEngine):
         cb = self.chain_bucket
         start, nbytes, k, j, offset = time.time(), 0, 0, 0, 0
         metas: list[TensorMeta] = []
+        indices: list[int | None] = []  # export="shard": tensor index of each piece
         writing: list[asyncio.Future | None] = [None] * self.num_slots  # write task reading from my slot (c, j)
+
+        def extra():
+            return {"index": indices, "model_type": self._send_model_type} if self.export == "shard" else None
+
         try:
-            async for tensor_meta, chunk in pieces:
+            async for tensor_meta, chunk, index in pieces:
                 at = _align(offset)
                 if at + tensor_meta.chunk_size > cb:
                     # the write task waits for an event after the packing copies, so packing the next bucket overlaps
                     # with the copy and the transfer of this one
+                    ready = self._mark_ready()
                     writing[j] = asyncio.ensure_future(
-                        self._write_next(seq, c, k, j, metas, offset, False, global_steps, self._mark_ready())
+                        self._write_next(seq, c, k, j, metas, offset, False, global_steps, ready, extra())
                     )
                     nbytes += offset
-                    k, j, offset, at, metas = k + 1, (k + 1) % self.num_slots, 0, 0, []
+                    k, j, offset, at, metas, indices = k + 1, (k + 1) % self.num_slots, 0, 0, [], []
                     if writing[j] is not None:  # my slot (c, j) is still being read by an earlier write
                         await writing[j]
                 tensor_meta.offset = at
                 metas.append(tensor_meta)
+                indices.append(index)
                 self._slot(c, j)[at : at + tensor_meta.chunk_size].copy_(chunk, non_blocking=True)
                 offset = at + tensor_meta.chunk_size
             writing[j] = asyncio.ensure_future(
-                self._write_next(seq, c, k, j, metas, offset, True, global_steps, self._mark_ready())
+                self._write_next(seq, c, k, j, metas, offset, True, global_steps, self._mark_ready(), extra())
             )
             nbytes += offset
             for w in writing:
@@ -779,12 +901,21 @@ class MoriCheckpointEngine(CheckpointEngine):
             raise
         acc = {"buckets": 0, "bytes": 0}
         handoff: asyncio.Queue = asyncio.Queue()
+        # export="shard": tensors being put together; at most limit + the largest tensor (see _assemble)
+        assembly = SimpleNamespace(
+            entries={}, pending=0, peak=0, limit=self.num_slots * self.bucket_size, done=set(), next_index=0
+        )
+        self._assembly = assembly  # kept for inspection after the sync
+        self._recv_model_type = None
 
         async def run_chain(c):
+            pieces = self._receive_chain(c, seq, global_steps, acc)
+            if self.export == "shard":
+                tensors = self._assemble(pieces, assembly)
+            else:
+                tensors = merge_weight_chunks(((m, v) async for m, v, _ in pieces), self.chain_bucket)
             try:
-                async for name, weight in merge_weight_chunks(
-                    self._receive_chain(c, seq, global_steps, acc), self.chain_bucket
-                ):
+                async for name, weight in tensors:
                     taken = asyncio.Event()
                     await handoff.put(("item", name, weight, taken))
                     await taken.wait()  # the consumer asked for the next tensor: it is done with this one
@@ -800,12 +931,16 @@ class MoriCheckpointEngine(CheckpointEngine):
             while remaining:
                 kind, a, b, taken = await handoff.get()
                 if kind == "item":
-                    yield a, b
+                    for name, weight in self._unfuse(a, b):
+                        yield name, weight
                     taken.set()
                 elif kind == "done":
                     remaining -= 1
                 else:
                     raise b
+            if assembly.entries:  # every stripe ended, yet some tensor misses pieces
+                names = sorted(assembly.entries)
+                raise RuntimeError(f"mori: {len(names)} tensors incomplete at the end of the sync, e.g. {names[:3]}")
         except BaseException as e:  # incl. GeneratorExit (the consumer stopped mid-sync) and cancellation
             # first, before anything can be cancelled: a consumer may still read a slot on the GPU, MoRI writes may
             # still run, so nothing of this engine may be reused (fail-stop)
@@ -822,7 +957,62 @@ class MoriCheckpointEngine(CheckpointEngine):
             f"{acc['bytes'] / 2**30:.2f} GiB in {time.time() - start:.2f}s"
         )
 
-    async def _receive_chain(self, c, seq, global_steps, acc) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    async def _assemble(self, pieces, assembly) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+        """export="shard": copy each received piece to its place in the full tensor (shared by all stripes, which
+        bring the other ranks' pieces) and yield a tensor once every byte of it arrived.
+
+        Bounded: a stripe starts a new tensor only if it fits in `assembly.limit` bytes next to the tensors being
+        assembled, or if it is the next tensor of the export order that is not complete yet (`next_index`); it waits
+        otherwise, holding its slot, which stalls its sender. At most one tensor is over the limit at a time, so the
+        memory held is at most limit + the largest tensor. The check and the reservation happen without yielding to
+        the event loop, so two stripes cannot both pass one check. No deadlock: every tensor index is sent by some
+        rank, all stripes send in export order, so the pieces of tensor `next_index` come before anything a stripe
+        could be waiting on, and that tensor is always admitted."""
+        entries = assembly.entries  # name -> [index, full tensor bytes, bytes still missing]
+        async for meta, view, index in pieces:
+            entry = entries.get(meta.name)
+            if entry is None:
+                total = meta.shape.numel() * meta.dtype.itemsize
+                deadline = time.monotonic() + self.timeout_s
+                while True:
+                    entry = entries.get(meta.name)  # started meanwhile by another stripe
+                    if entry is not None:
+                        break
+                    if assembly.pending + total <= assembly.limit or index == assembly.next_index:
+                        entry = entries[meta.name] = [index, torch.empty(total, dtype=torch.uint8, device=view.device)]
+                        entry.append(total)
+                        assembly.pending += total
+                        assembly.peak = max(assembly.peak, assembly.pending)
+                        break
+                    self._check_abort()
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(
+                            f"mori: timed out after {self.timeout_s}s waiting for room to assemble "
+                            f"{meta.name} (tensor {index}; waiting for tensor {assembly.next_index})"
+                        )
+                    await asyncio.sleep(0.0005)
+            entry[1][meta.chunk_offset : meta.chunk_offset + meta.chunk_size].copy_(view, non_blocking=True)
+            entry[2] -= meta.chunk_size
+            if entry[2] == 0:
+                del entries[meta.name]
+                assembly.pending -= entry[1].numel()
+                assembly.done.add(entry[0])
+                while assembly.next_index in assembly.done:
+                    assembly.done.discard(assembly.next_index)
+                    assembly.next_index += 1
+                yield meta.name, entry[1].view(meta.dtype).view(meta.shape)
+
+    def _unfuse(self, name: str, tensor: torch.Tensor):
+        """export="shard" ships the trainer's own parameters, e.g. Transformers 5 packed MoE experts; split them into
+        the per-expert checkpoint names, as the FSDP engine's full export does (views, no copies)."""
+        if self.export != "shard" or self._recv_model_type is None:
+            yield name, tensor
+            return
+        yield from self._unfuse_moe_params([(name, tensor)], self._recv_model_type)
+
+    async def _receive_chain(
+        self, c, seq, global_steps, acc
+    ) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor, int | None], None]:
         ro = self._roles[c]
         k, early = 0, {}
         # per slot: the task that frees it once its forward writes have left and the consumer is done with it; the
@@ -839,6 +1029,9 @@ class MoriCheckpointEngine(CheckpointEngine):
                 steps = msg["global_steps"]
                 if global_steps is not None and steps is not None and steps != global_steps:
                     raise RuntimeError(f"mori: got weights of step {steps} while expecting step {global_steps}")
+                if msg.get("model_type") is not None:
+                    self._recv_model_type = msg["model_type"]
+                extra = {key: msg[key] for key in ("index", "model_type") if key in msg} or None
                 j = msg["slot"]
                 assert j == k % self.num_slots, f"bucket {k} of stripe {c} arrived in slot {j}"
                 for r in release:  # surface a failed forward or free early
@@ -852,11 +1045,12 @@ class MoriCheckpointEngine(CheckpointEngine):
                 forward = None
                 if ro.nexts:  # next node's holder and/or the other GPUs of my node
                     forward = asyncio.ensure_future(
-                        self._write_next(seq, c, k, j, msg["metas"], msg["used"], msg["is_last"], steps)
+                        self._write_next(seq, c, k, j, msg["metas"], msg["used"], msg["is_last"], steps, None, extra)
                     )
                 buf = self._slot(c, j)
-                for tensor_meta in msg["metas"]:
-                    yield tensor_meta, buf[tensor_meta.offset : tensor_meta.offset + tensor_meta.chunk_size]
+                indices = msg.get("index") or [None] * len(msg["metas"])
+                for tensor_meta, index in zip(msg["metas"], indices, strict=True):
+                    yield tensor_meta, buf[tensor_meta.offset : tensor_meta.offset + tensor_meta.chunk_size], index
                 # the consumer asked for the next tensor, so its reads of this bucket's views are queued on the
                 # current stream: free the slot once they ran and the forward writes have left
                 release[j] = asyncio.ensure_future(self._release(seq, c, j, forward, self._mark_ready()))
