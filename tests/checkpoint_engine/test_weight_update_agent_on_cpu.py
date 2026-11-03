@@ -147,3 +147,15 @@ def test_wait_for_version_surfaces_agent_failure():
         assert agent.get_state()["failed"]
 
     asyncio.run(main())
+
+
+def test_first_version_is_loaded_regardless_of_lag():
+    """The trainer waits for the first published version at startup, so the lag policy must not hold it back."""
+
+    async def main():
+        registry, calls = InMemoryWeightRegistry(), []
+        agent = _agent(registry, calls, min_version_lag=2)
+        await registry.publish(_manifest(0))
+        assert await _run_until(agent, 0) == 0
+
+    asyncio.run(main())

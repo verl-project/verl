@@ -76,7 +76,11 @@ class WeightUpdateAgent:
         try:
             while not self._stopped:
                 manifest = await self.registry.latest_ready()
-                if manifest is not None and manifest.version - self.version >= self.min_version_lag:
+                # A replica that has not loaded any published version yet takes the first one regardless
+                # of the lag policy: the trainer waits for it before generation starts.
+                if manifest is not None and (
+                    self.version < 0 or manifest.version - self.version >= self.min_version_lag
+                ):
                     await self._update(manifest.version)
                 else:
                     await asyncio.sleep(self.poll_interval)
