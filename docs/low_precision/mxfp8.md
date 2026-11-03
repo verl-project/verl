@@ -1,6 +1,6 @@
 # MXFP8 RL on Blackwell
 
-Last updated: 10/22/2026
+Last updated: 11/03/2026
 
 MXFP8 is the OCP microscaling FP8 format: E4M3 elements with one E8M0 scale per 32-element block,
 decoded natively by Blackwell tensor cores. This recipe trains with Transformer Engine's MXFP8 recipe and
@@ -49,6 +49,46 @@ Notes:
 
 verl defaults the MXFP8 dense and MoE kernels of vLLM and SGLang to DeepGEMM; for details, see
 [Low-Precision Rollout and Quantization-Aware Training](qat.md).
+
+## Post-sync MXFP8 self-check
+
+`VERL_MXFP8_REFIT_CHECK` accepts `warn` (default: log a failed check and continue), `raise` (stop the sync), or `0` (disable).
+
+After loading, both engines derive kernel-specific copies of the MXFP8 weights and scales (swizzled
+scales, shuffled or packed experts). If a sync skips that step, the kernel pairs fresh weights with stale
+scales while every shape and dtype still matches. After every sync, verl therefore runs the smallest MXFP8
+linear layer and one expert of the smallest MXFP8 MoE layer through their own kernels on a small random
+input and compares the output with a BF16 reference on the dequantized canonical weights. The B200 validation runs
+read relative errors of about 0.03 (dense) and 0.05 (experts); deliberately stale layouts produced O(1) errors.
+These are observations, not universal error bounds.
+
+- `VERL_MXFP8_REFIT_CHECK_TOL` (default 0.25) and `VERL_MXFP8_REFIT_CHECK_MOE_TOL` set the thresholds.
+- On SGLang, the refit loader also reports experts whose scales the sync did not write.
+- The expert probe is skipped, with a warning, where its made-up routing cannot send every row to one
+  expert at weight 1. On vLLM: expert or data parallelism, non-SiLU gates, and, on monolithic MoE kernels, a
+  routed scaling factor, grouped top-k, a score correction bias or custom routing. On SGLang: expert
+  parallelism, TP without `reduce_results`, and non-softmax, grouped, biased or custom routing.
+
+What it does not show:
+
+- It samples one dense layer and one expert per sync; a layer outside the sample can still be stale.
+- It runs the kernels eagerly. A re-derivation into new storage, instead of the storage a CUDA graph
+  captured, passes the probe while graph replays keep reading the old values. That the captured storage is
+  updated rests on indirect evidence (the re-derived layouts are copied back in place, and the KL stays in
+  its healthy range), not on a graph replay.
+
+### Configurations SGLang refuses
+
+Two configurations are refused before a weight sync writes anything:
+
+- MoE layers kept in BF16 (`rollout.quantization.ignore`) whose experts the MoE runner re-laid out at load:
+  SGLang's FlashInfer TRT-LLM runner stores BF16 experts in a block layout a weight sync cannot write, while
+  verl's default DeepGEMM runner keeps them in checkpoint layout.
+- The delta checkpoint engine with any quantized rollout (`rollout.quantization` or the checkpoint's own
+  `quantization_config`): it applies its payloads without the trainer-side weight quantization.
+
+Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for an SGLang rollout: verl starts SGLang
+with `enable_memory_saver=True`, which refuses that allocator mode.
 
 ## Example: Qwen3-8B on GSM8K
 

@@ -65,6 +65,22 @@ def resolve_sglang_quantization_config(config: Any, model_config: Any) -> dict[s
     return dict(native)
 
 
+def refuse_delta_sync_if_quantized(config: Any, model_config: Any) -> None:
+    """Refuse the delta checkpoint engine for a quantized rollout, whatever its format.
+
+    The delta engine applies sparse payloads in place without the trainer-side weight quantization, so an
+    FP8/FP4 parameter would receive unscaled high-precision values. This holds for every quantized rollout,
+    from ``rollout.quantization`` or from the checkpoint's own ``quantization_config``, not only for the
+    formats on the refit loader.
+    """
+    if resolve_sglang_quantization_config(config, model_config) is not None:
+        raise ValueError(
+            "The delta checkpoint engine (wire_format='delta_flush') does not support a quantized SGLang rollout "
+            "(rollout.quantization or the checkpoint's own quantization_config): it applies its payloads in place "
+            "without the trainer-side weight quantization. Use a bucketed checkpoint engine or a BF16 rollout."
+        )
+
+
 def _translate_ignored_layers(ignored_layers: Iterable[str]) -> list[str]:
     translated = []
     for ignored in ignored_layers:
@@ -211,7 +227,7 @@ def finalize_tensors() -> list[tuple[str, torch.Tensor]]:
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
     """Load one SGLang quantized-refit bucket and finalize kernel layouts once per sync."""
     from verl.utils.sglang.sglang_fp4_utils import stage_mxfp4_moe_params
-    from verl.utils.sglang.sglang_fp8_utils import stage_mxfp8_moe_scales
+    from verl.utils.sglang.sglang_fp8_utils import refuse_relaid_bf16_moe_layers, stage_mxfp8_moe_scales
 
     named_tensors = list(named_tensors)
     finalize = any(name == FINALIZE_MARKER for name, _ in named_tensors)
@@ -219,6 +235,7 @@ def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str
     try:
         if named_tensors:
             if _SYNC_FP8_ATTR not in model.__dict__:
+                refuse_relaid_bf16_moe_layers(model)
                 model.__dict__[_SYNC_FP8_ATTR] = stage_mxfp8_moe_scales(model)
                 model.__dict__[_SYNC_FP4_ATTR] = stage_mxfp4_moe_params(model)
             model.load_weights(named_tensors)
@@ -245,13 +262,23 @@ def _finish_sync(model: torch.nn.Module) -> None:
         reprocess_mxfp8_layers,
         reprocess_mxfp8_moe_layers,
     )
+    from verl.utils.sglang.sglang_mxfp8_refit_check import (
+        self_check_mxfp8_linear,
+        self_check_mxfp8_moe,
+        snapshot_mxfp8_moe_for_check,
+    )
 
     if _SYNC_FP8_ATTR not in model.__dict__:
         return
     fp8_staged = model.__dict__[_SYNC_FP8_ATTR]
     fp4_staged = model.__dict__.get(_SYNC_FP4_ATTR, ())
+    # Canonical expert weights and scales, copied before the MoE runner rewrites them.
+    moe_snapshot = snapshot_mxfp8_moe_for_check(model)
     reprocess_mxfp8_layers(model)
     reprocess_mxfp8_moe_layers(model, fp8_staged)
     reprocess_mxfp4_moe_layers(fp4_staged)
+    # The re-derived layouts are now what the kernels read; they must reproduce the canonical reference.
+    self_check_mxfp8_linear(model)
+    self_check_mxfp8_moe(moe_snapshot)
     del model.__dict__[_SYNC_FP8_ATTR]
     model.__dict__.pop(_SYNC_FP4_ATTR, None)
