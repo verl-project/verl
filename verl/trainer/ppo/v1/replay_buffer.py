@@ -524,10 +524,9 @@ class ReplayBufferAsync(ReplayBuffer):
         pass
 
     def _uses_weight_version_clock(self) -> bool:
-        # With decoupled weight sync, replicas load new weights on their own schedule, so the step a
-        # prompt was dispatched at no longer says which weights generated it.
-        decoupled = self.trainer_config.get("decoupled_weight_sync", None) if self.trainer_config else None
-        return bool(decoupled and decoupled.get("enable", False))
+        # In decoupled_async, replicas load new weights on their own schedule, so the step a prompt
+        # was enqueued at no longer says which weights generated it.
+        return self.trainer_mode == "decoupled_async"
 
     def _oldest_weight_versions(self, partition_id: str) -> dict[str, int]:
         """Per prompt group, the oldest weight version any of its trajectories started on."""

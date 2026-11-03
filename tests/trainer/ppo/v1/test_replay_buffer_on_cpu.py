@@ -1289,10 +1289,10 @@ def test_wait_for_sampleable_replaces_groups_sample_would_have_evicted(tq_init, 
 
 
 def test_decoupled_weight_sync_measures_staleness_by_weight_version():
-    """With decoupled weight sync, a group is as stale as the oldest weights its trajectories started on."""
+    """In decoupled_async, a group is as stale as the oldest weights its trajectories started on."""
     rb = ReplayBufferAsync(
-        trainer_mode="separate_async",
-        trainer_config={"decoupled_weight_sync": {"enable": True}},
+        trainer_mode="decoupled_async",
+        trainer_config={},
         max_off_policy_threshold=2,
         max_off_policy_strategy="drop",
         sampler_kwargs={},
@@ -1313,7 +1313,7 @@ def test_decoupled_weight_sync_measures_staleness_by_weight_version():
     }
     assert rb._stale_terminal_keys(global_steps=10, partition_id=pid) == {old_weights}
 
-    rb.trainer_config = {}
+    rb.trainer_mode = "separate_async"
     assert rb._stale_terminal_keys(global_steps=10, partition_id=pid) == set()
 
 

@@ -234,7 +234,7 @@ trainer:
   # V1 trainer mode configs
   v1:
 
-    # Trainer mode: "sync", "colocate_async", "separate_async"
+    # Trainer mode: "sync", "colocate_async", "separate_async", "decoupled_async"
     trainer_mode: sync
 
     # Synchronous PPO trainer
@@ -250,6 +250,33 @@ trainer:
       num_warmup_batches: 1
 
     # Asynchronous PPO trainer with separate trainer and rollout
+    decoupled_async:
+
+      # Rollout replicas load published weight versions and claim prompts on their own; the
+      # trainer only publishes weights and enqueues prompts. Requires
+      # actor_rollout_ref.rollout.checkpoint_engine.backend=transport_pull and vLLM rollout.
+
+      # Number of warmup batches to enqueue before the training loop starts.
+      num_warmup_batches: 1
+
+      # Number of local updates per published weight version.
+      parameter_sync_step: 4
+
+      # A replica loads a newer version once it is at least this many versions ahead.
+      min_version_lag: 1
+
+      # Seconds between weight registry polls on each replica.
+      poll_interval: 0.5
+
+      # Seconds the trainer waits at startup for every replica to load the initial weights.
+      init_timeout: 600
+
+      # Maximum prompt groups generating at once across all replicas; null for no limit.
+      max_inflight_prompts: null
+
+      # Seconds between TransferQueue polls of the prompt dispatcher.
+      dispatch_poll_interval: 0.2
+
     separate_async:
 
       # Number of warmup batches to add before training loop starts.
@@ -260,22 +287,6 @@ trainer:
 
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
-
-      # Rollout replicas pull published weight versions on their own schedule; the trainer only
-      # publishes and never pauses rollout. Requires checkpoint_engine.backend=transport_pull.
-      decoupled_weight_sync:
-
-        # Whether to enable decoupled weight sync.
-        enable: false
-
-        # A replica loads a newer version once it is at least this many versions ahead.
-        min_version_lag: 1
-
-        # Seconds between registry polls on each replica.
-        poll_interval: 0.5
-
-        # Seconds the trainer waits at startup for every replica to load the initial weights.
-        init_timeout: 600
 
       # Lend idle hybrid trainer GPUs to rollout
       hybrid_rollout:
