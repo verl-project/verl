@@ -47,7 +47,6 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
-    build_r3_replay_mask,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -77,6 +76,7 @@ from verl.utils.megatron_utils import (
     unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
+from verl.utils.router_replay import build_r3_replay_mask
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 

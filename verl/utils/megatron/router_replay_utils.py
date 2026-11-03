@@ -44,7 +44,7 @@ from verl.models.mcore.util import (
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
-from verl.workers.utils.padding import build_r3_replay_mask as build_r3_replay_mask
+from verl.utils.router_replay import build_r3_replay_mask as build_r3_replay_mask
 
 device_name = get_device_name()
 
