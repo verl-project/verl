@@ -181,13 +181,26 @@ Megatron QAT uses [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer) t
 install and dispatch fake quantizers. FP8_BLOCK, MXFP8 and MXFP4 dispatch to
 verl's TileLang kernels with fused quantize-dequantize and straight-through
 gradients; parameter export invokes the same kernels without dequantization,
-making their quantized values and scales bit-exact by construction. NVFP4 fake-quantizes
-weights with the exporter's kernel and activations per token as the rollout does. Both FP4 modes apply only to
-routed experts. MXFP8 and MXFP4 generate E8M0 scales with DeepSeek's upward
+making their quantized values and scales bit-exact by construction. NVFP4 is
+described [below](#nvfp4-qat). Both FP4 modes apply only to routed experts. MXFP8 and MXFP4 generate E8M0 scales with DeepSeek's upward
 power-of-two rounding recipe. MXFP4 expert activations use the MXFP8 1x32 kernel
 rather than FP4. Use `mxfp4_mxfp8` for the vLLM combination where dense linear
 layers also use MXFP8.
 Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them aligned with the rollout ignore list; for Qwen3.5 MXFP8, add `*linear_attn.in_proj_a` and `*linear_attn.in_proj_b`.
+
+#### NVFP4 QAT
+
+`mode: nvfp4` with `rollout.quantization.moe: NVFP4` trains W4A4 routed experts against the rollout that
+[NVFP4 training](nvfp4.md) uses, with the same [requirements](nvfp4.md#requirements) and expert tensor
+parallel size 1.
+
+- Weights: E2M1 values in groups of 16 with E4M3 scales and one global scale per expert matrix; `gate_proj`
+  and `up_proj` share one. Fake quantization and the trainer-side export run the same kernel, so the rollout
+  gets the weights training used.
+- Activations: each token gets a global scale from its own amax, as in the rollout's MoE kernel. Fake
+  quantization matches FlashInfer's per-token quantization bitwise, including
+  `FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH`; set it the same way for the trainer and the rollout. The rollout
+  quantizes the `down_proj` input inside the fused kernel, so that input matches only approximately.
 
 ### Engine notes
 

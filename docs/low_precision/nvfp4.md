@@ -7,7 +7,7 @@ and serves the rollout in the same precision. Activations are quantized per toke
 Parameters stay BF16; attention, dense MLPs, shared experts, router, norms, embeddings and the LM head run
 in BF16.
 
-For NVFP4 fake-quantization training, see [NVFP4 QAT](nvfp4_qat.md). The rollout quantization interface
+For NVFP4 fake-quantization training, see [NVFP4 QAT](qat.md#nvfp4-qat). The rollout quantization interface
 shared by all formats is described in [Low-Precision Rollout and Quantization-Aware Training](qat.md).
 
 ## Requirements
