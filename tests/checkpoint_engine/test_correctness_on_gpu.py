@@ -111,7 +111,7 @@ async def test_transport_pull_checkpoint_engine(
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="transport_pull",
         update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"transport_pull": {"device": device, "backend": backend}},
+        engine_kwargs={"transport_pull": {"device": device, "transport": backend}},
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)

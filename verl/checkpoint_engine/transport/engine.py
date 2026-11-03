@@ -39,12 +39,13 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 class TransportPullCheckpointEngine(CheckpointEngine):
     """Trainer rank 0 publishes weight versions; rollout workers pull them with one-sided reads.
 
-    Requires torch >= 2.15 for torch.distributed._transport.
+    With transport="nixl_native" it runs on any torch; other transports need torch >= 2.15.
 
     Args:
         bucket_size: Size in bytes of one remote read.
         device: Device of the publisher slots and puller mirror, "cuda" or "cpu".
-        backend: torch.distributed._transport backend.
+        transport: Transport backend: "nixl_native" (any torch), or a torch.distributed._transport
+            backend such as "nixl" (torch >= 2.15). Not named `backend`, which selects the engine.
         num_slots: Versions the publisher keeps at once.
         lease_ttl: Reader lease duration in seconds.
         registry_name: Ray actor name of the shared registry.
@@ -57,7 +58,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
         self,
         bucket_size: int,
         device: str = "cuda",
-        backend: str = "nixl",
+        transport: str = "nixl",
         num_slots: int = 2,
         lease_ttl: float = 60.0,
         registry_name: str = "verl_weight_registry",
@@ -67,7 +68,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
     ):
         self.bucket_size = bucket_size
         self.device = device
-        self.backend = backend
+        self.transport = transport
         self.num_slots = num_slots
         self.lease_ttl = lease_ttl
         self.registry_name = registry_name
@@ -124,7 +125,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
                 self.registry,
                 self.bucket_size,
                 device=self.device,
-                backend=self.backend,
+                backend=self.transport,
                 num_slots=self.num_slots,
                 transport_factory=self.transport_factory,
             )
@@ -139,7 +140,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
             self.puller = WeightPuller(
                 self.registry,
                 device=self.device,
-                backend=self.backend,
+                backend=self.transport,
                 lease_ttl=self.lease_ttl,
                 transport_factory=self.transport_factory,
             )
