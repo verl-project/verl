@@ -364,6 +364,11 @@ jobs:
           echo "==== [2/2] Testing network connectivity via healthz ===="
           curl -sS --fail "${SUBMITTER_URL}/healthz"
 
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Run multinode E2E RayJob
         run: |
           /root/.cache/verl_ci/submit_and_wait_rayjob.sh \
