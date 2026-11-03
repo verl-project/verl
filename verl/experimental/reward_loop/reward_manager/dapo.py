@@ -14,6 +14,8 @@
 
 import inspect
 
+from omegaconf import OmegaConf
+
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
@@ -33,6 +35,10 @@ class DAPORewardManager(RewardManagerBase):
         overlong_buffer_cfg = config.reward.get("reward_kwargs", {}).get("overlong_buffer_cfg", None)
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = config.reward.get("reward_kwargs", {}).get("max_resp_len", None)
+        # The rollout's response cap. The agent loop scores each response unpadded, so the batch width is not it.
+        self.response_length_limit = (
+            OmegaConf.select(config, "actor_rollout_ref.rollout.response_length", default=None) or self.max_resp_len
+        )
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
 
@@ -62,8 +68,9 @@ class DAPORewardManager(RewardManagerBase):
         # Copy: the rollouts of a prompt share one extra_info dict, and run_single runs them concurrently.
         extra_info = dict(data_item.non_tensor_batch.get("extra_info") or {})
         # The response hit the length limit without emitting EOS; compute_score may treat it as unfinished.
+        limit = self.response_length_limit or response_length
         extra_info["truncated"] = bool(
-            valid_response_length == response_length and int(valid_response_ids[-1]) != self.tokenizer.eos_token_id
+            valid_response_length >= limit and int(valid_response_ids[-1]) != self.tokenizer.eos_token_id
         )
 
         response_str = await self.loop.run_in_executor(

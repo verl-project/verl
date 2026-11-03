@@ -131,25 +131,40 @@ def test_reward_loop_construct_with_overlong_buffer_disabled():
 
 
 @pytest.mark.parametrize(
-    "last_token, valid_len, truncated",
-    [(1, 4, True), (_DummyTokenizer.eos_token_id, 4, False), (1, 3, False)],
-    ids=["full_length_without_eos", "full_length_with_eos", "shorter_than_max"],
+    "last_token, valid_len, width, config, truncated",
+    [
+        (1, 4, 4, {}, True),
+        (_DummyTokenizer.eos_token_id, 4, 4, {}, False),
+        (1, 3, 4, {}, False),
+        # The agent loop scores unpadded responses: the batch width equals the valid length.
+        (1, 3, 3, {"actor_rollout_ref": {"rollout": {"response_length": 4}}}, False),
+        (1, 4, 4, {"actor_rollout_ref": {"rollout": {"response_length": 4}}}, True),
+        (1, 3, 3, {"reward": {"reward_kwargs": {"max_resp_len": 4}}}, False),
+    ],
+    ids=[
+        "full_length_without_eos",
+        "full_length_with_eos",
+        "shorter_than_max",
+        "unpadded_shorter_than_rollout_limit",
+        "unpadded_at_rollout_limit",
+        "unpadded_shorter_than_max_resp_len",
+    ],
 )
-def test_reward_loop_passes_truncated_to_compute_score(last_token, valid_len, truncated):
+def test_reward_loop_passes_truncated_to_compute_score(last_token, valid_len, width, config, truncated):
     seen = []
 
     def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
         seen.append(extra_info)
         return 0.5
 
-    data = _make_data(batch_size=1, seq_len=4)
+    data = _make_data(batch_size=1, seq_len=width)
     data.batch["responses"][0, valid_len - 1] = last_token
-    data.batch["attention_mask"][0, 4 + valid_len :] = 0
+    data.batch["attention_mask"][0, width + valid_len :] = 0
     data.non_tensor_batch["extra_info"] = np.array([{"index": 0}], dtype=object)
 
     async def score():
         reward_manager = RewardLoopDAPORewardManager(
-            config=OmegaConf.create({"reward": {}}), tokenizer=_DummyTokenizer(), compute_score=compute_score
+            config=OmegaConf.create({"reward": {}, **config}), tokenizer=_DummyTokenizer(), compute_score=compute_score
         )
         return await reward_manager.run_single(data)
 
