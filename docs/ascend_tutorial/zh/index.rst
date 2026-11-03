@@ -1,7 +1,7 @@
 Ascend (NPU) 教程
 =====================
 
-Last updated: 06/05/2026.
+Last updated: 11/03/2026.
 
 .. toctree::
    :maxdepth: 1
@@ -10,6 +10,7 @@ Last updated: 06/05/2026.
    README.md
    get_start/dockerfile_build_guidance
    get_start/install_guidance
+   get_start/container_source_install
    get_start/quick_start
    get_start/install_guidance_A5
 

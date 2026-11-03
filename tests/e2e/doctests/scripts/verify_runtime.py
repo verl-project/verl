@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# verify_runtime.py：快速入门/安装测试共用的运行时自检（模型、数据、NPU 数量、关键导入）。
+# Runtime checks shared by the installation and Quick Start workers.
 
 #
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -27,12 +27,12 @@ from pathlib import Path
 
 
 def fail(message: str) -> None:
-    """Print one failure message to stderr（错误信息统一走 stderr）。"""
+    """Print one failure message to stderr."""
     print(f"verify_runtime: {message}", file=sys.stderr)
 
 
 def check_input_file(path_text: str, label: str) -> bool:
-    """检查一个输入文件是否存在且非空（空文件视为无效输入）。"""
+    """Require each supplied input path to be a nonempty file."""
     if not path_text:
         return True
     path = Path(path_text)
@@ -46,7 +46,7 @@ def check_input_file(path_text: str, label: str) -> bool:
 
 
 def check_model_dir(model_path: str) -> bool:
-    """检查模型目录是否包含 config.json（HuggingFace 权重目录的最小要求）。"""
+    """Require a supplied model directory to contain config.json."""
     if not model_path:
         return True
     if not Path(model_path, "config.json").is_file():
@@ -56,7 +56,7 @@ def check_model_dir(model_path: str) -> bool:
 
 
 def npu_device_count(failures: list[str]) -> int:
-    """返回可见 NPU 数量；torch/torch_npu 不可用时返回 -1 并记录原因。"""
+    """Return the visible NPU count, recording import or device-query failures."""
     try:
         import torch
 
@@ -99,7 +99,7 @@ def check_imports(backend: str = "") -> bool:
 
 
 def parse_args() -> argparse.Namespace:
-    """解析自检参数；未提供的检查项自动跳过。"""
+    """Parse the optional runtime checks requested by the caller."""
     parser = argparse.ArgumentParser(description="Verify verl Ascend doctest runtime prerequisites.")
     parser.add_argument("--model-path", default="")
     parser.add_argument("--train-file", default="")
@@ -116,7 +116,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    """执行全部自检并返回退出码：0 通过，1 存在失败项。"""
+    """Run the requested checks and return a nonzero status on any failure."""
     args = parse_args()
     ok = True
     ok &= check_model_dir(args.model_path)

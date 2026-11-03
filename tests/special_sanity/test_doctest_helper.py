@@ -4,6 +4,7 @@
 """CPU tests for RST extraction and the real Bash entry points."""
 
 import importlib.util
+import json
 import os
 import shlex
 import shutil
@@ -163,7 +164,7 @@ def test_installation_check_entrypoint(run_worker):
     """The workflow's installation/check command must reach the RST helper."""
     result = run_worker("installation", "check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Validated 8 documentation blocks" in result.stdout
+    assert "Validated 12 documentation blocks" in result.stdout
 
 
 @pytest.mark.parametrize("args", [(), ("quickstart", "a2"), ("installation", "pip"), ("quickstart", "typo")])
@@ -200,6 +201,56 @@ def isolated_repo(tmp_path):
     for relative in (DOCTEST_PATH, Path("docs/ascend_tutorial/zh/get_start"), Path("tests/special_npu/quick_start")):
         shutil.copytree(REPO_ROOT / relative, repo / relative)
     return repo
+
+
+def test_matrix_follows_public_image_changes(helper, isolated_repo):
+    """Changing a public image must update both training-engine cases without a Dockerfile."""
+    guide = isolated_repo / helper.CONTAINER_DOC
+    guide.write_text(guide.read_text(encoding="utf-8").replace("9.1.0-a3-", "9.1.1-a3-"), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(isolated_repo / DOCTEST_PATH / "scripts/doctest_helper.py"), "matrix"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    entries = json.loads(result.stdout)["include"]
+    assert [entry["case"] for entry in entries] == list(CASES)
+    for entry in entries:
+        expected = "9.1.1-a3-ubuntu22.04-py3.12" if entry["case"].endswith("_vllm") else "8.5.0-a3-ubuntu22.04-py3.11"
+        assert entry["image"].endswith(":" + expected)
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_manual_matrix_selects_one_case(helper, case):
+    """A manual selection must not allocate runners for unrelated combinations."""
+    matrix = helper.installation_matrix(case)
+    assert len(matrix["include"]) == 1
+    assert matrix["include"][0]["case"] == case
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "docker pull cann:9.1.0\n",
+        "export IMAGE=cann:9.1.0\nexport IMAGE=cann:8.5.0\n",
+        "export IMAGE=$(touch should-not-exist)\n",
+        "export IMAGE='unterminated\n",
+        "export IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:latest\n",
+    ],
+)
+def test_matrix_rejects_unusable_image(helper, monkeypatch, block):
+    """Missing, ambiguous, dynamic, or unversioned images must fail planning on CPU."""
+    monkeypatch.setattr(helper, "require_doctest_block", lambda name: block)
+    with pytest.raises(helper.DoctestError):
+        helper.installation_matrix()
+
+
+def test_named_container_block_rejects_duplicates(helper):
+    """A duplicate RST block name must not silently select one installation path."""
+    name = "container-image-vllm"
+    block = f".. code-block:: bash\n   :name: {name}\n\n   export IMAGE=cann:example\n"
+    with pytest.raises(helper.DoctestError, match="Ambiguous"):
+        helper.extract_doctest_block(block + "\n" + block, name)
 
 
 def test_missing_documented_script_fails(run_worker, isolated_repo):

@@ -8,15 +8,17 @@ on:
       - tests/special_sanity/test_doctest_helper.py
       - docs/ascend_tutorial/zh/get_start/**
       - scripts/install_*_mcore_npu.sh
+      - requirements-npu.txt
       - tests/special_npu/quick_start/**
   workflow_dispatch:
     inputs:
       backend:
         description: Combination to install from source and verify with one GRPO step
         required: true
-        default: fsdp2_vllm
+        default: all
         type: choice
         options:
+          - all
           - fsdp2_vllm
           - megatron_vllm
           - fsdp2_sglang
@@ -24,9 +26,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  INSTALL_CASE: ${{ inputs.backend || 'fsdp2_vllm' }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,7 +35,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.image.outputs.image }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,30 +47,32 @@ jobs:
           uv venv --python 3.12
           uv pip install pytest
           .venv/bin/python -m pytest -q tests/special_sanity/test_doctest_helper.py
-      - name: Read the A3 CANN base image from the backend Dockerfile
-        id: image
+      - name: Read installation cases and images from the public guide
+        id: matrix
+        env:
+          SELECTED_CASE: ${{ inputs.backend || 'all' }}
         run: |
-          case "$INSTALL_CASE" in
-            fsdp2_vllm|megatron_vllm) dockerfile=docker/ascend/Dockerfile.ascend_9.1.0_a3 ;;
-            fsdp2_sglang|megatron_sglang) dockerfile=docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3 ;;
-            *) exit 1 ;;
-          esac
-          image=$(awk '$1 == "FROM" {print $2; exit}' "$dockerfile")
-          [[ "$image" == swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:* ]]
-          echo "image=$image" >> "$GITHUB_OUTPUT"
+          matrix=$(.venv/bin/python tests/e2e/doctests/scripts/doctest_helper.py matrix --case "$SELECTED_CASE")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
   installation:
+    name: Installation (${{ matrix.case }})
     needs: check
     # Fork PRs use the upstream repository's workflow-approval policy, as in e2e_ascend.yml.
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     timeout-minutes: 180
     container:
-      image: ${{ needs.check.outputs.image }}
+      image: ${{ matrix.image }}
       options: --shm-size 16g
     defaults:
       run:
         shell: bash -el {0}
     env:
+      INSTALL_CASE: ${{ matrix.case }}
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       TRANSFORMERS_VERBOSITY: error

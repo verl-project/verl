@@ -3,8 +3,9 @@
 These scripts extract existing commands from
 `docs/ascend_tutorial/zh/get_start/` and exercise verl's installation and GRPO
 Quick Start. Test-side selectors identify the installation code blocks and
-Quick Start table entries; the user documentation needs no markers or layout
-changes. Missing or ambiguous commands fail the check.
+Quick Start table entries. The existing installation and Quick Start pages keep
+their layout; the new container guide uses standard RST code-block names for
+image selection and prerequisites. Missing or ambiguous commands fail the check.
 
 Read-only checks require Bash and Python 3.10 or newer, without an NPU:
 
@@ -41,6 +42,12 @@ installer, logs Python/package versions, checks imports, and executes the chosen
 Quick Start case. Version logging helps diagnose mismatches; it is not a strict
 comparison against the documentation's compatibility table.
 
+For the A3 Ubuntu environment used by CI, follow the public
+[CANN container source-install guide](../../../docs/ascend_tutorial/zh/get_start/container_source_install.rst).
+Its image assignments are the source of truth for CI, and the Ubuntu worker
+executes its system-dependency block. The guide explains how to start the
+container, prepare Conda, and continue with the existing installation commands.
+
 ```bash
 ALLOW_INSTALL=1 INSTALL_BACKEND=sglang INSTALL_CASE=fsdp2_sglang \
 MODEL_PATH=/path/to/Qwen3-0.6B GSM8K_DATASET_PATH=/path/to/gsm8k \
@@ -66,17 +73,28 @@ Set `KEEP_INSTALL_WORKDIR=1` to retain it, or provide an empty
 `ALLOW_INSTALL=1 DRY_RUN=1` to validate the plan without installing packages.
 
 The GitHub workflow runs CPU tool tests on relevant pull requests, followed by
-source installation and one GRPO step for `fsdp2_vllm` on the upstream project's
-A3 eight-device runner. Fork pull requests follow the repository's workflow
+source installation and one GRPO step for **each of the four combinations** on
+the upstream project's A3 eight-device runner. Matrix jobs run one at a time;
+one failed case does not cancel the remaining cases. Fork pull requests follow the repository's workflow
 approval policy; a maintainer must approve runs when GitHub requires it.
 New runs on the same ref cancel older runs. Workflows running in forks execute
 only the CPU checks.
 
-Manual runs can select any of the four supported combinations. GitHub requires
+Manual runs can select one combination or `all`. Configured coverage does not
+mean that every combination has already passed; inspect each job's result.
+Preview the exact image/case matrix without installing anything:
+
+```bash
+python3 tests/e2e/doctests/scripts/doctest_helper.py matrix
+python3 tests/e2e/doctests/scripts/doctest_helper.py matrix --case fsdp2_sglang
+```
+
+GitHub requires
 the workflow to exist on the default branch before `workflow_dispatch` is
 available; the pull-request trigger provides installation coverage before merge.
-The CANN base image comes from the selected backend's Dockerfile; the workflow
-bootstraps Miniforge, while the documentation creates the Python environment.
+The CANN base image comes from the selected backend's command in the public
+container guide; the workflow bootstraps Miniforge, while the original installation
+documentation creates the Python environment.
 The runner must expose its NPU devices and cached inputs to the container:
 Qwen3-0.6B under `/root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B` and GSM8K
 under `/root/.cache/modelscope/dataset/openai/gsm8k`, matching the existing

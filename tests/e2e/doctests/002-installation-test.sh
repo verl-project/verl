@@ -29,10 +29,14 @@ function detect_os() {
   esac
 }
 function run_installation_check() {
+  local block
   log_info "Validating documented commands (read-only)..."
   "${DOCTEST_PYTHON}" "${DOCTEST_HELPER_PATH}" validate
   check_shell_block installation-vllm
   check_shell_block installation-sglang
+  for block in container-image-vllm container-image-sglang container-prerequisites-ubuntu container-conda; do
+    check_shell_block "${block}"
+  done
   log_info "Installation documentation check passed."
 }
 
@@ -40,8 +44,7 @@ function run_installation_check() {
 function install_system_tools() {
   case "$1" in
     ubuntu)
-      apt-get update
-      apt-get install -y gcc g++ cmake libnuma-dev wget git curl unzip build-essential ca-certificates
+      run_shell_block container-prerequisites-ubuntu
       ;;
     openeuler)
       yum install -y gcc gcc-c++ cmake numactl-devel wget git curl unzip make ca-certificates
