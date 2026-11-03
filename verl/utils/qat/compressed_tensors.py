@@ -74,18 +74,22 @@ SUPPORTED_SCHEMES: dict[str, Optional[str]] = {
     # quantized MXFP8 expert inputs, rather than the upstream MXFP4 W4A4
     # preset.
     "MXFP4": "mxfp4",
-    # NVFP4 is deliberately W4A4 and routed-expert-only.  Unlike MX formats,
-    # its tensor-level activation scale is static and must come from QAT.
+    # NVFP4 is deliberately W4A4 and routed-expert-only, and always runs with
+    # per-token activations (``moe_activation=nvfp4_per_token``, the default).
     "NVFP4": "nvfp4",
 }
 
 # ``moe_activation`` overrides, named as vLLM's ``quantization_config.moe.activation``,
 # mapped to the ``moe`` preset each applies to. ``nvfp4_per_token`` quantizes the
 # NVFP4 expert inputs per token at runtime, as Transformer Engine's row-scaled NVFP4
-# training does; it pairs with ``override_transformer_config.fp4``, not QAT.
+# training and NVFP4 QAT do.
 MOE_ACTIVATIONS: dict[str, str] = {
     "nvfp4_per_token": "NVFP4",
 }
+
+# Each override is the only activation scheme verl runs for its preset, and its default:
+# NVFP4 has no static activation scales.
+_REQUIRED_MOE_ACTIVATIONS: dict[str, str] = {preset: activation for activation, preset in MOE_ACTIVATIONS.items()}
 
 # Layers that stay in high precision regardless of model. Patterns must start
 # with "re:": vLLM rewrites plain dotted names through the model's
@@ -160,8 +164,17 @@ def qat_modes_for_config(ct_config: Mapping[str, Any]) -> set[Optional[str]]:
     variants = {_preset_of(scheme) for scheme in _group_schemes(ct_config)}
     if variants == {("MXFP4", None), ("MXFP8", None)}:
         return {"mxfp4_mxfp8"}
-    # No ModelOpt QAT mode matches an activation override.
-    return {SUPPORTED_SCHEMES[preset] if activation is None else None for preset, activation in variants}
+    return {
+        SUPPORTED_SCHEMES[preset] if activation == _REQUIRED_MOE_ACTIVATIONS.get(preset) else None
+        for preset, activation in variants
+    }
+
+
+def _check_required_activations(ct_config: Mapping[str, Any], source: str) -> None:
+    for preset, activation in filter(None, (_preset_of(scheme) for scheme in _group_schemes(ct_config))):
+        required = _REQUIRED_MOE_ACTIVATIONS.get(preset)
+        if required is not None and activation != required:
+            raise ValueError(f"{source}: {preset} is supported only with moe_activation={required}")
 
 
 def is_all_mxfp8_config(ct_config: Mapping[str, Any]) -> bool:
@@ -268,6 +281,7 @@ def _load_config_file(config_file: str) -> dict[str, Any]:
             raise ValueError(
                 f"{config_file}: config group {name!r} does not match any supported scheme {sorted(SUPPORTED_SCHEMES)}"
             )
+    _check_required_activations(config, config_file)
     return config
 
 
@@ -294,6 +308,8 @@ def build_compressed_tensors_config(
 
     linear = _check_scheme("linear", linear)
     moe = _check_scheme("moe", moe)
+    if moe_activation is None:
+        moe_activation = _REQUIRED_MOE_ACTIVATIONS.get(moe)
     if moe_activation is not None and MOE_ACTIVATIONS.get(moe_activation) != moe:
         supported = {activation: f"moe={preset}" for activation, preset in MOE_ACTIVATIONS.items()}
         raise ValueError(
@@ -470,48 +486,10 @@ class CompressedTensorsWeightQuantizer:
     outputs. Everything else passes through unchanged.
     """
 
-    def __init__(
-        self,
-        ct_config: Mapping[str, Any],
-        input_global_scales: Optional[Mapping[str, torch.Tensor]] = None,
-    ):
+    def __init__(self, ct_config: Mapping[str, Any]):
         self.ignore = list(ct_config.get("ignore") or [])
         self.schemes = _group_schemes(ct_config)
         self.linear_scheme = next((s for s in self.schemes if "Linear" in s.targets), None)
-        self.input_global_scales = dict(input_global_scales or {})
-
-    def set_input_global_scales(self, scales: Mapping[str, torch.Tensor]) -> None:
-        """Install ModelOpt-observed NVFP4 activation scales keyed by HF module name."""
-        self.input_global_scales = dict(scales)
-
-    def refresh_input_global_scales(self, model: torch.nn.Module) -> None:
-        """Refresh NVFP4 activation scales from ModelOpt before an export."""
-        from verl.utils.qat.modelopt import collect_nvfp4_input_global_scales
-
-        scales = collect_nvfp4_input_global_scales(model)
-        if scales:
-            self.set_input_global_scales(scales)
-
-    def _input_global_scale(self, module: str, scheme: "QuantizationScheme") -> Optional[torch.Tensor]:
-        from compressed_tensors.quantization import QuantizationStrategy
-
-        if scheme.input_activations is None or scheme.input_activations.strategy != QuantizationStrategy.TENSOR_GROUP:
-            return None
-        scale = self.input_global_scales.get(module)
-        if scale is None:
-            match = re.search(r"(?:^|\.)layers\.(\d+)\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj)$", module)
-            if match:
-                projection = "gate_up" if match.group(2) in ("gate_proj", "up_proj") else "down"
-                scale = self.input_global_scales.get(f"layers.{match.group(1)}.mlp.experts.{projection}")
-        if scale is None:
-            # The first rollout sync precedes any actor forward, so no observer
-            # value exists yet.  One is the neutral CT divisor and leaves the
-            # dynamic group-16 FP8 local scales their full representable range.
-            scale = torch.ones(1)
-        scale = scale.detach().float().reshape(1)
-        if not torch.isfinite(scale).all() or (scale <= 0).any():
-            raise ValueError(f"Invalid input_global_scale for {module!r}: {scale}")
-        return scale
 
     def _compress_packed_experts(
         self,
@@ -569,9 +547,6 @@ class CompressedTensorsWeightQuantizer:
             prefix = name[: -len("weight")]
             for key, value in _compress_weight(tensor, scheme).items():
                 yield prefix + self._compressed_key(key), value
-            input_scale = self._input_global_scale(name[: -len(".weight")], scheme)
-            if input_scale is not None:
-                yield prefix + self._compressed_key("input_global_scale"), input_scale
 
 
 _UNPACKED_EXPERT = re.compile(r"(?P<prefix>.*\.experts\.\d+)\.(?P<proj>gate_proj|up_proj|down_proj)\.weight$")
@@ -611,23 +586,16 @@ class NVFP4PerTokenWeightQuantizer(CompressedTensorsWeightQuantizer):
             f"the routed experts of layers {self.bf16_expert_layers} in BF16; set rollout.quantization.ignore={hint}"
         )
 
-    def refresh_input_global_scales(self, model: torch.nn.Module) -> None:
-        """Per-token activations carry no observed scale."""
-
     @staticmethod
     def _quantize(weight: torch.Tensor, global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         from verl.utils.qat.nvfp4 import quantize_nvfp4
 
         return quantize_nvfp4(weight, global_scale)
 
-    @staticmethod
-    def _global_scale(*weights: torch.Tensor) -> torch.Tensor:
-        # vLLM's online NVFP4: (fp4_max * fp8_max) / amax, amax clamped away from zero.
-        amax = torch.stack([w.float().abs().amax() for w in weights]).amax().clamp_min(1e-8)
-        return (6.0 * torch.finfo(torch.float8_e4m3fn).max / amax).reshape(1)
-
     def _emit(self, prefix: str, weights: dict[str, torch.Tensor]) -> Iterator[tuple[str, torch.Tensor]]:
-        global_scale = self._global_scale(*weights.values())
+        from verl.utils.qat.nvfp4 import nvfp4_global_scale
+
+        global_scale = nvfp4_global_scale(*weights.values())
         names = list(weights)
         packed, scale = self._quantize(torch.cat([weights[name] for name in names]), global_scale)
         rows = [weights[name].shape[0] for name in names]
@@ -710,7 +678,6 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
         self.scheme = _scheme_for_preset("FP8_BLOCK", ["Linear"])
         self.schemes = [self.scheme]
         self.linear_scheme = self.scheme
-        self.input_global_scales = {}
 
     def _is_ignored(self, module: str) -> bool:
         if _matches(module, DEFAULT_IGNORE):
@@ -765,8 +732,9 @@ def dispatch_rollout_weight_quantizer(
     native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`. DeepSeek-V4
     still gets an FP8 quantizer object, but it passes through the private mixed
     FP8/FP4 layout already produced by Megatron-Bridge.
-    Per-token NVFP4 routed experts use :class:`NVFP4PerTokenWeightQuantizer`; NVFP4 training
-    (``real_nvfp4_bf16_layers`` set) requires them and the same BF16 layers.
+    Per-token NVFP4 routed experts use :class:`NVFP4PerTokenWeightQuantizer`. NVFP4 training
+    (``real_nvfp4_bf16_layers`` set) and NVFP4 QAT require them; NVFP4 training also requires the
+    same BF16 layers.
     """
     rollout_quantization = getattr(rollout_config, "quantization", None)
     linear = getattr(rollout_quantization, "linear", None)
@@ -806,10 +774,7 @@ def dispatch_rollout_weight_quantizer(
     real_nvfp4 = real_nvfp4_bf16_layers is not None
     if quantization_config is None:
         if real_nvfp4:
-            raise ValueError(
-                "override_transformer_config.fp4 needs rollout.quantization.moe=NVFP4 "
-                "with moe_activation=nvfp4_per_token"
-            )
+            raise ValueError("override_transformer_config.fp4 needs rollout.quantization.moe=NVFP4")
         if qat_mode is not None:
             raise ValueError(
                 "QAT needs a quantized rollout to sync to: use a model with a native "
@@ -828,17 +793,14 @@ def dispatch_rollout_weight_quantizer(
         for scheme in _group_schemes(quantization_config)
     )
     if per_token and getattr(rollout_config, "name", None) != "vllm":
-        raise ValueError("rollout.quantization.moe_activation=nvfp4_per_token is supported only with the vLLM rollout")
-    if per_token and qat_mode is not None:
-        raise ValueError(
-            "rollout.quantization.moe_activation=nvfp4_per_token pairs with override_transformer_config.fp4, not QAT"
-        )
+        raise ValueError("rollout.quantization.moe=NVFP4 is supported only with the vLLM rollout")
     if real_nvfp4 and not per_token:
         raise ValueError(
             "override_transformer_config.fp4 trains routed experts in per-token NVFP4; "
-            "set rollout.quantization.moe=NVFP4 with moe_activation=nvfp4_per_token"
+            "set rollout.quantization.moe=NVFP4"
         )
     if quant_method == "compressed-tensors":
+        _check_required_activations(quantization_config, "rollout quantization_config")
         qat_modes = qat_modes_for_config(quantization_config) if qat_mode is not None else set()
         if per_token:
             bf16_expert_layers = None

@@ -142,9 +142,4 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
             else:
                 self.optimizer.step()
 
-        if self._qat_enabled:
-            from verl.utils.qat.core import invalidate_all_scales
-
-            invalidate_all_scales(self.module)
-
         return grad_norm.item()

@@ -202,7 +202,6 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_start_in_bf16=2
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_end_in_bf16=4
     actor_rollout_ref.rollout.quantization.moe=NVFP4
-    actor_rollout_ref.rollout.quantization.moe_activation=nvfp4_per_token
     "actor_rollout_ref.rollout.quantization.ignore=[${BF16_EXPERT_LAYERS%,}]"
   )
 fi

@@ -40,7 +40,6 @@ from packaging import version
 
 from verl.utils.vllm.vllm_fp4_utils import (
     install_mxfp4_mxfp8_compressed_tensors_patch,
-    install_nvfp4_cutlass_compressed_tensors_patch,
     is_deepseek_v4_model,
     process_mxfp4_moe_weights_after_loading,
     process_nvfp4_moe_weights_after_loading,
@@ -328,7 +327,6 @@ def apply_vllm_quant_patches():
     activations.
     """
     install_mxfp4_mxfp8_compressed_tensors_patch()
-    install_nvfp4_cutlass_compressed_tensors_patch()
     install_nvfp4_per_token_compressed_tensors_patch()
     if fp8_state.vllm_patches:
         logger.debug("vLLM quantization patches already applied")

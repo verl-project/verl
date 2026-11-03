@@ -49,17 +49,6 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
-      qat:
-        _target_: verl.workers.config.QATEngineConfig
-        enable: false
-        mode: w4a16
-        group_size: 16
-        ignore_patterns:
-        - lm_head
-        - embed_tokens
-        - re:.*mlp.gate$
-        activation_observer: static_minmax
-        quantization_config_path: null
       turbo_config:
         distributed:
           fully_shard_parallel_size: 16
@@ -164,16 +153,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     grad_clip: 1.0
     ulysses_sequence_parallel_size: 1
     entropy_from_logits_with_chunking: false
@@ -257,17 +236,6 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
-      qat:
-        _target_: verl.workers.config.QATEngineConfig
-        enable: false
-        mode: w4a16
-        group_size: 16
-        ignore_patterns:
-        - lm_head
-        - embed_tokens
-        - re:.*mlp.gate$
-        activation_observer: static_minmax
-        quantization_config_path: null
       turbo_config:
         distributed:
           fully_shard_parallel_size: 16
@@ -583,17 +551,6 @@ critic:
     forward_only: false
     strategy: fsdp
     dtype: bfloat16
-    qat:
-      _target_: verl.workers.config.QATEngineConfig
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     turbo_config:
       distributed:
         fully_shard_parallel_size: 16

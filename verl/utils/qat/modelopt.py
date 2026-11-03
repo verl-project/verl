@@ -116,80 +116,35 @@ class _GroupedMxfp4FakeQuant(torch.autograd.Function):
 
 
 class _Nvfp4FakeQuant(torch.autograd.Function):
-    """compressed-tensors-compatible NVFP4 QDQ with an explicit global scale."""
+    """NVFP4 QDQ of the rollout's quantization, with straight-through grad."""
 
     @staticmethod
-    def forward(ctx, x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
-        from compressed_tensors.quantization import QuantizationArgs
-        from compressed_tensors.quantization.lifecycle.forward import fake_quantize
-        from compressed_tensors.quantization.utils import calculate_qparams
+    def forward(ctx, x: torch.Tensor, per_token: bool) -> torch.Tensor:
+        from verl.utils.qat.nvfp4 import fake_quantize_nvfp4, fake_quantize_nvfp4_per_token, nvfp4_global_scale
 
-        args = QuantizationArgs(
-            num_bits=4,
-            type="float",
-            symmetric=True,
-            group_size=16,
-            strategy="tensor_group",
-            dynamic=False,
-            scale_dtype="torch.float8_e4m3fn",
-        )
         shape = x.shape
         x2d = x.reshape(-1, shape[-1])
-        groups = x2d.unflatten(-1, (-1, 16))
-        min_vals, max_vals = groups.amin(dim=-1), groups.amax(dim=-1)
-        scale, zero_point = calculate_qparams(
-            min_vals.float(),
-            max_vals.float(),
-            args,
-            global_scale=global_scale.float(),
-        )
-        return (
-            fake_quantize(
-                x2d,
-                scale,
-                zero_point,
-                args,
-                global_scale=global_scale.float(),
-            )
-            .reshape(shape)
-            .to(x.dtype)
-        )
+        if per_token:
+            return fake_quantize_nvfp4_per_token(x2d).reshape(shape)
+        return fake_quantize_nvfp4(x2d, nvfp4_global_scale(x2d)).reshape(shape)
 
     @staticmethod
     def backward(ctx, grad):
         return grad, None
 
 
-def _nvfp4_global_scale(inputs: torch.Tensor) -> torch.Tensor:
-    from compressed_tensors.quantization.utils import generate_gparam
-
-    amax = inputs.detach().float().abs().amax()
-    return generate_gparam(-amax, amax).to(device=inputs.device)
-
-
 def _nvfp4_weight_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
+    # One global scale per expert matrix, as the export computes it; the fused linear_fc1
+    # holds gate_proj and up_proj, which the export gives one shared scale.
     if inputs.ndim > 2:
-        # TEGroupedLinear stores one expert matrix per leading entry. The
-        # compressed-tensors checkpoint likewise assigns one global scale per
-        # expert, so quantize each matrix independently.
-        return torch.stack(
-            [_Nvfp4FakeQuant.apply(weight, _nvfp4_global_scale(weight)) for weight in inputs],
-            dim=0,
-        )
-    return _Nvfp4FakeQuant.apply(inputs, _nvfp4_global_scale(inputs))
+        # TEGroupedLinear stores one expert matrix per leading entry.
+        return torch.stack([_Nvfp4FakeQuant.apply(weight, False) for weight in inputs], dim=0)
+    return _Nvfp4FakeQuant.apply(inputs, False)
 
 
 def _nvfp4_input_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
-    # vLLM's W4A4 kernel needs one static tensor-level scale while the local
-    # group-16 scales remain dynamic. Keep a running maximum during QAT and use
-    # that exact scale for both fake quant and checkpoint export.
-    current = _nvfp4_global_scale(inputs)
-    previous = getattr(quantizer, "_verl_input_global_scale", None)
-    if previous is not None:
-        # Running max of amax == running min of the global divisor.
-        current = torch.minimum(previous.to(current.device), current)
-    quantizer._verl_input_global_scale = current.detach()
-    return _Nvfp4FakeQuant.apply(inputs, current)
+    # The rollout's per-token MoE kernel quantizes each token with its own global scale.
+    return _Nvfp4FakeQuant.apply(inputs, True)
 
 
 if not is_registered_quant_backend(_FP8_BLOCK_BACKEND):
@@ -281,7 +236,7 @@ def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
 
 
 def _nvfp4_quantize_config() -> tuple[list[dict], None]:
-    """NVFP4 W4A4 on routed experts with export-compatible running scales."""
+    """NVFP4 W4A4 on routed experts, with the rollout's per-token activation scales."""
     quant_cfg = mtq.normalize_quant_cfg_list(copy.deepcopy(mtq.NVFP4_EXPERTS_ONLY_CFG["quant_cfg"]))
     for entry in quant_cfg:
         cfg = entry.get("cfg")
@@ -293,22 +248,6 @@ def _nvfp4_quantize_config() -> tuple[list[dict], None]:
         elif name.endswith("input_quantizer"):
             cfg["backend"] = _NVFP4_INPUT_BACKEND
     return quant_cfg, None
-
-
-def collect_nvfp4_input_global_scales(model: nn.Module | list[nn.Module]) -> dict[str, torch.Tensor]:
-    """Collect observed expert activation scales under HF-style canonical keys."""
-    scales = {}
-    chunks = model if isinstance(model, list) else [model]
-    for chunk in chunks:
-        for name, module in chunk.named_modules():
-            scale = getattr(module, "_verl_input_global_scale", None)
-            if scale is None or not name.endswith("input_quantizer") or ".mlp.experts" not in name:
-                continue
-            layer = next((part for part in name.split(".") if part.isdigit()), None)
-            projection = "gate_up" if "linear_fc1" in name else "down" if "linear_fc2" in name else None
-            if layer is not None and projection is not None:
-                scales[f"layers.{layer}.mlp.experts.{projection}"] = scale.detach()
-    return scales
 
 
 def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> list[dict]:
@@ -490,6 +429,12 @@ def _get_qat_field(qat_config, key, default=None):
 def apply_qat_to_modules(modules, qat_config):
     """Apply ModelOpt fake quantization to a list of Megatron module chunks."""
     qat_mode = _get_qat_field(qat_config, "mode", "fp8")
+    if qat_mode == "nvfp4":
+        from megatron.core import parallel_state
+
+        # The export computes each expert's global scale over the whole matrix.
+        if parallel_state.get_expert_tensor_parallel_world_size() > 1:
+            raise NotImplementedError("NVFP4 QAT needs expert_tensor_parallel_size=1")
     ignore_patterns = _get_qat_field(qat_config, "ignore_patterns", None)
     if ignore_patterns is not None:
         ignore_patterns = list(ignore_patterns)

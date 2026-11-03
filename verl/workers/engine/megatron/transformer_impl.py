@@ -1047,9 +1047,6 @@ class MegatronEngine(BaseEngine):
             per_tensor_param = ((name, tensor) for name, tensor in per_tensor_param if "_quantizer." not in name)
         if self._rollout_weight_quantizer is not None and not adapter_only:
             # QAT-trained master weights quantize to the same values the fake quant used in training.
-            refresh_scales = getattr(self._rollout_weight_quantizer, "refresh_input_global_scales", None)
-            if refresh_scales is not None:
-                refresh_scales(self.module)
             per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
 
         return per_tensor_param, peft_config

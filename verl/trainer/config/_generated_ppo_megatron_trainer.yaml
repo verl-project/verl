@@ -94,8 +94,6 @@ actor_rollout_ref:
         ignore_patterns:
         - lm_head
         - '*mlp.gate'
-        activation_observer: null
-        quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -186,16 +184,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
   ref:
@@ -295,8 +283,6 @@ actor_rollout_ref:
         ignore_patterns:
         - lm_head
         - '*mlp.gate'
-        activation_observer: null
-        quantization_config_path: null
     _target_: verl.workers.config.McoreActorConfig
     entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
     entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
@@ -640,8 +626,6 @@ critic:
       ignore_patterns:
       - lm_head
       - '*mlp.gate'
-      activation_observer: null
-      quantization_config_path: null
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron
