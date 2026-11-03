@@ -428,6 +428,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install transformers==5.21.0
       - name: Clone FSDPTurbo
         run: |
           git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo

@@ -203,5 +203,6 @@ jobs:
           rm -rf /FSDPTurbo
           git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
           export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
+          pip install transformers==5.21.0
           ray stop --force
           bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh

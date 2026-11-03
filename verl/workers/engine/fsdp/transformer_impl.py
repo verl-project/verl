@@ -137,9 +137,11 @@ class FSDPEngine(BaseEngine):
         self.rank = torch.distributed.get_rank()
 
         # Apply NPU patches for FSDP backend
-        from .utils import apply_npu_fsdp_patches
+        skip_npu_patches = getattr(self.engine_config, "strategy", None) == "fsdp_turbo"
+        if not skip_npu_patches:
+            from .utils import apply_npu_fsdp_patches
 
-        apply_npu_fsdp_patches(self.model_config)
+            apply_npu_fsdp_patches(self.model_config)
 
         # build device mesh for Ulysses Sequence Parallel
 
