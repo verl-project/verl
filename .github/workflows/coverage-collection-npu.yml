@@ -1,0 +1,90 @@
+# Calls the original workloads directly; no generated job definitions.
+# Temporary PR trigger for validation; schedule is 05:00 UTC+8 on alternate calendar days.
+name: Coverage Collection (Ascend PR workloads)
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - .github/workflows/**
+      - scripts/ci/**
+  schedule:
+    - cron: 0 21 */2 * *
+permissions:
+  contents: read
+concurrency:
+  group: ascend-coverage-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  e2e_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_sglang_2_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_sglang_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_sglang_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_vllm_2_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_vllm_2_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_megatron_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_ppo_trainer_veomni_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_ppo_trainer_veomni_vllm_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_sft_llm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_sft_llm_ascend.yml
+    with:
+      coverage_mode: true
+  e2e_v1_separate_async_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/e2e_v1_separate_async_ascend.yml
+    with:
+      coverage_mode: true
+  model_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/model_ascend.yml
+    with:
+      coverage_mode: true
+  npu_unit_tests:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/npu_unit_tests.yml
+    with:
+      coverage_mode: true
+  reward_model_sglang_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/reward_model_sglang_ascend.yml
+    with:
+      coverage_mode: true
+  reward_model_vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/reward_model_vllm_ascend.yml
+    with:
+      coverage_mode: true
+  sgl_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/sgl_ascend.yml
+    with:
+      coverage_mode: true
+  vllm_ascend:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/vllm_ascend.yml
+    with:
+      coverage_mode: true

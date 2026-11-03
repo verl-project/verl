@@ -32,7 +32,6 @@
 name: e2e_sft_llm_ascend
 
 on:
-  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -53,17 +52,24 @@ on:
       - "tests/special_e2e/sft"
       - "verl/trainer/fsdp_sft_trainer.py"
       - "verl/trainer/config/sft_trainer.yaml"
+  workflow_call:
+    inputs:
+      coverage_mode:
+        description: Collect raw branch coverage for the existing workload steps
+        type: boolean
+        required: false
+        default: false
 
-# Cancel jobs on the same ref if a new one is triggered
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: e2e_sft_llm_ascend-${{ inputs.coverage_mode && 'coverage' || 'pr' }}-${{ github.ref }}
+  cancel-in-progress: ${{ !inputs.coverage_mode && github.ref != 'refs/heads/main' }}
 
 # Declare permissions just read content.
-permissions: 
+permissions:
   contents: read
 
 env:
+  VERL_COVERAGE_ENABLED: ${{ inputs.coverage_mode }}
   # Disposable caches and locks must stay off the read-only dataset/model mounts.
   HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
@@ -72,7 +78,7 @@ jobs:
   e2e_sft_llm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
-    timeout-minutes: 90 # Increase this timeout value as needed
+    timeout-minutes: ${{ inputs.coverage_mode && 210 || 90 }} # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
@@ -136,9 +142,25 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Initialize coverage (optional)
+        if: inputs.coverage_mode
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_sft_llm_ascend.yml/${{ github.job }}/data
+          VERL_COVERAGE_WORKFLOW: e2e_sft_llm_ascend.yml
+          VERL_COVERAGE_JOB: ${{ github.job }}
+        run: |
+          # Persist identity for subsequent workload steps, but not instrumentation.
+          printf 'VERL_COVERAGE_ROOT=%s\n' "$VERL_COVERAGE_ROOT" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_WORKFLOW=%s\n' "$VERL_COVERAGE_WORKFLOW" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_JOB=%s\n' "$VERL_COVERAGE_JOB" >> "$GITHUB_ENV"
+          command -v uv >/dev/null || python -m pip install uv
+          uv pip install --python "$(python -c 'import sys; print(sys.executable)')" "coverage==7.8.2" "PyYAML==6.0.2"
+          python scripts/ci/coverage/collect.py init
       - name: Prepare gsm8k dataset
         run: |
           python3 examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+        shell: python scripts/ci/coverage/collect.py run step-06 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
@@ -148,22 +170,27 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_e2e/sft/run_sft.sh
+        shell: python scripts/ci/coverage/collect.py run step-08 {0}
       - name: Running GSM8K E2E training tests on 8 NPUs w/o rmpad using function rm
         run: |
           ray stop --force
           RM_PAD=False bash tests/special_e2e/sft/run_sft.sh
+        shell: python scripts/ci/coverage/collect.py run step-09 {0}
       - name: Running GSM8K E2E training tests on 8 NPUs with sequence parallism
         run: |
           ray stop --force
           SP_SIZE=2 bash tests/special_e2e/sft/run_sft.sh
+        shell: python scripts/ci/coverage/collect.py run step-10 {0}
       - name: Running GSM8K E2E training tests with LoRA
         run: |
           ray stop --force
           LORA_RANK=32 bash tests/special_e2e/sft/run_sft.sh
+        shell: python scripts/ci/coverage/collect.py run step-11 {0}
       - name: Run GSM8K E2E training and resume tests resuming from the checkpoint manager
         run: |
           ray stop --force
           LORA_RANK=32 RESUME_MODE=auto TOTAL_TRAIN_STEP=2 bash tests/special_e2e/sft/run_sft.sh
+        shell: python scripts/ci/coverage/collect.py run step-12 {0}
       - name: Running GSM8K E2E training tests with multiturn and various configs and compare results
         run: |
           ray stop --force
@@ -192,3 +219,19 @@ jobs:
           echo "run with tp2 pp2 vpp2 cp2 num_gpus8 mode=ray"
           BACKEND=megatron TP_SIZE=2 PP_SIZE=2 VPP_SIZE=NULL CP_SIZE=2 NUM_GPUS=8 mode=ray bash tests/special_e2e/sft/run_sft_engine.sh
           rm -rf ~/verl/test/log
+        shell: python scripts/ci/coverage/collect.py run step-13 {0}
+      - name: Package coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_sft_llm_ascend.yml/${{ github.job }}/data
+        run: python scripts/ci/coverage/collect.py package
+      - name: Retain coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-coverage-e2e_sft_llm_ascend.yml-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_sft_llm_ascend.yml/${{ github.job }}/coverage.tar.gz
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 14
