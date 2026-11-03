@@ -169,6 +169,9 @@ def get_ppo_ray_runtime_env(config=None):
     # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
     for key in (
         "VLLM_DISABLE_COMPILE_CACHE",
+        "VERL_WEIGHT_DIAGNOSTICS_DIR",
+        "VERL_WEIGHT_DIAGNOSTICS_MODE",
+        "VERL_WEIGHT_DIAGNOSTICS_LIMIT",
         "PYTHONHASHSEED",
         "CUBLAS_WORKSPACE_CONFIG",
         "FLASH_ATTENTION_DETERMINISTIC",

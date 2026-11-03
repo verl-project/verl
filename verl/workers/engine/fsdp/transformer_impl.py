@@ -932,6 +932,9 @@ class FSDPEngine(BaseEngine):
         if _needs_staging and not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
         params = self.module.state_dict()
+        from verl.utils.weight_diagnostics import trace_weights
+
+        trace_weights("export.before", model=self.module)
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
         if _needs_staging and self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
@@ -1019,6 +1022,9 @@ class FSDPEngine(BaseEngine):
         else:
             params = self.module.state_dict()
 
+        from verl.utils.weight_diagnostics import trace_weights
+
+        trace_weights("export.before", model=self.module)
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
