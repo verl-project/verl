@@ -26,6 +26,7 @@ from .engine import (
     McoreEngineConfig,
     TorchtitanEngineConfig,
     VeOmniEngineConfig,
+    plumb_freeze_vision_tower,
 )
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
@@ -60,6 +61,8 @@ class CriticConfig(BaseConfig):
         ppo_epochs (int): Number of PPO epochs per batch.
         shuffle (bool): Shuffle training data across PPO epochs.
         cliprange_value (float): PPO value function clipping range.
+        freeze_vision_tower (bool): Freeze the vision tower of a multimodal value
+            model, mirroring ``actor.freeze_vision_tower``. default False
         loss_agg_mode (str): Loss aggregation mode.
         loss_scale_factor (Optional[int]): Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode.
         checkpoint (Dict[str, Any]): Checkpoint configuration.
@@ -90,6 +93,7 @@ class CriticConfig(BaseConfig):
     data_loader_seed: int = 42
     shuffle: bool = True
     cliprange_value: float = 0.5
+    freeze_vision_tower: bool = False
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
     ppo_micro_batch_size: Optional[int] = None
@@ -179,6 +183,7 @@ class McoreCriticConfig(CriticConfig):
         """Validate Megatron critic configuration parameters."""
         super().__post_init__()
         self.engine = self.megatron
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="critic")
 
 
 @dataclass
@@ -214,6 +219,11 @@ class FSDPCriticConfig(CriticConfig):
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
         # falls back to FSDP1 even when critic.strategy="fsdp2".
         object.__setattr__(self.engine, "strategy", self.strategy)
+        # Forward freeze_vision_tower next to the strategy sync: __post_init__ is
+        # the choke point every critic construction path goes through (both
+        # trainers), so a future path cannot forget it. The separation trainer's
+        # critic uses a different engine object and still plumbs explicitly.
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="critic")
 
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate FSDP critic configuration with runtime parameters."""
@@ -247,6 +257,7 @@ class TorchTitanCriticConfig(CriticConfig):
         """Validate TorchTitan critic configuration parameters."""
         super().__post_init__()
         self.engine = self.torchtitan
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="critic")
 
 
 @dataclass
@@ -297,6 +308,7 @@ class VeOmniCriticConfig(CriticConfig):
         """Set engine to VeOmni config."""
         super().__post_init__()
         self.engine = self.veomni
+        plumb_freeze_vision_tower(self.engine, self.freeze_vision_tower, role="critic")
 
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate VeOmni critic configuration with runtime parameters."""

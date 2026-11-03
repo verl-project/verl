@@ -231,6 +231,23 @@ def patch_vlm_for_ulysses_input_slicing(model_class: type):
     print(f"Monkey patch {model_class.__name__}.forward for Ulysses SP input slicing.")
 
 
+# Model types whose verl adapter (verl/models/transformers/<family>.py) runs a
+# dummy visual forward on text-only batches. Only these families can keep a
+# trainable tower (vision LoRA / QAT) safe under freeze_vision_tower: every
+# rank still enters the tower once per step, so FSDP stays aligned. Keep in
+# sync with the dispatch in patch_forward_with_backends below — each family's
+# model types appear in exactly one branch there.
+VL_DUMMY_VISUAL_FORWARD_MODEL_TYPES = (
+    "qwen2_5_vl",
+    "qwen2_vl",
+    "qwen3_vl",
+    "qwen3_vl_moe",
+    "glm4v",
+    "qwen3_5",
+    "qwen3_5_moe",
+)
+
+
 def patch_forward_with_backends(
     model: PreTrainedModel,
     use_fused_kernels: bool = False,

@@ -60,6 +60,10 @@ data_loader_seed: 42
 # PPO value function clipping range
 cliprange_value: 0.5
 
+# Freeze the vision tower of a multimodal value model: requires_grad_(False), keep it
+# out of per-module FSDP wrapping, and skip the dummy visual forward on text-only batches.
+freeze_vision_tower: false
+
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
 loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
 

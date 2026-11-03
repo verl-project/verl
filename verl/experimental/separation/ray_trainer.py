@@ -150,13 +150,15 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
             # convert critic_cfg into TrainingWorkerConfig for the unified model engine worker
             from verl.workers.config import FSDPEngineConfig
-            from verl.workers.engine_workers import TrainingWorkerConfig
+            from verl.workers.engine_workers import TrainingWorkerConfig, plumb_freeze_vision_tower
 
             self.orig_critic_cfg = critic_cfg
             if self.orig_critic_cfg.strategy == "fsdp":
                 engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
                 engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
                 engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
+                # Same freeze plumbing as the other critic paths (trainer_base.py, ray_trainer.py).
+                plumb_freeze_vision_tower(engine_config, critic_cfg.freeze_vision_tower, role="critic")
             else:
                 raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
 

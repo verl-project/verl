@@ -30,6 +30,7 @@ from transformers.models.glm4v.modeling_glm4v import (
 from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
 from verl.utils.device import is_npu_available
+from verl.utils.model import may_skip_dummy_visual_forward
 from verl.utils.transformers_compat import unpack_visual_output
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
@@ -380,10 +381,19 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
     if pixel_values is None and pixel_values_videos is None:  # handle mixed text-image data
-        pixel_values = torch.zeros((16, 1176), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
-        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+        # The dummy visual forward keeps vision params in the autograd graph (FSDP
+        # grad completeness) and equalizes cross-rank vision-tower entry counts
+        # (FSDP2 per-module all-gather alignment, #3496). Both concerns vanish
+        # once the visual path is fully frozen and out of per-module FSDP
+        # wrapping. may_skip_dummy_visual_forward (shared with the other VLM
+        # adapters) holds the full rule: the engine's frozen-and-excluded marker
+        # plus no trainable params anywhere in the visual path, re-checked per
+        # forward as defense in depth (PEFT/QAT attach after marking).
+        if not may_skip_dummy_visual_forward(model):
+            pixel_values = torch.zeros((16, 1176), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
+            image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
+            inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)

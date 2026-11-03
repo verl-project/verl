@@ -8,6 +8,10 @@ strategy: ${actor_rollout_ref.actor.strategy}
 # same as actor_rollout_ref.actor.use_torch_compile if it exists, otherwise 1
 use_torch_compile: ${oc.select:actor_rollout_ref.actor.use_torch_compile,true}
 
+# whether to freeze the vision tower, same as the actor (pre-0.8 behavior: ref froze together with actor)
+# same as actor_rollout_ref.actor.freeze_vision_tower if it exists, otherwise false
+freeze_vision_tower: ${oc.select:actor_rollout_ref.actor.freeze_vision_tower,false}
+
 # [Will be deprecated, use log_prob_micro_batch_size_per_gpu]
 # The batch size for one forward pass in the computation of log_prob. Global batch size.
 log_prob_micro_batch_size: null
