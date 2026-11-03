@@ -359,6 +359,10 @@ class CheckpointEngineWorker(Worker):
             wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
         )
 
+    async def prefetch_weights(self, version: int) -> bool:
+        """Fetch a weight version ahead of `update_weights`, for engines that support it."""
+        return await self.checkpoint_engine.prefetch(version)
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)

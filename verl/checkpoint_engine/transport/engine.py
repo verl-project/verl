@@ -84,6 +84,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
         self._registry = None
         self.publisher = None
         self.puller = None
+        self._prefetched = None
         # Last version published (trainer) or pulled (rollout) by this engine.
         self.last_version = -1
 
@@ -139,10 +140,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
         await self.publisher.publish(weights, version=version)
         self.last_version = version
 
-    @torch.no_grad()
-    async def receive_weights(self, global_steps: int | None = None) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
-        """Pull the newest version that is at least `global_steps`, or newer than the last pull."""
-        min_version = global_steps if global_steps is not None else self.last_version + 1
+    def _get_puller(self) -> WeightPuller:
         if self.puller is None:
             self.puller = WeightPuller(
                 self.registry,
@@ -151,15 +149,45 @@ class TransportPullCheckpointEngine(CheckpointEngine):
                 lease_ttl=self.lease_ttl,
                 transport_factory=self.transport_factory,
             )
-        while True:
-            manifest = await self.puller.wait_for_version(min_version, timeout=self.wait_timeout)
+        return self.puller
+
+    async def prefetch(self, version: int) -> bool:
+        """Pull `version` into the local mirror without touching the inference engine.
+
+        Rollout can keep generating meanwhile; the next `receive_weights` hands out the prefetched
+        copy instead of reading again.
+
+        Returns:
+            False if the version was retired or the read was torn, so the caller should retry with
+            a newer version.
+        """
+        manifest = await self.registry.get_manifest(version)
+        if manifest is None:
+            return False
+        try:
+            self._prefetched = await self._get_puller().fetch(manifest)
+        except (LeaseError, TornReadError) as e:
+            logger.warning(f"Prefetch of version {version} failed: {e}")
+            return False
+        return True
+
+    @torch.no_grad()
+    async def receive_weights(self, global_steps: int | None = None) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+        """Yield the newest version that is at least `global_steps`, or newer than the last one.
+
+        A version taken by `prefetch` is used when it is new enough; otherwise it is pulled now.
+        """
+        min_version = global_steps if global_steps is not None else self.last_version + 1
+        pulled, self._prefetched = self._prefetched, None
+        while pulled is None or pulled.version < min_version:
+            manifest = await self._get_puller().wait_for_version(min_version, timeout=self.wait_timeout)
             try:
                 pulled = await self.puller.fetch(manifest)
-                break
             except (LeaseError, TornReadError) as e:
                 # Retired before it could be leased, or the lease lapsed mid-read: a newer version
                 # is already READY, so start over from the latest one.
                 logger.warning(f"Pull of version {manifest.version} failed, retrying: {e}")
+                pulled = None
         self.last_version = pulled.version
         for name, tensor in pulled.named_tensors():
             yield name, tensor

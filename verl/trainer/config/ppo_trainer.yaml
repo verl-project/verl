@@ -261,6 +261,22 @@ trainer:
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
 
+      # Rollout replicas pull published weight versions on their own schedule; the trainer only
+      # publishes and never pauses rollout. Requires checkpoint_engine.backend=transport_pull.
+      decoupled_weight_sync:
+
+        # Whether to enable decoupled weight sync.
+        enable: false
+
+        # A replica loads a newer version once it is at least this many versions ahead.
+        min_version_lag: 1
+
+        # Seconds between registry polls on each replica.
+        poll_interval: 0.5
+
+        # Seconds the trainer waits at startup for every replica to load the initial weights.
+        init_timeout: 600
+
       # Lend idle hybrid trainer GPUs to rollout
       hybrid_rollout:
 

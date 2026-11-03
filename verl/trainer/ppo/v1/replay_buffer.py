@@ -517,11 +517,36 @@ class ReplayBufferAsync(ReplayBuffer):
     def _validate_mode_config(self) -> None:
         pass
 
+    def _uses_weight_version_clock(self) -> bool:
+        # With decoupled weight sync, replicas load new weights on their own schedule, so the step a
+        # prompt was dispatched at no longer says which weights generated it.
+        decoupled = self.trainer_config.get("decoupled_weight_sync", None) if self.trainer_config else None
+        return bool(decoupled and decoupled.get("enable", False))
+
+    def _oldest_weight_versions(self, partition_id: str) -> dict[str, int]:
+        """Per prompt group, the oldest weight version any of its trajectories started on."""
+        oldest: dict[str, int] = {}
+        for key, tag in self.partitions[partition_id].items():
+            version = tag.get("min_global_steps")
+            if version is not None:
+                uid = key.split("_", 1)[0]
+                oldest[uid] = min(version, oldest.get(uid, version))
+        return oldest
+
     def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
         if partition_id == "val" or self.max_off_policy_threshold is None or self.max_off_policy_strategy != "drop":
             return set()
-        prompt_global_steps = self.prompt_global_steps[partition_id]
         terminal_keys = self.finished_keys[partition_id]
+        if self._uses_weight_version_clock():
+            # Version v is published at the end of step v, so a group generated entirely by the newest
+            # weights has lag 1, the same as a group dispatched this step under the default clock.
+            oldest = self._oldest_weight_versions(partition_id)
+            return {
+                uid
+                for uid in terminal_keys
+                if uid in oldest and global_steps - oldest[uid] > self.max_off_policy_threshold
+            }
+        prompt_global_steps = self.prompt_global_steps[partition_id]
         return {
             uid
             for uid in terminal_keys

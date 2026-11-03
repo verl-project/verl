@@ -52,6 +52,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     # Default for instances that bypass __init__ (e.g. test stubs): hybrid
     # replicas are enabled unless hybrid_rollout.enable_switch=False.
     _enable_hybrid_replicas = True
+    _decoupled_weight_sync = False
 
     def __init__(self, config: DictConfig):
         train_batch_size = config.data.train_batch_size
@@ -69,6 +70,16 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         assert config.actor_rollout_ref.rollout.checkpoint_engine.backend != "naive", (
             "please use nccl/nixl/mooncake, etc. backend for separate async training"
         )
+        decoupled = config.trainer.v1.separate_async.get("decoupled_weight_sync", None)
+        self._decoupled_weight_sync = bool(decoupled and decoupled.get("enable", False))
+        if self._decoupled_weight_sync:
+            assert config.actor_rollout_ref.rollout.checkpoint_engine.backend == "transport_pull", (
+                "decoupled_weight_sync needs actor_rollout_ref.rollout.checkpoint_engine.backend=transport_pull"
+            )
+            assert config.actor_rollout_ref.rollout.name == "vllm", "decoupled_weight_sync supports vLLM rollout only"
+            assert not config.trainer.v1.separate_async.hybrid_rollout.enable_switch, (
+                "decoupled_weight_sync cannot lend trainer GPUs to rollout (hybrid_rollout.enable_switch)"
+            )
         if need_reward_model(config):
             assert config.reward.reward_model.enable_resource_pool, (
                 "Colocate reward model (reward.reward_model.enable_resource_pool=False) is not supported "
@@ -176,11 +187,16 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         # create checkpoint engine manager for trainer and standalone rollout
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.standalone_checkpoint_manager = CheckpointEngineManager(
-            config=checkpoint_engine_config,
-            actor_wg=self.actor_rollout_wg,
-            replicas=self.standalone_server_manager.get_replicas(),
-        )
+        if self._decoupled_weight_sync:
+            # Replicas pull weights themselves; the trainer only publishes.
+            self.standalone_checkpoint_manager = None
+            self._start_weight_update_agents(checkpoint_engine_config)
+        else:
+            self.standalone_checkpoint_manager = CheckpointEngineManager(
+                config=checkpoint_engine_config,
+                actor_wg=self.actor_rollout_wg,
+                replicas=self.standalone_server_manager.get_replicas(),
+            )
 
         # hybrid engine is in rollout mode after initialization
         if self._enable_hybrid_replicas:
@@ -235,8 +251,56 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             managers.append(standalone)
         return managers
 
+    def _start_weight_update_agents(self, checkpoint_engine_config) -> None:
+        from verl.checkpoint_engine.transport.update_agent import WeightUpdateAgent
+
+        decoupled = self.config.trainer.v1.separate_async.decoupled_weight_sync
+        registry_name = checkpoint_engine_config.engine_kwargs.get("transport_pull", {}).get(
+            "registry_name", "verl_weight_registry"
+        )
+        agent_cls = ray.remote(num_cpus=0)(WeightUpdateAgent)
+        self.weight_update_agents = [
+            agent_cls.remote(
+                servers=replica.servers,
+                workers=replica.workers,
+                registry_name=registry_name,
+                min_version_lag=decoupled.min_version_lag,
+                poll_interval=decoupled.poll_interval,
+            )
+            for replica in self.standalone_server_manager.get_replicas()
+        ]
+        # Each agent loops until stopped; the refs only resolve if one fails.
+        self._weight_update_agent_runs = [agent.run.remote() for agent in self.weight_update_agents]
+
+    def _check_weight_update_agents(self) -> None:
+        finished, _ = ray.wait(self._weight_update_agent_runs, num_returns=1, timeout=0)
+        if finished:
+            ray.get(finished)  # re-raises the agent's error
+            raise RuntimeError("A weight update agent exited unexpectedly")
+
+    def _publish_weights(self) -> dict:
+        """Publish the current weights as version global_steps; rollout replicas pick it up themselves."""
+        self._check_weight_update_agents()
+        ray.get(self.actor_rollout_wg.update_weights(global_steps=self.global_steps))
+        states = ray.get([agent.get_state.remote() for agent in self.weight_update_agents])
+        metrics = {"weight_update/published_version": self.global_steps}
+        versions = [state["version"] for state in states]
+        metrics["weight_update/min_replica_version"] = min(versions)
+        metrics["weight_update/max_replica_version"] = max(versions)
+        for key in ("weight_update/prefetch_seconds", "weight_update/pause_seconds"):
+            values = [state[key] for state in states if key in state]
+            if values:
+                metrics[f"{key}_max"] = max(values)
+        return metrics
+
     def on_init_end(self):
         # update weights after loading checkpoint
+        if self._decoupled_weight_sync:
+            self._publish_weights()
+            # Generation must not start on weights older than the checkpoint that was loaded.
+            timeout = self.config.trainer.v1.separate_async.decoupled_weight_sync.init_timeout
+            ray.get([agent.wait_for_version.remote(self.global_steps, timeout) for agent in self.weight_update_agents])
+            return
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         if self._enable_hybrid_replicas:
             self.checkpoint_manager.update_weights(self.global_steps)
@@ -392,9 +456,12 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             prepare_seconds = time.perf_counter() - prepare_start
 
         with marked_timer("update_weights", self.timing_raw, color="red"):
-            self._pending_sync_metrics = dict(
-                self.standalone_checkpoint_manager.update_weights(self.global_steps) or {}
-            )
+            if self._decoupled_weight_sync:
+                self._pending_sync_metrics = self._publish_weights()
+            else:
+                self._pending_sync_metrics = dict(
+                    self.standalone_checkpoint_manager.update_weights(self.global_steps) or {}
+                )
 
         if config.enable_switch:
             self._pending_sync_metrics.update(decision_metrics)
