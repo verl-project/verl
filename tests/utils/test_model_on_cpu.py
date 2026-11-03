@@ -62,3 +62,14 @@ def test_vision_token_types_keep_one_row_per_sample():
     ]
     merged = extract_multi_modal_inputs(batch)
     assert merged["vision_token_types"].tolist() == [[-1, -1, -1, -1], [-1, 0, 1, 3], [-1, -1, -1, -1]]
+
+
+def test_vision_token_types_use_selected_text_lengths():
+    batch = [{}, {"vision_token_types": torch.tensor([[-1, 0, 1, 3]])}, None]
+    input_ids = torch.nested.as_nested_tensor([torch.arange(n) for n in (9, 4, 6)], layout=torch.jagged)
+    merged = extract_multi_modal_inputs(batch, indices=[1, 2], input_ids=input_ids)
+    assert merged["vision_token_types"].tolist() == [[-1, 0, 1, 3, -1, -1], [-1] * 6]
+
+    batch[1]["vision_token_types"] = torch.tensor([[-1, 0, 1]])
+    with pytest.raises(ValueError, match="3 entries for 4 input tokens"):
+        extract_multi_modal_inputs(batch, input_ids=input_ids)

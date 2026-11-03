@@ -590,6 +590,8 @@ def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
 def extract_multi_modal_inputs(
     batch_data: list[dict[str, torch.Tensor]],
     indices: Optional[list[int]] = None,
+    *,
+    input_ids: Optional[torch.Tensor] = None,
 ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
     """
     Extract and process multi-modal inputs from a batch.
@@ -597,6 +599,7 @@ def extract_multi_modal_inputs(
     Args:
         batch_data (list[dict[str, torch.Tensor]]): The batch containing potential multi-modal inputs
         indices (Optional[list[int]]): If provided, only extract inputs at these indices
+        input_ids (Optional[torch.Tensor]): Unpadded token rows for the original batch, used to align vision types.
 
     Returns:
         dict[str, torch.Tensor | list[torch.Tensor]]: Processed multi-modal inputs ready for model consumption
@@ -606,11 +609,10 @@ def extract_multi_modal_inputs(
     multi_modal_inputs_collected = {}
     has_image_bound = False
 
-    selected_batch_data = batch_data
-    if indices is not None:
-        selected_batch_data = [batch_data[i] for i in indices if i < len(batch_data)]
+    selected_indices = range(len(batch_data)) if indices is None else [i for i in indices if i < len(batch_data)]
 
-    for inputs in selected_batch_data:
+    for i in selected_indices:
+        inputs = batch_data[i]
         inputs = inputs.data if isinstance(inputs, NonTensorData) else inputs
         # Mixed pure text and multi-modal dataset.
         if inputs is None:
@@ -630,10 +632,17 @@ def extract_multi_modal_inputs(
             # One row per sample: text-only samples may omit it, so give them an all -1 (text) row
             # to keep rows in batch order for DeepSeek-V4.1 image placement.
             rows = []
-            for inputs in selected_batch_data:
+            lengths = [row.size(0) for row in input_ids.unbind()] if input_ids is not None else None
+            for i in selected_indices:
+                inputs = batch_data[i]
                 inputs = inputs.data if isinstance(inputs, NonTensorData) else inputs
                 value = None if inputs is None else inputs.get(key)
-                rows.append(value if value is not None else values[0].new_full((1, 0), -1))
+                length = lengths[i] if lengths is not None else 0
+                if value is None:
+                    value = values[0].new_full((1, length), -1)
+                elif value.shape[-1] < length:
+                    raise ValueError(f"vision_token_types has {value.shape[-1]} entries for {length} input tokens")
+                rows.append(value)
             multi_modal_inputs[key] = _pad_last_dim_and_cat(rows, key)
         elif key in _VARLEN_MULTI_MODAL_KEYS:
             # some multi-modal keys with variable length are put in non-tensor batch,

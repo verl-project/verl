@@ -748,15 +748,27 @@ def _as_quantization_config(config: Any) -> Optional[dict[str, Any]]:
     raise TypeError(f"quantization_config must be a mapping, got {type(config).__name__}")
 
 
+def parse_vllm_hf_overrides(hf_overrides: Any) -> dict[str, Any]:
+    """Validate the mapping or JSON object in ``rollout.engine_kwargs.vllm.hf_overrides``."""
+    if hf_overrides is None:
+        return {}
+    config_key = "rollout.engine_kwargs.vllm.hf_overrides"
+    if isinstance(hf_overrides, str):
+        try:
+            hf_overrides = json.loads(hf_overrides)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{config_key} is not valid JSON: {exc}") from exc
+    if not isinstance(hf_overrides, Mapping):
+        raise TypeError(f"{config_key} must be a mapping or JSON object, got {type(hf_overrides).__name__}")
+    return dict(hf_overrides)
+
+
 def _vllm_hf_overrides(rollout_config: Any) -> Mapping[str, Any]:
     """``rollout.engine_kwargs.vllm.hf_overrides`` as a mapping; empty for other rollouts."""
     if getattr(rollout_config, "name", None) != "vllm":
         return {}
     engine_kwargs = getattr(rollout_config, "engine_kwargs", None) or {}
-    hf_overrides = (engine_kwargs.get("vllm") or {}).get("hf_overrides") or {}
-    if isinstance(hf_overrides, str):
-        hf_overrides = json.loads(hf_overrides)
-    return hf_overrides
+    return parse_vllm_hf_overrides((engine_kwargs.get("vllm") or {}).get("hf_overrides"))
 
 
 def _merge_nested(base: Mapping[str, Any], updates: Mapping[str, Any]) -> dict[str, Any]:
