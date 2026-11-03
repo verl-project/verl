@@ -102,14 +102,14 @@ re-prefilled when the replica applies the new version.
 
 ## Limitations and follow-ups
 
-- **Wasted re-prefill** after each publish. Proposed fix: a per-request minimum weight version that
-  holds new requests at admission until the replica has loaded it
-  ([Luosuu/verl#1](https://github.com/Luosuu/verl/issues/1)).
+- **Prompt dispatch and wasted re-prefill.** The trainer still pushes prompts through
+  `generate_sequences`, and prompts enqueued right after a publish start on the old weights. Proposed
+  fix: the trainer only writes `pending` prompts, tagged with a minimum weight version, to
+  TransferQueue. A rollout-side `PromptDispatcher` claims them up to an in-flight cap once replicas
+  have loaded that version ([Luosuu/verl#1](https://github.com/Luosuu/verl/issues/1)).
 - **`keep` pause mode** to resume long in-flight requests on their old-weight KV cache instead of
   re-prefilling them.
 - **Full copies.** Every rollout rank pulls the whole model from trainer rank 0. Sharded pulls (each
   rank reads only its TP/EP slice from each trainer rank) and P2P relays come next.
-- **Prompt dispatch** is still pushed by the trainer through `generate_sequences`. Rollout-side
-  claiming of pending prompts in TransferQueue would remove the last trainer→rollout call.
 - **Checkpoint resume** needs a run epoch in the version once the registry outlives the job, so a
   resumed trainer can republish older weights.
