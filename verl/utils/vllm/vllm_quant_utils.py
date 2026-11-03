@@ -24,7 +24,8 @@ The layout surgery each quantization scheme needs is delegated to a sibling
 module: ``vllm_fp8_utils`` for ``Fp8LinearMethod`` / ``Fp8MoEMethod``, and
 ``vllm_fp4_utils`` for ``Mxfp4MoEMethod``. Each exposes a stage/process pair
 that returns an empty result when the model has no layer it owns, so the
-dispatch below stays unconditional.
+dispatch below stays unconditional. Ascend ModelSlim layouts use their native
+restore/process hooks below.
 """
 
 import importlib.metadata
@@ -136,10 +137,22 @@ def is_quantized_model(vllm_config):
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
+        elif is_vllm_ascend_mx_quant(vllm_config.quant_config):
+            return True
         elif is_compressed_tensors_model(vllm_config):
             return True
 
     return False
+
+
+def is_vllm_ascend_mx_quant(quant_config):
+    try:
+        from vllm_ascend.quantization import AscendModelSlimConfig
+    except ImportError:
+        return False
+    if not isinstance(quant_config, AscendModelSlimConfig):
+        return False
+    return "W8A8_MXFP8" in quant_config.quant_description.values()
 
 
 def is_compressed_tensors_model(vllm_config) -> bool:
@@ -208,6 +221,27 @@ def refresh_rocm_attention_weight_caches(model):
             module._dsv4_wo_a_bf16 = live
 
 
+def restore_mxfp8_weights_for_loading(model):
+    for _, module in model.named_modules():
+        if not hasattr(module, "_mxfp8_transformed"):
+            continue
+        method = getattr(module, "quant_method", None)
+        scheme = getattr(method, "quant_method", None)
+        restore = getattr(scheme, "restore_weights_for_rl_loading", None)
+        if restore is not None:
+            restore(module)
+
+
+def apply_mxfp8_transformation_after_loading(model):
+    for _, module in model.named_modules():
+        if not hasattr(module, "_mxfp8_original_shapes"):
+            continue
+        method = getattr(module, "quant_method", None)
+        process = getattr(method, "process_weights_after_loading", None)
+        if process is not None:
+            process(module)
+
+
 def prepare_quanted_weights_for_loading(model):
     """Restore quantized params to the layout their ``weight_loader`` expects.
 
@@ -218,6 +252,7 @@ def prepare_quanted_weights_for_loading(model):
     so this is safe to call for any quantization scheme. The returned value is
     opaque reload state for the paired call.
     """
+    restore_mxfp8_weights_for_loading(model)
     reload_state: dict[str, Any] = {
         "fp8_layers": stage_fp8_params_for_loading(model),
         "mxfp4_moe_modules": stage_mxfp4_moe_params_for_loading(model),
@@ -231,6 +266,7 @@ def prepare_quanted_weights_for_loading(model):
 
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
+    apply_mxfp8_transformation_after_loading(model)
     reload_state = reload_state or {}
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
