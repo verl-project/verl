@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+from itertools import groupby, zip_longest
 
 import numpy as np
 import ray
@@ -88,6 +89,37 @@ async def ensure_async_iterator(iterable):
     else:
         for item in iterable:
             yield item
+
+
+def routing_replay_prompts_match(
+    actor_ids: list[int],
+    rollout_ids: list[int],
+    *,
+    image_token_id: int | None = None,
+    image_count: int = 0,
+) -> bool:
+    """Compare replay prompts, allowing V4.1 image expansion from a compact prompt only."""
+    if actor_ids == rollout_ids:
+        return True
+    if image_token_id is None or image_count <= 0:
+        return False
+    compact, expanded = sorted((actor_ids, rollout_ids), key=len)
+    if compact.count(image_token_id) != image_count:
+        return False
+
+    runs = zip_longest(groupby(compact), groupby(expanded), fillvalue=(None, ()))
+    for (token, compact_run), (other_token, expanded_run) in runs:
+        if token != other_token:
+            return False
+        compact_len = sum(1 for _ in compact_run)
+        expanded_len = sum(1 for _ in expanded_run)
+        if token == image_token_id:
+            # A V4.1 image spans 2 + height * (width + 1) tokens, at least four per image.
+            if expanded_len < 4 * compact_len:
+                return False
+        elif expanded_len != compact_len:
+            return False
+    return True
 
 
 def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):

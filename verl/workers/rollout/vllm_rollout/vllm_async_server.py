@@ -61,6 +61,7 @@ from verl.workers.rollout.utils import (
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
     qwen2_5_vl_dedup_image_tokens,
+    routing_replay_prompts_match,
     run_uvicorn,
     validate_topk_logprob_request,
     warn_topk_logprob_budget,
@@ -798,20 +799,16 @@ class vLLMHttpServer:
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
             rollout_prompt_ids = final_res.prompt_token_ids or []
-            if (
+            is_deepseek_image_prompt = (
                 getattr(getattr(self.model_config, "hf_config", None), "model_type", None) == "deepseek_v41"
                 and image_data is not None
+            )
+            if not routing_replay_prompts_match(
+                actor_prompt_ids,
+                rollout_prompt_ids,
+                image_token_id=self.model_config.hf_config.image_token_id if is_deepseek_image_prompt else None,
+                image_count=len(image_data) if is_deepseek_image_prompt else 0,
             ):
-                image_token_id = self.model_config.hf_config.image_token_id
-                rollout_prompt_ids, actor_prompt_ids = (
-                    [
-                        token_id
-                        for index, token_id in enumerate(prompt_token_ids)
-                        if token_id != image_token_id or index == 0 or prompt_token_ids[index - 1] != image_token_id
-                    ]
-                    for prompt_token_ids in (rollout_prompt_ids, actor_prompt_ids)
-                )
-            if rollout_prompt_ids != actor_prompt_ids:
                 raise ValueError("Rollout routing replay requires identical actor and rollout prompt tokens")
             routed_experts = final_res.outputs[0].routed_experts
 
@@ -1504,12 +1501,11 @@ class vLLMHttpServer:
         Models shipping their own ``quantization_config`` need nothing here; either way the
         workers install the refit patches from the resulting vLLM ``quant_config``.
         """
+        from verl.utils.qat.compressed_tensors import parse_vllm_hf_overrides
+
         quantization = self.config.quantization
         vllm_engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
-        hf_overrides = vllm_engine_kwargs.get("hf_overrides", {}) or {}
-        if isinstance(hf_overrides, str):
-            hf_overrides = json.loads(hf_overrides)
-        hf_overrides = dict(hf_overrides or {})
+        hf_overrides = parse_vllm_hf_overrides(vllm_engine_kwargs.get("hf_overrides"))
         if not quantization.enabled:
             return hf_overrides
 

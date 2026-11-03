@@ -24,6 +24,7 @@ from verl.utils.qat.compressed_tensors import (
     Fp8ConfigWeightQuantizer,
     _rollout_quantization_config,
     dispatch_rollout_weight_quantizer,
+    parse_vllm_hf_overrides,
 )
 
 _FP8 = {"quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [128, 128]}
@@ -75,6 +76,27 @@ def test_rollout_quantization_config_follows_vllm_hf_overrides(hf_overrides, exp
 def test_hf_overrides_apply_only_to_vllm():
     rollout = _rollout({"text_config": {"quantization_config": None}}, name="sglang")
     assert _rollout_quantization_config(_multimodal_fp8(), rollout) == (False, _FP8)
+
+
+@pytest.mark.parametrize("overrides", [[], False, 0, "[]", "false", "0", "null", '"text"'])
+def test_hf_overrides_reject_non_object_configs(overrides):
+    with pytest.raises(TypeError, match=r"rollout\.engine_kwargs\.vllm\.hf_overrides must be a mapping or JSON object"):
+        _rollout_quantization_config(_multimodal_fp8(), _rollout(overrides))
+
+
+@pytest.mark.parametrize("overrides", ["", "{bad json"])
+def test_hf_overrides_report_the_config_key_for_invalid_json(overrides):
+    with pytest.raises(ValueError, match=r"rollout\.engine_kwargs\.vllm\.hf_overrides is not valid JSON"):
+        _rollout_quantization_config(_multimodal_fp8(), _rollout(overrides))
+
+
+def test_parsed_hf_overrides_do_not_mutate_the_input():
+    overrides = {"quantization_config": None}
+    parsed = parse_vllm_hf_overrides(overrides)
+    parsed["quantization_config"] = _FP8
+    assert overrides == {"quantization_config": None}
+    assert parse_vllm_hf_overrides(None) == {}
+    assert parse_vllm_hf_overrides("{}") == {}
 
 
 def test_text_config_override_needs_a_text_config():

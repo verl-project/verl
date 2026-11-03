@@ -261,6 +261,17 @@ class _FakeMapper:
         return out
 
 
+class AutoWeightsLoader:
+    """Stand-in for vLLM's flat loader that records what the resolver passes it."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def load_weights(self, weights):
+        self.model.loaded = list(weights)
+        return {name for name, _ in self.model.loaded}
+
+
 class _FakeModel:
     """A fake vLLM model exposing only the introspection surface the resolver uses."""
 
@@ -283,8 +294,7 @@ class _FakeModel:
         return iter(())
 
     def load_weights(self, weights):
-        # Record resolved names for assertions.
-        self.loaded = [name for name, _ in weights]
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 class _FakeVllmConfig:
@@ -660,7 +670,7 @@ def test_update_weights_resolves_names_before_load(monkeypatch):
 
     worker._update_weights(weights, peft_config={"r": 1}, base_sync_done=False)
 
-    assert model.loaded == [
+    assert [name for name, _ in model.loaded] == [
         "merger.linear_fc1.weight",
         "language_model.model.layers.0.self_attn.q_proj.weight",
     ]
@@ -988,19 +998,12 @@ class _FakeStrictInner:
         return {name for name, _ in weights if params_dict[name] is not None}
 
 
-class _OuterModel:
+class _OuterModel(_FakeModel):
     """Wraps an inner transformer under ``.model`` (the ForCausalLM layout)."""
 
     def __init__(self, inner, params):
+        super().__init__(params)
         self.model = inner
-        self._params = dict(params)
-
-    def named_parameters(self, remove_duplicate: bool = False):
-        del remove_duplicate
-        yield from self._params.items()
-
-    def named_buffers(self):
-        return iter(())
 
 
 def _strict_outer(params):
@@ -1008,11 +1011,43 @@ def _strict_outer(params):
     return _OuterModel(_FakeStrictInner(), params)
 
 
-def test_strict_loader_keeps_base_layer_suffix_on_newer_vllm(monkeypatch):
+def test_strict_child_keeps_base_layer_suffix_only_inside_its_prefix(monkeypatch):
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    key = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    model = _strict_outer({key: torch.empty(0)})
-    assert _resolve(_make_worker(model), model, key) == key
+    inner = "model.layers.0.self_attn.q_proj.base_layer.weight"
+    sibling = "lm_head.base_layer.weight"
+    model = _strict_outer({inner: torch.empty(0), sibling: torch.empty(0)})
+    worker = _make_worker(model)
+    assert _resolve(worker, model, inner) == inner
+    assert _resolve(worker, model, sibling) == "lm_head.weight"
+
+
+def test_vlm_strict_child_uses_the_mapped_language_model_prefix(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class Vlm(_FakeModel):
+        language_model = _strict_outer({})
+
+    key = "model.language_model.layers.0.self_attn.q_proj.base_layer.weight"
+    live = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
+    sibling = "language_model.lm_head.base_layer.weight"
+    model = Vlm(
+        {live: torch.empty(0), sibling: torch.empty(0)},
+        mapper=_FakeMapper({"model.language_model.": "language_model.model."}),
+    )
+    worker = _make_worker(model)
+    assert _resolve(worker, model, key) == key
+    assert _resolve(worker, model, sibling) == "language_model.lm_head.weight"
+
+
+def test_strict_root_keeps_top_level_base_layer_suffix(monkeypatch):
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class StrictRoot(_FakeStrictInner, _FakeModel):
+        pass
+
+    name = "lm_head.base_layer.weight"
+    model = StrictRoot({name: torch.empty(0)})
+    assert _resolve(_make_worker(model), model, name) == name
 
 
 def test_strict_loader_non_lora_param_on_wrapped_module_re_suffixed(monkeypatch):
@@ -1068,19 +1103,8 @@ def test_fp8_weight_is_dequantized_for_live_bf16_projection(monkeypatch, vllm_qu
     """LoRA base sync of an FP8 weight + scale into a BF16 live projection loads one BF16 weight."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
 
-    class Model:
-        def named_parameters(self, remove_duplicate=False):
-            return iter([("layers.0.self_attn.q_b_proj.base_layer.weight", torch.empty(2, 2, dtype=torch.bfloat16))])
-
-        def named_buffers(self):
-            return iter(())
-
-        def load_weights(self, weights):
-            self.loaded = list(weights)
-            return {name for name, _ in self.loaded}
-
     class Runner:
-        model = Model()
+        model = _FakeModel({"layers.0.self_attn.q_b_proj.base_layer.weight": torch.empty(2, 2, dtype=torch.bfloat16)})
 
     vllm_quant_utils.load_quanted_weights(
         [
@@ -1099,19 +1123,8 @@ def test_weight_scale_is_kept_for_live_int8_weight(monkeypatch, vllm_quant_utils
     """Only unquantized live weights drop trainer scales; an int8 live weight keeps its scale."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
 
-    class Model:
-        def named_parameters(self, remove_duplicate=False):
-            return iter([("layers.0.mlp.down_proj.base_layer.weight", torch.empty(2, 2, dtype=torch.int8))])
-
-        def named_buffers(self):
-            return iter(())
-
-        def load_weights(self, weights):
-            self.loaded = list(weights)
-            return {name for name, _ in self.loaded}
-
     class Runner:
-        model = Model()
+        model = _FakeModel({"layers.0.mlp.down_proj.base_layer.weight": torch.empty(2, 2, dtype=torch.int8)})
 
     vllm_quant_utils.load_quanted_weights(
         [

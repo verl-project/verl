@@ -182,7 +182,7 @@ except (ImportError, AttributeError, ValueError):
 
 # Per-class cache: the live (vLLM-namespace) param prefix of the deepest
 # *strict* ``load_weights`` in the model stack. ``""`` = the top model is
-# strict (DeepseekV2); ``"language_model.model."`` = a VLM's flat wrappers
+# strict; ``"language_model.model."`` = a VLM's flat wrappers
 # delegate to an inner strict *Model; ``None`` = no strict loader (all flat).
 _inner_load_weights_is_strict_cache: dict = {}
 _STRICT_PREFIX_MISS = object()
@@ -203,17 +203,17 @@ def _inner_load_weights_is_strict(model) -> str | None:
     if cached is not None:
         return None if cached is _STRICT_PREFIX_MISS else cached
 
-    deeper = getattr(model, "model", None) or getattr(model, "language_model", None)
+    load_fn = getattr(model, "load_weights", None)
+    code = getattr(load_fn, "__code__", None)
     result: str | None = None
-    if deeper is not None and deeper is not model:
-        load_fn = getattr(deeper, "load_weights", None)
-        code = getattr(getattr(load_fn, "__func__", load_fn), "__code__", None)
-        if code is not None and "AutoWeightsLoader" not in code.co_names:
-            result = ""  # this level is strict, prefix is the path to here
-        else:
+    if code is not None and "AutoWeightsLoader" not in code.co_names:
+        result = ""
+    else:
+        attr = "model" if getattr(model, "model", None) is not None else "language_model"
+        deeper = getattr(model, attr, None)
+        if deeper is not None and deeper is not model:
             inner_prefix = _inner_load_weights_is_strict(deeper)
             if inner_prefix is not None:
-                attr = "model" if getattr(model, "model", None) is deeper else "language_model"
                 result = attr + "." + inner_prefix
     _inner_load_weights_is_strict_cache[cls] = result if result is not None else _STRICT_PREFIX_MISS
     return result
@@ -318,7 +318,7 @@ def resolve_weight_name(
             and _has_routed_experts(marker[1:])
         )
         if is_per_expert_leaf:
-            if _inner_load_weights_is_strict(model) is not None:
+            if _name_reaches_strict_loader(model, name):
                 if ".base_layer." not in tail:
                     head = name[: idx + len(marker)] + tail
                     prefix, lf = head.rsplit(".", 1)

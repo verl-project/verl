@@ -354,9 +354,18 @@ def merge_router_topk_indices(
                     "BSHD router replay rows cannot be reshaped into a sequence-major batch: "
                     f"rows={layers_topk_idx.shape[1]}, batch={batch_size}"
                 )
-            padded_seqlen = layers_topk_idx.shape[1] // batch_size
-            restored = layers_topk_idx.squeeze(0).contiguous().view(torch.int16)
-            restored = restored.view(padded_seqlen, batch_size, *restored.shape[1:])
+            restored = layers_topk_idx.view(-1, batch_size, *layers_topk_idx.shape[2:])
+            cp_size = mpu.get_context_parallel_world_size()
+            if cp_size > 1:
+                # Each rank holds a front and a mirrored back slice of the padded sequence.
+                if restored.shape[0] % 2:
+                    raise RuntimeError("BSHD router replay expects an even local sequence length for zigzag CP")
+                half = restored.shape[0] // 2
+                shards = [torch.empty_like(restored) for _ in range(cp_size)]
+                torch.distributed.all_gather(shards, restored, group=mpu.get_context_parallel_group())
+                restored = torch.cat([shard[:half] for shard in shards] + [shard[half:] for shard in reversed(shards)])
+            restored = restored.view(torch.int16)
+            padded_seqlen = restored.shape[0]
             lengths = [int(length) for length in input_ids.offsets().diff().tolist()]
             if any(length > padded_seqlen for length in lengths):
                 raise RuntimeError(

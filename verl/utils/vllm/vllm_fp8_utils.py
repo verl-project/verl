@@ -311,45 +311,28 @@ def stage_fp8_params_for_loading(model):
     return staged_layers
 
 
-def _resolve_fp8_moe_quant_method(module):
-    """Return the Fp8MoEMethod backing ``module``, unwrapping the LoRA shell.
-
-    merge=False swaps quant_method to FusedMoEModularMethod (no
-    process_weights_after_loading). Unwrap to call the real repack so
-    staging buffers become inference layout instead of being folded verbatim.
-    """
-    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
-
-    qm = getattr(module, "quant_method", None)
-    if isinstance(qm, Fp8MoEMethod):
-        return qm
-    inner = getattr(qm, "old_quant_method", None)
-    if isinstance(inner, Fp8MoEMethod):
-        return inner
-    return None
-
-
 def process_fp8_weights_after_loading(layers):
     """Re-derive the inference layout in place and reinstate the live params."""
     for layer in layers:
-        live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
-
-        quant_method = getattr(layer, "quant_method", None)
-        process = getattr(quant_method, "process_weights_after_loading", None)
-        # Patch replace_parameter so the repack folds into the live storage
-        # the CUDA graph captured, not a fresh Parameter (which leaves the
-        # captured storage zero). Both branches below repack under it.
         from vllm.model_executor.layers.quantization import fp8 as _vllm_fp8
 
+        live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
+        quant_method = getattr(layer, "quant_method", None)
+        process = getattr(quant_method, "process_weights_after_loading", None)
+        inner = getattr(quant_method, "old_quant_method", None)
+        if inner is not None and isinstance(inner, _vllm_fp8.Fp8MoEMethod):
+            from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+            # Older LoRA wrappers inherit the base no-op. Newer wrappers repack and
+            # restore the LoRA context on the rebuilt kernel through their own hook.
+            if (
+                process is None
+                or getattr(process, "__func__", None) is QuantizeMethodBase.process_weights_after_loading
+            ):
+                process = inner.process_weights_after_loading
         if process is not None:
             with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
                 process(layer)
-        else:
-            # merge=False no-op wrapper: unwrap to Fp8MoEMethod and repack.
-            resolved = _resolve_fp8_moe_quant_method(layer)
-            if resolved is not None:
-                with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
-                    resolved.process_weights_after_loading(layer)
 
         # Anything routed through the patched ``replace_parameter`` has already
         # been folded and dropped from ``live``; what remains was rewritten by a

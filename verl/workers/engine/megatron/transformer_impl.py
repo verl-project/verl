@@ -1169,7 +1169,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
         input_ids = batch["input_ids"]
         loss_mask = batch["loss_mask"].to(bool)
-        multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+        multi_modal_inputs = extract_multi_modal_inputs(
+            batch.get("multi_modal_inputs", []), input_ids=input_ids if input_ids.is_nested else None
+        )
 
         routed_experts = batch.get("routed_experts", None)
 
