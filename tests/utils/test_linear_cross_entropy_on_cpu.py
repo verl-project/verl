@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from verl.utils.device import get_device_name, get_torch_device
+
 _MODULE_PATH = Path(__file__).resolve().parents[2] / "verl" / "utils" / "kernel" / "linear_cross_entropy.py"
 _SPEC = importlib.util.spec_from_file_location("_linear_cross_entropy", _MODULE_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -236,7 +238,8 @@ def public_configuration(monkeypatch):
     return module, calls
 
 
-def _configure(group=(0, 1), max_tokens=4096, device="cuda:0"):
+def _configure(group=(0, 1), max_tokens=4096, device=None):
+    device = device or f"{get_device_name()}:0"
     return lce.configure_liger_flsce(
         max_tokens=max_tokens,
         hidden_size=5120,
@@ -256,7 +259,7 @@ def test_configuration_delegates_repeated_calls_and_capacity_to_liger(public_con
         name = call["flsce"].group
         assert call["process_groups"] == {name: (0, 1)}
         assert call["bootstrap_group"] is lce.dist.group.WORLD
-        assert call["device"] == torch.device("cuda:0")
+        assert call["device"] == torch.device(f"{get_device_name()}:0")
         assert call["flsce"].hidden_size == 5120
         assert call["flsce"].local_vocab_size == 62080
     assert calls[0]["flsce"].group == calls[1]["flsce"].group
@@ -280,7 +283,7 @@ def test_configuration_preserves_optional_native_fallback(public_configuration):
     assert _configure() is False
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda:0", "xpu:0"])
+@pytest.mark.parametrize("device", ["cpu", f"{get_device_name()}:0"])
 @pytest.mark.parametrize("configured", [True, False])
 def test_configuration_leaves_device_support_to_liger(monkeypatch, public_configuration, device, configured):
     module, calls = public_configuration
@@ -288,8 +291,10 @@ def test_configuration_leaves_device_support_to_liger(monkeypatch, public_config
     def hardware_probe(*args, **kwargs):
         pytest.fail("VeRL must not inspect hardware to configure Liger")
 
-    monkeypatch.setattr(lce.torch.cuda, "is_available", hardware_probe)
-    monkeypatch.setattr(lce.torch.cuda, "get_device_capability", hardware_probe)
+    # Neither the CUDA runtime nor the current platform's device module may be probed.
+    for runtime in (lce.torch.cuda, get_torch_device()):
+        monkeypatch.setattr(runtime, "is_available", hardware_probe)
+        monkeypatch.setattr(runtime, "get_device_capability", hardware_probe, raising=False)
     monkeypatch.setattr(module, "configure", lambda **kwargs: calls.append(kwargs) or configured)
     assert _configure(device=device) is configured
     assert calls[0]["device"] == torch.device(device)
