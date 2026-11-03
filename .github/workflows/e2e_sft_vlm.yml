@@ -74,7 +74,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -99,10 +99,10 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      # No install step: every command below runs through uv, which syncs .venv
-      # from the committed uv.lock (offline, from the image's baked cache).
+      # Every command below runs through uv, which syncs .venv from uv.lock.
+      # VeOmni's generated models require the pinned Transformers overlay.
       # Keep these extras identical across the job so uv never re-syncs torch.
-      UV_RUN: "uv run --frozen --all-packages --extra megatron --extra veomni-sft"
+      UV_RUN: "uv run --frozen --all-packages --extra megatron --extra veomni-sft --with transformers==5.16.1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -122,7 +122,7 @@ jobs:
           $UV_RUN python3 examples/data_preprocess/pokemon.py --local_dataset_path ${HOME}/models/hf_data/pokemon-gpt4o-captions
       - name: Running Pokemon E2E training tests with multiturn and various configs and compare results
         run: |
-          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct DATASET_DIR=~/data/pokemon-gpt4o-captions VPP_SIZE=null $UV_RUN bash tests/special_e2e/sft/test_sft_engine_all.sh
+          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct DATASET_DIR=~/data/pokemon-gpt4o-captions VPP_SIZE=null RUN_TORCHTITAN=0 $UV_RUN bash tests/special_e2e/sft/test_sft_engine_all.sh
 
   cleanup:
     runs-on: ubuntu-latest

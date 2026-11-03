@@ -26,8 +26,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-if not torch.cuda.is_available():
-    pytest.skip("Requires CUDA", allow_module_level=True)
+from verl.utils.device import get_device_name, is_device_available
+
+if not is_device_available():
+    pytest.skip("Requires an accelerator device", allow_module_level=True)
 
 
 def _nested(rows: list[list[int]], device: str) -> torch.Tensor:
@@ -99,9 +101,10 @@ def _legacy_attention_mask_from_response_loss_mask(
 
 
 def test_prepare_model_inputs_uses_full_sequence_attention_mask_on_gpu():
-    device = "cuda"
+    device = get_device_name()
     FSDPEngineWithLMHead = _fsdp_engine_with_lm_head_cls()
     engine = FSDPEngineWithLMHead.__new__(FSDPEngineWithLMHead)
+    engine.pad_to_length = False
     micro_batch = _make_micro_batch(device)
 
     model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
@@ -131,7 +134,7 @@ def test_prepare_model_inputs_uses_full_sequence_attention_mask_on_gpu():
     torch.testing.assert_close(legacy_attention_mask, expected_legacy_attention_mask)
     assert not torch.equal(legacy_attention_mask, expected_attention_mask)
     torch.testing.assert_close(model_inputs["attention_mask"], expected_attention_mask)
-    assert model_inputs["attention_mask"].device.type == "cuda"
+    assert model_inputs["attention_mask"].device.type == get_device_name()
     assert model_inputs["attention_mask"].dtype == torch.int32
     assert model_inputs["input_ids"].shape == (2, 5)
     assert output_args["input_ids_rmpad_rolled"].shape == (8,)
@@ -141,9 +144,10 @@ def test_prepare_model_inputs_passes_declared_packed_sequence_boundaries_on_gpu(
     from verl.utils import tensordict_utils as tu
     from verl.utils.dataset.dataset_utils import DatasetPadMode
 
-    device = "cuda"
+    device = get_device_name()
     FSDPEngineWithLMHead = _fsdp_engine_with_lm_head_cls()
     engine = FSDPEngineWithLMHead.__new__(FSDPEngineWithLMHead)
+    engine.pad_to_length = False
     engine.use_ulysses_sp = False
     engine.pass_packed_cu_seqlens = True
     micro_batch = _make_micro_batch(device)
@@ -171,9 +175,10 @@ def test_prepare_model_outputs_can_be_sliced_back_to_response_shape_on_gpu():
     from verl.utils.torch_functional import logprobs_from_logits
     from verl.workers.utils.padding import no_padding_2_padding
 
-    device = "cuda"
+    device = get_device_name()
     FSDPEngineWithLMHead = _fsdp_engine_with_lm_head_cls()
     engine = FSDPEngineWithLMHead.__new__(FSDPEngineWithLMHead)
+    engine.pad_to_length = False
     micro_batch = _make_micro_batch(device)
     _, output_args = engine.prepare_model_inputs(micro_batch)
 

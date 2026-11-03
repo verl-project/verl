@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+from pathlib import Path
 
 import torch
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 _major, _ = get_device_capability()
 # Opt-in GB200 NCCL WAR: set TLLM_DISABLE_NVLS_MNNVL=1 in the launch shell to disable
 # both NCCL_NVLS_ENABLE and NCCL_MNNVL_ENABLE on Blackwell. Required by async-RL
-# Megatron on GB200 nodes without IMEX (mbridge all_gather raises NCCL 801).
+# Megatron on GB200 nodes without IMEX (weight export all_gather raises NCCL 801).
 _gb200_nccl_env = {}
 if (_major or 0) >= 10 and os.environ.get("TLLM_DISABLE_NVLS_MNNVL", "0") == "1":
     _gb200_nccl_env = {"NCCL_NVLS_ENABLE": "0", "NCCL_MNNVL_ENABLE": "0"}
@@ -82,15 +83,39 @@ NVTX_INJECTION_ENV = "NVTX_INJECTION64_PATH"
 _NVTX_INJECTION_DISABLED = "/nonexistent/verl-disabled-nvtx-injection.so"
 
 
+def _available_physical_cores() -> int:
+    """Return the number of physical CPU cores available to this process."""
+    try:
+        available_cpus = os.sched_getaffinity(0)
+    except AttributeError:
+        return os.cpu_count() or 1
+
+    physical_cores = set()
+    for cpu in available_cpus:
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        try:
+            package_id = (topology / "physical_package_id").read_text().strip()
+            core_id = (topology / "core_id").read_text().strip()
+        except OSError:
+            return len(available_cpus)
+        physical_cores.add((package_id, core_id))
+    return len(physical_cores) or 1
+
+
+def _default_omp_num_threads(config) -> int:
+    from omegaconf import OmegaConf
+
+    n_gpus_per_node = OmegaConf.select(config, "trainer.n_gpus_per_node", default=1) if config is not None else 1
+    n_gpus_per_node = max(int(n_gpus_per_node or 1), 1)
+    return max(_available_physical_cores() // n_gpus_per_node, 1)
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
         "NCCL_DEBUG": "WARN",
         "VLLM_LOGGING_LEVEL": "WARN",
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
-        # TODO: disable compile cache due to cache corruption issue
-        # https://github.com/vllm-project/vllm/issues/31199
-        "VLLM_DISABLE_COMPILE_CACHE": "1",
         # Needed for multi-processes colocated on same NPU device
         # https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/maintenref/envvar/envref_07_0143.html
         "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
@@ -111,9 +136,8 @@ def get_ppo_ray_runtime_env(config=None):
         config: Optional training config. When the engine strategy is Megatron
             and the GPU is Hopper/Ampere, CUDA_DEVICE_MAX_CONNECTIONS=1 is set.
     """
-    working_dir = (
-        json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")).get("runtime_env", {}).get("working_dir", None)
-    )
+    job_runtime_env = json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")).get("runtime_env", {})
+    working_dir = job_runtime_env.get("working_dir", None)
 
     runtime_env = {
         "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
@@ -125,6 +149,8 @@ def get_ppo_ray_runtime_env(config=None):
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    if os.environ.get("OMP_NUM_THREADS") is None and "OMP_NUM_THREADS" not in job_runtime_env.get("env_vars", {}):
+        runtime_env["env_vars"]["OMP_NUM_THREADS"] = str(_default_omp_num_threads(config))
     # Set after the loop above on purpose: the point is to override an inherited value, so it must
     # survive the "already set in the launching shell" filter.
     if _uses_torch_profiler(config) and os.environ.get("VERL_KEEP_NVTX_INJECTION", "0") != "1":
@@ -142,6 +168,7 @@ def get_ppo_ray_runtime_env(config=None):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
     # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
     for key in (
+        "VLLM_DISABLE_COMPILE_CACHE",
         "PYTHONHASHSEED",
         "CUBLAS_WORKSPACE_CONFIG",
         "FLASH_ATTENTION_DETERMINISTIC",

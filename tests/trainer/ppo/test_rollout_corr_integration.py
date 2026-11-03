@@ -22,6 +22,7 @@ from verl.trainer.ppo.rollout_corr_helper import (
     compute_offpolicy_metrics,
     compute_rollout_correction_and_rejection_mask,
 )
+from verl.utils.device import get_device_name, is_device_available
 from verl.workers.config.actor import ActorConfig
 
 
@@ -32,7 +33,7 @@ class TestRolloutISIntegration:
     def sample_data(self):
         """Create sample training data."""
         batch_size, seq_length = 4, 16
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_device_name() if is_device_available() else "cpu"
 
         return {
             "old_log_prob": torch.randn(batch_size, seq_length, device=device),
@@ -232,7 +233,7 @@ class TestRolloutISIntegration:
 
     def test_exact_icepop_matches_filtered_weighted_ppo_loss(self, config_with_rollout_is):
         """IcePop should match the local RL zero-weight semantics."""
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_device_name() if is_device_available() else "cpu"
 
         old_log_prob = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
         log_prob = old_log_prob.clone()

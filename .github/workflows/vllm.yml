@@ -80,7 +80,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -132,8 +132,8 @@ jobs:
             tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
             tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
             tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \
-            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_accumulates_lora_across_buckets \
-            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket
+            tests/workers/rollout/rollout_vllm/test_submitter_gate_on_cpu.py \
+            tests/utils/test_vllm_weight_name_normalization_on_cpu.py
       - name: Prepare gsm8k dataset
         run: |
           $UV_RUN ray stop --force
@@ -150,6 +150,10 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      - name: Test vLLM score-centering support coverage
+        run: |
+          $UV_RUN ray stop --force
+          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_topk_support.py -v -s
       # - name: Test vllm rollout generation determinism (same-instance + cross-instance + cross-instance AgentLoop)
       #   run: |
       #     VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \

@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# Qwen3.5-397B-A17B SFT with Megatron backend + mbridge
-#
+# Qwen3.5-397B-A17B SFT with Megatron backend
+# Using verlai/verl:uv.cu130.dev3 docker image
 # Requirements:
 #   - 128+ GPUs (80GB each, e.g. 16x8 H100/H200)
-#   - Docker: verlai/verl:vllm015 (or equivalent)
-#   - Additional packages on top of the base image:
-#       pip install --upgrade transformers
-#       pip install flash-linear-attention
-#       pip install -U git+https://github.com/ISEEKYAN/mbridge.git
-#   - Megatron-LM==0.16.0
+#   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
+#   - Install the current uv.lock's megatron extra, including flash-linear-attention:
+#       uv sync --frozen --extra megatron
+#       source .venv/bin/activate
+#
+# CUDA dependencies from the current uv.lock (Python 3.12):
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
 #
 # Qwen3.5 architecture notes:
-#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
-#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - engine.use_remove_padding=False  (forces bshd compute format)
-#     - data.use_dynamic_bsz=False       (required for bshd mode)
-#
-#   Once https://github.com/NVIDIA/Megatron-LM/pull/2644 is merged, THD
-#   format will be supported and engine.use_remove_padding can be set to True
-#   for better performance.
+#   This example uses BSHD compute format:
+#     - model.use_remove_padding=False
+#     - engine.use_remove_padding=False
+#     - data.use_dynamic_bsz=False
+#   Megatron-Core 0.18.0 and 0.19.2 also support THD for GDN.
+#   The settings above retain BSHD for this example.
 #
 # MTP (Multi-Token Prediction) notes:
 #   - model.mtp.enable=True               enables MTP module
@@ -91,8 +90,7 @@ MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.1}
 # Engine config
 # ============================================================
 # Key Qwen3.5 settings:
-#   engine.use_remove_padding=False   - GDN requires bshd format (no THD)
-#   engine.vanilla_mbridge=True       - use mbridge (not megatron-bridge)
+#   engine.use_remove_padding=False   - use BSHD for this recipe
 ENGINE_CONFIG="\
     engine=${BACKEND} \
     optim=${BACKEND} \
@@ -100,7 +98,7 @@ ENGINE_CONFIG="\
     optim.min_lr=${MIN_LR} \
     optim.lr_warmup_steps=10 \
     optim.weight_decay=0.1 \
-    optim.betas='[0.9,0.95]' \
+    optim.betas=[0.9,0.95] \
     optim.clip_grad=1.0 \
     optim.lr_warmup_init=0 \
     optim.lr_decay_style=cosine \
@@ -115,7 +113,6 @@ ENGINE_CONFIG="\
     engine.expert_model_parallel_size=${EP_SIZE} \
     engine.expert_tensor_parallel_size=${ETP_SIZE} \
     engine.use_mbridge=True \
-    engine.vanilla_mbridge=True \
     engine.dtype=${DTYPE} \
     engine.use_remove_padding=False \
     engine.override_transformer_config.attention_backend=auto \

@@ -169,12 +169,6 @@ class FSDPEngine(BaseEngine):
         self._autocast_dtype = torch.bfloat16
         self.scaler = None
 
-        # QAT (Quantization-Aware Training)
-        self._qat_config = getattr(self.engine_config, "qat", None)
-        self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
-        if self._qat_enabled:
-            logger.info(f"QAT enabled: mode={self._qat_config.mode}, group_size={self._qat_config.group_size}")
-
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
         else:
@@ -221,6 +215,8 @@ class FSDPEngine(BaseEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
+            per_tensor_param_fn=self._get_hf_export_per_tensor_param,
+            hf_export_dtype=self._autocast_dtype,
         )
 
         self.to(
@@ -533,58 +529,6 @@ class FSDPEngine(BaseEngine):
             raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
         return lr_scheduler
 
-    def _apply_qat(self, module):
-        """Apply QAT transformations to the model before FSDP wrapping."""
-        from verl.utils.qat.core import apply_qat, enable_qat_fuse
-
-        module = apply_qat(
-            module,
-            {
-                "enable": self._qat_config.enable,
-                "mode": self._qat_config.mode,
-                "group_size": self._qat_config.group_size,
-                "ignore_patterns": list(self._qat_config.ignore_patterns),
-                "activation_observer": self._qat_config.activation_observer,
-            },
-        )
-        enable_qat_fuse(module)
-
-        if self._qat_config.mode == "w4a4":
-            self._restore_w4a4_input_scales(module, self.model_config.local_path)
-
-        return module
-
-    def _restore_w4a4_input_scales(self, model, model_path):
-        """Restore input_global_scale and input_amax from checkpoint for W4A4 mode."""
-        import glob
-
-        from safetensors import safe_open
-
-        safetensor_files = glob.glob(f"{model_path}/model*.safetensors")
-        loaded_count = 0
-
-        for sf_path in safetensor_files:
-            with safe_open(sf_path, framework="pt") as f:
-                for key in f.keys():
-                    if "input_global_scale" in key:
-                        module_path = key.replace(".input_global_scale", "")
-                        amax_key = f"{module_path}.input_amax"
-
-                        module = model
-                        for part in module_path.split("."):
-                            module = module[int(part)] if part.isdigit() else getattr(module, part)
-
-                        scale_val = f.get_tensor(key)
-                        val = scale_val.item() if scale_val.numel() == 1 else scale_val.max().item()
-                        module.input_global_scale.fill_(val)
-
-                        amax_val = f.get_tensor(amax_key)
-                        amax = amax_val.item() if amax_val.numel() == 1 else amax_val.max().item()
-                        module.input_amax.fill_(amax)
-                        loaded_count += 1
-
-        logger.info(f"[QAT W4A4] Restored {loaded_count} input_global_scale/input_amax from {model_path}")
-
     def _build_model_optimizer(self):
         from verl.utils.model import print_model_size
 
@@ -597,10 +541,6 @@ class FSDPEngine(BaseEngine):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
-
-        # Apply QAT before FSDP wrapping (training only)
-        if self._qat_enabled and not self.engine_config.forward_only:
-            module = self._apply_qat(module)
 
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
@@ -826,11 +766,6 @@ class FSDPEngine(BaseEngine):
             else:
                 self.optimizer.step()
 
-        if self._qat_enabled:
-            from verl.utils.qat.core import invalidate_all_scales
-
-            invalidate_all_scales(self.module)
-
         return grad_norm.item()
 
     def lr_scheduler_step(self):
@@ -1035,28 +970,6 @@ class FSDPEngine(BaseEngine):
             )
             per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
-        if self._qat_enabled:
-            from verl.utils.qat.quantizer import QATQuantizer
-            from verl.utils.torch_dtypes import PrecisionType
-
-            mixed_precision_config = self.engine_config.mixed_precision
-            if mixed_precision_config is not None:
-                param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
-            else:
-                param_dtype = torch.bfloat16
-
-            quantizer = QATQuantizer(
-                mode=self._qat_config.mode,
-                group_size=self._qat_config.group_size,
-                ignore_patterns=list(self._qat_config.ignore_patterns),
-                device=torch.device(get_device_id()),
-                param_dtype=param_dtype,
-            )
-            per_tensor_param = quantizer.quantize_with_fusion(
-                per_tensor_param,
-                target_device=torch.device("cpu"),
-            )
-
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
@@ -1090,6 +1003,12 @@ class FSDPEngine(BaseEngine):
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.module)
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
+        if self._is_lora:
+            return self._merged_lora_per_tensor_param(), None
+        return self.get_per_tensor_param()
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()
@@ -1143,14 +1062,16 @@ class EngineTrainModeCtx(BaseEngineCtx):
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict):
-        if self.pad_to_length and tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False):
-            # Every top-K path re-derives the teacher tensors' layout from the *unpadded* packed
-            # length and slices them with the Ulysses rule only, which does not know about the
-            # static pad, so teacher and student token streams would silently misalign.
+        distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
+        if self.pad_to_length and (distillation_use_topk or score_centering):
+            # Every top-K path re-derives the teacher/rollout tensors' layout from the *unpadded*
+            # packed length and slices them with the Ulysses rule only, which does not know about
+            # the static pad, so the token streams would silently misalign.
             raise RuntimeError(
-                "pad_to_length is not supported with top-K distillation: the teacher tensors are "
-                "sliced with the Ulysses pad rule, which does not know about the static pad. "
-                "Disable pad_to_length for distillation runs."
+                "pad_to_length is not supported with top-K distillation or score centering: the "
+                "teacher/rollout top-k tensors are sliced with the Ulysses pad rule, which does "
+                "not know about the static pad. Disable pad_to_length for these runs."
             )
 
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
@@ -1339,11 +1260,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
+        score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
+            )
+        if score_centering and use_fused_kernels:
+            raise NotImplementedError(
+                "score_centering=True is not supported with use_fused_kernels=True: "
+                "fused kernels do not materialize the full logits tensor score centering needs."
             )
 
         model_output = {}
@@ -1409,7 +1336,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         )
 
                 # logits_processor_func return tensors with shape (1, total_nnz/sp_size)
-                if distillation_use_topk:
+                if distillation_use_topk or score_centering:
                     outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                     cu_seqlens = input_ids.offsets()
                     for k, v in outputs.items():
@@ -1422,9 +1349,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if not distillation_only:
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    inplace_backward = True
-                    if calculate_entropy:
-                        inplace_backward = False
+                    # entropy and the score centering hook reuse the logits in their backward
+                    inplace_backward = not (calculate_entropy or score_centering)
                     log_probs = logprobs_from_logits(
                         logits=logits_rmpad,
                         labels=input_ids_rmpad_rolled,
@@ -1508,7 +1434,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # (log_probs is also not gathered) and pad_size is only
                     # populated in output_args along the use_remove_padding=True
                     # path of prepare_model_inputs.
-                    if distillation_use_topk:
+                    if distillation_use_topk or score_centering:
                         outputs = logits_processor_func(student_logits=logits_rmpad.unsqueeze(0), data=micro_batch)
                         for k, v in outputs.items():
                             v = v.squeeze(0)
@@ -1519,7 +1445,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+                        log_probs = logprobs_from_logits(
+                            logits=logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=not score_centering,
+                        )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:

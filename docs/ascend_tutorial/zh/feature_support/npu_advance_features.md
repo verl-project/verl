@@ -61,7 +61,7 @@ Last updated: 05/13/2026.
 | SGLang 参数 | verl 对应通用参数 | 功能说明 |
 |:---|:---|:---|
 | `attention_backend` | `actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend` | **注意力后端选择** — NPU 上应设置为 `ascend` 以调用昇腾优化内核 |
-| `quantization` | `actor_rollout_ref.rollout.quantization` | **量化支持** — 支持模型量化加载与推理 |
+| `quantization` | `actor_rollout_ref.rollout.engine_kwargs.sglang.quantization` | **量化支持** — 支持模型量化加载与推理 |
 
 
 > 更多 SGLang NPU 特性参数请参考 [sglang 社区 NPU 特性支持文档](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
@@ -138,7 +138,7 @@ repatch
 
 | verl 参数 | 功能说明 |
 |:---|:---|
-| `actor_rollout_ref.actor.megatron.use_mbridge` | **MBridge 权重转换** — 启用 mbridge 进行权重格式转换 |
+| `actor_rollout_ref.actor.megatron.use_mbridge` | **Megatron-Bridge 权重转换** — 当前需要保持 `True` |
 | `actor_rollout_ref.actor.megatron.use_dist_checkpointing` | **分布式 checkpoint** — 使用分布式格式保存/加载权重，默认 `False` |
 | `actor_rollout_ref.actor.megatron.dist_checkpointing_path` | **分布式权重路径** — 分布式 checkpoint 加载路径，默认 `null` |
 
@@ -205,15 +205,11 @@ repatch
 
 ## 5. 限制与注意事项
 
-1. **mbridge 与 VPP 互斥**
-   - `actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) **暂不支持同时开启**
-   - 由于 verl 默认开启 mbridge，使用 VPP 时需手动将 `use_mbridge` 置为 `False`
-
-2. **FSDP1 vs FSDP2 差异**
+1. **FSDP1 vs FSDP2 差异**
    - `forward_prefetch` 和 `use_orig_params` 仅适用于 FSDP1
    - FSDP2 为默认推荐版本，API 支持度参照 [昇腾 PyTorch 版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/PyTorchNativeapi/docs/zh/native_apis/pytorch_2-7-1/torch-distributed-fsdp.md)
 
-3. **重计算参数依赖关系**
+2. **重计算参数依赖关系**
    - `recompute_method` 需 `recompute_granularity='full'` 才生效
    - `recompute_num_layers` 需 `recompute_granularity='full'` 才生效
    - 当 `recompute_method='uniform'` 时，`recompute_num_layers` 表示每个重计算单元的 Transformer 层数，需能被当前进程模型层数整除
@@ -233,7 +229,7 @@ repatch
 | 模型路径 | `model_path` | `model_path` | `actor_rollout_ref.model.path` |
 | 显存控制 | `gpu_memory_utilization` | `mem_fraction_static` | `actor_rollout_ref.rollout.gpu_memory_utilization` |
 | 图模式 | `enforce_eager` | `disable_cuda_graph` | `actor_rollout_ref.rollout.enforce_eager` |
-| 量化 | `quantization` | `quantization` | `actor_rollout_ref.rollout.quantization` |
+| 量化 | `quantization` | `quantization` | `actor_rollout_ref.rollout.engine_kwargs.{vllm,sglang}.quantization` |
 | 最大序列长度 | `max_model_len` | — | `actor_rollout_ref.rollout.max_model_len` |
 | 最大并发数 | `max_num_seqs` | `max_running_requests` | `actor_rollout_ref.rollout.max_num_seqs` |
 | 分词器 | `skip_tokenizer_init` | `skip_tokenizer_init` | `actor_rollout_ref.rollout.skip_tokenizer_init` |

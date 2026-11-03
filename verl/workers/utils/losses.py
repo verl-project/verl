@@ -60,6 +60,18 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
+    sc_outputs = {
+        key: no_padding_2_padding(model_output[key], data)
+        for key in (
+            "sc_correction",
+            "sc_sampler_head_mass",
+            "sc_train_head_mass",
+            "sc_support_aligned",
+            "sc_sampler_tail_mass",
+            "sc_support_unknown",
+        )
+        if key in model_output
+    }
 
     # global batch info for loss aggregation
     config.global_batch_info["dp_size"] = data["dp_size"]
@@ -101,6 +113,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+    policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -109,6 +122,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss_agg_mode=loss_agg_mode,
         config=config,
         rollout_is_weights=rollout_is_weights,
+        **policy_loss_kwargs,
     )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
@@ -117,6 +131,32 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics.update(pg_metrics)
     metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
+    if sc_outputs:
+        for key in (
+            "sc_sampler_head_mass",
+            "sc_train_head_mass",
+            "sc_support_aligned",
+            "sc_sampler_tail_mass",
+            "sc_support_unknown",
+        ):
+            if key not in sc_outputs:
+                continue
+            if key in ("sc_support_aligned", "sc_sampler_tail_mass", "sc_support_unknown"):
+                # Sum globally normalized token contributions across microbatches; the
+                # worker's DP mean then yields a token-weighted fraction, even for uneven rows.
+                global_tokens = config.global_batch_info["batch_num_tokens"]
+                value = agg_loss(
+                    sc_outputs[key],
+                    response_mask,
+                    "token-mean",
+                    dp_size=config.global_batch_info["dp_size"],
+                    batch_num_tokens=global_tokens,
+                )
+                aggregation = AggregationType.SUM if global_tokens is not None else AggregationType.MEAN
+            else:
+                value = masked_mean(sc_outputs[key], response_mask)
+                aggregation = AggregationType.MEAN
+            metrics[f"actor/{key}"] = Metric(value=value, aggregation=aggregation)
     policy_loss = pg_loss
 
     # add entropy loss

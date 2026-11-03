@@ -244,6 +244,10 @@ multi_turn:
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: True
 
+# Sampler top-k log-probs per generated token, needed by algorithm.rollout_correction.score_centering.
+# 0 disables; the paper uses 128 (32 also matches). vLLM only for now, single-turn agent loop only.
+topk_log_probs: 0
+
 # [Experimental] agent loop based rollout configs
 agent:
 
@@ -477,17 +481,30 @@ prometheus:
   # Specify served_model_name to avoid displaying overly long model paths in Grafana
   served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
 
-# type of quantization in vllm, currently support fp8 and torchao
-quantization: null
+# Low-precision rollout as a compressed-tensors quantization_config: the engine starts from it with dummy
+# weights and the trainer quantizes every weight sync (vLLM / SGLang + Megatron only for now). Off when all are null.
+quantization:
 
-# extra quantization information serialized in a config file, e.g. torchao_config.json
-quantization_config_file: null
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.RolloutQuantizationConfig
+
+  # compressed-tensors preset for dense linear layers (attention, dense MLP, shared experts), e.g. FP8_BLOCK
+  linear: null
+
+  # compressed-tensors preset for routed experts, e.g. FP8_BLOCK
+  moe: null
+
+  # activation override for the routed experts, as vLLM's quantization_config.moe.activation; moe=NVFP4 defaults to nvfp4_per_token
+  moe_activation: null
+
+  # extra "re:" patterns of layers kept in high precision
+  ignore: []
+
+  # compressed-tensors quantization_config JSON used as is, exclusive with linear/moe/ignore
+  config_file: null
 
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-
-# QAT configuration (inherited from actor's engine config)
-qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
 
 # Prefill-Decode disaggregation (SGLang only; keep rollout.name=sglang and toggle enabled=True).
 disaggregation:

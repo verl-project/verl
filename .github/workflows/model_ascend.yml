@@ -33,12 +33,7 @@
 name: model_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -59,6 +54,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Config locks must stay off the read-only model cache mount.
+  MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
+
 jobs:
   model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
@@ -71,6 +70,8 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
@@ -122,8 +123,14 @@ jobs:
       VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # Patch Megatron in the driver as well as workers.
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
@@ -142,6 +149,9 @@ jobs:
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
       - name: Running model_engine_ascend
+        env:
+          # Keep generated test checkpoints off the quota-limited /tmp filesystem.
+          PYTEST_DEBUG_TEMPROOT: /root/.cache/temp
         run: |
           ray stop --force
           pytest tests/models/test_engine.py

@@ -113,7 +113,6 @@ def create_training_config(model_type, strategy, device_count, model):
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
-            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=tp,
             pipeline_model_parallel_size=pp,
             context_parallel_size=cp,
@@ -275,9 +274,9 @@ def create_value_model(language_model_path, output_path):
 
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
-def test_critic_engine(strategy):
+def test_critic_engine(strategy, tmp_path):
     device_count = get_torch_device().device_count()
-    value_model_path = os.path.expanduser("~/models/test_model")
+    value_model_path = str(tmp_path / "test_model")
     language_model_path = get_test_language_model(device_count=device_count)
     create_value_model(language_model_path, value_model_path)
 
@@ -408,7 +407,6 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
-            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=2,
             pipeline_model_parallel_size=2,
             context_parallel_size=1,
@@ -566,7 +564,7 @@ def _grad_norm(module) -> torch.Tensor:
 def _has_any_grad(module) -> bool:
     any_grad = torch.tensor(
         int(any(param.grad is not None for param in module.parameters())),
-        device=torch.device("cuda", torch.cuda.current_device()),
+        device=torch.device(get_device_name(), get_torch_device().current_device()),
     )
     dist.all_reduce(any_grad, op=dist.ReduceOp.SUM)
     return any_grad.item() > 0
@@ -612,9 +610,9 @@ def _make_split_step_batch(config: HFModelConfig, engine_config: FSDPEngineConfi
 def _split_training_primitives_fsdp_worker(
     rank: int, world_size: int, rendezvous_file: str, model_path: str, strategy: str
 ):
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     dist.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
         rank=rank,
         world_size=world_size,
@@ -704,7 +702,7 @@ def _split_training_primitives_fsdp_worker(
     dist.destroy_process_group()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 CUDA devices")
+@pytest.mark.skipif(get_torch_device().device_count() < 2, reason="requires at least 2 accelerator devices")
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_fsdp_engine_split_forward_backward_and_optimizer_step(strategy, tmp_path):
     world_size = 2

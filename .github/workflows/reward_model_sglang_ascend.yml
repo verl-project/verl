@@ -33,12 +33,7 @@
 name: reward_model_sglang_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -57,6 +52,10 @@ concurrency:
 # Declare permissions just read content.
 permissions:
   contents: read
+
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
 
 jobs:
   reward_model_sglang_ascend:
@@ -113,7 +112,7 @@ jobs:
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running sglang generative reward model tests on 8 NPUs
         run: |
           ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py

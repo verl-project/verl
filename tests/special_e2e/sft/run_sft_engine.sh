@@ -7,7 +7,7 @@ mode=${mode:-spmd}
 
 if [ "$mode" = "spmd" ]; then
   ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
-  COMMAND="torchrun --standalone --nnodes=${NNODES:-1} --nproc-per-node=${NUM_GPUS:-1} ${ENTRYPOINT}"
+  COMMAND="python -m torch.distributed.run --standalone --nnodes=${NNODES:-1} --nproc-per-node=${NUM_GPUS:-1} ${ENTRYPOINT}"
 else
   ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer_ray"}
   COMMAND="python ${ENTRYPOINT} trainer.nnodes=${NNODES:-1} trainer.n_gpus_per_node=${NUM_GPUS:-1}"
@@ -16,7 +16,6 @@ fi
 DATASET_DIR=${DATASET_DIR:-~/data/gsm8k_sft}
 TRAIN_FILES=${DATASET_DIR}/train.parquet
 VAL_FILES=${DATASET_DIR}/test.parquet
-VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
 backend=${BACKEND:-fsdp}
 
@@ -42,6 +41,8 @@ CP_SIZE=${CP_SIZE:-1}
 PAD_MODE=${PAD_MODE:-no_padding}
 
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
+
+PAD_TO_LENGTH=${PAD_TO_LENGTH:-False}
 
 FSDP_ENGINE_CONFIG="\
     engine=${backend} \
@@ -93,7 +94,6 @@ MEGATRON_ENGINE_CONFIG="\
     engine.context_parallel_size=${CP_SIZE} \
     +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
     engine.use_mbridge=True \
-    engine.vanilla_mbridge=${VANILLA_MBRIDGE} \
     "
 
 TORCHTITAN_ENGINE_CONFIG="\
@@ -113,6 +113,7 @@ TORCHTITAN_ENGINE_CONFIG="\
     engine.pipeline_parallel_size=${PP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
     engine.data_parallel_shard_size=${FSDP_SIZE} \
+    engine.pad_to_length=${PAD_TO_LENGTH} \
     engine.use_torch_compile=False"
 
 AUTOMODEL_ENGINE_CONFIG="\
@@ -143,7 +144,7 @@ elif [ "$backend" = "veomni" ]; then
 elif [ "$backend" = "torchtitan" ]; then
     ENGINE_CONFIG="$TORCHTITAN_ENGINE_CONFIG"
     echo "Using torchtitan engine"
-    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-pad_to_length-${PAD_TO_LENGTH}-mode-${mode}
 elif [ "$backend" = "automodel" ]; then
     ENGINE_CONFIG="$AUTOMODEL_ENGINE_CONFIG"
     echo "Using automodel engine"
@@ -155,6 +156,9 @@ else
 fi
 
 mkdir -p "${ckpts_home}"
+# These comparison runs disable resume; discard stale and partial checkpoints.
+rm -rf -- "${ckpts_home:?}/"*
+trap 'rm -rf -- "${ckpts_home:?}/"*' EXIT
 
 $COMMAND \
     data.train_files="${TRAIN_FILES}" \
@@ -181,5 +185,3 @@ $COMMAND \
     # trainer.total_training_steps=${TOTAL_TRAIN_STEP} \
     # trainer.checkpoint.save_contents=[model,optimizer,extra,hf_model] \
     # trainer.max_ckpt_to_keep=1 \
-
-rm -rf "${ckpts_home:?}/*"

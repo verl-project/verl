@@ -12,7 +12,7 @@ Last updated: 11/03/2026.
    get_start/install_guidance
    get_start/container_source_install
    get_start/quick_start
-   get_start/install_guidance_A5
+   get_start/install_guidance_950
 
 .. toctree::
    :maxdepth: 1

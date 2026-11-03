@@ -32,12 +32,7 @@
 name: vllm_ascend
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - main
-      - v0.*
+  # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
       - main
@@ -71,18 +66,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Disposable cache; preprocessing rebuilds it when missing.
+  HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
+
 jobs:
   vllm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
-        --shm-size 16g
+        --shm-size 120g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
@@ -101,6 +102,8 @@ jobs:
         run: |
           pip3 install --no-deps -e .[test]
           pip3 install pytest-asyncio
+          pip install "av<19"
+          pip uninstall -y nvidia-resiliency-ext
       - name: Check final pip list
         run: |
           pip list
@@ -110,7 +113,7 @@ jobs:
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Test the latest vLLM Rollout async with deterministic agent loop
         env:
           PYTHONHASHSEED: "0"
