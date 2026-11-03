@@ -171,3 +171,34 @@ def test_reward_loop_passes_truncated_to_compute_score(last_token, valid_len, wi
     assert asyncio.run(score())["reward_score"] == 0.5
     assert seen == [{"index": 0, "truncated": truncated}]
     assert data.non_tensor_batch["extra_info"][0] == {"index": 0}
+
+
+def test_reward_loop_empty_response():
+    """An empty unpadded response has length 0: no IndexError, not truncated, no overlong penalty."""
+    seen = []
+
+    def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
+        seen.append(extra_info)
+        return 0.5
+
+    data = _make_data(batch_size=1, seq_len=4)
+    data.batch["responses"] = torch.ones(1, 0, dtype=torch.long)
+    data.batch["attention_mask"] = torch.ones(1, 4, dtype=torch.long)  # the prompt only
+    config = {
+        "actor_rollout_ref": {"rollout": {"response_length": 4}},
+        "reward": {
+            "reward_kwargs": {
+                "max_resp_len": 4,
+                "overlong_buffer_cfg": {"enable": True, "len": 2, "penalty_factor": 1.0, "log": False},
+            }
+        },
+    }
+
+    async def score():
+        reward_manager = RewardLoopDAPORewardManager(
+            config=OmegaConf.create(config), tokenizer=_DummyTokenizer(), compute_score=compute_score
+        )
+        return await reward_manager.run_single(data)
+
+    assert asyncio.run(score())["reward_score"] == 0.5
+    assert seen == [{"truncated": False}]

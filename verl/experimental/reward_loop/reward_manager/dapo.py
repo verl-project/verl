@@ -60,7 +60,8 @@ class DAPORewardManager(RewardManagerBase):
         data_item = data[0]
         response_ids = data_item.batch["responses"]
         response_length = response_ids.shape[-1]
-        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
+        # An empty response: attention_mask[-0:] would be the whole mask, prompt included.
+        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum() if response_length else 0
         valid_response_ids = response_ids[:valid_response_length]
 
         data_source = data_item.non_tensor_batch["data_source"]
@@ -70,7 +71,9 @@ class DAPORewardManager(RewardManagerBase):
         # The response hit the length limit without emitting EOS; compute_score may treat it as unfinished.
         limit = self.response_length_limit or response_length
         extra_info["truncated"] = bool(
-            valid_response_length >= limit and int(valid_response_ids[-1]) != self.tokenizer.eos_token_id
+            valid_response_length >= limit
+            and valid_response_ids.numel() > 0
+            and int(valid_response_ids[-1]) != self.tokenizer.eos_token_id
         )
 
         response_str = await self.loop.run_in_executor(
