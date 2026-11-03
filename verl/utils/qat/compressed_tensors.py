@@ -189,6 +189,22 @@ def _module_name_for_quant_match(module: str) -> str:
     return module.removesuffix(".base_layer").removeprefix("model.")
 
 
+def get_fp8_ignored_layers(fp8_config: Mapping[str, Any], *, is_multimodal: bool = False) -> list[str]:
+    """Expand VLM text-layer aliases for both weight export and engine initialization."""
+    ignored = list(fp8_config.get("ignored_layers") or fp8_config.get("modules_to_not_convert") or [])
+    if is_multimodal and fp8_config.get("ignored_layers_match_mode", "exact") == "exact":
+        for module in ignored.copy():
+            if module.startswith("model.layers."):
+                alias = "model.language_model." + module.removeprefix("model.")
+            elif module.startswith("model.language_model.layers."):
+                alias = "model." + module.removeprefix("model.language_model.")
+            else:
+                continue
+            if alias not in ignored:
+                ignored.append(alias)
+    return ignored
+
+
 def _matches(name: str, targets: Iterable[str]) -> bool:
     for target in targets:
         if target.startswith("re:"):
@@ -659,7 +675,13 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
     its private mixed FP8/FP4 layout already exported by Megatron-Bridge.
     """
 
-    def __init__(self, fp8_config: Mapping[str, Any], *, model_types: Iterable[Optional[str]] = ()):
+    def __init__(
+        self,
+        fp8_config: Mapping[str, Any],
+        *,
+        model_types: Iterable[Optional[str]] = (),
+        is_multimodal: bool = False,
+    ):
         quant_method = str(fp8_config.get("quant_method", "")).lower()
         self.passthrough = bool(_DEEPSEEK_V4_MODEL_TYPES & set(model_types))
         if self.passthrough:
@@ -678,7 +700,7 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
             )
         self.ignore = [
             _module_name_for_quant_match(module)
-            for module in (fp8_config.get("ignored_layers") or fp8_config.get("modules_to_not_convert") or [])
+            for module in get_fp8_ignored_layers(fp8_config, is_multimodal=is_multimodal)
         ]
         self.ignore_match_mode = fp8_config.get("ignored_layers_match_mode", "exact")
         if self.ignore_match_mode not in ("exact", "substring", "suffix"):
@@ -895,7 +917,11 @@ def dispatch_rollout_weight_quantizer(
             quantizer = CompressedTensorsWeightQuantizer(quantization_config)
     elif "fp8" in quant_method:
         qat_modes = {"fp8"}
-        quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)
+        quantizer = Fp8ConfigWeightQuantizer(
+            quantization_config,
+            model_types=model_types,
+            is_multimodal=getattr(hf_config, "text_config", None) is not None,
+        )
     else:
         raise NotImplementedError(
             f"Trainer-side rollout weight export does not support native quant_method={quant_method!r}"

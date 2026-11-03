@@ -861,7 +861,7 @@ def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
     monkeypatch.setattr(
         _vllm_rollout_utils,
         "load_quanted_weights",
-        lambda weights, runner, is_drafter=False, peft_config=None: loaded.extend(name for name, _ in weights) or [],
+        lambda weights, runner, **kwargs: loaded.extend(name for name, _ in weights) or [],
     )
     updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
 
@@ -1123,3 +1123,111 @@ def test_weight_scale_is_kept_for_live_int8_weight(monkeypatch, vllm_quant_utils
     )
 
     assert [name.rsplit(".", 1)[-1] for name, _ in Runner.model.loaded] == ["weight", "weight_scale"]
+
+
+@pytest.fixture
+def fp8_sync_worker(monkeypatch, vllm_quant_utils):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.o_proj = torch.nn.Linear(128, 128, bias=False, dtype=torch.bfloat16)
+            self.o_proj.weight.data.zero_()
+            self.register_buffer("sentinel", torch.zeros(1))
+
+        @torch.no_grad()
+        def load_weights(self, weights):
+            loaded = set()
+            for name, tensor in weights:
+                self.get_parameter(name).copy_(tensor)
+                loaded.add(name)
+            return loaded
+
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(_vllm_rollout_utils, "prepare_quanted_weights_for_loading", lambda model: {})
+    monkeypatch.setattr(_vllm_rollout_utils, "load_quanted_weights", vllm_quant_utils.load_quanted_weights)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "process_quanted_weights_after_loading",
+        vllm_quant_utils.process_quanted_weights_after_loading,
+    )
+    worker = _staging_sync_worker(Model())
+    worker.model_runner.drafter = types.SimpleNamespace(model=Model())
+    worker.model_runner.vllm_config.speculative_config = types.SimpleNamespace(method="mtp")
+    return worker
+
+
+@pytest.mark.parametrize("first", ["weight", "weight_scale_inv"])
+def test_fp8_pair_survives_ipc_buffer_reuse(monkeypatch, fp8_sync_worker, first):
+    weight = torch.full((128, 128), 2, dtype=torch.float8_e4m3fn)
+    scale = torch.full((1, 1), 3.0)
+    parts = {"weight": weight, "weight_scale_inv": scale}
+    second = "weight_scale_inv" if first == "weight" else "weight"
+
+    def buckets():
+        yield [("o_proj." + first, parts[first])], False
+        parts[first].view(torch.uint8).zero_()  # Sender overwrites the acknowledged IPC bucket.
+        yield [("o_proj." + second, parts[second])], True
+
+    _install_fake_receiver(monkeypatch, buckets())
+    fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+    for model in fp8_sync_worker._iter_all_models():
+        assert torch.all(model.o_proj.weight == 6)
+
+
+def test_missing_fp8_scale_checked_after_buffer_only_final_bucket(monkeypatch, fp8_sync_worker, vllm_quant_utils):
+    weight = ("o_proj.weight", torch.ones(128, 128, dtype=torch.float8_e4m3fn))
+    with pytest.raises(RuntimeError, match=r"missing weight_scale.*o_proj\.weight"):
+        vllm_quant_utils.load_quanted_weights([weight], fp8_sync_worker.model_runner, peft_config={"r": 1})
+
+    _install_fake_receiver(monkeypatch, [([weight], False), ([("sentinel", torch.ones(1))], True)])
+    with pytest.raises(RuntimeError, match=r"missing weight_scale.*o_proj\.weight"):
+        fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+
+    # The failed round's weight cannot pair with a scale from the next round.
+    _install_fake_receiver(monkeypatch, [([("o_proj.weight_scale_inv", torch.ones(1, 1))], True)])
+    fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+    for model in fp8_sync_worker._iter_all_models():
+        assert model.sentinel.item() == 1
+        assert torch.count_nonzero(model.o_proj.weight) == 0
+
+
+def test_fp8_orphan_restores_live_storage_before_retry(monkeypatch, fp8_sync_worker, vllm_quant_utils):
+    # Exercise the real FP8 stage/fold helpers with a small CPU kernel-layout transform.
+    quant_module = types.ModuleType("vllm.model_executor.layers.quantization")
+    quant_module.fp8 = types.SimpleNamespace(replace_parameter=None)
+    monkeypatch.setitem(sys.modules, quant_module.__name__, quant_module)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "prepare_quanted_weights_for_loading",
+        lambda model: {"fp8_layers": vllm_quant_utils.stage_fp8_params_for_loading(model)},
+    )
+
+    def repack(layer):
+        assert layer.weight.dtype == torch.float32 and layer.weight.shape == (2, 2)
+        layer.weight = torch.nn.Parameter(layer.weight.to(torch.uint8).flatten(), requires_grad=False)
+
+    models = list(fp8_sync_worker._iter_all_models())
+    live = []
+    for model in models:
+        model.packed = torch.nn.Module()
+        model.packed.weight = torch.nn.Parameter(torch.zeros(4, dtype=torch.uint8), requires_grad=False)
+        model.packed._verl_fp8_pristine = {"weight": ((2, 2), torch.float32)}
+        model.packed.quant_method = types.SimpleNamespace(process_weights_after_loading=repack)
+        live.append((model.packed.weight, model.packed.weight.data_ptr()))
+
+    weight = ("o_proj.weight", torch.ones(128, 128, dtype=torch.float8_e4m3fn))
+    for value in (1, 2):
+        parts = [weight, ("packed.weight", torch.full((2, 2), float(value)))]
+        if value == 1:
+            _install_fake_receiver(monkeypatch, [(parts, True)])
+            with pytest.raises(RuntimeError, match=r"missing weight_scale.*o_proj\.weight"):
+                fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+        else:
+            _install_fake_receiver(
+                monkeypatch, [(parts, False), ([("o_proj.weight_scale_inv", torch.ones(1, 1))], True)]
+            )
+            fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+        for model, (param, ptr) in zip(models, live, strict=True):
+            assert model.packed.weight is param and param.data_ptr() == ptr
+            assert torch.all(param == value)

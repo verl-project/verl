@@ -152,22 +152,29 @@ def is_compressed_tensors_model(vllm_config) -> bool:
 
 
 def configure_fp8_ignored_layers_match_mode(vllm_config) -> None:
-    """Apply verl's optional native-FP8 ignore matching extension."""
+    """Configure FP8 exclusions before vLLM maps them into its model namespace."""
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    from verl.utils.qat.compressed_tensors import (
+        _as_quantization_config,
+        _resolve_quantization_config,
+        get_fp8_ignored_layers,
+    )
 
     quant_config = getattr(vllm_config, "quant_config", None)
     if not isinstance(quant_config, Fp8Config):
         return
     hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
-    serialized = getattr(hf_config, "quantization_config", None)
-    if hasattr(serialized, "to_dict"):
-        serialized = serialized.to_dict()
-    if not isinstance(serialized, dict):
+    serialized = _as_quantization_config(_resolve_quantization_config(hf_config, {})[1])
+    if serialized is None:
         return
     match_mode = serialized.get("ignored_layers_match_mode", "exact")
     if match_mode not in ("exact", "substring", "suffix"):
         raise ValueError(f"Unsupported ignored_layers_match_mode={match_mode!r}")
     quant_config.ignored_layers_match_mode = match_mode
+    quant_config.ignored_layers = get_fp8_ignored_layers(
+        serialized, is_multimodal=getattr(hf_config, "text_config", None) is not None
+    )
 
 
 def refresh_rocm_attention_weight_caches(model):
@@ -286,7 +293,13 @@ def reset_uncalibrated_kv_cache_scales(model):
             set_default_quant_scales(module, register_buffer=False)
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
+def validate_fp8_weight_pairs(pending_fp8):
+    orphaned_weights = [name for name, entry in pending_fp8.items() if "weight" in entry]
+    if orphaned_weights:
+        raise RuntimeError("FP8 weights missing weight_scale or weight_scale_inv: " + ", ".join(orphaned_weights))
+
+
+def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None, reload_states=None):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -375,7 +388,9 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
             return (weight.float() * scale).to(torch.bfloat16)[:rows, :cols].contiguous()
 
         fp8_dtypes = {torch.float8_e4m3fn, torch.float8_e5m2}
-        pending_fp8 = {}
+        reload_state = None if reload_states is None else reload_states[model]
+        pending_fp8 = {} if reload_state is None else reload_state.setdefault("pending_fp8", {})
+        bucket_parts = set()
         normalized_weights = []
         for name, tensor in weights:
             resolved = resolve_weight_name(model, name, live_names, routed_expert_prefixes=routed_expert_prefixes)
@@ -402,6 +417,8 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
                             )
                         )
                         del pending_fp8[pairing_key]
+                    elif reload_state is not None:
+                        bucket_parts.add((pairing_key, leaf))
                     continue
                 # Drop trainer-only scales only for live weights that are not quantized at all.
                 if leaf in {"weight_scale", "weight_scale_inv"} and live_dtype in {
@@ -411,13 +428,14 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
                 }:
                     continue
             normalized_weights.append((resolved, tensor))
-        orphaned_weights = [
-            name
-            for name, entry in pending_fp8.items()
-            if "weight" in entry and "weight_scale" not in entry and "weight_scale_inv" not in entry
-        ]
-        if orphaned_weights:
-            raise RuntimeError("FP8 weights missing weight_scale or weight_scale_inv: " + ", ".join(orphaned_weights))
+        if reload_state is None:
+            validate_fp8_weight_pairs(pending_fp8)
+        else:
+            # Only unpaired parts survive the callback. IPC reuses its buffer for the next bucket.
+            for name, leaf in bucket_parts:
+                entry = pending_fp8.get(name)
+                if entry is not None and leaf in entry:
+                    entry[leaf] = entry[leaf].clone()
         weights = normalized_weights
     weights = list(weights)
 

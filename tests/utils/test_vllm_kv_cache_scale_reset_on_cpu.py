@@ -110,6 +110,28 @@ def _scales(layer):
     ]
 
 
+@pytest.mark.parametrize("nested", [False, True], ids=["top", "text"])
+def test_fp8_text_exclusions_are_expanded_before_native_mapping(quant_utils, monkeypatch, nested):
+    class Fp8Config:
+        def apply_vllm_mapper(self, mapper):
+            pytest.fail("vLLM must apply its mapper during model initialization")
+
+    fp8 = types.ModuleType("vllm.model_executor.layers.quantization.fp8")
+    fp8.Fp8Config = Fp8Config
+    monkeypatch.setitem(sys.modules, fp8.__name__, fp8)
+    ignored = "model.layers.0.mlp.down_proj"
+    serialized = {"quant_method": "fp8", "modules_to_not_convert": [ignored]}
+    text_config = SimpleNamespace(quantization_config=serialized if nested else None)
+    hf_config = SimpleNamespace(quantization_config=None if nested else serialized, text_config=text_config)
+    config = SimpleNamespace(quant_config=Fp8Config(), model_config=SimpleNamespace(hf_config=hf_config))
+
+    quant_utils.configure_fp8_ignored_layers_match_mode(config)
+
+    assert config.quant_config.ignored_layers == [ignored, "model.language_model.layers.0.mlp.down_proj"]
+    assert config.quant_config.ignored_layers_match_mode == "exact"
+    assert serialized["modules_to_not_convert"] == [ignored]
+
+
 @pytest.mark.parametrize("as_parameters", [False, True], ids=["buffers", "grad_parameters"])
 def test_resets_scales_without_kv_cache_scheme(quant_utils, as_parameters):
     model = nn.ModuleDict({"attn": _attention_layer(as_parameters=as_parameters)})
