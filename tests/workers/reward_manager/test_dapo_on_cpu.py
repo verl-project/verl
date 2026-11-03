@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,6 +21,7 @@ import torch
 from omegaconf import OmegaConf
 
 from verl import DataProto
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.experimental.reward_loop.reward_manager.dapo import DAPORewardManager as RewardLoopDAPORewardManager
 from verl.workers.reward_manager.dapo import DAPORewardManager
 
@@ -171,6 +173,41 @@ def test_reward_loop_passes_truncated_to_compute_score(last_token, valid_len, wi
     assert asyncio.run(score())["reward_score"] == 0.5
     assert seen == [{"index": 0, "truncated": truncated}]
     assert data.non_tensor_batch["extra_info"][0] == {"index": 0}
+
+
+@pytest.mark.parametrize("response_ids, truncated", [([5, 6, 7], False), ([5, 6, 7, 8], True)])
+def test_reward_loop_truncated_through_agent_loop_worker(response_ids, truncated):
+    """AgentLoopWorker._compute_score hands the manager an unpadded response; the limit comes from the config."""
+    seen = []
+
+    def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
+        seen.append(extra_info)
+        return 0.5
+
+    async def score():
+        reward_manager = RewardLoopDAPORewardManager(
+            config=OmegaConf.create({"actor_rollout_ref": {"rollout": {"response_length": 4}}, "reward": {}}),
+            tokenizer=_DummyTokenizer(),
+            compute_score=compute_score,
+        )
+        worker = object.__new__(AgentLoopWorker)
+        worker.processor = None
+        worker.mm_processor_kwargs = None
+        worker.reward_loop_worker_handles = [
+            SimpleNamespace(compute_score=SimpleNamespace(remote=reward_manager.run_single))
+        ]
+        output = AgentLoopOutput(
+            prompt_ids=[1, 1],
+            response_ids=response_ids,
+            response_mask=[1] * len(response_ids),
+            metrics=AgentLoopMetrics(),
+        )
+        kwargs = {"data_source": "unit_test", "reward_model": {"ground_truth": "1"}, "extra_info": {"index": 0}}
+        await AgentLoopWorker._compute_score(worker, [output], kwargs=kwargs)
+        return output
+
+    assert asyncio.run(score()).reward_score == 0.5
+    assert seen == [{"index": 0, "truncated": truncated}]
 
 
 def test_reward_loop_empty_response():
