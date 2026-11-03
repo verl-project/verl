@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import uuid
 
 import pytest
 import ray
@@ -123,12 +124,16 @@ def test_fencing_detects_expired_lease_after_read():
 
 
 def test_ray_registry_shared_by_name():
-    ray.init(num_cpus=1, namespace="test_transport_registry")
+    # Other tests in the same session (TransferQueue) may already have started Ray.
+    started_ray = not ray.is_initialized()
+    if started_ray:
+        ray.init(num_cpus=1, namespace="test_transport_registry")
     try:
 
         async def main():
-            publisher = RayWeightRegistry(name="test_registry")
-            reader = RayWeightRegistry(name="test_registry")
+            name = f"test_registry_{uuid.uuid4().hex}"
+            publisher = RayWeightRegistry(name=name)
+            reader = RayWeightRegistry(name=name)
             await publisher.publish(_manifest(3))
             manifest = await reader.latest_ready()
             assert manifest.version == 3 and manifest.endpoint == b"ep-3"
@@ -141,4 +146,5 @@ def test_ray_registry_shared_by_name():
 
         _run(main())
     finally:
-        ray.shutdown()
+        if started_ray:
+            ray.shutdown()
