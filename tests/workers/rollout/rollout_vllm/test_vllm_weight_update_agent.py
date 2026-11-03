@@ -97,10 +97,19 @@ async def _run():
         )
     )
 
-    async def generate(max_tokens):
+    async def generate(max_tokens, **extra):
         return await server.generate.remote(
-            prompt_ids=prompt_ids, sampling_params={**GREEDY, "max_tokens": max_tokens}, request_id=uuid4().hex
+            prompt_ids=prompt_ids,
+            sampling_params={**GREEDY, "max_tokens": max_tokens, **extra},
+            request_id=uuid4().hex,
         )
+
+    async def keep_busy(stop: asyncio.Event):
+        """Issue full-length requests back to back, so generation is never idle."""
+        outputs = []
+        while not stop.is_set():
+            outputs.append(await generate(512, ignore_eos=True))
+        return outputs
 
     # The replica loaded the checkpoint from disk; this is what the original weights produce.
     reference = (await generate(16)).token_ids
@@ -118,13 +127,15 @@ async def _run():
     assert output.token_ids == reference
     assert output.extra_fields["global_steps"] == 0
 
-    # Version 1, published while a long request is generating: the apply phase must abort it.
-    long_request = asyncio.ensure_future(generate(512))
+    # Version 1, published under continuous load: the apply phase must abort in-flight requests.
+    stop_load = asyncio.Event()
+    load = [asyncio.ensure_future(keep_busy(stop_load)) for _ in range(4)]
     await asyncio.sleep(0.5)
     await publisher.publish(iter(versions[1]), version=1)
     assert await agent.wait_for_version.remote(1, 300) == 1
-    interrupted = await long_request
-    assert interrupted.stop_reason in ("aborted", "abort"), interrupted.stop_reason
+    stop_load.set()
+    load_outputs = [o for outputs in await asyncio.gather(*load) for o in outputs]
+    assert any(o.stop_reason in ("aborted", "abort") for o in load_outputs), [o.stop_reason for o in load_outputs]
     output = await generate(16)
     assert output.token_ids != reference, "the replica still serves the original weights"
     assert len(set(output.token_ids)) == 1, "with all-zero logits greedy decoding repeats one token"
