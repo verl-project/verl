@@ -22,12 +22,13 @@
 容器还需提供与宿主驱动匹配的 `npu-smi`，可只读挂载宿主的
 `/usr/local/sbin/npu-smi`。verl 使用它检查 IPC 支持；仅挂载驱动库并不能替代该工具。
 
-main 的 AuxOutput 路由输出要求启用底层前缀缓存机制。配置
-`rollout.enable_prefix_caching=False` 时，verl 会为每次生成分配独立的
-`cache_salt`，保留不跨请求复用前缀的行为，同时支持完整路由记录。
-权重更新后的缓存清理仍由 rollout 生命周期执行。图模式使用
-`additional_config.rl_config.sleep_mode_extra_cleanup=False`；旧的顶层
-`enable_sleep_mode_extra_cleanup` 字段不再受支持。
+本文固定配套 vLLM-Ascend v0.30.0 与 vLLM v0.30.0。
+R3 使用原生 `enable_return_routed_experts` 返回路由 IDs，
+`RoutedExpertsManager` 按物理 KV block slot 存储路由。
+`rollout.enable_prefix_caching` 直接按配置传入，不强制开启，也不增加请求盐值。
+权重更新后的缓存清理由原生 rollout 生命周期执行。图模式使用
+`additional_config.rl_config.sleep_mode_extra_cleanup=False`。
+
 脚本通过 `additional_config.enable_flashcomm1` 和 `weight_nz_mode` 显式设置
 FlashComm1 与权重格式，默认分别为开启和 `0`。兼容读取旧的
 `VLLM_ASCEND_ENABLE_FLASHCOMM`、`VLLM_ASCEND_ENABLE_NZ` 启动参数；main

@@ -86,7 +86,6 @@ def _server(cls, *, custom=None, routes=None, aborted=False):
     server._disaggregation_role = "null"
     server._submission_paused = False
     server._admitting = 0
-    server._routing_cache_policy = SimpleNamespace(prepare_prompt=lambda prompt: None)
     server.requests = []
 
     async def add_request(request_id, prompt, sampling_params, **kwargs):
