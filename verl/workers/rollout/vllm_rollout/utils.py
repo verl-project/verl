@@ -264,7 +264,7 @@ class vLLMColocateWorkerExtension:
         """Check worker capabilities without starting a transfer or touching weights."""
         import inspect
 
-        if mode not in ("npu_ipc", "hccl"):
+        if mode not in ("npu_ipc", "hccl", "reload"):
             raise ValueError(f"Unsupported Ascend weight update mode: {mode!r}")
         if get_device_name() != "npu":
             raise ValueError(f"Weight update mode {mode!r} requires Ascend NPU workers")
@@ -276,7 +276,7 @@ class vLLMColocateWorkerExtension:
             raise ValueError("Ascend native updates currently support unquantized full weights only")
         if is_quantized_model(self.model_runner.vllm_config) or self._use_mtp_drafter_weight_sync():
             raise ValueError("Ascend native updates do not support quantized weights or a separate MTP drafter")
-        if mode in ("npu_ipc",):
+        if mode in ("npu_ipc", "reload"):
             from vllm_ascend.distributed.weight_transfer.packed_tensor import packed_npu_ipc_consumer
 
             if not callable(packed_npu_ipc_consumer):
@@ -293,15 +293,28 @@ class vLLMColocateWorkerExtension:
                 )
             except (TypeError, ValueError) as exc:
                 raise RuntimeError("Incompatible packed NPU IPC consumer; check the pinned version") from exc
-        transfer = getattr(self.model_runner.vllm_config, "weight_transfer_config", None)
-        if getattr(transfer, "backend", None) != mode:
-            raise ValueError(f"Receiver weight_transfer_config.backend must match {mode!r}")
-        calls = {
-            "init_weight_transfer_engine": {"init_info": {}},
-            "start_weight_update": {},
-            "update_weights": {"update_info": {}},
-            "finish_weight_update": {},
-        }
+        if mode == "reload":
+            from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+            from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import npu_generate_uuid
+
+            if not callable(rebuild_npu_tensor) or not callable(npu_generate_uuid):
+                raise RuntimeError("Installed Ascend runtime lacks reload IPC support; check the pinned version")
+            device = getattr(self, "device", None)
+            if device is None or device.index is None:
+                raise ValueError("Reload requires an initialized worker NPU device index")
+            # Resolve the receiver identity before its trainer starts sending.
+            npu_generate_uuid(device.index)
+            calls = {"reload_weights": {"weights_iterator": iter(()), "is_checkpoint_format": True}}
+        else:
+            transfer = getattr(self.model_runner.vllm_config, "weight_transfer_config", None)
+            if getattr(transfer, "backend", None) != mode:
+                raise ValueError(f"Receiver weight_transfer_config.backend must match {mode!r}")
+            calls = {
+                "init_weight_transfer_engine": {"init_info": {}},
+                "start_weight_update": {},
+                "update_weights": {"update_info": {}},
+                "finish_weight_update": {},
+            }
         for name, arguments in calls.items():
             method = getattr(self, name, None)
             if not callable(method):
@@ -318,6 +331,17 @@ class vLLMColocateWorkerExtension:
 
         try:
             receive_ascend_native_weights(self, self._get_zmq_handle())
+        except BaseException:
+            self._ascend_weight_update_failed = True
+            raise
+
+    def update_weights_from_ascend_reload(self, peft_config=None, base_sync_done=False, use_shm=False):
+        """Reload one complete checkpoint-format stream through the native API."""
+        self.validate_ascend_weight_update("reload", peft_config, use_shm)
+        from verl.workers.rollout.vllm_rollout.ascend_weight_transfer import receive_ascend_reload_weights
+
+        try:
+            receive_ascend_reload_weights(self, self._get_zmq_handle())
         except BaseException:
             self._ascend_weight_update_failed = True
             raise

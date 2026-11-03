@@ -48,7 +48,7 @@ def _check_preflight_errors(error):
 
 def validate_ascend_sender(adapter, mode, peft_config=None):
     """Validate the selected backend without allocating buffers or starting RPCs."""
-    if mode not in ("npu_ipc", "hccl"):
+    if mode not in ("npu_ipc", "hccl", "reload"):
         raise ValueError(f"Unsupported Ascend weight update mode: {mode!r}")
     if get_device_name() != "npu":
         raise ValueError(f"Weight update mode {mode!r} requires Ascend NPU workers")
@@ -58,7 +58,9 @@ def validate_ascend_sender(adapter, mode, peft_config=None):
         raise ValueError("Weight update bucket size must be positive")
     if mode == "hccl":
         import torch.distributed as dist
-        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerWeightTransferEngine
+        from vllm_ascend.distributed.weight_transfer.hccl_engine import (
+            HCCLTrainerWeightTransferEngine,
+        )
 
         for method in ("trainer_init", "send_weights", "shutdown"):
             if not callable(getattr(HCCLTrainerWeightTransferEngine, method, None)):
@@ -69,16 +71,18 @@ def validate_ascend_sender(adapter, mode, peft_config=None):
             tp <= 0
             or world != int(os.environ["RAY_LOCAL_WORLD_SIZE"])
             or world % tp
-            or (world // tp < 2)
-            or (adapter.config.data_parallel_size != 1)
-            or (adapter.config.pipeline_model_parallel_size != 1)
-            or (adapter._pd_role is not None)
+            or world // tp < 2
+            or adapter.config.data_parallel_size != 1
+            or adapter.config.pipeline_model_parallel_size != 1
+            or adapter._pd_role is not None
         ):
             raise ValueError("Native HCCL colocated mode requires one node, at least two TP replicas, DP=PP=1")
     else:
         if adapter.use_shm:
             raise ValueError("Ascend IPC/reload requires colocated NPU IPC, not shared memory")
-        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import npu_generate_uuid
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+            npu_generate_uuid,
+        )
 
         if not callable(npu_generate_uuid):
             raise RuntimeError("Installed vLLM-Ascend does not provide NPU IPC UUID support")
@@ -123,12 +127,13 @@ async def update_ascend_weights(adapter, weights, *, mode, **kwargs):
         if sender is not None:
             sender.close()
         raise
+
     future = None
     try:
         if mode == "hccl":
             await send_ascend_hccl_weights(adapter, weights)
         else:
-            method = "update_weights_from_ascend_ipc"
+            method = "update_weights_from_ascend_reload" if mode == "reload" else "update_weights_from_ascend_ipc"
             future = await adapter._execute_method(
                 method, non_block=True, kwargs={**kwargs, "use_shm": adapter.use_shm}
             )
@@ -142,6 +147,8 @@ async def update_ascend_weights(adapter, weights, *, mode, **kwargs):
             import ray
 
             try:
+                # Best effort: cancelling Ray cannot interrupt a running native
+                # collective. The IPC abort/timeout and job supervisor handle it.
                 ray.cancel(future, force=False)
             except Exception:
                 logger.warning("Could not cancel failed Ascend receiver RPC", exc_info=True)
@@ -342,6 +349,77 @@ def receive_ascend_native_weights(worker, zmq_handle):
         # instead of finalizing a partial parameter set.
         raise
     finally:
+        socket.close(linger=0)
+
+
+def receive_ascend_reload_weights(worker, zmq_handle):
+    """Feed a whole stream to native reload_weights, finalizing exactly once.
+
+    The official packed consumer returns independent NPU storage so delayed
+    model loaders never retain views into the producer's reusable IPC bucket.
+    """
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import npu_generate_uuid
+    from vllm_ascend.distributed.weight_transfer.packed_tensor import packed_npu_ipc_consumer
+
+    # Resolve dependencies/device identity before creating the socket. The
+    # worker preflight checks these before any trainer starts its send loop.
+    device_index = worker.device.index
+    uuid = npu_generate_uuid(device_index)
+    socket = zmq.Context.instance().socket(zmq.REP)
+    pending = False
+    complete = False
+    count = 0
+
+    def weights_iterator():
+        nonlocal pending, complete, count
+        while True:
+            message = socket.recv_pyobj()
+            pending = True
+            if message.get("abort"):
+                raise RuntimeError(f"Trainer aborted weight update: {message.get('error')}")
+            info = message["update_info"]
+            weights = []
+            if info["names"]:
+                weights = packed_npu_ipc_consumer(
+                    ipc_handle=info["ipc_handles"],
+                    physical_npu_id=uuid,
+                    names=info["names"],
+                    shapes=info["shapes"],
+                    dtype_names=info["dtype_names"],
+                    tensor_sizes=info["tensor_sizes"],
+                    device_index=device_index,
+                )
+            count += len(weights)
+            yield from weights
+            del weights
+            get_torch_device().synchronize()
+            if message["is_last"]:
+                complete = True
+                return
+            socket.send_pyobj({"ok": True})
+            pending = False
+
+    iterator = weights_iterator()
+    try:
+        socket.setsockopt(zmq.RCVTIMEO, 300_000)
+        socket.setsockopt(zmq.SNDTIMEO, 300_000)
+        socket.connect(zmq_handle)
+        worker.reload_weights(weights_iterator=iterator, is_checkpoint_format=True)
+        if not complete:
+            raise RuntimeError("Native reload returned before consuming the entire stream")
+        get_torch_device().synchronize()
+        socket.send_pyobj({"ok": True})
+        pending = False
+        logger.info("Ascend native reload completed: tensors=%d", count)
+    except BaseException as exc:
+        if pending:
+            try:
+                socket.send_pyobj({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            except zmq.ZMQError:
+                pass
+        raise
+    finally:
+        iterator.close()
         socket.close(linger=0)
 
 

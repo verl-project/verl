@@ -62,6 +62,8 @@ def _config(backend=None, mode=None):
         ("custom_backend", None, None),
         ("npu_ipc", None, "npu_ipc"),
         ("hccl", None, "hccl"),
+        (None, "reload", "reload"),
+        ("npu_ipc", "reload", "reload"),
     ],
 )
 def test_mode_selection(backend, mode, expected):
@@ -71,6 +73,14 @@ def test_mode_selection(backend, mode, expected):
 @pytest.mark.parametrize("config", [{}, {"engine_kwargs": {}}, {"engine_kwargs": {"vllm": None}}])
 def test_missing_optional_config_preserves_legacy(config):
     assert resolve_weight_update_mode(config) is None
+
+
+def test_selector_accepts_mapping_and_config_objects():
+    config = {
+        "engine_kwargs": {"vllm": {"weight_transfer_config": SimpleNamespace(backend="npu_ipc")}},
+        "custom": {"ascend_weight_update_mode": "reload"},
+    }
+    assert resolve_weight_update_mode(config) == "reload"
 
 
 def _load_update_method(events, allow_native=False):
@@ -173,7 +183,19 @@ def test_legacy_cuda_dispatch_contract(backend, use_shm, has_server):
     assert events == expected
 
 
-@pytest.mark.parametrize("backend, mode", [("hccl", None), ("npu_ipc", None)])
+@pytest.mark.parametrize(
+    "backend, mode",
+    [("hccl", "reload"), ("nccl", "reload"), ("ipc", "reload"), (None, "typo"), (None, ""), (None, False)],
+)
+def test_invalid_mode_fails_before_rpc(backend, mode):
+    events = []
+    adapter = _adapter(events, _config(backend, mode))
+    with pytest.raises(ValueError):
+        asyncio.run(_load_update_method(events)(adapter, iter([])))
+    assert events == []
+
+
+@pytest.mark.parametrize("backend, mode", [("hccl", None), ("npu_ipc", None), (None, "reload")])
 def test_native_mode_cannot_be_ignored_by_delta_flush(backend, mode):
     events = []
     adapter = _adapter(events, _config(backend, mode))
@@ -189,7 +211,10 @@ def test_default_delta_flush_retains_existing_dispatch():
     assert events == [("delta", [("weight", 7)], {"global_steps": 5})]
 
 
-@pytest.mark.parametrize("backend, mode, expected", [("hccl", None, "hccl"), ("npu_ipc", None, "npu_ipc")])
+@pytest.mark.parametrize(
+    "backend, mode, expected",
+    [("hccl", None, "hccl"), ("npu_ipc", None, "npu_ipc"), (None, "reload", "reload")],
+)
 def test_native_dispatch_preserves_kwargs_and_common_tail(backend, mode, expected):
     events = []
     adapter = _adapter(events, _config(backend, mode))

@@ -113,7 +113,7 @@ def worker_preflight():
     return Worker(), namespace
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc", "hccl"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "hccl", "reload"])
 def test_cuda_rejected_before_importing_ascend(worker_preflight, monkeypatch, mode):
     worker, namespace = worker_preflight
     namespace["get_device_name"] = lambda: "cuda"
@@ -128,7 +128,7 @@ def test_cuda_rejected_before_importing_ascend(worker_preflight, monkeypatch, mo
         worker.validate(mode)
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc", "hccl"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "hccl", "reload"])
 def test_valid_worker_preflight_does_not_call_loading_methods(worker_preflight, native_dependencies, mode):
     worker, _ = worker_preflight
     worker.model_runner.vllm_config.weight_transfer_config.backend = mode
@@ -143,7 +143,7 @@ def test_receiver_backend_must_match_selected_mode(worker_preflight, native_depe
         worker.validate(mode)
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "reload"])
 def test_shared_memory_is_rejected_for_native_ipc(worker_preflight, mode):
     worker, _ = worker_preflight
     with pytest.raises(ValueError, match="shared memory"):
@@ -172,7 +172,14 @@ def test_worker_rejects_unsupported_model_state(worker_preflight, case):
 
 
 @pytest.mark.parametrize(
-    "method", ["init_weight_transfer_engine", "start_weight_update", "update_weights", "finish_weight_update"]
+    "method",
+    [
+        "init_weight_transfer_engine",
+        "start_weight_update",
+        "update_weights",
+        "finish_weight_update",
+        "reload_weights",
+    ],
 )
 @pytest.mark.parametrize("failure", ["missing", "signature"])
 def test_worker_method_capabilities_are_validated(worker_preflight, native_dependencies, method, failure):
@@ -182,7 +189,7 @@ def test_worker_method_capabilities_are_validated(worker_preflight, native_depen
         worker.validate("reload" if method == "reload_weights" else "npu_ipc")
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "reload"])
 @pytest.mark.parametrize("failure", ["missing", "signature"])
 def test_official_packed_consumer_capability_is_checked(worker_preflight, native_dependencies, mode, failure):
     worker, _ = worker_preflight
@@ -191,6 +198,47 @@ def test_official_packed_consumer_capability_is_checked(worker_preflight, native
     module.packed_npu_ipc_consumer = None if failure == "missing" else lambda incompatible: None
     with pytest.raises(RuntimeError, match="packed|IPC"):
         worker.validate(mode)
+
+
+def test_reload_uuid_dependency_must_be_callable(worker_preflight, native_dependencies):
+    worker, _ = worker_preflight
+    module = native_dependencies["vllm_ascend.distributed.weight_transfer.npu_ipc_engine"]
+    module.npu_generate_uuid = None
+    with pytest.raises(RuntimeError, match="IPC|UUID|uuid"):
+        worker.validate("reload")
+
+
+@pytest.mark.parametrize("device", [None, SimpleNamespace(type="npu", index=None)])
+def test_reload_requires_initialized_device_before_resolving_uuid(worker_preflight, native_dependencies, device):
+    worker, _ = worker_preflight
+    worker.device = device
+
+    def unexpected_uuid(*args):
+        raise AssertionError("UUID resolution must follow device validation")
+
+    native_dependencies["vllm_ascend.distributed.weight_transfer.npu_ipc_engine"].npu_generate_uuid = unexpected_uuid
+    with pytest.raises(ValueError, match="initialized worker NPU device index"):
+        worker.validate("reload")
+
+
+@pytest.mark.parametrize("uuid_fails", [False, True])
+def test_reload_resolves_device_identity_during_preflight(worker_preflight, native_dependencies, uuid_fails):
+    worker, _ = worker_preflight
+    calls = []
+
+    def uuid(*args):
+        calls.append(args)
+        if uuid_fails:
+            raise RuntimeError("device identity unavailable")
+        return "npu-0"
+
+    native_dependencies["vllm_ascend.distributed.weight_transfer.npu_ipc_engine"].npu_generate_uuid = uuid
+    if uuid_fails:
+        with pytest.raises(RuntimeError, match="device identity unavailable"):
+            worker.validate("reload")
+    else:
+        worker.validate("reload")
+    assert len(calls) == 1
 
 
 @pytest.fixture
@@ -356,7 +404,7 @@ def test_task_cancellation_marks_invalid_cancels_receiver_and_closes_sender(coor
     assert coordinator.events[-1] == "close"
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "reload"])
 def test_success_prepares_before_rpc_then_awaits_receiver(coordinator, mode):
     _run_update(coordinator, mode)
     method = "update_weights_from_ascend_reload" if mode == "reload" else "update_weights_from_ascend_ipc"

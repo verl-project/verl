@@ -33,4 +33,12 @@ def resolve_weight_update_mode(config) -> str | None:
     vllm_config = _config_value(_config_value(config, "engine_kwargs"), "vllm")
     transfer_config = _config_value(vllm_config, "weight_transfer_config")
     backend = _config_value(transfer_config, "backend")
+    ascend_mode = _config_value(_config_value(config, "custom"), "ascend_weight_update_mode")
+
+    if ascend_mode not in (None, "reload"):
+        raise ValueError("ascend_weight_update_mode must be unset or 'reload'")
+    if ascend_mode == "reload":
+        if backend not in (None, "npu_ipc"):
+            raise ValueError("Ascend reload requires an unset backend or 'npu_ipc'; other backends cannot be combined")
+        return "reload"
     return backend if backend in ("npu_ipc", "hccl") else None

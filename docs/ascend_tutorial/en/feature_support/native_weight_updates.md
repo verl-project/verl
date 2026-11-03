@@ -95,3 +95,33 @@ stream succeeds. Producer tensors are copied before advancing a potentially
 reusing exporter. A single oversized tensor can exceed the batch limit.
 Cancellation queues cleanup after the outstanding transport call; it cannot
 interrupt a stuck HCCL collective. Persistent groups are reused between rounds.
+
+## Whole-stream reload
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      ascend_weight_update_mode: reload
+    engine_kwargs:
+      vllm:
+        additional_config:
+          weight_nz_mode: 0
+```
+
+Leave `weight_transfer_config.backend` unset, or set it to `npu_ipc`. Combining
+reload with HCCL/NCCL/other backends is rejected. Reload is a loading API, not a
+third wire transport: this adapter uses packed NPU IPC to feed one iterator to
+`worker.reload_weights(weights_iterator=..., is_checkpoint_format=True)`.
+The official consumer copies each bucket before the producer reuses it. The
+last ACK is withheld until reload has consumed the entire iterator and finished
+postprocessing. An early return or iterator failure is not successful loading.
+
+In an additional downstream control, the same trained W1 and four image
+questions were evaluated in the same TP4 engine, twice through each loading
+path. Scheduling was paused using public APIs until all four prompts were
+enqueued. Runtime parameters, all 2436 generated token IDs per repetition and
+their log probabilities matched exactly (maximum absolute log-probability
+difference 0); all four means were 0.675. An earlier uncontrolled-scheduling
+repeatability failure remains unresolved. This scoped result is not a broad
+accuracy or multi-step convergence claim.
