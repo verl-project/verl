@@ -25,7 +25,8 @@ peft_utils = pytest.importorskip("megatron.bridge.peft.utils")
 @pytest.mark.parametrize("min_lr", [None, 0.001])
 def test_lora_plus_without_bridge_helper_preserves_native_groups(monkeypatch, min_lr):
     from megatron.bridge.peft import lora
-    from megatron.core.optimizer import OptimizerConfig, ParamKey
+    from megatron.bridge.peft.lora_layers import LinearAdapter
+    from megatron.core.optimizer import OptimizerConfig, _get_param_groups
 
     from verl.utils.megatron import optimizer as opt
 
@@ -33,15 +34,28 @@ def test_lora_plus_without_bridge_helper_preserves_native_groups(monkeypatch, mi
     monkeypatch.setattr(opt, "get_megatron_optimizer_native", lambda **kwargs: kwargs)
     monkeypatch.setattr(opt, "print_rank_0", lambda msg: None)
     config = OptimizerConfig(lr=0.01, min_lr=min_lr)
-    assert "config_overrides" not in opt.get_megatron_optimizer([], config)
+    model = torch.nn.Module()
+    model.proj = lora.LoRA(dim=2, target_modules=["proj"]).transform(torch.nn.Linear(4, 4), name="proj")
+    model.offset = torch.nn.Parameter(torch.zeros(1))
+    adapter = next(module for module in model.proj.modules() if isinstance(module, LinearAdapter))
+    assert "config_overrides" not in opt.get_megatron_optimizer([model], config)
 
-    overrides = opt.get_megatron_optimizer([], config, lora_plus_ratio=4.0)["config_overrides"]
-    for linear, factor in (("linear_in", 1), ("linear_out", 4)):
-        assert overrides[ParamKey(name=f"*.{linear}.weight")] == {
-            "max_lr": 0.01 * factor,
-            "min_lr": (min_lr or 0) * factor,
-        }
-    assert any(override.get("wd_mult") == 0 for override in overrides.values())
+    kwargs = opt.get_megatron_optimizer([model], config, lora_plus_ratio=4.0)
+    # MCore aligns optimizer groups across ranks even for a CPU-only model.
+    created_group = not torch.distributed.is_initialized()
+    if created_group:
+        torch.distributed.init_process_group("gloo", store=torch.distributed.HashStore(), rank=0, world_size=1)
+    try:
+        groups = _get_param_groups(**kwargs)
+    finally:
+        if created_group:
+            torch.distributed.destroy_process_group()
+
+    by_param = {id(param): group for group in groups for param in group["params"]}
+    for linear, factor in ((adapter.linear_in, 1), (adapter.linear_out, 4)):
+        assert by_param[id(linear.weight)]["max_lr"] == config.lr * factor
+        assert by_param[id(linear.weight)]["min_lr"] == (min_lr or 0) * factor
+    assert by_param[id(model.offset)]["wd_mult"] == 0
 
 
 @pytest.mark.parametrize(
