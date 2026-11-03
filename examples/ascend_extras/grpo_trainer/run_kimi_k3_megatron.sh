@@ -357,6 +357,7 @@ for role in actor ref; do
 done
 
 ROLLOUT=(
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.rl_config.enabled=True
     actor_rollout_ref.rollout.name=vllm
     "actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP"
     "actor_rollout_ref.rollout.data_parallel_size=$ROLLOUT_DP"
@@ -370,7 +371,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enable_prefix_caching=False
     "actor_rollout_ref.rollout.enforce_eager=$ROLLOUT_ENFORCE_EAGER"
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-    '+actor_rollout_ref.rollout.custom={sampling_defaults:{stop:"<|close|> response <|sep|>"}}'
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU"
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
@@ -379,7 +379,7 @@ ROLLOUT=(
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="$ROLLOUT_CUDAGRAPH_MODE"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="$ROLLOUT_CUDAGRAPH_CAPTURE_SIZES"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.max_cudagraph_capture_size=$ROLLOUT_MAX_CUDAGRAPH_CAPTURE_SIZE"
-    "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_sleep_mode_extra_cleanup=$ROLLOUT_SLEEP_EXTRA_CLEANUP"
+    "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.rl_config.sleep_mode_extra_cleanup=$ROLLOUT_SLEEP_EXTRA_CLEANUP"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.kimi_training_causal_conv1d=$KIMI_VLLM_USE_TRAINING_CAUSAL_CONV1D"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.kimi_kda_oproj_fp32_reduce=$KIMI_KDA_OPROJ_FP32_REDUCE"
 )

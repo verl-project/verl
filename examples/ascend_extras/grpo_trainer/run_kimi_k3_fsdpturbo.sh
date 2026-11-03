@@ -195,6 +195,7 @@ ACTOR_CONFIG=(
 )
 
 ROLLOUT_CONFIG=(
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.rl_config.enabled=True
     # Ascend main reads these from additional_config, not the legacy env vars.
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_flashcomm1=${VLLM_ASCEND_ENABLE_FLASHCOMM:-1}"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_mc2_hierarchy_comm=${mc2_hierarchy_comm}"
@@ -210,7 +211,6 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-    '+actor_rollout_ref.rollout.custom={sampling_defaults:{stop:"<|close|> response <|sep|>"}}'
     "actor_rollout_ref.rollout.max_model_len=${rollout_max_model_len}"
     "actor_rollout_ref.rollout.max_num_seqs=${rollout_max_num_seqs}"
     "actor_rollout_ref.rollout.n=${rollout_n}"

@@ -26,7 +26,9 @@
 R3 使用原生 `enable_return_routed_experts` 返回路由 IDs，
 `RoutedExpertsManager` 按物理 KV block slot 存储路由。
 `rollout.enable_prefix_caching` 直接按配置传入，不强制开启，也不增加请求盐值。
-权重更新后的缓存清理由原生 rollout 生命周期执行。图模式使用
+两个 Kimi 启动脚本均启用 `additional_config.rl_config.enabled=True`，
+由 vLLM-Ascend 原生 RL 配置清理与 CaMem 冲突的 expandable segments，并禁用 NZ。
+权重更新后的缓存清理由原生 rollout 生命周期执行；图模式使用
 `additional_config.rl_config.sleep_mode_extra_cleanup=False`。
 
 脚本通过 `additional_config.enable_flashcomm1` 和 `weight_nz_mode` 显式设置
@@ -110,11 +112,10 @@ Kimi 启动脚本通过已有 `model.external_lib` 加载
 
 ### Rollout 输入与采集
 
-rollout 使用标准 vLLM server，图像保持 PIL 输入。配套 vLLM-Ascend 的 Kimi
+rollout 使用主线 vLLM server，图像保持 PIL 输入。配套 vLLM-Ascend 的 Kimi
 processor 通过原生 prompt-update 接口接受 HF processor 产生的媒体块。
-脚本在 `rollout.custom.sampling_defaults.stop` 配置响应结束字符串，请求参数优先于这些
-默认值；EOS 由 vLLM 从 tokenizer 和 HF generation config 读取，`ignore_eos` 只控制
-EOS，显式配置的字符串 stop 仍然生效。原生 rollout processor 对已展开的媒体块保持
+EOS 由 vLLM 从 tokenizer 和 HF generation config 读取，`ignore_eos` 控制 EOS。
+原生 rollout processor 对已展开的媒体块保持
 token 数量和顺序，避免二次展开；自然输入也按相同图像预处理规则产生占位序列。
 
 ### 权重导出和同步
