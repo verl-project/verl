@@ -32,26 +32,27 @@
 name: e2e_ppo_trainer_megatron_vllm_ascend
 
 on:
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      # Entrypoints and fixtures used by the job below.
-      - ".github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml"
-      - "examples/data_preprocess/geo3k.py"
-      - "examples/grpo_trainer/run_qwen3_5_35b_megatron.sh"
-      - "tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh"
-      - "verl/trainer/main_ppo.py"
-      - "verl/trainer/config/ppo_megatron_trainer.yaml"
-      - "verl/trainer/ppo/**"
-      - "verl/workers/engine_workers.py"
-      - "verl/workers/engine/**"
-      - "verl/workers/rollout/**"
-      - "verl/utils/megatron_utils.py"
-      - "pyproject.toml"
-      - "requirements-npu.txt"
-      - "setup.py"
+  # Temporarily paused for the coverage-only run; uncomment these events to restore normal CI.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     # Entrypoints and fixtures used by the job below.
+  #     - ".github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml"
+  #     - "examples/data_preprocess/geo3k.py"
+  #     - "examples/grpo_trainer/run_qwen3_5_35b_megatron.sh"
+  #     - "tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh"
+  #     - "verl/trainer/main_ppo.py"
+  #     - "verl/trainer/config/ppo_megatron_trainer.yaml"
+  #     - "verl/trainer/ppo/**"
+  #     - "verl/workers/engine_workers.py"
+  #     - "verl/workers/engine/**"
+  #     - "verl/workers/rollout/**"
+  #     - "verl/utils/megatron_utils.py"
+  #     - "pyproject.toml"
+  #     - "requirements-npu.txt"
+  #     - "setup.py"
   workflow_call:
     inputs:
       coverage_mode:

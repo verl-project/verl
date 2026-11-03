@@ -33,15 +33,16 @@
 name: reward_model_vllm_ascend
 
 on:
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "verl/**/*.py"
-      # Entrypoints
-      - ".github/workflows/reward_model_vllm_ascend.yml"
-      - "tests/experimental/reward_loop/**"
+  # Temporarily paused for the coverage-only run; uncomment these events to restore normal CI.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "verl/**/*.py"
+  #     # Entrypoints
+  #     - ".github/workflows/reward_model_vllm_ascend.yml"
+  #     - "tests/experimental/reward_loop/**"
   workflow_call:
     inputs:
       coverage_mode:

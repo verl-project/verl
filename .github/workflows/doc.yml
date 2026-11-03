@@ -39,14 +39,15 @@ on:
     branches:
       - main
       - v0.*
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      - "docs/**"
-      - .github/workflows/doc.yml
+  # Temporarily disabled: restore this PR trigger to re-enable PR runs.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "**/*.py"
+  #     - "docs/**"
+  #     - .github/workflows/doc.yml
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

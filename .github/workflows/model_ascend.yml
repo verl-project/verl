@@ -33,17 +33,18 @@
 name: model_ascend
 
 on:
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "verl/**/*.py"
-      # Entrypoints
-      - ".github/workflows/model_ascend.yml"
-      - "tests/special_distributed/*.py"
-      - "tests/models/**"
-      - "tests/special_distributed/run_all.sh"
+  # Temporarily paused for the coverage-only run; uncomment these events to restore normal CI.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "verl/**/*.py"
+  #     # Entrypoints
+  #     - ".github/workflows/model_ascend.yml"
+  #     - "tests/special_distributed/*.py"
+  #     - "tests/models/**"
+  #     - "tests/special_distributed/run_all.sh"
   workflow_call:
     inputs:
       coverage_mode:
