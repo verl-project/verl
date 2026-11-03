@@ -203,6 +203,10 @@ class PPOTrainerDecoupledAsync(StandaloneRolloutMixin, PPOTrainer):
         self._start_prompt_dispatcher()
         self._add_async_warmup_batches(self.mode_config.num_warmup_batches)
 
+    def on_sample_end(self):
+        # Other modes pause or sleep rollout here; in this mode rollout keeps generating.
+        return
+
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             self._pending_sync_metrics = self._publish_weights()
