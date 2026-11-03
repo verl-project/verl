@@ -80,6 +80,7 @@ async def _run():
     from verl.checkpoint_engine.transport import RayWeightRegistry
     from verl.checkpoint_engine.transport.publisher import WeightPublisher
     from verl.checkpoint_engine.transport.update_agent import WeightUpdateAgent
+    from verl.utils.tokenizer import normalize_token_ids
     from verl.workers.rollout.replica import get_rollout_replica_class
 
     actor_rollout_ref = _rollout_config()
@@ -90,7 +91,7 @@ async def _run():
     server = replica.servers[0]
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    prompt_ids = list(
+    prompt_ids = normalize_token_ids(
         tokenizer.apply_chat_template(
             [{"role": "user", "content": "Name three primary colors."}], add_generation_prompt=True, tokenize=True
         )
