@@ -212,7 +212,18 @@ RUN pip install --no-cache-dir \
 # --no-deps to avoid pulling CUDA wheels or overriding the Primus torch/vLLM
 # stack. Re-validate SGLANG_TAG when bumping PRIMUS_TAG or VLLM_TAG.
 # Primus v26.8 torch headers require C++20. This SGLang commit still passes
-# -std=c++17 to hipcc, so that flag is rewritten only for v26.8.
+# -std=c++17 to hipcc, so sglang-rocm-cpp20.patch is applied only for v26.8.
+# Apply that patch after sglang-rocm-image-build.patch; its context includes
+# the fat-binary --offload-arch lines.
+#
+# git apply, against SGLANG_TAG. Upstream status when this image was updated:
+# - fused_add_rms_norm: still broken on main. The non-AITER path calls vLLM's
+#   4-arg in-place op with 6 arguments. Same bug as the closed, unmerged
+#   sglang#32034. sglang#46915 is open against amd_march, not main.
+#   sglang-fused-add-rms-norm-upstream-main.patch is that fix for current main.
+# - qwen3_asr exist_ok: already on main (0e90a6a2ab). This pin is older.
+# - rocm image build: local fat gfx942+gfx950 wheel and optional grpc skip.
+#   Upstream still builds one arch with --amdgpu-target.
 #
 # Usage in launch scripts:
 #   rollout_name="sglang"
@@ -222,24 +233,21 @@ ENV SGLANG_ATTENTION_BACKEND=triton
 ARG SGLANG_REPO=https://github.com/sgl-project/sglang.git
 # Pinned commit validated on rocm/primus + vLLM ROCm (see Dockerfile.rocm).
 ARG SGLANG_TAG=0801cc05ed202544e2e5c67d6b0a1d454de54fca
+COPY docker/rocm/patches/sglang-fused-add-rms-norm-vllm-signature.patch \
+     docker/rocm/patches/sglang-qwen3-asr-register-exist-ok.patch \
+     docker/rocm/patches/sglang-rocm-image-build.patch \
+     docker/rocm/patches/sglang-rocm-cpp20.patch \
+     /tmp/sglang-patches/
 RUN git clone ${SGLANG_REPO} /workspace/sglang \
     && cd /workspace/sglang \
     && git fetch --depth 1 origin ${SGLANG_TAG} \
     && git checkout ${SGLANG_TAG} \
-    # [Bugfix][ROCm] fused_add_rms_norm 6-arg crash on non-AITER path
-    # Ref: https://github.com/sgl-project/sglang/pull/32034
-    && sed -zi 's/            out = torch.empty_like(x)\n            residual_out = torch.empty_like(x)\n            if post_residual_addition is not None:\n                residual = residual + post_residual_addition\n            fused_add_rms_norm(\n                out, x, residual_out, residual, self.weight.data, self.variance_epsilon\n            )\n            return out, residual_out/            if post_residual_addition is not None:\n                residual = residual + post_residual_addition\n            residual = residual.contiguous()\n            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)\n            return x, residual/' \
-      python/sglang/srt/layers/layernorm.py \
-    && sed -zi 's/                out = torch.empty_like(x)\n                residual_out = torch.empty_like(x)\n                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                fused_add_rms_norm(\n                    out, x, residual_out, residual, w, self.variance_epsilon\n                )\n                return out, residual_out/                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                residual = residual.contiguous()\n                fused_add_rms_norm(x, residual, w, self.variance_epsilon)\n                return x, residual/' \
-      python/sglang/srt/layers/layernorm.py \
-    # transformers>=5.12 already registers qwen3_asr; SGLang must not fail on re-register
-    # Ref: sglang 0e90a6a2ab fix(config): keep Qwen3 ASR registration idempotent
-    && sed -i 's/AutoConfig.register("qwen3_asr", Qwen3ASRConfig)/AutoConfig.register("qwen3_asr", Qwen3ASRConfig, exist_ok=True)/' \
-      python/sglang/srt/configs/qwen3_asr.py \
-    && sed -i 's/AutoConfig.register("qwen3_asr_thinker", Qwen3ASRThinkerConfig)/AutoConfig.register("qwen3_asr_thinker", Qwen3ASRThinkerConfig, exist_ok=True)/' \
-      python/sglang/srt/configs/qwen3_asr.py \
-    # grpc rust extension is optional for verl rollout server mode
-    && sed -i 's|^\[\[tool.setuptools-rust.ext-modules\]\]|# [[tool.setuptools-rust.ext-modules]]|; s|^target = "sglang.srt.grpc._core"|# target = "sglang.srt.grpc._core"|; s|^path = "../rust/sglang-grpc/Cargo.toml"|# path = "../rust/sglang-grpc/Cargo.toml"|; s|^binding = "PyO3"|# binding = "PyO3"|' python/pyproject.toml \
+    && git apply /tmp/sglang-patches/sglang-fused-add-rms-norm-vllm-signature.patch \
+    && git apply /tmp/sglang-patches/sglang-qwen3-asr-register-exist-ok.patch \
+    && git apply /tmp/sglang-patches/sglang-rocm-image-build.patch \
+    && if [ "$PRIMUS_TAG" = "v26.8" ]; then \
+         git apply /tmp/sglang-patches/sglang-rocm-cpp20.patch; \
+       fi \
     && pip install --no-cache-dir \
         IPython \
         soundfile==0.13.1 \
@@ -248,12 +256,6 @@ RUN git clone ${SGLANG_REPO} /workspace/sglang \
     && cd sgl-kernel \
     && cp pyproject_rocm.toml pyproject.toml \
     && rm -rf build \
-    && sed -i 's|f"--amdgpu-target={amdgpu_target}"|"--offload-arch=gfx942", "--offload-arch=gfx950"|' setup_rocm.py \
-    && sed -i '/amdgpu_target not in \["gfx942", "gfx950"\]/,/sys.exit(1)/d' setup_rocm.py \
-    && if [ "$PRIMUS_TAG" = "v26.8" ]; then \
-         sed -i 's/-std=c++17/-std=c++20/' setup_rocm.py; \
-       fi \
-    && sed -zi 's/#if HIP_FP8_TYPE_FNUZ\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#if HIP_FP8_TYPE_E4M3\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#else\n#error "fp8 is not supported in this processor (arch < gfx942)."\n#endif  \/\/ HIP_FP8_TYPE_E4M3\n#endif  \/\/ HIP_FP8_TYPE_FNUZ/#if defined(__gfx942__)\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#endif  \/\/ __gfx942__/' include/utils.h \
     && python setup_rocm.py install \
     && python3 -c "import sglang; print('sglang', sglang.__version__)"
 
