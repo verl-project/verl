@@ -767,7 +767,8 @@ def dispatch_rollout_weight_quantizer(
     The rollout engine keeps its native ``quantization_config`` unless
     ``rollout.quantization`` explicitly overrides it. Both native and override
     compressed-tensors configs use :class:`CompressedTensorsWeightQuantizer`;
-    native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`. DeepSeek-V4
+    native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`; native Ascend
+    ModelSlim MXFP8 uses :class:`verl.utils.qat.ascend.AscendMxfp8WeightQuantizer`. DeepSeek-V4
     still gets an FP8 quantizer object, but it passes through the private mixed
     FP8/FP4 layout already produced by Megatron-Bridge.
     Per-token NVFP4 routed experts use :class:`NVFP4PerTokenWeightQuantizer`; NVFP4 training
@@ -789,7 +790,9 @@ def dispatch_rollout_weight_quantizer(
         getattr(hf_config, "model_type", None),
         getattr(getattr(hf_config, "text_config", None), "model_type", None),
     }
-    if has_override:
+    if rollout_quantization == "ascend":
+        quantization_config = {"quant_method": "ascend"}
+    elif has_override:
         if model_types & _DEEPSEEK_V4_MODEL_TYPES:
             raise NotImplementedError(
                 "rollout.quantization overrides are not supported for DeepSeek-V4: the trainer exports its "
@@ -858,6 +861,11 @@ def dispatch_rollout_weight_quantizer(
             quantizer = SGLangMxfp8WeightQuantizer(quantization_config)
         else:
             quantizer = CompressedTensorsWeightQuantizer(quantization_config)
+    elif quant_method == "ascend":
+        from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+
+        qat_modes = set()
+        quantizer = AscendMxfp8WeightQuantizer.from_model_path(model_config.local_path)
     elif "fp8" in quant_method:
         qat_modes = {"fp8"}
         quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)
