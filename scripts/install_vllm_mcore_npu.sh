@@ -4,20 +4,20 @@ USE_MEGATRON=${USE_MEGATRON:-1}
 
 echo "1. install basic packages"
 pip uninstall -y triton triton-ascend
-# 安装与 vLLM-Ascend 0.23.0 对应的软件包
+# Install packages for vLLM-Ascend 0.30.0.
 pip install torchvision==0.25.0
 pip install torchaudio==2.10.0
-pip install triton-ascend==3.2.2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 pip install "transformers==5.10.4" 
 pip install setuptools-scm
 
 
 echo "2. install vllm & vllm-ascend"
-git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git
+git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
-git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git
+git clone -b releases/v0.30.0 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
 pip install -r requirements.txt

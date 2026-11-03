@@ -1,0 +1,115 @@
+name: ascend documentation doctests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/doctest_ascend.yml
+      - tests/e2e/doctests/**
+      - tests/special_sanity/test_doctest_helper.py
+      - docs/ascend_tutorial/zh/get_start/**
+      - scripts/install_*_mcore_npu.sh
+      - requirements-npu.txt
+      - tests/special_npu/quick_start/**
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Combination to install from source and verify with one GRPO step
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - fsdp2_vllm
+          - megatron_vllm
+          - fsdp2_sglang
+          - megatron_sglang
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v3
+      - name: Test documentation tooling on CPU
+        run: |
+          uv venv --python 3.12
+          uv pip install pytest
+          .venv/bin/python -m pytest -q tests/special_sanity/test_doctest_helper.py
+      - name: Read installation cases and images from the public guide
+        id: matrix
+        env:
+          SELECTED_CASE: ${{ inputs.backend || 'all' }}
+        run: |
+          matrix=$(.venv/bin/python tests/e2e/doctests/scripts/doctest_helper.py matrix --case "$SELECTED_CASE")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+  installation:
+    name: Installation (${{ matrix.case }})
+    needs: check
+    # Fork PRs use the upstream repository's workflow-approval policy, as in e2e_ascend.yml.
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-800i-8
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
+    timeout-minutes: 180
+    container:
+      image: ${{ matrix.image }}
+      options: --shm-size 16g
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      INSTALL_CASE: ${{ matrix.case }}
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # The runner's shared cache can be read-only; Datasets needs to write locks and Arrow files.
+      HF_DATASETS_CACHE: /tmp/verl-doctest/huggingface/datasets
+      TRANSFORMERS_VERBOSITY: error
+      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B
+      GSM8K_DATASET_PATH: /root/.cache/modelscope/dataset/openai/gsm8k
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check cached inputs and writable dataset cache
+        run: |
+          if [[ ! -s "${MODEL_PATH}/config.json" ]]; then
+            echo "::error::Model config missing or empty: ${MODEL_PATH}/config.json"
+            exit 1
+          fi
+          if [[ ! -d "$GSM8K_DATASET_PATH" ]]; then
+            echo "::error::GSM8K dataset directory not found: $GSM8K_DATASET_PATH"
+            exit 1
+          fi
+          if ! mkdir -p "$HF_DATASETS_CACHE" ||
+             ! cache_probe="$(mktemp "${HF_DATASETS_CACHE}/.write-test.XXXXXX")"; then
+            echo "::error::Dataset processing cache is not writable: $HF_DATASETS_CACHE"
+            exit 1
+          fi
+          rm -f "$cache_probe"
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: ""
+          auto-activate: false
+      - name: Install documented environment and run Quick Start
+        env:
+          ALLOW_INSTALL: "1"
+          NDEVICES_PER_NODE: "8"
+        run: |
+          npu-smi info
+          export INSTALL_BACKEND="${INSTALL_CASE##*_}"
+          bash tests/e2e/doctests/scripts/run_doctests.sh installation source

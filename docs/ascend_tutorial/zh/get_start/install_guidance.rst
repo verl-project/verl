@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 09/29/2026.
+Last updated: 11/03/2026.
 
 关键更新
 --------
@@ -95,10 +95,10 @@ torch_npu     ``2.10.0.post4``                        NPU PyTorch 适配插件
 torchvision   ``0.25.0``                              PyTorch 图像处理库
 torchaudio    ``2.10.0``                              PyTorch 音频处理库
 triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend ``3.6.0.post2``                         NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
 transformers  ``5.10.4``                              Hugging Face 大模型库，提供模型架构与预训练权重
-vLLM          ``0.23.0``                              高性能 LLM 推理与服务引擎
-vLLM-Ascend   ``0.23.0``                              NPU vLLM 后端适配  
+vLLM          ``0.30.0``                              高性能 LLM 推理与服务引擎
+vLLM-Ascend   ``0.30.0``                              NPU vLLM 后端适配
 Megatron-LM   ``core_r0.18.0``                        大规模分布式训练框架
 MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
 ============= ======================================= ===================

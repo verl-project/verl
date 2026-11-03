@@ -112,6 +112,9 @@ jobs:
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Run all NPU unit tests
+        env:
+          # This SM90+ CUDA test imports TileLang before its skip marker can apply.
+          PYTEST_ADDOPTS: --ignore=tests/utils/test_qat_fp4_on_gpu.py
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
           # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
