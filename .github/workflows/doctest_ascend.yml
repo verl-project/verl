@@ -75,6 +75,8 @@ jobs:
       INSTALL_CASE: ${{ matrix.case }}
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # The runner's shared cache can be read-only; Datasets needs to write locks and Arrow files.
+      HF_DATASETS_CACHE: /tmp/verl-doctest/huggingface/datasets
       TRANSFORMERS_VERBOSITY: error
       MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B
       GSM8K_DATASET_PATH: /root/.cache/modelscope/dataset/openai/gsm8k
@@ -82,7 +84,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check cached model and dataset paths
+      - name: Check cached inputs and writable dataset cache
         run: |
           if [[ ! -s "${MODEL_PATH}/config.json" ]]; then
             echo "::error::Model config missing or empty: ${MODEL_PATH}/config.json"
@@ -92,6 +94,12 @@ jobs:
             echo "::error::GSM8K dataset directory not found: $GSM8K_DATASET_PATH"
             exit 1
           fi
+          if ! mkdir -p "$HF_DATASETS_CACHE" ||
+             ! cache_probe="$(mktemp "${HF_DATASETS_CACHE}/.write-test.XXXXXX")"; then
+            echo "::error::Dataset processing cache is not writable: $HF_DATASETS_CACHE"
+            exit 1
+          fi
+          rm -f "$cache_probe"
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
