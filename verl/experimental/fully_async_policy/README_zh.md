@@ -131,7 +131,7 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
   algorithm.rollout_correction.bypass_mode 默认为 True, 直接使用rollout log prob。
 
   我们在训练过程中，观测到随着训练的进行，训练后期指标和response长度可能会出现不稳定的情况，
-  这里我们可以使用 [Rollout Importance Sampling](https://verl.readthedocs.io/en/latest/advance/rollout_is.html) 的技术进行
+  这里我们可以使用 [Rollout Importance Sampling](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html) 的技术进行
   重要性采样，缓解这一问题。为了使用 `Rollout Importance Sampling` 我们需要使用训练引擎使用当前的参数版本计算old_log_prob，此开关需要打开。
   此外，在 mode d (async stream pipeline with partial rollout) 的情况下 `algorithm.rollout_correction.bypass_mode=False`
   以及
