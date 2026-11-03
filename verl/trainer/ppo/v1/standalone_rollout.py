@@ -88,6 +88,14 @@ class StandaloneRolloutMixin:
             self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
             return result
 
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Include standalone rollout GPUs in the throughput denominator."""
+        trainer_gpus = self.resource_pool_manager.get_n_gpus()
+        rollout_gpus = (
+            self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
+        )
+        return trainer_gpus + rollout_gpus
+
     def get_llm_client(self):
         # get server client from standalone rollout
         return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)

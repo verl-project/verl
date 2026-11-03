@@ -332,14 +332,6 @@ class PPOTrainerSeparateAsync(StandaloneRolloutMixin, PPOTrainer):
                     self.switch_to_rollout(already_registered=True)
                 self._to_rollout_costs.append(prepare_seconds + time.perf_counter() - switch_start)
 
-    def _get_n_gpus_for_throughput(self) -> int:
-        """Include standalone rollout GPUs in the throughput denominator."""
-        trainer_gpus = self.resource_pool_manager.get_n_gpus()
-        rollout_gpus = (
-            self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
-        )
-        return trainer_gpus + rollout_gpus
-
     def switch_to_rollout(self, *, already_registered: bool = False):
         """Install committed weights and make Hybrid replicas available for generation."""
         if not self._enable_hybrid_replicas:
