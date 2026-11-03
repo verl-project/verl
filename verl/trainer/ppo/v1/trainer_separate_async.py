@@ -271,6 +271,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         ]
         # Each agent loops until stopped; the refs only resolve if one fails.
         self._weight_update_agent_runs = [agent.run.remote() for agent in self.weight_update_agents]
+        # A failed agent leaves its replica paused. Check while waiting for samples too, or a lone
+        # replica's failure would leave sample() waiting forever instead of failing the job.
+        self.replay_buffer.health_check_fn = self._check_weight_update_agents
+
+    def _stop_weight_update_agents(self) -> None:
+        ray.get([agent.stop.remote() for agent in self.weight_update_agents])
+        # run() returns within one poll interval, or after the update it is applying.
+        ray.get(self._weight_update_agent_runs, timeout=300)
 
     def _check_weight_update_agents(self) -> None:
         finished, _ = ray.wait(self._weight_update_agent_runs, num_returns=1, timeout=0)
@@ -304,6 +312,11 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         if self._enable_hybrid_replicas:
             self.checkpoint_manager.update_weights(self.global_steps)
+
+    def on_train_end(self):
+        super().on_train_end()
+        if self._decoupled_weight_sync:
+            self._stop_weight_update_agents()
 
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)

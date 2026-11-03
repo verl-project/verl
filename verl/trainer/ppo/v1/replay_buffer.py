@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from collections import Counter, defaultdict
+from typing import Callable
 
 import numpy as np
 import transfer_queue as tq
@@ -156,6 +157,9 @@ class ReplayBuffer:
         self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
         self.refill_fn = refill_fn
+        # Optional callable run on every poll while waiting for samples; it raises to abort the wait
+        # when whatever produces samples has failed (e.g. a rollout weight update agent).
+        self.health_check_fn: Callable[[], None] | None = None
         self.filter_groups_metric = filter_groups_metric
         self.train_batch_size = train_batch_size
         self.gen_batch_size = gen_batch_size
@@ -406,6 +410,8 @@ class ReplayBuffer:
         return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
 
     def _wait_for_next_poll(self, partition_id: str, last_debug_time: float) -> float:
+        if self.health_check_fn is not None:
+            self.health_check_fn()
         time.sleep(self.poll_interval)
         now = time.time()
         if now - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:

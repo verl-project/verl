@@ -1315,3 +1315,19 @@ def test_decoupled_weight_sync_measures_staleness_by_weight_version():
 
     rb.trainer_config = {}
     assert rb._stale_terminal_keys(global_steps=10, partition_id=pid) == set()
+
+
+def test_health_check_aborts_a_blocked_sample(tq_init, partition_id):
+    """A failing health check ends a sample() that would otherwise wait for samples forever."""
+    rb = _make_rb(trainer_mode="separate_async")
+    calls = []
+
+    def health_check():
+        calls.append(None)
+        if len(calls) >= 3:
+            raise RuntimeError("rollout replica failed")
+
+    rb.health_check_fn = health_check
+    with pytest.raises(RuntimeError, match="rollout replica failed"):
+        _sample(rb, partition_id, batch_size=1, global_steps=1)
+    assert len(calls) == 3
