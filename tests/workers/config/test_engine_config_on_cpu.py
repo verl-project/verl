@@ -44,6 +44,34 @@ class TestMcoreEngineConfig:
         config = McoreEngineConfig(**{offload_field: True})
         assert getattr(config, offload_field) is True
 
+    def test_distributed_timeout_minutes(self):
+        assert McoreEngineConfig().distributed_timeout_minutes is None
+        assert McoreEngineConfig(distributed_timeout_minutes=90).distributed_timeout_minutes == 90
+
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5])
+    def test_distributed_timeout_minutes_rejects_invalid(self, value):
+        with pytest.raises(ValueError, match="distributed_timeout_minutes"):
+            McoreEngineConfig(distributed_timeout_minutes=value)
+
+    @pytest.mark.parametrize("timeout", [None, 90])
+    def test_distributed_timeout_minutes_reaches_megatron(self, monkeypatch, timeout):
+        from verl.workers.engine.megatron import transformer_impl
+
+        calls = []
+        monkeypatch.setattr(transformer_impl.mpu, "is_initialized", lambda: False)
+        monkeypatch.setattr(transformer_impl.mpu, "initialize_model_parallel", lambda **kwargs: calls.append(kwargs))
+
+        engine = object.__new__(transformer_impl.MegatronEngine)
+        engine.engine_config = McoreEngineConfig(distributed_timeout_minutes=timeout)
+        engine._init_device_mesh()
+
+        assert len(calls) == 1
+        if timeout is None:
+            # Megatron-Core keeps its own default.
+            assert "distributed_timeout_minutes" not in calls[0]
+        else:
+            assert calls[0]["distributed_timeout_minutes"] == timeout
+
 
 class TestFSDPEngineConfigCPU:
     def test_default_values(self):

@@ -40,6 +40,10 @@ dist_checkpointing_path: null
 # Whether to use dynamic context parallel scheduling
 dynamic_context_parallel: False
 
+# Timeout in minutes for the Megatron process groups (NCCL and gloo).
+# null keeps Megatron-Core's default (30 minutes).
+distributed_timeout_minutes: null
+
 # Maximum packed sequence length per DPxCP rank. A positive integer is required
 # when dynamic_context_parallel=True.
 max_seqlen_per_dp_cp_rank: null
