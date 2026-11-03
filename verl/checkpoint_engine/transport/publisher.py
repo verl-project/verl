@@ -26,7 +26,14 @@ from verl.utils.device import get_torch_device
 from verl.workers.rollout.utils import ensure_async_iterator
 
 from .registry import BucketDesc, WeightManifest, WeightRegistry
-from .transport import TransportFactory, bucket_ranges, default_transport_factory, plan_layout, tensor_view
+from .transport import (
+    TransportFactory,
+    alloc_slot_buffer,
+    bucket_ranges,
+    default_transport_factory,
+    plan_layout,
+    tensor_view,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -100,10 +107,7 @@ class WeightPublisher:
         self.transport = self.transport_factory(self.backend, self.device)
         ranges = bucket_ranges(self.total_bytes, self.bucket_size)
         for _ in range(self.num_slots):
-            if self.device == "cpu":
-                buffer = torch.empty(self.total_bytes, dtype=torch.uint8, pin_memory=True)
-            else:
-                buffer = torch.empty(self.total_bytes, dtype=torch.uint8, device=self.device)
+            buffer = alloc_slot_buffer(self.total_bytes, self.device)
             memories = [self.transport.register_memory(buffer[offset : offset + size]) for offset, size in ranges]
             self.slots.append(_Slot(buffer=buffer, memories=memories, buckets=[]))
         # Bind after registering: some backends (nixl_native) put registrations in the url.
@@ -150,6 +154,8 @@ class WeightPublisher:
 
         slot = await self._acquire_slot()
         index = 0
+        # Copies from device tensors are asynchronous even into a host slot; fence them before announcing.
+        needs_sync = self.device != "cpu"
         async for name, tensor in ensure_async_iterator(weights):
             if index >= len(self.tensors):
                 raise ValueError(f"Unexpected weight {name}: layout has {len(self.tensors)} tensors")
@@ -158,10 +164,11 @@ class WeightPublisher:
                 raise ValueError(f"Weight {name} {tuple(tensor.shape)} {tensor.dtype} does not match layout {spec}")
             # copy_ also casts to the wire dtype.
             tensor_view(slot.buffer, spec).copy_(tensor, non_blocking=True)
+            needs_sync = needs_sync or tensor.device.type != "cpu"
             index += 1
         if index != len(self.tensors):
             raise ValueError(f"Got {index} weights, layout has {len(self.tensors)}")
-        if self.device != "cpu":
+        if needs_sync:
             get_torch_device().synchronize()
 
         slot.version = version

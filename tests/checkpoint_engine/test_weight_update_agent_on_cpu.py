@@ -159,3 +159,16 @@ def test_first_version_is_loaded_regardless_of_lag():
         assert await _run_until(agent, 0) == 0
 
     asyncio.run(main())
+
+
+def test_waiting_for_a_version_loads_it_despite_lag():
+    """Validation waits for the newest version; the agent must load it even below min_version_lag."""
+
+    async def main():
+        registry, calls = InMemoryWeightRegistry(), []
+        agent = _agent(registry, calls, min_version_lag=3)
+        agent.version = 4
+        await registry.publish(_manifest(5))
+        assert await _run_until(agent, 5) == 5
+
+    asyncio.run(main())

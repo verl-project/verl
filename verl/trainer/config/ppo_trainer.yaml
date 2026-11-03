@@ -249,7 +249,7 @@ trainer:
       # part is rounded down to a whole number of gen_batch_size chunks.
       num_warmup_batches: 1
 
-    # Asynchronous PPO trainer with separate trainer and rollout
+    # Asynchronous PPO trainer whose rollout pulls weights and claims prompts on its own
     decoupled_async:
 
       # Rollout replicas load published weight versions and claim prompts on their own; the
@@ -277,6 +277,7 @@ trainer:
       # Seconds between TransferQueue polls of the prompt dispatcher.
       dispatch_poll_interval: 0.2
 
+    # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
       # Number of warmup batches to add before training loop starts.

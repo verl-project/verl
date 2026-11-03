@@ -39,6 +39,13 @@ def default_transport_factory(backend: str, device: str):
     return new_transport(backend, device)
 
 
+def alloc_slot_buffer(nbytes: int, device: str) -> torch.Tensor:
+    """A uint8 buffer for a slot or mirror; host buffers are pinned when an accelerator can use them."""
+    if device == "cpu":
+        return torch.empty(nbytes, dtype=torch.uint8, pin_memory=torch.accelerator.is_available())
+    return torch.empty(nbytes, dtype=torch.uint8, device=device)
+
+
 def plan_layout(named_tensors: list[tuple[str, torch.Size, torch.dtype]]) -> tuple[list[TensorSpec], int]:
     """Place tensors back to back in one slot buffer.
 

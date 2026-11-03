@@ -66,6 +66,8 @@ class WeightUpdateAgent:
         self.poll_interval = poll_interval
 
         self.version = -1
+        # Highest version a caller of wait_for_version needs; loaded even below min_version_lag.
+        self._demanded = -1
         self._version_changed = asyncio.Condition()
         self._stopped = False
         self._error: BaseException | None = None
@@ -76,11 +78,7 @@ class WeightUpdateAgent:
         try:
             while not self._stopped:
                 manifest = await self.registry.latest_ready()
-                # A replica that has not loaded any published version yet takes the first one regardless
-                # of the lag policy: the trainer waits for it before generation starts.
-                if manifest is not None and (
-                    self.version < 0 or manifest.version - self.version >= self.min_version_lag
-                ):
+                if manifest is not None and self._should_update(manifest.version):
                     await self._update(manifest.version)
                 else:
                     await asyncio.sleep(self.poll_interval)
@@ -90,6 +88,13 @@ class WeightUpdateAgent:
             async with self._version_changed:
                 self._version_changed.notify_all()
             raise
+
+    def _should_update(self, newest: int) -> bool:
+        # A replica that has not loaded any published version yet takes the first one: the trainer waits
+        # for it before generation starts. A caller waiting for a version also gets it regardless of lag.
+        if self.version < 0 or self.version < self._demanded <= newest:
+            return True
+        return newest - self.version >= self.min_version_lag
 
     async def _update(self, version: int):
         start = time.perf_counter()
@@ -125,7 +130,12 @@ class WeightUpdateAgent:
             self._version_changed.notify_all()
 
     async def wait_for_version(self, version: int, timeout: float | None = None) -> int:
-        """Block until the replica has loaded `version` or newer; returns the loaded version."""
+        """Block until the replica has loaded `version` or newer; returns the loaded version.
+
+        The agent loads `version` once it is published even if it is fewer than `min_version_lag` versions
+        ahead of the loaded one.
+        """
+        self._demanded = max(self._demanded, version)
 
         async def wait():
             async with self._version_changed:

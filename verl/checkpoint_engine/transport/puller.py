@@ -23,7 +23,14 @@ from typing import Iterator
 import torch
 
 from .registry import LeaseError, TensorSpec, WeightManifest, WeightRegistry
-from .transport import TransportFactory, bucket_ranges, default_transport_factory, same_layout, tensor_view
+from .transport import (
+    TransportFactory,
+    alloc_slot_buffer,
+    bucket_ranges,
+    default_transport_factory,
+    same_layout,
+    tensor_view,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -100,10 +107,7 @@ class WeightPuller:
             return
         self.close()
         assert ranges == bucket_ranges(manifest.total_bytes, manifest.buckets[0].size), "Buckets must tile the slot"
-        if self.device == "cpu":
-            self.buffer = torch.empty(manifest.total_bytes, dtype=torch.uint8, pin_memory=True)
-        else:
-            self.buffer = torch.empty(manifest.total_bytes, dtype=torch.uint8, device=self.device)
+        self.buffer = alloc_slot_buffer(manifest.total_bytes, self.device)
         self.transport = self.transport_factory(self.backend, self.device)
         self.memories = [self.transport.register_memory(self.buffer[offset : offset + size]) for offset, size in ranges]
         self.transport.connect(manifest.endpoint)
@@ -133,14 +137,16 @@ class WeightPuller:
                     for memory, bucket in zip(self.memories, manifest.buckets, strict=True)
                 ]
             )
+            valid = await self.registry.is_lease_valid(lease.lease_id)
         finally:
             renewer.cancel()
             try:
                 await renewer
             except (asyncio.CancelledError, LeaseError):
                 pass
-        valid = await self.registry.is_lease_valid(lease.lease_id)
-        await self.registry.release_lease(lease.lease_id)
+            # Release even when a read failed: the publisher would otherwise wait out the lease before it
+            # can reuse the slot, and a failed fetch is never used.
+            await self.registry.release_lease(lease.lease_id)
         if not valid:
             raise TornReadError(f"Lease on version {manifest.version} expired during the read")
 

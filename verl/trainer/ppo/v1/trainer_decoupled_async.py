@@ -199,6 +199,14 @@ class PPOTrainerDecoupledAsync(StandaloneRolloutMixin, PPOTrainer):
         timeout = self.mode_config.init_timeout
         ray.get([agent.wait_for_version.remote(self.global_steps, timeout) for agent in self.weight_update_agents])
 
+    def on_validate_begin(self):
+        # Validation sends prompts straight to the agent loop workers, without the dispatcher's version
+        # gating, so first make every replica serve the weights being validated.
+        timeout = self.mode_config.init_timeout
+        ray.get(
+            [agent.wait_for_version.remote(self._published_version, timeout) for agent in self.weight_update_agents]
+        )
+
     def on_train_begin(self):
         self._start_prompt_dispatcher()
         self._add_async_warmup_batches(self.mode_config.num_warmup_batches)

@@ -1331,3 +1331,28 @@ def test_health_check_aborts_a_blocked_sample(tq_init, partition_id):
     with pytest.raises(RuntimeError, match="rollout replica failed"):
         _sample(rb, partition_id, batch_size=1, global_steps=1)
     assert len(calls) == 3
+
+
+def test_decoupled_sample_accepts_old_prompt_generated_on_fresh_weights(tq_init, partition_id):
+    """A prompt that waited in the queue is judged by the weights that generated it, also in sample()."""
+    rb = ReplayBufferAsync(
+        trainer_mode="decoupled_async",
+        trainer_config={},
+        max_off_policy_threshold=2,
+        max_off_policy_strategy="drop",
+        sampler_kwargs={},
+        poll_interval=POLL_INTERVAL,
+    )
+    uid = _uid()
+    # Enqueued at step 1, but generated on version 4: at step 5 it is 4 steps old by enqueue time and
+    # 1 version old by weights.
+    tq.kv_put(
+        key=_trajectory_key(uid),
+        partition_id=partition_id,
+        fields={"input_ids": torch.tensor([1, 2, 3])},
+        tag={"is_prompt": False, "seq_len": 3, "global_steps": 1, "min_global_steps": 4, "max_global_steps": 4},
+    )
+    _set_prompt_status(partition_id, uid, "finished", global_steps=1)
+
+    batch = _sample(rb, partition_id, batch_size=1, global_steps=5)
+    assert _uids_of(batch.keys) == {uid}
