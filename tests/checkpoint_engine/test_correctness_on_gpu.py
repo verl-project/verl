@@ -113,22 +113,30 @@ async def test_transport_pull_checkpoint_engine(
         update_weights_bucket_megabytes=bucket_size_mb,
         engine_kwargs={"transport_pull": {"device": device, "transport": backend}},
     )
-    model_config = HFModelConfig(path=model_path, use_remove_padding=True)
+    # Weight sync does not depend on attention; sdpa avoids needing flash-attn for this torch.
+    model_config = HFModelConfig(
+        path=model_path, use_remove_padding=False, override_config={"attn_implementation": "sdpa"}
+    )
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
 
-    resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
-    trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
-    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    actor_wg.reset()
-    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+    try:
+        resource_pool = RayResourcePool(process_on_nodes=[num_gpus_per_node] * num_nodes, max_colocate_count=3)
+        trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
+        actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+        actor_wg.reset()
+        rollout, replicas = await create_rollout_worker_group(
+            rollout_pool, model_config, rollout_config, check_allclose
+        )
 
-    # Publisher slots and puller mirrors are set up once and reused by every sync.
-    checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
-    for _ in range(3):
-        await checkpoint_manager.update_weights()
-        rollout.check_weights()
-
-    ray.shutdown()
+        # Publisher slots and puller mirrors are set up once and reused by every sync.
+        checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas
+        )
+        for _ in range(3):
+            await checkpoint_manager.update_weights()
+            rollout.check_weights()
+    finally:
+        ray.shutdown()
 
 
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
