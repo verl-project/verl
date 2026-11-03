@@ -471,6 +471,7 @@ def test_per_tensor_generator(world_size, tmp_path, config, strategy):
 
 
 def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, model_path: str):
+    """Verify FSDPEngine resolves autocast dtype and ShardedGradScaler from mixed_precision and dtype."""
     # Regression test for #5932: FSDP engine must resolve autocast dtype from
     # mixed_precision.param_dtype rather than hardcoding bfloat16.
     get_torch_device().set_device(rank)
@@ -489,12 +490,14 @@ def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, mod
         override_config={"attn_implementation": "sdpa"},
     )
 
-    def build_engine(mixed_precision):
+    def build_engine(mixed_precision, dtype="bfloat16"):
+        """Instantiate and initialize an FSDPEngine with the given precision settings."""
         engine_config = FSDPEngineConfig(
             forward_only=False,
             fsdp_size=world_size,
             strategy="fsdp2",
             ulysses_sequence_parallel_size=1,
+            dtype=dtype,
             mixed_precision=mixed_precision,
         )
         engine: BaseEngine = EngineRegistry.new(
@@ -524,6 +527,11 @@ def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, mod
     engine = build_engine({"param_dtype": "fp16", "reduce_dtype": "fp32", "buffer_dtype": "fp32"})
     assert engine._autocast_dtype == torch.float16, f"expected fp16, got {engine._autocast_dtype}"
     assert isinstance(engine.scaler, ShardedGradScaler), "fp16 must create a ShardedGradScaler"
+
+    # When mixed_precision is None, param_dtype falls back to engine_config.dtype (#8076)
+    engine = build_engine(None, dtype="float16")
+    assert engine._autocast_dtype == torch.float16, f"expected fp16 from dtype, got {engine._autocast_dtype}"
+    assert isinstance(engine.scaler, ShardedGradScaler), "dtype=float16 must create a ShardedGradScaler"
 
     dist.barrier()
     dist.destroy_process_group()

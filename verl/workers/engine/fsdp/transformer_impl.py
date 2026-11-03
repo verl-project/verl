@@ -387,6 +387,7 @@ class FSDPEngine(BaseEngine):
         return module
 
     def _build_fsdp_module(self, module):
+        """Wrap ``module`` with FSDP1 or FSDP2 and configure mixed precision and loss scaling."""
         # TODO(ziheng): need to improve
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
@@ -394,11 +395,11 @@ class FSDPEngine(BaseEngine):
 
         mixed_precision_config = self.engine_config.mixed_precision
         if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", self.engine_config.dtype))
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
             buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
-            param_dtype = torch.bfloat16
+            param_dtype = PrecisionType.to_dtype(self.engine_config.dtype)
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
@@ -1045,9 +1046,11 @@ class FSDPEngine(BaseEngine):
 
             mixed_precision_config = self.engine_config.mixed_precision
             if mixed_precision_config is not None:
-                param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+                param_dtype = PrecisionType.to_dtype(
+                    mixed_precision_config.get("param_dtype", self.engine_config.dtype)
+                )
             else:
-                param_dtype = torch.bfloat16
+                param_dtype = PrecisionType.to_dtype(self.engine_config.dtype)
 
             quantizer = QATQuantizer(
                 mode=self._qat_config.mode,
