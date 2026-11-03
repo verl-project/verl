@@ -69,6 +69,10 @@ Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using 0.5
 
 - ``actor_rollout_ref.actor.megatron.use_mbridge=True``
 
+Set ``model.lora.lora_plus_ratio`` to the desired B-to-A learning rate ratio (for example, ``16.0``). The default ``1.0`` disables LoRA+. A non-default ratio requires ``optim.lr_warmup_init=0``.
+
+When expert parallelism and fused gradient accumulation are both enabled, training shared expert adapter weights requires Bridge's expert-adapter gradient finalizer (available in v0.7.0). With ``experts_shared_outer_loras=True``, HF adapter checkpoints and unmerged vLLM rollouts also require the matching Bridge export API. Bridge v0.7.0 supports per-expert 2D and stacked 3D export. vLLM's optional ``enable_moe_shared_loras`` layout requires a Bridge build that accepts ``export_adapter_weights(..., moe_shared_loras=True)``.
+
 **Key Differences from FSDP LoRA:**
 
 1. **LoRA Implementation**: Verl Megatron backend uses Megatron-Bridge's native LoRA implementation, which differs from HuggingFace PEFT.

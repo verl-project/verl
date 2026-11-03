@@ -1040,8 +1040,45 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
     return offset
 
 
-def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
+def _get_megatron_grad_finalizer(model):
+    """Select the finalizer that reduces replicated expert adapter gradients across EP."""
     from megatron.core.distributed import finalize_model_grads
+
+    try:
+        from megatron.bridge.peft import utils as peft_utils
+    except ImportError:
+        return finalize_model_grads
+
+    enable_ep_sync = getattr(peft_utils, "enable_expert_parallel_grad_sync_in_finalize", None)
+    finalize_ep_grads = getattr(peft_utils, "finalize_model_grads_with_expert_adapter_sync", None)
+    if enable_ep_sync is not None and finalize_ep_grads is not None:
+        return finalize_ep_grads if enable_ep_sync(model) > 0 else finalize_model_grads
+
+    # Legacy Bridge reduces autograd's gradient, but fused wgrad writes directly into main_grad.
+    for chunk in model:
+        config = get_model_config(chunk)
+        if config.expert_model_parallel_size <= 1 or not config.gradient_accumulation_fusion:
+            continue
+        for module in chunk.modules():
+            if isinstance(module, getattr(peft_utils, "SharedOuterGroupedExpertAdapter", ())):
+                shared = (module.linear_in if module._is_fc1 else module.linear_out,)
+            elif (
+                isinstance(module, getattr(peft_utils, "ParallelLinearAdapter", ()))
+                and getattr(module, "_uses_grouped_expert_sharding", lambda: False)()
+            ):
+                shared = (module.linear_in, module.linear_out)
+            else:
+                continue
+            if any(linear.weight.requires_grad for linear in shared):
+                raise RuntimeError(
+                    "Fused gradient accumulation for EP-replicated expert LoRA weights requires Megatron-Bridge's "
+                    "expert-adapter gradient finalizer (available in v0.7.0). Upgrade Bridge or disable "
+                    "gradient_accumulation_fusion."
+                )
+    return finalize_model_grads
+
+
+def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     from megatron.core.utils import get_model_config
 
     try:
@@ -1049,20 +1086,7 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     except ImportError:
         megatron_FSDP = DDP
 
-    # Shared-expert LoRA weights are EP-replicated; Bridge's finalize wrapper
-    # does a coalesced EP all-reduce after the DP sync (no-op without such
-    # adapters) and removes the broken per-layer fallback hook.
-    finalize_fn = finalize_model_grads
-    try:
-        from megatron.bridge.peft.utils import (
-            enable_expert_parallel_grad_sync_in_finalize,
-            finalize_model_grads_with_expert_adapter_sync,
-        )
-
-        if enable_expert_parallel_grad_sync_in_finalize(model) > 0:
-            finalize_fn = finalize_model_grads_with_expert_adapter_sync
-    except ImportError:
-        pass
+    finalize_fn = _get_megatron_grad_finalizer(model)
 
     # register some callbacks for megatron training, following https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.0rc7/megatron/training/training.py#L2039-L2057
     for one_model in model:
