@@ -35,7 +35,7 @@ class _FakeClock:
 
 
 def _manifest(version):
-    return WeightManifest(version=version, endpoint=f"ep-{version}", buckets=[])
+    return WeightManifest(version=version, endpoint=f"ep-{version}".encode(), total_bytes=0, tensors=[], buckets=[])
 
 
 def _run(coro):
@@ -54,7 +54,7 @@ def test_publish_and_latest_ready():
 
         await registry.retire(2)
         assert (await registry.latest_ready()).version == 1
-        assert (await registry.get_manifest(2)).endpoint == "ep-2"
+        assert (await registry.get_manifest(2)).endpoint == b"ep-2"
         assert registry._states[2] == VersionState.RETIRED
 
     _run(main())
@@ -131,7 +131,7 @@ def test_ray_registry_shared_by_name():
             reader = RayWeightRegistry(name="test_registry")
             await publisher.publish(_manifest(3))
             manifest = await reader.latest_ready()
-            assert manifest.version == 3 and manifest.endpoint == "ep-3"
+            assert manifest.version == 3 and manifest.endpoint == b"ep-3"
 
             lease = await reader.acquire_lease(3, ttl=60)
             await publisher.retire(3)

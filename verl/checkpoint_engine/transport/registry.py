@@ -35,6 +35,7 @@ from enum import Enum
 from typing import Any, Callable
 
 import ray
+import torch
 
 
 class VersionState(str, Enum):
@@ -45,25 +46,37 @@ class VersionState(str, Enum):
 
 
 @dataclass
+class TensorSpec:
+    name: str
+    shape: torch.Size
+    dtype: torch.dtype
+    offset: int
+    """Byte offset of the tensor in the version's contiguous slot buffer."""
+
+
+@dataclass
 class BucketDesc:
-    remote_buffer: bytes
-    """Serialized transport descriptor of the bucket buffer on the publisher."""
+    offset: int
+    """Byte offset of the bucket in the slot buffer."""
     size: int
-    """Number of valid bytes in the bucket."""
-    tensors: list[Any]
-    """TensorMeta of every chunk packed in the bucket, with `offset` set."""
+    """Size of the bucket in bytes; the unit of one remote read."""
+    remote_buffer: bytes
+    """Serialized transport descriptor of this bucket on the publisher."""
 
 
 @dataclass
 class WeightManifest:
     version: int
     """Weight version, i.e. the trainer's global step."""
-    endpoint: Any
-    """Transport-specific address readers connect to."""
+    endpoint: bytes
+    """Transport url readers connect to."""
+    total_bytes: int
+    """Size of the slot buffer; buckets tile [0, total_bytes)."""
+    tensors: list[TensorSpec]
+    """Every tensor lies contiguously in the slot, possibly across bucket boundaries."""
     buckets: list[BucketDesc]
-    """Buckets in read order."""
     extra: dict[str, Any] = field(default_factory=dict)
-    """Backend-specific fields, e.g. transport backend name or wire dtype."""
+    """Backend-specific fields, e.g. transport backend name."""
 
 
 @dataclass
@@ -196,10 +209,11 @@ class InMemoryWeightRegistry(WeightRegistry):
 
 
 class RayWeightRegistry(WeightRegistry):
-    """Client of an `InMemoryWeightRegistry` running as a named, detached Ray actor.
+    """Client of an `InMemoryWeightRegistry` running as a named Ray actor.
 
     Every process that constructs it with the same name shares one registry, so the trainer and
-    rollout replicas only need to agree on the name.
+    rollout replicas only need to agree on the name. The actor lives as long as the Ray job, so a
+    restarted job does not see versions whose publisher endpoints are gone.
 
     Args:
         name: Ray actor name of the registry.
@@ -209,7 +223,7 @@ class RayWeightRegistry(WeightRegistry):
     def __init__(self, name: str = "verl_weight_registry", namespace: str | None = None):
         self._actor = (
             ray.remote(InMemoryWeightRegistry)
-            .options(name=name, namespace=namespace, get_if_exists=True, lifetime="detached", num_cpus=0)
+            .options(name=name, namespace=namespace, get_if_exists=True, num_cpus=0)
             .remote()
         )
 

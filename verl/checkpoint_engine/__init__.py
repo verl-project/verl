@@ -82,3 +82,11 @@ try:
 except ImportError as e:
     CheckpointEngineRegistry.record_import_error("delta_checkpoint_engine", e)
     DeltaShardedCheckpointEngine = None
+
+try:
+    from .transport.engine import TransportPullCheckpointEngine
+
+    __all__ += ["TransportPullCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("transport.engine", e)
+    TransportPullCheckpointEngine = None
