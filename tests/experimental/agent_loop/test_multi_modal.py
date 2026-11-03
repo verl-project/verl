@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 import pytest
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from transformers.utils import get_json_schema
 
@@ -75,6 +75,9 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.seed = 0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
+
+    if rollout_config := os.getenv("AGENT_LOOP_TOOL_AGENT_ROLLOUT_CONFIG"):
+        config.actor_rollout_ref.rollout.merge_with(OmegaConf.create(rollout_config))
 
     return config
 

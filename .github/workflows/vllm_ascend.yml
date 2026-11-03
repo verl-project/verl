@@ -52,6 +52,7 @@ on:
       - "!**/*sglang*"
       # Entrypoints
       - ".github/workflows/vllm_ascend.yml"
+      - "tests/experimental/agent_loop/**"
       - "tests/special_e2e/generation"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
