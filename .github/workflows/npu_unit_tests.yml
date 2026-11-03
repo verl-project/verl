@@ -138,6 +138,7 @@ jobs:
               "--ignore-glob=tests/workers/rollout/rollout_trtllm",
               "--ignore-glob=*test_fsdp_lora_merge*",
               "--ignore-glob=*test_optimizer_offload_and_load.py*",
+              "--ignore-glob=*test_modelopt_mxfp8_on_gpu.py*",
               "tests/",
               "-k",
               "not test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu and not test_sender_accepts_strided_tensor",

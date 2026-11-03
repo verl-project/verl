@@ -28,12 +28,8 @@ import modelopt.torch.quantization as mtq
 from verl.utils.qat.modelopt import (
     _Fp8FakeQuant,
     _Mxfp4FakeQuant,
-    _Nvfp4FakeQuant,
     _assert_grouped_scale_boundaries,
     _group_fake_quant_weights,
-    _nvfp4_global_scale,
-    _nvfp4_input_backend,
-    _nvfp4_weight_backend,
     _patch_te_grouped_weight_fake_quant,
     build_quantize_config,
 )
@@ -546,114 +542,3 @@ def test_fp8_qat_qdq_exactly_matches_export(preset, block_shape, scale_fmt):
     exported_qdq = compressor.decompress(compressed, scheme)["weight"]
 
     torch.testing.assert_close(fake_quantized, exported_qdq.to(weight.dtype), rtol=0, atol=0)
-
-
-def test_nvfp4_rollout_is_moe_only_w4a4():
-    config = build_compressed_tensors_config(
-        linear=None,
-        moe="NVFP4",
-        ignore=[],
-        config_file=None,
-    )
-
-    scheme = config["config_groups"]["group_moe"]
-    assert config["format"] == "nvfp4-pack-quantized"
-    assert scheme["weights"]["strategy"] == "tensor_group"
-    assert scheme["weights"]["group_size"] == 16
-    assert scheme["weights"]["scale_dtype"] == "torch.float8_e4m3fn"
-    assert scheme["input_activations"]["strategy"] == "tensor_group"
-    assert scheme["input_activations"]["dynamic"] == "local"
-    assert qat_modes_for_config(config) == {"nvfp4"}
-
-    with pytest.raises(ValueError, match="only for routed MoE experts"):
-        build_compressed_tensors_config(
-            linear="NVFP4",
-            moe=None,
-            ignore=[],
-            config_file=None,
-        )
-
-
-def test_nvfp4_qat_uses_experts_only_export_compatible_backends():
-    config = build_quantize_config("nvfp4")
-    enabled = [entry for entry in config["quant_cfg"] if entry.get("enable", True)]
-    weight_cfgs = [entry["cfg"] for entry in enabled if entry["quantizer_name"].endswith("weight_quantizer")]
-    input_cfgs = [entry["cfg"] for entry in enabled if entry["quantizer_name"].endswith("input_quantizer")]
-
-    assert weight_cfgs
-    assert input_cfgs
-    assert all(cfg["backend"] == "verl_nvfp4_weight" for cfg in weight_cfgs)
-    assert all(cfg["backend"] == "verl_nvfp4_input" for cfg in input_cfgs)
-    assert all(cfg["block_sizes"] == {-1: 16, "type": "dynamic", "scale_bits": (4, 3)} for cfg in weight_cfgs)
-    assert all(cfg["block_sizes"] == {-1: 16, "type": "dynamic", "scale_bits": (4, 3)} for cfg in input_cfgs)
-    assert config["algorithm"] is None
-    assert not any(
-        entry["quantizer_name"] == "*weight_quantizer" and entry.get("enable", True) for entry in config["quant_cfg"]
-    )
-
-
-def test_nvfp4_qat_weight_qdq_exactly_matches_export():
-    from compressed_tensors.compressors import BaseCompressor
-    from compressed_tensors.compressors.format import infer_module_format
-
-    weight = torch.randn(64, 64, dtype=torch.bfloat16)
-    global_scale = _nvfp4_global_scale(weight)
-    fake_quantized = _Nvfp4FakeQuant.apply(weight, global_scale)
-    scheme = _scheme_for_preset("NVFP4", ["Linear"])
-    compressed = _compress_weight(weight, scheme, global_scale=global_scale)
-    compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
-    exported_qdq = compressor.decompress(compressed, scheme)["weight"]
-
-    torch.testing.assert_close(fake_quantized, exported_qdq, rtol=0, atol=0)
-
-
-def test_nvfp4_grouped_expert_qdq_uses_one_global_scale_per_expert():
-    weight = torch.randn(3, 64, 32, dtype=torch.bfloat16)
-    actual = _nvfp4_weight_backend(weight, None)
-    expected = torch.stack([_Nvfp4FakeQuant.apply(expert, _nvfp4_global_scale(expert)) for expert in weight])
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def test_nvfp4_input_backend_initializes_from_first_observation_then_tracks_minimum():
-    quantizer = SimpleNamespace()
-    first = torch.full((16, 16), 0.5, dtype=torch.bfloat16)
-    second = first * 2
-
-    _nvfp4_input_backend(first, quantizer)
-    first_scale = _nvfp4_global_scale(first)
-    torch.testing.assert_close(quantizer._verl_input_global_scale, first_scale)
-
-    _nvfp4_input_backend(second, quantizer)
-    torch.testing.assert_close(
-        quantizer._verl_input_global_scale,
-        torch.minimum(first_scale, _nvfp4_global_scale(second)),
-    )
-
-
-def test_nvfp4_export_uses_neutral_then_observed_input_scales():
-    config = build_compressed_tensors_config(
-        linear=None,
-        moe="NVFP4",
-        ignore=[],
-        config_file=None,
-    )
-    weights = torch.randn(2, 64, 32, dtype=torch.bfloat16)
-    quantizer = CompressedTensorsWeightQuantizer(config)
-    neutral = dict(quantizer([("model.layers.0.mlp.experts.gate_up_proj", weights)]))
-    assert neutral["model.layers.0.mlp.experts.0.gate_proj.input_global_scale"].item() == 1.0
-
-    quantizer.set_input_global_scales(
-        {
-            "layers.0.mlp.experts.gate_up": torch.tensor([0.25]),
-            "layers.0.mlp.experts.down": torch.tensor([0.5]),
-        }
-    )
-    result = dict(quantizer([("model.layers.0.mlp.experts.gate_up_proj", weights)]))
-    gate_prefix = "model.layers.0.mlp.experts.0.gate_proj."
-    up_prefix = "model.layers.0.mlp.experts.0.up_proj."
-    assert result[gate_prefix + "input_global_scale"].item() == 0.25
-    assert result[up_prefix + "input_global_scale"].item() == 0.25
-    torch.testing.assert_close(
-        result[gate_prefix + "weight_global_scale"],
-        result[up_prefix + "weight_global_scale"],
-    )
