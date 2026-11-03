@@ -224,6 +224,11 @@ class BucketedWeightSender:
         """Send a weight larger than the bucket size via cuda ipc or share memory."""
         logger.debug(f"Direct sending large weight {name}({weight.shape}, {weight.dtype})")
         # TODO: support fallback to shared memory
+        if weight.device != self.buffer.device:
+            # CUDA IPC shares device memory only. Stage weights that arrive in host memory (e.g.
+            # from a pinned host mirror); the copy stays alive until the receiver acks below.
+            weight = weight.to(self.buffer.device, non_blocking=True)
+            get_torch_device().synchronize()
         handle = reduce_tensor(weight)
         bucket_meta: dict[str, TensorMetadata] = {}
         bucket_meta[name] = {

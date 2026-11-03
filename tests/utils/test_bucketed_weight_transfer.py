@@ -122,11 +122,13 @@ def test_sender_accepts_strided_tensor(monkeypatch):
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
-def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
+def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, weights_on_host=False):
     """Sender process: generate weights, move to device, send."""
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 
     weights = _generate_weights(weight_specs, seed)
+    if weights_on_host:
+        weights = [(name, t.cpu().pin_memory()) for name, t in weights]
     sender = BucketedWeightSender(
         zmq_handle=zmq_handle,
         bucket_size_mb=bucket_size_mb,
@@ -158,7 +160,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, weights_on_host=False):
     """Spawn sender + receiver processes, then validate received tensors."""
     zmq_handle = _unique_zmq_handle()
     seed = 42
@@ -167,7 +169,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     sender_p = ctx.Process(
         target=_sender_fn,
-        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm),
+        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, weights_on_host),
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
@@ -292,3 +294,12 @@ class TestBucketedWeightTransferIPC:
         specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
 
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_large_weight_from_host(self):
+        # Checkpoint engines that land weights in pinned host memory (transport_pull, nixl with
+        # device=cpu) hand over CPU tensors; weights larger than the bucket must still go over CUDA IPC.
+        specs = [("embedding", (1024, 1024), torch.bfloat16)]  # 2MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(5)])
+        specs.append(("lm_head", (1024, 1024), torch.bfloat16))  # 2MB
+
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, weights_on_host=True)
