@@ -1,0 +1,30 @@
+_target_: verl.workers.config.MaxTextEngineConfig
+strategy: maxtext
+
+# MaxText YAML file, as passed to MaxText's train.py. One process owns every GPU on the trainer
+# node. Null uses MaxText's base.yml, so model_name must then be set in overrides.
+config_path: null
+
+# MaxText config keys applied on top of config_path (train.py's key=value arguments).
+overrides: {}
+
+# MaxText checkout to import. Null uses the installed package.
+maxtext_path: ${oc.env:MAXTEXT_PATH,null}
+
+# Extra environment variables, set before JAX starts.
+env: {}
+
+# Qwen3-30B-A3B scanned layout. Override for a different model.
+num_attention_heads: 32
+
+num_key_value_heads: 4
+
+head_dim: 128
+
+# Hugging Face checkpoint to start from. Null means the actor model path.
+hf_weights_path: null
+
+load_hf_weights: true
+
+# Headroom for the torch tensors copied to the rollout.
+mem_fraction: 0.85

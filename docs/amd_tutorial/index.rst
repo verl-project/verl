@@ -9,3 +9,4 @@ Last updated: 06/05/2026.
 
    amd_quick_start.rst
    amd_vllm_page.rst
+   amd_maxtext_page.rst

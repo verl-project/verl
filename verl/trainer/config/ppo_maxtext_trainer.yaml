@@ -1,0 +1,5 @@
+# Convenience entry point. Prefer: python -m verl.trainer.main_ppo model_engine=maxtext
+defaults:
+  - ppo_trainer
+  - override model_engine: maxtext
+  - _self_

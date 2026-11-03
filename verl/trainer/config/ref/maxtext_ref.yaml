@@ -1,0 +1,14 @@
+defaults:
+  - ref
+  - ../engine@maxtext: maxtext
+  - _self_
+
+_target_: verl.workers.config.MaxTextActorConfig
+strategy: maxtext
+
+maxtext:
+  config_path: ${actor_rollout_ref.actor.maxtext.config_path}
+  maxtext_path: ${actor_rollout_ref.actor.maxtext.maxtext_path}
+  overrides: ${actor_rollout_ref.actor.maxtext.overrides}
+  env: ${actor_rollout_ref.actor.maxtext.env}
+  forward_only: true

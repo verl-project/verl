@@ -1,0 +1,10 @@
+defaults:
+  - ../optim@optim: megatron
+  - ../engine@maxtext: maxtext
+  - actor
+  - _self_
+
+_target_: verl.workers.config.MaxTextActorConfig
+strategy: maxtext
+
+use_kl_loss: false

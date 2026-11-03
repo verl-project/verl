@@ -8,6 +8,9 @@ the ROCm software stack**. The NVIDIA images described in
 For an end-to-end walkthrough (build, run, and example PPO/GRPO commands), see
 the tutorial: [`docs/amd_tutorial/amd_quick_start.rst`](../../docs/amd_tutorial/amd_quick_start.rst).
 
+> [`Dockerfile.rocm.maxtext`](Dockerfile.rocm.maxtext) builds the image for the MaxText (JAX) trainer with a
+> vLLM rollout; see [`examples/maxtext`](../../examples/maxtext).
+
 > The other `Dockerfile.rocm*` / `Apptainerfile.rocm` files in this directory are
 > kept only as historical references for older verl releases (ROCm 6.x, pinned
 > verl 0.3.x / 0.4.x). New work should target `Dockerfile.rocm`.

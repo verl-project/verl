@@ -104,6 +104,17 @@ class DetachActorWorker(ActorRolloutRefWorker):
             )
 
             self._strategy_handlers = (copy_megatron_model_to_cpu, restore_megatron_model_from_cpu)
+        elif strategy == "maxtext":
+            # The previous policy is only restored when parameter_sync_step > 1, which
+            # validate_config rejects for MaxText. Keeping 57 GB of host copies for a
+            # path that cannot run would only cost time.
+            def save_nothing(_module):
+                return None
+
+            def restore_unsupported(_module, _saved):
+                raise NotImplementedError("MaxText cannot restore an earlier policy; use parameter_sync_step=1")
+
+            self._strategy_handlers = (save_nothing, restore_unsupported)
         elif strategy == "torchtitan":
             # TorchTitan also shards with FSDP2 (DTensor parameters), but its engine.module is the
             # list of model parts, so apply the FSDP2 helpers to each part.
