@@ -94,8 +94,9 @@ export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_NO_USAGE_STATS=1
 export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-# MoE backend: the image's default (VLLM_ROCM_USE_AITER_MOE=1). The EP expert-mask bug that once required turning AITER
-# MoE off is fixed in the vLLM branch (294014e28); under VLLM_BATCH_INVARIANT=1 vLLM selects the Triton MoE by itself.
+# MoE backend (rollout.moe_backend, set per arm below): the batch-invariant arm uses the Triton MoE, whose BI tiles the
+# trainer mirrors; the native arm uses AITER, the fast ROCm MoE. The EP expert-mask bug that once required turning
+# AITER MoE off is fixed in the vLLM branch (294014e28).
 
 ARM_ENV_NAMES=(PYTHONHASHSEED VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM
   CUDA_DEVICE_MAX_CONNECTIONS VLLM_ALLOW_INSECURE_SERIALIZATION VLLM_NO_USAGE_STATS VERL_FILE_LOGGER_PATH)
@@ -180,7 +181,9 @@ else
   else
     : "${ACTOR_PP:=1}" "${ACTOR_EP:=$((NNODES * NGPUS_PER_NODE))}" "${ACTOR_CP:=1}"
   fi
-  : "${ROLLOUT_MOE_BACKEND:=triton}"
+  # AITER MoE: with batch invariance off, the untuned Triton MoE made generation ~23-26 % slower than the
+  # batch-invariant arm; AITER is ~3 % faster than it (MI350X/MI355X rollout A/B).
+  : "${ROLLOUT_MOE_BACKEND:=aiter}"
   # Transformer Engine grouped GEMM: the BF16 backward of the default kernel can hang on gfx950.
   export NVTE_USE_GROUPED_GEMM_TRITON=1
   export TORCH_NCCL_AVOID_RECORD_STREAMS=1
