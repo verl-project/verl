@@ -77,6 +77,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 mm_processor_output=mm_processor_output,
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
+                trace_attributes={"turn": 0, "session": request_id},
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1

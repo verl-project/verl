@@ -30,7 +30,10 @@ from omegaconf import DictConfig
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
-from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.rollout_trace import (
+    current_rl_insight_trace_identity,
+    rollout_trace_op,
+)
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.router import GlobalRequestLoadBalancer  # noqa: F401
@@ -106,6 +109,7 @@ class LLMServerClient:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        trace_attributes: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
@@ -114,6 +118,8 @@ class LLMServerClient:
             request_id (str): request id for sticky session.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+            trace_attributes (Optional[Dict[str, Any]]): Per-request RL-Insight attributes
+                such as ``turn`` and ``session``, forwarded to the vLLM engine spans.
 
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
@@ -147,6 +153,28 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
+            # RL-Insight per-request correlation: trajectory identity set by the agent loop plus
+            # per-turn attributes (turn, session). Only agent-loop callers opt in by passing
+            # trace_attributes, and only vLLM exports them onto request spans; other clients that
+            # share this class (e.g. teacher models) never see the extra keyword. Forwarding is
+            # also skipped while engine tracing is off, as vLLM warns about trace context per request.
+            trace_config = self.config.actor_rollout_ref.rollout.trace
+            trace_kwargs = {}
+            if trace_attributes and trace_config.enable_otel and self.config.actor_rollout_ref.rollout.name == "vllm":
+                merged_trace_attributes = {
+                    **current_rl_insight_trace_identity(),
+                    **trace_attributes,
+                }
+                sample = merged_trace_attributes.get("sample")
+                traj = merged_trace_attributes.get("traj")
+                if sample is not None and traj is not None:
+                    session = merged_trace_attributes.get("session", "")
+                    experiment_name = trace_config.experiment_name or "default"
+                    merged_trace_attributes["state_lane_id"] = (
+                        f"experiment={experiment_name}/sample={sample}/session={session}/traj={traj}"
+                    )
+                if merged_trace_attributes:
+                    trace_kwargs = {"trace_attributes": merged_trace_attributes}
             output: TokenOutput = await server.generate.remote(
                 request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
@@ -156,6 +184,7 @@ class LLMServerClient:
                 **multimodal_kwargs,
                 **priority_kwargs,
                 session_id=request_id,
+                **trace_kwargs,
                 **kwargs,
             )
             global_steps = output.extra_fields.get("global_steps")
@@ -396,6 +425,15 @@ class LLMServerManager:
         start_rank: int = 0,
         load_balancer_cls: type | None = None,
     ):
+        """Create the manager and resolve the rollout replica class from ``rollout.name``.
+
+        Args:
+            config: Full training config; ``actor_rollout_ref.rollout`` selects the engine.
+            worker_group: Hybrid workers holding the rollout GPUs, if any.
+            rollout_resource_pool: Standalone resource pool, used by TensorRT-LLM.
+            start_rank: First replica rank to assign.
+            load_balancer_cls: Optional custom global load-balancer class.
+        """
         self.config = config
         self.rollout_config = config.actor_rollout_ref.rollout
         self.model_config = config.actor_rollout_ref.model
@@ -411,6 +449,13 @@ class LLMServerManager:
             self.rollout_replica_class = get_rollout_replica_class(
                 self.rollout_config.name,
                 disaggregation_enabled=self.rollout_config.disaggregation.enabled,
+            )
+
+        if self.rollout_config.trace.enable_otel and self.rollout_config.name != "vllm":
+            logger.warning(
+                "rollout.trace.enable_otel only supports the vLLM rollout engine; "
+                "engine request traces stay disabled for rollout.name=%s",
+                self.rollout_config.name,
             )
 
     @classmethod

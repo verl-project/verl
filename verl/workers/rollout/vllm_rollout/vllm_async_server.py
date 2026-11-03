@@ -23,6 +23,7 @@ import zlib
 from collections.abc import Mapping
 from pprint import pprint
 from typing import Any, Callable, Optional
+from urllib.parse import quote, urlparse
 
 import ray
 import vllm.entrypoints.cli.serve
@@ -290,7 +291,50 @@ class vLLMHttpServer:
         self._pd_prefill_side_channel_port = prefill_side_channel_port
         self._pd_prefill_engine_id = prefill_engine_id
 
-    async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
+    def _run_trace_identity(self) -> tuple[str | None, str | None]:
+        """Return the Run names stamped on every RL-Insight span.
+
+        RL-Insight appends an execution suffix to the Run name, and engine spans
+        bypass the Hub, so read the Hub's Run identity to keep engine spans in
+        the same Run. Falls back to the configured trace names when RL-Insight
+        is unavailable (not installed, inactive, or not initialized yet).
+        """
+        project = self.config.trace.project_name
+        experiment_name = self.config.trace.experiment_name
+        try:
+            from rl_insight import get_run_context
+
+            context = get_run_context()
+        except ImportError:
+            return project, experiment_name
+        if context is None:
+            return project, experiment_name
+        return context.project, context.experiment_name
+
+    def _set_otel_resource_attributes(self) -> None:
+        """Add run metadata to ``OTEL_RESOURCE_ATTRIBUTES``, keeping launcher-provided values."""
+        project, experiment_name = self._run_trace_identity()
+        resource_attributes = {
+            "project": project,
+            "experiment_name": experiment_name,
+            "replica": str(self.replica_rank),
+        }
+        attributes = ",".join(
+            f"{key}={quote(str(value), safe='')}" for key, value in resource_attributes.items() if value
+        )
+        existing_attributes = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
+        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
+            f"{existing_attributes},{attributes}" if existing_attributes else attributes
+        )
+
+    async def launch_server(self, master_address: str = None, master_port: str = None, dp_rpc_port: str = None):
+        """Build the vLLM serve arguments and start the server (or the headless engine).
+
+        Args:
+            master_address: Master address provided by the rank-0 node; required on other nodes.
+            master_port: Master port provided by the rank-0 node; required on other nodes.
+            dp_rpc_port: Data-parallel RPC port provided by the rank-0 node; required on other nodes.
+        """
         if self.node_rank != 0:
             assert master_address and master_port and dp_rpc_port, (
                 "non-master node should provide master_address, master_port and dp_rpc_port"
@@ -488,6 +532,33 @@ class vLLMHttpServer:
         if self._disaggregation_role != "null":
             args["kv_transfer_config"] = json.dumps(self._disaggregation_kv_transfer_config)
 
+        if self.config.trace.enable_otel:
+            explicit_endpoint = args.get("otlp_traces_endpoint") or args.get("otlp-traces-endpoint")
+            if explicit_endpoint:
+                # An explicit engine_kwargs endpoint wins over RL-Insight discovery.
+                logger.info(
+                    "rollout.trace.enable_otel=True but engine_kwargs set otlp_traces_endpoint; "
+                    "keeping the user-provided engine tracing endpoint"
+                )
+                self._set_otel_resource_attributes()
+                # vLLM defaults to gRPC. Infer OTLP/HTTP only from a standard traces path.
+                endpoint_path = urlparse(explicit_endpoint).path.rstrip("/")
+                if not os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL") and endpoint_path.endswith("/v1/traces"):
+                    os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+            else:
+                otlp_traces_endpoint = RLInsightLogger.otlp_traces_endpoint()
+                if otlp_traces_endpoint:
+                    self._set_otel_resource_attributes()
+                    # vLLM defaults to gRPC. RL-Insight's Tempo receiver speaks HTTP.
+                    os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+                    args["otlp_traces_endpoint"] = otlp_traces_endpoint
+                else:
+                    logger.warning(
+                        "rollout.trace.enable_otel=True but the RL-Insight OTLP endpoint is unavailable; "
+                        "engine request traces are disabled. Check that `rl_insight` is in trainer.logger, "
+                        "that RL_INSIGHT_SERVER_URL points to the RL-Insight server, and that Tempo is enabled."
+                    )
+
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
@@ -602,12 +673,15 @@ class vLLMHttpServer:
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
         session_id: Optional[str] = None,
+        trace_attributes: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
             session_id: Sticky caller id; turns of one session go to the same DP engine.
+            trace_attributes: Per-request RL-Insight attributes (``global_steps``, ``sample``,
+                ``session``, ``traj``, ``turn``, ``state_lane_id``) forwarded as trace headers.
         """
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
@@ -620,7 +694,17 @@ class vLLMHttpServer:
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
                 session_id=session_id,
+                trace_attributes=trace_attributes,
             )
+
+        # RL-Insight reads these headers when building engine request spans.
+        trace_headers = None
+        if trace_attributes:
+            trace_headers = {
+                f"rl-insight-{key.replace('_', '-')}": str(value)
+                for key, value in trace_attributes.items()
+                if value is not None and value != ""
+            } or None
 
         prompt_ids = normalize_token_ids(prompt_ids)
 
@@ -730,6 +814,7 @@ class vLLMHttpServer:
                 lora_request=lora_request,
                 priority=priority,
                 data_parallel_rank=self._dp_rank_for_session(session_id),
+                trace_headers=trace_headers,
             )
             assert final_res is not None
 
@@ -863,6 +948,7 @@ class vLLMHttpServer:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
         session_id: Optional[str] = None,
+        trace_attributes: Optional[dict[str, Any]] = None,
     ) -> TokenOutput:
         """Run prefill locally, then decode on a selected peer."""
         decode_peer = self._select_decode_peer()
@@ -892,6 +978,7 @@ class vLLMHttpServer:
             priority=priority,
             kv_transfer_params=prefill_kv_params,
             session_id=session_id,
+            trace_attributes=trace_attributes,
         )
         if is_mooncake:
             # Mooncake does not return decode params from the prefill leg.
@@ -919,6 +1006,7 @@ class vLLMHttpServer:
             priority=priority,
             kv_transfer_params=decode_kv_params,
             session_id=session_id,
+            trace_attributes=trace_attributes,
         )
 
     @RLInsightLogger.trace_state_decorator(
@@ -1263,6 +1351,7 @@ class vLLMHttpServer:
         lora_request: Optional[LoRARequest],
         priority: int,
         data_parallel_rank: Optional[int] = None,
+        trace_headers: Optional[dict[str, str]] = None,
     ) -> Optional[RequestOutput]:
         """Run one admitted request to completion and return its final RequestOutput.
 
@@ -1289,6 +1378,7 @@ class vLLMHttpServer:
                 lora_request=lora_request,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                trace_headers=trace_headers,
             )
             # Landed in the engine: a pause from here on covers this request.
             admitted = True

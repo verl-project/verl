@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import os
 import sys
 import types
@@ -20,7 +21,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import BaseModel
 
-from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
+from verl.utils.rollout_trace import (
+    RolloutTraceConfig,
+    current_rl_insight_trace_identity,
+    rl_insight_trace_identity,
+    rollout_trace_attr,
+    rollout_trace_op,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -379,3 +386,23 @@ async def test_rollout_trace_with_real_mlflow_backend():
     #     await instance.my_method_with_exception()
 
     print("\nWeave integration test ran successfully. Check your weave project for the trace.")
+
+
+def test_rl_insight_trace_identity_drops_none_and_resets():
+    """Identity drops None values and resets when the context exits."""
+    with rl_insight_trace_identity(global_steps=1, sample=None, traj=2):
+        assert current_rl_insight_trace_identity() == {"global_steps": 1, "traj": 2}
+    assert current_rl_insight_trace_identity() == {}
+
+
+async def test_rl_insight_trace_identity_isolated_per_task():
+    """Concurrent agent-loop tasks keep their own identity."""
+
+    async def child(sample):
+        with rl_insight_trace_identity(global_steps=7, sample=sample, traj=0):
+            await asyncio.sleep(0)
+            return current_rl_insight_trace_identity()
+
+    first, second = await asyncio.gather(child(0), child(1))
+    assert first["sample"] == 0
+    assert second["sample"] == 1
