@@ -522,14 +522,13 @@ class PPOTrainer(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
-                self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
-                return
+                break
 
         self.on_train_end()
-        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
+        self._shutdown_train_dataloader()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         train_batch_size = self.config.data.train_batch_size
@@ -1294,6 +1293,17 @@ class PPOTrainer(ABC):
             f.result()
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
+
+    def _shutdown_train_dataloader(self):
+        """Stop the train dataloader's worker processes.
+
+        StatefulDataLoader keeps its last iterator, so the workers would outlive fit(). At process exit Ray kills them
+        with the actor, and the trainer then reports "DataLoader worker (pid ...) is killed by signal: Killed".
+        """
+        iterator, self.train_dataloader_it = self.train_dataloader_it, None
+        shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+        if shutdown_workers is not None:
+            shutdown_workers()
 
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
