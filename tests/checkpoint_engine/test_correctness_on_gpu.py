@@ -89,6 +89,7 @@ async def test_nccl_checkpoint_engine(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["nixl", "nixl_native"])
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
@@ -96,20 +97,21 @@ async def test_transport_pull_checkpoint_engine(
     num_trainer,
     num_rollout,
     device,
+    backend,
     num_nodes=1,
     num_gpus_per_node=_ngpus,
     bucket_size_mb=128,
     check_allclose=True,
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
-    pytest.importorskip("torch.distributed._transport")
+    pytest.importorskip("nixl" if backend == "nixl_native" else "torch.distributed._transport")
     model_path = os.path.expanduser(model_path)
     ray.init(runtime_env={"env_vars": {"UCX_TLS": "rc,ud,cuda", "VERL_LOGGING_LEVEL": "DEBUG"}})
 
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="transport_pull",
         update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"transport_pull": {"device": device}},
+        engine_kwargs={"transport_pull": {"device": device, "backend": backend}},
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
