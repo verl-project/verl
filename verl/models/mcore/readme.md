@@ -139,12 +139,3 @@ The necessary features under development for scaling up are
     - more efficient and general weight resharding and loading
 3. Offline weights conversion
     - support weights larger than single GPU memory
-
-# Kimi K3 routing replay
-
-Kimi K3 uses image-expanded model rows for both R2 recording and R3 replay.
-Its model forward prepares replay after the actual row count is known.
-Rollout transfers expert IDs only. Training recomputes their gate weights
-from the current router, including normalization and scaling. The generic
-Megatron replay utility scatters the prepared IDs and mask and maintains one
-FIFO of `(ids, mask)` records. No gate probabilities are transported or replayed.

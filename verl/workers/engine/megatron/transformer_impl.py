@@ -46,10 +46,14 @@ from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
+    align_r3_router_replay_data,
+    build_r3_replay_mask,
     merge_nested_router_maps,
+    merge_router_topk_indices,
     pp_gather,
     reorder_and_merge_vpp_layers,
     set_model_router_replay_action,
+    set_router_replay_data,
 )
 from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_entropy,
@@ -1337,21 +1341,28 @@ class MegatronEngineWithLMHead(MegatronEngine):
         ):
             set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_FORWARD)
 
-        recorded_routes = (
-            self.mini_layer_topk_idx_list
-            if tu.get_non_tensor_data(batch, key="record_r2_routes", default=False)
-            else None
-        )
-        replay_routes = None
-        replay_response_mask = None
         if self.enable_routing_replay and RouterReplayHelper.is_replay_forward_action(
             self.tf_config, vp_rank, model=unwrapped_model
         ):
-            replay_routes = model_inputs["routed_experts"]
-            if replay_routes is None:
-                raise RuntimeError("Router replay requires routes from the preceding RECORD forward or rollout")
+            layers_topk_idx = model_inputs["routed_experts"]
+            if layers_topk_idx is None:
+                raise RuntimeError(
+                    "router_replay REPLAY: micro_batch has no routed_experts. "
+                    "R2 compute_log_prob must record and preserve routes before actor update."
+                )
+            replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
-                replay_response_mask = batch["response_mask"]
+                layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
+                replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
+            set_router_replay_data(
+                layers_topk_idx,
+                attention_mask,
+                self.tf_config,
+                vp_rank,
+                replay_mask=replay_mask,
+                local_cp_size=local_cp_size,
+                model=unwrapped_model,
+            )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()
@@ -1378,9 +1389,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
                 position_ids=batch.get("position_ids", None),
-                routed_experts=replay_routes,
-                replay_response_mask=replay_response_mask,
-                recorded_routes=recorded_routes,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1445,9 +1453,18 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
                 position_ids=batch.get("position_ids", None),
-                routed_experts=replay_routes,
-                replay_response_mask=replay_response_mask,
-                recorded_routes=recorded_routes,
+            )
+
+        # Router replay: record routing decisions for R2 mode
+        if tu.get_non_tensor_data(batch, key="record_r2_routes", default=False):
+            merge_router_topk_indices(
+                attention_mask,
+                input_ids,
+                self.mini_layer_topk_idx_list,
+                self.tf_config,
+                vp_rank,
+                local_cp_size=local_cp_size,
+                model=unwrapped_model,
             )
 
         # Router replay: switch to backward replay mode for next backward pass

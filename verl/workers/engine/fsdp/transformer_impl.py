@@ -142,46 +142,6 @@ def _load_hf_language_model(
     )
 
 
-def _select_raw_token_logits(logits: torch.Tensor, indices: torch.Tensor | None) -> torch.Tensor:
-    """Contract image-expanded logits back to the raw input-token sequence."""
-    if indices is None:
-        return logits
-    if logits.ndim != 3 or indices.ndim != 2 or logits.shape[0] != indices.shape[0]:
-        raise ValueError(
-            f"Invalid multimodal logit alignment shapes: logits={tuple(logits.shape)}, indices={tuple(indices.shape)}"
-        )
-    indices = indices.to(device=logits.device, dtype=torch.long)
-    expanded_length = int(indices.max().item()) + 1
-    if logits.shape[1] != expanded_length:
-        raise ValueError(
-            "Multimodal logit length does not match the reconstructed expanded sequence: "
-            f"logits={logits.shape[1]}, reconstructed={expanded_length}"
-        )
-    # Flatten and use index_select to avoid an Ascend advanced-index fallback.
-    batch, expanded_seq_len, vocab = logits.shape
-    row_indices = indices + (
-        torch.arange(batch, device=logits.device).unsqueeze(1) * expanded_seq_len
-    )
-    return (
-        logits.reshape(batch * expanded_seq_len, vocab)
-        .index_select(0, row_indices.reshape(-1))
-        .reshape(batch, indices.shape[1], vocab)
-    )
-
-
-def _move_multimodal_inputs_to_device(value, device):
-    # Move tensor leaves from non-tensor multimodal replay data to the model device.
-    if isinstance(value, torch.Tensor):
-        return value.to(device=device, non_blocking=True)
-    if isinstance(value, list):
-        return [_move_multimodal_inputs_to_device(item, device) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_move_multimodal_inputs_to_device(item, device) for item in value)
-    if isinstance(value, dict):
-        return {key: _move_multimodal_inputs_to_device(item, device) for key, item in value.items()}
-    return value
-
-
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1252,10 +1212,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
-        multi_modal_inputs = _move_multimodal_inputs_to_device(
-            extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", [])),
-            input_ids.device,
-        )
+        multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         pass_packed_cu_seqlens = getattr(self, "pass_packed_cu_seqlens", False)
 
         if not isinstance(temperature, torch.Tensor):
@@ -1417,10 +1374,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
         forward_params = getattr(self, "_model_forward_parameters", None)
         if forward_params is None:
             forward_params = signature(getattr(self.module, "module", self.module).forward).parameters
-        if "output_raw_logits" in forward_params:
+        if "output_packed_logits" in forward_params:
             if use_fused_kernels:
-                raise ValueError("Raw-logit model outputs require unfused kernels")
-            model_inputs["output_raw_logits"] = True
+                raise ValueError("Packed-logit model outputs require unfused kernels")
+            model_inputs["output_packed_logits"] = True
         if tu.get_non_tensor_data(micro_batch, "enable_routing_replay", default=False):
             if "routed_experts" not in forward_params:
                 raise ValueError("This model does not accept routing replay inputs")
@@ -1469,8 +1426,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         input_ids = micro_batch["input_ids"]
 
-        # Input and output layouts may differ for models that expand tokens internally.
-        # Packed outputs obey the same raw-token/SP ownership as the standard path.
+        # Model-provided packed logits obey the standard packed/SP ownership.
         if getattr(output, "logits_layout", None) == "packed" and not use_remove_padding:
             if use_fused_kernels:
                 raise ValueError("Model-provided packed logits require unfused outputs")
@@ -1523,12 +1479,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                             model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
-                logits = output.logits  # (bsz, response_length, vocab_size)
+                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
-                if isinstance(logits, DTensor):
-                    logits = logits.full_tensor()
-                logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
-                logits_rmpad = logits.squeeze(0)  # (total_nnz, vocab_size)
+                if isinstance(logits_rmpad, DTensor):
+                    logits_rmpad = logits_rmpad.full_tensor()
                 logits_rmpad = _scale_logits_by_temperature(
                     logits_rmpad,
                     temperature_rmpad.unsqueeze(-1),
@@ -1625,7 +1579,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
-                logits = _select_raw_token_logits(logits, output_args.get("logits_to_input_indices"))
                 logits = _scale_logits_by_temperature(
                     logits,
                     temperature,

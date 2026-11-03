@@ -284,38 +284,11 @@ def fused_forward_model_engine(vision_model: bool = False):
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
         position_ids: Tensor | None = None,
-        routed_experts: Tensor | None = None,
-        replay_response_mask: Tensor | None = None,
-        recorded_routes: list | None = None,
     ):
-        if hasattr(unwrap_model(model), "prepare_inputs_for_forward"):
-            raise NotImplementedError("Fused forwards do not support model-owned input layouts")
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
         config = unwrap_model(model).config
-        if routed_experts is not None:
-            from verl.utils.megatron.router_replay_utils import (
-                align_r3_router_replay_data,
-                build_r3_replay_mask,
-                set_router_replay_data,
-            )
-
-            replay_mask = None
-            if replay_response_mask is not None:
-                routed_experts = align_r3_router_replay_data(routed_experts, input_ids)
-                replay_mask = build_r3_replay_mask(input_ids, replay_response_mask)
-            unwrapped_model = unwrap_model(model)
-            set_router_replay_data(
-                routed_experts,
-                None,
-                unwrapped_model.config,
-                vp_rank=getattr(unwrapped_model, "vp_stage", None),
-                replay_mask=replay_mask,
-                local_cp_size=local_cp_size,
-                model=unwrapped_model,
-            )
-
         quant_align_size = get_thd_quant_align_size(config)
         min_local_rows = (
             config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
@@ -386,20 +359,6 @@ def fused_forward_model_engine(vision_model: bool = False):
                 temperature=temperature,
                 impl_backend=impl_backend,
                 **forward_kwargs,
-            )
-
-        if recorded_routes is not None:
-            from verl.utils.megatron.router_replay_utils import merge_router_topk_indices
-
-            unwrapped_model = unwrap_model(model)
-            merge_router_topk_indices(
-                None,
-                input_ids,
-                recorded_routes,
-                unwrapped_model.config,
-                vp_rank=getattr(unwrapped_model, "vp_stage", None),
-                local_cp_size=local_cp_size,
-                model=unwrapped_model,
             )
 
         if not post_process:

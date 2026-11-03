@@ -101,6 +101,9 @@ returned image features. Support for model-specific media text belongs in the
 native processor, not a model branch or decoding adapter in these utilities.
 When special media markers are stripped, a processor used for feature
 reconstruction must still be able to process the supplied images.
+Reserve one image-token slot per visual feature during preprocessing. The
+model then fills those slots without changing sequence length, so padding,
+position IDs, masks, logits and routing IDs share the normal token axis.
 
 Native checkpoint layouts
 -------------------------
@@ -136,7 +139,9 @@ Router replay
 Checkpoint loading/export and model forward support are independent of router
 replay. Enable replay separately through ``actor.fsdp_config.router_replay.mode``;
 the default is ``disabled``. The FSDP replay path supports ID-only R3, with
-selected-expert weights computed by the current native router.
+selected-expert weights computed by the current native router. The existing
+replay mask excludes uncaptured causal rows and zero-response padding samples;
+models consume IDs in token order without a separate multimodal row layout.
 
 Validation checklist
 --------------------

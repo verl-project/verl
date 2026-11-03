@@ -39,18 +39,29 @@ from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processo
 class ImageLeaf(BaseImageProcessor):
     _transparent_bg_config = None
     _transparent_bg_fill_stage = None
+    media_proc_cfg = {"patch_size": 14, "merge_kernel_size": 2}
 
     @staticmethod
     def make_image_prompt(width, height):
         return f"<|media_begin|>image {width}x{height}<|media_content|><|media_pad|><|media_end|>"
 
+    @staticmethod
+    def media_tokens_calculator(media):
+        image = media["image"]
+        return ((image.height + 27) // 28) * ((image.width + 27) // 28)
+
     def preprocess(self, medias, return_tensors="pt", **kwargs):
         images = [media["image"] for media in medias]
         assert all(isinstance(image, Image.Image) for image in images)
+        grids = [[1, (image.height + 27) // 28 * 2, (image.width + 27) // 28 * 2] for image in images]
         return BatchFeature(
             data={
-                "pixel_values": [list(image.getpixel((0, 0))) for image in images],
-                "grid_thws": [[1, image.height // 14, image.width // 14] for image in images],
+                "pixel_values": [
+                    list(image.getpixel((0, 0)))
+                    for image, (_, h, w) in zip(images, grids, strict=True)
+                    for _ in range(h * w)
+                ],
+                "grid_thws": grids,
             },
             tensor_type=return_tensors,
         )
@@ -86,7 +97,9 @@ def tokenizer(request):
     backend = Tokenizer(models.BPE(vocabulary, [], unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     backend.decoder = decoders.ByteLevel()
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]", eos_token="<|im_end|>")
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend, unk_token="[UNK]", eos_token="<|im_end|>", pad_token="<|pad|>"
+    )
     tokenizer.add_tokens(
         [
             AddedToken(token, special=request.param)
@@ -111,12 +124,20 @@ def processor(processor_type, tokenizer):
 
 @pytest.fixture
 def images():
-    return [Image.new("RGB", (28, 14), "red"), Image.new("RGB", (14, 28), "blue")]
+    return [Image.new("RGB", (56, 28), "red"), Image.new("RGB", (28, 28), "blue")]
+
+
+@pytest.fixture
+def image_prompts(images):
+    return [
+        ImageLeaf.make_image_prompt(*image.size).replace("<|media_pad|>", "<|media_pad|>" * count)
+        for image, count in zip(images, (2, 1), strict=True)
+    ]
 
 
 def assert_images(result):
-    torch.testing.assert_close(result["pixel_values"], torch.tensor([[255, 0, 0], [0, 0, 255]]))
-    torch.testing.assert_close(result["grid_thws"], torch.tensor([[1, 1, 2], [1, 2, 1]]))
+    torch.testing.assert_close(result["pixel_values"], torch.tensor([[255, 0, 0]] * 8 + [[0, 0, 255]] * 4))
+    torch.testing.assert_close(result["grid_thws"], torch.tensor([[1, 2, 4], [1, 2, 2]]))
 
 
 @pytest.mark.parametrize("text", ["question", ["question"]])
@@ -128,36 +149,55 @@ def test_text_only_uses_native_tokenizer(processor, text):
         torch.testing.assert_close(result[key], expected[key])
 
 
-@pytest.mark.parametrize("form", ["placeholders", "full-media", "features-only"])
-def test_standard_builder_calls_native_processor_with_multiple_images(processor, images, form):
+@pytest.mark.parametrize("form", ["placeholders", "full-media", "expanded", "features-only"])
+def test_standard_builder_calls_native_processor_with_multiple_images(processor, images, image_prompts, form):
     text = {
         "placeholders": "<|kimi_image_placeholder|>question<|kimi_image_placeholder|>",
-        "full-media": ImageLeaf.make_image_prompt(28, 14) + "question" + ImageLeaf.make_image_prompt(14, 28),
+        "full-media": ImageLeaf.make_image_prompt(56, 28) + "question" + ImageLeaf.make_image_prompt(28, 28),
+        "expanded": image_prompts[0] + "question" + image_prompts[1],
         "features-only": "question",
     }[form]
     result = build_multimodal_processor_inputs(processor, text=[text], images=images)
     assert_images(result)
     decoded = processor.tokenizer.decode(result["input_ids"][0], skip_special_tokens=False)
-    expected = (
-        text
-        if form == "features-only"
-        else ImageLeaf.make_image_prompt(28, 14) + "question" + ImageLeaf.make_image_prompt(14, 28)
-    )
+    expected = text if form == "features-only" else image_prompts[0] + "question" + image_prompts[1]
     assert decoded == expected
     assert get_processor_token_id(processor, "image") == processor.tokenizer.convert_tokens_to_ids("<|media_pad|>")
+    if form != "features-only":
+        assert int((result["input_ids"] == get_processor_token_id(processor, "image")).sum()) == 3
 
 
-def test_agent_loop_rebuilds_native_features_after_special_token_stripping(processor, images):
+def test_agent_loop_rebuilds_native_features_after_special_token_stripping(processor, images, image_prompts):
     from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
 
-    text = ImageLeaf.make_image_prompt(28, 14) + "question" + ImageLeaf.make_image_prompt(14, 28) + "answer<|im_end|>"
+    text = image_prompts[0] + "question" + image_prompts[1] + "answer<|im_end|>"
     input_ids = processor.tokenizer([text], return_tensors="pt")["input_ids"]
     assert "<|im_end|>" not in processor.tokenizer.decode(input_ids[0], skip_special_tokens=True)
     worker = SimpleNamespace(processor=processor, tokenizer=processor.tokenizer)
     output = SimpleNamespace(multi_modal_data={"images": images}, mm_processor_kwargs={})
     result = AgentLoopWorker._compute_multi_modal_inputs(worker, output, input_ids)
-    assert set(result) == {"pixel_values", "grid_thws"}
+    assert set(result) == {"pixel_values", "grid_thws", "image_grid_thw", "images_seqlens"}
+    torch.testing.assert_close(result["images_seqlens"], torch.tensor([8, 4]))
     assert_images(result)
+
+
+@pytest.mark.parametrize("padding_side", ["left", "right"])
+def test_expanded_image_coordinates_follow_standard_batch_padding(processor, images, image_prompts, padding_side):
+    processor.tokenizer.padding_side = padding_side
+    result = build_multimodal_processor_inputs(
+        processor,
+        text=["<|kimi_image_placeholder|>question"] * 2,
+        images=[[image] for image in images],
+        mm_processor_kwargs={"padding": True},
+    )
+    expected = processor.tokenizer([prompt + "question" for prompt in image_prompts], return_tensors="pt", padding=True)
+    for name, value in expected.items():
+        torch.testing.assert_close(result[name], value)
+    token_id = get_processor_token_id(processor, "image")
+    counts = (result["input_ids"] == token_id).sum(-1)
+    torch.testing.assert_close(counts, torch.tensor([2, 1]))
+    torch.testing.assert_close(counts, result["grid_thws"][:, 1:].prod(-1) // 4)
+    assert not result["attention_mask"][1, 0 if padding_side == "left" else -1]
 
 
 def test_legacy_medias_and_messages_still_use_native_entrypoints(processor, images):

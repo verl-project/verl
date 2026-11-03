@@ -64,7 +64,6 @@ case "$RUN_MODE" in
         ACTOR_MICRO_BATCH_SIZE_PER_GPU=${ACTOR_MICRO_BATCH_SIZE_PER_GPU:-1}
         LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}
         KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE=${KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE:-False}
-        KIMI_MEGATRON_DYNAMIC_MULTIMODAL_LENGTH=${KIMI_MEGATRON_DYNAMIC_MULTIMODAL_LENGTH:-False}
         ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-True}
         ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-True}
         ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-True}
@@ -89,7 +88,6 @@ case "$RUN_MODE" in
         ACTOR_MICRO_BATCH_SIZE_PER_GPU=${ACTOR_MICRO_BATCH_SIZE_PER_GPU:-2}
         LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-4}
         KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE=${KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE:-True}
-        KIMI_MEGATRON_DYNAMIC_MULTIMODAL_LENGTH=${KIMI_MEGATRON_DYNAMIC_MULTIMODAL_LENGTH:-True}
         ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-False}
         ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-False}
         ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-False}
@@ -108,10 +106,9 @@ esac
 
 TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT=${TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT:-600}
 TQ_NUM_THREADS=${TQ_NUM_THREADS:-8}
-KIMI_MEGATRON_MULTIMODAL_LENGTH_ALIGNMENT=${KIMI_MEGATRON_MULTIMODAL_LENGTH_ALIGNMENT:-256}
 # Keep the 2240-MiB embedding/head tensor in one reusable IPC bucket.
 ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES:-4096}
-for positive_integer in ACTOR_MICRO_BATCH_SIZE_PER_GPU LOG_PROB_MICRO_BATCH_SIZE_PER_GPU TQ_STORAGE_UNITS TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT TQ_NUM_THREADS KIMI_MEGATRON_MULTIMODAL_LENGTH_ALIGNMENT ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES; do
+for positive_integer in ACTOR_MICRO_BATCH_SIZE_PER_GPU LOG_PROB_MICRO_BATCH_SIZE_PER_GPU TQ_STORAGE_UNITS TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT TQ_NUM_THREADS ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES; do
     if [[ ! "${!positive_integer}" =~ ^[1-9][0-9]*$ ]]; then
         echo "$positive_integer must be a positive integer, got ${!positive_integer}" >&2
         exit 2
@@ -265,7 +262,7 @@ fi
 echo "run=$RUN_MODE model=$MODEL_PATH world=$world_size TP=$ACTOR_TP PP=$ACTOR_PP EP=$ACTOR_EP ETP=$ACTOR_ETP rollout_TP=$ROLLOUT_TP rollout_DP=$ROLLOUT_DP rollout_EP=$ROLLOUT_EP${pipeline_summary} steps=$TOTAL_TRAINING_STEPS"
 echo "optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION store_param_remainders=$OPTIMIZER_STORE_PARAM_REMAINDERS actor_param_offload=$ACTOR_PARAM_OFFLOAD actor_optimizer_offload=$ACTOR_OPTIMIZER_OFFLOAD actor_grad_offload=$ACTOR_GRAD_OFFLOAD ref_param_offload=$REF_PARAM_OFFLOAD recompute=$ACTOR_RECOMPUTE enforce_eager=$ROLLOUT_ENFORCE_EAGER rollout_gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTILIZATION update_weights_bucket_mb=$ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES cudagraph_mode=$ROLLOUT_CUDAGRAPH_MODE cudagraph_sizes=$ROLLOUT_CUDAGRAPH_CAPTURE_SIZES cudagraph_max=$ROLLOUT_MAX_CUDAGRAPH_CAPTURE_SIZE sleep_extra_cleanup=$ROLLOUT_SLEEP_EXTRA_CLEANUP"
 echo "micro_batch_actor=$ACTOR_MICRO_BATCH_SIZE_PER_GPU micro_batch_log_prob=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU"
-echo "training_kda=fused:$KIMI_USE_FUSED_KDA internal_recompute_disabled=$KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE dynamic_multimodal_length=$KIMI_MEGATRON_DYNAMIC_MULTIMODAL_LENGTH multimodal_length_alignment=$KIMI_MEGATRON_MULTIMODAL_LENGTH_ALIGNMENT dist_checkpoint=${ACTOR_USE_DIST_CHECKPOINTING:-True} resume_mode=${RESUME_MODE:-disable}"
+echo "training_kda=fused:$KIMI_USE_FUSED_KDA internal_recompute_disabled=$KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE dist_checkpoint=${ACTOR_USE_DIST_CHECKPOINTING:-True} resume_mode=${RESUME_MODE:-disable}"
 echo "transfer_queue_storage_units=$TQ_STORAGE_UNITS transfer_queue_timeout_s=$TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT transfer_queue_threads_per_unit=$TQ_NUM_THREADS"
 DATA=(
     data.train_files="$TRAIN_FILE"
@@ -355,8 +352,6 @@ for role in actor ref; do
         "++actor_rollout_ref.$role.megatron.override_transformer_config.kimi_use_fused_kda=$KIMI_USE_FUSED_KDA"
         "++actor_rollout_ref.$role.megatron.override_transformer_config.kimi_kda_disable_internal_recompute=$KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE"
         "++actor_rollout_ref.$role.megatron.override_transformer_config.kimi_kda_oproj_fp32_reduce=$KIMI_KDA_OPROJ_FP32_REDUCE"
-        "++actor_rollout_ref.$role.megatron.override_transformer_config.kimi_dynamic_multimodal_length=$KIMI_MEGATRON_DYNAMIC_MULTIMODAL_LENGTH"
-        "++actor_rollout_ref.$role.megatron.override_transformer_config.kimi_multimodal_length_alignment=$KIMI_MEGATRON_MULTIMODAL_LENGTH_ALIGNMENT"
         "++actor_rollout_ref.$role.megatron.override_transformer_config.kimi_use_fused_short_conv=True"
     )
 done
@@ -375,7 +370,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enable_prefix_caching=False
     "actor_rollout_ref.rollout.enforce_eager=$ROLLOUT_ENFORCE_EAGER"
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-    '+actor_rollout_ref.rollout.custom={sampling_defaults:{stop:"<|close|> response <|sep|>"},routed_experts_source_semantics:model_rows}'
+    '+actor_rollout_ref.rollout.custom={sampling_defaults:{stop:"<|close|> response <|sep|>"}}'
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU"
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
