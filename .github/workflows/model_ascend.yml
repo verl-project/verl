@@ -95,6 +95,11 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running rmpad model tests on 8 NPUs
         run: |
           pytest -s tests/models/test_transformer.py
@@ -145,6 +150,11 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py

@@ -121,6 +121,11 @@ jobs:
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
@@ -183,6 +188,11 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
