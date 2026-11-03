@@ -250,6 +250,10 @@ class ToolAgentLoop(AgentLoopBase):
                 mm_processor_output=agent_data.mm_processor_output,
                 audio_data=agent_data.audio_data,
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
+                trace_attributes={
+                    "turn": agent_data.assistant_turns,
+                    "session": agent_data.request_id,
+                },
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:

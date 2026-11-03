@@ -232,3 +232,70 @@ def test_agent_loop_session_falls_back_with_old_rl_insight(monkeypatch, mock_rl_
     assert session.identity["global_steps"] == 3
     session.finish(status="success", trajectories=[])
     assert "RL-Insight does not support agent_loop_session" in caplog.text
+
+
+def _install_fake_rl_insight_server(monkeypatch, services):
+    import sys
+    import types
+
+    package = types.ModuleType("rl_insight")
+    package.__path__ = []
+    server = types.ModuleType("rl_insight.server")
+    server.__path__ = []
+    http_api = types.ModuleType("rl_insight.server.http_api")
+    http_api.get_server_services = lambda: services
+    http_api.server_url = lambda: "http://127.0.0.1:18080"
+    network = types.ModuleType("rl_insight.server.network")
+    network.service_url_from_server_url = lambda base, port, path: (f"http://127.0.0.1:{port}{path}" if port else "")
+    monkeypatch.setitem(sys.modules, "rl_insight", package)
+    monkeypatch.setitem(sys.modules, "rl_insight.server", server)
+    monkeypatch.setitem(sys.modules, "rl_insight.server.http_api", http_api)
+    monkeypatch.setitem(sys.modules, "rl_insight.server.network", network)
+    return http_api
+
+
+def test_otlp_traces_endpoint_requires_rl_insight_enabled(monkeypatch):
+    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+
+    assert RLInsightLogger.otlp_traces_endpoint() is None
+
+
+def test_otlp_traces_endpoint_uses_server_otlp_port(monkeypatch):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+
+    assert RLInsightLogger.otlp_traces_endpoint() == "http://127.0.0.1:4318/v1/traces"
+
+
+def test_otlp_traces_endpoint_returns_none_without_otlp_port(monkeypatch):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    _install_fake_rl_insight_server(monkeypatch, {"otlp_port": None})
+
+    assert RLInsightLogger.otlp_traces_endpoint() is None
+
+
+def test_otlp_traces_endpoint_returns_none_when_discovery_raises(monkeypatch, caplog):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    http_api = _install_fake_rl_insight_server(monkeypatch, {"otlp_port": 4318})
+
+    def _raise():
+        raise RuntimeError("discovery boom")
+
+    http_api.get_server_services = _raise
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        assert RLInsightLogger.otlp_traces_endpoint() is None
+
+    assert "OTLP endpoint discovery failed" in caplog.text
+
+
+def test_otlp_traces_endpoint_warns_when_discovery_is_missing(monkeypatch, caplog):
+    import sys
+
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    monkeypatch.setitem(sys.modules, "rl_insight.server.http_api", None)
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        assert RLInsightLogger.otlp_traces_endpoint() is None
+
+    assert "OTLP endpoint discovery is unavailable" in caplog.text

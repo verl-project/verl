@@ -251,6 +251,38 @@ class RLInsightLogger:
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
+    def otlp_traces_endpoint(cls) -> str | None:
+        """Return the RL-Insight Tempo OTLP/HTTP traces endpoint, if available.
+
+        The RL-Insight server exposes ``otlp_port`` in its service status.
+        Returns ``None`` when RL-Insight is disabled, the server is unreachable,
+        or the installed RL-Insight version lacks the service-discovery helpers.
+        """
+        if not cls.enabled():
+            return None
+
+        try:
+            from rl_insight.server.http_api import get_server_services, server_url
+            from rl_insight.server.network import service_url_from_server_url
+        except ImportError as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery is unavailable; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+
+        try:
+            services = get_server_services()
+            endpoint = service_url_from_server_url(server_url(), services.get("otlp_port"), "/v1/traces")
+        except Exception as exc:
+            logger.warning(
+                "RL-Insight OTLP endpoint discovery failed; engine tracing stays disabled: %s",
+                exc,
+            )
+            return None
+        return endpoint or None
+
+    @classmethod
     def _warn_unsupported_rl_insight(cls, feature: str) -> None:
         """Warn once when an optional RL-Insight feature is unavailable."""
         if feature in cls._warned_unsupported_features:
