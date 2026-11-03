@@ -168,13 +168,17 @@ export TRAIN_FILE=/path/to/datasets/geo3k/train.parquet
 export TEST_FILE=/path/to/datasets/geo3k/test.parquet
 ```
 
-### FSDPTurbo 自动准备
+### 预先准备模型目录
 
-FSDPTurbo 启动脚本会在后端源码根目录的 `models/fsdpturbo-<权重目录名>`
-创建独立 checkpoint view。根目录由 `KIMI_BACKEND_ROOT` 指定，默认根据脚本位置推导；
-其中应包含 `verl/` 和 `FSDPTurbo/`。准备脚本链接原始 safetensors，复制配置、
-tokenizer 等文件，并覆盖为配套 FSDPTurbo 的 native modeling 和 processor 代码，
-不修改原权重目录。只修改源码、仍加载旧 checkpoint 目录不能更新实际执行的 remote code。
+两个 Kimi 启动脚本直接使用 `MODEL_PATH` 指向的模型目录。FSDPTurbo 脚本要求
+显式设置此变量。模型目录应由模型仓库或镜像构建流程提前发布，包含匹配的权重、
+配置、tokenizer、modeling、processor，以及 Hugging Face remote-code 加载所需的
+相对依赖文件；FSDPTurbo 的 `.kimi_k3` 导入需要对应的 `kimi_k3.py`。
+所有节点都应能访问同一版本的完整模型目录，并安装代码所需的运行依赖。
+
+`trust_remote_code=True` 会加载模型目录中的 Python 文件。只更新 FSDPTurbo
+源码或安装包，仍可能执行模型目录里的旧实现，因此发布模型时必须同步更新这些文件。
+FSDPTurbo 启动参数已设置 `load_checkpoint_after_shard=True`，无需在启动前改写模型配置。
 
 原生 `KimiK3Processor` 直接支持标准 Hugging Face `text`（字符串或文本列表）和
 `images` 参数，并声明自己的 `image_token`；原有 `medias/messages` API 继续保留。
@@ -186,35 +190,8 @@ verl 的通用 builder 和 AgentLoop 使用原 main 流程，没有 Kimi 转换�
 `data.max_prompt_length` 和 rollout 的上下文预算现在包含全部图像占位 token。
 应按实际视觉特征数设置预算；不能继续用只统计文本和单个图片标记的长度估算样本。
 
-### Megatron 显式准备
-
-Megatron 启动脚本直接读取 `MODEL_PATH`，不会运行模型准备脚本，也不要求其
-`BACKEND_ROOT` 下存在 `FSDPTurbo/`。使用独立位置的配套 FSDPTurbo 源码先生成
-一个新 view，再将 `MODEL_PATH` 指向它：
-
-```bash
-export BACKEND_ROOT=/path/to/megatron-kimi-k3
-export FSDPTURBO_SOURCE=/path/to/FSDPTurbo
-export ORIGINAL_MODEL_PATH=/path/to/models/kimi-k3-geo3k-sft
-export MODEL_PATH=/path/to/models/kimi-k3-native-view
-
-python3 "$BACKEND_ROOT/verl/examples/ascend_extras/grpo_trainer/prepare_kimi_k3_model.py" \
-  "$ORIGINAL_MODEL_PATH" "$MODEL_PATH" \
-  --code "$FSDPTURBO_SOURCE/fsdp_turbo/models/kimi"
-```
-
-随后保持该 `MODEL_PATH` 运行
-[run_kimi_k3_megatron.sh](../../../../examples/ascend_extras/grpo_trainer/run_kimi_k3_megatron.sh)。
-view 与原目录必须不同；各节点都需要能访问 view 和其链接指向的原始权重。
-准备脚本会覆盖 view 中的代码和元数据，原目录不变。
-
-脚本同时在 view 配置中写入 `load_checkpoint_after_shard=True`。当前 verl 仅在
-FSDP 加载流程读取此字段；配套 Kimi Bridge 从 `text_config` 映射其 provider 配置，
-不读取该字段，因此它不会把 Megatron 切换为 FSDP 加载路径。
-部署仍需满足 checkpoint remote code 的导入依赖：复制的 modeling 文件含有
-`fsdp_turbo` 包导入，而 Megatron launcher 不自动把 `FSDPTURBO_SOURCE` 加入
-`PYTHONPATH`。若部署中的 HF 类解析或转换需要导入这些文件，应在既有运行环境中
-提供匹配的 FSDPTurbo 包；`--code` 只复制代码，不安装运行依赖。
+Megatron 使用同样已准备好的 `MODEL_PATH`，其运行环境也需提供模型代码导入的依赖。
+例如使用配套 FSDPTurbo remote code 时，应在环境中安装匹配的 `fsdp_turbo` 包。
 
 ## 启动训练
 

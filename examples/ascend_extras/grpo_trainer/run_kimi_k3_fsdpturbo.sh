@@ -21,7 +21,7 @@ run_mode="${KIMI_RUN_MODE:-single}"
 start_time="${VERL_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 project_name="${VERL_PROJECT_NAME:-GRPO-Kimi-K3-A3B}"
 
-model_path=${MODEL_PATH:-/mnt/share/w00848461/weights/K3-top16-pruned_bf16_countbench_128_n4}
+model_path=${MODEL_PATH:?set MODEL_PATH to a prepared Kimi K3 model directory}
 
 case "$run_mode" in
     single)
@@ -76,12 +76,6 @@ vllm_path="${PROJECT_ROOT}/vllm"
 vllm_ascend_path="${PROJECT_ROOT}/vllm-ascend"
 runtime_site="${PROJECT_ROOT}/.runtime-site"
 cann_python_site="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/python/site-packages"
-
-# The checkpoint's Python files are executable remote code. Keep actor and
-# rollout on the reviewed FSDP-Turbo implementation for every launch.
-model_source=$model_path
-model_path="$PROJECT_ROOT/models/fsdpturbo-$(basename "$model_source")"
-python3 "$SCRIPT_DIR/prepare_kimi_k3_model.py" "$model_source" "$model_path" --code "$fsdp_turbo_path/fsdp_turbo/models/kimi"
 
 export PYTHONPATH="${PROJECT_ROOT}/.python_deps/modelopt-0.46.0:${runtime_site}:${verl_path}:${vllm_path}:${vllm_ascend_path}:${fsdp_turbo_path}:${fsdp_turbo_path}/examples:${cann_python_site}"
 export FSDP_TURBO_ROOT="${fsdp_turbo_path}"
