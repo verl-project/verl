@@ -22,6 +22,7 @@ from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
 from .engine import (
+    AutomodelEngineConfig,
     FSDPEngineConfig,
     McoreEngineConfig,
     TorchtitanEngineConfig,
@@ -37,6 +38,7 @@ __all__ = [
     "TorchTitanCriticConfig",
     "FSDPCriticModelCfg",
     "VeOmniCriticConfig",
+    "AutomodelCriticConfig",
 ]
 
 
@@ -310,3 +312,29 @@ class VeOmniCriticConfig(CriticConfig):
                         f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
                         f"veomni.ulysses_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
                     )
+
+
+@dataclass
+class AutomodelCriticConfig(CriticConfig):
+    """Configuration for Automodel-based critic model training.
+
+    Uses the Automodel (nemo_automodel) FSDP2 engine for the value model,
+    mirroring AutomodelActorConfig but for the critic role.
+
+    Args:
+        strategy (str): Training strategy set to 'automodel'.
+        automodel (AutomodelEngineConfig): Automodel engine configuration.
+    """
+
+    strategy: str = "automodel"
+    automodel: AutomodelEngineConfig = field(default_factory=AutomodelEngineConfig)
+    grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Set engine to Automodel config."""
+        super().__post_init__()
+        self.engine = self.automodel
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate Automodel critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)

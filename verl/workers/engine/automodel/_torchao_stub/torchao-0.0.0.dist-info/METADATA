@@ -1,0 +1,19 @@
+Metadata-Version: 2.1
+Name: torchao
+Version: 0.0.0
+
+Stub metadata for the verl torchao stub package (see
+verl/workers/engine/automodel/utils.py::_ensure_torchao_stub).
+
+transformers' `_is_package_available("torchao")` uses importlib.util.find_spec
+to detect the package (our stub dir is on sys.path, so the spec is found) and
+importlib.metadata.version to read its version. Without a dist-info,
+version() raises PackageNotFoundError and transformers keeps version "N/A"
+with availability True, which later crashes packaging.version.parse in
+is_torchao_available() (killed SGLang scheduler spawn children during
+unpickle-time transformers import).
+
+With this dist-info, importlib.metadata.version("torchao") returns "0.0.0" --
+a valid version below transformers' minimum torchao requirement, so
+is_torchao_available() cleanly returns False and the stub keeps
+HAVE_TORCHAO-style probes False.

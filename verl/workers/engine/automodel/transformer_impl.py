@@ -96,9 +96,12 @@ class AutomodelEngine(BaseEngine):
         apply_te_patches()
 
         world_size = torch.distributed.get_world_size()
-        self.distributed_config, self.device_mesh, self.moe_mesh = build_distributed_config_from_engine_config(
-            self.engine_config, world_size
-        )
+        (
+            self.distributed_setup,
+            self.distributed_config,
+            self.device_mesh,
+            self.moe_mesh,
+        ) = build_distributed_config_from_engine_config(self.engine_config, world_size)
 
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
@@ -127,9 +130,7 @@ class AutomodelEngine(BaseEngine):
 
     def initialize(self):
         """Build the model, optimizer, LR scheduler, and checkpointer using Automodel infrastructure."""
-        self.module = build_automodel_model(
-            self.model_config, self.engine_config, self.distributed_config, self.device_mesh, self.moe_mesh
-        )
+        self.module = build_automodel_model(self.model_config, self.engine_config, self.distributed_setup)
         log_gpu_memory_usage("After Automodel model build", logger=logger)
 
         if not self.engine_config.forward_only:
@@ -154,13 +155,17 @@ class AutomodelEngine(BaseEngine):
 
     def _build_optimizer(self, module):
         """Build optimizer via Automodel's build_optimizer."""
-        from nemo_automodel.components.config.loader import ConfigNode
-        from nemo_automodel.recipes.llm.train_ft import build_optimizer as automodel_build_optimizer
+        from nemo_automodel.components.optim.optimizer import build_optimizer as automodel_build_optimizer
 
         config = self.optimizer_config
 
-        opt_dict = {
-            "_target_": f"{config.optimizer_impl}.{config.optimizer}",
+        # New build_optimizer API: config is either an OptimizerConfig or a
+        # (name_or_path, kwargs) tuple; the legacy ConfigNode form is gone.
+        # A dotted import path that is a plain callable (e.g. torch.optim.AdamW)
+        # is wrapped in OptimizerFromFactoryConfig upstream (the documented
+        # external-integration escape hatch, e.g. verl).
+        opt_name = f"{config.optimizer_impl}.{config.optimizer}"
+        opt_kwargs = {
             "lr": config.lr,
             "weight_decay": config.weight_decay,
             "eps": config.eps,
@@ -168,21 +173,20 @@ class AutomodelEngine(BaseEngine):
         }
 
         if config.master_weights:
-            opt_dict["master_weights"] = config.master_weights
+            opt_kwargs["master_weights"] = config.master_weights
         if config.store_param_remainders:
-            opt_dict["store_param_remainders"] = config.store_param_remainders
+            opt_kwargs["store_param_remainders"] = config.store_param_remainders
 
         _short_to_torch = {"bf16": "torch.bfloat16", "fp32": "torch.float32", "fp16": "torch.float16"}
         for attr in ("exp_avg_dtype", "exp_avg_sq_dtype", "master_weight_dtype"):
             val = getattr(config, attr, None)
             if val is not None:
-                opt_dict[attr] = _short_to_torch.get(val, val)
+                opt_kwargs[attr] = _short_to_torch.get(val, val)
 
         if config.override_optimizer_config:
-            opt_dict.update(config.override_optimizer_config)
+            opt_kwargs.update(config.override_optimizer_config)
 
-        cfg_opt = ConfigNode(opt_dict)
-        optimizers = automodel_build_optimizer(module, cfg_opt, self.distributed_config, self.device_mesh)
+        optimizers = automodel_build_optimizer(module, (opt_name, opt_kwargs), device_mesh=self.device_mesh)
         assert len(optimizers) == 1, f"Expected 1 optimizer, got {len(optimizers)}"
         return optimizers[0]
 
@@ -421,6 +425,40 @@ class AutomodelEngine(BaseEngine):
     def get_per_tensor_param(self, **kwargs):
         load_automodel_model_to_gpu(self.module)
 
+        adapter = getattr(self.module, "state_dict_adapter", None)
+        to_hf_iter = getattr(adapter, "to_hf_iter", None) if adapter is not None else None
+
+        def _full_tensor(t):
+            return t.full_tensor() if isinstance(t, DTensor) else t
+
+        if to_hf_iter is not None:
+            # Custom automodel models (e.g. DeepSeek-V4) keep merged expert
+            # tensors under internal FQNs; the adapter's to_hf emits the
+            # checkpoint-convention names (per-expert w1/w2/w3) that the
+            # rollout replicas were initialized with. convert_weight_keys
+            # (HF ``_checkpoint_conversion_mapping``) is a no-op for these
+            # models, so route through the adapter instead. Stream one
+            # internal tensor at a time: DTensor -> full_tensor() happens
+            # lazily inside the generator to keep peak memory bounded, and
+            # the per-rank key sequence is identical (state_dict() order is
+            # deterministic module-tree order).
+            internal_state_dict = self.module.state_dict()
+
+            def param_generator():
+                try:
+                    yield from to_hf_iter(
+                        internal_state_dict,
+                        exclude_key_regex=r".*_extra_state.*",
+                        tensor_converter=_full_tensor,
+                    )
+                finally:
+                    # Offload only after the stream is fully consumed: the
+                    # lazy full_tensor() all-gathers need the params on GPU.
+                    if self._is_offload_param:
+                        offload_automodel_model_to_cpu(self.module)
+
+            return param_generator(), None
+
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
@@ -429,7 +467,7 @@ class AutomodelEngine(BaseEngine):
 
         def param_generator():
             for name, param in params.items():
-                unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
+                unsharded_tensor = _full_tensor(param)
                 yield name, unsharded_tensor
 
         return param_generator(), None
@@ -471,6 +509,102 @@ class AutomodelTrainModeCtx(BaseEngineCtx):
 @EngineRegistry.register(model_type="language_model", backend=["automodel"], device=["cuda"])
 class AutomodelEngineWithLMHead(AutomodelEngine):
     """Automodel engine for language model with LM head training."""
+
+    def _cp_sharding_enabled(self) -> bool:
+        """Whether trainer-side CP sharding can run for this model/mesh.
+
+        Requires a cp axis of size > 1 on the device mesh and a model-owned CP
+        prep hook (``prepare_model_inputs_for_cp`` — DSV4 exposes it, returning
+        a Miles-style contiguous ContextParallelSharder). CP data-plane
+        correctness additionally needs the CP batch shard + logprob reassembly
+        wired in this engine (see ``_shard_batch_for_cp``).
+        """
+        if self.device_mesh is None:
+            return False
+        mesh_dim_names = getattr(self.device_mesh, "mesh_dim_names", ())
+        if "cp" not in mesh_dim_names or self.device_mesh["cp"].size() <= 1:
+            return False
+        return hasattr(self.module, "prepare_model_inputs_for_cp")
+
+    def _shard_batch_for_cp(
+        self,
+        *,
+        input_ids_rmpad: torch.Tensor,
+        input_ids_rmpad_rolled: torch.Tensor,
+        position_ids_rmpad: torch.Tensor,
+        temperature_rmpad: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        pad_token_id: int,
+        output_args: dict,
+    ) -> tuple[dict, dict]:
+        """Contiguously shard the packed rmpad stream across the CP group.
+
+        The model-owned hook (``prepare_model_inputs_for_cp`` →
+        ``ContextParallelSharder``) is driven through nemo_automodel's standard
+        constructor path: the packed [1, total] stream becomes a single-row
+        batch with per-document ``seq_lens``; the sharder re-pads documents to
+        the model's compression-window multiple, slices this rank's contiguous
+        shard, and hands the CP group back under ``_dsv4_cp_group`` so DSV4
+        attention all-gathers K/V across CP ranks during forward.
+
+        Reassembly (log_probs/entropy → caller coordinates) happens in
+        ``prepare_model_outputs`` via ``ContextParallelSharder.gather_token_tensor``
+        (differentiable all_gather), so the loss/metric pipeline is unchanged
+        and every CP peer sees the full-sequence outputs.
+        """
+        from nemo_automodel.components.distributed.context_parallel.sharder import ContextParallelSharder
+
+        assert input_ids_rmpad.dim() == 2 and input_ids_rmpad.shape[0] == 1, (
+            f"CP sharding expects a single packed row [1, total], got {tuple(input_ids_rmpad.shape)}"
+        )
+        assert position_ids_rmpad.dim() == 2, (
+            f"CP sharding supports 2D position_ids only (text models); got {position_ids_rmpad.dim()}D"
+        )
+
+        doc_lens = cu_seqlens.diff().to(torch.long)
+        cp_batch = {
+            "input_ids": input_ids_rmpad,  # [1, total]
+            # next-token targets in the CALLER's packed coordinates; the sharder
+            # re-pads documents and slices, keeping per-token targets intact
+            "labels": input_ids_rmpad_rolled.unsqueeze(0),  # [1, total]
+            "position_ids": position_ids_rmpad,  # [1, total]
+            "seq_lens": doc_lens.unsqueeze(0),  # [1, n_docs]
+            "seq_lens_padded": doc_lens.unsqueeze(0).clone(),
+        }
+
+        sharder = ContextParallelSharder(
+            device_mesh=self.device_mesh,
+            model=self.module,
+            batch=cp_batch,
+            padding_token_id=pad_token_id,
+        )
+        cp_ctx, cp_batch = sharder.shard(cp_batch)
+
+        model_inputs = {
+            key: cp_batch[key]
+            for key in ("input_ids", "position_ids", "padding_mask", "packed_seq_ids")
+            if key in cp_batch
+        }
+        # CP group for DSV4 attention's K/V all-gather (model forward kwarg).
+        model_inputs["_dsv4_cp_group"] = cp_batch["_dsv4_cp_group"]
+
+        # Per-token temperature aligned to this rank's local shard (caller
+        # coordinates → padded row → local slice; dropped pad slots get 1.0).
+        temperature_local = (
+            sharder.shard_token_tensor(temperature_rmpad.unsqueeze(0), seq_dim=1, fill=1.0)
+            .reshape(-1)
+            .to(temperature_rmpad.dtype)
+        )
+
+        output_args.update(
+            {
+                "cp_ctx": cp_ctx,
+                "cp_sharder": sharder,
+                "cp_labels": cp_batch["labels"],  # [1, local] targets in shard coordinates
+                "temperature_rmpad": temperature_local,  # [local]
+            }
+        )
+        return model_inputs, output_args
 
     def prepare_model_inputs(self, micro_batch: TensorDict):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
@@ -521,6 +655,25 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 "attention_mask": None,
                 "position_ids": position_ids_rmpad,
             }
+
+            # Trainer-side CP: replace the full-sequence inputs with this rank's
+            # contiguous shard (model-owned ContextParallelSharder; DSV4). Only
+            # the FA2 backend is supported here — the TE cu_seqlens path below
+            # assumes an unsharded THD stream.
+            if self._cp_sharding_enabled():
+                assert self.engine_config.attn_implementation != "te", (
+                    "automodel engine CP sharding supports flash_attention_2 only, "
+                    f"got {self.engine_config.attn_implementation}"
+                )
+                model_inputs, output_args = self._shard_batch_for_cp(
+                    input_ids_rmpad=input_ids_rmpad,
+                    input_ids_rmpad_rolled=input_ids_rmpad_rolled,
+                    position_ids_rmpad=position_ids_rmpad,
+                    temperature_rmpad=temperature_rmpad,
+                    cu_seqlens=input_ids.offsets(),
+                    pad_token_id=tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0),
+                    output_args=output_args,
+                )
 
             # For TE attention backend, pass cu_seqlens
             if self.engine_config.attn_implementation == "te":
@@ -600,8 +753,46 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
             temperature_rmpad = output_args["temperature_rmpad"]
+            cp_sharder = output_args.get("cp_sharder", None)
 
-            if use_fused_kernels:
+            if cp_sharder is not None:
+                # CP: logits cover only this rank's contiguous shard; targets
+                # (cp_labels) and temperature are already in shard coordinates
+                # (see _shard_batch_for_cp). Reassemble the full packed stream
+                # via the differentiable CP all-gather + position map so every
+                # peer holds the full-sequence log_probs and the downstream
+                # loss/metric path is unchanged vs CP=1.
+                logits_rmpad = output.logits.squeeze(0)
+                if isinstance(logits_rmpad, DTensor):
+                    logits_rmpad = logits_rmpad.full_tensor()
+                logits_rmpad = logits_rmpad / temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype)
+
+                inplace_backward = not calculate_entropy
+                labels_local = output_args["cp_labels"].reshape(-1)
+                log_probs_local = logprobs_from_logits(
+                    logits=logits_rmpad, labels=labels_local, inplace_backward=inplace_backward
+                )
+                log_probs = cp_sharder.gather_token_tensor(
+                    log_probs_local.unsqueeze(0), seq_dim=1, trim=True, fill=0.0
+                ).reshape(-1)
+                if calculate_entropy:
+                    if not self.engine_config.entropy_checkpointing:
+                        if self.engine_config.entropy_from_logits_with_chunking:
+                            entropy_local = self.compute_entropy_from_logits(
+                                logits_rmpad,
+                                chunk_size=self.engine_config.entropy_from_logits_chunking,
+                            )
+                        else:
+                            entropy_local = self.compute_entropy_from_logits(logits_rmpad)
+                    else:
+                        entropy_local = torch.utils.checkpoint.checkpoint(
+                            self.compute_entropy_from_logits, logits_rmpad
+                        )
+                    entropy_rmpad = cp_sharder.gather_token_tensor(
+                        entropy_local.unsqueeze(0), seq_dim=1, trim=True, fill=0.0
+                    ).reshape(-1)
+
+            elif use_fused_kernels:
                 log_probs = output.log_probs.squeeze(0)
                 entropy_rmpad = output.entropy.squeeze(0)
             else:
@@ -690,11 +881,20 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
+        cp_ctx = output_args.get("cp_ctx", None)
         with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            raw_output = self.module(
-                **model_inputs,
-                use_cache=False,
-            )
+            if cp_ctx is not None:
+                # CP shard ctx (e.g. stream/collective guards) around the forward.
+                with cp_ctx():
+                    raw_output = self.module(
+                        **model_inputs,
+                        use_cache=False,
+                    )
+            else:
+                raw_output = self.module(
+                    **model_inputs,
+                    use_cache=False,
+                )
 
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch

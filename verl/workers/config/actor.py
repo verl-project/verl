@@ -23,6 +23,7 @@ from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
 from .engine import (
+    AutomodelEngineConfig,
     FSDPEngineConfig,
     McoreEngineConfig,
     TorchtitanEngineConfig,
@@ -38,6 +39,7 @@ __all__ = [
     "FSDPActorConfig",
     "McoreActorConfig",
     "VeOmniActorConfig",
+    "AutomodelActorConfig",
     "QATConfig",
     "TorchTitanActorConfig",
 ]
@@ -370,6 +372,34 @@ class VeOmniActorConfig(ActorConfig):
                 "configuration for MoE routing replay. Set "
                 "actor.use_remove_padding=True or router_replay.mode='disabled'."
             )
+
+
+@dataclass
+class AutomodelActorConfig(ActorConfig):
+    """Configuration for Automodel (nemo_automodel) actor models.
+
+    The engine builds the model via NeMoAutoModelForCausalLM and applies an
+    FSDP2/MegatronFSDP/DDP distributed strategy (see AutomodelEngineConfig for
+    the full engine surface). Model parameters are FSDP2 DTensors, so generic
+    FSDP2 utilities (sharded save/load, per-tensor export) work on this module
+    just like on the fsdp2/veomni strategies.
+
+    Args:
+        strategy (str): Training strategy set to 'automodel'.
+        automodel (AutomodelEngineConfig): Automodel engine settings.
+        use_remove_padding (bool): Whether to remove padding tokens in inputs during training
+        use_rollout_log_probs (bool): Whether to use log probabilities from the rollout engine
+    """
+
+    strategy: str = "automodel"
+    automodel: AutomodelEngineConfig = field(default_factory=AutomodelEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate Automodel actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.automodel
 
 
 @dataclass

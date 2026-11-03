@@ -1,0 +1,33 @@
+# automodel ref config, inheriting from trainer/config/ref/ref.yaml
+defaults:
+  - ref
+
+  # automodel engine config
+  - ../engine@automodel: automodel
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration (the ref role reuses the actor config class)
+_target_: verl.workers.config.AutomodelActorConfig
+
+strategy: automodel
+
+automodel:
+
+  # ref model is forward only
+  forward_only: True
+
+  # mirror the actor's automodel engine settings
+  distributed_strategy: ${oc.select:actor_rollout_ref.actor.automodel.distributed_strategy,fsdp2}
+  tp_size: ${oc.select:actor_rollout_ref.actor.automodel.tp_size,1}
+  pp_size: ${oc.select:actor_rollout_ref.actor.automodel.pp_size,1}
+  cp_size: ${oc.select:actor_rollout_ref.actor.automodel.cp_size,1}
+  ep_size: ${oc.select:actor_rollout_ref.actor.automodel.ep_size,1}
+  dp_replicate_size: ${oc.select:actor_rollout_ref.actor.automodel.dp_replicate_size,1}
+  param_offload: ${oc.select:actor_rollout_ref.actor.automodel.param_offload,False}
+  optimizer_offload: ${oc.select:actor_rollout_ref.actor.automodel.optimizer_offload,False}
+  activation_checkpointing: ${oc.select:actor_rollout_ref.actor.automodel.activation_checkpointing,False}
+  enable_fp8: ${oc.select:actor_rollout_ref.actor.automodel.enable_fp8,False}
+  model_dtype: ${oc.select:actor_rollout_ref.actor.automodel.model_dtype,fp32}
+  attn_implementation: ${oc.select:actor_rollout_ref.actor.automodel.attn_implementation,flash_attention_2}
