@@ -39,11 +39,13 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 class TransportPullCheckpointEngine(CheckpointEngine):
     """Trainer rank 0 publishes weight versions; rollout workers pull them with one-sided reads.
 
-    With transport="nixl_native" it runs on any torch; other transports need torch >= 2.15.
+    The default transport, "nixl_native", runs on any torch. torch.distributed._transport backends
+    need torch >= 2.15 on both trainer and rollout, since the two transports cannot interoperate.
 
     Args:
         bucket_size: Size in bytes of one remote read.
-        device: Device of the publisher slots and puller mirror, "cuda" or "cpu".
+        device: Device of the publisher slots and puller mirror. "cpu" (pinned host memory) by
+            default: each slot holds a full model copy, which rarely fits next to training state.
         transport: Transport backend: "nixl_native" (any torch), or a torch.distributed._transport
             backend such as "nixl" (torch >= 2.15). Not named `backend`, which selects the engine.
         num_slots: Versions the publisher keeps at once.
@@ -59,8 +61,8 @@ class TransportPullCheckpointEngine(CheckpointEngine):
     def __init__(
         self,
         bucket_size: int,
-        device: str = "cuda",
-        transport: str = "nixl",
+        device: str = "cpu",
+        transport: str = "nixl_native",
         num_slots: int = 2,
         rollout_dtype: torch.dtype | str | None = torch.bfloat16,
         lease_ttl: float = 60.0,

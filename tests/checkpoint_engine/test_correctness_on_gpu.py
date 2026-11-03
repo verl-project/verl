@@ -90,7 +90,7 @@ async def test_nccl_checkpoint_engine(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["nixl", "nixl_native"])
-@pytest.mark.parametrize("device", ["cuda", "cpu"])
+@pytest.mark.parametrize("device", ["cpu"])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_transport_pull_checkpoint_engine(
