@@ -73,3 +73,25 @@ the previous loading path. Those results are prior integration evidence, not an
 end-to-end pass on this rebased upstream commit. Re-run with the intended model
 and paired dependencies before merging. Do not infer convergence from one step
 or compare independent training runs as though their final weights were equal.
+
+## HCCL
+
+Select `engine_kwargs.vllm.weight_transfer_config.backend: hccl` instead of
+`npu_ipc`. This adapter requires `HCCLTrainerWeightTransferEngine.trainer_init`,
+`HCCLTrainerInitInfo`, a client and a replayable source, plus `send_weights` and
+`shutdown`; it does not use the former static-send API.
+
+The initial supported topology is one node, replicated FSDP full-weight
+streams, at least two TP replicas, and inference DP=PP=1, with no prefill/decode
+disaggregation. A replica's trainer leader sends to the next replica so the
+source physical NPU is not also a receiver in its HCCL group. Other ranks still
+consume the exporter to participate in FSDP gathers. This does not implement
+the delta-sharded checkpoint engine or a general multi-node M-to-N transport.
+
+The trainer materializes one bounded batch on its actor thread and invokes the
+official engine on a device-bound transport thread. Start is forwarded once,
+per-batch finish calls are deferred, and finalization occurs only after the full
+stream succeeds. Producer tensors are copied before advancing a potentially
+reusing exporter. A single oversized tensor can exceed the batch limit.
+Cancellation queues cleanup after the outstanding transport call; it cannot
+interrupt a stuck HCCL collective. Persistent groups are reused between rounds.

@@ -113,7 +113,7 @@ def worker_preflight():
     return Worker(), namespace
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "hccl"])
 def test_cuda_rejected_before_importing_ascend(worker_preflight, monkeypatch, mode):
     worker, namespace = worker_preflight
     namespace["get_device_name"] = lambda: "cuda"
@@ -128,14 +128,14 @@ def test_cuda_rejected_before_importing_ascend(worker_preflight, monkeypatch, mo
         worker.validate(mode)
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "hccl"])
 def test_valid_worker_preflight_does_not_call_loading_methods(worker_preflight, native_dependencies, mode):
     worker, _ = worker_preflight
     worker.model_runner.vllm_config.weight_transfer_config.backend = mode
     worker.validate(mode)
 
 
-@pytest.mark.parametrize("mode", ["npu_ipc"])
+@pytest.mark.parametrize("mode", ["npu_ipc", "hccl"])
 def test_receiver_backend_must_match_selected_mode(worker_preflight, native_dependencies, mode):
     worker, _ = worker_preflight
     worker.model_runner.vllm_config.weight_transfer_config.backend = "other"

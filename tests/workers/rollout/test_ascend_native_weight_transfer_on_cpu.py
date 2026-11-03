@@ -434,6 +434,222 @@ def test_native_lifecycle_and_acknowledgement_order(monkeypatch, fail_update):
         ]
 
 
+@pytest.mark.parametrize("failure", [None, "source", "send", "finish", "empty"])
+def test_hccl_native_calls_bounded_stream_and_peer_replica(monkeypatch, failure):
+    import asyncio
+
+    import ray
+    import torch.distributed as dist
+    import vllm.utils.network_utils as network
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import (
+        HCCLTrainerWeightTransferEngine as Engine,
+    )
+
+    events, received = [], []
+    import threading
+
+    closed = threading.Event()
+    main_thread = threading.get_ident()
+
+    class Future:
+        def __await__(self):
+            async def done():
+                return None
+
+            return done().__await__()
+
+    class RPC:
+        def remote(self, method, **kwargs):
+            assert threading.get_ident() == main_thread
+            events.append(method)
+            if failure == "finish" and method == "finish_weight_update":
+                raise ValueError("finish failed")
+            return Future()
+
+    server = SimpleNamespace(collective_rpc=RPC())
+
+    def actor(name):
+        assert name == "vllm_server_1_0"
+        return server
+
+    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "4")
+    monkeypatch.setattr(ray, "get_actor", actor)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 4)
+    monkeypatch.setattr(dist, "barrier", lambda: events.append("barrier"))
+    monkeypatch.setattr(network, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(network, "get_open_port", lambda: 54321)
+    monkeypatch.setattr(
+        native,
+        "get_torch_device",
+        lambda: SimpleNamespace(synchronize=lambda: None, device=lambda device: contextlib.nullcontext()),
+    )
+
+    class Trainer:
+        device = torch.device("cpu")
+
+        def __init__(self, client, source):
+            self.client, self.source = client, source
+
+        def send_weights(self):
+            assert threading.get_ident() != main_thread
+            pairs = list(self.source)
+            metadata = self.source.metadata()
+            assert [(m.name, m.dtype, m.shape) for m in metadata] == [
+                (name, tensor.dtype, tuple(tensor.shape)) for name, tensor in pairs
+            ]
+            assert [n for n, _ in self.source] == [n for n, _ in pairs]
+            self.client.start_weight_update()
+            self.client.update_weights({"names": [m.name for m in metadata]})
+            if failure == "send":
+                raise ValueError("send failed")
+            received.extend((n, t.clone()) for n, t in pairs)
+            self.client.finish_weight_update()
+
+        def shutdown(self):
+            events.append("shutdown")
+            closed.set()
+
+    def init(info, *, client, source):
+        assert threading.get_ident() != main_thread
+        assert vars(info) == dict(rank=0, master_address="127.0.0.1", master_port=54321, world_size=3, packed=False)
+        client.init_weight_transfer_engine({"rank_offset": 1})
+        return Trainer(client, source)
+
+    monkeypatch.setattr(Engine, "trainer_init", init)
+    config = SimpleNamespace(
+        tensor_model_parallel_size=2,
+        data_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        checkpoint_engine=SimpleNamespace(update_weights_bucket_megabytes=16 / (1024 * 1024)),
+    )
+    adapter = SimpleNamespace(
+        config=config, _pd_role=None, rollout_rank=0, replica_rank=0, _get_server_name_prefix=lambda: "vllm_"
+    )
+
+    def source():
+        if failure == "empty":
+            return
+        storage = torch.zeros(2)
+        for i in range(3):
+            assert threading.get_ident() == main_thread
+            storage.fill_(i)
+            yield str(i), storage
+        if failure == "source":
+            raise ValueError("source failed")
+        yield "large", torch.full((20,), 7.0)
+
+    if failure:
+        pattern = "empty HCCL" if failure == "empty" else f"{failure} failed"
+        with pytest.raises(ValueError, match=pattern):
+            asyncio.run(native.send_ascend_hccl_weights(adapter, source()))
+        assert closed.wait(2), "Failed trainer engines must be shut down"
+        assert adapter._ascend_hccl_state is None
+        assert "barrier" not in events
+        if failure != "finish":
+            assert "finish_weight_update" not in events
+        return
+
+    asyncio.run(native.send_ascend_hccl_weights(adapter, source()))
+    assert [n for n, t in received] == ["0", "1", "2", "large"]
+    assert [t[0].item() for n, t in received] == [0, 1, 2, 7]
+    assert events[0:2] == ["init_weight_transfer_engine", "start_weight_update"]
+    assert events[-2:] == ["finish_weight_update", "barrier"]
+    assert events.count("update_weights") == 3
+    assert events.count("start_weight_update") == 1
+    assert events.count("finish_weight_update") == 1
+    # The existing communicator is reused on subsequent training steps.
+    asyncio.run(native.send_ascend_hccl_weights(adapter, source()))
+    assert events.count("init_weight_transfer_engine") == 1
+    assert events.count("start_weight_update") == 2
+    assert events.count("finish_weight_update") == 2
+    # Non-senders still consume every item; skipping this would deadlock FSDP.
+    adapter.rollout_rank = 1
+    consumed = []
+
+    def drain():
+        for i in range(3):
+            consumed.append(i)
+            yield str(i), torch.zeros(1)
+
+    before = len(events)
+    asyncio.run(native.send_ascend_hccl_weights(adapter, drain()))
+    assert consumed == [0, 1, 2]
+    assert events[before:] == ["barrier"]
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "2")
+    with pytest.raises(ValueError, match="at least two TP replicas"):
+        asyncio.run(native.send_ascend_hccl_weights(adapter, source()))
+
+
+@pytest.mark.parametrize("phase", ["init", "send"])
+def test_hccl_cancellation_reclaims_engine_after_background_call_returns(monkeypatch, phase):
+    import asyncio
+    import threading
+
+    import ray
+    import torch.distributed as dist
+    import vllm.utils.network_utils as network
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerWeightTransferEngine as Engine
+
+    entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+    class Trainer:
+        device = torch.device("cpu")
+
+        def send_weights(self):
+            entered.set()
+            assert release.wait(3)
+
+        def shutdown(self):
+            closed.set()
+
+    def initialize(*args, **kwargs):
+        if phase == "init":
+            entered.set()
+            assert release.wait(3)
+        return Trainer()
+
+    monkeypatch.setattr(Engine, "trainer_init", initialize)
+    monkeypatch.setattr(ray, "get_actor", lambda name: object())
+    monkeypatch.setattr(dist, "get_world_size", lambda: 4)
+    monkeypatch.setattr(dist, "barrier", _unexpected_dependency_call)
+    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "4")
+    monkeypatch.setattr(network, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(network, "get_open_port", lambda: 54321)
+    monkeypatch.setattr(
+        native,
+        "get_torch_device",
+        lambda: SimpleNamespace(synchronize=lambda: None, device=lambda device: contextlib.nullcontext()),
+    )
+    adapter = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=2,
+            data_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            checkpoint_engine=SimpleNamespace(update_weights_bucket_megabytes=1),
+        ),
+        _pd_role=None,
+        rollout_rank=0,
+        replica_rank=0,
+        _get_server_name_prefix=lambda: "vllm_",
+    )
+
+    async def cancel_update():
+        task = asyncio.create_task(native.send_ascend_hccl_weights(adapter, [("weight", torch.ones(2))]))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert not closed.is_set(), "Do not close a communicator while its native call still uses it"
+        finally:
+            release.set()
+        assert await asyncio.to_thread(closed.wait, 2)
+
+    asyncio.run(cancel_update())
+    assert adapter._ascend_hccl_state is None
+
+
 @pytest.mark.parametrize("after_first_bucket", [False, True])
 def test_native_receiver_abort_does_not_finalize(monkeypatch, after_first_bucket):
     """A failed source must terminate the receiver without committing partial weights."""

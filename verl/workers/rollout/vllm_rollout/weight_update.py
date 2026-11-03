@@ -33,4 +33,4 @@ def resolve_weight_update_mode(config) -> str | None:
     vllm_config = _config_value(_config_value(config, "engine_kwargs"), "vllm")
     transfer_config = _config_value(vllm_config, "weight_transfer_config")
     backend = _config_value(transfer_config, "backend")
-    return backend if backend in ("npu_ipc",) else None
+    return backend if backend in ("npu_ipc", "hccl") else None

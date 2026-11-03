@@ -264,13 +264,13 @@ class vLLMColocateWorkerExtension:
         """Check worker capabilities without starting a transfer or touching weights."""
         import inspect
 
-        if mode not in ("npu_ipc",):
+        if mode not in ("npu_ipc", "hccl"):
             raise ValueError(f"Unsupported Ascend weight update mode: {mode!r}")
         if get_device_name() != "npu":
             raise ValueError(f"Weight update mode {mode!r} requires Ascend NPU workers")
         if getattr(self, "_ascend_weight_update_failed", False):
             raise RuntimeError("Previous weight update failed; restart this rollout worker before retrying")
-        if use_shm:
+        if mode != "hccl" and use_shm:
             raise ValueError("Ascend IPC/reload requires colocated NPU IPC, not shared memory")
         if peft_config or getattr(self, "_is_qat_model", False) or getattr(self, "_is_modelopt_qat", False):
             raise ValueError("Ascend native updates currently support unquantized full weights only")

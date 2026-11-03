@@ -61,6 +61,7 @@ def _config(backend=None, mode=None):
         ("ipc", None, None),
         ("custom_backend", None, None),
         ("npu_ipc", None, "npu_ipc"),
+        ("hccl", None, "hccl"),
     ],
 )
 def test_mode_selection(backend, mode, expected):
@@ -172,7 +173,7 @@ def test_legacy_cuda_dispatch_contract(backend, use_shm, has_server):
     assert events == expected
 
 
-@pytest.mark.parametrize("backend, mode", [("npu_ipc", None)])
+@pytest.mark.parametrize("backend, mode", [("hccl", None), ("npu_ipc", None)])
 def test_native_mode_cannot_be_ignored_by_delta_flush(backend, mode):
     events = []
     adapter = _adapter(events, _config(backend, mode))
@@ -188,7 +189,7 @@ def test_default_delta_flush_retains_existing_dispatch():
     assert events == [("delta", [("weight", 7)], {"global_steps": 5})]
 
 
-@pytest.mark.parametrize("backend, mode, expected", [("npu_ipc", None, "npu_ipc")])
+@pytest.mark.parametrize("backend, mode, expected", [("hccl", None, "hccl"), ("npu_ipc", None, "npu_ipc")])
 def test_native_dispatch_preserves_kwargs_and_common_tail(backend, mode, expected):
     events = []
     adapter = _adapter(events, _config(backend, mode))

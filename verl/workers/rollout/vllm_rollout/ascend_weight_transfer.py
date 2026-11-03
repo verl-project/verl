@@ -14,9 +14,11 @@
 
 """Bridge bounded full-weight streams to opt-in vLLM-Ascend APIs."""
 
+import asyncio
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import zmq
@@ -46,7 +48,7 @@ def _check_preflight_errors(error):
 
 def validate_ascend_sender(adapter, mode, peft_config=None):
     """Validate the selected backend without allocating buffers or starting RPCs."""
-    if mode not in ("npu_ipc",):
+    if mode not in ("npu_ipc", "hccl"):
         raise ValueError(f"Unsupported Ascend weight update mode: {mode!r}")
     if get_device_name() != "npu":
         raise ValueError(f"Weight update mode {mode!r} requires Ascend NPU workers")
@@ -54,12 +56,32 @@ def validate_ascend_sender(adapter, mode, peft_config=None):
         raise ValueError("Ascend native weight updates require full weights, not LoRA adapters")
     if adapter.config.checkpoint_engine.update_weights_bucket_megabytes <= 0:
         raise ValueError("Weight update bucket size must be positive")
-    if adapter.use_shm:
-        raise ValueError("Ascend IPC/reload requires colocated NPU IPC, not shared memory")
-    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import npu_generate_uuid
+    if mode == "hccl":
+        import torch.distributed as dist
+        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerWeightTransferEngine
 
-    if not callable(npu_generate_uuid):
-        raise RuntimeError("Installed vLLM-Ascend does not provide NPU IPC UUID support")
+        for method in ("trainer_init", "send_weights", "shutdown"):
+            if not callable(getattr(HCCLTrainerWeightTransferEngine, method, None)):
+                raise RuntimeError(f"Installed vLLM-Ascend is missing HCCL {method}; check the pinned version")
+        tp = adapter.config.tensor_model_parallel_size
+        world = dist.get_world_size()
+        if (
+            tp <= 0
+            or world != int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+            or world % tp
+            or (world // tp < 2)
+            or (adapter.config.data_parallel_size != 1)
+            or (adapter.config.pipeline_model_parallel_size != 1)
+            or (adapter._pd_role is not None)
+        ):
+            raise ValueError("Native HCCL colocated mode requires one node, at least two TP replicas, DP=PP=1")
+    else:
+        if adapter.use_shm:
+            raise ValueError("Ascend IPC/reload requires colocated NPU IPC, not shared memory")
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import npu_generate_uuid
+
+        if not callable(npu_generate_uuid):
+            raise RuntimeError("Installed vLLM-Ascend does not provide NPU IPC UUID support")
 
 
 async def update_ascend_weights(adapter, weights, *, mode, **kwargs):
@@ -76,12 +98,13 @@ async def update_ascend_weights(adapter, weights, *, mode, **kwargs):
         if getattr(adapter, "_ascend_weight_update_failed", False):
             raise RuntimeError("A previous Ascend weight update failed; restart the rollout workers before retrying")
         validate_ascend_sender(adapter, mode, kwargs.get("peft_config"))
-        sender = AscendNativeIPCWeightSender(
-            zmq_handle=adapter.zmq_handle,
-            bucket_size_mb=adapter.config.checkpoint_engine.update_weights_bucket_megabytes,
-            use_shm=adapter.use_shm,
-        )
-        sender.prepare()
+        if mode != "hccl":
+            sender = AscendNativeIPCWeightSender(
+                zmq_handle=adapter.zmq_handle,
+                bucket_size_mb=adapter.config.checkpoint_engine.update_weights_bucket_megabytes,
+                use_shm=adapter.use_shm,
+            )
+            sender.prepare()
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     try:
@@ -102,12 +125,17 @@ async def update_ascend_weights(adapter, weights, *, mode, **kwargs):
         raise
     future = None
     try:
-        method = "update_weights_from_ascend_ipc"
-        future = await adapter._execute_method(method, non_block=True, kwargs={**kwargs, "use_shm": adapter.use_shm})
-        sender.receiver_started = True
-        await sender.async_send_weights(weights)
-        if future is not None:
-            await future
+        if mode == "hccl":
+            await send_ascend_hccl_weights(adapter, weights)
+        else:
+            method = "update_weights_from_ascend_ipc"
+            future = await adapter._execute_method(
+                method, non_block=True, kwargs={**kwargs, "use_shm": adapter.use_shm}
+            )
+            sender.receiver_started = True
+            await sender.async_send_weights(weights)
+            if future is not None:
+                await future
     except BaseException:
         adapter._ascend_weight_update_failed = True
         if future is not None:
@@ -315,3 +343,194 @@ def receive_ascend_native_weights(worker, zmq_handle):
         raise
     finally:
         socket.close(linger=0)
+
+
+class _HCCLBatchSource:
+    """A replayable, materialized batch for the official trainer engine.
+
+    Only this bounded batch is held. Advancing verl's async/FSDP iterator stays
+    on the actor thread; the transport thread never performs FSDP gathers.
+    """
+
+    def __init__(self):
+        self.batch = []
+
+    def metadata(self):
+        from vllm.distributed.weight_transfer.base import ParamMeta
+
+        return [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self.batch]
+
+    def __iter__(self):
+        return iter(self.batch)
+
+
+class _HCCLUpdateClient:
+    """Adapt synchronous official RPCs to Ray and one whole-model transaction.
+
+    Each engine send covers one complete batch source. Layerwise loading must
+    span ALL batches, so forward start once and
+    defer finish until the outer iterator has completed successfully.
+    """
+
+    def __init__(self, server):
+        self.server = server
+
+    def begin_round(self, loop):
+        self.loop = loop
+        self.started = False
+
+    def _call(self, method, **kwargs):
+        async def rpc():
+            return await self.server.collective_rpc.remote(method, timeout=300, args=(), kwargs=kwargs)
+
+        future = asyncio.run_coroutine_threadsafe(rpc(), self.loop)
+        try:
+            return future.result(timeout=305)
+        except BaseException:
+            future.cancel()
+            raise
+
+    def init_weight_transfer_engine(self, init_info):
+        self._call("init_weight_transfer_engine", init_info=init_info)
+
+    def start_weight_update(self):
+        if not self.started:
+            self._call("start_weight_update")
+            self.started = True
+
+    def update_weights(self, update_info):
+        self._call("update_weights", update_info=update_info)
+
+    def finish_weight_update(self, weight_version=None):
+        # Called by the engine after each batch; finish_round owns the real tail.
+        pass
+
+    def finish_round(self):
+        if not self.started:
+            raise ValueError("Cannot finish an empty HCCL weight update")
+        self._call("finish_weight_update")
+        self.started = False
+
+
+async def send_ascend_hccl_weights(adapter, weights):
+    """Native HCCL broadcast for single-node replicated FSDP full-weight streams.
+
+    Each replica leader sends to the next replica, so the source NPU is not
+    also a receiver in its HCCL group. All other training ranks must still
+    consume the stream to participate in FSDP parameter gathers.
+    """
+    import ray
+    import torch.distributed as dist
+    from vllm.utils.network_utils import get_ip, get_open_port
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import (
+        HCCLTrainerInitInfo,
+        HCCLTrainerWeightTransferEngine,
+    )
+
+    from verl.workers.rollout.utils import ensure_async_iterator
+
+    tp = adapter.config.tensor_model_parallel_size
+    world = dist.get_world_size()
+    local_world = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+    if (
+        world != local_world
+        or world % tp
+        or world // tp < 2
+        or adapter.config.data_parallel_size != 1
+        or adapter.config.pipeline_model_parallel_size != 1
+        or adapter._pd_role is not None
+    ):
+        raise ValueError("Native HCCL colocated mode requires one node, at least two TP replicas, DP=PP=1")
+    is_sender = adapter.rollout_rank == 0
+    if not is_sender:
+        async for _ in ensure_async_iterator(weights):
+            pass
+        dist.barrier()
+        return
+
+    target = (adapter.replica_rank + 1) % (world // tp)
+    server = ray.get_actor(f"{adapter._get_server_name_prefix()}server_{target}_0")
+
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="verl-hccl-weights")
+    device = get_device_id()
+    state = getattr(adapter, "_ascend_hccl_state", None)
+    if state is None:
+        source = _HCCLBatchSource()
+        client = _HCCLUpdateClient(server)
+        engine = None
+    else:
+        engine, client, source = state
+    # A cancelled await does not stop its executor thread. Retain an engine
+    # created after cancellation so the queued cleanup can still close it.
+    engine_holder = [engine]
+    client.begin_round(loop)
+
+    def on_device(function):
+        # NPU device selection is thread-local. The official engine constructor
+        # and all its communication/cleanup run with the trainer's device set.
+        with get_torch_device().device(device):
+            return function()
+
+    async def run(function):
+        return await loop.run_in_executor(executor, on_device, function)
+
+    limit = adapter.config.checkpoint_engine.update_weights_bucket_megabytes * 1024 * 1024
+    size = count = 0
+
+    async def flush():
+        nonlocal count
+        # Finish producer copies before the transport thread uses another stream.
+        get_torch_device().synchronize()
+        await run(engine.send_weights)
+        count += len(source.batch)
+        source.batch.clear()
+
+    try:
+        if engine is None:
+            info = HCCLTrainerInitInfo(
+                rank=0, master_address=get_ip(), master_port=get_open_port(), world_size=tp + 1, packed=False
+            )
+
+            def initialize():
+                engine_holder[0] = HCCLTrainerWeightTransferEngine.trainer_init(info, client=client, source=source)
+                return engine_holder[0]
+
+            engine = await run(initialize)
+            adapter._ascend_hccl_state = (engine, client, source)
+
+        async for name, tensor in ensure_async_iterator(weights):
+            nbytes = tensor.numel() * tensor.element_size()
+            if source.batch and size + nbytes > limit:
+                await flush()
+                size = 0
+            # The exporter may reuse its storage on the next yield. Keep a
+            # private contiguous copy, including for a single oversized tensor.
+            source.batch.append((name, tensor.detach().to(device=engine.device, copy=True).contiguous()))
+            size += nbytes
+            if nbytes > limit:
+                await flush()
+                size = 0
+        if source.batch:
+            await flush()
+        await run(client.finish_round)
+    except BaseException:
+        adapter._ascend_hccl_state = None
+
+        def release():
+            try:
+                if engine_holder[0] is not None:
+                    engine_holder[0].shutdown()
+            except Exception:
+                logger.warning("Could not close failed HCCL trainer engine", exc_info=True)
+            finally:
+                source.batch.clear()
+
+        # Queue cleanup behind any operation still running after cancellation;
+        # do not free its source storage or join a stuck native collective.
+        executor.submit(on_device, release)
+        raise
+    finally:
+        executor.shutdown(wait=False)
+    dist.barrier()
+    logger.info("Ascend native HCCL weight update completed: target_replica=%d tensors=%d", target, count)
