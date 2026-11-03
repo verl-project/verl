@@ -58,9 +58,11 @@ __all__ = [
     "qat_modes_for_config",
 ]
 
-# Matched against vLLM's unfused expert names (``...mlp.experts.0.gate_proj``),
-# which is how compressed-tensors resolves fused MoE layers.
-MOE_TARGET = r"re:.*mlp\.experts\..*"
+# Match routed-expert module names independently of the model's MoE container
+# (for example ``mlp.experts.0.gate_proj`` or
+# ``block_sparse_moe.experts.0.w1``). This synthetic per-expert form is also
+# how compressed-tensors resolves fused 3D expert tensors.
+MOE_TARGET = r"re:.*\.experts\..*"
 
 # Presets whose rollout refit path (weight reload + process_weights_after_loading)
 # has been validated, mapped to the ModelOpt QAT mode that fake-quantizes identically.
@@ -390,16 +392,10 @@ def _compress_weight(
     """
     preset = _preset_of(scheme)
     if weight.is_cuda and preset == ("FP8_BLOCK", None):
-        import torch.nn.functional as F
-
         from verl.utils.qat.fp8 import fp8_quant
 
         rows, cols = scheme.weights.block_structure
-        pad_rows, pad_cols = -weight.shape[0] % rows, -weight.shape[1] % cols
-        padded = F.pad(weight, (0, pad_cols, 0, pad_rows)) if pad_rows or pad_cols else weight
-        quantized, scale = fp8_quant(padded, (rows, cols))
-        if pad_rows or pad_cols:
-            quantized = quantized[: weight.shape[0], : weight.shape[1]].contiguous()
+        quantized, scale = fp8_quant(weight, (rows, cols))
         return {"weight_scale": scale, "weight": quantized}
 
     if weight.is_cuda and preset == ("MXFP8", None):
@@ -446,13 +442,32 @@ def _unpack_experts(name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torc
             yield f"{prefix}.{expert_id}.down_proj.weight", weight
 
 
+def _unpack_compressed_experts(
+    name: str,
+    compressed: Mapping[str, torch.Tensor],
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Split grouped quantization outputs into vLLM's per-expert parameter names."""
+    match = _PACKED_EXPERTS.match(name)
+    prefix, proj = match["prefix"], match["proj"]
+    for expert_id in range(next(iter(compressed.values())).shape[0]):
+        if proj == "gate_up_proj":
+            for projection_id, projection in enumerate(("gate_proj", "up_proj")):
+                for key, value in compressed.items():
+                    part = value[expert_id].chunk(2, dim=0)[projection_id]
+                    yield f"{prefix}.{expert_id}.{projection}.{key}", part
+        else:
+            for key, value in compressed.items():
+                yield f"{prefix}.{expert_id}.down_proj.{key}", value[expert_id]
+
+
 class CompressedTensorsWeightQuantizer:
     """Quantize exported HF weights to match a compressed-tensors rollout config.
 
     A weight is quantized iff it is a 2D ``*.weight`` whose module is not
     ignored and is targeted by a config group, resolved like compressed-tensors
-    does: a name / "re:" target wins over the ``Linear`` class target. Packed 3D
-    experts are split per expert first. Everything else passes through unchanged.
+    does: a name / "re:" target wins over the ``Linear`` class target. Supported
+    packed 3D experts are quantized together before being split into per-expert
+    outputs. Everything else passes through unchanged.
     """
 
     def __init__(
@@ -504,32 +519,28 @@ class CompressedTensorsWeightQuantizer:
         tensor: torch.Tensor,
         scheme: "QuantizationScheme",
     ) -> Iterator[tuple[str, torch.Tensor]]:
-        """Compress packed experts, sharing NVFP4 gate/up tensor scales."""
-        from compressed_tensors.quantization import QuantizationStrategy
-        from compressed_tensors.quantization.utils import generate_gparam
+        """Quantize a fused expert tensor once, then emit per-expert parameters."""
+        preset = _preset_of(scheme)
+        if preset not in {("FP8_BLOCK", None), ("MXFP8", None), ("MXFP4", None)}:
+            raise NotImplementedError(f"Packed expert export does not support scheme {preset}")
+        if not tensor.is_cuda or tensor.dtype not in _HIGH_PRECISION_DTYPES:
+            raise ValueError("Packed expert export requires a high-precision CUDA tensor")
 
-        unpacked = list(_unpack_experts(name, tensor))
-        shared_global_scales: dict[tuple[int, str], torch.Tensor] = {}
-        if scheme.weights.strategy == QuantizationStrategy.TENSOR_GROUP:
-            by_expert: dict[int, list[torch.Tensor]] = {}
-            for module_name, weight in unpacked:
-                match = re.search(r"\.experts\.(\d+)\.(gate_proj|up_proj)\.weight$", module_name)
-                if match:
-                    by_expert.setdefault(int(match.group(1)), []).append(weight)
-            for expert_id, weights in by_expert.items():
-                amax = torch.stack([weight.float().abs().amax() for weight in weights]).amax()
-                shared_global_scales[(expert_id, "gate_up")] = generate_gparam(-amax, amax)
+        match = _PACKED_EXPERTS.match(name)
+        assert match is not None
+        if preset == ("FP8_BLOCK", None) and match["proj"] == "gate_up_proj":
+            rows = tensor.shape[-2]
+            block_rows = scheme.weights.block_structure[0]
+            if rows % 2 or (rows // 2) % block_rows:
+                raise ValueError(f"gate/up rows ({rows // 2}) must be divisible by FP8 block rows ({block_rows})")
 
-        for weight_name, weight in unpacked:
-            module = weight_name[: -len(".weight")]
-            match = re.search(r"\.experts\.(\d+)\.(gate_proj|up_proj)$", module)
-            global_scale = shared_global_scales.get((int(match.group(1)), "gate_up")) if match else None
-            compressed = _compress_weight(weight, scheme, global_scale=global_scale)
-            for key, value in compressed.items():
-                yield weight_name[: -len("weight")] + key, value
-            input_scale = self._input_global_scale(module, scheme)
-            if input_scale is not None:
-                yield weight_name[: -len("weight")] + "input_global_scale", input_scale
+        for output_name, value in _unpack_compressed_experts(name, _compress_weight(tensor, scheme)):
+            prefix, key = output_name.rsplit(".", 1)
+            yield f"{prefix}.{self._compressed_key(key)}", value
+
+    def _compressed_key(self, key: str) -> str:
+        """Map an internal compressed-tensors key to the rollout wire format."""
+        return key
 
     def _module_scheme(self, module: str) -> Optional["QuantizationScheme"]:
         if _matches(module, self.ignore):
@@ -557,10 +568,10 @@ class CompressedTensorsWeightQuantizer:
                 continue
             prefix = name[: -len("weight")]
             for key, value in _compress_weight(tensor, scheme).items():
-                yield prefix + key, value
+                yield prefix + self._compressed_key(key), value
             input_scale = self._input_global_scale(name[: -len(".weight")], scheme)
             if input_scale is not None:
-                yield prefix + "input_global_scale", input_scale
+                yield prefix + self._compressed_key("input_global_scale"), input_scale
 
 
 _UNPACKED_EXPERT = re.compile(r"(?P<prefix>.*\.experts\.\d+)\.(?P<proj>gate_proj|up_proj|down_proj)\.weight$")
@@ -663,7 +674,7 @@ class NVFP4PerTokenWeightQuantizer(CompressedTensorsWeightQuantizer):
             raise RuntimeError(f"Per-token NVFP4 export is missing gate_proj/up_proj halves for {unpaired[:4]}")
 
 
-class Fp8ConfigWeightQuantizer:
+class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
     """Export trainer weights in vLLM's native blockwise ``Fp8Config`` layout.
 
     Unlike :class:`CompressedTensorsWeightQuantizer`, this keeps the rollout's
@@ -697,6 +708,9 @@ class Fp8ConfigWeightQuantizer:
         if self.ignore_match_mode not in ("exact", "substring", "suffix"):
             raise ValueError(f"Unsupported ignored_layers_match_mode={self.ignore_match_mode!r}")
         self.scheme = _scheme_for_preset("FP8_BLOCK", ["Linear"])
+        self.schemes = [self.scheme]
+        self.linear_scheme = self.scheme
+        self.input_global_scales = {}
 
     def _is_ignored(self, module: str) -> bool:
         if _matches(module, DEFAULT_IGNORE):
@@ -707,11 +721,11 @@ class Fp8ConfigWeightQuantizer:
             return any(ignored in module for ignored in self.ignore)
         return any(module == ignored or module.endswith(f".{ignored}") for ignored in self.ignore)
 
-    def _compress(self, name: str, weight: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
-        prefix = name[: -len("weight")]
-        compressed = _compress_weight(weight, self.scheme)
-        yield name, compressed["weight"]
-        yield prefix + "weight_scale_inv", compressed["weight_scale"]
+    def _module_scheme(self, module: str) -> Optional["QuantizationScheme"]:
+        return None if self._is_ignored(module) else self.scheme
+
+    def _compressed_key(self, key: str) -> str:
+        return "weight_scale_inv" if key == "weight_scale" else key
 
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
         if self.passthrough:
@@ -723,26 +737,7 @@ class Fp8ConfigWeightQuantizer:
                     tensor = tensor.view(torch.uint8)
                 yield name, tensor
             return
-        for name, tensor in weights:
-            packed = _PACKED_EXPERTS.match(name) if tensor.ndim == 3 else None
-            if packed:
-                probe = f"{packed['prefix']}.0.gate_proj"
-                if self._is_ignored(probe):
-                    yield name, tensor
-                else:
-                    for weight_name, weight in _unpack_experts(name, tensor):
-                        yield from self._compress(weight_name, weight)
-                continue
-
-            if (
-                not name.endswith(".weight")
-                or tensor.ndim != 2
-                or tensor.dtype not in _HIGH_PRECISION_DTYPES
-                or self._is_ignored(name[: -len(".weight")])
-            ):
-                yield name, tensor
-                continue
-            yield from self._compress(name, tensor)
+        yield from super().__call__(weights)
 
 
 def _as_quantization_config(config: Any) -> Optional[dict[str, Any]]:
