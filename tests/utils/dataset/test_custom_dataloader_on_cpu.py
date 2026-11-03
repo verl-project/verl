@@ -780,6 +780,32 @@ def test_early_finalization_failure_restores_step_and_closes_loaders(trainer_cla
     trainer.on_train_end.assert_not_called()
 
 
+@pytest.mark.parametrize("completed_steps", [0, 1])
+def test_first_local_trigger_exhaustion_finalizes_only_completed_steps(trainer_class, completed_steps):
+    trainer, loader, events = streaming_fit_trainer(trainer_class, batches=6, save_freq=10, test_freq=10)
+    trainer.step = type(trainer).step.__get__(trainer)
+    trainer.prepare_step = Mock(return_value={})
+    trainer._step_once = Mock(
+        side_effect=[
+            *[
+                SimpleNamespace(keys=[], tags=[{}], partition_id="train")
+                for _ in range(completed_steps * trainer.parameter_sync_step)
+            ],
+            bridge.DataLoaderExhausted(),
+        ]
+    )
+
+    trainer.fit(None)
+
+    expected = [completed_steps] if completed_steps else []
+    assert [step for event, step in events if event == "save"] == expected
+    assert [step for event, step in events if event == "validate"] == expected
+    assert trainer._compute_metrics.call_count == completed_steps
+    assert trainer.global_steps == completed_steps + 1
+    assert loader.closed == 1
+    trainer.on_train_end.assert_called_once()
+
+
 def test_partial_ppo_update_failure_does_not_trigger_final_checkpoint(trainer_class):
     trainer, loader, _ = streaming_fit_trainer(trainer_class, batches=2, save_freq=10, test_freq=10)
     trainer.step = type(trainer).step.__get__(trainer)

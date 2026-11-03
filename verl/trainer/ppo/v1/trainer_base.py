@@ -603,6 +603,8 @@ class PPOTrainer(ABC):
             try:
                 batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
             except DataLoaderExhausted as error:
+                if trigger_idx == 0:
+                    raise
                 # Earlier local updates may already have changed the weights.
                 raise RuntimeError("Custom training source exhausted during PPO update/refill.") from error
             sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
