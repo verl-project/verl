@@ -170,9 +170,7 @@ def test_prepare_and_process_brackets_ascend_layout_reload():
             self.quant_method.process(layer)
 
     scheme = Scheme()
-    layer = SimpleNamespace(
-        _mxfp8_transformed=True, _mxfp8_original_shapes={}, quant_method=Method(scheme)
-    )
+    layer = SimpleNamespace(_mxfp8_transformed=True, _mxfp8_original_shapes={}, quant_method=Method(scheme))
 
     class Model:
         def named_modules(self):

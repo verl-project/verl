@@ -519,7 +519,9 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         quant_config = vllm_config.quant_config
-        logger.info(f"vLLM quantization config type: {type(quant_config).__name__ if quant_config is not None else None}")
+        logger.info(
+            f"vLLM quantization config type: {type(quant_config).__name__ if quant_config is not None else None}"
+        )
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
