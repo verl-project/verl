@@ -73,11 +73,12 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     pip cache purge
 
 # Prepare and install verl (update frequently)
-COPY requirements-npu-vllm.txt /tmp/requirements-npu-vllm.txt
 RUN git clone --recursive https://github.com/verl-project/verl.git && \
-    cd verl && cp /tmp/requirements-npu-vllm.txt requirements-npu-vllm.txt && \
-    pip install -r requirements-npu-vllm.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
+    cd verl && \
+    pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
     pip install -v -e . --no-deps && cd .. && \
+    # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin
+    pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge

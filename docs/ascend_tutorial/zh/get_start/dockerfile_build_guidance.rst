@@ -41,8 +41,8 @@ Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支（
 下表列出本分支 latest Dockerfile 的目标版本；镜像需要重新构建并验证。
 ``_v0.9.1`` 构建入口及对应镜像标签保留原依赖，安装 verl ``release/v0.9.1`` 源码；现有已发布镜像及历史 release 版本保持原样。
 
-当前 A2/A3/950 vLLM latest Dockerfile 从构建上下文复制 ``requirements-npu-vllm.txt``，使用本分支的 vLLM 专用依赖声明。
-请在仓库根目录运行构建，例如 ``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``。
+当前 A2/A3/950 vLLM latest Dockerfile 使用克隆仓库中的 ``requirements-npu.txt``，在安装 verl 后补装 ``triton-ascend==3.6.0.post2``。
+例如，可在仓库根目录运行构建：``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``。
 
 vLLM 后端当前 Dockerfile 目标组件版本
 ----------------------------------------------------------------
@@ -138,7 +138,7 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 .. code:: bash
 
-   # 从仓库根目录构建 latest vLLM 镜像，提供 requirements-npu-vllm.txt
+   # 从仓库根目录构建 latest vLLM 镜像
    cd {verl-root-path}
    docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
 

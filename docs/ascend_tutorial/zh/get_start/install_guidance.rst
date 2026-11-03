@@ -114,7 +114,7 @@ MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 
    使用 triton-ascend 提供的 Triton 实现，无需另行安装 triton 软件包。
    当前两个上游存在 FastAPI 约束冲突：vLLM 要求 ``>=0.133.0,<0.137.0``，vLLM-Ascend 要求 ``<0.124.0``，
    没有同时满足两者的版本。需先解决该冲突，再使用 ``pip check`` 检查最终环境并验证运行兼容性。
-   vLLM 使用独立的 ``requirements-npu-vllm.txt``；SGLang 继续使用原 ``requirements-npu.txt`` 及原依赖版本。
+   vLLM 与 SGLang 共用 ``requirements-npu.txt``；vLLM 在全部依赖安装完成后补装 ``triton-ascend==3.6.0.post2``，SGLang 保持原依赖版本。
 
 
 安装前准备（HDK & CANN）

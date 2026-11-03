@@ -41,8 +41,8 @@ and TransformerEngineNPU and MindSpeed-Ops are also installed.
 The tables below list this branch's latest Dockerfile targets. Images must be rebuilt and validated.
 The ``_v0.9.1`` builds and their image tags retain the original dependencies and install verl from ``release/v0.9.1``. Existing published images and historical releases retain their original versions.
 
-The current A2/A3/950 vLLM latest Dockerfiles copy ``requirements-npu-vllm.txt`` from the build context to use this branch's vLLM dependency declarations.
-Build from the repository root, for example: ``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``.
+The current A2/A3/950 vLLM latest Dockerfiles use ``requirements-npu.txt`` from the cloned repository, then install ``triton-ascend==3.6.0.post2`` after installing verl.
+For example, build from the repository root with ``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``.
 
 A2/A3 vLLM Current Dockerfile Target Component Versions
 -------------------------------------------------------------------
@@ -162,7 +162,7 @@ Image Build Command Examples
 
 .. code:: bash
 
-   # Build the latest vLLM image from the repository root to include requirements-npu-vllm.txt
+   # Build the latest vLLM image from the repository root
    cd {verl-root-path}
    docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
 

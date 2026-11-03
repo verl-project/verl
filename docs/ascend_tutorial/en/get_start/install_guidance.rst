@@ -118,7 +118,7 @@ MindSpeed      ``core_r0.18.0``                         Megatron-LM adaptation a
    The upstream FastAPI requirements currently conflict: vLLM requires ``>=0.133.0,<0.137.0``,
    while vLLM-Ascend requires ``<0.124.0``. No version satisfies both.
    Resolve this conflict, then run ``pip check`` and validate runtime compatibility.
-   vLLM uses ``requirements-npu-vllm.txt``; SGLang retains ``requirements-npu.txt`` and its original dependency versions.
+   vLLM and SGLang share ``requirements-npu.txt``. After all dependencies are installed, vLLM installs ``triton-ascend==3.6.0.post2``; SGLang retains its original dependency versions.
 
 
 Pre-installation Preparation (HDK & CANN)

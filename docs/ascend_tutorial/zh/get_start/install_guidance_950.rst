@@ -167,7 +167,9 @@ verl 依赖安装
     git clone https://github.com/verl-project/verl.git
     cd verl
     pip install -e .
-    pip install -r requirements-npu-vllm.txt
+    pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # 恢复 vLLM 所需的 Triton 版本
+    pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 
 
 日志过滤

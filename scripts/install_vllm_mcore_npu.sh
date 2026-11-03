@@ -50,7 +50,7 @@ fi
 echo "4. install verl"
 cd verl
 pip install -v -e .
-pip install -r requirements-npu-vllm.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 # （可选）提示：为了更佳的使用体验，最好将 recipe 子模块更新至最新 commit
 cd recipe
 git checkout main
@@ -59,4 +59,6 @@ cd ..
 echo "5. May need to check other neccessary packages"
 # Restore the inference requirements after installing the training dependencies.
 pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
+# Restore the vLLM Triton version after requirements-npu.txt installs its shared pin.
+pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 echo "Successfully installed all packages"
