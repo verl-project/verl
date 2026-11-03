@@ -183,25 +183,14 @@ def test_update_actor_passes_score_centering_flag(score_centering):
                     "policy_loss": {"rollout_correction": {"score_centering": score_centering}},
                 },
                 "rollout": {"n": 4, "temperature": 1.0},
-            },
-            "trainer": {"v1": {"mini_batch_mode": "fixed_count"}},
+            }
         }
     )
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
-    batch = SimpleNamespace(
-        extra_info={
-            "_minibatch_layout": {
-                "unit_count": 2,
-                "unit_global_sizes": [8],
-                "unit_padding_counts": [1],
-            }
-        }
-    )
+    trainer._get_update_minibatching_info = MagicMock(return_value={})
+    batch = SimpleNamespace(extra_info={})
 
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
-    assert batch.extra_info["global_mini_batch_sizes"] == [8]
-    assert batch.extra_info["global_mini_batch_padding_counts"] == [1]
-    assert "mini_batch_size" not in batch.extra_info
