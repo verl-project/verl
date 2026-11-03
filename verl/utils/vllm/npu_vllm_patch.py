@@ -118,12 +118,12 @@ def _patch_deepseek_v4_weight_loader(model_class) -> bool:
 
 def patch_vllm_ascend_deepseek_v4_weight_loader() -> None:
     """Patch DeepSeek V4 initialization and loading without editing vllm-ascend."""
-    from vllm_ascend.models.deepseek_v4 import AscendDeepseekV4ForCausalLM
+    from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
 
     _patch_deepseek_v4_weight_loader(AscendDeepseekV4ForCausalLM)
 
 
-def patch_vllm_ascend_v023_sched_yield():
+def patch_vllm_ascend_v030_sched_yield():
     """Disable sched_yield in vllm.distributed.utils on ARM hosts.
 
     On ARM hosts (e.g. Atlas A2 machines) the scheduler busy-wait with
@@ -152,7 +152,7 @@ def _normalized_source(fn) -> str:
     try:
         return "".join(inspect.getsource(fn).split())
     except (OSError, TypeError) as exc:
-        raise RuntimeError(f"{_GLM52_PATCH_ENV} requires inspectable vllm/vllm-ascend 0.23.x Python sources.") from exc
+        raise RuntimeError(f"{_GLM52_PATCH_ENV} requires inspectable vllm/vllm-ascend 0.30.x Python sources.") from exc
 
 
 def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
@@ -164,7 +164,7 @@ def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
     source = _normalized_source(original_forward)
     if "residual=x+residual" in source and "npu_rms_norm(residual,self.weight" in source:
         return False
-    if "npu_add_rms_norm" not in source:
+    if "npu_add_rms_norm" not in source or "npu_add_rms_norm_bias" not in source:
         raise RuntimeError(f"{_GLM52_PATCH_ENV} found an unsupported AscendRMSNorm.forward_oot implementation.")
 
     @wraps(original_forward)
@@ -174,7 +174,6 @@ def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
 
         import torch_npu
 
-        residual = layernorm_module.torch.ops.vllm.maybe_chunk_residual(x, residual)
         residual = x + residual
         x = torch_npu.npu_rms_norm(residual, self.weight, epsilon=self.variance_epsilon)[0]
         return x, residual
@@ -189,7 +188,7 @@ def patch_vllm_ascend_glm52() -> None:
     try:
         from vllm_ascend.ops import layernorm
     except (AttributeError, ImportError) as exc:
-        raise RuntimeError(f"{_GLM52_PATCH_ENV} could not load the required vllm-ascend 0.23.x patch targets.") from exc
+        raise RuntimeError(f"{_GLM52_PATCH_ENV} could not load the required vllm-ascend 0.30.x patch targets.") from exc
 
     patched = [
         _patch_glm52_ascend_rms_norm(layernorm),
@@ -198,7 +197,7 @@ def patch_vllm_ascend_glm52() -> None:
     logger.info("GLM-5.2 vllm-ascend compatibility patch %s", status)
 
 
-def patch_vllm_ascend_v023_fia_decode_mask():
+def patch_vllm_ascend_v030_fia_decode_mask():
     import inspect
     import textwrap
 
@@ -270,7 +269,7 @@ def patch_vllm_ascend_v023_fia_decode_mask():
         except AssertionError:
             logger.warning(
                 "Skip patching AscendAttentionBackendImpl.%s: the installed vllm-ascend source "
-                "does not match the expected releases/v0.23.0 code.",
+                "does not match the expected releases/v0.30.0 code.",
                 method_name,
             )
             continue
@@ -280,25 +279,25 @@ def patch_vllm_ascend_v023_fia_decode_mask():
         setattr(attention_v1.AscendAttentionBackendImpl, method_name, patched_method)
 
 
-def patch_vllm013_rotary_emb():
+def patch_vllm030_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
-    def vllm013_npu_rotary_embedding_init_impl(
+    def vllm030_npu_rotary_embedding_init_impl(
         self,
         enforce_enable: bool = False,
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super(ApplyRotaryEmb, self).__init__()
+        super(ApplyRotaryEmb, self).__init__(enforce_enable=enforce_enable)
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
         self.apply_rotary_emb_flash_attn = None
 
-    ApplyRotaryEmb.__init__ = vllm013_npu_rotary_embedding_init_impl
+    ApplyRotaryEmb.__init__ = vllm030_npu_rotary_embedding_init_impl
 
 
 def apply_npu_vllm_patches() -> None:
-    """Apply NPU-specific vLLM patches for weight loading, rotary embedding, and sleep.
+    """Apply NPU-specific vLLM patches for weight loading, rotary embedding, etc.
 
     Must be called before the vLLM engine is created.
     """
@@ -309,18 +308,16 @@ def apply_npu_vllm_patches() -> None:
     from packaging import version
 
     _VLLM_VERSION = version.parse(getattr(vllm, "__version__", "0.0.0"))
-    if version.parse("0.23.0") <= _VLLM_VERSION < version.parse("0.24.0"):
+    if version.parse("0.30.0") <= _VLLM_VERSION < version.parse("0.31.0"):
         # On ARM hosts (e.g. Atlas A2) the scheduler busy-wait with sched_yield degrades badly.
-        patch_vllm_ascend_v023_sched_yield()
+        patch_vllm_ascend_v030_sched_yield()
         # Only genuine single-token decode may skip the causal attention mask; mixed
         # prefill-decode and spec-decode FULL graph capture batches still need it.
-        patch_vllm_ascend_v023_fia_decode_mask()
+        patch_vllm_ascend_v030_fia_decode_mask()
         patch_vllm_ascend_deepseek_v4_weight_loader()
 
     # Disable flash_attn in RotaryEmbedding (NPU)
 
-    patch_vllm013_rotary_emb()
+    patch_vllm030_rotary_emb()
     if _glm52_patch_enabled():
-        import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa: F401
-
         patch_vllm_ascend_glm52()

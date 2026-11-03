@@ -31,29 +31,6 @@ def _load_npu_vllm_patch_module():
     return module
 
 
-def test_apply_npu_vllm_patches_accepts_modular_fused_moe(monkeypatch):
-    npu_vllm_patch = _load_npu_vllm_patch_module()
-    monkeypatch.setattr(npu_vllm_patch, "is_torch_npu_available", lambda check_device=False: True)
-    rotary_patch = Mock()
-    monkeypatch.setattr(npu_vllm_patch, "patch_vllm013_rotary_emb", rotary_patch)
-
-    vllm = ModuleType("vllm")
-    model_executor = ModuleType("vllm.model_executor")
-    layers = ModuleType("vllm.model_executor.layers")
-    fused_moe = ModuleType("vllm.model_executor.layers.fused_moe")
-    fused_moe.FusedMoEFactory = lambda *args, **kwargs: None
-    layers.fused_moe = fused_moe
-
-    monkeypatch.setitem(sys.modules, "vllm", vllm)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor", model_executor)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers", layers)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.fused_moe", fused_moe)
-
-    npu_vllm_patch.apply_npu_vllm_patches()
-
-    rotary_patch.assert_called_once_with()
-
-
 normalize_deepseek_v4_weight_names = _load_npu_vllm_patch_module().normalize_deepseek_v4_weight_names
 
 
@@ -198,26 +175,22 @@ def test_deepseek_v4_load_weights_patch_preserves_lazy_consumption():
     assert consumed == [0]
 
 
-def test_apply_npu_vllm_patches_installs_deepseek_v4_patch(monkeypatch):
+def test_apply_npu_vllm_patches_installs_every_patch(monkeypatch):
     patch_module = _load_npu_vllm_patch_module()
     monkeypatch.setattr(patch_module, "is_torch_npu_available", lambda check_device=False: True)
     patches = {}
     for name in (
-        "patch_vllm_ascend_v023_sched_yield",
-        "patch_vllm_ascend_v023_fia_decode_mask",
+        "patch_vllm_ascend_v030_sched_yield",
+        "patch_vllm_ascend_v030_fia_decode_mask",
         "patch_vllm_ascend_deepseek_v4_weight_loader",
-        "patch_vllm013_rotary_emb",
+        "patch_vllm030_rotary_emb",
     ):
         patches[name] = Mock()
         monkeypatch.setattr(patch_module, name, patches[name])
     monkeypatch.setattr(patch_module, "_glm52_patch_enabled", lambda: False)
     vllm = ModuleType("vllm")
-    vllm.__version__ = "0.23.0"
-    layers = ModuleType("vllm.model_executor.layers")
-    layers.fused_moe = SimpleNamespace()
+    vllm.__version__ = "0.30.0"
     monkeypatch.setitem(sys.modules, "vllm", vllm)
-    monkeypatch.setitem(sys.modules, "vllm.model_executor", ModuleType("vllm.model_executor"))
-    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers", layers)
 
     patch_module.apply_npu_vllm_patches()
 
