@@ -43,9 +43,10 @@ env:
   # shared e2e scripts must launch with ambient python instead of `uv run`.
   VERL_USE_UV: 0
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   e2e_v1_separate_async_fsdp2_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60
     container:
@@ -97,7 +98,7 @@ jobs:
           bash tests/special_e2e/run_v1_separate_async_ascend.sh
 
   e2e_v1_separate_async_megatron_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     needs: e2e_v1_separate_async_fsdp2_ascend
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60

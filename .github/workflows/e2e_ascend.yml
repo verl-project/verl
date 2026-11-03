@@ -72,9 +72,10 @@ env:
   HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   llm_rl_job:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     name: E2E Ascend testing for RL training scenarios of LLM models
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 120
@@ -145,7 +146,7 @@ jobs:
           USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
   vlm_rl_job:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     needs: llm_rl_job
     name: E2E Ascend testing for RL training scenarios of VLM models
     runs-on: linux-aarch64-a3-800i-16

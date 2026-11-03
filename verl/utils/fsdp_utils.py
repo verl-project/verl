@@ -54,6 +54,23 @@ else:
     fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy, fully_shard_module = None, None, None, None, None
 
 
+def materialize_fsdp_dtensor(param, device):
+    """Materialize an exported weight with an NPU completion/lifetime guard.
+
+    NPU checkpoint CI observes intermittent weight mismatches with the chained
+    ``param.to(device, non_blocking=True).full_tensor()`` path. Retaining the
+    staged DTensor through an explicit device wait passes the same assertions.
+    This is a conservative workaround: the backend race is not yet isolated,
+    and the per-weight wait trades overlap for correctness on NPU only.
+    Every trainer must use it, including ranks that only consume the generator.
+    """
+    staged = param.to(device, non_blocking=True)
+    full = staged.full_tensor()
+    if staged.device.type == "npu":
+        torch.npu.synchronize(staged.device)
+    return full
+
+
 def init_fn(x: torch.nn.Module):
     if torch.distributed.get_rank() != 0:
         x = x.to_empty(device=get_device_id(), recurse=False)

@@ -65,9 +65,10 @@ concurrency:
 permissions:
   contents: read
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   sglang_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:

@@ -91,9 +91,10 @@ env:
   # shared e2e scripts must launch with ambient python instead of `uv run`.
   VERL_USE_UV: 0
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
@@ -187,7 +188,7 @@ jobs:
           rm -rf checkpoints
 
   e2e_ppo_trainer_megatron-moe-expert-parallel_rocm:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
@@ -264,7 +265,7 @@ jobs:
     needs:
       - e2e_ppo_trainer_fsdp_vllm_rocm
       - e2e_ppo_trainer_megatron-moe-expert-parallel_rocm
-    if: ${{ always() && github.repository_owner == 'verl-project' }}
+    if: ${{ github.event.pull_request.number != 8443 && (always() && github.repository_owner == 'verl-project') }}
     runs-on: [rocm-mi300]
     container:
       image: "verlai/verl:rocm7.14_torch2.12_release_0724"

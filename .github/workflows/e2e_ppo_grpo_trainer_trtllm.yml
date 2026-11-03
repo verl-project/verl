@@ -98,9 +98,10 @@ env:
   # the shared e2e scripts must launch with ambient python instead of `uv run`.
   VERL_USE_UV: 0
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -115,6 +116,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   trtllm_unit_tests:
+    if: ${{ github.event.pull_request.number != 8443 }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
@@ -155,6 +157,7 @@ jobs:
             tests/workers/rollout/rollout_trtllm/test_trtllm_rollout_utils.py
 
   e2e_grpo_trainer_megatron-qwen2:
+    if: ${{ github.event.pull_request.number != 8443 }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
@@ -215,6 +218,7 @@ jobs:
         run: |
           rm -rf checkpoints
   e2e_grpo_trainer_megatron-vlm:
+    if: ${{ github.event.pull_request.number != 8443 }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
@@ -278,7 +282,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, trtllm_unit_tests, e2e_grpo_trainer_megatron-qwen2, e2e_grpo_trainer_megatron-vlm]
-    if: always()
+    if: ${{ github.event.pull_request.number != 8443 && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1
