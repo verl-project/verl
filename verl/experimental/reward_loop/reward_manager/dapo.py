@@ -59,7 +59,12 @@ class DAPORewardManager(RewardManagerBase):
 
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        extra_info = data_item.non_tensor_batch.get("extra_info", {})
+        # Copy: the rollouts of a prompt share one extra_info dict, and run_single runs them concurrently.
+        extra_info = dict(data_item.non_tensor_batch.get("extra_info") or {})
+        # The response hit the length limit without emitting EOS; compute_score may treat it as unfinished.
+        extra_info["truncated"] = bool(
+            valid_response_length == response_length and int(valid_response_ids[-1]) != self.tokenizer.eos_token_id
+        )
 
         response_str = await self.loop.run_in_executor(
             None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
