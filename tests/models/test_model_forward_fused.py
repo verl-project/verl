@@ -267,6 +267,7 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
     model = _new_uninitialized_model()
     model.config = SimpleNamespace(
         fine_grained_activation_offloading=False,
+        freeze_base_model_for_mtp=False,
         cuda_graph_impl="none",
         moe_paged_stash=False,
         mtp_num_layers=0,
