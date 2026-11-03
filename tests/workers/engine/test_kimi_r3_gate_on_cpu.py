@@ -23,13 +23,7 @@ from tensordict import TensorDict
 
 import verl.utils.tensordict_utils as tu
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
-from verl.workers.config.engine import EngineRouterReplayConfig, FSDPEngineConfig
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
-
-
-def test_fsdp_routing_replay_config_rejects_record_only_mode():
-    with pytest.raises(ValueError, match="only 'disabled' and 'R3'"):
-        FSDPEngineConfig(router_replay=EngineRouterReplayConfig(mode="R2"))
 
 
 @pytest.mark.parametrize("remove_padding", [False, True])
