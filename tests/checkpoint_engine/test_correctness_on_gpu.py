@@ -106,7 +106,8 @@ async def test_transport_pull_checkpoint_engine(
 ):
     pytest.importorskip("nixl" if backend == "nixl_native" else "torch.distributed._transport")
     model_path = os.path.expanduser(model_path)
-    ray.init(runtime_env={"env_vars": {"UCX_TLS": "rc,ud,cuda", "VERL_LOGGING_LEVEL": "DEBUG"}})
+    # Leave UCX_TLS unset: UCX picks cuda_ipc/shm within a node and rc where InfiniBand exists.
+    ray.init(runtime_env={"env_vars": {"VERL_LOGGING_LEVEL": "DEBUG"}})
 
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="transport_pull",
