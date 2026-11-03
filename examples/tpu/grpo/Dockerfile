@@ -7,8 +7,8 @@ ARG TORCH_TPU_VERSION=0.2.0
 ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
 # 10/25/2026 HEAD of torchtitan
 ARG TORCHTITAN_COMMIT=89ef29b5a0d03a6883079ab37ff1bdc498fe3485
-# Optimized Qwen3.5 (google-pytorch/torchtitan#80, last of the TPU Qwen3.5 perf series #73-#80):
-# ARG TORCHTITAN_COMMIT=3ebfb20abc89613b29b38634b464fbca0a24c96b
+# Optimized Qwen3.5 with Expert parallelism (EP > 1):
+# ARG TORCHTITAN_COMMIT=a7aad99bc17dc4ae36b9d2d6920f3d71fb71e51b
 
 ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
 
