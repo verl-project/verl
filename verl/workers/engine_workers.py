@@ -860,11 +860,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        do_lora_base_sync = False
-        if not self.peft_merge and peft_config is not None:
-            resync_base = self.lora_resync_base
-            self.rollout.sleep_level = 2 if resync_base else 1
-            do_lora_base_sync = resync_base or not self.base_sync_done
+        do_lora_base_sync = (
+            not self.peft_merge and peft_config is not None and (self.lora_resync_base or not self.base_sync_done)
+        )
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:

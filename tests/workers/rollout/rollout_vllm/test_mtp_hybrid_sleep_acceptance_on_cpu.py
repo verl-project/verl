@@ -14,6 +14,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -80,6 +81,23 @@ def test_lora_adapter_sleep_level_follows_resync_base(monkeypatch, lora, expecte
     server.model_config = SimpleNamespace(lora_rank=0, lora=lora)
 
     assert server._resolve_sleep_level() == expected_level
+
+
+@pytest.mark.parametrize(("mode", "expected_level"), [("COLOCATED", 1), ("HYBRID", 2)])
+def test_resync_base_sleep_depends_on_whether_the_trainer_reloads_weights(monkeypatch, mode, expected_level):
+    monkeypatch.setattr(vllm_async_server, "is_torch_npu_available", lambda check_device=False: False)
+    server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server.config = SimpleNamespace(free_cache_engine=True)
+    server.model_config = SimpleNamespace(lora_rank=0, lora={"rank": 8, "resync_base": True})
+    server.node_rank = 0
+    server.rollout_mode = vllm_async_server.RolloutMode[mode]
+    server.engine = AsyncMock()
+
+    asyncio.run(server.sleep())
+    server.engine.sleep.assert_awaited_once_with(level=expected_level)
+    if mode == "COLOCATED":
+        asyncio.run(server.wake_up())
+        server.engine.wake_up.assert_awaited_once_with(tags=["kv_cache", "weights"])
 
 
 def test_kv_cache_release_keeps_adapter_weights_with_resync_base(monkeypatch):
