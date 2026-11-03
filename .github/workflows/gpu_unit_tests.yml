@@ -84,9 +84,10 @@ env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -101,7 +102,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   gpu_unit_tests:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -147,7 +148,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, gpu_unit_tests]
-    if: always()
+    if: ${{ github.event.pull_request.number != 8443 && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

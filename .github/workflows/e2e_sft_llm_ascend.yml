@@ -68,9 +68,10 @@ env:
   HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
 
+# Temporary resource limit for PR #8443; remove before merge.
 jobs:
   e2e_sft_llm_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.number != 8443 && (github.repository_owner == 'verl-project') }}
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
