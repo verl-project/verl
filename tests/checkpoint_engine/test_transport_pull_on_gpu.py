@@ -71,7 +71,10 @@ class _Puller:
         manifest = await self.puller.wait_for_version(min_version, timeout=120)
         pulled = await self.puller.fetch(manifest)
         received = dict(pulled.named_tensors())
-        expected = _weights(pulled.version, "cpu")
+        # The publisher casts fp32 weights to its rollout_dtype, bf16 by default.
+        expected = [
+            (n, t.to(torch.bfloat16) if t.dtype == torch.float32 else t) for n, t in _weights(pulled.version, "cpu")
+        ]
         mismatched = [name for name, tensor in expected if not torch.equal(received[name].cpu(), tensor)]
         get_torch_device().synchronize()
         return pulled.version, mismatched

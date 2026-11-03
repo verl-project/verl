@@ -105,7 +105,12 @@ def _weights(step: int):
 
 
 def _publisher(registry, **kwargs):
+    kwargs.setdefault("rollout_dtype", None)
     return WeightPublisher(registry, bucket_size=4096, device="cpu", transport_factory=_FakeTransport, **kwargs)
+
+
+def _on_wire(tensor, rollout_dtype=torch.bfloat16):
+    return tensor.to(rollout_dtype) if tensor.dtype == torch.float32 else tensor
 
 
 def _puller(registry, **kwargs):
@@ -132,6 +137,26 @@ def test_publish_then_pull_is_bit_exact():
 
         # A lease is held only during the fetch.
         assert not registry._leases
+
+    _run(main())
+
+
+def test_fp32_weights_are_cast_to_rollout_dtype():
+    async def main():
+        registry = InMemoryWeightRegistry()
+        publisher, puller = _publisher(registry, rollout_dtype=torch.bfloat16), _puller(registry)
+        for step in (1, 2):
+            manifest = await publisher.publish(iter(_weights(step)), version=step)
+            received = dict((await puller.fetch(manifest)).named_tensors())
+            for name, expected in _weights(step):
+                assert received[name].dtype == _on_wire(expected).dtype, name
+                assert torch.equal(received[name], _on_wire(expected)), name
+        # The fp32 tensor takes half the bytes; bf16 and int64 tensors are unchanged.
+        assert {spec.name: spec.dtype for spec in manifest.tensors} == {
+            "big.weight": torch.bfloat16,
+            "odd.bias": torch.bfloat16,
+            "ids": torch.int64,
+        }
 
     _run(main())
 
@@ -240,7 +265,7 @@ def test_checkpoint_engine_round_trip():
                 other_rank.send_weights(iter(_weights(step)), global_steps=step),
             )
             for name, expected in _weights(step):
-                assert torch.equal(received[name], expected), name
+                assert torch.equal(received[name], _on_wire(expected)), name
         assert other_rank.publisher is None
 
         # Re-syncing an already published step drains the weights without publishing again.

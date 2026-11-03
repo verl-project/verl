@@ -48,7 +48,7 @@ class WeightPublisher:
     slot whose previous version no reader holds a lease on, then announces it in the registry
     and retires older versions. The trainer never waits for readers beyond that.
 
-    Device memory overhead is `num_slots * model bytes` on `device`.
+    Device memory overhead is `num_slots * model bytes` on `device`, counted in `rollout_dtype`.
 
     Args:
         registry: Where versions are announced.
@@ -56,6 +56,9 @@ class WeightPublisher:
         device: Device of the slot buffers, "cuda" or "cpu" (pinned host memory).
         backend: torch.distributed._transport backend.
         num_slots: Versions kept at once; 2 lets readers finish v while v+1 is written.
+        rollout_dtype: fp32 weights (e.g. FSDP master weights) are cast to this as they are copied
+            into a slot, halving slot memory and transfer for bf16. Other dtypes pass through.
+            None sends weights as the trainer produces them.
         reclaim_timeout: Seconds to wait for leases on the slot being overwritten to end.
         transport_factory: Override of transport construction, for tests.
     """
@@ -67,6 +70,7 @@ class WeightPublisher:
         device: str = "cuda",
         backend: str = "nixl",
         num_slots: int = 2,
+        rollout_dtype: torch.dtype | None = torch.bfloat16,
         reclaim_timeout: float = 600.0,
         transport_factory: TransportFactory = default_transport_factory,
     ):
@@ -76,6 +80,7 @@ class WeightPublisher:
         self.device = device
         self.backend = backend
         self.num_slots = num_slots
+        self.rollout_dtype = rollout_dtype
         self.reclaim_timeout = reclaim_timeout
         self.transport_factory = transport_factory
 
@@ -85,8 +90,13 @@ class WeightPublisher:
         self.total_bytes = None
         self.slots: list[_Slot] = []
 
+    def _wire_dtype(self, dtype: torch.dtype) -> torch.dtype:
+        return self.rollout_dtype if self.rollout_dtype is not None and dtype == torch.float32 else dtype
+
     def _setup(self, named_tensors: list[tuple[str, torch.Tensor]]):
-        self.tensors, self.total_bytes = plan_layout([(n, t.shape, t.dtype) for n, t in named_tensors])
+        self.tensors, self.total_bytes = plan_layout(
+            [(n, t.shape, self._wire_dtype(t.dtype)) for n, t in named_tensors]
+        )
         self.transport = self.transport_factory(self.backend, self.device)
         ranges = bucket_ranges(self.total_bytes, self.bucket_size)
         for _ in range(self.num_slots):
@@ -131,7 +141,10 @@ class WeightPublisher:
         if self.transport is None:
             # The layout is unknown until the weights are seen once; keep a host copy of this
             # first version to size the slots.
-            named = [(n, t.detach().to("cpu", copy=True)) async for n, t in ensure_async_iterator(weights)]
+            named = [
+                (n, t.detach().to("cpu", dtype=self._wire_dtype(t.dtype), copy=True))
+                async for n, t in ensure_async_iterator(weights)
+            ]
             self._setup(named)
             weights = iter(named)
 
@@ -141,8 +154,9 @@ class WeightPublisher:
             if index >= len(self.tensors):
                 raise ValueError(f"Unexpected weight {name}: layout has {len(self.tensors)} tensors")
             spec = self.tensors[index]
-            if (name, tensor.shape, tensor.dtype) != (spec.name, spec.shape, spec.dtype):
+            if (name, tensor.shape, self._wire_dtype(tensor.dtype)) != (spec.name, spec.shape, spec.dtype):
                 raise ValueError(f"Weight {name} {tuple(tensor.shape)} {tensor.dtype} does not match layout {spec}")
+            # copy_ also casts to the wire dtype.
             tensor_view(slot.buffer, spec).copy_(tensor, non_blocking=True)
             index += 1
         if index != len(self.tensors):

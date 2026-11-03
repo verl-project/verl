@@ -47,6 +47,8 @@ class TransportPullCheckpointEngine(CheckpointEngine):
         transport: Transport backend: "nixl_native" (any torch), or a torch.distributed._transport
             backend such as "nixl" (torch >= 2.15). Not named `backend`, which selects the engine.
         num_slots: Versions the publisher keeps at once.
+        rollout_dtype: dtype fp32 weights are cast to before publishing, e.g. torch.bfloat16 or
+            "bfloat16"; None sends them as the trainer produces them.
         lease_ttl: Reader lease duration in seconds.
         registry_name: Ray actor name of the shared registry.
         wait_timeout: Seconds a rollout worker waits for the requested version to be published.
@@ -60,6 +62,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
         device: str = "cuda",
         transport: str = "nixl",
         num_slots: int = 2,
+        rollout_dtype: torch.dtype | str | None = torch.bfloat16,
         lease_ttl: float = 60.0,
         registry_name: str = "verl_weight_registry",
         wait_timeout: float = 600.0,
@@ -70,6 +73,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
         self.device = device
         self.transport = transport
         self.num_slots = num_slots
+        self.rollout_dtype = getattr(torch, rollout_dtype) if isinstance(rollout_dtype, str) else rollout_dtype
         self.lease_ttl = lease_ttl
         self.registry_name = registry_name
         self.wait_timeout = wait_timeout
@@ -127,6 +131,7 @@ class TransportPullCheckpointEngine(CheckpointEngine):
                 device=self.device,
                 backend=self.transport,
                 num_slots=self.num_slots,
+                rollout_dtype=self.rollout_dtype,
                 transport_factory=self.transport_factory,
             )
         await self.publisher.publish(weights, version=version)
