@@ -439,6 +439,7 @@ class PPOTrainer(ABC):
         # perform validation before training
         if self.config.trainer.get("val_before_train", True):
             self.on_validate_begin()
+            self._wait_for_weight_updates()
             val_metrics = self._validate()
             self.on_validate_end()
             assert val_metrics, f"{val_metrics=}"
@@ -494,6 +495,7 @@ class PPOTrainer(ABC):
             ):
                 with marked_timer("testing", self.timing_raw, color="green"):
                     self.on_validate_begin()
+                    self._wait_for_weight_updates()
                     val_metrics: dict = self._validate()
                     self.on_validate_end()
                     if is_last_step:
@@ -526,6 +528,9 @@ class PPOTrainer(ABC):
                 progress_bar.close()
                 break
 
+        # The last weight update may still be finishing in the background (see
+        # CheckpointEngineManager.wait_for_weight_update); let it land before the loop exits.
+        self._wait_for_weight_updates()
         self.on_train_end()
         self._shutdown_dump_executor()
         self._shutdown_train_dataloader()
@@ -1388,6 +1393,25 @@ class PPOTrainer(ABC):
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
         return metric_dict
+
+    def _checkpoint_managers(self) -> list:
+        """Checkpoint engine managers that update rollout weights.
+
+        Subclasses owning additional replicas (e.g. the standalone rollout of separate-async
+        training) extend this list so their weight updates are waited for as well.
+        """
+        managers = [getattr(self, "checkpoint_manager", None)]
+        return [manager for manager in managers if manager is not None]
+
+    def _wait_for_weight_updates(self) -> None:
+        """Wait until every rollout replica holds the weights of the last weight update.
+
+        A checkpoint engine backend may finish ``update_weights`` in the background; call this
+        before generating with the new weights outside the training loop (validation) and before
+        the loop exits.
+        """
+        for manager in self._checkpoint_managers():
+            manager.wait_for_weight_update()
 
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.

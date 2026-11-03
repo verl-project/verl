@@ -228,6 +228,13 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # get server client from standalone rollout
         return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
 
+    def _checkpoint_managers(self) -> list:
+        managers = super()._checkpoint_managers()
+        standalone = getattr(self, "standalone_checkpoint_manager", None)
+        if standalone is not None:
+            managers.append(standalone)
+        return managers
+
     def _rollout_server_managers(self) -> list:
         managers = super()._rollout_server_managers()
         standalone = getattr(self, "standalone_server_manager", None)

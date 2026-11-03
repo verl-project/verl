@@ -586,6 +586,18 @@ class CheckpointEngineManager:
         return sync_metrics
 
     @auto_await
+    async def wait_for_weight_update(self):
+        """Wait until the rollout replicas hold the weights of the last ``update_weights``.
+
+        With a backend that publishes weights (``support_publish_weights=True``), ``update_weights`` returns
+        once the trainer has published them, and the rollout commit finishes on the background loop. Trainers
+        call this before anything that must see the new weights (validation) and before the training loop
+        exits. For coupled backends the last update is already committed, so this returns at once.
+        """
+        if self._update_ticket is not None:
+            await self._update_ticket.wait_committed()
+
+    @auto_await
     async def update_weights(self, global_steps: int = None):
         """Update weights from actor worker group to rollout replicas.
 
