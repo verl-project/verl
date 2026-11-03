@@ -265,7 +265,8 @@ async def _exercise_keep(model_path, prefix_cache_mode):
         preserve_kv_cache=True,
         enable_prefix_caching=prefix_cache_mode != "disabled",
         prefix_cache_mode="shared" if prefix_cache_mode == "shared" else "versioned",
-        enable_rollout_routing_replay=True,
+        # vLLM 0.32 routes expert ids through a KV connector that needs prefix caching.
+        enable_rollout_routing_replay=prefix_cache_mode != "disabled",
         calculate_log_probs=True,
         free_cache_engine=False,
         gpu_memory_utilization=0.2,
@@ -322,7 +323,8 @@ async def _exercise_keep(model_path, prefix_cache_mode):
         replica.observe = False
         assert output.stop_reason == "completed"
         assert len(output.token_ids) == len(output.log_probs) == 256
-        assert output.routed_experts.shape == (len(prompt) + 255, 2, 2)
+        if config.enable_rollout_routing_replay:
+            assert output.routed_experts.shape == (len(prompt) + 255, 2, 2)
         assert output.extra_fields["min_global_steps"] == start_version
         assert output.extra_fields["max_global_steps"] == start_version + 2
         internal_ids = []
@@ -339,7 +341,8 @@ async def _exercise_keep(model_path, prefix_cache_mode):
             count = len(prefix["tokens"])
             assert output.token_ids[:count] == prefix["tokens"]
             assert output.log_probs[:count] == prefix["logprobs"]
-            np.testing.assert_array_equal(output.routed_experts[: len(prefix["routing"])], prefix["routing"])
+            if config.enable_rollout_routing_replay:
+                np.testing.assert_array_equal(output.routed_experts[: len(prefix["routing"])], prefix["routing"])
         assert len(set(internal_ids)) == 1
         states = await replica.server_handle.collective_rpc.remote("keep_snapshot")
         positions = [
