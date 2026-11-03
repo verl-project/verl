@@ -13,6 +13,7 @@
 # limitations under the License.
 """SGLang MX low-precision config translation, weight export, and refit registration."""
 
+import logging
 import os
 from collections.abc import Iterable, Iterator, Mapping
 from copy import deepcopy
@@ -32,6 +33,10 @@ FINALIZE_MARKER = "__verl_sglang_quant_refit_finalize__"
 _SYNC_FP8_ATTR = "_verl_sglang_fp8_refit_staged"
 _SYNC_FP4_ATTR = "_verl_sglang_fp4_refit_staged"
 _SGLangRefitKind = Literal["mxfp8", "mxfp4"]
+
+logger = logging.getLogger(__name__)
+# SGLang's scheduler processes fall back to the root WARNING level and would drop the INFO evidence lines.
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _REGEX_IGNORE_TO_SGLANG = {
     r"re:.*lm_head$": "lm_head",
@@ -209,21 +214,32 @@ def finalize_tensors() -> list[tuple[str, torch.Tensor]]:
 
 
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
-    """Load one SGLang quantized-refit bucket and finalize kernel layouts once per sync."""
+    """Load one SGLang quantized-refit bucket and finalize kernel layouts once per sync.
+
+    Before a bucket is written, the export-vs-engine format check of the first weight sync reads it
+    (``verl.utils.sglang.sglang_sync_format_check``).
+    """
     from verl.utils.sglang.sglang_fp4_utils import stage_mxfp4_moe_params
     from verl.utils.sglang.sglang_fp8_utils import stage_mxfp8_moe_scales
+    from verl.utils.sglang.sglang_sync_format_check import sglang_sync_format_check
 
     named_tensors = list(named_tensors)
     finalize = any(name == FINALIZE_MARKER for name, _ in named_tensors)
     named_tensors = [(name, tensor) for name, tensor in named_tensors if name != FINALIZE_MARKER]
+    format_check = sglang_sync_format_check(model)
     try:
         if named_tensors:
-            if _SYNC_FP8_ATTR not in model.__dict__:
+            first_request = _SYNC_FP8_ATTR not in model.__dict__  # first request of this sync
+            if first_request:
+                format_check.begin_sync()
+            format_check.check_bucket(model, named_tensors)  # before anything is written into the engine
+            if first_request:
                 model.__dict__[_SYNC_FP8_ATTR] = stage_mxfp8_moe_scales(model)
                 model.__dict__[_SYNC_FP4_ATTR] = stage_mxfp4_moe_params(model)
             model.load_weights(named_tensors)
         if finalize:
             _finish_sync(model)
+            format_check.end_sync()
     except BaseException:
         _abandon_sync(model)
         raise

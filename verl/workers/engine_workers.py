@@ -743,6 +743,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             if weight_quantizer is not None:
                 self.actor.engine.set_rollout_weight_quantizer(weight_quantizer)
+                # Only engines with TE workspace evidence implement the training-side audit.
+                # Export vs engine runs independently in the rollout engine's weight loader.
+                set_train_export_audit = getattr(self.actor.engine, "set_train_export_audit", None)
+                if callable(set_train_export_audit):
+                    from verl.utils.quant_layer_audit import TrainExportAudit, fp8_recipe_of
+
+                    set_train_export_audit(
+                        TrainExportAudit.create(
+                            rollout_quantized=True,
+                            trainer_fp8_recipe=fp8_recipe_of(getattr(self.actor.engine, "engine_config", None)),
+                            rollout_name=self.config.rollout.name,
+                        )
+                    )
 
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)

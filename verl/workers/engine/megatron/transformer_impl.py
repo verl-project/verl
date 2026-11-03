@@ -212,6 +212,7 @@ class MegatronEngine(BaseEngine):
                 )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
         self._rollout_weight_quantizer = None
+        self._train_export_audit = None
 
         # override_transformer_config.fp4 trains the routed experts in NVFP4.
         from verl.utils.megatron.low_precision import bf16_layers_at_start_end
@@ -1048,11 +1049,19 @@ class MegatronEngine(BaseEngine):
         if self._rollout_weight_quantizer is not None and not adapter_only:
             # QAT-trained master weights quantize to the same values the fake quant used in training.
             per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
+            if self._train_export_audit is not None:
+                # Every sync route passes through this export, so the audit reads what the rollout is sent
+                # here; it compares with the training side when the stream ends.
+                per_tensor_param = self._train_export_audit.wrap_export(per_tensor_param, training_modules=self.module)
 
         return per_tensor_param, peft_config
 
     def set_rollout_weight_quantizer(self, quantizer) -> None:
         self._rollout_weight_quantizer = quantizer
+
+    def set_train_export_audit(self, audit) -> None:
+        """Compare the quantized export with the layers that ran FP8 in training (``verl.utils.quant_layer_audit``)."""
+        self._train_export_audit = audit
 
     def _mcore_export_index(self):
         """Build (once) the per-parameter delta export index: geometry specs and

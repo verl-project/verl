@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 11/2/2026
+Last updated: 11/03/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -274,6 +274,33 @@ SGLang uses the default CUDA Graph configuration):
 | Blackwell | SGLang | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00200 |
 | Blackwell | vLLM | ❌ | NVFP4 MoE | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00966 |
 | Blackwell | vLLM | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00766 |
+
+## Quantized-layer audit
+
+Three parties decide which layers are quantized, each on its own: training implicitly (TE linear modules
+inside `fp8_autocast`), and by name the trainer-side exporter and the engine, both from the same quantization
+config (`rollout.quantization`, or the checkpoint's own `quantization_config`). The audit compares them in two
+steps, each once:
+
+- **Training vs export**, when Megatron training runs a TE FP8 recipe, at the first weight sync after a training step
+  (the sync before it has no FP8 trace yet): each decoder layer's FP8 trace (TE's FP8 weight workspaces)
+  against the format the sync sends for that layer's GEMM projections (attention, MLP, experts,
+  linear-attention and SSM in / out projections). Weights the exporter keeps in BF16 by design are skipped.
+  Other decoder-layer weights, such as a convolution, are not judged, and the audit reports how many it left
+  out.
+- **Export vs engine**, whenever the rollout is quantized, during the first weight sync: inside the engine's
+  weight loader, before each bucket is written, every incoming weight's format (quantized or high
+  precision) against the engine parameter that receives it. vLLM checks every quantized format; SGLang
+  checks the formats of its refit loader (MXFP8, MXFP4). Later syncs send the same formats and are
+  not checked again.
+
+`VERL_QUANT_LAYER_AUDIT` switches both: `warn` (default) logs disagreements, `raise` stops the sync, and `0` disables the checks. `VERL_QUANT_LAYER_AUDIT_TRACE=1` logs each step of the training-side
+comparison. The training-side trace is per layer,
+so a TE module kept in BF16 inside an FP8 layer would go unnoticed (Megatron has no such per-module option
+today). With `disable_parameter_transpose_cache=True` TE keeps no FP8 workspace, and the audit warns once
+that it cannot run.
+
+The training-side comparison is installed only on engines that expose the TE audit interface. Other training backends can still use the export-vs-engine comparison. The audit checks which layers are quantized, not numerical equivalence between quantizers, scales or kernel outputs.
 
 ## Limitations
 
