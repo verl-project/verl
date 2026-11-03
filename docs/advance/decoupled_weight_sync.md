@@ -100,6 +100,22 @@ Learning curves and validation accuracy match within single-seed noise. Most dec
 span two versions: requests dispatched right after a publish start on the old weights and are
 re-prefilled when the replica applies the new version.
 
+Same setup with Qwen3-8B-Base (FSDP over the 4 training GPUs, 2 rollout replicas at TP=2), 20 steps:
+
+| Metric | Baseline (`nccl`, trainer-driven) | Decoupled |
+| --- | --- | --- |
+| Validation accuracy at steps 0 / 10 / 20 | 0.638 / 0.900 / 0.908 | 0.642 / 0.892 / 0.899 |
+| Step time (mean, steps 2–20) | 30.2 s | 29.5 s |
+| `old_log_prob` | 25.6 s | 26.1 s |
+| Trainer time in `update_weights` | 1.14 s | 0.20 s |
+| Replica pause / prefetch | — | ≤ 1.5 s / 4.2 s |
+| `off_policy/trajectory_spans/mean` | 1.0 | 2.0 |
+
+Accuracy matches. Step time barely moves because this setup is bound by `old_log_prob`: with
+`rollout_correction.bypass_mode=False` and `parameter_sync_step=4`, every later mini-batch saves the
+8B model to CPU and restores the old weights to recompute log-probs. The trainer still saves the
+~0.9 s per step that weight sync took, and rollout keeps generating while replicas prefetch.
+
 ## Limitations and follow-ups
 
 - **Prompt dispatch and wasted re-prefill.** The trainer still pushes prompts through
