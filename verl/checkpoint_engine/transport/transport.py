@@ -23,12 +23,17 @@ from .registry import BucketDesc, TensorSpec
 TENSOR_ALIGNMENT = 256
 
 TransportFactory = Callable[[str, str], Any]
-"""(backend, device) -> torch.distributed._transport.Transport"""
+"""(backend, device) -> torch.distributed._transport.Transport, or an object with the same methods.
+Callers register memory before `bind`, since some backends publish registrations in the bind url."""
 
 
 def default_transport_factory(backend: str, device: str):
-    # torch.distributed._transport ships with torch >= 2.15; import lazily so the rest of verl
-    # does not depend on it.
+    """`nixl_native` uses NIXL's own bindings on any torch version; every other backend name is
+    passed to torch.distributed._transport, which needs torch >= 2.15."""
+    if backend == "nixl_native":
+        from .nixl_native import NixlNativeTransport
+
+        return NixlNativeTransport(device)
     from torch.distributed._transport import new_transport
 
     return new_transport(backend, device)

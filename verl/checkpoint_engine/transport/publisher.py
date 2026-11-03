@@ -88,7 +88,6 @@ class WeightPublisher:
     def _setup(self, named_tensors: list[tuple[str, torch.Tensor]]):
         self.tensors, self.total_bytes = plan_layout([(n, t.shape, t.dtype) for n, t in named_tensors])
         self.transport = self.transport_factory(self.backend, self.device)
-        self.endpoint = self.transport.bind()
         ranges = bucket_ranges(self.total_bytes, self.bucket_size)
         for _ in range(self.num_slots):
             if self.device == "cpu":
@@ -96,11 +95,14 @@ class WeightPublisher:
             else:
                 buffer = torch.empty(self.total_bytes, dtype=torch.uint8, device=self.device)
             memories = [self.transport.register_memory(buffer[offset : offset + size]) for offset, size in ranges]
-            buckets = [
+            self.slots.append(_Slot(buffer=buffer, memories=memories, buckets=[]))
+        # Bind after registering: some backends (nixl_native) put registrations in the url.
+        self.endpoint = self.transport.bind()
+        for slot in self.slots:
+            slot.buckets = [
                 BucketDesc(offset=offset, size=size, remote_buffer=memory.to_remote_buffer().serialize())
-                for (offset, size), memory in zip(ranges, memories, strict=True)
+                for (offset, size), memory in zip(ranges, slot.memories, strict=True)
             ]
-            self.slots.append(_Slot(buffer=buffer, memories=memories, buckets=buckets))
         logger.info(f"Publisher at {self.endpoint!r}: {self.num_slots} slots of {self.total_bytes} bytes")
 
     async def _acquire_slot(self) -> _Slot:
