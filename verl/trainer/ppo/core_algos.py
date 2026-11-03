@@ -96,6 +96,7 @@ class AdvantageEstimator(str, Enum):
 
     GAE = "gae"
     GRPO = "grpo"
+    GRPO_SEGMENT = "grpo_segment"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
@@ -1364,9 +1365,31 @@ def compute_policy_loss_vanilla(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(
-        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-    )
+    # Segment fields are not accepted by the generic aggregator. Pop them so
+    # later entropy/KL calls can still splat global_batch_info.
+    segment_boundaries = config.global_batch_info.pop("segment_boundaries", None)
+    n_rollouts = config.global_batch_info.pop("n_rollouts", None)
+    if loss_agg_mode == "seg-mean-token-mean" and segment_boundaries:
+        from verl.trainer.ppo.segment_advantage import agg_segment_loss
+
+        pg_loss = agg_segment_loss(
+            loss_mat=pg_losses,
+            loss_mask=response_mask,
+            segment_boundaries=segment_boundaries,
+            dp_size=config.global_batch_info.get("dp_size", 1),
+            batch_num_tokens=config.global_batch_info.get("batch_num_tokens"),
+            global_batch_size=config.global_batch_info.get("global_batch_size"),
+            loss_scale_factor=config.global_batch_info.get("loss_scale_factor"),
+            n_rollouts=n_rollouts,
+        )
+    else:
+        effective_mode = "seq-mean-token-mean" if loss_agg_mode == "seg-mean-token-mean" else loss_agg_mode
+        pg_loss = agg_loss(
+            loss_mat=pg_losses,
+            loss_mask=response_mask,
+            loss_agg_mode=effective_mode,
+            **config.global_batch_info,
+        )
 
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
@@ -2557,3 +2580,7 @@ def compute_policy_loss_bypass_mode(
     pg_metrics.update(rollout_metrics)
 
     return pg_loss, pg_metrics
+
+
+# Register grpo_segment when this module is imported.
+import verl.trainer.ppo.segment_advantage as _segment_advantage  # noqa: E402,F401
