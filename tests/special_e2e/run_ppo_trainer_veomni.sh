@@ -6,7 +6,10 @@ DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo
 LAUNCH=(python3)
 RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
 if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
-    UV_EXTRAS=(--extra vllm --extra fsdp --extra veomni-sft --extra math)
+    # Standalone first-class `veomni` training backend (cu130 / torch 2.13), the
+    # named form of the old `fsdp + veomni-sft` composition: it already bundles the
+    # fsdp stack plus the deps-free veomni package, so no fsdp / veomni-sft extras.
+    UV_EXTRAS=(--extra vllm --extra veomni --extra math)
     UV_OVERLAY=(--with transformers==5.16.1)
     LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" "${UV_OVERLAY[@]}" python3)
     # Quote the Hydra value so the Transformers requirement's == stays literal.

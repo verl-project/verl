@@ -31,7 +31,7 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import preprocess_thd_engine, preprocess_vlm_thd_engine
+from verl.models.mcore.util import get_thd_quant_align_size, preprocess_thd_engine, preprocess_vlm_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
@@ -288,15 +288,14 @@ def fused_forward_model_engine(vision_model: bool = False):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         config = unwrap_model(model).config
+        quant_align_size = get_thd_quant_align_size(config)
         min_local_rows = (
             config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
         )
 
         thd_kwargs = dict(
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
@@ -329,7 +328,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels,
             pre_process=True,
             need_roll=True,
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,

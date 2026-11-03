@@ -12,9 +12,13 @@ export VERL_PLATFORM=tpu
 export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin
 export VERL_TPU_VLLM_ATTN_FP32_STATS=1
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
+# RL timeline: per-step trainer / weight-sync / rollout spans and TPU HBM usage in the job log; verl-hardware-plugin's
+# profilers.make_report turns the log into an HTML report. Set VERL_TPU_TIMELINE=0 to turn it off.
+export VERL_TPU_TIMELINE="${VERL_TPU_TIMELINE:-1}"
 export RAY_memory_monitor_refresh_ms=0
 export RAY_memory_usage_threshold=0.99
-export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false"
+# PROMOTE_F32 promotes sigmoid/SiLU/GELU to f32 (instead of bf16) on TPU 7x, for RL stability; a no-op on v6e.
+export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_bf16_emission_mode=PROMOTE_F32"
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
 exp_name="${EXPERIMENT_NAME:-qwen3_4b_gsm8k_grpo}"
@@ -44,9 +48,17 @@ TOTAL_TRAINER_CHIPS=$((NNODES_TRAINER * N_CHIPS_TRAINER))
 TOTAL_ROLLOUT_CHIPS=$((NNODES_ROLLOUT * N_CHIPS_ROLLOUT))
 
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-${TOTAL_TRAINER_CHIPS}}"
+CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
+# all_gather: load-balanced KV all-gather CP with Splash Attention; ulysses: DeepSpeed-Ulysses all-to-all CP.
+CONTEXT_PARALLEL_STRATEGY="${CONTEXT_PARALLEL_STRATEGY:-all_gather}"
+if (( TENSOR_PARALLEL_SIZE < 1 || CONTEXT_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHIPS % (TENSOR_PARALLEL_SIZE * CONTEXT_PARALLEL_SIZE) != 0 )); then
+    echo "ERROR: TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE} x CONTEXT_PARALLEL_SIZE=${CONTEXT_PARALLEL_SIZE} must be a positive divisor of the ${TOTAL_TRAINER_CHIPS} trainer chips." >&2
+    exit 1
+fi
+DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
 # The tpu-sync checkpoint engine supports a single rollout replica, so the rollout TP spans all rollout chips.
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
+FUSE_QKV="${FUSE_QKV:-True}"
 
 # Training & validation settings
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
@@ -67,10 +79,21 @@ MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-1024}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 
+# Rollout & training overlap settings
+# Batches queued ahead of the trainer. With 2, the rollout always has requests to refill its
+# MAX_NUM_SEQS decode slots, also while the trainer still waits for the long responses of a batch.
+NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-2}"
+# vLLM token budget per engine step. Every weight sync aborts the in-flight rollouts, which then
+# re-prefill their prompt and partial response; a larger budget gets them decoding again sooner.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
+# The actor update pads each packed micro-batch to a multiple of this many tokens. Smaller buckets
+# waste less compute on padding as responses get shorter, at the cost of a few more compiled shapes.
+PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-512}"
+
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=separate_async \
-    trainer.v1.separate_async.num_warmup_batches=1 \
+    trainer.v1.separate_async.num_warmup_batches="${NUM_WARMUP_BATCHES}" \
     trainer.v1.separate_async.parameter_sync_step=1 \
     transfer_queue.enable=True \
     transfer_queue.backend.SimpleStorage.total_storage_size=100000 \
@@ -104,9 +127,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.use_torch_compile=True \
     actor_rollout_ref.actor.torchtitan.use_torch_compile=True \
-    +actor_rollout_ref.actor.torchtitan.use_splash_attention=True \
-    +actor_rollout_ref.actor.torchtitan.tpu_eager_mode=DEFER_AND_FUSE \
-    +actor_rollout_ref.actor.torchtitan.use_simple_fsdp=True \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_splash_attention=True \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.tpu_eager_mode=DEFER_AND_FUSE \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_simple_fsdp=True \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     actor_rollout_ref.actor.optim.lr="${LEARNING_RATE}" \
     actor_rollout_ref.actor.optim.lr_warmup_steps="${LR_WARMUP_STEPS}" \
     actor_rollout_ref.actor.optim.decay_type=cosine \
@@ -127,6 +151,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.actor.torchtitan.seed="${SEED}" \
     actor_rollout_ref.actor.torchtitan.tensor_parallel_size="${TENSOR_PARALLEL_SIZE}" \
+    actor_rollout_ref.actor.torchtitan.context_parallel_size="${CONTEXT_PARALLEL_SIZE}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.context_parallel_strategy="${CONTEXT_PARALLEL_STRATEGY}" \
+    +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.context_parallel_strategy="${CONTEXT_PARALLEL_STRATEGY}" \
+    +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     actor_rollout_ref.actor.torchtitan.data_parallel_shard_size="${DATA_PARALLEL_SHARD_SIZE}" \
     actor_rollout_ref.actor.torchtitan.pipeline_parallel_size=1 \
     actor_rollout_ref.actor.torchtitan.attn_type=varlen \
@@ -134,7 +162,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.torchtitan.reshard_after_forward=always \
     actor_rollout_ref.actor.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.actor.torchtitan.pad_to_length=True \
-    actor_rollout_ref.actor.torchtitan.pad_to_length_bucket=1024 \
+    actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096 \
     actor_rollout_ref.ref.torchtitan.seed="${SEED}" \
@@ -161,7 +189,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.prompt_length="${MAX_PROMPT_LEN}" \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
-    actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_MODEL_LEN}" \
+    actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS}" \
     actor_rollout_ref.rollout.response_length="${MAX_RESPONSE_LEN}" \
     actor_rollout_ref.rollout.max_num_seqs="${MAX_NUM_SEQS}" \
     actor_rollout_ref.rollout.val_kwargs.do_sample=False \

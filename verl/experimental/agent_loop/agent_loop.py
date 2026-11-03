@@ -175,6 +175,19 @@ class AgentLoopOutput(BaseModel):
             output["rollout_topk_ids"], output["rollout_topk_log_probs"] = pad_rollout_topk(
                 response_topk_ids, response_topk_log_probs, prompt_length=output["prompts"].size(0)
             )
+            # Same prediction-row layout as the heads. Dummy prompt/padding heads are complete
+            # by construction; a legacy response without provider evidence remains unknown.
+            response_complete = extra_fields.pop("response_support_complete", None)
+            if response_complete is None:
+                response_complete = torch.zeros(len(response_topk_ids), dtype=torch.bool)
+            else:
+                response_complete = torch.as_tensor(response_complete)
+                if response_complete.dtype != torch.bool or response_complete.shape != (len(response_topk_ids),):
+                    raise ValueError("sampler support coverage must have one bool per response token")
+            complete = torch.ones(output["rollout_topk_ids"].size(0), dtype=torch.bool)
+            start = output["prompts"].size(0) - 1
+            complete[start : start + len(response_topk_ids)] = response_complete
+            output["rollout_support_complete"] = complete
         return output
 
 
@@ -613,6 +626,7 @@ class AgentLoopWorker:
         )
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+            params.pop("topk_log_probs", None)
             params["top_p"] = 1.0
             params["top_k"] = -1
             params["temperature"] = 0

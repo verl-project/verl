@@ -128,7 +128,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     assert preprocess_calls == [
         {
             "pre_process": True,
-            "use_fp8_padding": True,
+            "quant_align_size": 16,
             "min_local_rows": 64,
             "pad_to_length_bucket": None,
             "cp_layout": "dualpipev",
@@ -137,7 +137,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
         {
             "pre_process": True,
             "need_roll": True,
-            "use_fp8_padding": True,
+            "quant_align_size": 16,
             "min_local_rows": 64,
             "pad_to_length_bucket": None,
             "cp_layout": "dualpipev",

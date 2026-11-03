@@ -117,6 +117,8 @@ def construct_minimal_padding_template(
         ids, log_probs = dummy_rollout_topk(sequence_length, rollout_topk_ids.shape[-1])
         template_sample["rollout_topk_ids"] = ids
         template_sample["rollout_topk_log_probs"] = log_probs
+        if "rollout_support_complete" in template_sample:
+            template_sample["rollout_support_complete"] = torch.ones(sequence_length, dtype=torch.bool)
 
     # Update the fields and remove redundant parts
     template_sample.update(

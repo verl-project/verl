@@ -140,15 +140,12 @@ qat:
   _target_: verl.workers.config.QATEngineConfig
   # Whether to enable QAT
   enable: false
-  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4)
-  mode: "w4a16"
+  # Quantization mode: "fp8", "mxfp8", "mxfp4", "mxfp4_mxfp8", or "nvfp4".
+  # NVFP4 is W4A4 on routed experts only.
+  mode: "fp8"
   # Group size for blockwise quantization (NVFP4 requires 16)
   group_size: 16
   # Module name patterns to exclude from quantization (fnmatch style for Megatron)
   ignore_patterns:
     - "lm_head"
     - "*mlp.gate"
-  # Activation observer strategy (W4A4 only): "static_minmax", "memoryless_minmax", "minmax"
-  activation_observer: null
-  # Path to quantization config JSON for vLLM weight export
-  quantization_config_path: null

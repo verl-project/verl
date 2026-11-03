@@ -103,6 +103,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=1.0
     actor_rollout_ref.rollout.top_k=-1
+    # Score centering aligns complete recorded support automatically, otherwise it uses a trainer-tail approximation.
 )
 
 TRAINER=(
