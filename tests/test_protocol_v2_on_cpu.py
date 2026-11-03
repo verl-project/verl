@@ -1170,3 +1170,28 @@ def test_contiguous():
     data_cont.consolidate()
 
     tu.assert_tensordict_eq(data_cont, data)
+
+
+def test_tensor_dict_make_iterator_shuffles_whole_groups():
+    dataset = tu.get_tensordict({"obs": torch.arange(12)})
+    group_sizes = [4, 2, 4, 2]
+    blocks = [list(range(0, 4)), [4, 5], list(range(6, 10)), [10, 11]]
+
+    def epoch_orders(seed):
+        batches = tu.make_iterator(
+            dataset, 6, epochs=3, seed=seed, dataloader_kwargs={"shuffle": True}, group_sizes=group_sizes
+        )
+        flat = [i for batch in batches for i in batch["obs"].tolist()]
+        return [flat[e * 12 : (e + 1) * 12] for e in range(3)]
+
+    orders = epoch_orders(seed=0)
+    for order in orders:
+        assert sorted(order) == list(range(12))
+        for block in blocks:
+            start = order.index(block[0])
+            assert order[start : start + len(block)] == block
+    assert len({tuple(order) for order in orders}) > 1, "each epoch should reshuffle the blocks"
+    assert epoch_orders(seed=0) == orders
+
+    unshuffled = tu.make_iterator(dataset, 6, epochs=1, dataloader_kwargs={"shuffle": False}, group_sizes=group_sizes)
+    assert [i for batch in unshuffled for i in batch["obs"].tolist()] == list(range(12))

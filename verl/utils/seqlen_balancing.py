@@ -14,6 +14,7 @@
 
 import copy
 import heapq
+from collections.abc import Hashable
 from itertools import chain
 
 import torch
@@ -354,9 +355,16 @@ def rearrange_micro_batches(
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
     force_group_size=1,
+    group_sizes: list[int] | None = None,
+    group_token_lens: list[int] | None = None,
+    group_trunk_lens: list[int] | None = None,
 ):
     """
     Split a batch into micro-batches by total token count, with optional DP sync and padding.
+
+    Samples are partitioned as atomic groups of contiguous samples. By default every sample is its
+    own group. ``force_group_size`` makes fixed-size groups and ``group_sizes`` makes groups of any
+    size; a group always lands in one micro-batch.
 
     Args:
         batch (TensorDict): must include "attention_mask" (B*S); other fields are sliced similarly.
@@ -367,6 +375,16 @@ def rearrange_micro_batches(
         min_num_micro_batch (int, optional): force at least this many splits (pads empty ones).
         use_dynamic_bsz_balance (bool, optional): balance the computational workload between micro-batches
         force_group_size (int, optional): force consecutive samples to be in the same micro-batch (for RM training).
+        group_sizes (list[int], optional): sizes of contiguous sample groups that must stay in one
+            micro-batch, in batch order and summing to the batch size. Mutually exclusive with
+            ``force_group_size > 1``.
+        group_token_lens (list[int], optional): token count of each group, checked against
+            ``max_token_len``. Defaults to the sum of the member sequence lengths. Pass a smaller value
+            when the group is stored more compactly, e.g. shared-prefix packing.
+        group_trunk_lens (list[int], optional): tokens shared by the members of each group (the
+            packed trunk). When given, a group may be split into smaller groups, each keeping its
+            own trunk, so that this rank can always provide the micro-batch count agreed across DP
+            ranks. A group's packed length is then ``trunk + sum(seq_len - trunk)`` over its members.
 
     Returns:
         List[TensorDict]: the micro-batches.
@@ -385,16 +403,65 @@ def rearrange_micro_batches(
         f"max_token_len must be greater than the sequence length. Got {max_token_len=} and {max_seq_len=}"
     )
 
-    # Validate force_group_size
+    # Build the group layout: group g holds samples group_offsets[g] .. group_offsets[g + 1] - 1.
     batch_size = len(seq_len_effective)
-    assert batch_size % force_group_size == 0, (
-        f"Batch size {batch_size} must be divisible by force_group_size {force_group_size}"
-    )
+    if group_sizes is not None:
+        assert force_group_size == 1, "group_sizes and force_group_size > 1 are mutually exclusive"
+        assert all(size > 0 for size in group_sizes), f"group_sizes must be positive, got {group_sizes}"
+        assert sum(group_sizes) == batch_size, f"group_sizes {group_sizes} do not sum to batch size {batch_size}"
+        group_sizes = list(group_sizes)  # may be split below; never mutate the caller's list
+    else:
+        assert batch_size % force_group_size == 0, (
+            f"Batch size {batch_size} must be divisible by force_group_size {force_group_size}"
+        )
+        group_sizes = [force_group_size] * (batch_size // force_group_size)
+    num_groups = len(group_sizes)
+    group_offsets = [0]
+    for size in group_sizes:
+        group_offsets.append(group_offsets[-1] + size)
 
-    total_seqlen = seq_len_effective.sum().item()
-    # NOTE: num_microbatches <= batch_size, so take the min of this two.
-    # When force_group_size > 1, we work with groups instead of individual samples
-    num_groups = batch_size // force_group_size
+    # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
+    seq_len_effective = seq_len_effective.long()
+    # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
+    sample_workloads = calculate_workload(seq_len_effective).cpu().tolist()
+    sample_token_lens = seq_len_effective.cpu().tolist()
+    workloads = [sum(sample_workloads[group_offsets[g] : group_offsets[g + 1]]) for g in range(num_groups)]
+    if group_token_lens is None:
+        group_token_lens = [sum(sample_token_lens[group_offsets[g] : group_offsets[g + 1]]) for g in range(num_groups)]
+    else:
+        group_token_lens = [int(x) for x in group_token_lens]
+        assert len(group_token_lens) == num_groups, (
+            f"group_token_lens has {len(group_token_lens)} entries but there are {num_groups} groups"
+        )
+
+    if group_trunk_lens is not None:
+        group_trunk_lens = [int(x) for x in group_trunk_lens]
+        assert len(group_trunk_lens) == num_groups, (
+            f"group_trunk_lens has {len(group_trunk_lens)} entries but there are {num_groups} groups"
+        )
+
+    def split_largest_group() -> bool:
+        """Split the longest group with more than one sample into two, each part keeping its own trunk.
+
+        Returns False when every group is a single sample and nothing can be split.
+        """
+        candidates = [g for g in range(len(group_sizes)) if group_sizes[g] > 1]
+        if not candidates:
+            return False
+        g = max(candidates, key=lambda idx: group_token_lens[idx])
+        start, end = group_offsets[g], group_offsets[g + 1]
+        mid = start + group_sizes[g] // 2
+        trunk = group_trunk_lens[g]
+        parts = [(start, mid), (mid, end)]
+        group_sizes[g : g + 1] = [hi - lo for lo, hi in parts]
+        group_trunk_lens[g : g + 1] = [trunk, trunk]
+        group_token_lens[g : g + 1] = [trunk + sum(sample_token_lens[lo:hi]) - (hi - lo) * trunk for lo, hi in parts]
+        workloads[g : g + 1] = [sum(sample_workloads[lo:hi]) for lo, hi in parts]
+        group_offsets.insert(g + 1, mid)
+        return True
+
+    total_seqlen = sum(group_token_lens)
+    # NOTE: num_microbatches <= num_groups, so take the min of this two.
     num_micro_batches = min(num_groups, ceildiv(total_seqlen, max_token_len))
     if min_num_micro_batch is not None:
         # used to support pp
@@ -406,22 +473,6 @@ def rearrange_micro_batches(
         num_micro_batches = num_micro_batches.cpu().item()
     if num_batches_divided_by is not None:
         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
-
-    # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
-    seq_len_effective = seq_len_effective.long()
-
-    # When force_group_size > 1, aggregate workloads by groups
-    if force_group_size > 1:
-        # Calculate workload for each group (sum of workloads of samples in the group)
-        workloads_per_sample = calculate_workload(seq_len_effective)
-        workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
-        group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
-        group_token_lens = seq_len_effective.view(num_groups, force_group_size).sum(dim=1).cpu().tolist()
-        workloads = group_workloads
-    else:
-        # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
-        workloads = calculate_workload(seq_len_effective).cpu().tolist()
-        group_token_lens = seq_len_effective.cpu().tolist()
 
     max_group_token_len = max(group_token_lens)
     min_num_groups = num_groups
@@ -438,62 +489,69 @@ def rearrange_micro_batches(
             f"Got max_group_token_len={max_group_token_len} and max_token_len={max_token_len}."
         )
 
-    # ceildiv(total_seqlen, max_token_len) is only a lower bound because samples are indivisible.
+    # ceildiv(total_seqlen, max_token_len) is only a lower bound because groups are indivisible.
     # Increase the number of micro-batches until the balanced partition also respects the hard limit.
     step = num_batches_divided_by or 1
     while True:
-        if num_micro_batches > min_num_groups:
+        if group_trunk_lens is not None:
+            # Groups can be split, so split on this rank until it can fill the agreed micro-batch count;
+            # each part keeps its trunk and fits the budget.
+            while num_micro_batches > len(group_sizes) and split_largest_group():
+                pass
+            short = num_micro_batches > len(group_sizes)
+        else:
+            short = num_micro_batches > min_num_groups
+        if short and group_trunk_lens is None:
+            # min_num_groups was agreed across ranks above, so every rank raises together.
             raise ValueError(
                 "Cannot satisfy max_token_len while keeping forced groups atomic and using the same "
                 "micro-batch count across DP ranks. "
                 f"Requested {num_micro_batches} non-empty micro-batches, but a rank has only "
                 f"{min_num_groups} forced groups."
             )
-        micro_bsz_group_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
-        within_limit = all(
-            sum(group_token_lens[idx] for idx in partition) <= max_token_len for partition in micro_bsz_group_idx
-        )
+        if short:
+            within_limit = False
+        else:
+            micro_bsz_group_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
+            within_limit = all(
+                sum(group_token_lens[idx] for idx in partition) <= max_token_len for partition in micro_bsz_group_idx
+            )
+        fewest_groups = len(group_sizes)
         if sync_micro_batch_count:
-            within_limit_tensor = torch.tensor([int(within_limit)], device=get_device_name())
-            dist.all_reduce(within_limit_tensor, op=dist.ReduceOp.MIN, group=dp_group)
-            within_limit = bool(within_limit_tensor.item())
+            flags = torch.tensor([int(not within_limit), int(short), -fewest_groups], device=get_device_name())
+            dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=dp_group)
+            within_limit = not bool(flags[0].item())
+            short = bool(flags[1].item())
+            fewest_groups = -int(flags[2].item())
+        if short:
+            # Agreed across ranks, so every rank raises together.
+            raise ValueError(
+                "Cannot satisfy max_token_len with the same micro-batch count across DP ranks. "
+                f"Requested {num_micro_batches} non-empty micro-batches, but a rank has only "
+                f"{fewest_groups} samples."
+            )
         if within_limit:
             break
         num_micro_batches += step
 
-    if force_group_size > 1:
-        # Convert group indices back to sample indices.
-        micro_bsz_idx = []
-        for group_partition in micro_bsz_group_idx:
-            sample_partition = []
-            for group_idx in group_partition:
-                start_idx = group_idx * force_group_size
-                sample_partition.extend(range(start_idx, start_idx + force_group_size))
-            micro_bsz_idx.append(sample_partition)
-    else:
-        micro_bsz_idx = micro_bsz_group_idx
+    # Convert group indices back to sample indices, keeping each micro-batch's group workload for sorting.
+    micro_bsz = []
+    for group_partition in micro_bsz_group_idx:
+        sample_partition = []
+        for group_idx in group_partition:
+            sample_partition.extend(range(group_offsets[group_idx], group_offsets[group_idx + 1]))
+        partition_workload = sum(workloads[group_idx] for group_idx in group_partition)
+        micro_bsz.append((partition_workload, sample_partition))
 
     if use_dynamic_bsz_balance:
         # Use the sum of squared sequence lengths to approximate attention computation workload
-        if force_group_size > 1:
-            # For grouped samples, use group workloads for sorting
-            micro_bsz_idx.sort(
-                key=lambda partition: (
-                    sum(workloads[idx // force_group_size] for idx in partition[::force_group_size]),
-                    partition[0] if partition else 0,
-                ),
-                reverse=True,
-            )
-        else:
-            micro_bsz_idx.sort(
-                key=lambda partition: (
-                    sum(workloads[idx] for idx in partition),
-                    partition[0] if partition else 0,
-                ),
-                reverse=True,
-            )
+        micro_bsz.sort(
+            key=lambda item: (item[0], item[1][0] if item[1] else 0),
+            reverse=True,
+        )
         # Place smaller micro-batches at both ends to reduce the bubbles exposed during the warm-up and cool-down.
-        micro_bsz_idx = micro_bsz_idx[::2][::-1] + micro_bsz_idx[1::2]
+        micro_bsz = micro_bsz[::2][::-1] + micro_bsz[1::2]
+    micro_bsz_idx = [sample_partition for _, sample_partition in micro_bsz]
 
     micro_batches = []
 
@@ -660,3 +718,45 @@ def get_group_balanced_partitions(
         sample_partitions.append(sorted(sample_indices))
 
     return sample_partitions
+
+
+def get_equal_size_group_partitions(
+    workload_list: list[int], group_ids: list[Hashable], k_partitions: int
+) -> list[list[int]]:
+    """Split samples into equal-size partitions, keeping samples with the same group id together.
+
+    Group members need not be contiguous. Groups are placed largest-workload first on the least
+    loaded partition with room; a group that fits nowhere is split.
+
+    Args:
+        workload_list: Per-sample workload.
+        group_ids: Per-sample group id, e.g. the prompt ``uid``.
+        k_partitions: Number of partitions.
+
+    Returns:
+        ``k_partitions`` lists of sample indices with each group's members adjacent.
+    """
+    num_samples = len(workload_list)
+    assert len(group_ids) == num_samples, "workload_list and group_ids must have the same length"
+    assert num_samples % k_partitions == 0, f"batch size {num_samples} is not divisible by {k_partitions}"
+    capacity = num_samples // k_partitions
+
+    groups: dict[Hashable, list[int]] = {}
+    for idx, gid in enumerate(group_ids):
+        groups.setdefault(gid, []).append(idx)
+
+    partitions: list[list[int]] = [[] for _ in range(k_partitions)]
+    loads = [0] * k_partitions
+    for members in sorted(groups.values(), key=lambda m: -sum(workload_list[i] for i in m)):
+        fits = [p for p in range(k_partitions) if len(partitions[p]) + len(members) <= capacity]
+        while members:
+            if fits:
+                target = min(fits, key=lambda p: loads[p])
+            else:
+                target = max(range(k_partitions), key=lambda p: capacity - len(partitions[p]))
+            chunk = members[: capacity - len(partitions[target])]
+            members = members[len(chunk) :]
+            partitions[target].extend(chunk)
+            loads[target] += sum(workload_list[i] for i in chunk)
+            fits = []
+    return partitions

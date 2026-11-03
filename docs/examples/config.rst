@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 10/01/2026.
+Last updated: 10/18/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -156,6 +156,7 @@ Actor/Rollout/Reference Policy
         param_offload: False
         optimizer_offload: False
         fsdp_size: -1
+        use_prefix_packing: False
       checkpoint:
         # What to include in saved checkpoints
         # 'hf_model' saves the full model in HuggingFace format. For Megatron this requires
@@ -326,6 +327,10 @@ Actor/Rollout/Reference Policy
     offload
 
     - Trading speed for GPU memory.
+
+  - ``use_prefix_packing``: Compute the prompt shared by the ``rollout.n``
+    samples of a prompt once in the forward. The reference model follows the
+    actor. Default is False. See :doc:`../perf/perf_tuning`.
 
 - ``actor_rollout_ref.actor.use_kl_loss``: Whether to enable kl loss. Default is False.
 

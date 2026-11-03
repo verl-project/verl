@@ -103,3 +103,28 @@ def test_forward_only_stage_is_not_a_profiler_step():
 
     assert TrainingWorker.infer_batch(worker, data) is None
     worker.profiler.step.assert_not_called()
+
+
+def test_prefix_packing_shuffles_prompt_groups(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tu, "make_iterator", lambda data, **kwargs: calls.append(kwargs) or iter([]))
+    worker = _worker(_engine())
+    worker.engine_config.use_prefix_packing = True
+
+    def batch(shuffle):
+        prompts = [[1, 2, 3], [1, 2, 3], [7, 8], [9, 9]]
+        rows = [p + [5, 6] for p in prompts]
+        data = TensorDict(
+            {
+                "input_ids": torch.nested.as_nested_tensor([torch.tensor(r) for r in rows], layout=torch.jagged),
+                "prompts": torch.nested.as_nested_tensor([torch.tensor(p) for p in prompts], layout=torch.jagged),
+            },
+            batch_size=[4],
+        )
+        tu.assign_non_tensor(data, num_mini_batch=1, dataloader_kwargs={"shuffle": shuffle})
+        return data
+
+    TrainingWorker.train_mini_batch(worker, batch(shuffle=True))
+    TrainingWorker.train_mini_batch(worker, batch(shuffle=False))
+    assert calls[0]["group_sizes"] == [2, 1, 1]
+    assert calls[1]["group_sizes"] is None
