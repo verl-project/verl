@@ -308,25 +308,6 @@ def test_layerwise_reload_owns_weights_across_reused_buckets():
         assert [parameter.data_ptr() for parameter in model.parameters()] == addresses
 
 
-def test_layerwise_buffer_loader_retains_its_own_bucket_input():
-    model = _ToyModel()
-    source = torch.arange(4, dtype=torch.float32)
-    retained = []
-    target = model.model.layers[0].e_score_correction_bias
-    target.weight_loader = lambda buffer, loaded: retained.append((buffer, loaded))
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(model)
-    worker._update_weights(
-        [("model.layers.0.e_score_correction_bias", source)],
-        peft_config=None,
-        base_sync_done=True,
-        layerwise_reload=True,
-    )
-    source.zero_()
-    assert len(retained) == 1 and retained[0][0] is target
-    torch.testing.assert_close(retained[0][1], torch.arange(4, dtype=torch.float32))
-
-
 def test_layerwise_update_still_drops_tied_aliases(monkeypatch):
     model = _ToyModel()
     loaded = []

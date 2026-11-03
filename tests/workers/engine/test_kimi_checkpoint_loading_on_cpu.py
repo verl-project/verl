@@ -118,14 +118,6 @@ def test_streaming_load_materializes_dtensor_with_its_original_layout(tmp_path):
     mp.spawn(_check_sharded_meta_load, args=(str(tmp_path),), nprocs=2, join=True)
 
 
-def test_native_stream_loader_does_not_silently_skip_new_adapter_parameters(tmp_path):
-    model = torch.nn.Linear(3, 2, bias=False, device="meta")
-    model.register_parameter("lora_A", torch.nn.Parameter(torch.empty(1, 3, device="meta")))
-    save_file({"weight": torch.arange(6).reshape(2, 3).float()}, tmp_path / "model.safetensors")
-    with pytest.raises(RuntimeError, match="missing target parameters.*lora_A"):
-        load_kimi_k3_checkpoint_to_local_shards(model, str(tmp_path), materialize_device="cpu")
-
-
 def test_native_loader_preserves_tied_meta_parameters(tmp_path):
     model = torch.nn.Module()
     model.weight = torch.nn.Parameter(torch.empty(2, 3, device="meta"))

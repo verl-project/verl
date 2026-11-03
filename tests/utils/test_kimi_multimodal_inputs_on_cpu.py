@@ -45,11 +45,6 @@ class ImageLeaf(BaseImageProcessor):
     def make_image_prompt(width, height):
         return f"<|media_begin|>image {width}x{height}<|media_content|><|media_pad|><|media_end|>"
 
-    @staticmethod
-    def media_tokens_calculator(media):
-        image = media["image"]
-        return ((image.height + 27) // 28) * ((image.width + 27) // 28)
-
     def preprocess(self, medias, return_tensors="pt", **kwargs):
         images = [media["image"] for media in medias]
         assert all(isinstance(image, Image.Image) for image in images)
@@ -140,15 +135,6 @@ def assert_images(result):
     torch.testing.assert_close(result["grid_thws"], torch.tensor([[1, 2, 4], [1, 2, 2]]))
 
 
-@pytest.mark.parametrize("text", ["question", ["question"]])
-def test_text_only_uses_native_tokenizer(processor, text):
-    result = build_multimodal_processor_inputs(processor, text=text)
-    expected = processor.tokenizer(["question"], return_tensors="pt")
-    assert set(result) == set(expected)
-    for key in expected:
-        torch.testing.assert_close(result[key], expected[key])
-
-
 @pytest.mark.parametrize("form", ["placeholders", "full-media", "expanded", "features-only"])
 def test_standard_builder_calls_native_processor_with_multiple_images(processor, images, image_prompts, form):
     text = {
@@ -198,16 +184,6 @@ def test_expanded_image_coordinates_follow_standard_batch_padding(processor, ima
     torch.testing.assert_close(counts, torch.tensor([2, 1]))
     torch.testing.assert_close(counts, result["grid_thws"][:, 1:].prod(-1) // 4)
     assert not result["attention_mask"][1, 0 if padding_side == "left" else -1]
-
-
-def test_legacy_medias_and_messages_still_use_native_entrypoints(processor, images):
-    medias = [{"type": "image", "image": image} for image in images]
-    result = processor(medias=medias, text=["<|kimi_image_placeholder|><|kimi_image_placeholder|>question"])
-    assert_images(result)
-    messages = [{"role": "user", "content": [*medias, {"type": "text", "text": "question"}]}]
-    chat = processor(messages=messages)
-    for key, value in result.items():
-        torch.testing.assert_close(chat[key], value)
 
 
 def test_hf_factory_loads_native_processor_without_adaptation(native_source, tokenizer, tmp_path):

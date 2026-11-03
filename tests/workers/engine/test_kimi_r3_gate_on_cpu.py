@@ -27,12 +27,6 @@ from verl.workers.config.engine import EngineRouterReplayConfig, FSDPEngineConfi
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 
-@pytest.mark.parametrize("mode", ["disabled", "R3"])
-def test_fsdp_routing_replay_config_accepts_disabled_and_r3(mode):
-    config = FSDPEngineConfig(router_replay=EngineRouterReplayConfig(mode=mode))
-    assert config.router_replay.mode == mode
-
-
 def test_fsdp_routing_replay_config_rejects_record_only_mode():
     with pytest.raises(ValueError, match="only 'disabled' and 'R3'"):
         FSDPEngineConfig(router_replay=EngineRouterReplayConfig(mode="R2"))

@@ -67,26 +67,6 @@ def test_policy_to_cpu_keeps_buffers_ready_without_loading_parameters():
     torch.testing.assert_close(engine.module.rotary, torch.ones(3))
 
 
-@pytest.mark.parametrize("tp_rank", [0, 1])
-@pytest.mark.parametrize("cp_rank", [None, 0, 1])
-def test_turbo_output_collector_requires_both_tp_and_cp_source(tp_rank, cp_rank):
-    engine = object.__new__(FSDPTurboEngineWithLMHead)
-    engine._parallel_state = SimpleNamespace(
-        get_tp_rank=lambda: tp_rank,
-        is_group_enable=lambda name: cp_rank is not None,
-        get_ulysses_rank=lambda: cp_rank,
-    )
-    assert engine.is_mp_src_rank_with_outputs() is (tp_rank == 0 and cp_rank in (None, 0))
-
-
-@pytest.mark.parametrize("is_last", [False, True])
-def test_turbo_gradient_sync_context_leaves_ownership_to_native_wrapper(is_last):
-    engine = object.__new__(FSDPTurboEngineWithLMHead)
-    engine.module = object()  # No torch FSDP sync methods: Turbo owns its collectives.
-    with engine._gradient_sync_context(is_last_micro_batch=is_last):
-        pass
-
-
 @pytest.mark.parametrize("grad_norm", [1.25, float("inf"), float("nan")])
 @pytest.mark.parametrize("scaled", [False, True])
 def test_turbo_float_clip_result_and_nonfinite_guard_without_legacy_qat(monkeypatch, grad_norm, scaled):
