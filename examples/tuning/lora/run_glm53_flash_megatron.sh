@@ -9,7 +9,14 @@
 # both FP8/BF16-compatible weights. Use that original checkpoint for both
 # modes; BF16 disables vLLM quantization at runtime without rewriting config.
 #
-# Megatron-Bridge must be installed and importable on every node.
+# The frozen megatron extra pins Megatron-Bridge 0.6.2, which lacks GLM53FlashModel.
+# On every node, activate the same GPU environment used by Ray, with the matching
+# Megatron-Core installed (Bridge's 3rdparty/Megatron-LM at 902feb8eea).
+#   uv pip install --python "$(command -v python3)" --no-deps --reinstall \
+#     'git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@58382ddf9201475cf63c4aad535620b958ba55aa'
+#   python3 -c 'from megatron.bridge.models.glm5next.glm53flash_bridge import GLM53FlashModel'
+# Use that environment on the driver and Ray workers when launching from the verl checkout.
+#   VERL_USE_UV=0 bash examples/tuning/lora/run_glm53_flash_megatron.sh
 #
 # Knobs:
 #   USE_FP8        1 to enable FP8 hybrid blockwise training+rollout   (default: unset=BF16)
