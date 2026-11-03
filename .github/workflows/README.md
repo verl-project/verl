@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "your vemlp image" # e.g. "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "your vemlp image" # e.g. "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev5"
   DYNAMIC_RUNNER_URL: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner" # public veFaas api
 
 jobs:
@@ -122,7 +122,7 @@ works when run by hand, and drive the Ray workers through it via
 | script | extras it picks |
 | --- | --- |
 | `run_ppo_trainer_megatron.sh` | `$ENGINE` + `megatron` + `math` |
-| `run_ppo_trainer_veomni.sh` | `vllm` + `fsdp` + `veomni-sft` + `math`, with Transformers 5.16.1 |
+| `run_ppo_trainer_veomni.sh` | `vllm` + `veomni` + `math`, with Transformers 5.16.1 |
 | `run_ppo_trainer_torchtitan.sh` | `vllm` + `fsdp` + `torchtitan` + `math` |
 | `ppo_trainer/run_function_reward.sh` | `$ENGINE` + `fsdp`\|`megatron` (from `STRATEGY`) |
 | `run_one_step_off_policy.sh` | `vllm` + `fsdp`\|`megatron` (from `ACTOR_STRATEGY`) |
@@ -161,9 +161,17 @@ Two cases the lock cannot express, and how they are handled:
 - **A one-step version matrix.** Use `uv run --with pkg==x.y`, which layers the
   version over the synced env for that step only. `model.yml` does this for
   transformers 4.54.1.
-- **VeOmni.** The PPO and SFT LLM/VLM jobs use the git revision pinned in `uv.lock`
-  and `--with transformers==5.16.1` for its generated models. Keep that overlay
-  in each job's `UV_RUN` so all engines in the comparison use the same version.
+- **VeOmni.** `veomni` is both a standalone cu130 training backend (peer to
+  `fsdp` / `megatron`, bundling the fsdp stack + the deps-free veomni package) and
+  a package-only `veomni-sft` add-on. The PPO veomni job
+  (`e2e_ppo_trainer_veomni_vllm.yml`) syncs the standalone backend —
+  `vllm` + `veomni` + `math` — so it validates veomni end-to-end as a first-class
+  uv backend. The SFT LLM/VLM jobs instead layer the `veomni-sft` add-on over
+  `megatron` (alongside `torchtitan`) on purpose: one env hosts every engine the
+  cross-engine result comparison in `test_sft_engine_all.sh` needs. Both use the git
+  revision pinned in `uv.lock` and `--with transformers==5.16.1` for its generated
+  models; keep that overlay in each job's `UV_RUN` so all engines in the comparison
+  use the same version.
   The SFT scripts launch workers with `python -m torch.distributed.run` so the
   overlay's interpreter is used rather than the base venv's `torchrun` shebang.
   The PPO launch script passes the same extras and overlay to Ray through

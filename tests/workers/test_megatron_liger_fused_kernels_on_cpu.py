@@ -169,7 +169,12 @@ def test_worker_reserves_both_consumers_before_ref_reset(monkeypatch):
     config.ref.log_prob_micro_batch_size_per_gpu = 1
     model = SimpleNamespace(get=lambda key, default=None: config.model.get(key, default))
     ref = SimpleNamespace(engine=McoreEngineConfig(tensor_model_parallel_size=4), optim=None, checkpoint=None)
-    actor = SimpleNamespace(engine=McoreEngineConfig(tensor_model_parallel_size=2), optim=None, checkpoint=None)
+    actor = SimpleNamespace(
+        engine=McoreEngineConfig(tensor_model_parallel_size=2),
+        optim=None,
+        checkpoint=None,
+        policy_loss={},
+    )
 
     def convert(value):
         if value is config.model:

@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from omegaconf import MISSING, DictConfig, OmegaConf
 
@@ -31,6 +31,7 @@ __all__ = [
     "ServerConfig",
     "PrometheusConfig",
     "RolloutConfig",
+    "RolloutQuantizationConfig",
     "CheckpointEngineConfig",
 ]
 
@@ -139,6 +140,44 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+
+
+@dataclass
+class RolloutQuantizationConfig(BaseConfig):
+    """Low-precision rollout as a compressed-tensors ``quantization_config``; the trainer quantizes the weights.
+
+    Either pick compressed-tensors presets per layer kind (``linear`` / ``moe`` / ``ignore``),
+    or point ``config_file`` at a complete compressed-tensors ``quantization_config`` JSON.
+    """
+
+    # Preset for dense linear layers (attention, dense MLP, shared experts), e.g. FP8_BLOCK.
+    linear: Optional[str] = None
+    # Preset for routed experts, e.g. FP8_BLOCK.
+    moe: Optional[str] = None
+    # Activation override for the routed experts, as vLLM's quantization_config.moe.activation;
+    # moe=NVFP4 defaults to nvfp4_per_token.
+    moe_activation: Optional[str] = None
+    # Extra "re:" patterns kept in high precision.
+    ignore: list[str] = field(default_factory=list)
+    # compressed-tensors quantization_config JSON, used as is; exclusive with the fields above.
+    config_file: Optional[str] = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.linear or self.moe or self.config_file)
+
+    def build_quantization_config(self, model_path: str) -> dict[str, Any]:
+        """HF ``quantization_config`` the rollout engine starts from and the trainer quantizes refits to."""
+        from verl.utils.qat.compressed_tensors import build_compressed_tensors_config
+
+        return build_compressed_tensors_config(
+            linear=self.linear,
+            moe=self.moe,
+            ignore=self.ignore,
+            config_file=self.config_file,
+            model_path=model_path,
+            moe_activation=self.moe_activation,
+        )
 
 
 @dataclass
@@ -265,9 +304,7 @@ class RolloutConfig(BaseConfig):
 
     skip_tokenizer_init: bool = True
 
-    quantization: Optional[str] = None
-
-    quantization_config_file: Optional[str] = None
+    quantization: RolloutQuantizationConfig = field(default_factory=RolloutQuantizationConfig)
 
     enable_rollout_routing_replay: bool = False
     moe_load_balance_metrics_interval: int = 0
@@ -275,8 +312,6 @@ class RolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
-
-    qat: Optional[dict] = None
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 

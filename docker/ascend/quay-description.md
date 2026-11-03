@@ -1,4 +1,4 @@
-# verl for Ascend
+# verl for Huawei Ascend
 
 ## Quick Reference
 
@@ -15,7 +15,7 @@
 
 ## verl
 
-verl (Volcano Engine Reinforcement Learning for LLMs) is a flexible, efficient, and production-ready reinforcement learning training library for large language models. The Ascend container images provide evaluation environments for running verl on Ascend A2 and A3 hardware.
+verl (Volcano Engine Reinforcement Learning for LLMs) is a flexible, efficient, and production-ready reinforcement learning training library for large language models. The Huawei Ascend container images provide evaluation environments for running verl on Huawei Ascend A2 and A3 hardware.
 
 A2/A3 images are hosted at [quay.io/ascend/verl](https://quay.io/repository/ascend/verl?tab=tags&tag=latest).
 

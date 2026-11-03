@@ -36,7 +36,10 @@ committed ``uv.lock`` covers every backend, and you pick the backends for a
 given run as **extras**:
 
 - Inference: ``vllm`` or ``sglang``.
-- Training: ``fsdp`` or ``megatron``.
+- Training: ``fsdp``, ``megatron``, or ``veomni`` (``veomni`` runs VeOmni's
+  FSDP/SP/EP parallelism on the same cu130 / torch-2.13 stack as ``fsdp``;
+  select it at runtime with ``model_engine=veomni`` for PPO/GRPO or
+  ``engine=veomni`` for SFT).
 - ``cpu``: GPU-free, for CI / quick checks.
 
 There is **no install step**. ``uv run --extra ...`` materializes the project
@@ -60,7 +63,7 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
 .. note::
 
    uv never compiles a native package from source. ``apex``,
-   ``transformer-engine`` and ``flash-attn`` — plus the pure-python
+   ``transformer-engine``, ``flash-attn`` and ``deep-ep`` — plus the pure-python
    ``megatron-bridge`` — are pulled **prebuilt** from the verl wheelhouse index
    (`verl-project.github.io/verl-wheelhouse
    <https://verl-project.github.io/verl-wheelhouse/simple/>`_, wired in
@@ -73,6 +76,37 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
    wheels for the pinned versions are already cu130 / torch-2.13 builds. Only the
    git-sourced ``megatron-core`` (``core_v0.19.2``, paired with
    ``megatron-bridge`` 0.6.2) is built when the environment is first materialized.
+
+DeepEP with Megatron
+:::::::::::::::::::::
+
+The ``megatron`` extra installs native DeepEP 1.2.1 from the wheelhouse,
+matched to torch 2.13 / CUDA 13.0 on both supported architectures. NVSHMEM
+is a separate native dependency: the ``verlai/verl:uv.cu130.dev5`` image
+provides NVSHMEM 3.4.5 and its loader configuration. Installing NVSHMEM alone
+does not install the Python ``deep_ep`` module.
+
+.. code:: bash
+
+   uv sync --frozen --extra megatron --extra vllm
+   uv run --frozen --extra megatron --extra vllm python -c "import deep_ep; print(deep_ep.__file__)"
+
+On a compatible MoE model and GPU fabric, enable the native dispatcher through
+Megatron's transformer configuration (example EP size: 8):
+
+.. code:: bash
+
+   bash examples/grpo_trainer/run_qwen3_30b_a3b_megatron.sh \
+     actor_rollout_ref.actor.megatron.expert_model_parallel_size=8 \
+     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=flex \
+     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True \
+     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_flex_dispatcher_backend=deepep
+
+If a separate Megatron reference model is enabled, configure its EP group and
+transformer overrides as well. DeepEP 1.2.1 uses the native NVSHMEM transport;
+installing its aarch64 wheel does not establish that a particular GB200
+cross-node topology is supported. This setup does not install a FlashComm
+adapter or redirect the ``deep_ep`` import.
 
 Run a job or a test
 :::::::::::::::::::::
@@ -164,7 +198,7 @@ A typical run combines **one inference engine** with **one training backend**,
 for example ``--extra vllm --extra fsdp``. The rules:
 
 - Choose at most one inference engine: ``vllm`` **or** ``sglang`` (not both).
-- Add a training backend: ``fsdp`` (default) or ``megatron``.
+- Add a training backend: ``fsdp`` (default), ``megatron``, or ``veomni``.
 - ``cpu`` is GPU-free and is used on its own.
 
 The mutually exclusive sets are declared in ``[tool.uv].conflicts``, so uv
@@ -261,7 +295,7 @@ Pick a base image
 
    * - Extra(s)
      - Recommended base image
-   * - ``vllm`` / ``fsdp`` / ``megatron``
+   * - ``vllm`` / ``fsdp`` / ``megatron`` / ``veomni``
      - ``nvidia/cuda:13.0.2-devel-ubuntu24.04`` (matches ``docker/Dockerfile.uv.cu130``)
    * - ``sglang``
      - ``lmsysorg/sglang:v0.5.20`` or ``nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04``
@@ -362,7 +396,7 @@ uv troubleshooting
 - **Start over** — ``python manage_envs.py clean``, then run again.
 
 Some system-level pieces are not handled by uv at all (the Dockerfiles set them
-up): system apt packages, GDRCopy + DeepEP for MoE all-to-all, Mooncake for
+up): system apt packages, GDRCopy and NVSHMEM for native DeepEP, Mooncake for
 SGLang KV-cache transfer, the flashinfer JIT cache, and sgl-router. See
 ``docker/Dockerfile.stable.{vllm,sglang}`` for reference.
 

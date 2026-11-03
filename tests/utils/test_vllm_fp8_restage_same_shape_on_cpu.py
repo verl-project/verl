@@ -76,6 +76,11 @@ def _repacking_process(self, layer):
     _fp8().replace_parameter(layer, "w13_weight_scale_inv", layer.w13_weight_scale_inv.data.reshape(E, -1).clone())
 
 
+def _direct_repacking_process(self, layer):
+    """MXFP8-linear-like prep that assigns a same-layout replacement without replace_parameter."""
+    layer.w13_weight = torch.nn.Parameter(_swap_halves(layer.w13_weight.data), requires_grad=False)
+
+
 class _StubVllmFp8:
     NAMES = (
         "vllm",
@@ -198,6 +203,21 @@ def test_shape_changing_repack_is_still_staged():
         try:
             model, layer = _loaded_layer(module, stub)
             assert tuple(layer.w13_weight_scale_inv.shape) == (E, 2)
+            assert module.stage_fp8_params_for_loading(model) == [layer]
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+def test_direct_same_shape_parameter_replacement_is_restaged():
+    module = _load_fp8_utils()
+    with _StubVllmFp8(_direct_repacking_process) as stub:
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            model, layer = _loaded_layer(module, stub)
+            assert layer._verl_fp8_repacked == {"w13_weight"}
             assert module.stage_fp8_params_for_loading(model) == [layer]
         finally:
             for p in patchers:

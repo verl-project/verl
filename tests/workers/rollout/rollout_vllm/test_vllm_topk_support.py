@@ -73,16 +73,19 @@ def test_processed_topk_support_evidence(llm, top_k, top_p):
 
 
 @pytest.mark.parametrize("k,expected_complete", [(2, False), (4, True)])
-def test_small_decode_batch_ties_do_not_prove_support_fits_configured_top_k(k, expected_complete):
-    # The small-batch PyTorch provider retains both cutoff ties despite top_k=2. Record the
-    # omitted tied token as the sampled token; it has positive probability in the real sampler.
+def test_small_decode_batch_provider_support_coverage(k, expected_complete):
+    # vLLM 0.29 retains both cutoff ties, while 0.32 keeps exactly top_k entries.
+    # Either way, an all-finite partial head does not prove complete support.
     logits = torch.tensor([[2.0, 1.0, 1.0, 0.0]], device="cuda")
     logits = apply_top_k_top_p(logits, torch.tensor([2], device="cuda"), None)
     log_probs = logits.log_softmax(-1)
-    assert int(log_probs.isfinite().sum()) == 3
+    support_ids = log_probs[0].isfinite().nonzero().flatten().tolist()
+    assert len(support_ids) in (2, 3)
     head, ids = log_probs.topk(k, -1)
-    # topk may break equal-logit ties differently across devices. Pick the actual omitted id.
-    sampled_id = next((i for i in range(4) if log_probs[0, i].isfinite() and i not in ids[0].tolist()), 2)
+    # When 0.29 retains the cutoff tie, sample the omitted support member. Otherwise
+    # sample from the recorded head; duplicated sampled/top-k entries are valid.
+    omitted_support_ids = [token_id for token_id in support_ids if token_id not in ids[0].tolist()]
+    sampled_id = omitted_support_ids[0] if omitted_support_ids else ids[0, 0].item()
     flat = FlatLogprobs()
     append_logprobs_for_next_position(
         flat,
@@ -94,7 +97,7 @@ def test_small_decode_batch_ties_do_not_prove_support_fits_configured_top_k(k, e
     )
     _, head_ids, _, complete = extract_response_topk_logprobs_with_coverage(flat, k, vocab_size=4)
     assert complete.tolist() == [expected_complete]
-    if k == 2:
+    if omitted_support_ids:
         assert not (head_ids == sampled_id).any()
 
 

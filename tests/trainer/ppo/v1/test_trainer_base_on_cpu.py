@@ -29,6 +29,21 @@ from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
 from verl.utils import tensordict_utils as tu
 
 
+@pytest.mark.parametrize("use_critic", [False, True])
+def test_advantage_requests_reward_metadata_and_optional_critic_values(use_critic):
+    trainer = object.__new__(_StubTrainer)
+    trainer.use_critic = use_critic
+    batch = SimpleNamespace(keys=["sample"], partition_id="train")
+    with patch(
+        "verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get", side_effect=RuntimeError("stop after field selection")
+    ) as get_batch:
+        with pytest.raises(RuntimeError, match="stop after field selection"):
+            trainer._compute_advantage(batch, {})
+    fields = get_batch.call_args.kwargs["select_fields"]
+    assert "extra_fields" in fields
+    assert ("values" in fields) == use_critic
+
+
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
     params = {"top_p": 0.9, "top_k": 64, "temperature": 1.0, "topk_log_probs": 128, "logprobs": True}
     apply_greedy_sampling_params(params)
