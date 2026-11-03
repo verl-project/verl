@@ -12,14 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 
+from verl.protocol import DataProto
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+from verl.utils.debug.metrics import calculate_debug_metrics
 
 
 def test_greedy_reward_baseline_does_not_request_score_centering_heads():
@@ -199,3 +204,83 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+@pytest.mark.parametrize("case", ["mixed", "nonfinite", "all_empty"])
+@pytest.mark.parametrize("empty_sample_count", [0, 2])
+def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sample_count):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.parameter_sync_step = 4
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 16}})
+    local_metrics = []
+    batches = []
+    for index, sample_count in enumerate([1, empty_sample_count, 3, empty_sample_count]):
+        available = case != "all_empty" and index in (0, 2)
+        response_mask = torch.zeros((4, 2), dtype=torch.long)
+        if available:
+            response_mask[:sample_count] = 1
+        rollout_log_probs = torch.tensor([[-1.0, -2.0]]).repeat(4, 1)
+        actor_log_probs = rollout_log_probs - (0.5 if index == 0 else 1.0)
+        if case == "nonfinite" and index == 2:
+            actor_log_probs[0, 0] = float("nan")
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": rollout_log_probs,
+                "old_log_probs": actor_log_probs,
+                "response_mask": response_mask,
+                "responses": torch.zeros((4, 2)),
+            }
+        )
+        local_metrics.append(calculate_debug_metrics(data))
+        batches.append(
+            KVBatchMeta(
+                partition_id="train",
+                keys=[f"step_{index}_row_{row}" for row in range(4)],
+                tags=[{"is_padding": row >= sample_count, "local_step": index} for row in range(4)],
+            )
+        )
+
+    observed_indices = []
+    timing_raw = {}
+
+    def step_once(metrics, timing, sample_batch_size):
+        assert timing is timing_raw
+        assert sample_batch_size == 4
+        index = trainer.local_trigger_step
+        observed_indices.append(index)
+        metrics.update(local_metrics[index])
+        return batches[index]
+
+    metrics = {"existing_metric": 7.0}
+    with (
+        patch.object(trainer, "prepare_step", return_value={"timing_s/prepare": 0.5}) as prepare_step,
+        patch.object(trainer, "_step_once", side_effect=step_once) as local_step,
+    ):
+        combined = trainer.step(metrics, timing_raw)
+
+    prepare_step.assert_called_once_with()
+    assert local_step.call_count == 4
+    assert observed_indices == [0, 1, 2, 3]
+    assert combined.partition_id == "train"
+    assert combined.keys == [key for batch in batches for key in batch.keys]
+    assert combined.tags == [tag for batch in batches for tag in batch.tags]
+    assert metrics["existing_metric"] == 7.0
+    assert metrics["timing_s/prepare"] == 0.5
+    assert metrics["training/rollout_probs_diff_valid"] == (0 if case == "all_empty" else 1)
+    assert metrics["training/rollout_logprobs_mismatch_count"] == (0 if case == "all_empty" else 8)
+    for key in (
+        "training/rollout_probs_diff_mean",
+        "training/rollout_probs_diff_std",
+        "training/rollout_actor_probs_pearson_corr",
+        "training/rollout_logprobs_diff_mean",
+        "training/rollout_probs_diff_max",
+        "training/rollout_logprobs_diff_max",
+    ):
+        if case in ("nonfinite", "all_empty"):
+            assert math.isnan(metrics[key])
+        elif key.endswith("_max"):
+            assert metrics[key] == pytest.approx(max(local_metrics[0][key], local_metrics[2][key]))
+        else:
+            # The two available updates have 1 and 3 non-padding samples, despite both returning four rows.
+            expected = (local_metrics[0][key] + 3 * local_metrics[2][key]) / 4
+            assert metrics[key] == pytest.approx(expected)
