@@ -75,10 +75,22 @@ jobs:
       HF_ENDPOINT: https://hf-mirror.com
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       TRANSFORMERS_VERBOSITY: error
+      MODEL_PATH: /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B
+      GSM8K_DATASET_PATH: /root/.cache/modelscope/dataset/openai/gsm8k
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Check cached model and dataset paths
+        run: |
+          if [[ ! -s "${MODEL_PATH}/config.json" ]]; then
+            echo "::error::Model config missing or empty: ${MODEL_PATH}/config.json"
+            exit 1
+          fi
+          if [[ ! -d "$GSM8K_DATASET_PATH" ]]; then
+            echo "::error::GSM8K dataset directory not found: $GSM8K_DATASET_PATH"
+            exit 1
+          fi
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
@@ -91,6 +103,4 @@ jobs:
         run: |
           npu-smi info
           export INSTALL_BACKEND="${INSTALL_CASE##*_}"
-          export MODEL_PATH="${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B"
-          export GSM8K_DATASET_PATH="${HOME}/.cache/datasets/openai/gsm8k"
           bash tests/e2e/doctests/scripts/run_doctests.sh installation source

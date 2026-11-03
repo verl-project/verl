@@ -77,8 +77,12 @@ the workflow to exist on the default branch before `workflow_dispatch` is
 available; the pull-request trigger provides installation coverage before merge.
 The CANN base image comes from the selected backend's Dockerfile; the workflow
 bootstraps Miniforge, while the documentation creates the Python environment.
-The runner must expose its NPU devices and cached Qwen3-0.6B/GSM8K data to the
-container. A2 and openEuler are not included in this workflow.
+The runner must expose its NPU devices and cached inputs to the container:
+Qwen3-0.6B under `/root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B` and GSM8K
+under `/root/.cache/modelscope/dataset/openai/gsm8k`, matching the existing
+Ascend E2E dataset cache. The workflow checks the model config and dataset
+directory before installing packages. A2 and openEuler are not included in
+this workflow.
 
 ```bash
 python3 -m pytest -q tests/special_sanity/test_doctest_helper.py
