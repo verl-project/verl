@@ -78,30 +78,35 @@ Kimi K3 的模型差异由 FSDPTurbo 原生模型持有：packed/HF 坐标转换
 有界导出和图文展开都位于 `fsdp_turbo/models/kimi/`。
 verl 使用通用 FSDP/FSDPTurbo 引擎，不注册 Kimi Engine，也不从 models 反向导入 workers。
 
-训练显式请求 `output_raw_logits=True`。原生模型用实际图文合并产生的位置映射，
-在 LM head 前选择原始 token 的 hidden states；图片占位符对应最后一个 image feature。
-CP 模型先交换 hidden states 到标准 packed/SP ownership，再执行 head，避免跨卡搬运词表 logits。
-原有输出对象通过 `logits_layout="packed"` 和 `logits_pad_size` 声明输出布局；输入仍可为 BSHD。
-通用引擎据此复用已有 packed labels、temperature、log-prob、entropy 和 score-centering 流程。
-默认 HF/SFT forward 不启用此输出契约，保留原展开序列输出；CP1 的 packed 输入也保留。
+Processor 根据本次图像预处理的 grid 和视觉合并 kernel，提前生成与图像特征数一致的
+`<|media_pad|>` token。模型把视觉特征填入这些现有位置，forward 不再改变序列长度；
+文本、图像、position IDs、attention mask 和路由 IDs 共用同一 token 轴。
+verl 复用通用样本拼接、padding、mask 和 log-prob 对齐，不保留 raw-token 到内部展开行的映射。
+
+CP=1 时普通 HF/SFT 输出与输入 token 同长。RL 请求通用的 `output_packed_logits=True` 时，
+模型在 LM head 前按有效 token mask 去掉 padding，CP 再将 hidden states 重排到
+packed/SP ownership。输出仍使用 `logits_layout="packed"`、`logits_pad_size`，
+复用通用 packed labels、temperature、log-prob、entropy 和 score-centering；词表 logits 不跨卡传输。
 
 ### ID-only R3（独立启用）
 
 模型加载、前向和权重同步不依赖 R3；路由采集与回放单独配置。
-R3 仅透传专家 IDs 和传输语义，模型在实际图文合并后对齐有效行，再切分 CP。
-训练端使用 `actor.fsdp_config.router_replay.mode=R3`，复用现有回放配置；
-`rollout.enable_rollout_routing_replay=True` 只控制推理端采集。默认 `disabled`，不支持 R2。
-自然缺失的最后一个因果行继续使用当前 router 的选择，权重由当前 gate scores gather、
-归一化和 scaling 得到。verl 中不保留 Kimi 展开几何或专家权重回放逻辑。
+训练端设置 `actor.fsdp_config.router_replay.mode=R3`，
+`rollout.enable_rollout_routing_replay=True` 控制推理端采集。默认 `disabled`，不支持 R2。
+路由 IDs 通过主线已有 token 传输和 padding 流程进入训练端，直接对应预展开后的 token；
+不额外声明传输坐标或在模型中重新对齐。通用 replay mask 排除最终未采集行和无响应的
+合成填充样本，CP 对 IDs、mask 和 hidden states 使用相同切分。
+专家组合权重由当前 gate scores gather、归一化和 scaling，回放仅固定离散 IDs。
 
 ### Megatron 原生布局
 
-Megatron 路径复用标准 GPT forward。MS-Bridge 的 Kimi 模型通过
-`prepare_inputs_for_forward` 提供展开布局、有效路由行和原始 token logits 对齐；
-verl 保留通用 BSHD padding、labels、temperature、logits processor 及 ID-only 回放。
+Megatron 路径直接复用主线标准 GPT forward。MS-Bridge 原生模型将视觉特征填入
+Processor 预留的位置，labels、position IDs、mask 和 logits 保持同一 token 坐标；
+不再提供额外的展开布局或 raw-logit 索引接口。
 Kimi 启动脚本通过已有 `model.external_lib` 加载
 `mindspeed_bridge.runtime.kimi_k3_autoload`，并显式配置 `attention_backend=auto`。
-该路径需要包含此布局接口的配套 MS-Bridge 版本。
+该路径需要包含此等长输入契约的配套 MS-Bridge 版本；verl 在线训练的 Bridge CP 路径
+仍限 CP=1，原生 SFT 的 CP 切分能力不据此宣称已完成在线训练验收。
 
 ### Rollout 输入与采集
 
@@ -109,9 +114,8 @@ rollout 使用标准 vLLM server，图像保持 PIL 输入。配套 vLLM-Ascend 
 processor 通过原生 prompt-update 接口接受 HF processor 产生的媒体块。
 脚本在 `rollout.custom.sampling_defaults.stop` 配置响应结束字符串，请求参数优先于这些
 默认值；EOS 由 vLLM 从 tokenizer 和 HF generation config 读取，`ignore_eos` 只控制
-EOS，显式配置的字符串 stop 仍然生效。`rollout.custom.routed_experts_source_semantics=model_rows`
-显式保留展开序列的专家 IDs，未设置时保留原有逻辑 token 传输。
-包含 tool mask 的多轮输出目前不支持 model-row 回放，会在输出校验时明确拒绝。
+EOS，显式配置的字符串 stop 仍然生效。原生 rollout processor 对已展开的媒体块保持
+token 数量和顺序，避免二次展开；自然输入也按相同图像预处理规则产生占位序列。
 
 ### 权重导出和同步
 
@@ -137,11 +141,11 @@ NNODES=1 NPUS_PER_NODE=16 TURBO_EP_SIZE=8 TURBO_CP_SIZE=2 \
 
 CP 大小需要整除设备数和 attention/KDA 的 head 数。CP 分组内处理同一批样本，
 数据并行大小为设备数除以 CP 大小；FSDP 仍覆盖全部训练设备。
-本配置保持 rollout routing replay 开启。rollout 只传专家 IDs，原生模型将完整展开序列的
-IDs 和有效行 mask 对齐到实际图文融合位置，再使用与隐藏状态相同的 CP padding 和切分。
+本配置保持 rollout routing replay 开启。rollout 只传与 token 一一对应的专家 IDs，
+训练端使用有效回放 mask，并与隐藏状态一起按相同 CP 规则 padding 和切分。
 训练前向按当前 router 参数重算所选专家的 gate 权重，沿用模型的归一化和 scaling；
 重算复用相同的 IDs，不传输或回放采样时的 gate 权重。
-模型先完成图文融合，再切分展开后的序列。原生模型在 LM head 前将 raw-token hidden states
+模型先填充图像特征，再沿既有 token 轴切分。原生模型在 LM head 前将有效 hidden states
 重排到 packed/SP 分块；普通 log-prob、entropy、sum_pi_squared 和 score centering 均使用
 同一通用 logits processor/标量汇总路径。词表 logits 始终留在本卡。
 
@@ -174,9 +178,12 @@ tokenizer 等文件，并覆盖为配套 FSDPTurbo 的 native modeling 和 proce
 原生 `KimiK3Processor` 直接支持标准 Hugging Face `text`（字符串或文本列表）和
 `images` 参数，并声明自己的 `image_token`；原有 `medias/messages` API 继续保留。
 verl 的通用 builder 和 AgentLoop 使用原 main 流程，没有 Kimi 转换或解码适配层。
-完整媒体文本的处理、占位符计数和图片顺序由原生 processor 负责；AgentLoop 用
+完整媒体文本的处理、实际 grid 对应的占位 token 数和图片顺序由原生 processor 负责；AgentLoop 用
 `skip_special_tokens=True` 重建文本时，即使媒体标记被移除，也可从保留的 PIL 图片
 重新获得特征和 grid 元数据。准备数据时应检查过滤后的数据集非空。
+
+`data.max_prompt_length` 和 rollout 的上下文预算现在包含全部图像占位 token。
+应按实际视觉特征数设置预算；不能继续用只统计文本和单个图片标记的长度估算样本。
 
 ### Megatron 显式准备
 

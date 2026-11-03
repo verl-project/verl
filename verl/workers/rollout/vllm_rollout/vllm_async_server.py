@@ -861,11 +861,6 @@ class vLLMHttpServer:
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
-            routed_experts_source_semantics=(
-                (self.config.custom or {}).get("routed_experts_source_semantics")
-                if routed_experts is not None
-                else None
-            ),
             stop_reason=stop_reason,
             num_preempted=num_preempted,
             extra_fields=extra_fields,
@@ -960,6 +955,7 @@ class vLLMHttpServer:
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
+
         if self.rollout_mode == RolloutMode.HYBRID:
             # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
             # processes across all DP shards (unlike collective_rpc which only reaches

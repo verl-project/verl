@@ -20,7 +20,6 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
-from verl.workers.rollout.schemas import MODEL_ROW_ROUTE_SEMANTICS
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -92,24 +91,16 @@ class SingleTurnAgentLoop(AgentLoopBase):
         response_ids = merge_result.token_ids[-len(response_mask) :] if response_mask else []
         prompt_ids = merge_result.token_ids[: len(merge_result.token_ids) - len(response_mask)]
 
-        model_rows = output.routed_experts_source_semantics == MODEL_ROW_ROUTE_SEMANTICS
-        if model_rows and output.routed_experts is not None and len(response_ids) > self.response_length:
-            raise ValueError(
-                "Model-row replay cannot truncate generated tokens after route capture: "
-                f"generated={len(response_ids)}, configured={self.response_length}"
-            )
-
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
             response_logprobs=response_logprobs[: self.response_length] if response_logprobs else None,
             routed_experts=(
-                output.routed_experts
-                if model_rows or output.routed_experts is None
-                else output.routed_experts[: len(prompt_ids) + self.response_length]
+                output.routed_experts[: len(prompt_ids) + self.response_length]
+                if output.routed_experts is not None
+                else None
             ),
-            routed_experts_source_semantics=output.routed_experts_source_semantics,
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             mm_processor_output=mm_processor_output,

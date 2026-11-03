@@ -25,7 +25,7 @@ from typing import Callable, ContextManager, Optional
 import torch
 import torch.distributed
 from peft import LoraConfig, TaskType, get_peft_model
-from tensordict import NonTensorStack, TensorDict
+from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
@@ -71,7 +71,7 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.utils.padding import build_attention_mask_from_nested
+from verl.workers.utils.padding import build_attention_mask_from_nested, build_r3_replay_mask
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import (
@@ -1379,18 +1379,23 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 raise ValueError("Packed-logit model outputs require unfused kernels")
             model_inputs["output_packed_logits"] = True
         if tu.get_non_tensor_data(micro_batch, "enable_routing_replay", default=False):
-            if "routed_experts" not in forward_params:
-                raise ValueError("This model does not accept routing replay inputs")
-            if "routed_experts" not in micro_batch:
-                raise ValueError("Routing replay requires routed_experts")
-            model_inputs["routed_experts"] = micro_batch["routed_experts"]
-            if "router_replay_mask" in micro_batch:
-                model_inputs["router_replay_mask"] = micro_batch["router_replay_mask"]
-            if "routed_experts_transport_semantics" in forward_params:
-                semantics = tu.get_non_tensor_data(micro_batch, "routed_experts_transport_semantics", default=None)
-                if isinstance(semantics, NonTensorStack):
-                    semantics = semantics.tolist()
-                model_inputs["routed_experts_transport_semantics"] = semantics
+            routes = micro_batch["routed_experts"]
+            replay_mask = build_r3_replay_mask(micro_batch["input_ids"], micro_batch["response_mask"])
+            if use_remove_padding:
+                layers, topk = routes.shape[-2:]
+                routes = routes.values().flatten(1).T
+                replay_mask = replay_mask.values().unsqueeze(0)
+                routes, _ = pad_packed_inputs(routes, None, static_pad_size)
+                replay_mask, _ = pad_packed_inputs(replay_mask, None, static_pad_size)
+                if self.use_ulysses_sp:
+                    prepare = ulysses_pad if is_vlm_model else ulysses_pad_and_slice_inputs
+                    routes, _, _ = prepare(routes, sp_size=self.ulysses_sequence_parallel_size)
+                    replay_mask, _, _ = prepare(replay_mask, sp_size=self.ulysses_sequence_parallel_size)
+                routes = routes.T.reshape(1, -1, layers, topk)
+            else:
+                routes = routes.to_padded_tensor(0, output_size=(*input_ids.shape, *routes.shape[-2:]))
+                replay_mask = replay_mask.to_padded_tensor(False, output_size=input_ids.shape)
+            model_inputs.update(routed_experts=routes, router_replay_mask=replay_mask)
 
         return model_inputs, output_args
 

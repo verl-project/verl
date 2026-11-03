@@ -78,39 +78,10 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
 
     routed_experts = data.get("routed_experts", None)
     if routed_experts is not None and not routed_experts.is_nested:
-        semantics = tu.get_non_tensor_data(data, "routed_experts_transport_semantics", None)
-        if hasattr(semantics, "tolist"):
-            semantics = semantics.tolist()
-        contracts = {semantics} if semantics is None or isinstance(semantics, str) else set(semantics)
-        if len(contracts) != 1 or not contracts <= {None, "model_rows"}:
-            raise ValueError(f"Routing rows require one supported layout, got {contracts}")
-        if contracts == {"model_rows"}:
-            # Model coordinates have an independent row axis; do not unpad
-            # them with an attention mask in raw-token coordinates.
-            route_seq_len = routed_experts.shape[1]
-            route_offsets = torch.arange(
-                0,
-                (routed_experts.shape[0] + 1) * route_seq_len,
-                route_seq_len,
-                dtype=torch.int64,
-                device=routed_experts.device,
-            )
-            routed_experts_nested = torch.nested.nested_tensor_from_jagged(
-                routed_experts.flatten(0, 1), offsets=route_offsets
-            )
-        else:
-            if routed_experts.max() <= 255:
-                routed_experts = routed_experts.to(torch.uint8)
-            if routed_experts.shape[1] != attention_mask.shape[1]:
-                raise ValueError(
-                    "logical-token routed experts must match attention-mask "
-                    f"length: routes={routed_experts.shape[1]}, "
-                    f"tokens={attention_mask.shape[1]}"
-                )
-            routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
-            routed_experts_nested = torch.nested.nested_tensor_from_jagged(
-                routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
-            )
+        routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
+        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+            routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
+        )
         data["routed_experts"] = routed_experts_nested
 
     # (bsz, seqlen, topk)
@@ -262,3 +233,22 @@ def response_to_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> tor
         response_list.append(tensor[i, : response_lens[i]])
 
     return torch.nested.as_nested_tensor(response_list, layout=torch.jagged)
+
+
+def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Build a full-sequence replay mask for rollout-captured routes.
+
+    Response logprobs are read from shifted model rows, but those rows attend to
+    earlier hidden states whose MoE routing also affects the result. Replay every
+    causal row that can influence response logprobs and skip only the final
+    response row, whose logits are not used by ``no_padding_2_padding``.
+    """
+    total_lens = input_ids.offsets().diff()
+    response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
+    bs = total_lens.size(0)
+    values = torch.tensor([True, False], dtype=torch.bool, device=total_lens.device).repeat(bs)
+    replay_lens = torch.where(response_lens > 0, total_lens - 1, torch.zeros_like(total_lens))
+    suffix_lens = total_lens - replay_lens
+    counts = torch.stack([replay_lens, suffix_lens], dim=1).flatten()
+    mask_values = torch.repeat_interleave(values, counts)
+    return torch.nested.nested_tensor_from_jagged(mask_values, offsets=input_ids.offsets())

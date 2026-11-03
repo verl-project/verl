@@ -34,7 +34,6 @@ from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSch
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
-from verl.workers.rollout.schemas import MODEL_ROW_ROUTE_SEMANTICS
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -94,7 +93,6 @@ class AgentData:
         self.tool_calls: list[FunctionCall] = []
 
         self.routed_experts = None
-        self.routed_experts_source_semantics = None
 
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
@@ -184,9 +182,6 @@ class ToolAgentLoop(AgentLoopBase):
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
-        model_rows = agent_data.routed_experts_source_semantics == MODEL_ROW_ROUTE_SEMANTICS
-        if model_rows and agent_data.routed_experts is not None and len(response_ids) > self.response_length:
-            raise ValueError("Model-row replay cannot truncate generated tokens after route capture")
         multi_modal_data = {}
         if agent_data.image_data is not None:
             multi_modal_data["images"] = agent_data.image_data
@@ -208,11 +203,10 @@ class ToolAgentLoop(AgentLoopBase):
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             routed_experts=(
-                agent_data.routed_experts
-                if model_rows or agent_data.routed_experts is None
-                else agent_data.routed_experts[: len(prompt_ids) + self.response_length]
+                agent_data.routed_experts[: len(prompt_ids) + self.response_length]
+                if agent_data.routed_experts is not None
+                else None
             ),
-            routed_experts_source_semantics=agent_data.routed_experts_source_semantics,
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
@@ -291,7 +285,6 @@ class ToolAgentLoop(AgentLoopBase):
 
         if output.routed_experts is not None:
             agent_data.routed_experts = output.routed_experts
-            agent_data.routed_experts_source_semantics = output.routed_experts_source_semantics
 
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:

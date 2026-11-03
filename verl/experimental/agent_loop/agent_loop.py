@@ -48,7 +48,6 @@ from transformers import AutoProcessor, AutoTokenizer
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
-from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.import_utils import resolve_config_path
@@ -70,20 +69,11 @@ from verl.workers.config import (
     RolloutConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
-from verl.workers.rollout.schemas import MODEL_ROW_ROUTE_SEMANTICS, validate_model_row_capture
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
-
-
-def _as_route_tensor(value: np.ndarray | torch.Tensor, name: str) -> torch.Tensor:
-    if isinstance(value, torch.Tensor):
-        return value
-    if isinstance(value, np.ndarray):
-        return torch.from_numpy(value if value.flags.writeable else value.copy())
-    raise TypeError(f"Unsupported type for {name}: {type(value)}")
 
 
 class AgentLoopMetrics(BaseModel):
@@ -108,8 +98,6 @@ class AgentLoopOutput(BaseModel):
     """Log probabilities for the response tokens."""
     routed_experts: Optional[Any] = None
     """Routed experts for the total tokens."""
-    routed_experts_source_semantics: Optional[str] = None
-    """Explicit row semantics for routed_experts; never infer this from shape."""
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
     reward_score: Optional[float] = None
@@ -139,27 +127,18 @@ class AgentLoopOutput(BaseModel):
             output["rollout_log_probs"] = torch.tensor(response_logprobs, dtype=torch.float32)
 
         routed_experts = output.pop("routed_experts", None)
-        route_semantics = output.pop("routed_experts_source_semantics", None)
-        if route_semantics == MODEL_ROW_ROUTE_SEMANTICS and routed_experts is None:
-            raise ValueError("Model-row replay requires expert IDs")
         if routed_experts is not None:
-            routed_experts = _as_route_tensor(routed_experts, "routed_experts")
-            if route_semantics == MODEL_ROW_ROUTE_SEMANTICS:
-                validate_model_row_capture(
-                    routed_experts, len(self.prompt_ids), len(self.response_ids), self.response_mask
-                )
-                # Preserve the independent model-row axis for jagged transport.
-                aligned = routed_experts
-            elif route_semantics is None:
-                routed_experts = routed_experts.to(torch.int64)
-                total_length = output["prompts"].size(0) + output["responses"].size(0)
-                aligned = routed_experts.new_zeros((total_length, *routed_experts.shape[1:]))
-                num_rows = min(routed_experts.size(0), total_length)
-                aligned[:num_rows] = routed_experts[:num_rows]
-            else:
-                raise ValueError(f"unsupported routed_experts_source_semantics={route_semantics!r}")
+            routed_experts = torch.tensor(routed_experts, dtype=torch.int16)
+            # Router replay indexes this field by absolute token position, so it must
+            # span the whole sequence. The rollout engine records fewer rows than that:
+            # it only sees tokens fed through the model, and multi-turn loops stop
+            # recording at the last generation. Trailing rows stay zero; replay masks
+            # them out instead of consuming them.
+            total_length = output["prompts"].size(0) + output["responses"].size(0)
+            aligned = routed_experts.new_zeros((total_length, *routed_experts.shape[1:]))
+            num_rows = min(routed_experts.size(0), total_length)
+            aligned[:num_rows] = routed_experts[:num_rows]
             output["routed_experts"] = aligned
-            output["routed_experts_transport_semantics"] = route_semantics
 
         # rm_scores: reward score for each token
         reward_score = output.pop("reward_score", None)
@@ -258,14 +237,6 @@ class ToolListWrap:
         self.tools = tools
 
 
-class ModelConfigWrap:
-    """Wrapper for ``HFModelConfig`` to keep Hydra from recursively
-    interpreting its nested ``_target_`` fields during agent construction."""
-
-    def __init__(self, config: HFModelConfig):
-        self.config = config
-
-
 class AgentLoopBase(ABC):
     """An agent loop takes an input message, chat with OpenAI compatible LLM server and interact with various
     environments.
@@ -289,15 +260,10 @@ class AgentLoopBase(ABC):
         dataset_cls: type[RLHFDataset],
         data_config: DictConfigWrap,
         hf_model_type: str | None = None,
-        model_config: Optional[HFModelConfig] = None,
         **kwargs,
     ):
         self.config = trainer_config.config
         self.rollout_config = self.config.actor_rollout_ref.rollout
-        # AgentLoopWorker already materializes HFModelConfig once per worker.
-        # Pass that object into each short-lived loop instead of rebuilding the
-        # tokenizer/processor/config for every trajectory.
-        self.model_config = model_config.config if isinstance(model_config, ModelConfigWrap) else model_config
         self.server_manager = server_manager
         self.tokenizer = tokenizer
         self.processor = processor
@@ -754,23 +720,9 @@ class AgentLoopWorker:
                 hf_model_type=self.hf_model_type,
                 dataset_cls=self.dataset_cls,
                 data_config=DictConfigWrap(self.config.data),
-                model_config=ModelConfigWrap(self.model_config),
                 tools=ToolListWrap(self.tools),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            # Both the legacy and TransferQueue exits pass this point. Validate
-            # model-coordinate captures before either padding or serialization.
-            for sample in output if isinstance(output, list) else [output]:
-                if sample.routed_experts_source_semantics == MODEL_ROW_ROUTE_SEMANTICS:
-                    if sample.routed_experts is None:
-                        raise ValueError("Model-row replay requires expert IDs")
-                    sample.routed_experts = _as_route_tensor(sample.routed_experts, "routed_experts")
-                    validate_model_row_capture(
-                        sample.routed_experts,
-                        len(sample.prompt_ids),
-                        len(sample.response_ids),
-                        sample.response_mask,
-                    )
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
@@ -862,28 +814,30 @@ class AgentLoopWorker:
         routed_experts = None
         if output.routed_experts is not None:
             total_length = input_ids.shape[1]
-            experts_tensor = _as_route_tensor(output.routed_experts, "routed_experts")
-            length, layer_num, topk_num = experts_tensor.shape
-            route_semantics = output.routed_experts_source_semantics
-            if route_semantics == MODEL_ROW_ROUTE_SEMANTICS:
-                routed_experts = torch.nested.as_nested_tensor(
-                    [experts_tensor],
-                    layout=torch.jagged,
-                )
-            elif route_semantics is None:
-                routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
-                # Text-only/backward-compatible route payloads use the logical
-                # token axis. Expanded model-row captures require explicit
-                # row semantics.
-                start_pos = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
-                end_pos = min(start_pos + length, total_length)
-                if start_pos < 0 or end_pos > total_length:
-                    raise ValueError(
-                        f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
-                    )
-                routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
+            length, layer_num, topk_num = output.routed_experts.shape
+            if isinstance(output.routed_experts, np.ndarray):
+                routed_experts_array = output.routed_experts
+                if not routed_experts_array.flags.writeable:
+                    routed_experts_array = routed_experts_array.copy()
+                experts_tensor = torch.from_numpy(routed_experts_array)
+            elif isinstance(output.routed_experts, torch.Tensor):
+                experts_tensor = output.routed_experts
             else:
-                raise ValueError(f"unsupported routed_experts_source_semantics={route_semantics!r}")
+                raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
+            experts_tensor = experts_tensor.to(torch.int16)
+            routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
+
+            # Calculate start position: left padding means original prompt starts at the end
+            start_pos = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
+            end_pos = min(start_pos + length, total_length)
+
+            # Add boundary checks for robustness
+            if start_pos < 0 or end_pos > total_length:
+                raise ValueError(
+                    f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
+                )
+
+            routed_experts[:, start_pos:end_pos] = experts_tensor.unsqueeze(0)
 
         multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
         position_ids = self._compute_position_ids(
@@ -931,7 +885,6 @@ class AgentLoopWorker:
             attention_mask=attention_mask,
             response_logprobs=response_logprobs,
             routed_experts=routed_experts,
-            routed_experts_source_semantics=output.routed_experts_source_semantics,
             multi_modal_inputs=multi_modal_inputs,
             multi_modal_data=output.multi_modal_data,
             mm_processor_kwargs=output.mm_processor_kwargs,
@@ -1149,16 +1102,8 @@ class AgentLoopWorker:
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
-        route_presence = [input.routed_experts is not None for input in inputs]
-        if any(route_presence) and not all(route_presence):
-            raise ValueError("a routing batch cannot mix samples with and without expert IDs")
-        if all(route_presence):
-            route_tensors = [input.routed_experts for input in inputs]
-            optional_outputs["routed_experts"] = (
-                tu.concat_nested_tensors(route_tensors)
-                if route_tensors[0].is_nested
-                else torch.cat(route_tensors, dim=0)
-            )
+        if inputs[0].routed_experts is not None:
+            optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
@@ -1175,19 +1120,6 @@ class AgentLoopWorker:
             },
             batch_size=len(inputs),
         )
-        if all(route_presence):
-            route_semantics = {item.routed_experts_source_semantics for item in inputs}
-            if route_semantics == {MODEL_ROW_ROUTE_SEMANTICS}:
-                tu.assign_non_tensor_data(
-                    batch,
-                    "routed_experts_transport_semantics",
-                    MODEL_ROW_ROUTE_SEMANTICS,
-                )
-            elif route_semantics != {None}:
-                raise ValueError(
-                    "a routed-experts batch cannot mix row-semantics contracts, got "
-                    f"{sorted(repr(value) for value in route_semantics)}"
-                )
 
         scores = [input.reward_score for input in inputs]
         if all(score is not None for score in scores):
