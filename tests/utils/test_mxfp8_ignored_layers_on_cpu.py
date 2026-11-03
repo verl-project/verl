@@ -29,7 +29,7 @@ import importlib.util
 import pytest
 import torch
 
-from verl.utils.qat.compressed_tensors import DEFAULT_IGNORE, Fp8ConfigWeightQuantizer, _matches
+from verl.utils.qat.compressed_tensors import DEFAULT_IGNORE, Fp8ConfigWeightQuantizer, _matches, get_fp8_ignored_layers
 
 requires_ct = pytest.mark.skipif(
     importlib.util.find_spec("compressed_tensors") is None, reason="compressed-tensors is not installed"
@@ -50,6 +50,32 @@ def test_default_ignore_keeps_routers_but_not_gate_up_proj():
     assert not _matches("model.layers.0.mlp.gate_up_proj", DEFAULT_IGNORE)
     assert not _matches("model.layers.0.mlp.gate_proj", DEFAULT_IGNORE)
     assert not _matches("model.layers.0.mlp.shared_expert.gate_proj", DEFAULT_IGNORE)
+
+
+def test_native_fp8_exact_text_aliases_preserve_the_configured_exclusions():
+    short = "model.layers.0.self_attn.b_proj"
+    full = "model.language_model.layers.0.self_attn.b_proj"
+    short_mlp = "model.layers.0.mlp.down_proj"
+    original = [short, full, short_mlp, "model.visual.merger"]
+    config = {"ignored_layers": original.copy(), "modules_to_not_convert": ["lm_head"]}
+
+    assert get_fp8_ignored_layers(config, is_multimodal=True) == [
+        *original,
+        "model.language_model.layers.0.mlp.down_proj",
+    ]
+    assert config["ignored_layers"] == original
+    assert get_fp8_ignored_layers({"ignored_layers": None, "modules_to_not_convert": [short]}, is_multimodal=True) == [
+        short,
+        full,
+    ]
+    assert get_fp8_ignored_layers({"ignored_layers": [full]}, is_multimodal=True) == [full, short]
+
+
+@pytest.mark.parametrize(("mode", "is_multimodal"), [("exact", False), ("substring", True), ("suffix", True)])
+def test_native_fp8_text_aliases_only_expand_for_exact_vlm_exclusions(mode, is_multimodal):
+    short = "model.layers.0.self_attn.b_proj"
+    config = {"modules_to_not_convert": [short], "ignored_layers_match_mode": mode}
+    assert get_fp8_ignored_layers(config, is_multimodal=is_multimodal) == [short]
 
 
 @requires_ct
@@ -77,6 +103,31 @@ def test_native_fp8_ignore_matches_unwrapped_lora_base_name():
     assert result["model.layers.0.self_attn.fused_qkvbfg_a_proj.base_layer.weight"] is ignored
     assert "model.layers.0.self_attn.fused_qkvbfg_a_proj.base_layer.weight_scale_inv" not in result
     assert result["model.layers.1.self_attn.fused_qkvbfg_a_proj.base_layer.weight"].dtype == torch.float8_e4m3fn
+
+
+@requires_ct
+@pytest.mark.parametrize("base_suffix", ["", ".base_layer"])
+def test_native_fp8_ignore_matches_vlm_text_weights(base_suffix):
+    b_proj = "model.layers.0.self_attn.b_proj"
+    quantizer = Fp8ConfigWeightQuantizer(
+        {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+            "modules_to_not_convert": [b_proj],
+        },
+        is_multimodal=True,
+    )
+    ignored = torch.ones(64, 4096, dtype=torch.bfloat16)
+    quantized = torch.ones(128, 128, dtype=torch.bfloat16)
+    ignored_name = f"model.language_model.layers.0.self_attn.b_proj{base_suffix}.weight"
+    quantized_name = f"model.language_model.layers.0.mlp.gate_proj{base_suffix}.weight"
+
+    result = dict(quantizer([(ignored_name, ignored), (quantized_name, quantized)]))
+
+    assert set(result) == {ignored_name, quantized_name, quantized_name + "_scale_inv"}
+    assert result[ignored_name] is ignored
+    assert result[quantized_name].dtype == torch.float8_e4m3fn
 
 
 @requires_ct

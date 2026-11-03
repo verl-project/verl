@@ -18,6 +18,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from verl.utils.qat.compressed_tensors import (
     Fp8ConfigWeightQuantizer,
@@ -94,6 +95,35 @@ def test_dispatch_exports_unquantized_weights_when_hf_overrides_null_the_text_co
         rollout_config=_rollout({"text_config": {"quantization_config": None}}),
     )
     assert overridden is None
+
+
+@pytest.mark.parametrize("is_multimodal", [True, False])
+@pytest.mark.parametrize(
+    ("excluded_prefix", "export_prefix"),
+    [("model", "model.language_model"), ("model.language_model", "model")],
+)
+def test_dispatch_native_fp8_text_exclusion_matches_only_the_vlm_export(is_multimodal, excluded_prefix, export_prefix):
+    pytest.importorskip("compressed_tensors")
+    hf_config = _multimodal_fp8() if is_multimodal else SimpleNamespace(model_type="text")
+    model_config = SimpleNamespace(hf_config=hf_config, local_path=None)
+    config = {**_FP8, "ignored_layers": [f"{excluded_prefix}.layers.0.mlp.down_proj"]}
+    quantizer = dispatch_rollout_weight_quantizer(
+        model_config=model_config, rollout_config=_rollout({"quantization_config": config})
+    )
+    down = f"{export_prefix}.layers.0.mlp.down_proj.weight"
+    other = f"{export_prefix}.layers.1.mlp.down_proj.weight"
+    weight = torch.ones(128, 128, dtype=torch.bfloat16)
+
+    result = dict(quantizer([(down, weight), (other, weight)]))
+
+    if is_multimodal:
+        assert result[down] is weight
+        assert down + "_scale_inv" not in result
+    else:
+        assert result[down].dtype == torch.float8_e4m3fn
+        assert down + "_scale_inv" in result
+    assert result[other].dtype == torch.float8_e4m3fn
+    assert other + "_scale_inv" in result
 
 
 # DeepSeek-V4.1-Flash's checkpoint quantization_config.
