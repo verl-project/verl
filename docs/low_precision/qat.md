@@ -182,8 +182,9 @@ install and dispatch fake quantizers. FP8_BLOCK, MXFP8 and MXFP4 dispatch to
 verl's TileLang kernels with fused quantize-dequantize and straight-through
 gradients; parameter export invokes the same kernels without dequantization,
 making their quantized values and scales bit-exact by construction. NVFP4 is
-described [below](#nvfp4-qat). Both FP4 modes apply only to routed experts. MXFP8 and MXFP4 generate E8M0 scales with DeepSeek's upward
-power-of-two rounding recipe. MXFP4 expert activations use the MXFP8 1x32 kernel
+described below. Both FP4 modes apply only to routed experts.
+MXFP8 and MXFP4 generate E8M0 scales with DeepSeek's upward power-of-two
+rounding recipe. MXFP4 expert activations use the MXFP8 1x32 kernel
 rather than FP4. Use `mxfp4_mxfp8` for the vLLM combination where dense linear
 layers also use MXFP8.
 Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them aligned with the rollout ignore list; for Qwen3.5 MXFP8, add `*linear_attn.in_proj_a` and `*linear_attn.in_proj_b`.
@@ -191,7 +192,7 @@ Its `ignore_patterns` use Megatron module names and `fnmatch` syntax. Keep them 
 #### NVFP4 QAT
 
 `mode: nvfp4` with `rollout.quantization.moe: NVFP4` trains W4A4 routed experts against the rollout that
-[NVFP4 training](nvfp4.md) uses, with the same [requirements](nvfp4.md#requirements) and expert tensor
+[NVFP4 training](nvfp4.md) uses, with the same requirements and expert tensor
 parallel size 1.
 
 - Weights: E2M1 values in groups of 16 with E4M3 scales and one global scale per expert matrix; `gate_proj`

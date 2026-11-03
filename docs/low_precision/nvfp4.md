@@ -7,8 +7,9 @@ and serves the rollout in the same precision. Activations are quantized per toke
 Parameters stay BF16; attention, dense MLPs, shared experts, router, norms, embeddings and the LM head run
 in BF16.
 
-For NVFP4 fake-quantization training, see [NVFP4 QAT](qat.md#nvfp4-qat). The rollout quantization interface
-shared by all formats is described in [Low-Precision Rollout and Quantization-Aware Training](qat.md).
+For NVFP4 fake-quantization training, see the NVFP4 QAT section of
+[Low-Precision Rollout and Quantization-Aware Training](qat.md), which also describes the rollout
+quantization interface shared by all formats.
 
 ## Requirements
 
@@ -34,8 +35,7 @@ actor_rollout_ref:
         num_layers_at_end_in_bf16: 4
   rollout:
     quantization:
-      moe: NVFP4
-      moe_activation: nvfp4_per_token   # activations quantized per token, as in training
+      moe: NVFP4   # activations quantized per token, as in training
       ignore: ["re:.*layers\\.(0|1|44|45|46|47)\\.mlp\\.experts\\..*"]  # same layers, 48-layer model
 ```
 
@@ -52,7 +52,7 @@ actor_rollout_ref:
 
 ## Rollout
 
-`moe_activation: nvfp4_per_token` (vLLM's `quantization_config.moe.activation`) exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
+`moe: NVFP4` runs with `moe_activation: nvfp4_per_token` (vLLM's `quantization_config.moe.activation`), the default. It exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
 online `nvfp4_per_token` quantization, and runs them on FlashInfer's TRT-LLM MoE kernel with per-token
 activation scales. Refits load each bucket in place into the storage the CUDA graphs captured, so the extra
 memory is one MoE layer's post-processing. With rollout TP and EP off, each rank holds a slice of every
