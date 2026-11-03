@@ -1,12 +1,12 @@
-# MXFP4 MoE RL on Blackwell
+# MXFP4 MoE QAT on Blackwell
 
-Last updated: 10/29/2026
+Last updated: 11/03/2026
 
 MXFP4 is the OCP microscaling FP4 format: E2M1 elements with one E8M0 scale per 32-element block. In verl it covers
 the routed experts of MoE models. The rollout serves MXFP4 expert weights, quantized on the trainer side, and
-DeepGEMM quantizes the expert activations to FP8 at run time. Training stays in BF16; with QAT, ModelOpt
-fake-quantizes the routed experts during training: their weights exactly as the exported rollout weights, their
-inputs to MXFP8, close to the rollout's FP8 activations.
+DeepGEMM quantizes the expert activations to FP8 at run time. Transformer Engine has no MXFP4 training, so training
+stays in BF16; with QAT, the routed experts are fake-quantized during training: their weights exactly as the
+exported rollout weights, their inputs to MXFP8, close to the rollout's FP8 activations.
 
 The rollout quantization interface shared by all formats, the kernel defaults and the format details are described
 in [Low-Precision Rollout and Quantization-Aware Training](qat.md). For MXFP8 end to end, see
@@ -36,15 +36,14 @@ actor_rollout_ref.actor.megatron.qat:
 Notes:
 
 - `lm_head`, the token embedding, MoE routers and every dense layer stay in BF16 on the rollout and in training.
-- During QAT, the routed experts' weights are fake-quantized with the same QDQ as the trainer-side exporter, so the
-  QAT forward and the exported rollout weights agree bit for bit. The experts' inputs are fake-quantized to MXFP8
-  (1x32 blocks), while the rollout's DeepGEMM kernel quantizes them to FP8 in 1x128 groups with E8M0 scales.
+- ModelOpt installs the fake quantizers; they run verl's TileLang MXFP4 kernel, the one the trainer-side exporter
+  uses without dequantization, so the QAT forward and the exported rollout weights agree bit for bit (see
+  [qat.md](qat.md)). The experts' inputs are fake-quantized to MXFP8 (1x32 blocks), while the rollout's DeepGEMM
+  kernel quantizes them to FP8 in 1x128 groups with E8M0 scales.
 - QAT quantizes the Transformer Engine modules of the layer spec that Megatron-Bridge builds for the model, the
-  grouped expert linears included, so tensor and expert parallelism can be combined.
+  grouped expert linears included, so tensor and expert parallelism can be combined. All expert weights of a grouped
+  linear are fake-quantized in one kernel launch.
 - QAT and Transformer Engine FP8 training are mutually exclusive; the engine refuses the combination.
-- QAT fake-quantizes all expert weights of a grouped linear in one call. On the example below, QAT makes a step about
-  16% longer than the MXFP4 rollout alone; with ModelOpt's per-expert loop, the first QAT step took 3743 s instead
-  of 1056 s on the same GPUs.
 
 ## Example: Qwen3-30B-A3B on DAPO-Math-17k
 
@@ -64,6 +63,9 @@ PRECISION=bf16 TOTAL_TRAINING_STEPS=10 bash examples/mxfp4/run_qwen3_30b_a3b_meg
 ```
 
 ### Results
+
+> These runs predate verl's TileLang QAT and export kernels and ModelOpt 0.47 (verl main 2ab35292, with the expert
+> weights of a grouped linear stacked and fake-quantized in one call); they are being rerun on current main.
 
 **Configuration**
 

@@ -5,7 +5,7 @@
 # experts; PRECISION=mxfp4 quantizes the rollout's experts only (no QAT); PRECISION=bf16 runs the same job in BF16, as
 # the baseline. MXFP4 covers the routed experts only: dense layers, lm_head, embeddings and routers stay in BF16.
 # The rollout serves the experts through vLLM's DeepGEMM FP4 MoE kernel, which needs SM100/SM120. The defaults were
-# tested on one 4xB300 node (4xB200 untested) and run without a validation set. See docs/low_precision/mxfp4.md.
+# tested on one 4xB300 node (4xB200 untested) and run without a validation set. See docs/low_precision/mxfp4_qat.md.
 
 set -xeuo pipefail
 export CUDA_DEVICE_MAX_CONNECTIONS=1
