@@ -25,6 +25,13 @@ on:
 permissions:
   contents: read
 
+env:
+  INSTALL_CASE: ${{ inputs.backend || 'fsdp2_vllm' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -42,12 +49,9 @@ jobs:
           uv pip install pytest
           .venv/bin/python -m pytest -q tests/special_sanity/test_doctest_helper.py
       - name: Read the A3 CANN base image from the backend Dockerfile
-        if: github.event_name == 'workflow_dispatch'
         id: image
-        env:
-          DOCTEST_CASE: ${{ inputs.backend }}
         run: |
-          case "$DOCTEST_CASE" in
+          case "$INSTALL_CASE" in
             fsdp2_vllm|megatron_vllm) dockerfile=docker/ascend/Dockerfile.ascend_9.1.0_a3 ;;
             fsdp2_sglang|megatron_sglang) dockerfile=docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3 ;;
             *) exit 1 ;;
@@ -57,7 +61,8 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
   installation:
     needs: check
-    if: github.event_name == 'workflow_dispatch' && github.repository_owner == 'verl-project'
+    # Fork PRs use the upstream repository's workflow-approval policy, as in e2e_ascend.yml.
+    if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 180
     container:
@@ -83,7 +88,6 @@ jobs:
         env:
           ALLOW_INSTALL: "1"
           NDEVICES_PER_NODE: "8"
-          INSTALL_CASE: ${{ inputs.backend }}
         run: |
           npu-smi info
           export INSTALL_BACKEND="${INSTALL_CASE##*_}"

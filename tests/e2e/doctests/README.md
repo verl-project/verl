@@ -65,8 +65,16 @@ Set `KEEP_INSTALL_WORKDIR=1` to retain it, or provide an empty
 `INSTALL_WORKDIR` (which is always retained). Source installation also supports
 `ALLOW_INSTALL=1 DRY_RUN=1` to validate the plan without installing packages.
 
-The GitHub workflow runs CPU tool tests on relevant pull requests. Manual runs
-add source installation and one GRPO step on the existing A3 eight-device runner.
+The GitHub workflow runs CPU tool tests on relevant pull requests, followed by
+source installation and one GRPO step for `fsdp2_vllm` on the upstream project's
+A3 eight-device runner. Fork pull requests follow the repository's workflow
+approval policy; a maintainer must approve runs when GitHub requires it.
+New runs on the same ref cancel older runs. Workflows running in forks execute
+only the CPU checks.
+
+Manual runs can select any of the four supported combinations. GitHub requires
+the workflow to exist on the default branch before `workflow_dispatch` is
+available; the pull-request trigger provides installation coverage before merge.
 The CANN base image comes from the selected backend's Dockerfile; the workflow
 bootstraps Miniforge, while the documentation creates the Python environment.
 The runner must expose its NPU devices and cached Qwen3-0.6B/GSM8K data to the
