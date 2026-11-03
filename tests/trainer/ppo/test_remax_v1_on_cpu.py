@@ -243,3 +243,34 @@ def test_worker_adds_no_greedy_session_without_flag_or_in_validation(monkeypatch
     assert _run_prompt_sessions(monkeypatch, {"uid": "u"}, validate=False) == [(0, 1.0), (1, 1.0)]
     # validation rollouts never get the baseline, even if the prompt carries the flag
     assert _run_prompt_sessions(monkeypatch, {"uid": "u", "__remax_baseline__": True}, validate=True) == [(0, 1.0)]
+
+
+class _StopAfterFieldCapture(Exception):
+    """Raised by the fake TQ right after capturing ``select_fields``, before any real data flows."""
+
+
+class _FieldCaptureTQ:
+    def __init__(self):
+        self.select_fields = None
+
+    def kv_batch_get(self, keys, partition_id, select_fields):
+        self.select_fields = select_fields
+        raise _StopAfterFieldCapture
+
+
+@pytest.mark.parametrize("use_critic", [True, False])
+@pytest.mark.parametrize("use_remax", [True, False])
+def test_compute_advantage_requests_values_and_baselines_independently(monkeypatch, use_critic, use_remax):
+    """``values`` tracks ``use_critic`` and ``reward_baselines`` tracks ``_use_remax``, independently of each other."""
+    from verl.trainer.ppo.v1 import trainer_base
+
+    fake_tq = _FieldCaptureTQ()
+    monkeypatch.setattr(trainer_base, "tq", fake_tq)
+    fake_self = SimpleNamespace(use_critic=use_critic, _use_remax=use_remax)
+    batch = trainer_base.KVBatchMeta(partition_id="train", keys=["a_0_0"], tags=[{}])
+
+    with pytest.raises(_StopAfterFieldCapture):
+        trainer_base.PPOTrainer._compute_advantage(fake_self, batch, metrics={})
+
+    assert ("values" in fake_tq.select_fields) == use_critic
+    assert ("reward_baselines" in fake_tq.select_fields) == use_remax
