@@ -16,7 +16,6 @@
 # limitations under the License.
 """Pretrain utilities."""
 
-import gc
 import inspect
 import logging
 import os
@@ -457,32 +456,6 @@ def _clear_te_fp8_weight_workspaces(model_chunk):
     return cleared
 
 
-def _iter_ddp_buffers(model_chunk):
-    for buffers in (model_chunk.buffers, model_chunk.expert_parallel_buffers):
-        yield from buffers
-
-
-def _release_ddp_grad_storage(buffer) -> None:
-    size = buffer.grad_data.storage().size()
-    if size > 0:
-        buffer.grad_data_size = size
-        buffer.grad_data.storage().resize_(0)
-
-
-def _restore_ddp_grad_storage(buffer) -> None:
-    if not hasattr(buffer, "grad_data_size"):
-        return
-    current_size = buffer.grad_data.storage().size()
-    if current_size == 0:
-        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-    elif current_size != buffer.grad_data_size:
-        raise RuntimeError(
-            "Megatron gradient buffer changed size while offloaded: "
-            f"current={current_size}, expected={buffer.grad_data_size}"
-        )
-    buffer.grad_data.zero_()
-
-
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
@@ -494,52 +467,57 @@ def offload_megatron_model_to_cpu(models):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            for buffer in _iter_ddp_buffers(model_chunk):
-                # offload parameters
-                if buffer.param_data.storage().size() > 0:
-                    # Reuse a single pinned cpu_data buffer per DDP buffer.
-                    # The previous implementation reallocated cpu_data via
-                    # `.cpu().pin_memory()` on every offload. Python evaluates
-                    # the RHS before the assignment, so the new pinned block is
-                    # allocated while the old cpu_data is still referenced --
-                    # peak host memory at the moment of allocation is 2x
-                    # param_data size. On large Megatron models this transient
-                    # peak exceeds the cgroup limit and OOMKills the pod even
-                    # though steady-state usage would be 1x. Reallocating here
-                    # would re-trigger the same 2x peak, so we allocate at most
-                    # once per buffer and assert shape/dtype invariance on
-                    # subsequent calls -- a mismatch means a caller rebuilt
-                    # param_data under us, which is a bug we want surfaced
-                    # rather than silently worked around.
-                    existing = getattr(buffer.param_data, "cpu_data", None)
-                    if existing is None:
-                        buffer.param_data.cpu_data = torch.empty(
-                            buffer.param_data.size(),
-                            dtype=buffer.param_data.dtype,
-                            device="cpu",
-                            pin_memory=True,
-                        )
-                        buffer.param_data_size = buffer.param_data.storage().size()
-                    else:
-                        assert existing.shape == buffer.param_data.shape, (
-                            f"cpu_data shape {tuple(existing.shape)} != "
-                            f"param_data shape {tuple(buffer.param_data.shape)}; "
-                            "reallocating would reintroduce the 2x peak."
-                        )
-                        assert existing.dtype == buffer.param_data.dtype, (
-                            f"cpu_data dtype {existing.dtype} != "
-                            f"param_data dtype {buffer.param_data.dtype}; "
-                            "reallocating would reintroduce the 2x peak."
-                        )
-                    # Synchronous D2H copy into the preexisting pinned
-                    # buffer; must complete before resize_(0) frees the
-                    # GPU storage.
-                    buffer.param_data.cpu_data.copy_(buffer.param_data.data, non_blocking=False)
-                    buffer.param_data.storage().resize_(0)
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            for buffers in model_chunk_all_buffers:
+                for buffer in buffers:
+                    # offload parameters
+                    if buffer.param_data.storage().size() > 0:
+                        # Reuse a single pinned cpu_data buffer per DDP buffer.
+                        # The previous implementation reallocated cpu_data via
+                        # `.cpu().pin_memory()` on every offload. Python evaluates
+                        # the RHS before the assignment, so the new pinned block is
+                        # allocated while the old cpu_data is still referenced --
+                        # peak host memory at the moment of allocation is 2x
+                        # param_data size. On large Megatron models this transient
+                        # peak exceeds the cgroup limit and OOMKills the pod even
+                        # though steady-state usage would be 1x. Reallocating here
+                        # would re-trigger the same 2x peak, so we allocate at most
+                        # once per buffer and assert shape/dtype invariance on
+                        # subsequent calls -- a mismatch means a caller rebuilt
+                        # param_data under us, which is a bug we want surfaced
+                        # rather than silently worked around.
+                        existing = getattr(buffer.param_data, "cpu_data", None)
+                        if existing is None:
+                            buffer.param_data.cpu_data = torch.empty(
+                                buffer.param_data.size(),
+                                dtype=buffer.param_data.dtype,
+                                device="cpu",
+                                pin_memory=True,
+                            )
+                            buffer.param_data_size = buffer.param_data.storage().size()
+                        else:
+                            assert existing.shape == buffer.param_data.shape, (
+                                f"cpu_data shape {tuple(existing.shape)} != "
+                                f"param_data shape {tuple(buffer.param_data.shape)}; "
+                                "reallocating would reintroduce the 2x peak."
+                            )
+                            assert existing.dtype == buffer.param_data.dtype, (
+                                f"cpu_data dtype {existing.dtype} != "
+                                f"param_data dtype {buffer.param_data.dtype}; "
+                                "reallocating would reintroduce the 2x peak."
+                            )
+                        # Synchronous D2H copy into the preexisting pinned
+                        # buffer; must complete before resize_(0) frees the
+                        # GPU storage.
+                        buffer.param_data.cpu_data.copy_(buffer.param_data.data, non_blocking=False)
+                        buffer.param_data.storage().resize_(0)
 
-                assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
+                    assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
 
-                _release_ddp_grad_storage(buffer)
+                    if buffer.grad_data.storage().size() > 0:
+                        # if the grad_data size is already zero, we assume that it is already offloaded
+                        buffer.grad_data_size = buffer.grad_data.storage().size()
+                        buffer.grad_data.storage().resize_(0)
             # Offload frozen parameters not in DDP buffers (e.g. base model in LoRA/PEFT)
             # DDP buffers only contain requires_grad=True params, so frozen params must be offloaded separately.
             for param in model_chunk.module.parameters():
@@ -568,58 +546,6 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def offload_megatron_grad_to_cpu(models):
-    """Release Megatron gradient storage while keeping model parameters resident.
-
-    Megatron DDP preallocates persistent FP32 gradient buffers.  After an
-    optimizer step those buffers no longer contain state that must survive
-    until the next training phase, but keeping their storage resident can
-    prevent a colocated rollout engine from materializing TP-gathered weights.
-    Record each buffer size before releasing it so
-    :func:`load_megatron_model_to_gpu` can recreate and zero the storage on the
-    next train-mode entry.
-    """
-    # Gradient reduction/zeroing may have been enqueued asynchronously.  The
-    # storage must not be resized while any device work still references it.
-    get_torch_device().synchronize()
-
-    for model_chunk in models:
-        if isinstance(model_chunk, DDP):
-            for buffer in _iter_ddp_buffers(model_chunk):
-                _release_ddp_grad_storage(buffer)
-        else:
-            # Non-DDP modules do not have a recreatable flat grad buffer. Keep
-            # their gradients on CPU so this helper remains safe for reference
-            # and small-model uses of the generic Megatron engine.
-            for _, param in model_chunk.named_parameters():
-                if param.grad is not None and param.grad.device.type != "cpu":
-                    old_grad = param.grad
-                    param.grad = param.grad.to("cpu")
-                    if _can_safely_resize_storage(old_grad):
-                        old_grad.storage().resize_(0)
-
-    gc.collect()
-    get_torch_device().empty_cache()
-
-
-@torch.no_grad()
-def load_megatron_grad_to_gpu(models):
-    """Restore gradient storage released by :func:`offload_megatron_grad_to_cpu`."""
-    device_id = get_device_id()
-    for model_chunk in models:
-        if isinstance(model_chunk, DDP):
-            for buffer in _iter_ddp_buffers(model_chunk):
-                _restore_ddp_grad_storage(buffer)
-        else:
-            for parameter in model_chunk.parameters():
-                if parameter.grad is not None and parameter.grad.device.type == "cpu":
-                    parameter.grad = parameter.grad.to(device_id, non_blocking=True)
-
-    gc.collect()
-    get_torch_device().empty_cache()
-
-
-@torch.no_grad()
 def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
     """
     Load megatron model to GPU.
@@ -630,14 +556,25 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            for buffer in _iter_ddp_buffers(model_chunk):
-                if load_grad:
-                    _restore_ddp_grad_storage(buffer)
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            for buffers in model_chunk_all_buffers:
+                for buffer in buffers:
+                    # sometimes, we don't want to load grad for pure inference
+                    if load_grad and hasattr(buffer, "grad_data_size"):
+                        current_storage_size = buffer.grad_data.storage().size()
+                        if current_storage_size == 0 or current_storage_size == buffer.grad_data_size:
+                            buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                            buffer.grad_data.zero_()
+                        else:
+                            # Non-standard layers (e.g. GatedDeltaNet) may have grad
+                            # buffers with mismatched storage size; skip resize and
+                            # zero in-place with current storage.
+                            buffer.grad_data.zero_()
 
-                if buffer.param_data.storage().size() == 0:
-                    buffer.param_data.storage().resize_(buffer.param_data_size)
-                    # copy data from cpu to cuda
-                    buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+                    if buffer.param_data.storage().size() == 0:
+                        buffer.param_data.storage().resize_(buffer.param_data_size)
+                        # copy data from cpu to cuda
+                        buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
 
             # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
             if load_frozen_params:

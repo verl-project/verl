@@ -41,7 +41,6 @@ CANN_HOME=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
 CANN_PYTHON_SITE=${CANN_PYTHON_SITE:-${CANN_HOME}/python/site-packages}
 CANN_TBE_SITE=${CANN_TBE_SITE:-${CANN_HOME}/opp/built-in/op_impl/ai_core/tbe}
 
-ACTOR_GRAD_OFFLOAD=${ACTOR_GRAD_OFFLOAD:-True}
 SAVE_FREQ=${SAVE_FREQ:--1}
 OPTIMIZER_CPU_OFFLOAD=${OPTIMIZER_CPU_OFFLOAD:-True}
 OPTIMIZER_STORE_PARAM_REMAINDERS=${OPTIMIZER_STORE_PARAM_REMAINDERS:-True}
@@ -259,7 +258,7 @@ if ((ACTOR_PP > 1)); then
     fi
 fi
 echo "run=$RUN_MODE model=$MODEL_PATH world=$world_size TP=$ACTOR_TP PP=$ACTOR_PP EP=$ACTOR_EP ETP=$ACTOR_ETP rollout_TP=$ROLLOUT_TP rollout_DP=$ROLLOUT_DP rollout_EP=$ROLLOUT_EP${pipeline_summary} steps=$TOTAL_TRAINING_STEPS"
-echo "optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION store_param_remainders=$OPTIMIZER_STORE_PARAM_REMAINDERS actor_param_offload=$ACTOR_PARAM_OFFLOAD actor_optimizer_offload=$ACTOR_OPTIMIZER_OFFLOAD actor_grad_offload=$ACTOR_GRAD_OFFLOAD ref_param_offload=$REF_PARAM_OFFLOAD recompute=$ACTOR_RECOMPUTE enforce_eager=$ROLLOUT_ENFORCE_EAGER rollout_gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTILIZATION update_weights_bucket_mb=$ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES cudagraph_mode=$ROLLOUT_CUDAGRAPH_MODE cudagraph_sizes=$ROLLOUT_CUDAGRAPH_CAPTURE_SIZES cudagraph_max=$ROLLOUT_MAX_CUDAGRAPH_CAPTURE_SIZE sleep_extra_cleanup=$ROLLOUT_SLEEP_EXTRA_CLEANUP"
+echo "optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION store_param_remainders=$OPTIMIZER_STORE_PARAM_REMAINDERS actor_param_offload=$ACTOR_PARAM_OFFLOAD actor_optimizer_offload=$ACTOR_OPTIMIZER_OFFLOAD ref_param_offload=$REF_PARAM_OFFLOAD recompute=$ACTOR_RECOMPUTE enforce_eager=$ROLLOUT_ENFORCE_EAGER rollout_gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTILIZATION update_weights_bucket_mb=$ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES cudagraph_mode=$ROLLOUT_CUDAGRAPH_MODE cudagraph_sizes=$ROLLOUT_CUDAGRAPH_CAPTURE_SIZES cudagraph_max=$ROLLOUT_MAX_CUDAGRAPH_CAPTURE_SIZE sleep_extra_cleanup=$ROLLOUT_SLEEP_EXTRA_CLEANUP"
 echo "micro_batch_actor=$ACTOR_MICRO_BATCH_SIZE_PER_GPU micro_batch_log_prob=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU"
 echo "training_kda=fused:$KIMI_USE_FUSED_KDA internal_recompute_disabled=$KIMI_KDA_DISABLE_INTERNAL_RECOMPUTE dist_checkpoint=${ACTOR_USE_DIST_CHECKPOINTING:-True} resume_mode=${RESUME_MODE:-disable}"
 echo "transfer_queue_storage_units=$TQ_STORAGE_UNITS transfer_queue_timeout_s=$TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT transfer_queue_threads_per_unit=$TQ_NUM_THREADS"
@@ -305,7 +304,6 @@ ACTOR=(
     "actor_rollout_ref.actor.megatron.use_dist_checkpointing=${ACTOR_USE_DIST_CHECKPOINTING:-True}"
     "actor_rollout_ref.actor.megatron.param_offload=$ACTOR_PARAM_OFFLOAD"
     "actor_rollout_ref.actor.megatron.optimizer_offload=$ACTOR_OPTIMIZER_OFFLOAD"
-    "actor_rollout_ref.actor.megatron.grad_offload=$ACTOR_GRAD_OFFLOAD"
 )
 
 if [[ "${ACTOR_RECOMPUTE,,}" == true ]]; then
