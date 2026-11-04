@@ -32,6 +32,8 @@
 name: nightly_ci_ascend
 
 on:
+  # Temporary PR trigger for the PPO Qwen3-8B FSDP vLLM job.
+  pull_request:
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -50,7 +52,7 @@ env:
 jobs:
   # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    if: ${{ github.repository_owner == 'verl-project' && (github.event_name == 'pull_request' || github.event.schedule == '0 17 * * *') }}
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
