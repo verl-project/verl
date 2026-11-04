@@ -274,9 +274,9 @@ def create_value_model(language_model_path, output_path):
 
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
-def test_critic_engine(strategy):
+def test_critic_engine(strategy, tmp_path):
     device_count = get_torch_device().device_count()
-    value_model_path = os.path.expanduser("~/models/test_model")
+    value_model_path = str(tmp_path / "test_model")
     language_model_path = get_test_language_model(device_count=device_count)
     create_value_model(language_model_path, value_model_path)
 

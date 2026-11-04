@@ -36,4 +36,6 @@ clip_grad: 1.0
 # LR scheduler type: "constant" or "cosine"
 lr_scheduler_type: cosine
 
+# Extra keyword arguments for VeOmni's build_optimizer, e.g. {fused: true}. With
+# actor.veomni.enable_fsdp_offload the AdamW step runs on host tensors and fused defaults to true.
 override_optimizer_config: {}

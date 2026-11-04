@@ -1,11 +1,14 @@
 Ascend Installation Guide
 ==========================
 
-Last updated: 09/29/2026.
+Last updated: 11/03/2026.
 
 Key Updates
 -----------
 
+-  2026/11/03: This branch targets vLLM / vLLM-Ascend ``0.30.0`` and
+   aligns torch_npu to ``2.10.0.post7``, transformers to ``5.14.1``, and xgrammar to ``>=0.2.1,<1.0.0``.
+   triton-ascend uses ``3.6.0.post2``; Megatron-LM uses ``core_v0.18.0``; MindSpeed remains at ``core_r0.18.0``.
 -  2026/08/29: Updated MindSpeed / Megatron-LM from ``core_r0.16.0`` to
    ``core_r0.18.0``. Deprecated mbridge in favor of Megatron-Bridge, with
    Megatron-Bridge version ``0.5.0``.
@@ -94,17 +97,28 @@ HDK            ``26.0.rc1``                             NPU hardware driver and 
 CANN           ``9.1.0``                                CANN software that helps developers build and run AI services on the Ascend software and hardware platform
 Python         ``>=3.10, <3.13``, recommended ``3.12``                     
 torch          ``2.10.0``                               PyTorch deep learning framework base package
-torch_npu      ``2.10.0.post4``                         NPU PyTorch adaptation plugin
+torch_npu      ``2.10.0.post7``                         NPU PyTorch adaptation plugin
 torchvision    ``0.25.0``                               PyTorch image processing library
 torchaudio     ``2.10.0``                               PyTorch audio processing library
-triton         ``3.5.0``                                Triton, used for writing custom operators
-triton-ascend  ``3.2.2``                                NPU Triton adaptation; for the installation command, refer to the script `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_
-transformers   ``5.10.4``                               Hugging Face large model library, providing model architecture and pretrained weights
-vLLM           ``0.23.0``                               High-performance LLM inference and serving engine
-vLLM-Ascend    ``0.23.0``                               NPU vLLM backend adaptation
-Megatron-LM    ``core_r0.18.0``                         Large-scale distributed training framework
+triton-ascend  ``3.6.0.post2``                          NPU Triton adaptation; for the installation command, refer to the script `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+transformers   ``5.14.1``                               Hugging Face large model library, providing model architecture and pretrained weights
+xgrammar       ``>=0.2.1,<1.0.0``                        vLLM structured output dependency
+vLLM           ``0.30.0``                               High-performance LLM inference and serving engine
+vLLM-Ascend    ``0.30.0``                               NPU vLLM backend adaptation
+Megatron-LM    ``core_v0.18.0``                         Large-scale distributed training framework
 MindSpeed      ``core_r0.18.0``                         Megatron-LM adaptation and optimization component for Ascend NPU
 ============== ======================================== ===================
+
+.. note::
+
+   torch, torch_npu, torchvision, torchaudio, triton-ascend, and transformers follow the
+   `vLLM-Ascend 0.30.0 requirements <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_.
+   xgrammar follows the `vLLM 0.30.0 dependency range <https://github.com/vllm-project/vllm/blob/v0.30.0/requirements/common.txt>`_.
+   triton-ascend provides the Triton implementation; do not install the separate triton package.
+   The upstream FastAPI requirements currently conflict: vLLM requires ``>=0.133.0,<0.137.0``,
+   while vLLM-Ascend requires ``<0.124.0``. No version satisfies both.
+   Resolve this conflict, then run ``pip check`` and validate runtime compatibility.
+   vLLM and SGLang share ``requirements-npu.txt``. After all dependencies are installed, vLLM installs ``triton-ascend==3.6.0.post2``; SGLang retains its original dependency versions.
 
 
 Pre-installation Preparation (HDK & CANN)
@@ -152,7 +166,7 @@ We provide a conda-based one-stop `Installation Script <../../../../scripts/inst
 Log Filtering
 ^^^^^^^^^^^^^
 
-After upgrading transformers to 5.10.4, a large number of deprecated alias warnings may appear. You can add an environment variable to filter out redundant logs.
+If transformers emits a large number of deprecated alias warnings, you can add an environment variable to filter out redundant logs.
 
 .. code:: bash
 
