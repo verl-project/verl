@@ -58,26 +58,14 @@ def test_lora_plus_without_bridge_helper_preserves_native_groups(monkeypatch, mi
     assert by_param[id(model.offset)]["wd_mult"] == 0
 
 
-@pytest.mark.parametrize(
-    "adapter_cls,grouped,ep,fused,train_shared,needs_finalizer",
-    [
-        ("ParallelLinearAdapter", True, 2, True, True, True),
-        ("SharedOuterGroupedExpertAdapter", True, 2, True, True, True),
-        ("SharedOuterGroupedExpertAdapter", True, 2, True, False, False),
-        ("GroupedExpertLinearAdapter", True, 2, True, True, False),
-        ("ParallelLinearAdapter", False, 2, True, True, False),
-        ("ParallelLinearAdapter", True, 1, True, True, False),
-        ("ParallelLinearAdapter", True, 2, False, True, False),
-    ],
-)
-def test_legacy_bridge_expert_grad_hooks(monkeypatch, adapter_cls, grouped, ep, fused, train_shared, needs_finalizer):
-    from megatron.core.distributed import finalize_model_grads
-
-    from verl.utils.megatron_utils import _get_megatron_grad_finalizer
-
+@pytest.fixture
+def legacy_bridge(monkeypatch):
     monkeypatch.delattr(peft_utils, "enable_expert_parallel_grad_sync_in_finalize", raising=False)
     monkeypatch.delattr(peft_utils, "finalize_model_grads_with_expert_adapter_sync", raising=False)
-    # Construct a CPU-only adapter without initializing TP/EP process groups.
+
+
+def _adapter_model(adapter_cls, *, grouped=True, ep=2):
+    # Exercise hook selection without building a distributed transformer.
     cls = getattr(peft_utils, adapter_cls)
     adapter = cls.__new__(cls)
     torch.nn.Module.__init__(adapter)
@@ -85,13 +73,87 @@ def test_legacy_bridge_expert_grad_hooks(monkeypatch, adapter_cls, grouped, ep, 
     adapter.is_expert = grouped
     adapter.base_linear_name = "layers.0.mlp.experts.linear_fc1" if grouped else "layers.0.mlp.linear_fc1"
     adapter.linear_in = torch.nn.Linear(1, 1, bias=False)
-    adapter.linear_in.weight.requires_grad_(train_shared)
     adapter.linear_out = torch.nn.Linear(1, 1, bias=False)
+    for linear in (adapter.linear_in, adapter.linear_out):
+        linear.gradient_accumulation_fusion = True
     model = torch.nn.Sequential(adapter)
-    model.config = SimpleNamespace(expert_model_parallel_size=ep, gradient_accumulation_fusion=fused)
+    model.config = SimpleNamespace(expert_model_parallel_size=ep, gradient_accumulation_fusion=True)
+    return model
 
-    if needs_finalizer:
-        with pytest.raises(RuntimeError, match="expert-adapter gradient finalizer"):
+
+@pytest.mark.parametrize(
+    "adapter_cls,grouped,ep,train_in,expected",
+    [
+        ("ParallelLinearAdapter", True, 2, True, (False, False)),
+        ("ParallelLinearAdapter", True, 2, False, (True, False)),
+        ("GroupedExpertLinearAdapter", True, 2, True, (True, True)),
+        ("ParallelLinearAdapter", False, 2, True, (True, True)),
+        ("ParallelLinearAdapter", True, 1, True, (True, True)),
+    ],
+)
+def test_legacy_bridge_expert_grad_hooks(legacy_bridge, adapter_cls, grouped, ep, train_in, expected):
+    from megatron.core.distributed import finalize_model_grads
+
+    from verl.utils.megatron_utils import _get_megatron_grad_finalizer
+
+    model = _adapter_model(adapter_cls, grouped=grouped, ep=ep)
+    a, b = model[0].linear_in, model[0].linear_out
+    a.weight.requires_grad_(train_in)
+    assert _get_megatron_grad_finalizer([model]) is finalize_model_grads
+    assert (a.gradient_accumulation_fusion, b.gradient_accumulation_fusion) == expected
+    assert model.config.gradient_accumulation_fusion
+
+
+@pytest.mark.parametrize(
+    "ep,stage,fc1,trainable,fused,expected_fusion",
+    [
+        (2, [0, 1], True, True, True, False),
+        (2, [0, 1], False, True, False, False),
+        (2, [0, 1], False, True, True, False),
+        (2, [0, 1], True, False, True, True),
+        (1, [0], True, True, True, True),
+        (2, [0, 2], True, True, True, None),
+        (2, [0, 1, 2, 3], True, True, False, None),
+        (1, [0, 1], False, False, False, None),
+    ],
+)
+def test_legacy_bridge_shared_outer_group(
+    legacy_bridge, monkeypatch, ep, stage, fc1, trainable, fused, expected_fusion
+):
+    from megatron.core import parallel_state
+    from megatron.core.distributed import finalize_model_grads
+
+    from verl.utils.megatron_utils import _get_megatron_grad_finalizer
+
+    model = _adapter_model("SharedOuterGroupedExpertAdapter", ep=ep)
+    adapter = model[0]
+    adapter._is_fc1 = fc1
+    shared, per_expert = (adapter.linear_in, adapter.linear_out) if fc1 else (adapter.linear_out, adapter.linear_in)
+    shared.weight.requires_grad_(trainable)
+    shared.gradient_accumulation_fusion = fused
+    monkeypatch.setattr(parallel_state, "get_expert_model_parallel_group", lambda: list(range(ep)))
+    monkeypatch.setattr(parallel_state, "get_tensor_and_data_parallel_group", lambda with_context_parallel: stage)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda group: group)
+    if expected_fusion is None:
+        with pytest.raises(RuntimeError, match="different ranks"):
             _get_megatron_grad_finalizer([model])
     else:
         assert _get_megatron_grad_finalizer([model]) is finalize_model_grads
+        assert shared.gradient_accumulation_fusion == expected_fusion
+        assert per_expert.gradient_accumulation_fusion and model.config.gradient_accumulation_fusion
+
+
+@pytest.mark.parametrize("replicated", [0, 1])
+def test_native_bridge_expert_grad_finalizer(monkeypatch, replicated):
+    from megatron.core.distributed import finalize_model_grads
+
+    from verl.utils.megatron_utils import _get_megatron_grad_finalizer
+
+    model = _adapter_model("SharedOuterGroupedExpertAdapter")
+    monkeypatch.setattr(
+        peft_utils, "enable_expert_parallel_grad_sync_in_finalize", lambda chunks: replicated, raising=False
+    )
+    native = object()
+    monkeypatch.setattr(peft_utils, "finalize_model_grads_with_expert_adapter_sync", native, raising=False)
+    assert _get_megatron_grad_finalizer([model]) is (native if replicated else finalize_model_grads)
+    assert model[0].linear_in.gradient_accumulation_fusion

@@ -1054,27 +1054,35 @@ def _get_megatron_grad_finalizer(model):
     if enable_ep_sync is not None and finalize_ep_grads is not None:
         return finalize_ep_grads if enable_ep_sync(model) > 0 else finalize_model_grads
 
-    # Legacy Bridge reduces autograd's gradient, but fused wgrad writes directly into main_grad.
+    # Legacy Bridge hooks reduce autograd's wgrad, which fused MCore linears bypass.
     for chunk in model:
-        config = get_model_config(chunk)
-        if config.expert_model_parallel_size <= 1 or not config.gradient_accumulation_fusion:
-            continue
+        ep_size = get_model_config(chunk).expert_model_parallel_size
         for module in chunk.modules():
             if isinstance(module, getattr(peft_utils, "SharedOuterGroupedExpertAdapter", ())):
+                # Legacy Bridge also broadcasts the shared weight over this group during initialization.
+                stage = parallel_state.get_tensor_and_data_parallel_group(with_context_parallel=True)
+                ep = parallel_state.get_expert_model_parallel_group()
+                ep_ranks = set(torch.distributed.get_process_group_ranks(ep))
+                if set(torch.distributed.get_process_group_ranks(stage)) != ep_ranks:
+                    raise RuntimeError(
+                        "This Megatron-Bridge build synchronizes shared-outer LoRA weights across the entire "
+                        "pipeline stage. Use a Bridge build with expert-adapter gradient finalization when "
+                        "the stage and expert-parallel groups have different ranks."
+                    )
+                if len(ep_ranks) == 1:
+                    continue
                 shared = (module.linear_in if module._is_fc1 else module.linear_out,)
             elif (
-                isinstance(module, getattr(peft_utils, "ParallelLinearAdapter", ()))
+                ep_size > 1
+                and isinstance(module, getattr(peft_utils, "ParallelLinearAdapter", ()))
                 and getattr(module, "_uses_grouped_expert_sharding", lambda: False)()
             ):
                 shared = (module.linear_in, module.linear_out)
             else:
                 continue
-            if any(linear.weight.requires_grad for linear in shared):
-                raise RuntimeError(
-                    "Fused gradient accumulation for EP-replicated expert LoRA weights requires Megatron-Bridge's "
-                    "expert-adapter gradient finalizer (available in v0.7.0). Upgrade Bridge or disable "
-                    "gradient_accumulation_fusion."
-                )
+            for linear in shared:
+                if linear.weight.requires_grad:
+                    linear.gradient_accumulation_fusion = False
     return finalize_model_grads
 
 
