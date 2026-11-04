@@ -6,7 +6,8 @@
 #   - vLLM 0.26.0 batch-invariance patches for DeepSeek-V4 on ROCm (patches/vllm-bi-*.patch, applied after the
 #     four DeepSeek-V4 patches that Dockerfile.rocm.deepseek-v4 applies), and
 #   - Megatron-LM with mLite's vLLM-aligned DeepSeek-V4 implementation (impl=vllm) on ROCm: ISEEKYAN/Megatron-LM
-#     ds4_vllm_align_preview plus patches/megatron-dsv4-*.patch.
+#     ds4_vllm_align_preview plus patches/megatron-dsv4-*.patch, and
+#   - upstream rdma-core in /opt/rdma-core for hosts with AMD ionic 26.x NIC drivers (see ionic-rdma-env.sh).
 # With VLLM_BATCH_INVARIANT=1 the rollout log-probs and the trainer log-probs of the same tokens are bitwise equal.
 # Every patched file is checked against patches/deepseek-v4-true-on-policy.sha256 at build time.
 #
@@ -106,6 +107,30 @@ site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 printf '%s\n' /opt/Megatron-LM/experimental/lite /opt/Megatron-LM/experimental/lite/examples/verl \
   > "${site}/megatron_lite_verl_mlite.pth"
 EOF
+
+# --- RDMA userspace for AMD ionic (Pollara / AINIC) NICs ------------------------------------------------------------
+# The base image's libionic 54 (rdma-core 39) speaks ionic provider ABI 4. ionic 26.x host drivers (e.g. 26.08)
+# provide ABI 1, which only upstream rdma-core's ionic provider (v61+) speaks; with the wrong one RCCL silently uses
+# TCP sockets. Upstream rdma-core goes to /opt/rdma-core next to the base userspace, which stays the default;
+# ionic-rdma-env.sh selects the one that opens the host's NICs (the recipe runs it).
+ARG RDMA_CORE_VERSION=65.0
+ARG RDMA_CORE_SHA256=8eb93c14740146e04c28ac25874e106b61c7d3ab66a36d07099e938985ef0680
+RUN <<'EOF'
+set -eux
+apt-get update
+apt-get install -y --no-install-recommends cmake ninja-build pkg-config \
+  libnl-3-dev libnl-route-3-dev libudev-dev
+cd /tmp
+wget -q "https://github.com/linux-rdma/rdma-core/releases/download/v${RDMA_CORE_VERSION}/rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+echo "${RDMA_CORE_SHA256}  rdma-core-${RDMA_CORE_VERSION}.tar.gz" | sha256sum -c -
+tar xzf "rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+cmake -S "rdma-core-${RDMA_CORE_VERSION}" -B rdma-build -GNinja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/opt/rdma-core -DCMAKE_INSTALL_LIBDIR=lib -DNO_MAN_PAGES=1 -DNO_PYVERBS=1 -DENABLE_STATIC=0
+ninja -C rdma-build install
+rm -rf /tmp/rdma-build "/tmp/rdma-core-${RDMA_CORE_VERSION}"* /var/lib/apt/lists/*
+test -e /opt/rdma-core/lib/libibverbs/libionic-rdmav*.so
+EOF
+COPY --chmod=755 docker/rocm/ionic-rdma-env.sh /usr/local/bin/ionic-rdma-env.sh
 
 # --- verl (this checkout) -----------------------------------------------------------------------------------------
 COPY . /opt/verl

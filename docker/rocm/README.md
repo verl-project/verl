@@ -117,6 +117,15 @@ CP4 x EP32 with FSDP2, rollout TP1 x DP8 x EP8 per node. Multi-node runs need an
 workers run this image, and containers started with `--ulimit nofile=1048576:1048576` (the default open-file
 limit ran out in gloo after ~26 steps).
 
+RDMA between nodes: start the containers with `--device /dev/infiniband --ulimit memlock=-1:-1` and the site's RCCL
+settings (for example `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX` and the `NCCL_TOPO_FILE` of the host). On hosts with
+AMD ionic (Pollara / AINIC) NICs, the image's two ibverbs userspaces cover both driver generations: the base
+image's libionic for ionic drivers before 26.x, and upstream rdma-core in `/opt/rdma-core` for ionic 26.x (e.g.
+26.08). The recipe selects the one that can open the NICs with `ionic-rdma-env.sh`. Run
+`eval "$(ionic-rdma-env.sh)"` before `ray start` on every node too. With the wrong userspace RCCL logs
+`Using network Socket` instead of `Using network IB` and runs at TCP speed (MI355X, 2 nodes x 8, 1 GiB all-reduce:
+5.8 GB/s bus bandwidth over sockets vs 376 GB/s over RDMA).
+
 ## Release History
 
 - 2026/07/20: ROCm 7.14 stack — torch==2.12.0, triton==3.7.0, vLLM @`18d87a87d`,   SGLang @`0801cc05ed`, 

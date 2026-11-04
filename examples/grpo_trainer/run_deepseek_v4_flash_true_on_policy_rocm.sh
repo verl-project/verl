@@ -101,6 +101,12 @@ export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 ARM_ENV_NAMES=(PYTHONHASHSEED VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM
   CUDA_DEVICE_MAX_CONNECTIONS VLLM_ALLOW_INSECURE_SERIALIZATION VLLM_NO_USAGE_STATS VERL_FILE_LOGGER_PATH)
 [[ -v VLLM_ROCM_USE_AITER_MOE ]] && ARM_ENV_NAMES+=(VLLM_ROCM_USE_AITER_MOE)  # set by the image
+# RDMA: select the ibverbs userspace that matches the host's AMD ionic NIC driver (docker/rocm/ionic-rdma-env.sh;
+# with the wrong one RCCL silently falls back to TCP sockets) and pass the choice on to the Ray workers.
+if command -v ionic-rdma-env.sh >/dev/null; then
+  eval "$(ionic-rdma-env.sh)"
+  if [[ "${LD_LIBRARY_PATH:-}" == */opt/rdma-core/lib* ]]; then ARM_ENV_NAMES+=(LD_LIBRARY_PATH NCCL_DMABUF_ENABLE); fi
+fi
 
 # --- Arm switch: the only place the arms differ ------------------------------------------------------------------
 runtime_config_root="$(mktemp -d "${TMPDIR:-/tmp}/ds4flash-rocm-config.XXXXXX")"
