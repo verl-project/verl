@@ -753,7 +753,19 @@ def dispatch_rollout_weight_quantizer(
         getattr(hf_config, "model_type", None),
         getattr(getattr(hf_config, "text_config", None), "model_type", None),
     }
-    if rollout_quantization == "ascend":
+    use_ascend = rollout_quantization == "ascend"
+    if (
+        not use_ascend
+        and not isinstance(rollout_quantization, str)
+        and not has_override
+        and native is None
+        and getattr(rollout_config, "name", None) == "vllm"
+        and getattr(model_config, "local_path", None) is not None
+    ):
+        from verl.utils.qat.ascend import detect_ascend_modelslim
+
+        use_ascend = detect_ascend_modelslim(model_config.local_path)
+    if use_ascend:
         quantization_config = {"quant_method": "ascend"}
     elif has_override:
         if model_types & _DEEPSEEK_V4_MODEL_TYPES:

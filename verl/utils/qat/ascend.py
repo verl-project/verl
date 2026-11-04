@@ -22,6 +22,14 @@ import torch
 from verl.utils.qat.compressed_tensors import _HIGH_PRECISION_DTYPES, _PACKED_EXPERTS, _unpack_experts
 
 
+def detect_ascend_modelslim(model_path: str) -> bool:
+    try:
+        from vllm_ascend.quantization.utils import detect_quantization_method
+    except ImportError:
+        return False
+    return detect_quantization_method(model_path) == "ascend"
+
+
 class AscendMxfp8WeightQuantizer:
     """Export trainer weights in vLLM-Ascend's native W8A8_MXFP8 layout."""
 
