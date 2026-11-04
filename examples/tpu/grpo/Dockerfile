@@ -7,9 +7,9 @@ ARG TORCH_TPU_VERSION=0.2.0
 ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
 # torchtitan main 8ad0bfc (11/03/2026) + the Qwen3.5 TPU optimizations: Tokamax GatedDeltaNet kernels, Pallas
 # causal conv1d / gated RMSNorm, fused CE and grouped-matmul tiles, expert parallelism (EP > 1) and the fast dropless
-# EP dispatcher (Ring-of-Experts, chunked pipelining), google-pytorch/torchtitan branch qwen3_5-35b-a3b-tpu-moe-ep-fast.
+# EP dispatcher (Ring-of-Experts, chunked pipelining): head of google-pytorch/torchtitan#142.
 # Use any torchtitan main commit for the dense / EP = 1 recipes.
-ARG TORCHTITAN_COMMIT=e0f2114060554ce27c10baab959e97a7d1f197c7
+ARG TORCHTITAN_COMMIT=3f393cdcce6eea8d51d048c43b5d7e94858db8c4
 
 ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
 
