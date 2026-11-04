@@ -817,9 +817,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
-            if effective_mode == "delta_sharded":
+            if effective_mode == "delta_sharded" or getattr(self.checkpoint_engine, "consumes_training_engine", False):
                 # the delta engine owns the sync state machine (seed vs steady,
-                # snapshot prime), so it drives the training engine itself.
+                # snapshot prime), and engines that consume the training engine
+                # (e.g. sharded exports reading each rank's local shards) drive it themselves.
                 metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
             else:
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param()

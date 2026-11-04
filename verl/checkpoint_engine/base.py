@@ -133,6 +133,11 @@ class CheckpointEngine(ABC):
     #                       while steady updates carry sparse patches.
     wire_format = "named_tensors"
 
+    # True when send_weights takes the trainer's training engine (a BaseEngine) instead of a generator of full
+    # tensors, e.g. to send each rank's own shards (BaseEngine.get_per_tensor_param_shard) without an all-gather.
+    # The trainer worker then hands its training engine to send_weights.
+    consumes_training_engine = False
+
     @abstractmethod
     def prepare(self) -> dict[str, Any]:
         """Prepare checkpoint engine before each step send_weights/receive_weights.
@@ -353,11 +358,18 @@ class CheckpointEngineWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
-        await self.server_adapter.update_weights(
-            weights,
-            global_steps=global_steps,
-            wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
-        )
+        try:
+            await self.server_adapter.update_weights(
+                weights,
+                global_steps=global_steps,
+                wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
+            )
+        except BaseException:
+            # close the receiver now rather than whenever the generator is collected (the traceback keeps it alive),
+            # so an engine can tell its peers right away that this sync failed
+            if hasattr(weights, "aclose"):
+                await weights.aclose()
+            raise
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
