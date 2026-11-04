@@ -391,13 +391,13 @@ class WeightUpdateTicket:
     trainer_published: list[ray.ObjectRef]
     rollout_committed: concurrent.futures.Future
 
-    def wait_published(self):
+    async def wait_published(self):
         """Wait until trainer workers have published this weight version."""
-        return ray.get(self.trainer_published)
+        return await asyncio.gather(*self.trainer_published)
 
-    def wait_committed(self):
+    async def wait_committed(self):
         """Wait until rollout workers have installed this weight version."""
-        return self.rollout_committed.result()
+        return await asyncio.wrap_future(self.rollout_committed)
 
 
 class CheckpointEngineManager:
@@ -422,6 +422,23 @@ class CheckpointEngineManager:
          v                                        |    |    |    |    |    |    |    |
          └─────────────(nccl/nixl/..)─────────────┴────┴────┴────┴────┴────┴────┴────┘
     ```
+
+    Design notes:
+
+    1. Coupled strong synchronization (``support_publish_weights=False``), such as NCCL/NIXL:
+       the trainer sender and rollout receiver must participate in the same transfer. The manager waits for the
+       previous update to commit, aborts in-flight generation, releases the rollout KV cache, builds the communication
+       topology, and starts trainer send plus rollout receive. ``update_weights`` returns only after rollout installs
+       the version, both sides finalize the transfer, and rollout generation resumes.
+
+    2. Decoupled publish/commit (``support_publish_weights=True``), such as a trainer D2H snapshot followed by an
+       asynchronous rollout RDMA read: after synchronously building the control-plane topology, the manager starts
+       trainer publish and schedules rollout commit on its background event loop. ``update_weights`` returns once the
+       immutable trainer snapshot is published; in parallel, the background task aborts generation, releases the KV
+       cache, fetches and installs that version, finalizes the transfer, and resumes rollout.
+
+    The manager allows at most one uncommitted version. Every new update first waits for the previous rollout commit,
+    which bounds snapshot lifetime and prevents versions from being installed out of order.
 
     Args:
         config: The checkpoint engine config.
@@ -560,7 +577,16 @@ class CheckpointEngineManager:
         """
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
-    def update_weights(self, global_steps: int = None):
+    @staticmethod
+    def _merge_sync_metrics(results: list[Any]) -> dict[str, Any]:
+        sync_metrics = {}
+        for result in results:
+            if isinstance(result, dict):
+                sync_metrics.update(result)
+        return sync_metrics
+
+    @auto_await
+    async def update_weights(self, global_steps: int = None):
         """Update weights from actor worker group to rollout replicas.
 
         Args:
@@ -568,25 +594,33 @@ class CheckpointEngineManager:
         """
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
-            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
         # Wait previous update to be committed
         if self._update_ticket is not None:
-            self._update_ticket.wait_committed()
+            await self._update_ticket.wait_committed()
 
-        self._update_ticket = self.submit_update(global_steps=global_steps)
+        self._update_ticket = await self.submit_update(global_steps=global_steps)
         if self.backend_cls.support_publish_weights:
-            return self._update_ticket.wait_published()
+            published = await self._update_ticket.wait_published()
+            return self._merge_sync_metrics(published)
         else:
-            return self._update_ticket.wait_committed()
+            return await self._update_ticket.wait_committed()
 
-    def submit_update(self, global_steps) -> WeightUpdateTicket:
+    async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
         # 1. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
+
+        if not self.backend_cls.support_publish_weights:
+            # Coupled transports allocate receive buffers and start collectives in
+            # build_process_group(), so preserve the original ordering: quiesce
+            # rollout and release its KV cache before either of those operations.
+            await self.abort_replicas()
+            await self.release_kv_cache_replicas()
 
         # 2. build process group
         self.build_process_group(rollout)
@@ -616,11 +650,12 @@ class CheckpointEngineManager:
         global_steps: int | None,
     ):
         """Install a published weight version on rollout workers."""
-        await self.abort_replicas()
-        await self.release_kv_cache_replicas()
+        if self.backend_cls.support_publish_weights:
+            await self.abort_replicas()
+            await self.release_kv_cache_replicas()
 
         rollout_committed = rollout.update_weights(global_steps=global_steps)
-        await asyncio.gather(*trainer_published, *rollout_committed)
+        results = await asyncio.gather(*trainer_published, *rollout_committed)
 
         await asyncio.gather(
             *self.actor_wg.execute_checkpoint_engine(["finalize"] * self.actor_wg.world_size),
@@ -629,6 +664,7 @@ class CheckpointEngineManager:
 
         await self.resume_kv_cache_replicas()
         await self.resume_generation_replicas()
+        return self._merge_sync_metrics(results[: self.actor_wg.world_size])
 
 
 async def split_weight_chunks(
