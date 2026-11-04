@@ -681,7 +681,9 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
         *,
         model_types: Iterable[Optional[str]] = (),
         is_multimodal: bool = False,
+        rollout_backend: str = "vllm",
     ):
+        self.rollout_backend = rollout_backend
         quant_method = str(fp8_config.get("quant_method", "")).lower()
         self.passthrough = bool(_DEEPSEEK_V4_MODEL_TYPES & set(model_types))
         if self.passthrough:
@@ -727,6 +729,11 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
 
     def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
         if self.passthrough:
+            if self.rollout_backend == "sglang":
+                # SGLang's native DeepSeek loader takes Bridge's packed int8
+                # weights and numeric E8M0 scales, not vLLM's uint8 views.
+                yield from weights
+                return
             # Megatron-Bridge already exported DeepSeek-V4's private FP8/FP4
             # layout. vLLM allocated the expert bytes as uint8, so only
             # reinterpret the packed values and E8M0 scales before transfer.
@@ -933,6 +940,7 @@ def dispatch_rollout_weight_quantizer(
             quantization_config,
             model_types=model_types,
             is_multimodal=getattr(hf_config, "text_config", None) is not None,
+            rollout_backend=getattr(rollout_config, "name", "vllm"),
         )
     else:
         raise NotImplementedError(

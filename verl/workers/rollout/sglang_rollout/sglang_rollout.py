@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+from contextlib import asynccontextmanager
 from typing import Generator
 
 import ray
@@ -47,10 +48,11 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import (
-    DEEPSEEK_V4_FUSION_GROUPS,
     SGLANG_LORA_NAME,
+    get_deepseek_v4_fusion_groups,
     get_named_tensor_buckets,
     lora_served_as_adapter,
+    normalize_lora_weight_name_for_sglang,
     normalize_peft_config_for_sglang,
 )
 
@@ -273,6 +275,19 @@ class ServerAdapter(BaseRollout):
             return self._pd_tp_local_rank == 0
         return self.device_mesh["infer_tp"].get_local_rank() == 0
 
+    @asynccontextmanager
+    async def _weight_update_session(self):
+        # SGLang restores packed parameters once before a refit and repacks only
+        # after every bucket (including the quantized finalizer) has arrived.
+        engine = self._engine if self._engine is not None and self._is_server_tp_leader() else None
+        if engine is not None:
+            await engine.begin_weight_update()
+        try:
+            yield
+        finally:
+            if engine is not None:
+                await engine.end_weight_update()
+
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
 
@@ -344,6 +359,8 @@ class ServerAdapter(BaseRollout):
         peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
         if peft_config and base_sync_done:
             if self.device_mesh["infer_tp"].get_local_rank() == 0:
+                # Consume collective exports before sending any server requests.
+                serialize_peft_config, serialize_named_tensors = self.wrap_lora_params(peft_config, weights)
                 # unload lora
                 models_result = await self._engine.available_models()
                 exists = any(item["id"] == SGLANG_LORA_NAME for item in models_result["data"])
@@ -351,7 +368,6 @@ class ServerAdapter(BaseRollout):
                     await self._engine.unload_lora_adapter(SGLANG_LORA_NAME)
 
                 # load lora by tensor
-                serialize_peft_config, serialize_named_tensors = self.wrap_lora_params(peft_config, weights)
                 from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
 
                 req = LoadLoRAAdapterFromTensorsReqInput(
@@ -361,34 +377,35 @@ class ServerAdapter(BaseRollout):
                 )
                 # send http request
                 await self._engine.load_lora_adapter_from_tensor(req)
+            else:
+                # Consume export collectives and any DTensor.full_tensor() gathers.
+                for _, tensor in weights:
+                    _preprocess_tensor_for_update_weights(tensor.detach())
         else:
-            update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            fusion_groups = (
-                DEEPSEEK_V4_FUSION_GROUPS
-                if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
-                else ()
-            )
-            async for params_batch in get_named_tensor_buckets(
-                weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
-            ):
-                load_format = None
+            async with self._weight_update_session():
+                update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+                fusion_groups = get_deepseek_v4_fusion_groups(self.model_config.hf_config)
+                async for params_batch in get_named_tensor_buckets(
+                    weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
+                ):
+                    load_format = None
+                    if use_quantized_refit:
+                        load_format = LOADER_FQN
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=load_format,
+                    )
                 if use_quantized_refit:
-                    load_format = LOADER_FQN
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                    load_format=load_format,
-                )
-            if use_quantized_refit:
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                    load_format=LOADER_FQN,
-                )
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=LOADER_FQN,
+                    )
 
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
@@ -408,10 +425,11 @@ class ServerAdapter(BaseRollout):
         """
         assert self._pd_role is None, "delta checkpoint engine does not support PD disaggregation"
         applied = 0
-        for named, is_last in flushes:
-            await self._update_weights_delta_flush(named, flush_cache=is_last)
-            applied += 1
-            del named
+        async with self._weight_update_session():
+            for named, is_last in flushes:
+                await self._update_weights_delta_flush(named, flush_cache=is_last)
+                applied += 1
+                del named
         if self._engine is not None and self._is_server_tp_leader() and global_steps is not None:
             await self.server_actor.set_global_steps.remote(global_steps)
         logger.info("delta apply v=%s flushes=%d (in-place via sglang loader)", global_steps, applied)
@@ -469,8 +487,12 @@ class ServerAdapter(BaseRollout):
         peft_config_json = normalize_peft_config_for_sglang(peft_config)
 
         # lora weights
+        model_type = getattr(self.model_config.hf_config, "model_type", None)
         processed_weights: dict[str, torch.Tensor] = {
-            name: _to_ipc_device(_preprocess_tensor_for_update_weights(tensor.detach())) for name, tensor in weights
+            normalize_lora_weight_name_for_sglang(name, model_type): _to_ipc_device(
+                _preprocess_tensor_for_update_weights(tensor.detach())
+            )
+            for name, tensor in weights
         }
 
         # One serialized copy per TP rank, same field and shape as the weight sync above.
