@@ -39,6 +39,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+    # Greedy REMAX baselines are used for their rewards, not score-centering training heads.
+    params.pop("topk_log_probs", None)
     params["top_p"] = 1.0
     params["top_k"] = -1
     params["temperature"] = 0
@@ -68,6 +70,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        # the trainer never consumes the sampler head on validation rollouts
+        if config.topk_log_probs and not validate:
+            sampling_params["topk_log_probs"] = config.topk_log_probs
 
         # override sampling params for validation
         if validate:

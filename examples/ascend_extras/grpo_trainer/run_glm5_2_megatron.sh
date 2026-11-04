@@ -158,7 +158,6 @@ ACTOR_ARGS=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.attention_softmax_in_fp32=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.pad_bshd_to_minibatch_max=False
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.dsa_grouped_recompute=True

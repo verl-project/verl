@@ -3,7 +3,7 @@
 #
 # Environment:
 #   - transformers==5.9.0
-#   - vllm==0.24.0
+#   - vllm==0.24.0; on AMD ROCm, a vLLM with VLLM_ROCM_DSV4_BPRESHUFFLE (vllm-project/vllm#63604)
 #   - veomni==0.1.12
 
 set -xeuo pipefail
@@ -156,6 +156,36 @@ TRAINER=(
     trainer.total_training_steps=500
 )
 
+# Environment of every Ray worker, also on a cluster started with a plain `ray start`. A value set in the
+# launching shell wins. Keys that `ray job submit --runtime-env` already sets are left to the job, since Ray
+# rejects the same key in ray.init's runtime env.
+#   NCCL_DEBUG=VERSION     ROCm: at verl's default WARN, RCCL logs a deprecation warning for every MoE all-to-all
+#   VLLM_ROCM_USE_AITER=1  gfx94x: vLLM's DeepSeek-V4 sparse-attention indexer has no other ROCm path. The GPU
+#                          architecture is read from this node's KFD topology, so set it explicitly when
+#                          launching from a node without AMD GPUs
+EV='+ray_kwargs.ray_init.runtime_env.env_vars'
+job_env_keys=" $(python -c "import json, os; print(*json.loads(os.environ.get('RAY_JOB_CONFIG_JSON_ENV_VAR', '{}')).get('runtime_env', {}).get('env_vars', {}))" 2>/dev/null || true) "
+RUNTIME_ENV=()
+add_worker_env() {
+    [[ "$job_env_keys" == *" $1 "* ]] || RUNTIME_ENV+=("${EV}.$1=\"$2\"")
+}
+if python -c "import sys, torch; sys.exit(torch.version.hip is None)" 2>/dev/null; then
+    add_worker_env NCCL_DEBUG "${NCCL_DEBUG:-VERSION}"
+    gfx_version=$(awk '$1 == "gfx_target_version" && $2 > 0 {print $2; exit}' /sys/class/kfd/kfd/topology/nodes/*/properties 2>/dev/null || true)
+    if [ -n "${VLLM_ROCM_USE_AITER:-}" ] || [[ "$gfx_version" == 904?? ]]; then
+        add_worker_env VLLM_ROCM_USE_AITER "${VLLM_ROCM_USE_AITER:-1}"
+        aiter=${VLLM_ROCM_USE_AITER:-1}
+        # With AITER, a vLLM without VLLM_ROCM_DSV4_BPRESHUFFLE B-preshuffles DeepSeek-V4's FP8 weights once after
+        # loading, and the weights verl syncs later are not reshuffled. A vLLM that cannot be imported here is not checked.
+        if [[ $rollout_name == vllm && (${aiter,,} == 1 || ${aiter,,} == true) ]] &&
+            python -c "import sys, vllm.envs as e; sys.exit('VLLM_ROCM_DSV4_BPRESHUFFLE' in e.environment_variables)" 2>/dev/null; then
+            echo "With AITER this vLLM B-preshuffles DeepSeek-V4's FP8 weights, so the rollouts would run on corrupted weights" \
+                "after the first weight sync. Use a vLLM with VLLM_ROCM_DSV4_BPRESHUFFLE (vllm-project/vllm#63604)." >&2
+            exit 1
+        fi
+    fi
+fi
+
 ########################### launch ###########################
 python -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -163,4 +193,5 @@ python -m verl.trainer.main_ppo \
     "${ENGINE_CONFIG[@]}" \
     "${ACTOR_CONFIG[@]}" \
     "${ROLLOUT_CONFIG[@]}" \
+    "${RUNTIME_ENV[@]}" \
     "$@"

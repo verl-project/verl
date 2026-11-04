@@ -4,7 +4,7 @@ set -x
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 SAVE_PATH=${SAVE_PATH:-./profiler_data-dis}
 rm -rf "$SAVE_PATH"
 

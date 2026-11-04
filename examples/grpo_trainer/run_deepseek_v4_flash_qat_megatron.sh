@@ -23,8 +23,7 @@
 #
 # Knobs
 #   QAT_ENABLE=True               turn the fake-quant on (default False, i.e. plain fp8 training)
-#   QAT_MODE=mxfp4_experts        verl/utils/modelopt/quantize.py; scopes to *mlp.experts*
-#   QAT_BYPASS_TE_FP8_ASSERT=True ModelOpt refuses to run any quantizer under TE's fp8_autocast.
+#   QAT_MODE=mxfp4_experts        verl/utils/qat/modelopt.py; scopes to *mlp.experts*
 #                                 That guard exists to keep pure simulation faithful; here the
 #                                 stacking is intentional (FP4 weights feeding a real FP8 GEMM), so
 #                                 it is lifted at runtime. Activations are quantized once, by TE --
@@ -104,7 +103,6 @@ ROLLOUT_IS_THRESHOLD=${ROLLOUT_IS_THRESHOLD:-2.0}
 # MXFP4 quantization-aware training on the routed MoE experts. See the header.
 QAT_ENABLE=${QAT_ENABLE:-False}
 QAT_MODE=${QAT_MODE:-mxfp4_experts}
-QAT_BYPASS_TE_FP8_ASSERT=${QAT_BYPASS_TE_FP8_ASSERT:-True}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
@@ -220,7 +218,6 @@ if [ "${QAT_ENABLE}" = "True" ]; then
     QAT_ARGS=(
         ++actor_rollout_ref.actor.megatron.qat.enable=True
         ++actor_rollout_ref.actor.megatron.qat.mode=${QAT_MODE}
-        ++actor_rollout_ref.actor.megatron.qat.bypass_te_fp8_assert=${QAT_BYPASS_TE_FP8_ASSERT}
         # rollout.qat is an oc.select alias of actor.megatron.qat in the generated config. The vLLM
         # worker must not build quantizers: it consumes the MXFP4 weights the bridge exports.
         ++actor_rollout_ref.rollout.qat.enable=False
@@ -252,7 +249,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.max_model_len=${ROLLOUT_MAX_MODEL_LEN}
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB}
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=${ROLLOUT_KV_CACHE_DTYPE}
-    +actor_rollout_ref.rollout.quantization=fp8
 )
 
 REWARD=(

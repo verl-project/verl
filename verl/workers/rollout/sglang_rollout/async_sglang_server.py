@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import dataclasses
 import json
 import logging
 import os
@@ -28,6 +27,7 @@ import torch
 from packaging import version
 from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
+    Engine,
     ServerArgs,
     _GlobalState,
     app,
@@ -52,12 +52,19 @@ from verl.utils.profiler import (
     relocate_rollout_traces,
     rollout_profiler_global_ranks,
 )
+from verl.utils.sglang.sglang_quant_utils import (
+    prepare_sglang_quantization,
+    resolve_sglang_quantization_config,
+    set_default_sglang_quantization_backends,
+    uses_sglang_refit_loader,
+)
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
+    default_moe_runner_backend,
     lora_rank_of,
     lora_served_as_adapter,
     sglang_lora_target_modules,
@@ -299,17 +306,22 @@ class SGLangHttpServer:
         # (e.g. text "flashinfer" vs vision "flashinfer_cudnn"), so don't mirror it.
         # Leave None to let sglang's VisionAttention auto-pick per device
         # (triton_attn on Ada, fa3 on Hopper, fa4 on Blackwell).
-        quantization = self.config.get("quantization", None)
-        if quantization is not None:
-            if quantization == "fp8":
-                from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
+        model_override_args = {}
+        quantization_config = resolve_sglang_quantization_config(self.config, self.model_config)
+        if quantization_config is not None and (
+            self.config.quantization.enabled or uses_sglang_refit_loader(quantization_config)
+        ):
+            # The trainer quantizes every refit to this config. On Hopper the block-FP8 linear/MoE methods keep
+            # weights in checkpoint layout after loading, so update_weights_from_tensor can write refits in place.
+            quantization_config = prepare_sglang_quantization(
+                quantization_config,
+                custom_weight_loader,
+                engine_kwargs,
+            )
+            model_override_args["quantization_config"] = quantization_config
+            logger.info(f"Rollout quantization_config: {quantization_config}")
 
-                assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
-                    "sglang>=0.5.5 is required for FP8 quantization"
-                )
-                fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
-            else:
-                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+        set_default_sglang_quantization_backends(quantization_config, engine_kwargs)
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -332,13 +344,19 @@ class SGLangHttpServer:
             "attention_backend": attention_backend,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
-            "quantization": quantization,
-            "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
-            if quantization == "fp8"
-            else json.dumps({}),
+            "json_model_override_args": json.dumps(model_override_args),
             "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
         }
+        # bf16 weight updates crash SGLang's default MoE runner on Blackwell (see default_moe_runner_backend)
+        moe_runner_backend = default_moe_runner_backend(quantization_config, engine_kwargs, self.model_config.hf_config)
+        if moe_runner_backend is not None:
+            args["moe_runner_backend"] = moe_runner_backend
+            logger.info(
+                "sglang moe_runner_backend=%s: SGLang's default on Blackwell cannot take bf16 weight updates "
+                "(sgl-project/sglang#27787); set engine_kwargs.sglang.moe_runner_backend to override",
+                moe_runner_backend,
+            )
 
         # update lora-related args
         if self.lora_as_adapter:
@@ -371,20 +389,15 @@ class SGLangHttpServer:
             # start sglang metrics
             args["enable_metrics"] = True
 
-        # enable_weights_cpu_backup is supported in sglang>=0.5.3
-        if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
-            # HYBRID mode also needs CPU weight backup so that:
-            #   1. sleep() can release GPU weights to free memory for the training engine.
-            #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
-            #      from CPU before applying the latest trainer weights via IPC.
-            # Without this, sleep() releases GPU memory but update_weights() cannot restore
-            # the weight buffers, causing OOM when training tries to use the freed memory.
-            enable_weights_cpu_backup = (
-                True
-                if self.rollout_mode in (RolloutMode.COLOCATED, RolloutMode.HYBRID) or self.model_config.lora_rank > 0
-                else False
-            )
-            args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
+        # HYBRID mode also needs CPU weight backup so that:
+        #   1. sleep() can release GPU weights to free memory for the training engine.
+        #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
+        #      from CPU before applying the latest trainer weights via IPC.
+        # Without this, sleep() releases GPU memory but update_weights() cannot restore
+        # the weight buffers, causing OOM when training tries to use the freed memory.
+        args["enable_weights_cpu_backup"] = (
+            self.rollout_mode in (RolloutMode.COLOCATED, RolloutMode.HYBRID) or self.model_config.lora_rank > 0
+        )
 
         if self._disaggregation_role != "null":
             disagg = self.config.disaggregation
@@ -405,10 +418,6 @@ class SGLangHttpServer:
 
         # mtp
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            # Enable weights CPU backup for sglang >= 0.5.6
-            if version.parse(sglang.__version__) < version.parse("0.5.6"):
-                raise ValueError(f"sglang version {sglang.__version__} is not supported for MTP rollout")
-
             args["speculative_algorithm"] = self.config.mtp.speculative_algorithm
             args["speculative_num_steps"] = self.config.mtp.speculative_num_steps
             args["speculative_eagle_topk"] = self.config.mtp.speculative_eagle_topk
@@ -422,32 +431,12 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        # For SGLang main branch or version >= 0.5.10
-        # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
-        if version.parse(sglang.__version__) >= version.parse("0.5.10"):
-            from sglang.srt.entrypoints.http_server import Engine
-
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
-                server_args=server_args,
-                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
-                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
-                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
-            )
-        elif version.parse(sglang.__version__) >= version.parse("0.5.7"):
-            from sglang.srt.entrypoints.http_server import _launch_subprocesses
-
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
-                server_args=server_args,
-                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
-                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
-                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
-            )
-        else:
-            from sglang.srt.entrypoints.http_server import _launch_subprocesses
-
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
-                server_args=server_args
-            )
+        self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
+            server_args=server_args,
+            init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
+            run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
+            run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
+        )
 
         # In multi-node cases, non-zero rank nodes should not launch http server.
         if self.node_rank > 0:
@@ -477,6 +466,9 @@ class SGLangHttpServer:
         self._server_port, self._server_task = await run_uvicorn(app, server_args, self._server_address)
         self.tokenizer_manager.server_status = ServerStatus.Up
 
+    @RLInsightLogger.trace_state_decorator(
+        "wake_up", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def wake_up(self):
         if self.node_rank != 0:
             return
@@ -501,6 +493,9 @@ class SGLangHttpServer:
         """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
         return lora_served_as_adapter(self.model_config)
 
+    @RLInsightLogger.trace_state_decorator(
+        "sleep", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -524,10 +519,16 @@ class SGLangHttpServer:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
             await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             await self.tokenizer_manager.flush_cache()
 
+    @RLInsightLogger.trace_state_decorator(
+        "release_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -535,6 +536,9 @@ class SGLangHttpServer:
         obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
+    @RLInsightLogger.trace_state_decorator(
+        "resume_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
+    )
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -553,6 +557,7 @@ class SGLangHttpServer:
         bootstrap_host: Optional[str] = None,
         bootstrap_port: Optional[int] = None,
         bootstrap_room: Optional[int] = None,
+        session_id: Optional[str] = None,
     ) -> TokenOutput:
         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
         # paired local-prefill + remote-decode calls; decode returns the tokens
@@ -653,7 +658,10 @@ class SGLangHttpServer:
         if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.trace_state(
+            "sglang_generate",
+            state_lane_id=ray.get_runtime_context().get_actor_name(),
+        ):
             output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
@@ -680,22 +688,21 @@ class SGLangHttpServer:
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
-            if self.config.skip_tokenizer_init:
-                # convert to numpy
-                captured = output.get("meta_info", {}).get("routed_experts", None)
-                routed_experts = captured.numpy() if captured is not None else None
-            else:
-                from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
+            captured = output.get("meta_info", {}).get("routed_experts", None)
+            if captured is not None:
+                from sglang.srt.state_capturer.routed_experts import extract_routed_experts_from_meta_info
+
+                routed_experts = extract_routed_experts_from_meta_info(output)
 
                 hf_config = self.model_config.hf_config
-                if not hasattr(hf_config, "num_hidden_layers") or not hasattr(hf_config, "num_experts_per_tok"):
+                text_config = getattr(hf_config, "text_config", hf_config)
+                if not hasattr(text_config, "num_hidden_layers") or not hasattr(text_config, "num_experts_per_tok"):
                     raise AttributeError(
-                        "enable_rollout_routing_replay is set, but hf_config is missing "
-                        "'num_hidden_layers' or 'num_experts_per_tok'. This feature requires an MoE model "
-                        "configuration that defines these attributes."
+                        "enable_rollout_routing_replay requires an MoE model config with "
+                        "`num_hidden_layers` and `num_experts_per_tok`"
                     )
-                routed_experts = extract_routed_experts_from_meta_info(output).reshape(
-                    -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
+                routed_experts = routed_experts.reshape(
+                    -1, text_config.num_hidden_layers, text_config.num_experts_per_tok
                 )
 
         extra_fields = {"global_steps": self.global_steps}
@@ -853,7 +860,7 @@ class SGLangReplica(RolloutReplica):
                     }
                 },
                 name=name,
-                max_concurrency=self.max_concurrency,
+                max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
@@ -887,12 +894,21 @@ class SGLangReplica(RolloutReplica):
             else f"{server_address}:{server_port}"
         )
 
-    async def abort_all_requests(self):
+    async def abort_all_requests(self, reject_request: bool = False):
         """Abort all ongoing generation requests on the primary server.
 
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
+        if reject_request:
+            # SGLang blocks new requests inside its own tokenizer manager, so verl has no
+            # admission point to fail them at. Requests routed here after the pause wait
+            # until continue_generation(). TODO: add a verl-side gate in front of
+            # tokenizer_manager.pause_generation() so this replica can reject them too.
+            logger.warning(
+                "SGLang rollout ignores reject_request=True: requests arriving while generation "
+                "is paused will wait for the next resume_generation() instead of failing over."
+            )
         await self.servers[0].abort_all_requests.remote()
 
     async def resume_generation(self):

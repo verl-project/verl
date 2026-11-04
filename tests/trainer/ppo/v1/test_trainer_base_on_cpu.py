@@ -12,12 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+import pytest
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
-from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+
+
+def test_greedy_reward_baseline_does_not_request_score_centering_heads():
+    params = {"top_p": 0.9, "top_k": 64, "temperature": 1.0, "topk_log_probs": 128, "logprobs": True}
+    apply_greedy_sampling_params(params)
+    assert params == {"top_p": 1.0, "top_k": -1, "temperature": 0, "logprobs": True}
 
 
 class _StubTrainer(PPOTrainer):
@@ -163,3 +171,31 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
         "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
         10,
     )
+
+
+@pytest.mark.parametrize("score_centering", [True, False])
+def test_update_actor_passes_score_centering_flag(score_centering):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "actor": {
+                    "ppo_mini_batch_size": 2,
+                    "calculate_entropy": False,
+                    "entropy_coeff": 0.0,
+                    "ppo_epochs": 1,
+                    "data_loader_seed": 1,
+                    "shuffle": False,
+                    "policy_loss": {"rollout_correction": {"score_centering": score_centering}},
+                },
+                "rollout": {"n": 4, "temperature": 1.0},
+            }
+        }
+    )
+    trainer.actor_rollout_wg = MagicMock()
+    trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
+    batch = SimpleNamespace(extra_info={})
+
+    trainer._update_actor(batch, {})
+
+    assert batch.extra_info["score_centering"] is score_centering

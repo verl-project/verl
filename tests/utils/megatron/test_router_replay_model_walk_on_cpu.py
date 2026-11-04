@@ -15,7 +15,7 @@
 """Router replay addressed through the forwarded model rather than the global router list.
 
 Every ``RouterReplay`` appends itself to the process-global ``RouterReplay.router_instances``, so
-when a build registers routers that are not part of the final model — an mbridge prebuild does this
+when a build registers routers that are not part of the final model
 for Qwen3-VL — that list is longer than the model's local layer count and a positional slice of it
 addresses the wrong objects. Replay targets then land on orphans while the real routers keep an
 unset ``target_topk_idx``, and the action toggle never reaches the routers that actually forward.
@@ -83,7 +83,7 @@ def _routers(model):
 @pytest.fixture
 def orphans_then_model(monkeypatch):
     """Register routers that never make it into the model, then build the model — the registration
-    order an mbridge prebuild produces."""
+    order a preliminary model build can produce."""
     monkeypatch.setattr(router_replay_utils, "TopKRouter", FakeTopKRouter)
     RouterReplay.router_instances.clear()
     orphans = [RouterReplay() for _ in range(NUM_LAYERS)]

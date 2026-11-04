@@ -91,12 +91,8 @@ override_transformer_config:
 
 override_mcore_model_config: {}
 
-# oc.select: default val for ref.megatron.use_mbridge
+# Enable bridge-based Megatron model construction.
 use_mbridge: True
-
-# Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge
-# oc.select: default val for ref.megatron.vanilla_mbridge
-vanilla_mbridge: False
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True
@@ -144,18 +140,14 @@ qat:
   _target_: verl.workers.config.QATEngineConfig
   # Whether to enable QAT
   enable: false
-  # Quantization mode: "w4a16" (weight-only NVFP4), "w4a4" (NVFP4 weight + activation),
-  # or "mxfp4_experts" (weight-only MXFP4 on routed MoE experts; keep TE fp8_autocast on)
-  mode: "w4a16"
+  # Quantization mode: "fp8", "mxfp8", "mxfp4", "mxfp4_mxfp8", or "nvfp4".
+  # NVFP4 is W4A4 on routed experts only.
+  # "mxfp4_experts" is weight-only MXFP4 on routed experts for DeepSeek-V4; it stacks on TE FP8 training
+  # (override_transformer_config.fp8), whose real FP8 GEMM then quantizes the activations.
+  mode: "fp8"
   # Group size for blockwise quantization (NVFP4 requires 16)
   group_size: 16
   # Module name patterns to exclude from quantization (fnmatch style for Megatron)
   ignore_patterns:
     - "lm_head"
     - "*mlp.gate"
-  # Activation observer strategy (W4A4 only): "static_minmax", "memoryless_minmax", "minmax"
-  activation_observer: null
-  # Path to quantization config JSON for vLLM weight export
-  quantization_config_path: null
-  # Let weight-only fake-quant run under TE fp8_autocast (real FP8 GEMM); lifts modelopt's guard.
-  bypass_te_fp8_assert: false
