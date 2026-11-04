@@ -248,15 +248,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
         ``global_mini_batch_sizes`` carries controller-established padded row
         counts used for slicing. ``global_mini_batch_padding_counts`` carries the
         number of synthetic rows excluded from loss normalization.
-        Otherwise the legacy fixed-size ``mini_batch_size`` or
-        ``num_mini_batch`` contract is used. The optional global padding mask
-        keeps sequence-level normalization padding-aware when workers shuffle rows.
+        Otherwise the fixed-size ``mini_batch_size`` contract is used. The
+        optional global padding mask keeps sequence-level normalization
+        padding-aware when workers shuffle rows.
         """
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
         mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
-        num_mini_batch = tu.pop(data, key="num_mini_batch", default=None)
         global_mini_batch_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
         global_mini_batch_padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
         global_padding_mask = tu.pop(data, key=PADDING_MASK_KEY, default=None)
@@ -264,11 +263,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
 
-        assert global_mini_batch_sizes is not None or mini_batch_size is not None or num_mini_batch is not None
-
         if global_mini_batch_sizes is not None:
-            if mini_batch_size is not None or num_mini_batch is not None:
-                raise ValueError("global_mini_batch_sizes cannot be combined with mini_batch_size or num_mini_batch")
+            if mini_batch_size is not None:
+                raise ValueError("global_mini_batch_sizes cannot be combined with mini_batch_size")
             if global_padding_mask is not None:
                 raise ValueError(f"{PADDING_MASK_KEY} cannot be combined with global_mini_batch_sizes")
             dp_size = self.engine.get_data_parallel_size()
@@ -296,14 +293,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             dataloader = tu.make_variable_batch_iterator(data, mini_batch_sizes=local_mini_batch_sizes, epochs=epochs)
             total_num_iterations = len(global_mini_batch_sizes) * epochs
         else:
-            if mini_batch_size is None:
-                assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
-                mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
-            else:
-                assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
-                    f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
-                )
-                mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
+            assert mini_batch_size is not None
+            assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
+                f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+            )
+            mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
 
             # make iterator
             dataloader = tu.make_iterator(

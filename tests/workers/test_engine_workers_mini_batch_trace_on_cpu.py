@@ -87,7 +87,7 @@ def test_update_loop_names_each_mini_batch(monkeypatch):
     worker.train_batch = MagicMock(return_value={})
 
     data = TensorDict({}, batch_size=[3])
-    tu.assign_non_tensor(data, num_mini_batch=3)
+    tu.assign_non_tensor(data, mini_batch_size=1)
 
     assert TrainingWorker.train_mini_batch(worker, data) is None
     # Numbered from the start of the step: without the index every iteration looks alike.
