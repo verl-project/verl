@@ -49,21 +49,21 @@ def _engine(**overrides):
 
 
 def _worker(engine):
-    return SimpleNamespace(
-        engine=engine,
-        engine_config=SimpleNamespace(
-            forward_only=False,
-            use_dynamic_bsz=False,
-            infer_max_token_len_per_gpu=128,
-            infer_micro_batch_size_per_gpu=1,
-            max_token_len_per_gpu=128,
-            micro_batch_size_per_gpu=1,
-            use_fused_kernels=False,
-        ),
-        model_config={},
-        loss_fn=lambda: None,
-        profiler=MagicMock(),
+    worker = TrainingWorker.__new__(TrainingWorker)
+    worker.engine = engine
+    worker.engine_config = SimpleNamespace(
+        forward_only=False,
+        use_dynamic_bsz=False,
+        infer_max_token_len_per_gpu=128,
+        infer_micro_batch_size_per_gpu=1,
+        max_token_len_per_gpu=128,
+        micro_batch_size_per_gpu=1,
+        use_fused_kernels=False,
     )
+    worker.model_config = {}
+    worker.loss_fn = lambda: None
+    worker.profiler = MagicMock()
+    return worker
 
 
 def _record_names(monkeypatch):
@@ -78,13 +78,14 @@ def _record_names(monkeypatch):
     return names
 
 
-def test_update_loop_names_each_mini_batch(monkeypatch):
+def test_worker_layout_updates_profiler_and_scheduler(monkeypatch):
     mini_batches = [TensorDict({}, batch_size=[]) for _ in range(3)]
     monkeypatch.setattr(tu, "make_iterator", lambda data, **kwargs: iter(mini_batches))
     names = _record_names(monkeypatch)
 
     worker = _worker(_engine())
-    worker.train_batch = MagicMock(return_value={})
+    scheduler_updates = []
+    worker.train_batch = lambda batch: scheduler_updates.append(tu.get(batch, "update_lr_scheduler")) or {}
 
     data = TensorDict({}, batch_size=[3])
     tu.assign_non_tensor(data, mini_batch_size=1)
@@ -95,9 +96,10 @@ def test_update_loop_names_each_mini_batch(monkeypatch):
     # The profiler is advanced once per mini-batch -- the unit a torch.profiler.schedule
     # sub-samples the update loop by.
     assert worker.profiler.step.call_count == len(mini_batches)
+    assert scheduler_updates == [False, False, True]
 
 
-def test_variable_size_update_loop_excludes_padding_from_loss_normalization():
+def test_controller_layout_excludes_padding_from_loss_normalization():
     worker = _worker(_engine(get_data_parallel_size=lambda: 2))
     seen_batches = []
 
@@ -119,7 +121,7 @@ def test_variable_size_update_loop_excludes_padding_from_loss_normalization():
     ]
 
 
-def test_fixed_size_update_loop_counts_shuffled_non_padding_rows_across_dp(monkeypatch):
+def test_worker_layout_counts_shuffled_non_padding_rows_across_dp(monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda group: 2)
 
     def all_gather_object(output, local_valid_rows, group):
