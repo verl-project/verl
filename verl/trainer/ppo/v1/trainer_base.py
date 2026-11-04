@@ -613,6 +613,35 @@ class PPOTrainer(ABC):
 
     # ------------------------------ abstract methods ------------------------------
 
+    def sync_initial_weights(self, checkpoint_manager: Optional["CheckpointEngineManager"] = None):
+        """Push the trainer's weights to the rollout engines once initialization ends.
+
+        With the weight-update check enabled on a fresh run, verify the update
+        path instead of only syncing: it records the baseline from the state it
+        just wrote, then pushes the same weights again and compares.
+
+        Args:
+            checkpoint_manager: Manager to drive. Defaults to ``self.checkpoint_manager``;
+                trainers that own a second manager for standalone replicas pass it in.
+        """
+        checkpoint_manager = checkpoint_manager or self.checkpoint_manager
+        enabled = self.config.actor_rollout_ref.rollout.checkpoint_engine.get("check_weight_update_equal", False)
+        if not enabled:
+            checkpoint_manager.update_weights(self.global_steps)
+        elif self.global_steps > 0:
+            # Preserve the startup policy: resumed runs sync without the diagnostic.
+            print(
+                f"Skipping weight update check on a resumed run (global_steps={self.global_steps}): "
+                "the diagnostic is enabled only for fresh runs."
+            )
+            checkpoint_manager.update_weights(self.global_steps)
+        else:
+            verified = checkpoint_manager.verify_update_path(self.global_steps)
+            print(
+                f"Weight update check passed: {verified['replicas']} replica(s), "
+                f"{verified['num_keys']} weight shard(s) matched."
+            )
+
     def on_init_end(self):
         """Called after the initialization ends."""
         return

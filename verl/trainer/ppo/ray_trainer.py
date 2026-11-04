@@ -1427,7 +1427,24 @@ class RayPPOTrainer:
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
-        self.checkpoint_manager.update_weights(self.global_steps)
+        check_weight_update_equal = self.config.actor_rollout_ref.rollout.checkpoint_engine.get(
+            "check_weight_update_equal", False
+        )
+        if check_weight_update_equal and self.global_steps > 0:
+            # Preserve the startup policy: resumed runs sync without the diagnostic.
+            print(
+                f"Skipping weight update check on a resumed run (global_steps={self.global_steps}): "
+                "the diagnostic is enabled only for fresh runs."
+            )
+            self.checkpoint_manager.update_weights(self.global_steps)
+        elif check_weight_update_equal:
+            verified = self.checkpoint_manager.verify_update_path(self.global_steps)
+            print(
+                f"Weight update check passed: {verified['replicas']} replica(s), "
+                f"{verified['num_keys']} weight shard(s) matched."
+            )
+        else:
+            self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 

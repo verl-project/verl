@@ -140,6 +140,12 @@ class CheckpointEngineConfig(BaseConfig):
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+    # Check the weight-update path once, before training starts: snapshot the
+    # first full transfer, pause generation, reset weights, then transfer again
+    # and compare digests before resuming. Retains KV allocations and requires
+    # full weight sync plus checksum/reset APIs covering all vLLM DP ranks.
+    # Off by default: a full pass hashes every weight on the host.
+    check_weight_update_equal: bool = False
 
 
 @dataclass

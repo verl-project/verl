@@ -507,20 +507,24 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
     @auto_await
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, *, checking_weights: bool = False):
         """Update weights from actor worker group to rollout replicas.
 
         Args:
             global_steps: The global steps of the actor worker group.
+            checking_weights: Keep generation paused and leave resident weights
+                and KV allocations untouched during the diagnostic transfer.
         """
 
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
-            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            kwargs = {"manage_rollout_memory": False} if checking_weights else {}
+            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend, **kwargs))
             return {}
 
-        # 1. abort and save all unfinished requests for partial rollout
-        await self.abort_replicas()
+        # The diagnostic already paused all replicas before snapshot/reset.
+        if not checking_weights:
+            await self.abort_replicas()
 
         # 2. create a temporay worker group for all replicas
         workers = []
@@ -530,7 +534,8 @@ class CheckpointEngineManager:
         actor_wg = self.actor_wg
 
         # 3. release kv_cache before weight sync (weights stay in place)
-        await self.release_kv_cache_replicas()
+        if not checking_weights:
+            await self.release_kv_cache_replicas()
 
         # 4. build process group
         self.build_process_group(rollout)
@@ -553,13 +558,83 @@ class CheckpointEngineManager:
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
 
-        # 7. restore kv_cache after weight sync
-        await self.resume_kv_cache_replicas()
-
-        # 8. resume all unfinished requests for partial rollout
-        await self.resume_generation_replicas()
+        # 7. restore KV cache and unfinished requests after weight sync
+        if not checking_weights:
+            await self.resume_kv_cache_replicas()
+            await self.resume_generation_replicas()
 
         return sync_metrics
+
+    async def _compare_replicas_with_baseline(self) -> tuple[int, int, list[dict]]:
+        """Return result count, digest key count and failures; reject empty replica results."""
+        checked = 0
+        total_keys = 0
+        failures: list[dict] = []
+        for replica in self.replicas:
+            results = await replica.check_weights("compare")
+            if not results:
+                raise RuntimeError("weight update check received no comparison from a rollout replica")
+            for result in results:
+                checked += 1
+                total_keys += result.get("num_keys", 0)
+                if not result.get("success"):
+                    failures.append(result)
+
+        return checked, total_keys, failures
+
+    @auto_await
+    async def verify_update_path(self, global_steps: int = None) -> dict:
+        """Verify a full sync by recording digests, resetting weights and syncing again.
+
+        After the normal bootstrap sync, pause generation and retain KV memory
+        throughout snapshot/reset/sync/compare. Resume only on success; failed
+        checks may leave randomized weights.
+        """
+        if not self.replicas:
+            raise RuntimeError("weight update check needs at least one rollout replica")
+        if self.backend == "delta_sharded":
+            raise ValueError("weight update check requires full weight transfers; delta_sharded cannot restore reset weights")
+
+        # Bootstrap through the normal lifecycle: startup may have slept the
+        # replicas. Once weights and KV memory are resident, only pause/resume.
+        await self.update_weights(global_steps)
+        await self.abort_replicas()
+        print("Weight update check: generation paused; retaining KV cache memory")
+        for replica in self.replicas:
+            results = await replica.check_weights("prepare")
+            if not results or any(not result.get("success") for result in results):
+                raise RuntimeError("weight update check could not prepare every rollout replica")
+        print(f"Weight update check: snapshotting {len(self.replicas)} rollout replica(s)")
+        baseline_keys = 0
+        for replica in self.replicas:
+            results = await replica.check_weights("snapshot")
+            if not results or any(not r.get("success") or r.get("num_keys", 0) == 0 for r in results):
+                raise RuntimeError("weight update check received no valid baseline from a rollout replica")
+            baseline_keys += sum(r["num_keys"] for r in results)
+        print(f"Weight update check: baseline recorded, {baseline_keys} weight shard(s)")
+
+        for replica in self.replicas:
+            results = await replica.check_weights("reset")
+            if not results or any(not r.get("success") for r in results):
+                raise RuntimeError("weight update check failed to reset a rollout replica")
+        print("Weight update check: weights reset, syncing through the real update path")
+
+        await self.update_weights(global_steps, checking_weights=True)
+
+        print("Weight update check: comparing against the baseline")
+        checked, total_keys, failures = await self._compare_replicas_with_baseline()
+        if failures:
+            sample = failures[0].get("mismatches", [])[:5]
+            raise RuntimeError(
+                f"weight update check failed on {len(failures)} of {checked} replica(s); "
+                f"first mismatched keys: {sample}"
+            )
+
+        for replica in self.replicas:
+            await replica.check_weights("finish")
+        await self.resume_generation_replicas()
+
+        return {"replicas": checked, "num_keys": total_keys, "success": True}
 
 
 async def split_weight_chunks(

@@ -30,7 +30,7 @@ class PPOTrainerSync(PPOTrainer):
 
     def on_init_end(self):
         # update weights after loading checkpoint
-        self.checkpoint_manager.update_weights(self.global_steps)
+        self.sync_initial_weights()
 
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):

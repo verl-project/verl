@@ -54,6 +54,7 @@ from verl.utils.profiler import (
 )
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
+from verl.utils.weight_checksum import WeightCheckEngineAdapter, compare_checksums
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
@@ -181,6 +182,8 @@ class vLLMHttpServer:
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
         self._warned_missing_spec_decode_stats = False
+        # Digests recorded by check_weights("snapshot"); None until then.
+        self._weight_baseline: dict[str, str] | None = None
 
         # vLLM's pause stops requests being scheduled but still accepts them, and a request
         # admitted after the pause is invisible to the drain's liveness check.
@@ -997,6 +1000,47 @@ class vLLMHttpServer:
             return
         await self.engine.wake_up(tags=["kv_cache"])
         await self.engine.reset_prefix_cache(reset_connector=True)
+
+    async def check_weights(self, action: str) -> dict | None:
+        """Run prepare/snapshot/reset/compare/finish on this replica's engine.
+
+        Prepare validates support; finish clears the baseline. KV memory stays resident.
+        Headless actors return None and do not count as successful checks.
+        """
+        if self.node_rank != 0 or not hasattr(self, "engine"):
+            return None
+
+        checker = WeightCheckEngineAdapter(self.engine, self.config.data_parallel_size)
+        if action == "prepare":
+            if self.lora_as_adapter:
+                raise ValueError("weight update check requires full weight sync; adapter-only sync cannot restore reset weights")
+            checker.validate()
+            return {"success": True}
+
+        if action == "finish":
+            # Invalidate cached values after weight updates, retaining the pool.
+            await self.engine.reset_prefix_cache(reset_connector=True)
+            self._weight_baseline = None
+            return {"success": True}
+
+        if action == "snapshot":
+            self._weight_baseline = await checker.checksums()
+            if not self._weight_baseline:
+                raise RuntimeError("weight update check received no weight digests")
+            return {"success": True, "num_keys": len(self._weight_baseline)}
+
+        if action == "reset":
+            await checker.reset()
+            return {"success": True}
+
+        if action == "compare":
+            if self._weight_baseline is None:
+                return {"success": False, "mismatches": [], "message": "compare without a snapshot"}
+            current = await checker.checksums()
+            matched, mismatches = compare_checksums(self._weight_baseline, current)
+            return {"success": matched, "mismatches": mismatches, "num_keys": len(current)}
+
+        raise ValueError(f"unknown weight-checker action: {action!r}")
 
     async def snapshot(self) -> dict[str, Any]:
         """Return live KV-cache and scheduler queue observations.

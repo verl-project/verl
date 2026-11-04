@@ -299,6 +299,23 @@ class RolloutReplica(ABC):
         """Restore the kv_cache GPU memory after a weight sync."""
         await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
 
+    async def check_weights(self, action: str) -> list[dict]:
+        """Run one weight-checker action on every server of this replica.
+
+        Only the server that owns the engine answers, so headless actors drop
+        out here instead of being reported as passing.
+
+        Args:
+            action: One of ``prepare``, ``snapshot``, ``reset``, ``compare`` or ``finish``.
+
+        Returns:
+            One result per server that actually ran the action.
+        """
+        if not self.servers:
+            return []
+        results = await asyncio.gather(*[server.check_weights.remote(action) for server in self.servers])
+        return [result for result in results if result is not None]
+
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
         await asyncio.gather(*[server.start_profile.remote(**kwargs) for server in self.servers])

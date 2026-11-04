@@ -293,6 +293,11 @@ checkpoint_engine:
   # Backend for checkpoint engine: naive, nccl, nixl, hccl
   backend: naive
 
+  # Check once before training: sync, pause, snapshot, reset, sync and compare.
+  # KV memory stays resident during verification; generation resumes on success.
+  # Resumed runs (global_steps > 0) skip this optional startup diagnostic.
+  check_weight_update_equal: false
+
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
   # This parameter controls the maximum payload size for a single weight update request.
   # Reference: https://github.com/verl-project/verl/pull/2418

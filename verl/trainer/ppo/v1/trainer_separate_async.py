@@ -237,7 +237,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def on_init_end(self):
         # update weights after loading checkpoint
-        self.standalone_checkpoint_manager.update_weights(self.global_steps)
+        self.sync_initial_weights(self.standalone_checkpoint_manager)
         if self._enable_hybrid_replicas:
             self.checkpoint_manager.update_weights(self.global_steps)
 

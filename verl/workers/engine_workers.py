@@ -786,7 +786,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         "update_weight",
         state_lane_id=lambda self: f"rank_{self.rank}",
     )
-    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
+    async def update_weights(self, global_steps: int = None, mode: str = "auto", manage_rollout_memory: bool = True):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -810,6 +810,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                   :meth:`checkpoint_engine.send_weights` for asynchronous weight
                   transfer via checkpoint engine, suitable for disaggregated
                   trainer/rollout deployments.
+            manage_rollout_memory: Resume rollout weights and KV memory during
+                normal sync. False for a paused diagnostic with resident memory.
         """
 
         # Resolve mode: "auto" falls back to config, explicit values take precedence
@@ -841,7 +843,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             # vLLM: level-1 sleep still unmaps weights → must resume.
             resume_weights = self.config.rollout.free_cache_engine
-        if resume_weights:
+        if resume_weights and manage_rollout_memory:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
@@ -878,7 +880,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After offload model to cpu", logger=logger)
 
         # 4. resume kv_cache
-        if self.config.rollout.free_cache_engine:
+        if self.config.rollout.free_cache_engine and manage_rollout_memory:
             # All trainer ranks enter this naive sync path via ONE_TO_ALL. Wait for
             # their offload and device cleanup before a leader wakes the rollout
             # workers; local device synchronization alone cannot prevent OOM on peers.
