@@ -5,10 +5,11 @@ FROM rayproject/ray:2.56.0-py312
 
 ARG TORCH_TPU_VERSION=0.2.0
 ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
-# 10/25/2026 HEAD of torchtitan
-ARG TORCHTITAN_COMMIT=89ef29b5a0d03a6883079ab37ff1bdc498fe3485
-# Optimized Qwen3.5 with Expert parallelism (EP > 1):
-# ARG TORCHTITAN_COMMIT=a7aad99bc17dc4ae36b9d2d6920f3d71fb71e51b
+# torchtitan main 8ad0bfc (11/03/2026) + the Qwen3.5 TPU optimizations: Tokamax GatedDeltaNet kernels, Pallas
+# causal conv1d / gated RMSNorm, fused CE and grouped-matmul tiles, expert parallelism (EP > 1) and the fast dropless
+# EP dispatcher (Ring-of-Experts, chunked pipelining), google-pytorch/torchtitan branch qwen3_5-35b-a3b-tpu-moe-ep-fast.
+# Use any torchtitan main commit for the dense / EP = 1 recipes.
+ARG TORCHTITAN_COMMIT=e0f2114060554ce27c10baab959e97a7d1f197c7
 
 ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
 
@@ -30,8 +31,8 @@ set -e
 libtpu_links=https://storage.googleapis.com/jax-releases/libtpu_releases.html
 torch_index=https://download.pytorch.org/whl/cpu
 # All packages come from public indexes (PyPI, the PyTorch CPU index, the libtpu release page).
-# jax/jaxlib: the vllm-torchtpu pin; libtpu, tokamax and torchao: torchtitan/experiments/tpu/requirements.txt.
-torch=2.13.0 torchvision=0.28.0 jax=0.11.2 libtpu=0.0.50
+# jax/jaxlib, libtpu, tokamax and torchao: torchtitan/experiments/tpu/requirements.txt.
+torch=2.13.0 torchvision=0.28.0 jax=0.12.0.1 libtpu=0.0.50
 transformers="transformers>=5.18.0,<5.20.0"
 tensordict="tensordict==0.15.1"
 export PIP_CACHE_DIR=/root/.cache/pip PIP_ROOT_USER_ACTION=ignore

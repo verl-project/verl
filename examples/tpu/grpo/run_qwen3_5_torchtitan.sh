@@ -36,6 +36,21 @@ fi
 if [[ -n "${TPU_DVFS_P_STATE:-}" ]]; then
     LIBTPU_INIT_ARGS+=" --xla_tpu_dvfs_p_state=${TPU_DVFS_P_STATE}"
 fi
+# SPARSECORE_OFFLOAD=True: offload FSDP / EP all-gather and reduce-scatter onto the SparseCores and let the scheduler
+# overlap dependent EP + FSDP collectives (torchtitan tpu_flags SPARSECORE_COLLECTIVE_OFFLOAD +
+# MAXTEXT_MOE_SPARSECORE_OFFLOAD, as torchtitan's Qwen3.5 EP recipes set). EXTRA_LIBTPU_INIT_ARGS appends any other flags.
+if [[ "${SPARSECORE_OFFLOAD:-False}" == "True" ]]; then
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_aggregator=true"
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true"
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
+    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
+fi
+if [[ -n "${EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
+    LIBTPU_INIT_ARGS+=" ${EXTRA_LIBTPU_INIT_ARGS}"
+fi
 export LIBTPU_INIT_ARGS
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
@@ -124,6 +139,20 @@ MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-$(( MAX_MODEL_LEN * MICRO_BATCH_
 # USE_DYNAMIC_BSZ=True packs each micro-batch up to MAX_TOKEN_LEN_PER_GPU tokens (instead of MICRO_BATCH_SIZE
 # sequences) for the actor update and the rollout / reference log-probs; verl requires the three to agree.
 USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+# MoE expert-parallel knobs of verl-hardware-plugin (engine_kwargs.tpu.*), passed only when set:
+# EP_DISPATCHER (auto / ragged / static; static keeps torchtitan's TpuQwen35TokenDispatcher, whose fast dropless
+# build runs Ring-of-Experts when EXPERT_PARALLEL_SIZE <= num_experts_per_tok), EP_TOKEN_CHUNKS (chunked
+# dispatch -> experts -> combine pipelining) and EP_PAIRED_GROUPED_MM (paired W1+W3 Pallas grouped matmul under EP).
+EXTRA_TPU_OVERRIDES=()
+if [[ -n "${EP_DISPATCHER:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_dispatcher=${EP_DISPATCHER}")
+fi
+if [[ -n "${EP_TOKEN_CHUNKS:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_token_chunks=${EP_TOKEN_CHUNKS}")
+fi
+if [[ -n "${EP_PAIRED_GROUPED_MM:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_paired_grouped_mm=${EP_PAIRED_GROUPED_MM}")
+fi
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
@@ -263,4 +292,4 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.nnodes="${NNODES_ROLLOUT}" \
     actor_rollout_ref.rollout.n_gpus_per_node="${N_CHIPS_ROLLOUT}" \
     +rollout.nnodes="${NNODES_ROLLOUT}" \
-    +rollout.n_gpus_per_node="${N_CHIPS_ROLLOUT}" "$@"
+    +rollout.n_gpus_per_node="${N_CHIPS_ROLLOUT}" ${EXTRA_TPU_OVERRIDES[@]+"${EXTRA_TPU_OVERRIDES[@]}"} "$@"
