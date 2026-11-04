@@ -46,16 +46,19 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # Hopper has no ue8m0 block-scaling GEMM: keep TE and vLLM on FP32 block scales so both sides agree on
 # the FP8 grid. Blackwell uses ue8m0 natively, and must leave both variables unset (docs/low_precision/fp8.md).
-HOPPER_FP32_SCALES=${HOPPER_FP32_SCALES:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | grep -q '^9\.' && echo 1 || echo 0)}
+# compute_cap of GPU 0 (no pipeline: the script runs under pipefail). Empty when nvidia-smi is unavailable.
+_cc=$(nvidia-smi -i 0 --query-gpu=compute_cap --format=csv,noheader 2>/dev/null || true)
+case "${HOPPER_FP32_SCALES:-}" in
+    "") case "${_cc}" in 9.*) HOPPER_FP32_SCALES=1 ;; *) HOPPER_FP32_SCALES=0 ;; esac ;;
+esac
 if [ "${HOPPER_FP32_SCALES}" = 1 ]; then
     export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
     export VLLM_USE_DEEP_GEMM_E8M0=0
 fi
 # The ModelOpt MX fake-quant kernel is JIT-compiled for the visible device; pinning the arch keeps the
 # one-off nvcc time from multiplying on images that list many architectures (9.0 Hopper, 10.0 Blackwell).
-if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
-    _cc=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
-    [ -n "${_cc}" ] && export TORCH_CUDA_ARCH_LIST="${_cc}"
+if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ] && [ -n "${_cc}" ]; then
+    export TORCH_CUDA_ARCH_LIST="${_cc}"
 fi
 
 ############################### configs ################################
