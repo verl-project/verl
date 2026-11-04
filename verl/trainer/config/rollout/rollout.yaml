@@ -97,6 +97,12 @@ enable_chunked_prefill: True
 # Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
 enable_prefix_caching: True
 
+# How weight updates invalidate prefix KV kept beyond GPU memory (vLLM KV connector stores, SGLang
+# HiCache storage). GPU-local caches are cleared in both modes. "reset" also resets the vLLM connector's
+# store (SGLang HiCache storage is not cleared); "salt" keeps external stores and salts every request
+# with "<run>:<global_steps>", so entries written under older weights are never matched.
+external_kv_cache_invalidation: reset
+
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs
 
