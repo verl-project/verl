@@ -97,7 +97,7 @@ vllm = [
     # wheelhouse so vllm can select its compatible version.
     # transformers 5.16.1 is the project-wide pin (enforced in
     # override-dependencies below).
-    "transformers==5.16.1",
+    "transformers==5.20.2",
 ]
 
 sglang = [
@@ -115,7 +115,7 @@ sglang = [
     # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
     # imported lazily (fa4 backend only), so the default backends work.
     # sglang's transformers requirement is settled by the project-wide override.
-    "transformers==5.16.1",
+    "transformers==5.20.2",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -249,7 +249,7 @@ cpu = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    "transformers==5.16.1",
+    "transformers==5.20.2",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -393,7 +393,7 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers==5.16.1 project-wide — one version for every backend, so a
+#   * transformers==5.20.2 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
 #     on the package, so this also settles the engines' own pins. Keep it inside
@@ -422,7 +422,7 @@ conflicts = [
 #     non-default "fa4" attention backend.
 override-dependencies = [
     "tilelang==0.1.15",
-    "transformers==5.16.1",
+    "transformers==5.20.2",
     "tokenizers==0.23.2",
     "numpy>=2.0.0",
     "kernels>=0.14.1,<0.15",
