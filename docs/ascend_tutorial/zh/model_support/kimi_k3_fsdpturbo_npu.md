@@ -110,6 +110,7 @@ Kimi 启动脚本通过已有 `model.external_lib` 加载
 主进程在同一 Python 进程内调用配套 Bridge 的 `setup_kimi_k3_runtime(driver=True)`，
 再执行 verl 入口；Ray 的 `worker_process_setup_hook` 调用同一函数初始化训练 Worker。
 外部入口按已有 WorkerGroup 和 rollout 环境区分进程，跳过纯 rollout 和辅助进程。
+作业环境显式设置 `VLLM_ASCEND_AUTO_DETECT_QUANTIZATION=1`，由原生 NPU 平台在 rollout server 覆盖为 `0`，避免宿主环境中的同名变量干扰训练 Worker 筛选。
 运行环境应使用 MegatronAdaptor + MindSpeed-Ops；入口会拒绝额外安装的旧
 `mindspeed.megatron_adaptor`，避免两套 patch manager 混用。各节点需要使用相同的依赖组合。
 该路径需要包含此等长输入契约的配套 MS-Bridge 版本；verl 在线训练的 Bridge CP 路径

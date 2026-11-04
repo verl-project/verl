@@ -409,6 +409,7 @@ TRANSFER_QUEUE=(
 )
 
 RAY=(++ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=mindspeed_bridge.runtime.kimi_k3.setup_kimi_k3_runtime)
+RAY+=('++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_AUTO_DETECT_QUANTIZATION="1"')
 ray_env_vars=(
     TMPDIR XDG_CACHE_HOME HF_HOME HF_MODULES_CACHE TRITON_CACHE_DIR TORCHINDUCTOR_CACHE_DIR PYTHONDONTWRITEBYTECODE
     ASCEND_RT_VISIBLE_DEVICES PYTHONPATH OMP_NUM_THREADS PYTHONHASHSEED
