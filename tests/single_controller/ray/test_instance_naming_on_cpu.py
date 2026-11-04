@@ -76,9 +76,12 @@ def test_vllm_prefix_and_weight_socket_share_instance_id():
     )
 
 
-def test_instance_id_can_be_read_from_nested_or_rollout_config():
+def test_instance_id_can_be_read_from_top_level_config():
     assert get_instance_id({"instance": {"id": "policy_1"}}) == "policy_1"
-    assert get_instance_id({"actor_rollout_ref": {"rollout": {"instance_id": "policy_2"}}}) == "policy_2"
+
+
+def test_present_top_level_instance_without_id_does_not_fall_back():
+    assert get_instance_id({"instance": {}, "instance_id": "component_id"}) is None
 
 
 def test_instance_id_is_read_from_a_dataclass_config():
@@ -112,16 +115,21 @@ def test_instance_id_is_injected_into_both_rollout_configs():
     assert config.reward.reward_model.rollout.instance_id == "policy_a"
 
 
-def test_rollout_level_instance_id_is_honoured_when_top_level_is_unset():
+def test_explicit_null_instance_id_clears_previously_injected_id():
     config = _struct_config(
         {
-            "actor_rollout_ref": {"rollout": {"instance_id": "policy_x"}},
-            "reward": {"reward_model": {"rollout": {}}},
+            "instance": {"id": "policy_a"},
+            "actor_rollout_ref": {"rollout": {"name": "vllm"}},
+            "reward": {"reward_model": {"rollout": {"name": "vllm"}}},
         }
     )
 
-    assert inject_instance_id(config) == "policy_x"
-    assert config.reward.reward_model.rollout.instance_id == "policy_x"
+    assert inject_instance_id(config) == "policy_a"
+    config.instance.id = None
+
+    assert inject_instance_id(config) is None
+    assert config.actor_rollout_ref.rollout.instance_id is None
+    assert config.reward.reward_model.rollout.instance_id is None
 
 
 def test_injection_tolerates_absent_reward_model():

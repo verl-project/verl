@@ -19,8 +19,9 @@ import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
-from omegaconf import open_dict
+from omegaconf import DictConfig, open_dict
 
 _VALID_INSTANCE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _INSTANCE_SEPARATOR = "__"
@@ -77,37 +78,35 @@ class InstanceNameBuilder:
         return f"{scoped[: self.max_name_length - len(digest) - 1]}_{digest}"
 
 
-def get_instance_id(config: object) -> str | None:
-    """Read the instance identifier, preferring the top-level keys.
+def get_instance_id(config: Mapping[str, Any]) -> str | None:
+    """Read the instance ID from a trainer or component config.
 
-    Both Hydra ``DictConfig`` and VERL's ``BaseConfig`` implement ``Mapping``, so
-    one lookup path covers the trainer config and the per-component configs.
+    Trainer configs use ``instance.id``. When the ``instance`` section is present,
+    its ``id`` is authoritative, including a missing or ``None`` value.
+    Component configs such as ``RolloutConfig`` use ``instance_id``.
     """
     if not isinstance(config, Mapping):
         return None
 
     instance = config.get("instance")
-    if isinstance(instance, Mapping) and instance.get("id") is not None:
-        return str(instance["id"])
+    if isinstance(instance, Mapping):
+        instance_id = instance.get("id")
+        return str(instance_id) if instance_id is not None else None
 
     if config.get("instance_id") is not None:
         return str(config["instance_id"])
 
-    rollout_root = config.get("actor_rollout_ref")
-    rollout = rollout_root.get("rollout") if isinstance(rollout_root, Mapping) else None
-    if isinstance(rollout, Mapping) and rollout.get("instance_id") is not None:
-        return str(rollout["instance_id"])
-
     return None
 
 
-def inject_instance_id(config: object) -> str | None:
+def inject_instance_id(config: DictConfig) -> str | None:
     """Write the instance id into the rollout configs downstream components read.
 
     The trainer sees the top-level config while rollout components only receive
     their own ``RolloutConfig``, so the value has to be copied across before they
-    are constructed. Writing ``None`` when no identifier is configured is
-    deliberate: it clears any value left over from a previous composition.
+    are constructed. Propagating ``None`` keeps downstream name builders on
+    VERL's default naming path and clears a previously injected id when the same
+    config object is reused.
     """
     instance_id = get_instance_id(config)
     with open_dict(config.actor_rollout_ref.rollout):
