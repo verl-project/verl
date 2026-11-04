@@ -56,6 +56,44 @@ def test_native_ascend_dispatch_reads_modelslim_description(tmp_path):
     assert quantizer.quant_description == description
 
 
+def test_auto_detected_ascend_dispatch_reads_modelslim_description(tmp_path, monkeypatch):
+    from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+    from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
+
+    description = {"quant_method": "ascend", "model.layers.0.self_attn.q_proj.weight": "W8A8_MXFP8"}
+    (tmp_path / "quant_model_description.json").write_text(json.dumps(description))
+    monkeypatch.setattr("verl.utils.qat.ascend.detect_ascend_modelslim", lambda path: True)
+    model_config = SimpleNamespace(
+        local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
+    )
+    rollout_config = SimpleNamespace(
+        name="vllm",
+        quantization=SimpleNamespace(linear=None, moe=None, moe_activation=None, ignore=[], config_file=None),
+        checkpoint_engine=SimpleNamespace(backend="naive"),
+    )
+
+    quantizer = dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
+
+    assert isinstance(quantizer, AscendMxfp8WeightQuantizer)
+    assert quantizer.quant_description == description
+
+
+def test_ascend_auto_detection_keeps_unquantized_without_signature(tmp_path, monkeypatch):
+    from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
+
+    monkeypatch.setattr("verl.utils.qat.ascend.detect_ascend_modelslim", lambda path: False)
+    model_config = SimpleNamespace(
+        local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
+    )
+    rollout_config = SimpleNamespace(
+        name="vllm",
+        quantization=SimpleNamespace(linear=None, moe=None, moe_activation=None, ignore=[], config_file=None),
+        checkpoint_engine=SimpleNamespace(backend="naive"),
+    )
+
+    assert dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config) is None
+
+
 def test_ascend_quantizer_emits_mxfp8_weights_and_scales(monkeypatch):
     from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
 
