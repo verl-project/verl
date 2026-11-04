@@ -755,6 +755,14 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         """
         return await self._make_async_request("resume_memory_occupation", {"tags": tags})
 
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        """Restore the server's packed parameters before a complete weight refit."""
+        return await self._make_async_request("begin_weight_update", {"selector": selector})
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        """Finalize the complete refit after its last tensor bucket."""
+        return await self._make_async_request("end_weight_update")
+
     async def update_weights_from_tensor(
         self,
         req: UpdateWeightsFromTensorReqInput,
