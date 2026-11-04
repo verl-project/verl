@@ -186,6 +186,14 @@ fi
 if [[ -n "${AC_SAVE_SPLASH_AND_ROUTING:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ac_save_splash_and_routing=${AC_SAVE_SPLASH_AND_ROUTING}")
 fi
+# STATIC_MICRO_BATCH_LEN / STATIC_MAX_RESPONSE_LEN: pad every packed micro-batch (and its response bucket) to at
+# least this many tokens, e.g. MAX_TOKEN_LEN_PER_GPU / MAX_RESPONSE_LEN, so the trainer compiles one shape.
+if [[ -n "${STATIC_MICRO_BATCH_LEN:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}")
+fi
+if [[ -n "${STATIC_MAX_RESPONSE_LEN:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
+fi
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
