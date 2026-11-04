@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import concurrent.futures
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Generator
@@ -126,6 +128,12 @@ class CheckpointEngine(ABC):
     >>> server_adapter = ServerAdapter()
     >>> await server_adapter.update_weights(engine.get_weights()) # update weights via cuda ipc
     """
+
+    # Whether send_weights() publishes an immutable trainer-side snapshot independently
+    # of rollout consumers. When True, the manager may return after publishing while
+    # rollout commits the snapshot in the background. Coupled transports such as NCCL
+    # and NIXL must keep this False so update_weights() waits for rollout commit.
+    support_publish_weights = False
 
     # How receive_weights yields weights to the server adapter:
     #   "named_tensors" -- (name, tensor) pairs, bucketed into full-tensor loads.
@@ -377,6 +385,21 @@ class CheckpointEngineWorker(Worker):
 _worker_cls = ray.remote(CheckpointEngineWorker)
 
 
+@dataclass
+class WeightUpdateTicket:
+    version: int | None
+    trainer_published: list[ray.ObjectRef]
+    rollout_committed: concurrent.futures.Future
+
+    def wait_published(self):
+        """Wait until trainer workers have published this weight version."""
+        return ray.get(self.trainer_published)
+
+    def wait_committed(self):
+        """Wait until rollout workers have installed this weight version."""
+        return self.rollout_committed.result()
+
+
 class CheckpointEngineManager:
     """Checkpoint engine manager to coordinate weight synchronization between actor and rollout replicas.
 
@@ -418,6 +441,37 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+
+        self._update_ticket = None
+        self._background_loop = asyncio.new_event_loop()
+        self._background_loop_ready = threading.Event()
+        self._background_loop_thread = threading.Thread(
+            target=self._run_background_loop,
+            name="checkpoint-engine-manager",
+            daemon=True,
+        )
+        self._background_loop_thread.start()
+        if not self._background_loop_ready.wait(timeout=5):
+            self.close()
+            raise RuntimeError("Failed to start CheckpointEngineManager background event loop.")
+
+    def _run_background_loop(self):
+        asyncio.set_event_loop(self._background_loop)
+        self._background_loop_ready.set()
+        self._background_loop.run_forever()
+
+    def close(self):
+        """Stop and close the background event loop."""
+        loop = getattr(self, "_background_loop", None)
+        thread = getattr(self, "_background_loop_thread", None)
+        if loop is None or thread is None:
+            return
+
+        if thread.is_alive():
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join()
+        if not loop.is_closed():
+            loop.close()
 
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for actor worker group and rollout replicas."""
@@ -506,60 +560,75 @@ class CheckpointEngineManager:
         """
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
-    @auto_await
-    async def update_weights(self, global_steps: int = None):
+    def update_weights(self, global_steps: int = None):
         """Update weights from actor worker group to rollout replicas.
 
         Args:
             global_steps: The global steps of the actor worker group.
         """
-
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
-        # 1. abort and save all unfinished requests for partial rollout
-        await self.abort_replicas()
+        # Wait previous update to be committed
+        if self._update_ticket is not None:
+            self._update_ticket.wait_committed()
 
-        # 2. create a temporay worker group for all replicas
+        self._update_ticket = self.submit_update(global_steps=global_steps)
+        if self.backend_cls.support_publish_weights:
+            return self._update_ticket.wait_published()
+        else:
+            return self._update_ticket.wait_committed()
+
+    def submit_update(self, global_steps) -> WeightUpdateTicket:
+        # 1. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
-        actor_wg = self.actor_wg
 
-        # 3. release kv_cache before weight sync (weights stay in place)
-        await self.release_kv_cache_replicas()
-
-        # 4. build process group
+        # 2. build process group
         self.build_process_group(rollout)
 
-        # 5. update weights of all workers
-        results = ray.get(
-            actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
-        )
-        # The sender workers return the engine's per-sync metrics (empty for
-        # backends that don't track any); merge and hand them to the trainer.
-        sync_metrics: dict = {}
-        for result in results[: actor_wg.world_size]:
-            if isinstance(result, dict):
-                sync_metrics.update(result)
+        # 3. trainer publish weights
+        trainer_published = self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
 
-        # 6. finalize all workers
-        ray.get(
-            actor_wg.execute_checkpoint_engine(["finalize"] * actor_wg.world_size)
-            + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
+        # 4. rollout consume weights
+        rollout_committed = asyncio.run_coroutine_threadsafe(
+            self._commit_update(
+                rollout=rollout,
+                trainer_published=trainer_published,
+                global_steps=global_steps,
+            ),
+            self._background_loop,
+        )
+        return WeightUpdateTicket(
+            version=global_steps,
+            trainer_published=trainer_published,
+            rollout_committed=rollout_committed,
         )
 
-        # 7. restore kv_cache after weight sync
+    async def _commit_update(
+        self,
+        rollout: RayWorkerGroup,
+        trainer_published: list[ray.ObjectRef],
+        global_steps: int | None,
+    ):
+        """Install a published weight version on rollout workers."""
+        await self.abort_replicas()
+        await self.release_kv_cache_replicas()
+
+        rollout_committed = rollout.update_weights(global_steps=global_steps)
+        await asyncio.gather(*trainer_published, *rollout_committed)
+
+        await asyncio.gather(
+            *self.actor_wg.execute_checkpoint_engine(["finalize"] * self.actor_wg.world_size),
+            *rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size),
+        )
+
         await self.resume_kv_cache_replicas()
-
-        # 8. resume all unfinished requests for partial rollout
         await self.resume_generation_replicas()
-
-        return sync_metrics
 
 
 async def split_weight_chunks(
