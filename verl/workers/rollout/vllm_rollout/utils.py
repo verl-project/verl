@@ -270,7 +270,6 @@ class vLLMColocateWorkerExtension:
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
         staged_moe_layers = []
-        layerwise_finalize = None
 
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
@@ -287,18 +286,6 @@ class vLLMColocateWorkerExtension:
             quant_reload_states = [
                 (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
             ]
-        elif peft_config is None:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-                initialize_layerwise_reload,
-            )
-
-            # vLLM 0.26 keeps kernel-formatted weights after initialization.
-            # Restore checkpoint-format metadata before the bucket stream, then
-            # repack once after the final bucket.
-            for model in self._iter_all_models():
-                initialize_layerwise_reload(model)
-            layerwise_finalize = finalize_layerwise_reload
         else:
             # TODO(wuxibin): not need anymore for newer vllm version.
             for model in self._iter_all_models():
@@ -348,7 +335,6 @@ class vLLMColocateWorkerExtension:
                     list(lora_weights.items()),
                     peft_config=peft_config,
                     base_sync_done=base_sync_done,
-                    layerwise_reload=layerwise_finalize is not None,
                 )
                 lora_weights.clear()
                 return
@@ -356,16 +342,12 @@ class vLLMColocateWorkerExtension:
                 weights,
                 peft_config=peft_config,
                 base_sync_done=base_sync_done,
-                layerwise_reload=layerwise_finalize is not None,
             )
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
-        if layerwise_finalize is not None:
-            for model, model_config in self._iter_all_models_with_config():
-                layerwise_finalize(model, model_config)
-        elif peft_config and base_sync_done:
+        if peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
@@ -378,18 +360,16 @@ class vLLMColocateWorkerExtension:
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
 
-    def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers, *, layerwise_reload=False):
+    def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
 
         The main model (yielded first) reuses the prebuilt ``named_buffers`` map;
         the drafter builds its own. Returns buffers applied to the main model.
         """
         models = list(self._iter_all_models())
-        loaded = apply_buffer_updates(
-            models[0], buffer_updates, named_buffers=main_named_buffers, layerwise_reload=layerwise_reload
-        )
+        loaded = apply_buffer_updates(models[0], buffer_updates, named_buffers=main_named_buffers)
         for model in models[1:]:
-            apply_buffer_updates(model, buffer_updates, layerwise_reload=layerwise_reload)
+            apply_buffer_updates(model, buffer_updates)
         return loaded
 
     def _update_weights(
@@ -397,7 +377,6 @@ class vLLMColocateWorkerExtension:
         weights: list[tuple[str, torch.Tensor]],
         peft_config: dict,
         base_sync_done: bool,
-        layerwise_reload: bool = False,
     ):
         if peft_config and base_sync_done:
             # The caller already copied these out of the receiver's reused IPC bucket buffer (#6454).
@@ -432,19 +411,12 @@ class vLLMColocateWorkerExtension:
                     for model in self._iter_all_models():
                         model_updates = drop_tied_alias_updates(model, param_updates)
                         if peft_config is None:
-                            # Native layerwise loaders may retain inputs until a
-                            # later bucket completes the layer. Own each tensor
-                            # before the IPC receiver reuses its storage.
-                            if layerwise_reload:
-                                model_updates = [(name, tensor.clone()) for name, tensor in model_updates]
                             model.load_weights(model_updates)
                         else:
                             names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
                             names.update(n for n, _ in model.named_buffers())
                             model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
-                loaded_buffers = self._apply_buffer_updates_all_models(
-                    buffer_updates, named_buffers, layerwise_reload=layerwise_reload
-                )
+                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "
                     f"loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}"

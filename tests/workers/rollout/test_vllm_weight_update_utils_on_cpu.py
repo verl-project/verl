@@ -212,176 +212,45 @@ def test_apply_buffer_updates_ignores_non_buffer_weights():
     assert torch.count_nonzero(model.model.layers[0].e_score_correction_bias) == 0
 
 
-@pytest.mark.parametrize("layerwise", [False, True])
-def test_vllm_update_weights_loads_params_and_buffers(layerwise):
-    model = _ToyModel()
-
-    def load_weights(weights):
-        with torch.no_grad():
-            for name, value in weights:
-                dict(model.named_parameters())[name].copy_(value)
-
-    model.load_weights = load_weights
-
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(model)
-
-    weights = [
-        ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
-        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
-    ]
-
-    worker._update_weights(weights, peft_config=None, base_sync_done=False, layerwise_reload=layerwise)
-    torch.testing.assert_close(model.model.layers[0].linear.weight, torch.ones(4, 4))
-    torch.testing.assert_close(
-        model.model.layers[0].e_score_correction_bias, torch.tensor([5, 6, 7, 8], dtype=torch.float32)
-    )
-
-
-@pytest.mark.parametrize("layerwise", [False, True])
-def test_vllm_update_weights_syncs_buffers_to_mtp_drafter(layerwise):
-    """When an MTP drafter is synced, its registered buffers must be updated too."""
-    main_model = _ToyModel()
-    drafter_model = _ToyModel()
-    main_model.load_weights = lambda weights: None
-    drafter_model.load_weights = lambda weights: None
-
-    class _SpecConfig:
-        method = "mtp"
-        draft_model_config = object()
-
-    class _Drafter:
-        def __init__(self, m):
-            self.model = m
-
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
-    worker.model_runner.drafter = _Drafter(drafter_model)
-
-    weights = [
-        ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
-        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
-    ]
-
-    worker._update_weights(weights, peft_config=None, base_sync_done=False, layerwise_reload=layerwise)
-
-    expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
-    torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
-    torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
-
-
-def test_layerwise_reload_owns_weights_across_reused_buckets():
-    pytest.importorskip("vllm.model_executor.model_loader.reload")
-    from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
-        initialize_layerwise_reload,
-        record_metadata_for_reloading,
-    )
-
-    model = torch.nn.Linear(3, 2)
-
-    def load_weights(weights):
-        for name, value in weights:
-            parameter = getattr(model, name)
-            parameter.weight_loader(parameter, value)
-
-    model.load_weights = load_weights
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(model)
-    record_metadata_for_reloading(model)
-    addresses = [parameter.data_ptr() for parameter in model.parameters()]
-    bucket = torch.empty(6)
-
-    for step in range(1, 6):
-        initialize_layerwise_reload(model)
-        bucket.fill_(step)
-        worker._update_weights(
-            [("weight", bucket.view(2, 3))], peft_config=None, base_sync_done=True, layerwise_reload=True
-        )
-        bucket.fill_(-step)
-        worker._update_weights([("bias", bucket[:2])], peft_config=None, base_sync_done=True, layerwise_reload=True)
-        bucket.zero_()
-        finalize_layerwise_reload(model, None)
-
-        torch.testing.assert_close(model.weight, torch.full((2, 3), float(step)))
-        torch.testing.assert_close(model.bias, torch.full((2,), float(-step)))
-        assert [parameter.data_ptr() for parameter in model.parameters()] == addresses
-
-
-def test_layerwise_update_still_drops_tied_aliases(monkeypatch):
-    model = _ToyModel()
-    loaded = []
-    model.load_weights = lambda weights: loaded.extend(weights)
-    monkeypatch.setattr(_vllm_rollout_utils, "drop_tied_alias_updates", lambda model, updates: updates[:1])
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(model)
-    source = torch.ones(4, 4)
-    worker._update_weights(
-        [("model.layers.0.linear.weight", source), ("lm_head.weight", source)],
-        peft_config=None,
-        base_sync_done=False,
-        layerwise_reload=True,
-    )
-    source.zero_()
-    assert [name for name, _ in loaded] == ["model.layers.0.linear.weight"]
-    torch.testing.assert_close(loaded[0][1], torch.ones(4, 4))
-
-
-def test_native_layerwise_reload_updates_meta_buffers_and_mtp_drafter():
-    pytest.importorskip("vllm.model_executor.model_loader.reload")
-    from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
-        initialize_layerwise_reload,
-        record_metadata_for_reloading,
-    )
-
-    class Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(2))
-            self.register_buffer("checkpoint_buffer", torch.zeros(2))
-            self.register_buffer("e_score_correction_bias", torch.zeros(2))
-            self.checkpoint_buffer.weight_loader = lambda param, source: param.copy_(source * 2)
-
-        def load_weights(self, weights):
-            for name, value in weights:
-                param = dict(self.named_parameters())[name]
-                param.weight_loader(param, value)
-
-    main, draft = Model(), Model()
-    spec = types.SimpleNamespace(method="mtp", draft_model_config=object())
-    worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(main, speculative_config=spec)
-    worker.model_runner.drafter = types.SimpleNamespace(model=draft)
-    models = [main, draft]
+@pytest.mark.parametrize("sync_mtp", [False, True], ids=["main", "main-and-mtp"])
+def test_vllm_update_weights_loads_params_and_buffers(sync_mtp):
+    models = [_ToyModel() for _ in range(2 if sync_mtp else 1)]
     addresses = []
     for model in models:
-        record_metadata_for_reloading(model)
         addresses.append(
-            [model.weight.data_ptr(), model.checkpoint_buffer.data_ptr(), model.e_score_correction_bias.data_ptr()]
+            (model.model.layers[0].linear.weight.data_ptr(), model.model.layers[0].e_score_correction_bias.data_ptr())
         )
-    for step in range(1, 4):
-        for model in models:
-            initialize_layerwise_reload(model)
-            assert model.checkpoint_buffer.is_meta
-            assert not model.e_score_correction_bias.is_meta
-        bucket = torch.full((2,), float(step))
-        worker._update_weights([("weight", bucket)], peft_config=None, base_sync_done=True, layerwise_reload=True)
-        bucket.fill_(step + 2)
+
+        def load_weights(weights, model=model):
+            with torch.no_grad():
+                for name, value in weights:
+                    dict(model.named_parameters())[name].copy_(value)
+
+        model.load_weights = load_weights
+
+    spec = types.SimpleNamespace(method="mtp", draft_model_config=object()) if sync_mtp else None
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(models[0], speculative_config=spec)
+    if sync_mtp:
+        worker.model_runner.drafter = types.SimpleNamespace(model=models[1])
+    bucket = torch.empty(16)
+    inputs = torch.ones(1, 4)
+    for version in (1, 2):
+        bucket.fill_(version)
         worker._update_weights(
-            [("checkpoint_buffer", bucket), ("e_score_correction_bias", bucket)],
-            peft_config=None,
-            base_sync_done=True,
-            layerwise_reload=True,
+            [("model.layers.0.linear.weight", bucket.view(4, 4))], peft_config=None, base_sync_done=False
         )
-        bucket.zero_()
-        for index, model in enumerate(models):
-            finalize_layerwise_reload(model, None)
-            torch.testing.assert_close(model.weight, torch.full((2,), float(step)))
-            torch.testing.assert_close(model.checkpoint_buffer, torch.full((2,), float((step + 2) * 2)))
-            torch.testing.assert_close(model.e_score_correction_bias, torch.full((2,), float(step + 2)))
-            assert [
-                model.weight.data_ptr(),
-                model.checkpoint_buffer.data_ptr(),
-                model.e_score_correction_bias.data_ptr(),
-            ] == addresses[index]
+        expected_buffer = torch.arange(4, dtype=torch.float32) + version * 5
+        bucket[:4].copy_(expected_buffer)
+        worker._update_weights(
+            [("model.layers.0.e_score_correction_bias", bucket[:4])], peft_config=None, base_sync_done=False
+        )
+        bucket.fill_(-999)  # Standard loaders consume the receiver's view synchronously.
+        for model, address in zip(models, addresses, strict=True):
+            block = model.model.layers[0]
+            assert (block.linear.weight.data_ptr(), block.e_score_correction_bias.data_ptr()) == address
+            torch.testing.assert_close(block.linear.weight, torch.full((4, 4), float(version)))
+            torch.testing.assert_close(block.e_score_correction_bias, expected_buffer)
+            torch.testing.assert_close(
+                block.linear(inputs) + block.e_score_correction_bias, 4 * version + expected_buffer[None]
+            )

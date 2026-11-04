@@ -297,8 +297,7 @@ distributed:
 
 ## 权重同步与上游能力复用
 
-非量化权重同步使用 vLLM 的 `initialize_layerwise_reload` 和
-`finalize_layerwise_reload`。verl 在接收 IPC bucket 时复制一次输入张量，
-保证延迟到后续 bucket 才加载的权重不会被覆盖。Ascend 不再重复复制输入，
-只保留 callable loader 和非 checkpoint 运行时状态的兼容处理。
+普通非量化 MoE 权重同步复用主线的 staging、加载、原生后处理与 fold 流程。
+staging 使用初始化时记录的 checkpoint 布局，逐 bucket 加载后由 fold 写回原推理存储。
+此路径保留 main/MTP 的 buffer 更新和 tied-weight alias 处理。
 训推 log-prob 差异直接使用上游指标 `training/rollout_logprobs_diff_mean`。
