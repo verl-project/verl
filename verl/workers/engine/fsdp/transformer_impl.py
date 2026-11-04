@@ -299,7 +299,8 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        if getattr(self.model_config.hf_config, "load_checkpoint_after_shard", False):
+        load_after_shard = getattr(self.model_config.hf_config, "load_checkpoint_after_shard", False)
+        if load_after_shard:
             force_meta = True
             load_pretrained = False
         if force_meta:
@@ -349,6 +350,12 @@ class FSDPEngine(BaseEngine):
                     torch_dtype=torch_dtype,
                     model_config=self.model_config.hf_config,
                     trust_remote_code=self.model_config.trust_remote_code,
+                )
+
+            if load_after_shard and not callable(getattr(module, "load_hf_checkpoint_shards", None)):
+                raise ValueError(
+                    "load_checkpoint_after_shard=True requires a callable "
+                    f"{type(module).__name__}.load_hf_checkpoint_shards"
                 )
 
             use_liger = self.model_config.use_liger

@@ -14,6 +14,7 @@
 
 """The existing engine API exports full HF by default, including delta seeds."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -157,18 +158,32 @@ def test_model_build_loads_native_checkpoint_only_after_wrap(load_after_shard):
     )
 
 
-def test_after_shard_declaration_reuses_meta_construction_without_pretrained_load():
+@pytest.mark.parametrize("load_after_shard", [None, False, True])
+@pytest.mark.parametrize("loader", ["missing", "noncallable", "supported"])
+def test_after_shard_declaration_validates_loader_before_model_patches(load_after_shard, loader):
     from unittest.mock import Mock
 
+    def build_model(*args, **kwargs):
+        module = torch.nn.Linear(2, 2)
+        if loader == "supported":
+            module.load_hf_checkpoint_shards = Mock()
+        elif loader == "noncallable":
+            module.load_hf_checkpoint_shards = None
+        return module
+
     auto_class = SimpleNamespace(
-        from_config=Mock(side_effect=lambda *args, **kwargs: torch.nn.Linear(2, 2)),
-        from_pretrained=Mock(side_effect=AssertionError("must not load full CPU weights")),
+        from_config=Mock(side_effect=build_model),
+        from_pretrained=Mock(side_effect=build_model),
     )
+    hf_config = SimpleNamespace(tie_word_embeddings=False)
+    if load_after_shard is not None:
+        hf_config.load_checkpoint_after_shard = load_after_shard
     engine = object.__new__(FSDPEngine)
+    engine.device_mesh = None
     engine.engine_config = SimpleNamespace(model_dtype="fp32", forward_only=False)
     engine.model_config = SimpleNamespace(
         model_type="language_model",
-        hf_config=SimpleNamespace(load_checkpoint_after_shard=True),
+        hf_config=hf_config,
         trust_remote_code=False,
         local_path="checkpoint",
         use_liger=False,
@@ -180,8 +195,21 @@ def test_after_shard_declaration_reuses_meta_construction_without_pretrained_loa
     engine.ulysses_sequence_parallel_size = 1
     with (
         patch("verl.utils.model.get_hf_auto_model_class", return_value=auto_class),
-        patch("verl.workers.engine.fsdp.transformer_impl.apply_monkey_patch"),
+        patch("verl.workers.engine.fsdp.transformer_impl.get_init_weight_context_manager", return_value=nullcontext),
+        patch("verl.workers.engine.fsdp.transformer_impl.apply_monkey_patch") as patch_model,
     ):
-        module = engine._build_module()
-    assert isinstance(module, torch.nn.Linear)
-    assert module.weight.is_meta
+        if load_after_shard and loader != "supported":
+            with pytest.raises(ValueError, match="load_checkpoint_after_shard=True.*load_hf_checkpoint_shards"):
+                engine._build_module()
+            patch_model.assert_not_called()
+        else:
+            module = engine._build_module()
+            assert isinstance(module, torch.nn.Linear)
+            assert module.weight.is_meta == bool(load_after_shard)
+            patch_model.assert_called_once()
+    if load_after_shard:
+        auto_class.from_config.assert_called_once()
+        auto_class.from_pretrained.assert_not_called()
+    else:
+        auto_class.from_pretrained.assert_called_once()
+        auto_class.from_config.assert_not_called()
