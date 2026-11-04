@@ -10,7 +10,7 @@ ARG TORCHTITAN_COMMIT=89ef29b5a0d03a6883079ab37ff1bdc498fe3485
 # Optimized Qwen3.5 (google-pytorch/torchtitan#80, last of the TPU Qwen3.5 perf series #73-#80):
 # ARG TORCHTITAN_COMMIT=3ebfb20abc89613b29b38634b464fbca0a24c96b
 
-ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
+ARG VLLM_TORCHTPU_COMMIT=281b52666c6a4f1e64e97ad573a66d1082d178c3
 
 USER root
 RUN apt-get update && apt-get install -y gcc-12 g++-12 build-essential cmake ninja-build \
