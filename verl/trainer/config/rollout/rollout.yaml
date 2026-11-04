@@ -97,6 +97,12 @@ enable_chunked_prefill: True
 # Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
 enable_prefix_caching: True
 
+# Retain standalone vLLM requests and KV across weight updates.
+preserve_kv_cache: False
+
+# Prefix sharing when preserving KV: versioned (task's starting weight version) or shared (across versions).
+prefix_cache_mode: versioned
+
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs
 

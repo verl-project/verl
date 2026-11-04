@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from verl.workers.config.rollout import RolloutConfig
 
 
@@ -22,3 +24,8 @@ def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():
     config.max_model_len = 32768
     config.max_num_batched_tokens = config.max_model_len
     assert config.max_num_batched_tokens == 32768
+
+
+def test_prefix_cache_mode_rejects_unknown_values():
+    with pytest.raises(ValueError, match="prefix_cache_mode"):
+        RolloutConfig(name="vllm", prefix_cache_mode="per_step")

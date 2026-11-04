@@ -56,11 +56,13 @@ class _FakeEngine:
         self.reset_prefix_calls = 0
         self.outputs = []
         self.sampling_params = []
+        self.prompts = []
         self.closed = 0
 
     async def add_request(self, request_id, prompt, params, lora_request=None, priority=0, data_parallel_rank=None):
         """Like AsyncLLM.add_request(): returns a collector that yields ``outputs``, the last one finished."""
         self.sampling_params.append(params)
+        self.prompts.append(prompt)
         pending = list(self.outputs)
         for i, output in enumerate(pending):
             output.finished = i == len(pending) - 1
@@ -372,6 +374,7 @@ def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch):
         assert server.engine.sampling_params[0].logprob_token_ids is None
         assert output.token_ids == [5, 9] and output.stop_reason == "completed"
         assert output.extra_fields == {"global_steps": 7, "num_cached_tokens": 0}
+        assert "cache_salt" not in server.engine.prompts[0]
         assert server.engine.closed == 1
         assert server._admitting == 0
 
@@ -474,6 +477,82 @@ def test_abort_is_not_blocked_by_requests_waiting_for_their_first_token():
     asyncio.run(main())
 
 
+def test_keep_pause_parks_late_arrivals_until_the_new_weights_are_live(monkeypatch):
+    async def main():
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5])])
+        server.config = RolloutConfig(
+            name="vllm",
+            max_model_len=64,
+            prompt_length=32,
+            response_length=16,
+            preserve_kv_cache=True,
+            enable_prefix_caching=True,
+        )
+
+        await server.pause_generation()
+        assert server.engine.pause_kwargs == [{"mode": "keep", "clear_cache": False}]
+        assert server._submission_paused is True, "keep pause must close the gate like the abort path"
+
+        task = asyncio.create_task(server.generate([1, 2, 3], {}, "late"))
+        await asyncio.sleep(0.05)
+        assert not task.done(), "a request arriving during the weight update must park"
+
+        await server.set_global_steps(8)
+        await server.resume_generation()
+        output = await asyncio.wait_for(task, timeout=5)
+
+        assert output.extra_fields["min_global_steps"] == 8
+        assert output.extra_fields["max_global_steps"] == 8
+        assert output.extra_fields["cache_salt"] == "8"
+
+    asyncio.run(main())
+
+
+def test_replica_keep_pause_closes_every_server_gate():
+    async def main():
+        calls = []
+
+        def handle(rank):
+            async def pause():
+                calls.append(rank)
+
+            return SimpleNamespace(pause_generation=SimpleNamespace(remote=pause))
+
+        replica = object.__new__(vllm_async_server.vLLMReplica)
+        replica.servers = [handle(0), handle(1)]
+
+        await replica.pause_generation()
+
+        assert sorted(calls) == [0, 1]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("mode,enabled", [("versioned", True), ("shared", True), ("versioned", False)])
+def test_prefix_cache_namespace_across_weight_updates(monkeypatch, mode, enabled):
+    async def main():
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5])])
+        server.config = RolloutConfig(
+            name="vllm",
+            max_model_len=64,
+            prompt_length=32,
+            response_length=16,
+            preserve_kv_cache=True,
+            enable_prefix_caching=enabled,
+            prefix_cache_mode=mode,
+        )
+        first = await server.generate([1, 2, 3], {}, "first")
+        salted = enabled and mode == "versioned"
+        assert first.extra_fields.get("cache_salt") == ("7" if salted else None)
+        server.global_steps = 8
+        await server.generate([1, 2, 3], {}, "new")
+        await server.generate([1, 2, 3, 5], {}, "next-turn", cache_salt=first.extra_fields.get("cache_salt"))
+        salts = [prompt.get("cache_salt") for prompt in server.engine.prompts]
+        assert salts == (["7", "8", "7"] if salted else [None, None, None])
+
+    asyncio.run(main())
+
+
 def test_request_hooks_add_selected_token_scores_without_overriding_generate(monkeypatch):
     async def main():
         rows = [{5: Logprob(logprob=-0.1, rank=1), 7: Logprob(logprob=-2.3, rank=2)}]
@@ -512,6 +591,52 @@ def test_output_hook_runs_for_requests_aborted_with_empty_outputs(monkeypatch):
         assert output.stop_reason == "aborted" and output.token_ids == []
         assert output.extra_fields["selected_logprobs"] == []
         assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def test_generate_retains_start_and_end_versions_and_original_sampling_records(monkeypatch):
+    async def main():
+        rows = [{5: Logprob(logprob=-0.2, rank=1)}, {9: Logprob(logprob=-0.7, rank=1)}]
+        final = _request_output([5, 9], rows)
+        routing = [[3], [4], [5], [6]]
+        final.outputs[0].routed_experts = routing
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [])
+        server.config = RolloutConfig(
+            name="vllm",
+            max_model_len=64,
+            prompt_length=32,
+            response_length=16,
+            preserve_kv_cache=True,
+            enable_rollout_routing_replay=True,
+        )
+        outputs = [_request_output([5], rows[:1]), final]
+        outputs[0].finished = False
+        final.finished = True
+
+        class _Collector:
+            def get_nowait(self_inner):
+                return None
+
+            async def get(self_inner):
+                if len(outputs) == 1:
+                    await server.set_global_steps(8)
+                return outputs.pop(0)
+
+            def close(self_inner):
+                pass
+
+        async def add_request(*args, **kwargs):
+            return _Collector()
+
+        server.engine.add_request = add_request
+        output = await server.generate([1, 2, 3], {"logprobs": True}, "r")
+
+        assert output.extra_fields["global_steps"] == 8
+        assert output.extra_fields["min_global_steps"] == 7
+        assert output.extra_fields["max_global_steps"] == 8
+        assert output.token_ids == [5, 9] and output.log_probs == [-0.2, -0.7]
+        assert output.routed_experts is routing
 
     asyncio.run(main())
 

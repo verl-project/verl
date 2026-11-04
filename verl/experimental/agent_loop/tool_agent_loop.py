@@ -250,6 +250,11 @@ class ToolAgentLoop(AgentLoopBase):
                 mm_processor_output=agent_data.mm_processor_output,
                 audio_data=agent_data.audio_data,
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
+                **(
+                    {"cache_salt": agent_data.extra_fields["cache_salt"]}
+                    if "cache_salt" in agent_data.extra_fields
+                    else {}
+                ),
             )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:

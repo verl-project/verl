@@ -27,6 +27,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout.replica import RolloutMode
 from verl.workers.rollout.utils import ensure_async_iterator
 
 
@@ -351,12 +352,14 @@ class CheckpointEngineWorker(Worker):
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, *, preserve_kv_cache: bool = False):
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
+        kwargs = {"preserve_kv_cache": True} if preserve_kv_cache else {}
         await self.server_adapter.update_weights(
             weights,
             global_steps=global_steps,
             wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
+            **kwargs,
         )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
@@ -519,8 +522,22 @@ class CheckpointEngineManager:
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
-        # 1. abort and save all unfinished requests for partial rollout
-        await self.abort_replicas()
+        preserve_kv_cache = all(
+            r.config.name == "vllm"
+            and r.config.preserve_kv_cache
+            and r.rollout_mode == RolloutMode.STANDALONE
+            and not r.config.disaggregation.enabled
+            and not r.is_multimodal
+            and not (
+                (r.model_config.lora_rank > 0 or r.model_config.lora.get("rank", 0) > 0)
+                and not r.model_config.lora.get("merge", False)
+            )
+            for r in self.replicas
+        )
+        if preserve_kv_cache:
+            await asyncio.gather(*[r.pause_generation() for r in self.replicas])
+        else:
+            await self.abort_replicas()
 
         # 2. create a temporay worker group for all replicas
         workers = []
@@ -530,15 +547,17 @@ class CheckpointEngineManager:
         actor_wg = self.actor_wg
 
         # 3. release kv_cache before weight sync (weights stay in place)
-        await self.release_kv_cache_replicas()
+        if not preserve_kv_cache:
+            await self.release_kv_cache_replicas()
 
         # 4. build process group
         self.build_process_group(rollout)
 
         # 5. update weights of all workers
+        kwargs = {"preserve_kv_cache": True} if preserve_kv_cache else {}
         results = ray.get(
             actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
+            + rollout.update_weights(global_steps=global_steps, **kwargs)
         )
         # The sender workers return the engine's per-sync metrics (empty for
         # backends that don't track any); merge and hand them to the trainer.
@@ -554,7 +573,8 @@ class CheckpointEngineManager:
         )
 
         # 7. restore kv_cache after weight sync
-        await self.resume_kv_cache_replicas()
+        if not preserve_kv_cache:
+            await self.resume_kv_cache_replicas()
 
         # 8. resume all unfinished requests for partial rollout
         await self.resume_generation_replicas()
