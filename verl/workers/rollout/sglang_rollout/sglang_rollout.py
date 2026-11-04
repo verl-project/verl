@@ -331,7 +331,7 @@ class ServerAdapter(BaseRollout):
         if wire_format == "delta_flush":
             if use_quantized_refit:
                 raise ValueError(
-                    "SGLang MXFP8/MXFP4/NVFP4 custom refit is not supported with wire_format='delta_flush'; "
+                    "SGLang MXFP8/MXFP4 custom refit is not supported with wire_format='delta_flush'; "
                     "use the regular bucketed weight sync"
                 )
             await self._update_weights_delta(weights, global_steps=global_steps)

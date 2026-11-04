@@ -132,16 +132,12 @@ class QATEngineConfig(BaseConfig):
         mode (str): Quantization mode, "fp8", "mxfp8", "mxfp4", or "nvfp4", default "fp8"
         group_size (int): Group size for blockwise quantization, default 16
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
-        activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
-        quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
     """
 
     enable: bool = False
     mode: str = "fp8"
     group_size: int = 16
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
-    activation_observer: str = "static_minmax"
-    quantization_config_path: Optional[str] = None
 
 
 @dataclass
@@ -216,6 +212,15 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        if real_nvfp4_enabled(self.override_transformer_config):
+            if self.qat.enable:
+                raise ValueError("override_transformer_config.fp4 and ModelOpt QAT are mutually exclusive")
+            if self.dtype != "bfloat16":
+                raise ValueError("NVFP4 training currently requires dtype='bfloat16'")
+            if self.use_megatron_fsdp:
+                raise ValueError("NVFP4 training is a Megatron-DDP path and does not support Megatron-FSDP")
         if self.dynamic_context_parallel and (
             not isinstance(self.max_seqlen_per_dp_cp_rank, int)
             or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
@@ -267,7 +272,6 @@ class FSDPEngineConfig(EngineConfig):
             (``max_token_len_per_gpu * ulysses_sequence_parallel_size``) collapses every
             within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
             default 1024
-        qat (QATEngineConfig): QAT configuration, default disabled
     """
 
     # ulysses_sequence_parallel_size is mutable for backward compatibility
@@ -291,7 +295,6 @@ class FSDPEngineConfig(EngineConfig):
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
-    qat: QATEngineConfig = field(default_factory=QATEngineConfig)
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

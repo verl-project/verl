@@ -20,6 +20,7 @@ The module is loaded by path with its vLLM-facing siblings stubbed, so these run
 import importlib.util
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,7 +107,6 @@ def quant_utils():
         "verl.utils.vllm.vllm_fp4_utils": _stub(
             "verl.utils.vllm.vllm_fp4_utils",
             install_mxfp4_mxfp8_compressed_tensors_patch=noop,
-            install_nvfp4_cutlass_compressed_tensors_patch=noop,
             is_deepseek_v4_model=lambda model: False,
             process_mxfp4_moe_weights_after_loading=noop,
             process_nvfp4_moe_weights_after_loading=noop,
@@ -118,6 +118,15 @@ def quant_utils():
             build_fp8_method_patchers=noop,
             process_fp8_weights_after_loading=noop,
             stage_fp8_params_for_loading=noop,
+        ),
+        "verl.utils.vllm.vllm_nvfp4_per_token_utils": _stub(
+            "verl.utils.vllm.vllm_nvfp4_per_token_utils", install_nvfp4_per_token_compressed_tensors_patch=noop
+        ),
+        "verl.utils.vllm.vllm_unquant_utils": _stub(
+            "verl.utils.vllm.vllm_unquant_utils",
+            fold_unquantized_moe_params=nullcontext,
+            stage_unquantized_moe_params=noop,
+            unquantized_moe_modules=noop,
         ),
     }
     saved = {name: sys.modules.get(name) for name in stubs}

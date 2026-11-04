@@ -26,20 +26,35 @@ from .transformer_impl import FSDPEngineWithLMHead
 class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
     def _init_device_mesh(self):
         super()._init_device_mesh()
-        self._init_parallel_state()
+        self._init_turbo_config()
 
-    def _init_parallel_state(self):
+    def _init_turbo_config(self):
         from fsdp_turbo.distributed.parallel_state import get_parallel_state, init_parallel_state
         from fsdp_turbo.fsdp_turbo_config import FSDPTurboConfig, _dict_to_dataclass
+        from fsdp_turbo.utils.device import set_accelerator_compatible
 
+        set_accelerator_compatible()
         self.fsdp_turbo_config = _dict_to_dataclass(FSDPTurboConfig, self.engine_config.turbo_config)
-        self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload = self.engine_config.offload_policy
+        self.fsdp_turbo_config.distributed.fsdp_plan.cpu_offload = (
+            self.engine_config.offload_policy or self.engine_config.forward_only
+        )
         init_parallel_state(self.fsdp_turbo_config)
         self._parallel_state = get_parallel_state()
         if self._is_ulysses_enabled():
             self._process_ulysses_config()
 
     def _build_module(self):
+        from fsdp_turbo.models.utils import get_model_by_name
+        from fsdp_turbo.utils.model import set_fused_overrides
+
+        import verl.utils.model as verl_model_utils
+
+        set_fused_overrides(self.model_config.hf_config, self.fsdp_turbo_config)
+        turbo_model_cls = get_model_by_name(self.fsdp_turbo_config.model.model_name_or_path)
+        _orig_get_class = verl_model_utils.get_hf_auto_model_class
+        if turbo_model_cls is not None:
+            verl_model_utils.get_hf_auto_model_class = lambda **kw: turbo_model_cls
+
         # Do not let verl's Qwen VLM monkey patch slice the text model before
         # FSDP-Turbo's post-fusion model patch does the CP split.
         cp_size = self.ulysses_sequence_parallel_size
@@ -48,6 +63,8 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
             return super()._build_module()
         finally:
             self.ulysses_sequence_parallel_size = cp_size
+            if turbo_model_cls is not None:
+                verl_model_utils.get_hf_auto_model_class = _orig_get_class
 
     def _build_fsdp_module(self, module):
         from fsdp_turbo.fsdp_turbo import FSDPTurbo
@@ -141,10 +158,5 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
                 self.optimizer.zero_grad()
             else:
                 self.optimizer.step()
-
-        if self._qat_enabled:
-            from verl.utils.qat.core import invalidate_all_scales
-
-            invalidate_all_scales(self.module)
 
         return grad_norm.item()

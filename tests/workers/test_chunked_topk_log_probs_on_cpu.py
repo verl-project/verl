@@ -38,6 +38,7 @@ import torch
 import torch.nn.functional as F
 
 from verl.trainer.distillation.fsdp.losses import _chunked_topk_log_probs
+from verl.utils.device import get_device_name, is_device_available
 
 
 def _reference_topk_log_probs(logits: torch.Tensor, topk_ids: torch.Tensor) -> torch.Tensor:
@@ -80,7 +81,7 @@ def test_numerical_equivalence(B, T, V, K, dtype, atol):
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU-only test for low-precision dtypes")
+@pytest.mark.skipif(not is_device_available(), reason="GPU-only test for low-precision dtypes")
 @pytest.mark.parametrize(
     "dtype,atol",
     [
@@ -94,8 +95,8 @@ def test_numerical_equivalence_low_precision_on_gpu(dtype, atol):
     """Verify bf16/fp16 equivalence on GPU (where fused log_softmax upcasts)."""
     torch.manual_seed(42)
     B, T, V, K = 2, 64, 152064, 64
-    logits = torch.randn(B, T, V, dtype=dtype, device="cuda")
-    topk_ids = torch.randint(0, V, (B, T, K), device="cuda")
+    logits = torch.randn(B, T, V, dtype=dtype, device=get_device_name())
+    topk_ids = torch.randint(0, V, (B, T, K), device=get_device_name())
 
     ref = _reference_topk_log_probs(logits, topk_ids)
     out = _chunked_topk_log_probs(logits, topk_ids, chunk_size=4096)
