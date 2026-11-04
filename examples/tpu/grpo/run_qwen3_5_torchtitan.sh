@@ -47,26 +47,40 @@ export LIBTPU_INIT_ARGS
 # - SPARSECORE_OFFLOAD=True: TorchTitan Qwen3.5 fast-EP SparseCore collective offload + TensorCore gather/copy flags
 # - TRAINER_EXTRA_LIBTPU_INIT_ARGS: any additional trainer-only XLA/libtpu flags.
 VERL_TPU_TRAINER_LIBTPU_INIT_ARGS=""
+VERL_TPU_TRAINER_XLA_FLAGS=""
 if [[ -n "${TRAINER_SCOPED_VMEM_LIMIT_KIB:-}" ]]; then
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_scoped_vmem_limit_kib=${TRAINER_SCOPED_VMEM_LIMIT_KIB}"
 fi
 if [[ "${SPARSECORE_OFFLOAD:-False}" == "True" ]]; then
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_latency_hiding_layer_scheduler=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_enable_async_all_gather=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_prefer_async_allgather_to_allreduce=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_aggregator=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_offloading_gather_to_sparsecore=false"
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+    VERL_TPU_TRAINER_XLA_FLAGS+=" --xla_enable_hlo_sharding_v3=false"
 fi
 if [[ -n "${TRAINER_EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" ${TRAINER_EXTRA_LIBTPU_INIT_ARGS}"
 fi
+if [[ -n "${TRAINER_EXTRA_XLA_FLAGS:-}" ]]; then
+    VERL_TPU_TRAINER_XLA_FLAGS+=" ${TRAINER_EXTRA_XLA_FLAGS}"
+fi
 VERL_TPU_TRAINER_LIBTPU_INIT_ARGS="${VERL_TPU_TRAINER_LIBTPU_INIT_ARGS# }"
 if [[ -n "${VERL_TPU_TRAINER_LIBTPU_INIT_ARGS}" ]]; then
     export VERL_TPU_TRAINER_LIBTPU_INIT_ARGS
+fi
+VERL_TPU_TRAINER_XLA_FLAGS="${VERL_TPU_TRAINER_XLA_FLAGS# }"
+if [[ -n "${VERL_TPU_TRAINER_XLA_FLAGS}" ]]; then
+    export VERL_TPU_TRAINER_XLA_FLAGS
 fi
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
@@ -168,6 +182,9 @@ if [[ -n "${EP_TOKEN_CHUNKS:-}" ]]; then
 fi
 if [[ -n "${EP_PAIRED_GROUPED_MM:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_paired_grouped_mm=${EP_PAIRED_GROUPED_MM}")
+fi
+if [[ -n "${AC_SAVE_SPLASH_AND_ROUTING:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ac_save_splash_and_routing=${AC_SAVE_SPLASH_AND_ROUTING}")
 fi
 
 python3 -m verl.trainer.main_ppo \
