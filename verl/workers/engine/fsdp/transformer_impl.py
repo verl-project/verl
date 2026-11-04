@@ -261,8 +261,8 @@ class FSDPEngine(BaseEngine):
 
         self.to(
             device="cpu",
-            model=self._is_offload_param or self._uses_fsdp2_cpu_offload_policy,
-            optimizer=self._is_offload_optimizer or self._uses_fsdp2_cpu_offload_policy,
+            model=self._is_offload_param,
+            optimizer=self._is_offload_optimizer,
             grad=self._is_offload_param,
         )
 
