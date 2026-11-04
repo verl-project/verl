@@ -321,15 +321,13 @@ class vLLMHttpServer:
         hf_overrides = self._apply_quantization()
         hf_quantization_config = getattr(self.model_config.hf_config, "quantization_config", None)
         effective_quantization_config = hf_overrides.get("quantization_config") or hf_quantization_config
-        from verl.utils.vllm.vllm_quant_utils import (
-            checkpoint_hf_config_for_backend_defaults,
-            set_default_vllm_quantization_backends,
-        )
+        from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
         set_default_vllm_quantization_backends(
             effective_quantization_config,
             engine_kwargs,
-            hf_config=checkpoint_hf_config_for_backend_defaults(hf_overrides, self.model_config.hf_config),
+            hf_config=self.model_config.hf_config,
+            checkpoint_quantization=not hf_overrides.get("quantization_config"),
         )
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}

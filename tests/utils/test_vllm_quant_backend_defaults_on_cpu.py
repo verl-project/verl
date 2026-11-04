@@ -79,6 +79,15 @@ _CT_MXFP4_LINEAR_EXPERTS_IGNORED_QUANT = {
     "config_groups": {"group_linear": {"targets": ["Linear"], "weights": _CT_MXFP4_WEIGHTS}},
     "ignore": ["re:.*lm_head", _MOE_TARGET],
 }
+# Layer-specific ignore rules are resolved per expert module with the model's layer / expert counts.
+_TWO_LAYER_MOE_HF = SimpleNamespace(model_type="deepseek_v3", num_hidden_layers=2, n_routed_experts=2)
+_LAYER0_EXPERTS = r"re:model\.layers\.0\.mlp\.experts\..*"
+_LAYER1_EXPERTS = r"re:model\.layers\.1\.mlp\.experts\..*"
+_CT_MXFP4_LAYER0_EXPERTS_IGNORED_QUANT = {**_CT_MXFP4_QUANT, "ignore": ["re:.*lm_head", _LAYER0_EXPERTS]}
+_CT_MXFP4_ALL_LAYERS_EXPERTS_IGNORED_QUANT = {
+    **_CT_MXFP4_QUANT,
+    "ignore": ["re:.*lm_head", _LAYER0_EXPERTS, _LAYER1_EXPERTS],
+}
 _FP8_QUANT = {"quant_method": "fp8", "fmt": "e4m3", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"}
 _NVFP4_QUANT = {"quant_method": "modelopt", "quant_algo": "NVFP4"}
 
@@ -133,9 +142,11 @@ def defaults(quant_utils, monkeypatch):
     monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
     monkeypatch.delenv("VERL_ROLLOUT_USE_DEEP_GEMM", raising=False)
 
-    def run(quantization_config, hf_config=None, hopper=False, **engine_kwargs):
+    def run(quantization_config, hf_config=None, hopper=False, checkpoint_quantization=True, **engine_kwargs):
         monkeypatch.setattr(quant_utils, "_is_hopper", lambda: hopper)
-        quant_utils.set_default_vllm_quantization_backends(quantization_config, engine_kwargs, hf_config=hf_config)
+        quant_utils.set_default_vllm_quantization_backends(
+            quantization_config, engine_kwargs, hf_config=hf_config, checkpoint_quantization=checkpoint_quantization
+        )
         return engine_kwargs
 
     return run
@@ -149,6 +160,7 @@ def defaults(quant_utils, monkeypatch):
         (_CT_MXFP4_QUANT, None),
         (_CT_MXFP8_LINEAR_MXFP4_MOE_QUANT, None),
         (_CT_MXFP4_LINEAR_QUANT, None),
+        (_CT_MXFP4_LAYER0_EXPERTS_IGNORED_QUANT, _TWO_LAYER_MOE_HF),  # layer 1's experts are still MXFP4
     ],
 )
 def test_mxfp4_experts_keep_vllm_moe_selection_on_hopper(defaults, quantization_config, hf_config, caplog):
@@ -173,11 +185,28 @@ def test_fp8_moe_still_defaults_to_deep_gemm(defaults, hopper, hf_config):
 
 @pytest.mark.parametrize("hopper", [True, False])
 @pytest.mark.parametrize(
-    "quantization_config", [_CT_MXFP4_LINEAR_FP8_MOE_QUANT, _CT_MXFP4_LINEAR_EXPERTS_IGNORED_QUANT]
+    "quantization_config, hf_config",
+    [
+        (_CT_MXFP4_LINEAR_FP8_MOE_QUANT, None),
+        (_CT_MXFP4_LINEAR_EXPERTS_IGNORED_QUANT, None),
+        (_CT_MXFP4_ALL_LAYERS_EXPERTS_IGNORED_QUANT, _TWO_LAYER_MOE_HF),  # every layer's experts ignored
+    ],
 )
-def test_mxfp4_outside_the_experts_group_keeps_deep_gemm(defaults, hopper, quantization_config):
-    kwargs = defaults(quantization_config, None, hopper=hopper)
+def test_mxfp4_outside_the_experts_keeps_deep_gemm(defaults, hopper, quantization_config, hf_config):
+    kwargs = defaults(quantization_config, hf_config, hopper=hopper)
     assert kwargs == {"linear_backend": "deep_gemm", "moe_backend": "deep_gemm"}
+
+
+def test_layer_specific_ignore_needs_the_layer_count(defaults):
+    # Without a model config only layer 0 is probed, so ignoring it hides layer 1's MXFP4 experts; launch_server
+    # always passes the model config.
+    assert defaults(_CT_MXFP4_LAYER0_EXPERTS_IGNORED_QUANT, None, hopper=True) == {
+        "linear_backend": "deep_gemm",
+        "moe_backend": "deep_gemm",
+    }
+    assert defaults(_CT_MXFP4_LAYER0_EXPERTS_IGNORED_QUANT, _TWO_LAYER_MOE_HF, hopper=True) == {
+        "linear_backend": "deep_gemm"
+    }
 
 
 @pytest.mark.parametrize("hopper", [True, False])
@@ -202,17 +231,15 @@ def test_opt_out_env_leaves_everything_to_vllm(defaults, monkeypatch):
     assert os.environ.get("VLLM_USE_DEEP_GEMM_E8M0") == "0"
 
 
-def test_rollout_quantization_override_ignores_checkpoint_expert_dtype(quant_utils, defaults):
-    # A rollout quantization override requantizes the experts too, so launch_server must not forward the
-    # checkpoint's expert_dtype; the effective FP8 block config then keeps DeepGEMM for the MoE on Hopper.
-    pick = quant_utils.checkpoint_hf_config_for_backend_defaults
-    assert pick({"quantization_config": _FP8_QUANT}, _DSV4_HF) is None
-    assert pick({}, _DSV4_HF) is _DSV4_HF
-    assert pick(None, _DSV4_HF) is _DSV4_HF
-    assert defaults(_FP8_QUANT, pick({"quantization_config": _FP8_QUANT}, _DSV4_HF), hopper=True) == {
+def test_rollout_quantization_override_ignores_checkpoint_expert_dtype(defaults):
+    # A rollout quantization override requantizes the experts too, so the checkpoint's expert_dtype must not
+    # count (launch_server passes checkpoint_quantization=False); the effective FP8 block config then keeps
+    # DeepGEMM for the MoE on Hopper, while the model config is still available for layer / expert counts.
+    assert defaults(_FP8_QUANT, _DSV4_HF, hopper=True, checkpoint_quantization=False) == {
         "linear_backend": "deep_gemm",
         "moe_backend": "deep_gemm",
     }
+    assert defaults(_FP8_QUANT, _DSV4_HF, hopper=True) == {"linear_backend": "deep_gemm"}
 
 
 def test_explicit_auto_linear_backend_keeps_hopper_e8m0_override(defaults):
