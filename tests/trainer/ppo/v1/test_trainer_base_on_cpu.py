@@ -206,14 +206,16 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     assert batch.extra_info["score_centering"] is score_centering
 
 
-@pytest.mark.parametrize("case", ["mixed", "nonfinite", "all_empty"])
+@pytest.mark.parametrize("case", ["mixed", "nonfinite", "all_empty", "single_token"])
 @pytest.mark.parametrize("empty_sample_count", [0, 2])
-def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sample_count):
+@pytest.mark.parametrize("reverse_updates", [False, True])
+def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sample_count, reverse_updates):
     """Exercise real trainer-step aggregation with producer outputs and batch metadata.
 
     Mock preparation and worker updates to isolate four local updates on CPU.
-    Check padding-derived weights, mixed/nonfinite/all-empty windows, and retained
-    trajectory metadata and existing metrics.
+    Check both update orders, padding-derived weights, and mixed/nonfinite/all-empty
+    windows. A single-token update has available tokens but undefined std/correlation.
+    Retain trajectory metadata and existing metrics in every case.
     """
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.parameter_sync_step = 4
@@ -225,6 +227,8 @@ def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sa
         response_mask = torch.zeros((4, 2), dtype=torch.long)
         if available:
             response_mask[:sample_count] = 1
+        if case == "single_token" and index == 0:
+            response_mask[0, 1] = 0
         rollout_log_probs = torch.tensor([[-1.0, -2.0]]).repeat(4, 1)
         actor_log_probs = rollout_log_probs - (0.5 if index == 0 else 1.0)
         if case == "nonfinite" and index == 2:
@@ -237,7 +241,11 @@ def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sa
                 "responses": torch.zeros((4, 2)),
             }
         )
-        local_metrics.append(calculate_debug_metrics(data))
+        if case == "single_token" and index == 0:
+            with pytest.warns(UserWarning, match="degrees of freedom"):
+                local_metrics.append(calculate_debug_metrics(data))
+        else:
+            local_metrics.append(calculate_debug_metrics(data))
         batches.append(
             KVBatchMeta(
                 partition_id="train",
@@ -246,6 +254,10 @@ def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sa
             )
         )
 
+    available_metrics = (local_metrics[0], local_metrics[2])
+    if reverse_updates:
+        local_metrics.reverse()
+        batches.reverse()
     observed_indices = []
     timing_raw = {}
 
@@ -274,7 +286,10 @@ def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sa
     assert metrics["existing_metric"] == 7.0
     assert metrics["timing_s/prepare"] == 0.5
     assert metrics["training/rollout_probs_diff_valid"] == (0 if case == "all_empty" else 1)
-    assert metrics["training/rollout_logprobs_mismatch_count"] == (0 if case == "all_empty" else 8)
+    expected_mismatches = {"all_empty": 0, "single_token": 7}.get(case, 8)
+    assert metrics["training/rollout_logprobs_mismatch_count"] == expected_mismatches
+    if case in ("mixed", "single_token"):
+        assert metrics["training/rollout_logprobs_diff_mean"] == pytest.approx(0.875)
     for key in (
         "training/rollout_probs_diff_mean",
         "training/rollout_probs_diff_std",
@@ -283,11 +298,14 @@ def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sa
         "training/rollout_probs_diff_max",
         "training/rollout_logprobs_diff_max",
     ):
-        if case in ("nonfinite", "all_empty"):
+        if case in ("nonfinite", "all_empty") or (
+            case == "single_token"
+            and key in ("training/rollout_probs_diff_std", "training/rollout_actor_probs_pearson_corr")
+        ):
             assert math.isnan(metrics[key])
         elif key.endswith("_max"):
-            assert metrics[key] == pytest.approx(max(local_metrics[0][key], local_metrics[2][key]))
+            assert metrics[key] == pytest.approx(max(available_metrics[0][key], available_metrics[1][key]))
         else:
             # The two available updates have 1 and 3 non-padding samples, despite both returning four rows.
-            expected = (local_metrics[0][key] + 3 * local_metrics[2][key]) / 4
+            expected = (available_metrics[0][key] + 3 * available_metrics[1][key]) / 4
             assert metrics[key] == pytest.approx(expected)

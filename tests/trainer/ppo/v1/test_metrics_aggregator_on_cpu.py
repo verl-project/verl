@@ -22,6 +22,7 @@ down the per-key aggregation rules (weighted mean/sum/max/min/last/time_sum).
 
 import math
 
+import numpy as np
 import pytest
 import torch
 
@@ -145,6 +146,72 @@ def test_rollout_debug_metrics_exclude_unavailable_steps(metric, empty_position,
 
 
 @pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
+def test_rollout_debug_metrics_exclude_finite_unavailable_values(metric):
+    """Use availability rather than finiteness to decide which updates contribute."""
+    agg = MetricsAggregator()
+    agg.add_step_metrics({metric: 2.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=1)
+    agg.add_step_metrics({metric: 1000.0, _ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    agg.add_step_metrics({metric: 6.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=3)
+    out = agg.get_aggregated_metrics()
+    assert out[metric] == pytest.approx(6.0 if metric in _ROLLOUT_DEBUG_MAXIMA else 5.0)
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
+@pytest.mark.parametrize("omit_first_guard", [False, True])
+def test_rollout_debug_metrics_keep_sparse_values_and_guards_aligned(metric, omit_first_guard):
+    """Pair each value with its own guard even when either is absent on other steps.
+
+    The missing-guard case gives equally sized value and flag lists from different
+    steps; matching list lengths alone cannot establish the correct pairing.
+    """
+    first = {metric: 6.0}
+    if not omit_first_guard:
+        first[_ROLLOUT_DEBUG_VALID] = 1
+    agg = MetricsAggregator()
+    agg.add_step_metrics(first, sample_count=1)
+    agg.add_step_metrics({_ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    agg.add_step_metrics({metric: float("nan"), _ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    agg.add_step_metrics({metric: 2.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=3)
+    out = agg.get_aggregated_metrics()
+    assert out[metric] == pytest.approx(6.0 if metric in _ROLLOUT_DEBUG_MAXIMA else 3.0)
+    assert out[_ROLLOUT_DEBUG_VALID] == 1
+
+
+@pytest.mark.parametrize("flag", [0, 1])
+def test_rollout_debug_guard_alone_does_not_create_diagnostics(flag):
+    """Keep unreported diagnostics absent even when an availability flag is emitted."""
+    agg = MetricsAggregator()
+    agg.add_step_metrics({_ROLLOUT_DEBUG_VALID: flag}, sample_count=10)
+    assert agg.get_aggregated_metrics() == {_ROLLOUT_DEBUG_VALID: flag}
+
+
+def test_rollout_debug_guard_does_not_filter_other_metrics():
+    """Unavailable diagnostics leave unrelated scalar and dictionary reductions intact."""
+    agg = MetricsAggregator()
+    for flag, value, weight in [(0, 2.0, 1), (1, 6.0, 3)]:
+        agg.add_step_metrics(
+            {
+                _ROLLOUT_DEBUG_VALID: flag,
+                "actor/loss/mean": value,
+                "training/rollout_latency_mean": value,
+                "training/global_step": value,
+                "timing_s/update_actor": value,
+                "training/off_policy/evicted_samples": value,
+                DAPO_FILTERED_REWARD_COUNTS_KEY: {1.0: weight},
+            },
+            sample_count=weight,
+        )
+    out = agg.get_aggregated_metrics()
+    assert out["actor/loss/mean"] == pytest.approx(5.0)
+    assert out["training/rollout_latency_mean"] == pytest.approx(5.0)
+    assert out["training/global_step"] == 6.0
+    assert out["timing_s/update_actor"] == 8.0
+    assert out["training/off_policy/evicted_samples"] == 8.0
+    assert out[DAPO_FILTERED_REWARD_COUNTS_KEY] == {1.0: 4}
+
+
+@pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA)
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf")], ids=["nan", "inf"])
 @pytest.mark.parametrize("nonfinite_first", [False, True])
 def test_rollout_debug_metrics_preserve_available_nonfinite_values(metric, nonfinite, nonfinite_first):
@@ -208,13 +275,45 @@ def test_rollout_debug_metrics_missing_guard_and_missing_metrics():
     assert agg.get_aggregated_metrics() == {metric: 5.0}
 
 
-def test_rollout_debug_metrics_accept_scalar_tensors():
-    """Apply the same availability filtering to scalar tensor values and guards."""
+@pytest.mark.parametrize("shape", [(), (1,)])
+def test_rollout_debug_metrics_accept_scalar_tensors(shape):
+    """Filter scalar and single-element tensor guards while retaining unequal weights."""
     agg = MetricsAggregator()
     metric = "training/rollout_probs_diff_mean"
-    agg.add_step_metrics({metric: torch.tensor(float("nan")), _ROLLOUT_DEBUG_VALID: torch.tensor(0)})
-    agg.add_step_metrics({metric: torch.tensor(2.0), _ROLLOUT_DEBUG_VALID: torch.tensor(1)}, sample_count=2)
-    assert agg.get_aggregated_metrics() == {metric: 2.0, _ROLLOUT_DEBUG_VALID: 1.0}
+    for flag, value, weight in [(1, 2.0, 1), (0, float("nan"), 100), (1, 6.0, 3)]:
+        agg.add_step_metrics(
+            {metric: torch.tensor(value).reshape(shape), _ROLLOUT_DEBUG_VALID: torch.tensor(flag).reshape(shape)},
+            sample_count=weight,
+        )
+    assert agg.get_aggregated_metrics() == {metric: 5.0, _ROLLOUT_DEBUG_VALID: 1.0}
+
+
+def test_rollout_debug_metrics_accept_numpy_scalars():
+    """Apply availability and sample weighting to NumPy scalar metrics and guards."""
+    agg = MetricsAggregator()
+    metric = "training/rollout_probs_diff_mean"
+    for flag, value, weight in [(1, 2.0, 1), (0, float("nan"), 100), (1, 6.0, 3)]:
+        agg.add_step_metrics({metric: np.float32(value), _ROLLOUT_DEBUG_VALID: np.int64(flag)}, sample_count=weight)
+    assert agg.get_aggregated_metrics() == {metric: 5.0, _ROLLOUT_DEBUG_VALID: 1.0}
+
+
+def test_rollout_debug_metrics_reset_between_available_and_unavailable_windows():
+    """Keep values, weights, and availability isolated across successive reset cycles."""
+    agg = MetricsAggregator()
+    keys = _ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA
+    for flag, value, weight in [(1, 6.0, 1), (0, float("nan"), 100), (1, 2.0, 3)]:
+        agg.add_step_metrics({**dict.fromkeys(keys, value), _ROLLOUT_DEBUG_VALID: flag}, sample_count=weight)
+    first = agg.get_aggregated_metrics()
+    for key in keys:
+        assert first[key] == pytest.approx(6.0 if key in _ROLLOUT_DEBUG_MAXIMA else 3.0)
+    agg.reset()
+    agg.add_step_metrics({**dict.fromkeys(keys, float("nan")), _ROLLOUT_DEBUG_VALID: 0}, sample_count=100)
+    second = agg.get_aggregated_metrics()
+    assert second[_ROLLOUT_DEBUG_VALID] == 0
+    assert all(math.isnan(second[key]) for key in keys)
+    agg.reset()
+    agg.add_step_metrics({**dict.fromkeys(keys, 9.0), _ROLLOUT_DEBUG_VALID: 1}, sample_count=2)
+    assert agg.get_aggregated_metrics() == {**dict.fromkeys(keys, 9.0), _ROLLOUT_DEBUG_VALID: 1.0}
 
 
 @pytest.mark.parametrize("nonfinite", [False, True])
