@@ -51,6 +51,12 @@ class MetricsAggregator:
             ],
             "last": [
                 "training/global_step",
+            ],
+            "max": [
+                # Validity flag of the rollout_probs_diff_* metrics: 1 when at least one
+                # local step produced a valid measurement, 0 only when none did. "last"
+                # would report the final step only, misaligning the flag with the mean,
+                # which is aggregated across all (valid) steps.
                 "training/rollout_probs_diff_valid",
             ],
         }
@@ -102,15 +108,42 @@ class MetricsAggregator:
             return "weighted_avg"
         return "weighted_avg"
 
+    def _validity_mask(self, metric_name: str, values: list[float]) -> list[bool] | None:
+        """Return per-entry validity from the metric's companion ``*_valid`` flag, if tracked.
+
+        When a local step has an empty response mask, its ``rollout_probs_diff_*`` values are
+        NaN placeholders emitted with ``valid=0``; such entries must not contribute to the
+        aggregated mean/max (``NaN * 0`` is still ``NaN``). Nonfinite values from ``valid=1``
+        steps are deliberately kept so genuine numerical failures stay observable.
+        """
+        valid_flags = None
+        # The companion flag strips the metric suffix, e.g.
+        # "training/rollout_probs_diff_mean" -> "training/rollout_probs_diff_valid".
+        for suffix in ("_mean", "_std", "_max", "_min", "_avg"):
+            if metric_name.endswith(suffix):
+                valid_flags = self.metric_values.get(metric_name[: -len(suffix)] + "_valid")
+                break
+        if valid_flags is None:
+            valid_flags = self.metric_values.get(f"{metric_name}_valid")
+        if valid_flags is None or len(valid_flags) != len(values):
+            return None
+        return [valid != 0 for valid in valid_flags]
+
     def _aggregate_single_metric(self, metric_name: str, values: list[float]) -> float:
         if not values:
             return 0.0
 
         agg_type = self._get_aggregation_type(metric_name)
+        mask = None if metric_name.endswith("_valid") else self._validity_mask(metric_name, values)
         if agg_type == "last":
             return values[-1]
         if agg_type == "weighted_avg":
             weights = self.metric_weights[metric_name]
+            if mask is not None:
+                pairs = [(v, w) for v, w, keep in zip(values, weights, mask, strict=False) if keep]
+                if not pairs:
+                    return float("nan")
+                values, weights = (list(p) for p in zip(*pairs, strict=True))
             if len(values) != len(weights) or sum(weights) == 0:
                 return sum(values) / len(values)
             weighted_sum = sum(v * c for v, c in zip(values, weights, strict=False))
@@ -118,6 +151,10 @@ class MetricsAggregator:
         if agg_type in ("sum", "time_sum"):
             return sum(values)
         if agg_type == "max":
+            if mask is not None:
+                values = [v for v, keep in zip(values, mask, strict=False) if keep]
+                if not values:
+                    return float("nan")
             return max(values)
         if agg_type == "min":
             return min(values)
