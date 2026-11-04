@@ -55,6 +55,7 @@ from verl.workers.rollout.sglang_rollout.utils import (
     normalize_lora_weight_name_for_sglang,
     normalize_peft_config_for_sglang,
 )
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -385,15 +386,22 @@ class ServerAdapter(BaseRollout):
             async with self._weight_update_session():
                 update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
                 fusion_groups = get_deepseek_v4_fusion_groups(self.model_config.hf_config)
+
+                async def canonical_base_weights(iterable):
+                    async for name, tensor in ensure_async_iterator(iterable):
+                        yield _strip_lora_base_layer(name), tensor
+
                 async for params_batch in get_named_tensor_buckets(
-                    weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
+                    canonical_base_weights(weights),
+                    update_weights_bucket_bytes,
+                    fusion_groups=fusion_groups,
                 ):
                     load_format = None
                     if use_quantized_refit:
                         load_format = LOADER_FQN
                     await sgl_update_weights(
                         engine=self._engine,
-                        params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
+                        params_batch=[(name, _to_ipc_device(t)) for name, t in params_batch],
                         device_mesh_key="infer_tp",
                         device_mesh=self.device_mesh,
                         load_format=load_format,
