@@ -36,22 +36,38 @@ fi
 if [[ -n "${TPU_DVFS_P_STATE:-}" ]]; then
     LIBTPU_INIT_ARGS+=" --xla_tpu_dvfs_p_state=${TPU_DVFS_P_STATE}"
 fi
-# SPARSECORE_OFFLOAD=True: offload FSDP / EP all-gather and reduce-scatter onto the SparseCores and let the scheduler
-# overlap dependent EP + FSDP collectives (torchtitan tpu_flags SPARSECORE_COLLECTIVE_OFFLOAD +
-# MAXTEXT_MOE_SPARSECORE_OFFLOAD, as torchtitan's Qwen3.5 EP recipes set). EXTRA_LIBTPU_INIT_ARGS appends any other flags.
-if [[ "${SPARSECORE_OFFLOAD:-False}" == "True" ]]; then
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_aggregator=true"
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true"
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
-    LIBTPU_INIT_ARGS+=" --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
-fi
 if [[ -n "${EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
     LIBTPU_INIT_ARGS+=" ${EXTRA_LIBTPU_INIT_ARGS}"
 fi
 export LIBTPU_INIT_ARGS
+
+# Trainer-only libtpu flags (applied via PlatformTPU.get_worker_env_vars on RayWorkerGroup trainer/ref actors only,
+# leaving vLLM rollout workers untouched so scoped-VMEM / SparseCore trainer flags never slow vLLM compilation):
+# - TRAINER_SCOPED_VMEM_LIMIT_KIB (e.g. 65472 on TPU v7x for Pallas Ring-of-Experts and double-buffered LCE kernels)
+# - SPARSECORE_OFFLOAD=True: TorchTitan Qwen3.5 fast-EP SparseCore collective offload + TensorCore gather/copy flags
+# - TRAINER_EXTRA_LIBTPU_INIT_ARGS: any additional trainer-only XLA/libtpu flags.
+VERL_TPU_TRAINER_LIBTPU_INIT_ARGS=""
+if [[ -n "${TRAINER_SCOPED_VMEM_LIMIT_KIB:-}" ]]; then
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_scoped_vmem_limit_kib=${TRAINER_SCOPED_VMEM_LIMIT_KIB}"
+fi
+if [[ "${SPARSECORE_OFFLOAD:-False}" == "True" ]]; then
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_aggregator=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_offloading_gather_to_sparsecore=false"
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+fi
+if [[ -n "${TRAINER_EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" ${TRAINER_EXTRA_LIBTPU_INIT_ARGS}"
+fi
+VERL_TPU_TRAINER_LIBTPU_INIT_ARGS="${VERL_TPU_TRAINER_LIBTPU_INIT_ARGS# }"
+if [[ -n "${VERL_TPU_TRAINER_LIBTPU_INIT_ARGS}" ]]; then
+    export VERL_TPU_TRAINER_LIBTPU_INIT_ARGS
+fi
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
 MODEL_NAME="${MODEL_NAME:-Qwen3.5-35B-A3B}"
