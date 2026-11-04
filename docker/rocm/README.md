@@ -117,8 +117,13 @@ CP4 x EP32 with FSDP2, rollout TP1 x DP8 x EP8 per node. Multi-node runs need an
 workers run this image, and containers started with `--ulimit nofile=1048576:1048576` (the default open-file
 limit ran out in gloo after ~26 steps).
 
-RDMA between nodes: start the containers with `--device /dev/infiniband --ulimit memlock=-1:-1` and the site's RCCL
-settings (for example `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX` and the `NCCL_TOPO_FILE` of the host). On hosts with
+RDMA between nodes: start the containers with `--device /dev/infiniband --ulimit memlock=-1:-1` and pass your
+cluster's RCCL/RoCE settings into every container (they are site-specific, so the image and the recipe do not set
+them): the NIC list and GID index (`NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`), the host's topology file (`NCCL_TOPO_FILE`),
+and the fabric's RoCE traffic classes and connection settings (for example `NCCL_IB_TC`, `NCCL_IB_FIFO_TC`,
+`NCCL_IB_QPS_PER_CONNECTION`, `NCCL_PXN_DISABLE`). Most hosts keep these in `/etc/rccl.conf` or `/etc/nccl.conf`,
+which a container does not read. Without the traffic classes, large collectives can pass while the first small
+cross-rail ones fail with `NET/IB ... status=12` (retry exceeded). On hosts with
 AMD ionic (Pollara / AINIC) NICs, the image's two ibverbs userspaces cover both driver generations: the base
 image's libionic for ionic drivers before 26.x, and upstream rdma-core in `/opt/rdma-core` for ionic 26.x (e.g.
 26.08). The recipe selects the one that can open the NICs with `ionic-rdma-env.sh`. Run
