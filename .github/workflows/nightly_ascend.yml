@@ -32,7 +32,6 @@
 name: nightly_ci_ascend
 
 on:
-  pull_request:
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
