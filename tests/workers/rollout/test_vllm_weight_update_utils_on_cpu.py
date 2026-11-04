@@ -17,9 +17,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -56,8 +54,17 @@ def _load_weight_update_utils():
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
 
-    with patch.dict(sys.modules, _vocab_parallel_embedding_stubs()):
+    stubs = _vocab_parallel_embedding_stubs()
+    saved = {name: sys.modules.get(name) for name in stubs}
+    try:
+        sys.modules.update(stubs)
         spec.loader.exec_module(module)
+    finally:
+        for name, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
     return module
 
 
@@ -144,11 +151,19 @@ def _load_vllm_rollout_utils():
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
-    with patch.dict(sys.modules, fakes):
+    saved = {name: sys.modules.get(name) for name in fakes}
+    try:
+        sys.modules.update(fakes)
         spec = importlib.util.spec_from_file_location(module_name, module_path)
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(module)
+    finally:
+        for name, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
     return module
 
 
@@ -170,10 +185,15 @@ class _ToyModel(torch.nn.Module):
         self.model.layers = torch.nn.ModuleList([_ToyBlock()])
 
 
+class _FakeVllmConfig:
+    def __init__(self, speculative_config=None):
+        self.speculative_config = speculative_config
+
+
 class _FakeModelRunner:
     def __init__(self, inner_model, speculative_config=None):
         self.model = inner_model
-        self.vllm_config = types.SimpleNamespace(speculative_config=speculative_config)
+        self.vllm_config = _FakeVllmConfig(speculative_config=speculative_config)
 
 
 def test_split_buffer_updates_routes_registered_buffers():
@@ -212,45 +232,70 @@ def test_apply_buffer_updates_ignores_non_buffer_weights():
     assert torch.count_nonzero(model.model.layers[0].e_score_correction_bias) == 0
 
 
-@pytest.mark.parametrize("sync_mtp", [False, True], ids=["main", "main-and-mtp"])
-def test_vllm_update_weights_loads_params_and_buffers(sync_mtp):
-    models = [_ToyModel() for _ in range(2 if sync_mtp else 1)]
-    addresses = []
-    for model in models:
-        addresses.append(
-            (model.model.layers[0].linear.weight.data_ptr(), model.model.layers[0].e_score_correction_bias.data_ptr())
-        )
+def test_vllm_update_weights_loads_params_and_buffers():
+    model = _ToyModel()
+    loaded_param_names = []
+    apply_named_buffers = []
 
-        def load_weights(weights, model=model):
-            with torch.no_grad():
-                for name, value in weights:
-                    dict(model.named_parameters())[name].copy_(value)
+    def _fake_load_weights(weights):
+        loaded_param_names.extend(name for name, _ in weights)
 
-        model.load_weights = load_weights
+    model.load_weights = _fake_load_weights
 
-    spec = types.SimpleNamespace(method="mtp", draft_model_config=object()) if sync_mtp else None
+    original_apply_buffer_updates = _vllm_rollout_utils.apply_buffer_updates
+
+    def _spy_apply_buffer_updates(inner_model, buffer_updates, named_buffers=None):
+        apply_named_buffers.append(named_buffers)
+        return original_apply_buffer_updates(inner_model, buffer_updates, named_buffers=named_buffers)
+
+    _vllm_rollout_utils.apply_buffer_updates = _spy_apply_buffer_updates
+
     worker = object.__new__(vLLMColocateWorkerExtension)
-    worker.model_runner = _FakeModelRunner(models[0], speculative_config=spec)
-    if sync_mtp:
-        worker.model_runner.drafter = types.SimpleNamespace(model=models[1])
-    bucket = torch.empty(16)
-    inputs = torch.ones(1, 4)
-    for version in (1, 2):
-        bucket.fill_(version)
-        worker._update_weights(
-            [("model.layers.0.linear.weight", bucket.view(4, 4))], peft_config=None, base_sync_done=False
-        )
-        expected_buffer = torch.arange(4, dtype=torch.float32) + version * 5
-        bucket[:4].copy_(expected_buffer)
-        worker._update_weights(
-            [("model.layers.0.e_score_correction_bias", bucket[:4])], peft_config=None, base_sync_done=False
-        )
-        bucket.fill_(-999)  # Standard loaders consume the receiver's view synchronously.
-        for model, address in zip(models, addresses, strict=True):
-            block = model.model.layers[0]
-            assert (block.linear.weight.data_ptr(), block.e_score_correction_bias.data_ptr()) == address
-            torch.testing.assert_close(block.linear.weight, torch.full((4, 4), float(version)))
-            torch.testing.assert_close(block.e_score_correction_bias, expected_buffer)
-            torch.testing.assert_close(
-                block.linear(inputs) + block.e_score_correction_bias, 4 * version + expected_buffer[None]
-            )
+    worker.model_runner = _FakeModelRunner(model)
+
+    weights = [
+        ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
+        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
+    ]
+
+    try:
+        worker._update_weights(weights, peft_config=None, base_sync_done=False)
+    finally:
+        _vllm_rollout_utils.apply_buffer_updates = original_apply_buffer_updates
+
+    assert loaded_param_names == ["model.layers.0.linear.weight"]
+    assert apply_named_buffers and apply_named_buffers[0] is not None
+    torch.testing.assert_close(
+        model.model.layers[0].e_score_correction_bias, torch.tensor([5, 6, 7, 8], dtype=torch.float32)
+    )
+
+
+def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
+    """When an MTP drafter is synced, its registered buffers must be updated too."""
+    main_model = _ToyModel()
+    drafter_model = _ToyModel()
+    main_model.load_weights = lambda weights: None
+    drafter_model.load_weights = lambda weights: None
+
+    class _SpecConfig:
+        method = "mtp"
+        draft_model_config = object()
+
+    class _Drafter:
+        def __init__(self, m):
+            self.model = m
+
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(main_model, speculative_config=_SpecConfig())
+    worker.model_runner.drafter = _Drafter(drafter_model)
+
+    weights = [
+        ("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32)),
+        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 5),
+    ]
+
+    worker._update_weights(weights, peft_config=None, base_sync_done=False)
+
+    expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
+    torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
+    torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)

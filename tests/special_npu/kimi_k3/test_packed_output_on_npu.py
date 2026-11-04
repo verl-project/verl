@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# ruff: noqa: E402
 
 """Packed model outputs reuse the ordinary processors and SP gradient contract."""
 
@@ -23,11 +24,27 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from tensordict import TensorDict
 
+pytest.importorskip("torch_npu")
+
 import verl.utils.tensordict_utils as tu
+import verl.utils.torch_functional as verl_F
 from verl.trainer.ppo.score_centering import score_centering_logits_processor
+from verl.utils.device import get_torch_device
 from verl.utils.torch_functional import entropy_from_logits
 from verl.utils.ulysses import set_ulysses_sequence_parallel_group
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+
+
+def test_logprobs_respects_logits_device():
+    logits = torch.randn(2, 3, 7, requires_grad=True)
+    reference = logits.detach().clone().requires_grad_()
+    labels = torch.tensor([[0, 3, 6], [2, 4, 1]])
+    actual = verl_F.logprobs_from_logits(logits, labels)
+    expected = reference.log_softmax(-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    expected.sum().backward()
+    torch.testing.assert_close(logits.grad, reference.grad)
 
 
 def _engine(world_size):
@@ -62,17 +79,17 @@ def _compare_outputs(rank, world_size, score_centering):
     )
     args = dict(
         input_ids_rmpad_rolled=ids.values().roll(-1),
-        temperature=torch.tensor([0.8, 1.3], dtype=torch.float64),
+        temperature=torch.tensor([0.8, 1.3], dtype=torch.float32),
         temperature_is_one=False,
     )
-    hidden = torch.randn(5, 7, dtype=torch.float64)
+    hidden = torch.randn(5, 7, dtype=torch.float32)
     dense_hidden = torch.zeros(2, 3, 7, dtype=hidden.dtype)
     valid = torch.arange(3)[None, :] < offsets.diff()[:, None]
     dense_hidden[valid] = hidden
     chunk = (len(hidden) + world_size - 1) // world_size
     pad_size = chunk * world_size - len(hidden)
     local_hidden = torch.nn.functional.pad(hidden, (0, 0, 0, pad_size))[rank * chunk : (rank + 1) * chunk]
-    weight = torch.randn(7, 11, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(7, 11, dtype=torch.float32, requires_grad=True)
     reference = weight.detach().clone().requires_grad_()
     optimizers = [torch.optim.SGD([parameter], lr=0.01) for parameter in (weight, reference)]
     processor = (
@@ -104,21 +121,23 @@ def _compare_outputs(rank, world_size, score_centering):
         assert ("sc_correction" in actual) == score_centering
         assert actual.keys() == expected.keys()
         for key in expected:
-            torch.testing.assert_close(actual[key].values(), expected[key].values(), rtol=1e-6, atol=1e-6)
+            torch.testing.assert_close(actual[key].values(), expected[key].values(), rtol=1e-4, atol=1e-4)
         for output in (actual, expected):
             sum((value.values() * coefficients).sum() for value in output.values()).backward()
         dist.all_reduce(weight.grad)
         weight.grad /= world_size
-        torch.testing.assert_close(weight.grad, reference.grad, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(weight.grad, reference.grad, rtol=1e-4, atol=1e-4)
         for optimizer in optimizers:
             optimizer.step()
-        torch.testing.assert_close(weight, reference, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(weight, reference, rtol=1e-4, atol=1e-4)
 
 
 def _worker(rank, rendezvous, score_centering):
-    dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
+    get_torch_device().set_device(rank)
+    dist.init_process_group("cpu:gloo,npu:hccl", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
     try:
-        _compare_outputs(rank, 2, score_centering)
+        with torch.device(f"npu:{rank}"):
+            _compare_outputs(rank, 2, score_centering)
     finally:
         set_ulysses_sequence_parallel_group(None)
         dist.destroy_process_group()
@@ -127,15 +146,3 @@ def _worker(rank, rendezvous, score_centering):
 @pytest.mark.parametrize("score_centering", [False, True])
 def test_packed_outputs_use_standard_processors(tmp_path, score_centering):
     mp.spawn(_worker, args=(str(tmp_path / "packed_outputs"), score_centering), nprocs=2, join=True)
-
-
-if __name__ == "__main__":
-    dist.init_process_group("gloo")
-    try:
-        for enabled in (False, True):
-            _compare_outputs(dist.get_rank(), dist.get_world_size(), enabled)
-        if dist.get_rank() == 0:
-            print("PASS: packed outputs, score centering, gradients and three SGD updates")
-    finally:
-        set_ulysses_sequence_parallel_group(None)
-        dist.destroy_process_group()

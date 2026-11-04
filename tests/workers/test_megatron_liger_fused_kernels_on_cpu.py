@@ -214,7 +214,6 @@ def test_worker_reserves_both_consumers_before_ref_reset(monkeypatch):
         set_dispatch_collect=lambda **kwargs: None,
         _omega_profiler_config={},
         distillation_enabled=False,
-        enable_routing_replay=False,
     )
     with pytest.raises(ActorReached):
         engine_workers.ActorRolloutRefWorker.init_model(worker)

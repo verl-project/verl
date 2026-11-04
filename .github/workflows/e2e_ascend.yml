@@ -194,4 +194,5 @@ jobs:
           git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
           export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
           ray stop --force
+          python -c 'import pytest, torch_npu; raise SystemExit(pytest.main(["-q", "-x", "tests/special_npu/kimi_k3"]))'
           bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh

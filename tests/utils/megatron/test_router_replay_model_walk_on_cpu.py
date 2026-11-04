@@ -21,23 +21,21 @@ addresses the wrong objects. Replay targets then land on orphans while the real 
 unset ``target_topk_idx``, and the action toggle never reaches the routers that actually forward.
 
 Megatron-Core is not importable in the lightweight CPU CI image, so the ``megatron.core`` surfaces
-``router_replay_utils`` needs at import are temporarily stubbed with ``MagicMock`` via ``sys.modules``
-(already imported modules win), along with ``verl.models.mcore.util`` — importing it for
+``router_replay_utils`` needs at import are stubbed with ``MagicMock`` via ``sys.modules``
+(``setdefault``, so a real install wins), along with ``verl.models.mcore.util`` — importing it for
 real pulls in the whole Megatron model-provider registry. The sequence-parallel scatter and the
 pack/unpack are monkeypatched to identity so the tests exercise the addressing, not the tensor
 plumbing (that is covered by the GPU and e2e suites).
 """
 
-import importlib.util
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-_runtime_modules = (
+for _mod in (
     "megatron",
     "megatron.core",
     "megatron.core.pipeline_parallel",
@@ -52,24 +50,12 @@ _runtime_modules = (
     "megatron.core.transformer.transformer_config",
     "megatron.core.transformer.transformer_layer",
     "verl.models.mcore.util",
-)
+):
+    sys.modules.setdefault(_mod, MagicMock())
 
 
-# Keep these addressing-only substitutes out of other tests' real padding paths.
-with pytest.MonkeyPatch.context() as _patch:
-    for _name in _runtime_modules:
-        if _name not in sys.modules:
-            _patch.setitem(sys.modules, _name, MagicMock())
-    _root = Path(__file__).resolve().parents[3] / "verl/utils/megatron"
-    for _name in ("router_replay_patch", "router_replay_utils"):
-        _qualified_name = f"verl.utils.megatron.{_name}"
-        _spec = importlib.util.spec_from_file_location(_qualified_name, _root / f"{_name}.py")
-        _module = importlib.util.module_from_spec(_spec)
-        _patch.setitem(sys.modules, _qualified_name, _module)
-        _spec.loader.exec_module(_module)
-    router_replay_utils = _module
-    RouterReplay = router_replay_utils.RouterReplay
-    RouterReplayAction = router_replay_utils.RouterReplayAction
+from verl.utils.megatron import router_replay_utils  # noqa: E402
+from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction  # noqa: E402
 
 NUM_LAYERS = 4
 NUM_TOKENS = 3

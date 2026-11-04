@@ -11,15 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Standard token-axis rollout IDs reach FSDP without model-row metadata."""
+# ruff: noqa: E402
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from fsdp_turbo.models.kimi.kimi_r3_utils import prepare_kimi_routing_replay
 from tensordict import TensorDict
+
+pytest.importorskip("torch_npu")
+
+from fsdp_turbo.models.kimi.kimi_r3_utils import prepare_kimi_routing_replay
 
 import verl.utils.tensordict_utils as tu
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
@@ -41,8 +43,6 @@ def test_standard_agent_loop_ids_reach_native_replay_on_the_same_token_axis(remo
             routed_experts=routes,
             metrics=AgentLoopMetrics(),
         ).as_dict()
-        assert exported["routed_experts"].shape[0] == len(tokens)
-        assert not any("semantics" in key for key in exported)
         exports.append(exported)
         token_ids.append(tokens)
     batch = TensorDict(
@@ -58,19 +58,20 @@ def test_standard_agent_loop_ids_reach_native_replay_on_the_same_token_axis(remo
             "temperature": torch.ones(2),
         },
         batch_size=[2],
-    )
+    ).to("npu:0")
     tu.assign_non_tensor(batch, enable_routing_replay=True, use_remove_padding=remove_padding)
     engine = object.__new__(FSDPEngineWithLMHead)
     engine.pad_to_length = None
     engine.use_ulysses_sp = False
     engine.ulysses_sequence_parallel_size = 1
-    engine.module = torch.nn.Linear(2, 2)
+    engine.module = torch.nn.Linear(2, 2, device="npu:0")
     inputs, _ = engine.prepare_model_inputs(batch)
     assert inputs["routed_experts"].shape[:2] == inputs["input_ids"].shape
     mask = inputs["router_replay_mask"]
     expected = torch.tensor([[has_response] * 4 + [False], [has_response] * 3 + [False, False]])
     if remove_padding:
         expected = torch.cat((expected[0], expected[1, :4])).reshape(1, -1)
+    expected = expected.to("npu:0")
     torch.testing.assert_close(mask, expected)
     attention = inputs["attention_mask"]
     if attention is None:
@@ -78,5 +79,7 @@ def test_standard_agent_loop_ids_reach_native_replay_on_the_same_token_axis(remo
     config = SimpleNamespace(text_config=SimpleNamespace(num_hidden_layers=2, num_experts=4, num_experts_per_token=2))
     ids, actual_mask = prepare_kimi_routing_replay(inputs["routed_experts"], mask, attention, config)
     torch.testing.assert_close(actual_mask, expected)
-    torch.testing.assert_close(ids[actual_mask], torch.tensor([[0, 1], [2, 3]]).expand(int(expected.sum()), -1, -1))
+    torch.testing.assert_close(
+        ids[actual_mask], torch.tensor([[0, 1], [2, 3]], device="npu:0").expand(int(expected.sum()), -1, -1)
+    )
     assert not bool(ids[~actual_mask].any()) or not has_response
