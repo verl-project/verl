@@ -513,12 +513,7 @@ class FSDPEngine(BaseEngine):
             if self.engine_config.offload_policy or self.engine_config.forward_only:
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
-                # torch_npu cannot reliably complete the asynchronous pinned-CPU
-                # destination used by FSDP2 foreach_reduce().  It reports a null
-                # destination during the first actor backward even when HBM is
-                # available.  Keep CPU offload, but use synchronous pageable host
-                # copies on NPU; CUDA retains the pinned-copy fast path.
-                offload_policy = CPUOffloadPolicy(pin_memory=get_device_name() != "npu")
+                offload_policy = CPUOffloadPolicy(pin_memory=True)
                 self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {
