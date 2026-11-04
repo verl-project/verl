@@ -121,6 +121,9 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-512}"
 DATA_MAX_LENGTH="${DATA_MAX_LENGTH:-$(( MAX_MODEL_LEN > 8192 ? MAX_MODEL_LEN : 8192 ))}"
 MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-$(( MAX_MODEL_LEN * MICRO_BATCH_SIZE > 8192 ? MAX_MODEL_LEN * MICRO_BATCH_SIZE : 8192 ))}"
+# USE_DYNAMIC_BSZ=True packs each micro-batch up to MAX_TOKEN_LEN_PER_GPU tokens (instead of MICRO_BATCH_SIZE
+# sequences) for the actor update and the rollout / reference log-probs; verl requires the three to agree.
+USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
@@ -176,6 +179,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.actor.use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
     actor_rollout_ref.actor.data_loader_seed="${SEED}" \
     actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode \
     '+actor_rollout_ref.actor.policy_loss.rollout_correction=${algorithm.rollout_correction}' \
@@ -204,6 +208,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
     actor_rollout_ref.ref.torchtitan.seed="${SEED}" \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=True \
     actor_rollout_ref.ref.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
@@ -227,6 +232,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
     actor_rollout_ref.rollout.checkpoint_engine.backend=tpu-sync \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.prompt_length="${MAX_PROMPT_LEN}" \
