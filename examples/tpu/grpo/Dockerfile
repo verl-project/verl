@@ -38,7 +38,7 @@ export PIP_CACHE_DIR=/root/.cache/pip PIP_ROOT_USER_ACTION=ignore
 
 pip install --upgrade pip uv pandas==2.3.3
 pip install "jax[tpu]==${jax}" -f "${libtpu_links}"
-pip install tokamax==0.0.14
+pip install tokamax==0.0.17
 pip install "torch==${torch}" "torchvision==${torchvision}" --index-url "${torch_index}"
 pip install "libtpu==${libtpu}" -f "${libtpu_links}"
 pip install --pre --no-deps "torch-tpu==${TORCH_TPU_VERSION}" "tpu-sync-torch==${TPU_SYNC_VERSION}"
