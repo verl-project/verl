@@ -47,6 +47,7 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
+    build_r3_replay_mask,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -74,7 +75,6 @@ from verl.utils.megatron_utils import (
     unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
-from verl.utils.router_replay import build_r3_replay_mask
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
@@ -470,12 +470,7 @@ class MegatronEngine(BaseEngine):
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
-        # ``use_dist_checkpointing`` also selects the format used by the
-        # checkpoint manager for subsequent training saves.  A fresh run can
-        # therefore request sharded saves while still bootstrapping from the
-        # HuggingFace path in ``model.local_path``.  Only take the direct
-        # MCore-load branch when an initial dist-checkpoint path was supplied.
-        if self.engine_config.use_dist_checkpointing and self.engine_config.dist_checkpointing_path is not None:
+        if self.engine_config.use_dist_checkpointing:
             load_mcore_dist_weights(
                 module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
             )
@@ -958,21 +953,15 @@ class MegatronEngine(BaseEngine):
 
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
-        # Megatron's pipeline schedule skips backward for forward-only calls,
-        # but it does not disable autograd itself.  Old/ref log-prob therefore
-        # retained a useless graph and could not take inference-only operator
-        # paths.  Keep training unchanged while matching the no-grad contract
-        # already used by the FSDP and AutoModel engines.
-        with torch.set_grad_enabled(not forward_only):
-            losses_reduced = forward_backward_func(
-                forward_step_func=forward_step,
-                data_iterator=batch_generator,
-                model=self.module,
-                num_microbatches=n_micro_batch,
-                seq_length=1,  # the communication shape is obtained via p2p comm
-                micro_batch_size=1,  # the communication shape is obtained via p2p comm
-                forward_only=forward_only,
-            )
+        losses_reduced = forward_backward_func(
+            forward_step_func=forward_step,
+            data_iterator=batch_generator,
+            model=self.module,
+            num_microbatches=n_micro_batch,
+            seq_length=1,  # the communication shape is obtained via p2p comm
+            micro_batch_size=1,  # the communication shape is obtained via p2p comm
+            forward_only=forward_only,
+        )
 
         if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
             # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,

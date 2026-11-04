@@ -301,7 +301,7 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True
     actor_rollout_ref.actor.megatron.router_replay.mode=R3
-    "actor_rollout_ref.actor.megatron.use_dist_checkpointing=${ACTOR_USE_DIST_CHECKPOINTING:-True}"
+    "actor_rollout_ref.actor.megatron.use_dist_checkpointing=${ACTOR_USE_DIST_CHECKPOINTING:-False}"
     "actor_rollout_ref.actor.megatron.param_offload=$ACTOR_PARAM_OFFLOAD"
     "actor_rollout_ref.actor.megatron.optimizer_offload=$ACTOR_OPTIMIZER_OFFLOAD"
 )
