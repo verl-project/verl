@@ -237,6 +237,10 @@ class DistillationConfig(BaseConfig):
 
     enabled (bool):
         Whether on-policy distillation is enabled.
+    rollout_source_selector (dict):
+        Experimental user function configured with path, name, and kwargs. Receives the prompt batch,
+        global step, and rollout seed; returns one generation source (student or teacher) per submission.
+        An absent selector preserves student-only generation.
     n_gpus_per_node (int):
         Number of GPUs per node in the teacher resource pool.
     nnodes (int):
@@ -273,6 +277,7 @@ class DistillationConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
 
     enabled: bool = False
+    rollout_source_selector: dict = field(default_factory=dict)
     n_gpus_per_node: int = 0
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)

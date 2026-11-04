@@ -13,6 +13,14 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
+# Experimental: optional user function selecting student or teacher once per training submission.
+# No selector preserves student-only generation. See the OPD guide for the function contract.
+# Opt-in: synchronous V1, one vLLM teacher, text-only single-turn, supervised forward_kl_topk.
+rollout_source_selector:
+  path: null
+  name: null
+  kwargs: {}
+
 # distillation loss config
 distillation_loss:
 

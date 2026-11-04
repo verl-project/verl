@@ -140,6 +140,7 @@ def test_count_tq_prompt_groups_includes_every_prompt_status(tq_init, partition_
 
 def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     stub = type("Stub", (), {})()
+    stub.rollout_source_selector = None
     stub.trainer_mode = "separate_async"
     stub.global_steps = 4
     stub.agent_loop_manager = FakeAgentLoopManager()

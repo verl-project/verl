@@ -143,3 +143,39 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
     assert "rollout_topk_ids" not in fields.keys()
     assert "rollout_topk_log_probs" not in fields.keys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_ids", [[21], [21, 22, 23, 24]])
+async def test_teacher_source_tags_and_scoring_alignment(monkeypatch, response_ids):
+    worker = _DummyWorker(topk_log_probs=0)
+    worker.distillation_enabled = True
+    worker.teacher_key = "data_source"
+    captured = {}
+
+    class Scorer:
+        async def compute_teacher_logprobs_single(self, sequence_ids, **kwargs):
+            captured["scored"] = sequence_ids
+            return torch.ones(len(sequence_ids), 2, dtype=torch.long), torch.zeros(len(sequence_ids), 2)
+
+    worker.teacher_server_manager = Scorer()
+    output = _output({})
+    output.response_ids = response_ids
+    output.response_mask = [1] * len(response_ids)
+
+    async def put(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(agent_loop_tq_module.tq, "async_kv_batch_put", put)
+    await _WorkerTQ._agent_loop_postprocess(
+        worker, output, False, uid="u0", session_id=0, global_steps=3, rollout_source="teacher"
+    )
+    assert captured["scored"] == [101, 102, 103] + response_ids
+    fields, tag = captured["fields"], captured["tags"][0]
+    assert tag["rollout_source"] == "teacher" and tag["global_steps"] == 3
+    assert tag["min_global_steps"] is None and tag["max_global_steps"] is None
+    assert fields["rollout_source"][0] == "teacher"
+    assert fields["teacher_ids"][0].shape == (3 + len(response_ids), 2)
+    assert fields["teacher_logprobs"][0].shape == fields["teacher_ids"][0].shape
+    assert fields["loss_mask"][0].tolist() == [1] * len(response_ids)
+    assert "rollout_log_probs" not in fields and "routed_experts" not in fields

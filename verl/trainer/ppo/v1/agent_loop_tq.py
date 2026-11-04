@@ -223,6 +223,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                     "max_global_steps": field["extra_fields"].get("max_global_steps"),
                 }
             )
+            if "rollout_source" in kwargs:
+                tags[-1]["rollout_source"] = kwargs["rollout_source"]
 
         await tq.async_kv_batch_put(
             keys=keys,

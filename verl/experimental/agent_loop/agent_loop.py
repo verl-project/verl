@@ -32,7 +32,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 import hydra
@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
+from verl.experimental.teacher_rollout import is_teacher_rollout_enabled
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
@@ -528,6 +529,7 @@ class AgentLoopWorker:
         self.config = config
         self.llm_client = llm_client
         self.teacher_client = teacher_client
+        self.teacher_rollouts = is_teacher_rollout_enabled(config)
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
         rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
@@ -696,8 +698,22 @@ class AgentLoopWorker:
         *,
         agent_name: str,
         trace: bool = True,
+        rollout_source: Literal["student", "teacher"] = "student",
         **kwargs,
     ) -> _InternalAgentLoopOutput:
+        if self.teacher_rollouts and agent_name != "single_turn_agent":
+            raise ValueError("A rollout_source_selector requires the single_turn_agent for every sample.")
+        if trajectory["validate"]:
+            rollout_source = "student"
+        client = self.llm_client
+        if rollout_source == "teacher":
+            client = next(iter(self.teacher_client.values()))
+            # Scoring prepares response_length=1 on this same server. Override only the generation request.
+            sampling_params = dict(
+                sampling_params,
+                max_tokens=self.rollout_config.response_length,
+                ignore_eos=self.rollout_config.ignore_eos,
+            )
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -714,7 +730,7 @@ class AgentLoopWorker:
             agent_loop = hydra.utils.instantiate(
                 config=agent_loop_config,
                 trainer_config=DictConfigWrap(config=self.config),
-                server_manager=self.llm_client,
+                server_manager=client,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 hf_model_type=self.hf_model_type,
@@ -723,6 +739,8 @@ class AgentLoopWorker:
                 tools=ToolListWrap(self.tools),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            if self.teacher_rollouts:
+                kwargs["rollout_source"] = rollout_source
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(

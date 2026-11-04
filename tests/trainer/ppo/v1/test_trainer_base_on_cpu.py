@@ -199,3 +199,51 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_teacher_trajectory_recomputes_student_probabilities(monkeypatch):
+    import torch
+    from tensordict import TensorDict
+
+    from verl.trainer.ppo.v1 import trainer_base as module
+
+    class Batch(SimpleNamespace):
+        def __len__(self):
+            return 1
+
+    batch = Batch(keys=["teacher"], partition_id="train", tags=[{"rollout_source": "teacher"}], extra_info={})
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "algorithm": {"rollout_correction": {"bypass_mode": False}},
+            "actor_rollout_ref": {
+                "rollout": {"temperature": 1.0, "calculate_log_probs": False},
+                "actor": {"loss_agg_mode": "token-mean", "loss_scale_factor": None},
+            },
+        }
+    )
+    trainer.actor_rollout_wg = MagicMock()
+    trainer.actor_rollout_wg.compute_log_prob.return_value = batch
+    data = TensorDict(
+        {
+            "log_probs": torch.nested.as_nested_tensor([torch.tensor([-7.0, -2.0, -3.0, -8.0])], layout=torch.jagged),
+            "entropy": torch.nested.as_nested_tensor([torch.ones(4)], layout=torch.jagged),
+            "response_mask": torch.nested.as_nested_tensor([torch.ones(2)], layout=torch.jagged),
+        },
+        batch_size=[1],
+    )
+    captured = {}
+
+    def read(**kwargs):
+        assert "rollout_log_probs" not in kwargs["select_fields"]
+        return data
+
+    def write(**kwargs):
+        captured.update(kwargs)
+        return batch
+
+    monkeypatch.setattr(module.tq, "kv_batch_get", read)
+    monkeypatch.setattr(module.tq, "kv_batch_put", write)
+    trainer._compute_old_log_prob(batch, {})
+    assert captured["fields"]["old_log_probs"][0].tolist() == [-2.0, -3.0]
+    trainer.actor_rollout_wg.compute_log_prob.assert_called_once_with(batch)
