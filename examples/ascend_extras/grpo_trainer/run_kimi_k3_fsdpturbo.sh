@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${KIMI_BACKEND_ROOT:-$(cd -- "$SCRIPT_DIR/../../../.." && pwd -P)}"
 run_mode="${KIMI_RUN_MODE:-single}"
 start_time="${VERL_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
-project_name="${VERL_PROJECT_NAME:-GRPO-Kimi-K3-A3B}"
+project_name="${VERL_PROJECT_NAME:-GRPO-Kimi-K3}"
 
 model_path=${MODEL_PATH:?set MODEL_PATH to a prepared Kimi K3 model directory}
 
