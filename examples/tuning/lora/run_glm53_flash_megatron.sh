@@ -128,7 +128,7 @@ DATA=(
     data.train_batch_size=${TRAIN_BATCH_SIZE}
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
-    +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-False} \
+    +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-False}
 )
 
 MODEL=(
