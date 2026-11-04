@@ -44,12 +44,19 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export VLLM_USE_V1=1
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-# Keep TE and vLLM on FP32 block scales rather than ue8m0, so both sides agree on the FP8 grid.
-export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
-export VLLM_USE_DEEP_GEMM_E8M0=0
-# The ModelOpt MX kernel is JIT-compiled for the visible device; pin it so a future image listing
-# many architectures does not multiply the one-off nvcc time.
-export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
+# Hopper has no ue8m0 block-scaling GEMM: keep TE and vLLM on FP32 block scales so both sides agree on
+# the FP8 grid. Blackwell uses ue8m0 natively, and must leave both variables unset (docs/low_precision/fp8.md).
+HOPPER_FP32_SCALES=${HOPPER_FP32_SCALES:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | grep -q '^9\.' && echo 1 || echo 0)}
+if [ "${HOPPER_FP32_SCALES}" = 1 ]; then
+    export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
+    export VLLM_USE_DEEP_GEMM_E8M0=0
+fi
+# The ModelOpt MX fake-quant kernel is JIT-compiled for the visible device; pinning the arch keeps the
+# one-off nvcc time from multiplying on images that list many architectures (9.0 Hopper, 10.0 Blackwell).
+if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
+    _cc=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
+    [ -n "${_cc}" ] && export TORCH_CUDA_ARCH_LIST="${_cc}"
+fi
 
 ############################### configs ################################
 
