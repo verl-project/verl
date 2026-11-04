@@ -1,7 +1,7 @@
 Adding DeepSeek V4 support
 ==========================
 
-Last updated: 10/26/2026.
+Last updated: 11/4/2026.
 
 This guide describes the DeepSeek-V4-Flash integration for a Megatron actor and
 a vLLM rollout model. Most of the model-specific work is at two boundaries:
@@ -181,9 +181,11 @@ needed:
   Megatron-LM's grad-norm kernels do not accept until
   https://github.com/NVIDIA/Megatron-LM/pull/7279 lands, and the quantized
   main-param branch builds non-leaf shards until
-  https://github.com/NVIDIA/Megatron-LM/pull/8245 lands. The Megatron engine
-  applies runtime equivalents of both (``verl/models/mcore/patch.py``;
-  ``VERL_MEGATRON_OPTIMIZER_COMPAT=0`` disables them).
+  https://github.com/NVIDIA/Megatron-LM/pull/8245 lands. Until both are
+  merged, install Megatron-LM from
+  ``linmuchuiyang/Megatron-LM@dsv4-pro-optimizer-fixes``: the commit
+  Megatron-Bridge 0.6.2 pins (43e45e13) plus these two fixes and the other
+  pending fixes the example needs (the script header lists them).
 * ``optimizer_offload_fraction < 1`` keeps part of the Adam state on the GPU
   (fixed by https://github.com/verl-project/verl/pull/8286).
 

@@ -20,10 +20,10 @@
 #   bf16 grad buffer (GRAD_REDUCE_IN_FP32=False) and the precision-aware optimizer are both required,
 #   otherwise the fp32 master shards are materialized on the GPU and stage 0 runs out of memory.
 # - The precision-aware optimizer produces mixed bf16/fp32 gradient groups on DSV4 (hc alpha/bias,
-#   ape, attn_sink are fp32) and the quantized params need no-grad fp32 main-param shards.  verl applies
-#   runtime equivalents of https://github.com/NVIDIA/Megatron-LM/pull/7279 and
-#   https://github.com/NVIDIA/Megatron-LM/pull/8245 in the Megatron engine until they are merged
-#   (VERL_MEGATRON_OPTIMIZER_COMPAT=0 disables them).
+#   ape, attn_sink are fp32) and the quantized params need no-grad fp32 main-param shards.  Both need
+#   Megatron-LM fixes that are not merged yet (https://github.com/NVIDIA/Megatron-LM/pull/7279 and
+#   https://github.com/NVIDIA/Megatron-LM/pull/8245); the Megatron-LM branch under "Validated with"
+#   carries them.
 # - Response length 8192 on 80 GB GPUs needs ACTOR_EP=16 (DP1): with EP8 stage 0 holds ~11.6 B params
 #   (46 GiB of bf16 params + grads) next to the ~17 GiB that vLLM keeps resident after sleep, and the
 #   first update_actor runs out of memory.  The same applies when loading from a Megatron
@@ -39,8 +39,14 @@
 #
 # Validated with:
 # - Megatron-Bridge 0.6.2 (https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/c0e164ed)
-# - Megatron-LM https://github.com/NVIDIA/Megatron-LM/commit/43e45e13 (the uv.lock still pins
-#   megatron-core core_v0.19.2, which has no DeepSeek-V4; see https://github.com/verl-project/verl/issues/6864)
+# - Megatron-LM from https://github.com/linmuchuiyang/Megatron-LM/tree/dsv4-pro-optimizer-fixes:
+#   https://github.com/NVIDIA/Megatron-LM/commit/43e45e13 (the commit Megatron-Bridge 0.6.2 pins; the
+#   uv.lock's core_v0.19.2 has no DeepSeek-V4, see https://github.com/verl-project/verl/issues/6864)
+#   plus the pending upstream fixes this example needs, one commit each: #7279 and #8245 (above),
+#   #4046 and #7785 (resuming the offloaded HybridDeviceOptimizer), the native-fp32-param detach for
+#   optimizer_cpu_offload (as Megatron-LM main) and the FlashAttention-4 import guard (#6545).
+#     pip install --no-deps --no-build-isolation \
+#       "git+https://github.com/linmuchuiyang/Megatron-LM@dsv4-pro-optimizer-fixes"
 # - vLLM 0.29.0
 
 set -euo pipefail
@@ -51,6 +57,14 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export VLLM_USE_V1=1
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
+# Warn early when the Megatron-LM in use lacks the fixes above: without them the failure surfaces as
+# an illegal memory access in the first optimizer step.
+if python3 -c "import megatron.core" 2>/dev/null \
+   && ! python3 -c "from megatron.core.optimizer.clip_grads import _group_grads_by_dtype" 2>/dev/null; then
+    echo "WARNING: this Megatron-LM has no per-dtype grad-norm kernels (NVIDIA/Megatron-LM#7279);" \
+         "install the branch named in the header of this script" >&2
+fi
 
 
 ############################### hardware profile ###############################
@@ -111,8 +125,8 @@ OPTIMIZER_OFFLOAD_FRACTION=${OPTIMIZER_OFFLOAD_FRACTION:-1.0}
 # stage 0 (~11 B parameters per rank) fits at all.  Alignment is unchanged.
 GRAD_REDUCE_IN_FP32=${GRAD_REDUCE_IN_FP32:-False}
 # Megatron precision-aware optimizer: fp32 master shards live in the (offloaded) optimizer state
-# instead of on the GPU, main grads in bf16, Adam moments in fp32 (see the header for the two
-# Megatron-LM fixes verl applies at runtime).
+# instead of on the GPU, main grads in bf16, Adam moments in fp32 (needs the two Megatron-LM fixes
+# named in the header).
 PRECISION_AWARE_OPTIMIZER=${PRECISION_AWARE_OPTIMIZER:-${_PRECISION_AWARE_OPTIMIZER}}
 MAIN_GRADS_DTYPE=${MAIN_GRADS_DTYPE:-bf16}
 
