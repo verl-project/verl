@@ -89,7 +89,7 @@ vllm = [
     "verl[verl-core]",
     "torch==2.13.0",
     "torchvision==0.28.0",
-    "torchaudio==2.11.0",
+    "torchaudio==2.11.1",
     # PyPI's 0.32.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
     # no wheelhouse routing and no source build.
     "vllm==0.32.0",
@@ -104,7 +104,7 @@ sglang = [
     "verl[verl-core]",
     "torch==2.13.0",
     "torchvision==0.28.0",
-    "torchaudio==2.11.0",
+    "torchaudio==2.11.1",
     # sglang + sglang-kernel come from PyPI; upstream's 0.5.20 wheels are cu130 /
     # torch-2.13 builds already (sglang-kernel links libcudart.so.13).
     "sglang==0.5.20",
@@ -138,7 +138,7 @@ fsdp = [
     "verl[cupy-cu130]",
     "torch==2.13.0",
     "torchvision==0.28.0",
-    "torchaudio==2.11.0",
+    "torchaudio==2.11.1",
     "liger-kernel==0.8.4",
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
@@ -155,7 +155,7 @@ megatron = [
     "verl[cupy-cu130]",
     "torch==2.13.0",
     "torchvision==0.28.0",
-    "torchaudio==2.11.0",
+    "torchaudio==2.11.1",
     "nvidia-mathdx",
     "apex",
     "transformer-engine==2.20.2",
@@ -199,7 +199,7 @@ veomni = [
     "verl[cupy-cu130]",
     "torch==2.13.0",
     "torchvision==0.28.0",
-    "torchaudio==2.11.0",
+    "torchaudio==2.11.1",
     "liger-kernel==0.8.4",
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
@@ -248,7 +248,7 @@ cpu = [
     "verl[verl-core]",
     "torch==2.13.0",
     "torchvision==0.28.0",
-    "torchaudio==2.11.0",
+    "torchaudio==2.11.1",
     "transformers==5.16.1",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
