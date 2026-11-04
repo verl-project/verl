@@ -98,6 +98,7 @@ def _trainer(config, *, use_critic=True):
     trainer.local_trigger_step = 0
     trainer.tokenizer = SimpleNamespace(eos_token_id=0)
     trainer.actor_rollout_wg = SimpleNamespace(_dispatch_info={"actor": [0, 1]})
+    trainer.critic_wg = SimpleNamespace(_dispatch_info={"train": [0, 1]})
     return trainer
 
 
@@ -163,6 +164,14 @@ def test_invalid_mini_batch_mode_is_rejected():
 
     with pytest.raises(ValueError, match="trainer.v1.mini_batch_mode"):
         validate_minibatching_config(config, use_critic=False)
+
+
+def test_actor_and_critic_dp_sizes_must_match():
+    trainer = _trainer(_minibatching_config())
+    trainer.critic_wg._dispatch_info["train"] = [0]
+
+    with pytest.raises(NotImplementedError, match="actor_dp_size=2 and critic_dp_size=1"):
+        trainer._balance_batch(_batch(["p0_0_0"]), metrics={})
 
 
 def test_fixed_rows_builds_fixed_trajectory_minibatches(stub_padding):

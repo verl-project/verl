@@ -1663,6 +1663,13 @@ class PPOTrainer(ABC):
         return [*seeds, self.global_steps, self.local_trigger_step] if seeds else None
 
     @staticmethod
+    def _get_worker_data_parallel_size(worker_group, mesh_name: str) -> int:
+        """Return the data-parallel size registered for a worker mesh."""
+        if mesh_name not in worker_group._dispatch_info:
+            worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
+        return max(worker_group._dispatch_info[mesh_name]) + 1
+
+    @staticmethod
     def _get_global_mini_batch_layout(batch: KVBatchMeta, mini_batch_size: int) -> dict[str, list[int]]:
         """Coalesce balancing units into full or final partial optimizer mini-batches."""
         layout = batch.extra_info[_MINIBATCH_LAYOUT_KEY]
@@ -1686,14 +1693,16 @@ class PPOTrainer(ABC):
 
     def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen"):
         """Construct configured optimizer mini-batches and balance their workloads across DP ranks."""
-        # get actor dp size
-        role, worker_group = "actor", self.actor_rollout_wg
-        if role not in worker_group._dispatch_info:
-            dp_rank_mapping = worker_group._query_dispatch_info(role)
-            worker_group._dispatch_info[role] = dp_rank_mapping
-        else:
-            dp_rank_mapping = worker_group._dispatch_info[role]
-        dp_size = max(dp_rank_mapping) + 1
+        actor_dp_size = self._get_worker_data_parallel_size(self.actor_rollout_wg, "actor")
+        if self.use_critic:
+            critic_dp_size = self._get_worker_data_parallel_size(self.critic_wg, "train")
+            # TODO: Build and attach role-specific layouts before supporting different actor and critic DP sizes.
+            if actor_dp_size != critic_dp_size:
+                raise NotImplementedError(
+                    "V1 mini-batch balancing requires actor and critic to use the same data-parallel size, "
+                    f"got actor_dp_size={actor_dp_size} and critic_dp_size={critic_dp_size}."
+                )
+        dp_size = actor_dp_size
 
         mode = self._get_mini_batch_mode()
         unit_count = self._get_balance_unit_size()
