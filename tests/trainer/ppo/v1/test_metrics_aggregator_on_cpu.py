@@ -119,6 +119,7 @@ def test_last_metric_keeps_final_value():
 
 @pytest.mark.parametrize("flags", [(1, 0), (0, 1), (0, 0)])
 def test_rollout_probs_diff_valid_reports_any_available_step(flags):
+    """Availability remains set if any local update reports available diagnostics."""
     agg = MetricsAggregator()
     for flag in flags:
         agg.add_step_metrics({_ROLLOUT_DEBUG_VALID: flag})
@@ -129,6 +130,10 @@ def test_rollout_probs_diff_valid_reports_any_available_step(flags):
 @pytest.mark.parametrize("empty_position", [0, 1, 2])
 @pytest.mark.parametrize("empty_weight", [0, 100])
 def test_rollout_debug_metrics_exclude_unavailable_steps(metric, empty_position, empty_weight):
+    """Exclude placeholders and their weights regardless of their position.
+
+    Available averages retain sample weighting, while maxima use available values.
+    """
     steps = [(1, 2.0, 1), (1, 6.0, 3)]
     steps.insert(empty_position, (0, float("nan"), empty_weight))
     agg = MetricsAggregator()
@@ -143,6 +148,10 @@ def test_rollout_debug_metrics_exclude_unavailable_steps(metric, empty_position,
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf")], ids=["nan", "inf"])
 @pytest.mark.parametrize("nonfinite_first", [False, True])
 def test_rollout_debug_metrics_preserve_available_nonfinite_values(metric, nonfinite, nonfinite_first):
+    """Preserve available NaN and infinity in either contributor order.
+
+    A final unavailable update must not hide the nonfinite value or clear validity.
+    """
     steps = [(1, 2.0), (1, nonfinite)]
     if nonfinite_first:
         steps.reverse()
@@ -161,6 +170,7 @@ def test_rollout_debug_metrics_preserve_available_nonfinite_values(metric, nonfi
 
 @pytest.mark.parametrize("sample_count", [0, 2])
 def test_rollout_debug_metrics_all_unavailable(sample_count):
+    """Keep all-unavailable diagnostics as NaN and clear their retained keys on reset."""
     metrics = dict.fromkeys(_ROLLOUT_DEBUG_AVERAGES + _ROLLOUT_DEBUG_MAXIMA, float("nan"))
     metrics.update({_ROLLOUT_DEBUG_VALID: 0, "training/rollout_logprobs_mismatch_count": 0})
     agg = MetricsAggregator()
@@ -180,6 +190,7 @@ def test_rollout_debug_metrics_all_unavailable(sample_count):
 
 @pytest.mark.parametrize("metric", _ROLLOUT_DEBUG_AVERAGES)
 def test_rollout_debug_metrics_preserve_zero_total_weight_fallback(metric):
+    """Use the arithmetic mean of available values when their total weight is zero."""
     agg = MetricsAggregator()
     agg.add_step_metrics({metric: 2.0, _ROLLOUT_DEBUG_VALID: 1}, sample_count=0)
     agg.add_step_metrics({metric: float("nan"), _ROLLOUT_DEBUG_VALID: 0}, sample_count=10)
@@ -188,6 +199,7 @@ def test_rollout_debug_metrics_preserve_zero_total_weight_fallback(metric):
 
 
 def test_rollout_debug_metrics_missing_guard_and_missing_metrics():
+    """Treat a missing guard as available and omit absent metrics from the weights."""
     agg = MetricsAggregator()
     metric = "training/rollout_probs_diff_mean"
     agg.add_step_metrics({metric: 2.0}, sample_count=1)
@@ -197,6 +209,7 @@ def test_rollout_debug_metrics_missing_guard_and_missing_metrics():
 
 
 def test_rollout_debug_metrics_accept_scalar_tensors():
+    """Apply the same availability filtering to scalar tensor values and guards."""
     agg = MetricsAggregator()
     metric = "training/rollout_probs_diff_mean"
     agg.add_step_metrics({metric: torch.tensor(float("nan")), _ROLLOUT_DEBUG_VALID: torch.tensor(0)})
@@ -206,6 +219,7 @@ def test_rollout_debug_metrics_accept_scalar_tensors():
 
 @pytest.mark.parametrize("nonfinite", [False, True])
 def test_calculated_rollout_debug_metrics_aggregate_across_empty_responses(nonfinite):
+    """Aggregate real producer outputs across empty responses without hiding available NaNs."""
     agg = MetricsAggregator()
     valid_metrics = []
     for available, weight in [(True, 1), (False, 10), (True, 3), (False, 10)]:
@@ -265,6 +279,7 @@ def test_minmax_diff_falls_back_when_min_max_absent():
 
 
 def test_tensor_and_non_scalar_handling():
+    """Weight scalar tensor values by sample count and ignore multi-element tensors."""
     agg = MetricsAggregator()
     # 0-d / single-element tensors are recorded; multi-element tensors are ignored.
     agg.add_step_metrics({"actor/loss/mean": torch.tensor(2.0), "actor/vec": torch.tensor([1.0, 2.0])}, sample_count=1)

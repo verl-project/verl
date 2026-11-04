@@ -49,6 +49,7 @@ class MetricsAggregator:
         self.aggregation_rules = self._init_aggregation_rules()
 
     def _init_aggregation_rules(self) -> dict[str, list[str]]:
+        """Return explicit reduction rules, including availability across local updates."""
         return {
             "sum": [
                 "training/off_policy/evicted_samples",
@@ -68,7 +69,12 @@ class MetricsAggregator:
         }
 
     def add_step_metrics(self, metrics: dict[str, Any], sample_count: int = 0):
-        """Record one iteration's metrics."""
+        """Record one iteration's values and their sample weights.
+
+        A zero rollout validity flag excludes guarded diagnostics and their weights,
+        while retaining their keys for an all-unavailable window. A missing flag
+        leaves diagnostics available, including any NaN or infinity values.
+        """
         self.step_count += 1
         rollout_valid = metrics.get("training/rollout_probs_diff_valid", 1)
         if isinstance(rollout_valid, torch.Tensor) and rollout_valid.numel() == 1:
@@ -122,6 +128,12 @@ class MetricsAggregator:
         return "weighted_avg"
 
     def _aggregate_single_metric(self, metric_name: str, values: list[float]) -> float:
+        """Reduce retained values using the metric's rule and matching weights.
+
+        Empty guarded diagnostics return NaN; other empty metrics return zero.
+        Weighted averages fall back to an arithmetic mean when weights are absent
+        or total zero. Guarded maxima propagate NaN regardless of value order.
+        """
         if not values:
             return float("nan") if metric_name in self._ROLLOUT_DEBUG_METRICS else 0.0
 

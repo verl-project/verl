@@ -209,6 +209,12 @@ def test_update_actor_passes_score_centering_flag(score_centering):
 @pytest.mark.parametrize("case", ["mixed", "nonfinite", "all_empty"])
 @pytest.mark.parametrize("empty_sample_count", [0, 2])
 def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sample_count):
+    """Exercise real trainer-step aggregation with producer outputs and batch metadata.
+
+    Mock preparation and worker updates to isolate four local updates on CPU.
+    Check padding-derived weights, mixed/nonfinite/all-empty windows, and retained
+    trajectory metadata and existing metrics.
+    """
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.parameter_sync_step = 4
     trainer.config = OmegaConf.create({"data": {"train_batch_size": 16}})
@@ -244,6 +250,7 @@ def test_step_aggregates_rollout_diagnostics_across_local_updates(case, empty_sa
     timing_raw = {}
 
     def step_once(metrics, timing, sample_batch_size):
+        """Return the current local batch and attach its precomputed diagnostics."""
         assert timing is timing_raw
         assert sample_batch_size == 4
         index = trainer.local_trigger_step
