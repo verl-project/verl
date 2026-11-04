@@ -147,6 +147,7 @@ def test_ascend_quantizer_rejects_unsupported_weight_types():
 
 
 def test_native_string_quantization_needs_no_hf_override():
+    pytest.importorskip("vllm")
     from verl.workers.rollout.vllm_rollout.vllm_async_server import build_cli_args_from_config, vLLMHttpServer
 
     server = SimpleNamespace(config=SimpleNamespace(quantization="ascend"))
@@ -159,6 +160,7 @@ def test_native_string_quantization_needs_no_hf_override():
 
 
 def test_structured_quantization_does_not_set_native_engine_arg():
+    pytest.importorskip("vllm")
     from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
     server = SimpleNamespace(config=SimpleNamespace(quantization=SimpleNamespace(enabled=True)))
@@ -170,6 +172,7 @@ def test_structured_quantization_does_not_set_native_engine_arg():
 
 
 def test_ascend_mx_config_is_quantized(monkeypatch):
+    pytest.importorskip("vllm")
     from verl.utils.vllm.vllm_quant_utils import is_quantized_model
 
     class AscendModelSlimConfig:
@@ -184,6 +187,7 @@ def test_ascend_mx_config_is_quantized(monkeypatch):
 
 
 def test_prepare_and_process_brackets_ascend_layout_reload():
+    pytest.importorskip("vllm")
     from verl.utils.vllm.vllm_quant_utils import (
         prepare_quanted_weights_for_loading,
         process_quanted_weights_after_loading,
