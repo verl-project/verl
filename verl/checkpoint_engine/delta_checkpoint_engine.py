@@ -250,6 +250,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     wire_format = "delta_flush"
 
+    send_weights_takes_engine = True
+
     def prepare(self) -> WorkerMetadata:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
         # 2 * bucket_size fixed buffers. Still hand back the master zmq endpoint

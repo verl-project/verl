@@ -206,6 +206,36 @@ class ServerAdapter(BaseRollout):
         if self.config.free_cache_engine and self._ensure_server_handle():
             await self.server_handle.sleep.remote()
 
+    async def get_weight_ownership(self):
+        """This worker's ``RolloutLayout``, reported by its vLLM worker.
+
+        Every rollout worker needs its own layout, not only the one holding the server handle, so
+        each asks the replica's server and picks its entry from the per-worker ``collective_rpc``
+        results, which are ordered by rank within the replica.
+        """
+        from verl.workers.rollout.base import RolloutLayout
+
+        if self._pd_role is not None:
+            return None
+        if self.server_handle is None:
+            # node 0's server: the other nodes of a multi-node replica run vLLM headless, without an engine
+            actor_name = f"{self._get_server_name_prefix()}server_{self.replica_rank}_0"
+            try:
+                handle = ray.get_actor(actor_name)
+            except ValueError:
+                logger.warning(f"get_weight_ownership: server actor {actor_name} not found; assuming full ownership")
+                return None
+        else:
+            handle = self.server_handle
+        results = await handle.collective_rpc.remote("get_weight_ownership")
+        if not results or self.rollout_rank >= len(results):
+            logger.warning(
+                f"get_weight_ownership: {len(results or [])} vLLM workers for rollout rank {self.rollout_rank}; "
+                "assuming full ownership"
+            )
+            return None
+        return RolloutLayout.from_dict(results[self.rollout_rank])
+
     @torch.no_grad()
     async def update_weights(
         self,
