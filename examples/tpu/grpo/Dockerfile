@@ -9,7 +9,7 @@ ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
 # causal conv1d / gated RMSNorm, fused CE and grouped-matmul tiles, expert parallelism (EP > 1) and the fast dropless
 # EP dispatcher (Ring-of-Experts, chunked pipelining): head of google-pytorch/torchtitan#142.
 # Use any torchtitan main commit for the dense / EP = 1 recipes.
-ARG TORCHTITAN_COMMIT=b9eff0e298871cce5d84a3e1be521d667862e3c6
+ARG TORCHTITAN_COMMIT=0c0b6008a21a2391e5c125acb289c16b9428f6c3
 
 ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
 
