@@ -13,13 +13,8 @@
 # limitations under the License.
 import warnings
 
-from .bootstrap import bootstrap_megatron_runtime
-
-# Install the adaptor before importing FSDP/Megatron engine modules.
-bootstrap_megatron_runtime()
-
-from .base import BaseEngine, EngineRegistry  # noqa: E402
-from .fsdp import FSDPEngine, FSDPEngineWithLMHead, FSDPTurboEngineWithLMHead  # noqa: E402
+from .base import BaseEngine, EngineRegistry
+from .fsdp import FSDPEngine, FSDPEngineWithLMHead, FSDPTurboEngineWithLMHead
 
 __all__ = [
     "BaseEngine",

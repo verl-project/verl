@@ -207,7 +207,6 @@ export RAY_ENABLE_UV_RUN_RUNTIME_ENV=${RAY_ENABLE_UV_RUN_RUNTIME_ENV:-0}
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export RAY_memory_usage_threshold=${RAY_memory_usage_threshold:-0.99}
 export MINDSPEED_BRIDGE_AUTOREG_MODE=${MINDSPEED_BRIDGE_AUTOREG_MODE:-off}
-export VERL_USE_MEGATRON_ADAPTOR=enabled
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 export HCCL_SOCKET_IFNAME=${HCCL_SOCKET_IFNAME:-enp48s3u1u1}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-enp48s3u1u1}
@@ -409,12 +408,12 @@ TRANSFER_QUEUE=(
     "transfer_queue.backend.SimpleStorage.num_data_storage_units=$TQ_STORAGE_UNITS"
 )
 
-RAY=()
+RAY=(++ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=mindspeed_bridge.runtime.kimi_k3.setup_kimi_k3_runtime)
 ray_env_vars=(
     TMPDIR XDG_CACHE_HOME HF_HOME HF_MODULES_CACHE TRITON_CACHE_DIR TORCHINDUCTOR_CACHE_DIR PYTHONDONTWRITEBYTECODE
     ASCEND_RT_VISIBLE_DEVICES PYTHONPATH OMP_NUM_THREADS PYTHONHASHSEED
     TOKENIZERS_PARALLELISM TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT TQ_NUM_THREADS
-    MINDSPEED_BRIDGE_AUTOREG_MODE VERL_USE_MEGATRON_ADAPTOR
+    MINDSPEED_BRIDGE_AUTOREG_MODE
     VLLM_USE_V1 VLLM_VERSION VLLM_ASCEND_ENABLE_FLASHCOMM
     VLLM_ASCEND_ENABLE_NZ VLLM_DISABLE_COMPILE_CACHE
     CUDA_DEVICE_MAX_CONNECTIONS KIMI_RUN_TOKEN
@@ -443,7 +442,7 @@ log_file="$LOG_DIR/${EXPERIMENT_NAME}.log"
 echo "log=$log_file output=$OUTPUT_ROOT"
 cd "$BACKEND_ROOT/verl"
 
-python3 -m verl.trainer.main_ppo \
+python3 -c 'import runpy; from mindspeed_bridge.runtime.kimi_k3 import setup_kimi_k3_runtime; setup_kimi_k3_runtime(driver=True); runpy.run_module("verl.trainer.main_ppo", run_name="__main__", alter_sys=True)' \
     --config-path=config \
     --config-name=ppo_trainer.yaml \
     model_engine=megatron \

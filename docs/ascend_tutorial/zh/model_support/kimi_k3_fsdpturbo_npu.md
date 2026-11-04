@@ -107,6 +107,11 @@ Processor 预留的位置，labels、position IDs、mask 和 logits 保持同一
 不再提供额外的展开布局或 raw-logit 索引接口。
 Kimi 启动脚本通过已有 `model.external_lib` 加载
 `mindspeed_bridge.runtime.kimi_k3_autoload`，并显式配置 `attention_backend=auto`。
+主进程在同一 Python 进程内调用配套 Bridge 的 `setup_kimi_k3_runtime(driver=True)`，
+再执行 verl 入口；Ray 的 `worker_process_setup_hook` 调用同一函数初始化训练 Worker。
+外部入口按已有 WorkerGroup 和 rollout 环境区分进程，跳过纯 rollout 和辅助进程。
+运行环境应使用 MegatronAdaptor + MindSpeed-Ops；入口会拒绝额外安装的旧
+`mindspeed.megatron_adaptor`，避免两套 patch manager 混用。各节点需要使用相同的依赖组合。
 该路径需要包含此等长输入契约的配套 MS-Bridge 版本；verl 在线训练的 Bridge CP 路径
 仍限 CP=1，原生 SFT 的 CP 切分能力不据此宣称已完成在线训练验收。
 
