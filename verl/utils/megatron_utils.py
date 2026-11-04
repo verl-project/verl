@@ -1059,6 +1059,14 @@ def _get_megatron_grad_finalizer(model):
         ep_size = get_model_config(chunk).expert_model_parallel_size
         for module in chunk.modules():
             if isinstance(module, getattr(peft_utils, "SharedOuterGroupedExpertAdapter", ())):
+                outer = module.linear_in if module._is_fc1 else module.linear_out
+                # Broadcasting a frozen, unsharded projection only copies between replicas.
+                if (
+                    not outer.weight.requires_grad
+                    and (outer.tp_group is None or outer.tp_group.size() == 1)
+                    and getattr(outer, "gtp_remat_size", 1) == 1
+                ):
+                    continue
                 # Legacy Bridge also broadcasts the shared weight over this group during initialization.
                 stage = parallel_state.get_tensor_and_data_parallel_group(with_context_parallel=True)
                 ep = parallel_state.get_expert_model_parallel_group()
@@ -1071,7 +1079,7 @@ def _get_megatron_grad_finalizer(model):
                     )
                 if len(ep_ranks) == 1:
                     continue
-                shared = (module.linear_in if module._is_fc1 else module.linear_out,)
+                shared = (outer,)
             elif (
                 ep_size > 1
                 and isinstance(module, getattr(peft_utils, "ParallelLinearAdapter", ()))

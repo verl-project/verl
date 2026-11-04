@@ -71,7 +71,7 @@ Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using 0.5
 
 Set ``model.lora.lora_plus_ratio`` to the desired B-to-A learning rate ratio (for example, ``16.0``). The default ``1.0`` disables LoRA+. A non-default ratio requires ``optim.lr_warmup_init=0``.
 
-Bridge builds with the expert-adapter gradient finalizer (available in v0.7.0) support fused gradient accumulation for EP-replicated LoRA weights. With Bridge v0.6.2, verl disables fusion on the trainable replicated projections so Bridge's backward hooks sum their gradients. For shared-outer adapters, the legacy hook also requires the pipeline stage and the expert-parallel group to contain the same ranks.
+Bridge builds with the expert-adapter gradient finalizer (available in v0.7.0) support fused gradient accumulation for EP-replicated LoRA weights. With Bridge v0.6.2, verl disables fusion on the trainable replicated projections so Bridge's backward hooks sum their gradients. For shared-outer adapters, the legacy hook requires the pipeline stage and the expert-parallel group to contain the same ranks when the shared projection is trainable or its weight is sharded.
 
 With ``experts_shared_outer_loras=True``, HF adapter checkpoints and unmerged vLLM rollouts also require the matching Bridge export API. Bridge v0.7.0 supports per-expert 2D and stacked 3D export. vLLM's optional ``enable_moe_shared_loras`` layout requires a Bridge build that accepts ``export_adapter_weights(..., moe_shared_loras=True)``.
 

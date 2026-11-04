@@ -105,20 +105,22 @@ def test_legacy_bridge_expert_grad_hooks(legacy_bridge, adapter_cls, grouped, ep
 
 
 @pytest.mark.parametrize(
-    "ep,stage,fc1,trainable,fused,expected_fusion",
+    "ep,stage,fc1,trainable,fused,etp,gtp,expected_fusion",
     [
-        (2, [0, 1], True, True, True, False),
-        (2, [0, 1], False, True, False, False),
-        (2, [0, 1], False, True, True, False),
-        (2, [0, 1], True, False, True, True),
-        (1, [0], True, True, True, True),
-        (2, [0, 2], True, True, True, None),
-        (2, [0, 1, 2, 3], True, True, False, None),
-        (1, [0, 1], False, False, False, None),
+        (2, [0, 1], True, True, True, 1, 1, False),
+        (2, [0, 1], False, True, False, 1, 1, False),
+        (2, [0, 1], False, True, True, 1, 1, False),
+        (2, [0, 1], True, False, True, 1, 1, True),
+        (1, [0], True, True, True, 1, 1, True),
+        (2, [0, 2], True, True, True, 1, 1, None),
+        (2, [0, 1, 2, 3], True, True, False, 1, 1, None),
+        (1, [0, 1], False, False, True, 1, 1, True),
+        (1, [0, 1], True, False, True, 2, 1, None),
+        (1, [0, 1], False, False, True, 1, 2, None),
     ],
 )
 def test_legacy_bridge_shared_outer_group(
-    legacy_bridge, monkeypatch, ep, stage, fc1, trainable, fused, expected_fusion
+    legacy_bridge, monkeypatch, ep, stage, fc1, trainable, fused, etp, gtp, expected_fusion
 ):
     from megatron.core import parallel_state
     from megatron.core.distributed import finalize_model_grads
@@ -129,6 +131,8 @@ def test_legacy_bridge_shared_outer_group(
     adapter = model[0]
     adapter._is_fc1 = fc1
     shared, per_expert = (adapter.linear_in, adapter.linear_out) if fc1 else (adapter.linear_out, adapter.linear_in)
+    shared.tp_group = SimpleNamespace(size=lambda: etp)
+    shared.gtp_remat_size = gtp
     shared.weight.requires_grad_(trainable)
     shared.gradient_accumulation_fusion = fused
     monkeypatch.setattr(parallel_state, "get_expert_model_parallel_group", lambda: list(range(ep)))
