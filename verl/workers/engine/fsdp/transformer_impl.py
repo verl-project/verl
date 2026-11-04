@@ -595,11 +595,8 @@ class FSDPEngine(BaseEngine):
         # Load base model with specified configuration and dtype
         module = self._build_module()
         try:
-            forward_params = signature(module.forward).parameters
-            self._model_forward_parameters = frozenset(forward_params)
-            self.pass_packed_cu_seqlens = "cu_seqlens" in forward_params
+            self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
         except (TypeError, ValueError):
-            self._model_forward_parameters = frozenset()
             self.pass_packed_cu_seqlens = False
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
@@ -1374,13 +1371,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         model_inputs.update(multi_modal_inputs)
         model_inputs.update(extra_args)
-        forward_params = getattr(self, "_model_forward_parameters", None)
-        if forward_params is None:
-            forward_params = signature(getattr(self.module, "module", self.module).forward).parameters
-        if "output_packed_logits" in forward_params:
-            if use_fused_kernels:
-                raise ValueError("Packed-logit model outputs require unfused kernels")
-            model_inputs["output_packed_logits"] = True
         if tu.get_non_tensor_data(micro_batch, "enable_routing_replay", default=False):
             routes = micro_batch["routed_experts"]
             replay_mask = build_r3_replay_mask(micro_batch["input_ids"], micro_batch["response_mask"])
@@ -1433,35 +1423,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
         temperature_is_one = output_args.get("temperature_is_one", False)
 
         input_ids = micro_batch["input_ids"]
-
-        # Model-provided packed logits obey the standard packed/SP ownership.
-        if getattr(output, "logits_layout", None) == "packed" and not use_remove_padding:
-            if use_fused_kernels:
-                raise ValueError("Model-provided packed logits require unfused outputs")
-            labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
-            temperatures = verl_F.expand_as_nested(output_args["temperature"], input_ids).values().unsqueeze(0)
-            pad_size = 0
-            if self.use_ulysses_sp:
-                labels, _, pad_size = ulysses_pad_and_slice_inputs(
-                    labels,
-                    position_ids_rmpad=None,
-                    sp_size=self.ulysses_sequence_parallel_size,
-                )
-                temperatures, _, _ = ulysses_pad_and_slice_inputs(
-                    temperatures,
-                    position_ids_rmpad=None,
-                    sp_size=self.ulysses_sequence_parallel_size,
-                    pad_value=1,
-                )
-            if output.logits_pad_size != pad_size or output.logits.shape[:2] != labels.shape:
-                raise ValueError("Model packed logits do not match raw-token/SP ownership")
-            output_args = dict(
-                output_args,
-                input_ids_rmpad_rolled=labels.squeeze(0),
-                temperature_rmpad=temperatures.squeeze(0),
-                pad_size=pad_size,
-            )
-            use_remove_padding = True
 
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]

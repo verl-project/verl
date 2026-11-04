@@ -52,6 +52,7 @@ on:
       - "tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh"
       - "tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh"
       - "tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh"
+      - "tests/special_npu/kimi_k3/**"
       - "tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json"
       - "tests/utils/test_check_profiler_output.py"
       - "tests/special_sanity/check_device_api_usage.py"
