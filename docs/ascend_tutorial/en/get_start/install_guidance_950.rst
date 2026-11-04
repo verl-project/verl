@@ -1,7 +1,7 @@
 Ascend Installation Guide (Ascend 950PR&950DT products)
 ===============================================================
 
-Last updated: 09/22/2026.
+Last updated: 11/03/2026.
 
 
 Table of Contents
@@ -50,15 +50,27 @@ Dependency     Version                                            Description
 CANN           ``9.1.0``                                          CANN software that helps developers build and run AI services on the Ascend software and hardware platform
 Python         ``3.11``                                           Python version
 torch          ``2.10.0``                                         PyTorch deep learning framework base package
-torch_npu      ``2.10.0.post4``                                   NPU PyTorch adaptation plugin
-triton         ``3.5.0``                                          Triton, used for writing custom operators
-triton-ascend  ``3.2.2``                                          NPU Triton adaptation
-transformers   ``5.10.4``                                         Hugging Face large model library, providing model architecture and pretrained weights
-vLLM           ``0.23.0``                                         High-performance LLM inference and serving engine
-vLLM-Ascend    ``0.23.0``                                         NPU vLLM backend adaptation
-Megatron-LM    ``core_r0.12.0``                                   Large-scale distributed training framework
-MindSpeed      ``0c6c0ceaa523a96032dee1539a52032155e6404e``        Megatron-LM adaptation and optimization component for Ascend NPU
+torch_npu      ``2.10.0.post7``                                   NPU PyTorch adaptation plugin
+torchvision    ``0.25.0``                                         PyTorch image processing library
+torchaudio     ``2.10.0``                                         PyTorch audio processing library
+triton-ascend  ``3.6.0.post2``                                    NPU Triton adaptation
+transformers   ``5.14.1``                                         Hugging Face large model library, providing model architecture and pretrained weights
+xgrammar       ``>=0.2.1,<1.0.0``                                  vLLM structured output dependency
+vLLM           ``0.30.0``                                         High-performance LLM inference and serving engine
+vLLM-Ascend    ``0.30.0``                                         NPU vLLM backend adaptation
+Megatron-LM    ``core_v0.18.0``                                   Large-scale distributed training framework
+MindSpeed      ``core_r0.18.0``                                   Megatron-LM adaptation and optimization component for Ascend NPU
 ============== ================================================== ===================
+
+.. note::
+
+   The runtime dependencies follow the
+   `vLLM-Ascend 0.30.0 requirements <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_.
+   xgrammar follows the `vLLM 0.30.0 dependency range <https://github.com/vllm-project/vllm/blob/v0.30.0/requirements/common.txt>`_.
+   triton-ascend provides the Triton implementation; do not install the separate triton package.
+   The upstream FastAPI requirements currently conflict: vLLM requires ``>=0.133.0,<0.137.0``,
+   while vLLM-Ascend requires ``<0.124.0``. No version satisfies both.
+   Resolve this conflict, then run ``pip check`` and validate runtime compatibility.
 
 
 The Megatron training backend also requires the following Bridge components:
@@ -108,7 +120,7 @@ vLLM Inference Backend Support
     # Install vllm
     git clone https://github.com/vllm-project/vllm.git
     cd vllm
-    git checkout v0.23.0
+    git checkout v0.30.0
     VLLM_TARGET_DEVICE=empty pip install -v -e .
     cd ..
 
@@ -116,7 +128,7 @@ vLLM Inference Backend Support
     # Before installation, source the CANN environment: source /usr/local/Ascend/cann/set_env.sh
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
-    git checkout releases/v0.23.0
+    git checkout releases/v0.30.0
     pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     cd ..
 
@@ -126,19 +138,28 @@ Megatron Training Backend Support
 
 .. code:: bash
 
-    # MindSpeed
-    git clone https://gitcode.com/Ascend/MindSpeed.git
-    cd MindSpeed
-    git checkout 0c6c0ceaa523a96032dee1539a52032155e6404e
-    pip install -e .
-    cd ..
-
     # Megatron
     git clone https://github.com/NVIDIA/Megatron-LM.git
     cd Megatron-LM
-    git checkout core_r0.12.0
+    git checkout core_v0.18.0
     pip install -e .
     cd ..
+
+    # Install Ascend adapters for Megatron-LM core_v0.18.0
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
+    pip install -e MegatronAdaptor
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
+    pip install -e TransformerEngineNPU --no-build-isolation
+
+    # Install MindSpeed after MA and TENPU
+    git clone https://gitcode.com/Ascend/MindSpeed.git
+    cd MindSpeed
+    git checkout core_r0.18.0
+    pip install -e .
+    cd ..
+
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
+    pip install -e MindSpeed-Ops --no-build-isolation --no-deps
 
     # Configure environment variables
     export PYTHONPATH=$PYTHONPATH:your_path/Megatron-LM
@@ -150,10 +171,11 @@ Megatron Training Backend Support
 
     # Install MindSpeed-Bridge (repository default branch)
     git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    pip install -r MindSpeed-Bridge/requirements.txt
     pip install -e MindSpeed-Bridge --no-deps
 
-    # Install transformers
-    pip install transformers==5.10.4
+    # Restore inference versions after installing training dependencies
+    pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
 
 verl Dependency Installation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -163,13 +185,15 @@ verl Dependency Installation
     git clone https://github.com/verl-project/verl.git
     cd verl
     pip install -e .
-    pip install -r requirements-npu.txt
+    pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # Restore the Triton version required by vLLM
+    pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 
 
 Log Filtering
 ^^^^^^^^^^^^^
 
-After upgrading transformers to 5.10.4, a large number of deprecated alias warnings may appear. You can add an environment variable to filter out redundant logs.
+If transformers emits a large number of deprecated alias warnings, you can add an environment variable to filter out redundant logs.
 
 .. code:: bash
 

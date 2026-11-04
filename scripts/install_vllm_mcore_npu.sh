@@ -4,20 +4,19 @@ USE_MEGATRON=${USE_MEGATRON:-1}
 
 echo "1. install basic packages"
 pip uninstall -y triton triton-ascend
-# 安装与 vLLM-Ascend 0.23.0 对应的软件包
-pip install torchvision==0.25.0
-pip install torchaudio==2.10.0
-pip install triton-ascend==3.2.2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
-pip install "transformers==5.10.4" 
+# Align with the vLLM-Ascend releases/v0.30.0 runtime requirements.
+pip install torch==2.10.0 torch_npu==2.10.0.post7 torchvision==0.25.0 torchaudio==2.10.0
+pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+pip install "transformers==5.14.1"
 pip install setuptools-scm
 
 
 echo "2. install vllm & vllm-ascend"
-git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git
+git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
-git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git
+git clone -b releases/v0.30.0 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
 pip install -r requirements.txt
@@ -30,7 +29,7 @@ if [ $USE_MEGATRON -eq 1 ]; then
     # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron 相关依赖
     git clone https://gitcode.com/Ascend/MindSpeed.git
     cd MindSpeed && git checkout core_r0.18.0 && cd ..
-    git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git
+    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git
     git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
     git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
     git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
@@ -39,9 +38,9 @@ if [ $USE_MEGATRON -eq 1 ]; then
 
     # 安装 Megatron 及 Ascend 适配组件
     pip install -e Megatron-LM
-    pip install -e MindSpeed
     pip install -e MegatronAdaptor
     pip install -e TransformerEngineNPU --no-build-isolation
+    pip install -e MindSpeed
     pip install -e MindSpeed-Ops --no-build-isolation --no-deps
     pip install -r MindSpeed-Bridge/requirements.txt
     pip install -e MindSpeed-Bridge --no-deps
@@ -58,5 +57,8 @@ git checkout main
 cd ..
 
 echo "5. May need to check other neccessary packages"
-pip install transformers==5.10.4 xgrammar==0.1.33
+# Restore the inference requirements after installing the training dependencies.
+pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
+# Restore the vLLM Triton version after requirements-npu.txt installs its shared pin.
+pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 echo "Successfully installed all packages"
