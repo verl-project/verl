@@ -98,7 +98,6 @@ def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsIm
 
 class VeOmniEngine(FSDPEngine):
     _veomni_handles_position_ids = True
-    per_tensor_param_shard_is_hf = False  # fused expert stacks need converter specs (to_hf_chunk)
 
     def _apply_veomni_input_transforms(self, model_inputs: dict, micro_batch: TensorDict):
         """Apply VeOmni-specific input transforms shared by LM and value heads.

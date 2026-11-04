@@ -110,8 +110,6 @@ class FSDPEngine(BaseEngine):
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
 
-    per_tensor_param_shard_is_hf = True  # DTensor shards of HF-named parameters (see BaseEngine)
-
     def __init__(
         self,
         model_config: HFModelConfig,

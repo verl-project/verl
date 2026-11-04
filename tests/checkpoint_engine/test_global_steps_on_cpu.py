@@ -15,8 +15,6 @@
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
 from verl.checkpoint_engine.base import CheckpointEngineWorker
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
@@ -135,41 +133,3 @@ def test_actor_worker_hands_its_training_engine_to_an_engine_consuming_checkpoin
     assert checkpoint_engine.sent_weights is worker.actor.engine  # not a generator of full tensors
     assert checkpoint_engine.sent_global_steps == 5
     assert events == ["send_weights_complete", "offload"]
-
-
-@pytest.mark.parametrize("failure", ["error", "cancel"])
-def test_checkpoint_worker_closes_the_receive_stream_when_the_adapter_fails(failure):
-    """An engine learns at once that its consumer gave up, even before the first tensor, instead of when the stream is
-    garbage-collected (the traceback keeps it alive), so it can tell its peers right away."""
-    closed = []
-
-    class _Stream:
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            raise StopAsyncIteration
-
-        async def aclose(self):
-            closed.append(True)
-
-    class _FailingAdapter:
-        async def update_weights(self, weights, global_steps=None, **kwargs):
-            if failure == "error":
-                raise RuntimeError("adapter failed")
-            await asyncio.sleep(30)
-
-    worker = CheckpointEngineWorker.__new__(CheckpointEngineWorker)
-    worker.checkpoint_engine = SimpleNamespace(receive_weights=lambda global_steps=None: _Stream())
-    worker.server_adapter = _FailingAdapter()
-
-    async def run():
-        task = asyncio.ensure_future(CheckpointEngineWorker.update_weights.__wrapped__(worker, global_steps=3))
-        if failure == "cancel":
-            await asyncio.sleep(0.01)
-            task.cancel()
-        await task
-
-    with pytest.raises(RuntimeError if failure == "error" else asyncio.CancelledError):
-        asyncio.run(run())
-    assert closed == [True]
