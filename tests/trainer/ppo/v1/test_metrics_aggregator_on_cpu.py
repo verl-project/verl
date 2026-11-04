@@ -305,3 +305,19 @@ def test_rollout_failure_evicted_samples_are_summed_across_iterations():
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 1})
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 2})
     assert agg.get_aggregated_metrics()["training/rollout_failure/evicted_samples"] == pytest.approx(3.0)
+
+
+def test_valid_step_nan_is_not_swallowed_by_max():
+    # Regression: max() returns the first comparable finite value when a NaN is present
+    # (max([0.03, nan]) -> 0.03), so a genuine NaN from a valid=1 step must propagate
+    # even when a valid=0 NaN placeholder is filtered out of the same window.
+    agg = MetricsAggregator()
+    steps = [(0, float("nan")), (1, 0.03), (1, float("nan"))]
+    for valid, value in steps:
+        agg.add_step_metrics(
+            {"training/rollout_probs_diff_max": value, "training/rollout_probs_diff_valid": valid},
+            sample_count=1,
+        )
+    out = agg.get_aggregated_metrics()
+    assert math.isnan(out["training/rollout_probs_diff_max"])
+    assert out["training/rollout_probs_diff_valid"] == 1

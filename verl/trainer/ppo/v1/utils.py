@@ -155,6 +155,11 @@ class MetricsAggregator:
                 values = [v for v, keep in zip(values, mask, strict=False) if keep]
                 if not values:
                     return float("nan")
+                if any(value != value for value in values):
+                    # Python's max() swallows NaNs (max([0.03, nan]) -> 0.03), which would
+                    # hide a genuine nonfinite value from a valid=1 step behind a finite
+                    # result; propagate NaN instead so the failure stays observable.
+                    return float("nan")
             return max(values)
         if agg_type == "min":
             return min(values)
