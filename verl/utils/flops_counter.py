@@ -41,6 +41,19 @@ _DEVICE_FLOPS = {
     "Ascend950DT": 432e12,
     "Ascend910": 354e12,
     "RTX 3070 Ti": 21.75e12,
+    "TPU v7x": 1153.5e12,
+    "TPU v7": 1153.5e12,
+    "TPU7x": 1153.5e12,
+    "tpu7x": 1153.5e12,
+    "v7x": 1153.5e12,
+    "TPU v6e": 918e12,
+    "TPU v6 lite": 918e12,
+    "v6e": 918e12,
+    "TPU v5p": 459e12,
+    "v5p": 459e12,
+    "TPU v5e": 197e12,
+    "TPU v5 lite": 197e12,
+    "v5e": 197e12,
 }
 
 
