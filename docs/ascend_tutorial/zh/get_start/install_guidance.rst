@@ -3,6 +3,10 @@
 
 Last updated: 11/03/2026.
 
+.. contents:: 目录
+   :local:
+   :depth: 2
+
 关键更新
 --------
 
@@ -30,17 +34,6 @@ Last updated: 11/03/2026.
    ``torch_npu`` 软件包。如环境中不包含 ``torch_npu``\ ，仍需显式指定
    ``trainer.device=npu``\ 。
 
-目录
---------
-
-- `硬件支持 <#硬件支持>`_
-- `框架后端支持说明 <#框架后端支持说明>`_
-- `部署指南 <#部署指南>`_
-   - `Docker镜像获取、构建和使用 <#1-docker镜像获取构建和使用>`_
-   - `自定义安装-vLLM + FSDP/Megatron <#2-自定义安装-vllm--fsdpmegatron>`_
-   - `自定义安装-SGLang + FSDP/Megatron <#3-自定义安装-sglang--fsdpmegatron>`_
-- `附录 <#附录>`_
-
 硬件支持
 --------
 
@@ -52,13 +45,13 @@ Atlas 800T A3
 
 ..
 
-   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 `安装指南（Ascend 950PR&950DT系列产品） <install_guidance_950.rst>`_。
+   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 :doc:`安装指南（Ascend 950PR&950DT系列产品） <install_guidance_950>`。
 
 
 框架后端支持说明
 ----------------
 
-当前NPU上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU上支持以下常见训推后端的部署，您可以根据我们的 :doc:`昇腾镜像说明 <dockerfile_build_guidance>` 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -77,7 +70,7 @@ Atlas 800T A3
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
-`昇腾镜像说明 <dockerfile_build_guidance.rst>`__\ 。
+:doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
 
 
 2. 自定义安装-vLLM + FSDP/Megatron
@@ -97,7 +90,7 @@ torch         ``2.10.0``                              PyTorch 深度学习框架
 torch_npu     ``2.10.0.post7``                        NPU PyTorch 适配插件
 torchvision   ``0.25.0``                              PyTorch 图像处理库
 torchaudio    ``2.10.0``                              PyTorch 音频处理库
-triton-ascend ``3.6.0.post2``                         NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend ``3.6.0.post2``                         NPU Triton 适配，安装命令需参考脚本 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`__
 transformers  ``5.14.1``                              Hugging Face 大模型库，提供模型架构与预训练权重
 xgrammar      ``>=0.2.1,<1.0.0``                       vLLM 结构化输出依赖
 vLLM          ``0.30.0``                              高性能 LLM 推理与服务引擎
@@ -144,7 +137,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 源码安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们提供了基于conda一键部署 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_ ， 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
+我们提供了基于conda一键部署 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`__ ， 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
 
 .. code:: bash
 
@@ -184,7 +177,7 @@ torch         ``2.8.0``                               PyTorch 深度学习框架
 torch_npu     ``2.8.0.post2``                         NPU PyTorch 适配插件
 SGLang        ``v0.5.10``                             高性能 LLM 推理引擎
 triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_sglang_mcore_npu.sh>`_
+triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`__
 transformers  ``5.10.4``                               Hugging Face 大模型库，提供模型架构与预训练权重
 Megatron-LM   ``core_r0.18.0``                        大规模分布式训练框架
 MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
@@ -223,7 +216,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 源码安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们提供了基于conda一键部署 `安装脚本 <../../../../scripts/install_sglang_mcore_npu.sh>`_ ，脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
+我们提供了基于conda一键部署 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`__ ，脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
 
 .. code:: bash
 
