@@ -105,7 +105,11 @@ class vLLMPDReplica(vLLMReplica):
         assert len(self.workers) == self.world_size, (
             f"worker count {len(self.workers)} != PD world size {self.world_size}"
         )
-        assert not is_torch_npu_available(check_device=False), "vLLM PD on NPU not validated"
+        use_ascend_mooncake = self._is_ascend_platform()
+        transfer_backend = self.config.disaggregation.transfer_backend
+        if use_ascend_mooncake and transfer_backend == "nixl":
+            logger.warning("NixlConnector is not supported for Ascend PD; falling back to MooncakeConnectorV2")
+            transfer_backend = "mooncake"
 
         worker_infos = await asyncio.gather(
             *[
@@ -137,8 +141,12 @@ class vLLMPDReplica(vLLMReplica):
             prefill_kv_cfg = self._build_kv_transfer_config(
                 role="prefill",
                 engine_id=prefill_engine_id,
-                transfer_backend=self.config.disaggregation.transfer_backend,
+                transfer_backend=transfer_backend,
                 mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                use_ascend_mooncake=use_ascend_mooncake,
+                kv_port=prefill_side_channel_port,
+                prefill_tp=self._prefill_tp,
+                decode_tp=self._decode_tp,
             )
             self._prefill_servers = [
                 self._spawn_pd_server(
@@ -168,8 +176,12 @@ class vLLMPDReplica(vLLMReplica):
                 decode_kv_cfg = self._build_kv_transfer_config(
                     role="decode",
                     engine_id=uuid.uuid4().hex,
-                    transfer_backend=self.config.disaggregation.transfer_backend,
+                    transfer_backend=transfer_backend,
                     mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                    use_ascend_mooncake=use_ascend_mooncake,
+                    kv_port=decode_side_channel_port,
+                    prefill_tp=self._prefill_tp,
+                    decode_tp=self._decode_tp,
                 )
                 self._decode_servers.append(
                     self._spawn_pd_server(
@@ -222,6 +234,27 @@ class vLLMPDReplica(vLLMReplica):
             len(self._decode_servers),
         )
 
+    async def sleep(self):
+        """Drain the prefill ingress, then sleep P/D servers.
+
+        Ascend Direct's ``unregister_memory`` also disconnects peers, and the
+        KV pull session is owned by decode. Sleep every decode server first so
+        those sessions are gone before prefill unmaps its KV buffers.
+        """
+        if self._is_ascend_platform():
+            if not self._prefill_servers:
+                raise RuntimeError("PD servers have not been launched")
+            await self._prefill_servers[0].wait_for_requests_to_drain.remote()
+            await asyncio.gather(*[server.sleep.remote() for server in self._decode_servers])
+            await asyncio.gather(*[server.sleep.remote() for server in self._prefill_servers])
+            return
+        await super().sleep()
+
+    @staticmethod
+    def _is_ascend_platform() -> bool:
+        """Follow Verl's existing NPU availability convention."""
+        return is_torch_npu_available(check_device=False)
+
     @staticmethod
     def _collect_cuda_devices(worker_infos) -> str:
         return ",".join(worker_info[1] for worker_info in worker_infos)
@@ -232,23 +265,40 @@ class vLLMPDReplica(vLLMReplica):
         engine_id: str,
         transfer_backend: str,
         mooncake_protocol: Optional[str] = None,
+        use_ascend_mooncake: bool = False,
+        kv_port: Optional[int] = None,
+        prefill_tp: Optional[int] = None,
+        decode_tp: Optional[int] = None,
     ) -> dict:
         """Assemble vLLM's ``--kv-transfer-config`` payload."""
         role_to_kv_role = {
             "prefill": "kv_producer",
             "decode": "kv_consumer",
         }
-        connector = {
-            "nixl": "NixlConnector",
-            "mooncake": "MooncakeConnector",
-        }[transfer_backend]
+        if use_ascend_mooncake:
+            if transfer_backend != "mooncake":
+                raise ValueError("Ascend PD requires transfer_backend='mooncake'")
+            if kv_port is None or prefill_tp is None or decode_tp is None:
+                raise ValueError("MooncakeConnectorV2 requires kv_port, prefill_tp, and decode_tp")
+            connector = "MooncakeConnectorV2"
+        else:
+            connector = {
+                "nixl": "NixlConnector",
+                "mooncake": "MooncakeConnector",
+            }[transfer_backend]
         cfg: dict = {
             "kv_connector": connector,
             "kv_role": role_to_kv_role[role],
             "engine_id": engine_id,
             "kv_buffer_device": get_device_name(),
         }
-        if transfer_backend == "mooncake" and mooncake_protocol:
+        if use_ascend_mooncake:
+            cfg["kv_port"] = kv_port
+            cfg["kv_connector_extra_config"] = {
+                "prefill": {"dp_size": 1, "tp_size": prefill_tp},
+                "decode": {"dp_size": 1, "tp_size": decode_tp},
+            }
+        elif transfer_backend == "mooncake" and mooncake_protocol:
             cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}
         return cfg
 

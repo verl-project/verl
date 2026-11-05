@@ -44,7 +44,7 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
+from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import (
     build_rollout_dist_profiler,
@@ -1712,7 +1712,7 @@ class vLLMReplica(RolloutReplica):
         # KV-cache wake-up may already have resumed scheduling. Keep admission
         # closed during this resume too: new requests could otherwise start a
         # DP wave while only some ranks are still in the resume collective.
-        await self.servers[0].resume_engine_generation.remote()
+        await asyncio.gather(*[server.resume_engine_generation.remote() for server in self.servers])
         await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:

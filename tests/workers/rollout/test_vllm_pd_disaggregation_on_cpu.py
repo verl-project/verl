@@ -18,7 +18,7 @@ Covers Phase 1 of the verl-vllm-pd-disagg series:
   * ``RolloutConfig`` post_init coercion + name-vs-disagg.enabled gate
   * ``get_rollout_replica_class("vllm", disaggregation_enabled=True)`` resolves to ``vLLMPDReplica``
   * ``vLLMPDReplica`` config validation paths (NIXL-only, single-node MVP)
-  * ``vLLMPDReplica._build_kv_transfer_config`` JSON shape
+  * ``vLLMPDReplica._build_kv_transfer_config`` JSON shape, including Ascend MooncakeConnectorV2
 
 Phase 2 (NIXL 1P:1D smoke) and Phase 3 (1P:ND scaling) add live Ray-actor and
 vLLM-engine tests behind ``@pytest.mark.skipif(not CUDA_AVAILABLE)``.
@@ -26,6 +26,7 @@ vLLM-engine tests behind ``@pytest.mark.skipif(not CUDA_AVAILABLE)``.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from unittest.mock import patch
 
@@ -186,6 +187,10 @@ def _build_kv_cfg(
     engine_id: str = "test-eid",
     transfer_backend: str = "nixl",
     mooncake_protocol=None,
+    use_ascend_mooncake: bool = False,
+    kv_port=None,
+    prefill_tp=None,
+    decode_tp=None,
 ):
     # Lazy import: only meaningful when vllm-rollout deps are importable.
     pytest.importorskip("vllm")
@@ -196,6 +201,10 @@ def _build_kv_cfg(
         engine_id=engine_id,
         transfer_backend=transfer_backend,
         mooncake_protocol=mooncake_protocol,
+        use_ascend_mooncake=use_ascend_mooncake,
+        kv_port=kv_port,
+        prefill_tp=prefill_tp,
+        decode_tp=decode_tp,
     )
 
 
@@ -246,6 +255,26 @@ def test_build_kv_transfer_config_mooncake_protocol_ignored_for_nixl():
     the NIXL connector ignores it (UCX picks transport on its own)."""
     cfg = _build_kv_cfg(role="prefill", transfer_backend="nixl", mooncake_protocol="nvlink")
     assert "kv_connector_extra_config" not in cfg
+
+
+@pytest.mark.parametrize("role,expected_role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_build_kv_transfer_config_ascend_mooncake(role, expected_role):
+    cfg = _build_kv_cfg(
+        role=role,
+        transfer_backend="mooncake",
+        mooncake_protocol="tcp",
+        use_ascend_mooncake=True,
+        kv_port=19001,
+        prefill_tp=4,
+        decode_tp=2,
+    )
+    assert cfg["kv_connector"] == "MooncakeConnectorV2"
+    assert cfg["kv_role"] == expected_role
+    assert cfg["kv_port"] == 19001
+    assert cfg["kv_connector_extra_config"] == {
+        "prefill": {"dp_size": 1, "tp_size": 4},
+        "decode": {"dp_size": 1, "tp_size": 2},
+    }
 
 
 @pytest.mark.parametrize("protocol", ["nvlink", "local", "rdma", "tcp"])
@@ -398,6 +427,88 @@ def test_pd_replica_init_rejects_oversized_world(patched_replica_cls):
     cfg = _make_pd_config(decode_replicas=8)  # 1 + 8 = 9 GPUs needed
     with pytest.raises(NotImplementedError, match="single-node only"):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+
+
+class _AwaitableRemote:
+    def __init__(self, name: str, action: str, log: list[tuple[str, str, str]]):
+        self._name = name
+        self._action = action
+        self._log = log
+
+    def remote(self):
+        log = self._log
+        name = self._name
+        action = self._action
+
+        async def _run():
+            log.append(("start", name, action))
+            await asyncio.sleep(0)
+            log.append(("end", name, action))
+
+        return _run()
+
+
+class _SleepServerStub:
+    def __init__(self, name: str, log: list[tuple[str, str, str]]):
+        self.wait_for_requests_to_drain = _AwaitableRemote(name, "drain", log)
+        self.sleep = _AwaitableRemote(name, "sleep", log)
+
+
+def _sleep_bounds(log: list[tuple[str, str, str]], name: str) -> tuple[int, int]:
+    starts = [
+        i
+        for i, (phase, server, action) in enumerate(log)
+        if phase == "start" and server == name and action == "sleep"
+    ]
+    ends = [
+        i
+        for i, (phase, server, action) in enumerate(log)
+        if phase == "end" and server == name and action == "sleep"
+    ]
+    assert len(starts) == 1 and len(ends) == 1
+    return starts[0], ends[0]
+
+
+def test_npu_pd_sleeps_every_decode_before_prefill(patched_replica_cls):
+    replica = object.__new__(patched_replica_cls)
+    log: list[tuple[str, str, str]] = []
+    prefill = _SleepServerStub("prefill", log)
+    decode_0 = _SleepServerStub("decode-0", log)
+    decode_1 = _SleepServerStub("decode-1", log)
+    replica._prefill_servers = [prefill]
+    replica._decode_servers = [decode_0, decode_1]
+    replica.servers = [prefill, decode_0, decode_1]
+
+    with patch.object(patched_replica_cls, "_is_ascend_platform", return_value=True):
+        asyncio.run(replica.sleep())
+
+    assert log[0] == ("start", "prefill", "drain")
+    _, decode_0_end = _sleep_bounds(log, "decode-0")
+    _, decode_1_end = _sleep_bounds(log, "decode-1")
+    prefill_start, _ = _sleep_bounds(log, "prefill")
+    assert max(decode_0_end, decode_1_end) < prefill_start
+
+
+def test_resume_generation_resumes_every_engine_before_opening_gates():
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+
+    log: list[tuple[str, str, str]] = []
+
+    class _Server:
+        def __init__(self, name: str):
+            self.resume_engine_generation = _AwaitableRemote(name, "resume", log)
+            self.open_submission_gate = _AwaitableRemote(name, "gate", log)
+
+    replica = object.__new__(vLLMReplica)
+    replica.servers = [_Server("prefill"), _Server("decode-0"), _Server("decode-1")]
+    asyncio.run(vLLMReplica.resume_generation(replica))
+
+    resume_ends = [i for i, (phase, _, action) in enumerate(log) if phase == "end" and action == "resume"]
+    gate_starts = [i for i, (phase, _, action) in enumerate(log) if phase == "start" and action == "gate"]
+    assert len(resume_ends) == 3
+    assert len(gate_starts) == 3
+    assert max(resume_ends) < min(gate_starts)
 
 
 def test_pd_replica_init_requires_disaggregation_enabled(patched_replica_cls):
