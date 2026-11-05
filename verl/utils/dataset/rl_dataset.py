@@ -32,7 +32,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from verl.utils.import_utils import load_extern_object
+from verl.utils.import_utils import load_extern_object, resolve_config_path
 from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
 logger = logging.getLogger(__name__)
@@ -129,9 +129,13 @@ class RLHFDataset(Dataset):
             try:
                 from verl.tools.tool_registry import load_all_tools
 
+                # Ray actors run in the cluster working directory, not the driver's;
+                # resolve relative paths the same way the agent loop does.
+                tool_config_path = resolve_config_path(self.tool_config_path) if self.tool_config_path else None
+                function_tool_path = resolve_config_path(self.function_tool_path) if self.function_tool_path else None
                 tool_list = load_all_tools(
-                    tool_config_path=self.tool_config_path,
-                    function_tool_path=self.function_tool_path,
+                    tool_config_path=tool_config_path,
+                    function_tool_path=function_tool_path,
                 )
                 self.tool_schemas = [
                     tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list

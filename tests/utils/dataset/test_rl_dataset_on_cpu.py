@@ -334,3 +334,36 @@ def test_video_rl_data(video_data_file):
     assert "images" not in data_proto.non_tensor_batch
 
     print("raw_prompt", data_proto.non_tensor_batch["raw_prompt"][0])
+
+
+def test_tool_config_path_is_resolved(tmp_path, monkeypatch):
+    """Relative tool paths must be resolved like the agent loop does."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    parquet = tmp_path / "train.parquet"
+    pq.write_table(pa.table({"prompt": ["hello"]}), parquet)
+
+    resolved = {}
+
+    def fake_resolve(path):
+        resolved["path"] = path
+        return path
+
+    monkeypatch.setattr("verl.utils.dataset.rl_dataset.resolve_config_path", fake_resolve)
+    monkeypatch.setattr(
+        "verl.tools.tool_registry.load_all_tools",
+        lambda tool_config_path, function_tool_path: [],
+    )
+
+    config = OmegaConf.create(
+        {
+            "prompt_key": "prompt",
+            "max_prompt_length": 128,
+            "filter_overlong_prompts": False,
+            "tool_config_path": "relative/tools.yaml",
+        }
+    )
+    RLHFDataset(data_files=str(parquet), tokenizer=None, config=config)
+
+    assert resolved["path"] == "relative/tools.yaml"
