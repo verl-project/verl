@@ -58,9 +58,10 @@ def test_long_answer_straddling_the_window_boundary_is_not_truncated(method):
     """A number cut in half by the tail window must not be reported as the answer."""
     answer = "1234567890123456789"
     prefix = "#### " if method == "strict" else "the answer is "
-    # Place the answer so that the tail window starts in the middle of its digits.
-    tail = prefix + answer
-    solution_str = _pad(_SOLUTION_CLIP_CHARS + 10 - len(answer) // 2) + tail
+    # Follow the answer with just enough text that the tail window starts in the middle of its digits.
+    kept_digits = len(answer) // 2
+    solution_str = prefix + answer + _pad(_SOLUTION_CLIP_CHARS - kept_digits)
+    assert solution_str[-_SOLUTION_CLIP_CHARS:].startswith(answer[-kept_digits:] + _pad(1))
 
     assert extract_solution(solution_str, method=method) == answer
 
