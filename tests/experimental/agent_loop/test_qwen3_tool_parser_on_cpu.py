@@ -108,3 +108,15 @@ def test_missing_tools_defaults_to_empty_list():
 
     assert result is not None
     assert json.loads(result.arguments) == {"items": "value"}
+
+
+def test_ellipsis_parameter_keeps_raw_string():
+    """``...`` parses as ``Ellipsis``, which ``json.dumps`` cannot serialize.
+
+    The parser must keep the original text instead of raising and dropping the
+    whole tool call.
+    """
+    result = _parse_single_param("array", "...")
+
+    assert result is not None
+    assert json.loads(result.arguments) == {"items": "..."}
