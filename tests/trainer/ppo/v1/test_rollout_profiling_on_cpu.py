@@ -15,7 +15,7 @@
 """Tests for the rollout profiler lifecycle across V1 trainer modes."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 from omegaconf import OmegaConf
 
@@ -105,12 +105,9 @@ def test_sync_stops_rollout_after_sampling():
     calls.attach_mock(trainer.checkpoint_manager.sleep_replicas, "sleep")
     calls.attach_mock(manager.stop_profile, "stop")
 
-    with patch.object(PPOTrainer, "_add_batch_to_generate") as submit:
-        calls.attach_mock(submit, "submit")
-        trainer._add_batch_to_generate()
-        trainer.on_sample_end()
+    trainer.on_sample_end()
 
-    assert calls.mock_calls == [call.submit(), call.sleep(), call.stop()]
+    assert calls.mock_calls == [call.sleep(), call.stop()]
     manager.start_profile.assert_not_called()
 
 
@@ -209,8 +206,7 @@ def test_rollout_stops_before_the_first_training_stage():
     batch = SimpleNamespace(extra_info={})
     trainer.config.actor_rollout_ref = OmegaConf.create({"rollout": {"temperature": 1.0}})
     trainer.config.trainer = OmegaConf.create({"critic_warmup": 0})
-    trainer.replay_buffer = MagicMock()
-    trainer.replay_buffer.sample.return_value = (batch, {})
+    trainer._sample_replay = MagicMock(return_value=(batch, {}, 1))
     trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=object())
 
     for name in ("_balance_batch", "_compute_old_log_prob", "_compute_advantage", "_update_actor"):

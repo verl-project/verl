@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .agent_loop_tq import AgentLoopManagerTQ, AgentLoopWorkerTQ
+from .streaming_dataloader import StreamingDataloaderActor, StreamingDataloaderAsyncActor
 from .trainer_base import PPOTrainer, get_trainer_cls, register_trainer
 from .trainer_colocate_async import PPOTrainerColocateAsync
 from .trainer_separate_async import PPOTrainerSeparateAsync
@@ -27,4 +28,6 @@ __all__ = [
     "PPOTrainerSeparateAsync",
     "AgentLoopWorkerTQ",
     "AgentLoopManagerTQ",
+    "StreamingDataloaderActor",
+    "StreamingDataloaderAsyncActor",
 ]

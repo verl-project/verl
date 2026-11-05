@@ -53,10 +53,10 @@ defaults:
 actor_rollout_ref:
 
   # Whether actor and rollout colocate on the same GPUs (hybrid engine).
-  # Set to False only with the v1 separate_async trainer: no colocated
-  # rollout replicas are created on the training GPUs and rollout is served
-  # exclusively by the standalone rollout pool.
-  # All other trainers require True.
+  # This is used by non-V1 trainers; the V1 separate_async trainer ignores
+  # this knob and uses trainer.v1.separate_async.hybrid_rollout.enable_switch
+  # instead to decide whether colocated rollout replicas are created.
+  # All non-V1 trainers require True.
   hybrid_engine: true
 
   # Timeout for operations executed against the process group
@@ -243,20 +243,18 @@ trainer:
     # Asynchronous PPO trainer with colocated trainer and rollout
     colocate_async:
 
-      # Number of warmup batches to add before training loop starts.
-      # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
-      # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
-      # part is rounded down to a whole number of gen_batch_size chunks.
-      num_warmup_batches: 1
+      # Target in-flight session inventory, expressed in train batches at the fixed rollout.n
+      watermark_batches: 2
 
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
-      # Number of warmup batches to add before training loop starts.
-      # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
-      # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
-      # part is rounded down to a whole number of gen_batch_size chunks.
-      num_warmup_batches: 1
+      # Target in-flight session inventory, expressed in train batches at the fixed rollout.n
+      watermark_batches: 2
+
+      # Cap on dispatched-but-unconsumed prompt groups (in flight plus awaiting sampling), in train batches.
+      # Bounds steady-state staleness to about this many steps when rollout outpaces training; null disables it
+      max_outstanding_batches: 4
 
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
@@ -305,16 +303,20 @@ trainer:
       # Whether sync trainers replace failed groups that have no trajectories
       sync_refill_failed_groups: False
 
-      # Custom sampler config
+      # Seconds between TransferQueue polls while waiting for rollouts; separate_async counts a step as idle
+      # when its sample wait exceeds one poll interval
+      poll_interval: 2.0
+
+      # Custom sampler config: a StreamingDataloader (sync) or StreamingDataloaderAsync (async) subclass
       custom_sampler:
 
-        # Path to the custom sampler class
+        # Path to the file defining the custom dataloader class
         path: null
 
-        # Name of the custom sampler class
+        # Name of the custom dataloader class
         name: null
 
-      # Additional kwargs for the custom sampler
+      # Additional kwargs for the custom sampler, available as self.sampler_kwargs
       sampler_kwargs: {}
 
 # profiler configs

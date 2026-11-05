@@ -16,7 +16,6 @@ import os
 import time
 from collections import deque
 from copy import deepcopy
-from dataclasses import replace
 from enum import Enum
 
 import ray
@@ -83,19 +82,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # steady-state training and only ever serve warmup and validation, while
         # permanently costing engine init, a startup weight sync, and the offload /
         # memory headroom their wake-ups require. They are therefore created only
-        # when enable_switch=True. actor_rollout_ref.hybrid_engine=False (the v0
-        # fully-async convention) keeps its "no colocated replicas" meaning and
-        # wins over a conflicting enable_switch=True, which is ignored with a
-        # warning instead of failing startup.
+        # when enable_switch=True.
         self.hybrid_rollout_config: HybridRolloutSwitchConfig = omega_conf_to_dataclass(
             self.config.trainer.v1.separate_async.hybrid_rollout
         )
-        if not bool(config.actor_rollout_ref.get("hybrid_engine", True)) and self.hybrid_rollout_config.enable_switch:
-            logger.warning(
-                "trainer.v1.separate_async.hybrid_rollout.enable_switch is ignored because "
-                "actor_rollout_ref.hybrid_engine=False; disabling hybrid switching"
-            )
-            self.hybrid_rollout_config = replace(self.hybrid_rollout_config, enable_switch=False)
         # Read by PPOTrainer._setup() (triggered by init()).
         self._enable_hybrid_replicas = self.hybrid_rollout_config.enable_switch
         if self.hybrid_rollout_config.enable_switch:
@@ -106,14 +96,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 raise ValueError(
                     "trainer.v1.separate_async.hybrid_rollout.enable_switch does not support rollout disaggregation: "
                     "step-boundary redistribution relies on paused replicas queueing new requests"
-                )
-            # Custom samplers own their polling. One that cannot wait on buffer depth would hand the
-            # GPUs back before the step has anything to train on, which is worse than not switching.
-            required_methods = ("wait_for_sampleable", "get_sampleable_count")
-            if any(not hasattr(self.replay_buffer, method) for method in required_methods):
-                raise TypeError(
-                    f"{type(self.replay_buffer).__name__} must implement {required_methods} when "
-                    "trainer.v1.separate_async.hybrid_rollout.enable_switch=True"
                 )
             self._init_hybrid_rollout_state()
 
@@ -241,13 +223,16 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         if self._enable_hybrid_replicas:
             self.checkpoint_manager.update_weights(self.global_steps)
 
-    def on_train_begin(self):
-        self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)
-
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+
+    def _get_sampleable_count(self, global_steps: int) -> int:
+        return ray.get(self.streaming_dataloader.count_sampleable.remote(global_steps))
+
+    def _wait_for_sampleable(self, global_steps: int, target_count: int) -> dict:
+        return ray.get(self.streaming_dataloader.wait_sampleable.remote(global_steps, target_count))
 
     def on_step_begin(self):
         self._step_sample_wait_seconds = 0.0
@@ -262,7 +247,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             return
 
         self._step_threshold = self._switch_threshold()
-        sampleable_count = self.replay_buffer.get_sampleable_count(self.global_steps, "train")
+        sampleable_count = self._get_sampleable_count(self.global_steps)
         if sampleable_count >= self._step_threshold:
             self._timed_switch_to_trainer()
 
@@ -276,7 +261,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def on_sample_begin(self):
         if self.hybrid_rollout_config.enable_switch:
-            sampleable = self.replay_buffer.get_sampleable_count(self.global_steps, "train")
+            sampleable = self._get_sampleable_count(self.global_steps)
             mini_batch_size = self.config.data.train_batch_size // self.parameter_sync_step
             self._step_wait_samples += max(0, mini_batch_size - sampleable)
         self._sample_start = time.perf_counter()
@@ -295,9 +280,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         logger.info(f"Lending hybrid engine to generation until {self._step_threshold} groups are sampleable")
         with marked_timer("switch_wait", self.timing_raw, color="yellow"):
-            _, eviction_metrics = self.replay_buffer.wait_for_sampleable(
-                self.global_steps, "train", self._step_threshold
-            )
+            eviction_metrics = self._wait_for_sampleable(self.global_steps, self._step_threshold)
         self._timed_switch_to_trainer()
         return eviction_metrics
 
@@ -310,8 +293,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def _step_had_idle(self) -> bool:
         """Whether waiting for sampleable prompts."""
-        poll_interval = getattr(self.replay_buffer, "poll_interval", 2.0)
-        return self._step_sample_wait_seconds > poll_interval
+        return self._step_sample_wait_seconds > self.replay_poll_interval
 
     def _adapt_switch_threshold(self, had_idle: bool) -> None:
         config = self.hybrid_rollout_config
@@ -356,7 +338,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 self._adapt_switch_threshold(had_idle)
 
             decision_threshold = self._switch_threshold()
-            sampleable_count = self.replay_buffer.get_sampleable_count(self.global_steps + 1, "train")
+            sampleable_count = self._get_sampleable_count(self.global_steps + 1)
             remaining = max(0, decision_threshold - sampleable_count)
             per_sample_time = self._wait_seconds / self._wait_samples if self._wait_samples > 0 else None
             effective_switch_cost = self._effective_switch_cost()

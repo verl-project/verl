@@ -60,9 +60,14 @@ def _make_trainer(tmp_path, events, async_save=False):
     trainer.checkpoint_callback = _RecordingCallback(config=trainer.config, events=events)
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.save_checkpoint.side_effect = lambda *a, **k: events.append(("wg_save",))
-    dataloader = MagicMock()
-    dataloader.state_dict.return_value = {}
-    trainer.train_dataloader = dataloader
+
+    class _RemoteSave:
+        def remote(self, *_args):
+            events.append(("data_save",))
+            return []
+
+    trainer.streaming_dataloader = MagicMock()
+    trainer.streaming_dataloader.save_checkpoint = _RemoteSave()
     return trainer
 
 
@@ -75,6 +80,7 @@ def test_save_fires_on_save_after_worker_save(tmp_path):
     expected_dir = os.path.join(str(tmp_path), "global_step_3")
     assert events == [
         ("wg_save",),
+        ("data_save",),
         ("on_save", 3, expected_dir, False),
     ]
     tracker = os.path.join(str(tmp_path), "latest_checkpointed_iteration.txt")

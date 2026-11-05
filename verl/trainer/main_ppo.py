@@ -18,13 +18,13 @@ from pprint import pprint
 import hydra
 import ray
 from omegaconf import DictConfig, OmegaConf
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from verl.plugin.platform import get_platform
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
-from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.logging_utils import configure_verl_logging
 
 logger = logging.getLogger(__name__)
@@ -110,28 +110,26 @@ class TaskRunnerV1:
     def __init__(self):
         self.config = None
         self.trainer = None
-        self.agent_loop_manager = None
+        self.streaming_dataloader = None
 
-    def init_agent_loop_manager(self):
-        """Initialize the agent loop manager to generate sequences.
+    def init_streaming_dataloader(self):
+        """Create the actor that owns async train data, replay, and rollout dispatch."""
+        from verl.trainer.ppo.v1.streaming_dataloader import create_streaming_dataloader_actor_cls
 
-        NOTE: User can customize their own agent loop manager, the only requirement is:
-        1. implement `generate_sequences` method
-        2. put agent loop outputs into TransferQueue
-        """
-        from verl.trainer.ppo.v1 import AgentLoopManagerTQ
-
-        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
-        if manager_class_fqn:
-            agent_loop_manager_cls = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
-        else:
-            agent_loop_manager_cls = AgentLoopManagerTQ
-
-        self.agent_loop_manager = agent_loop_manager_cls.create(
+        dataloader_cls = create_streaming_dataloader_actor_cls(self.config)
+        self.streaming_dataloader = dataloader_cls.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=ray.get_runtime_context().get_node_id(),
+                soft=False,
+            )
+        ).remote(
             config=self.config,
+            tokenizer=self.trainer.tokenizer,
+            processor=self.trainer.processor,
             llm_client=self.trainer.get_llm_client(),
             teacher_client=self.trainer.get_teacher_client(),
             reward_loop_worker_handles=self.trainer.get_reward_handles(),
+            filter_groups_metric=self.trainer.filter_groups_metric,
         )
 
     def run(self, config: DictConfig):
@@ -155,8 +153,8 @@ class TaskRunnerV1:
         try:
             self.trainer = trainer_cls(config=config)
             self.trainer.init()
-            self.init_agent_loop_manager()
-            self.trainer.fit(self.agent_loop_manager)
+            self.init_streaming_dataloader()
+            self.trainer.fit(streaming_dataloader=self.streaming_dataloader)
             succeeded = True
         finally:
             try:
@@ -164,7 +162,11 @@ class TaskRunnerV1:
                 if tracking is not None:
                     tracking.finish(exit_code=0 if succeeded else 1)
             finally:
-                tq.close()
+                try:
+                    if self.streaming_dataloader is not None:
+                        ray.kill(self.streaming_dataloader)
+                finally:
+                    tq.close()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)

@@ -221,11 +221,10 @@ Actor/Rollout/Reference Policy
 **Common config for actor, rollout and reference model**
 
 - ``actor_rollout_ref.hybrid_engine``: Whether actor and rollout colocate
-  on the same GPUs (hybrid engine). In the V1 ``separate_async`` trainer
-  no colocated rollout replicas are created on the training GPUs unless
-  ``trainer.v1.separate_async.hybrid_rollout.enable_switch=True``; setting
-  this flag to ``False`` also disables them then (with a warning).
-  All other trainers require ``True``
+  on the same GPUs (hybrid engine). This knob is ignored by the V1
+  ``separate_async`` trainer, which uses
+  ``trainer.v1.separate_async.hybrid_rollout.enable_switch`` to decide
+  whether colocated rollout replicas are created.
 - ``actor_rollout_ref.model.path``: Huggingface model path. This can be
   either local path or HDFS path. For HDFS path, we provide utils to
   download it to DRAM and convert the HDFS path to local path.
