@@ -157,9 +157,8 @@ def apply_patch():
     # DeepSeek sparse-attention (DSA) needs ``fast_hadamard_transform``, which
     # cannot be built on ROCm (its setup requires nvcc). Install a pure-torch
     # fallback from the central mcore patch entry so every DSA importer picks it
-    # up without engine-specific wiring. Callers run this both before model
-    # creation (hf_to_mcore_config_dpskv3) and after it in
-    # megatron_utils.make_megatron_module, so the shim also back-fills importers.
+    # up without engine-specific wiring. megatron_utils.make_megatron_module
+    # calls this after model creation, so the shim also back-fills importers.
     apply_fast_hadamard_transform_shim()
 
     import megatron.core

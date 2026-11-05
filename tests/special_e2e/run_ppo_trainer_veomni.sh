@@ -6,7 +6,10 @@ DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo
 LAUNCH=(python3)
 RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
 if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
-    UV_EXTRAS=(--extra vllm --extra fsdp --extra veomni-sft --extra math)
+    # Standalone first-class `veomni` training backend (cu130 / torch 2.13), the
+    # named form of the old `fsdp + veomni-sft` composition: it already bundles the
+    # fsdp stack plus the deps-free veomni package, so no fsdp / veomni-sft extras.
+    UV_EXTRAS=(--extra vllm --extra veomni --extra math)
     UV_OVERLAY=(--with transformers==5.16.1)
     LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" "${UV_OVERLAY[@]}" python3)
     # Quote the Hydra value so the Transformers requirement's == stays literal.
@@ -50,6 +53,7 @@ MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-128}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
 NUM_GPUS=${NUM_GPUS:-8}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-8}
 FSDP_SIZE=${FSDP_SIZE:-4}
 SP_SIZE=${SP_SIZE:-2}
 EP_SIZE=${EP_SIZE:-1}
@@ -78,7 +82,7 @@ common_params=(
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.veomni.param_offload=True \
     actor_rollout_ref.actor.veomni.optimizer_offload=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size="${MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \

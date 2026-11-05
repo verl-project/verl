@@ -22,6 +22,7 @@ from verl.utils.megatron_utils import unwrap_model
 
 from .util import (
     build_vlm_attn_mask_bshd,
+    get_thd_quant_align_size,
     postprocess_bshd_engine,
     postprocess_thd_engine,
     preprocess_bshd_engine,
@@ -138,8 +139,9 @@ def gptmodel_forward_model_engine(
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
-    fp8 = unwrap_model(model).config.fp8
-    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+    quant_align_size = get_thd_quant_align_size(unwrap_model(model).config)
+    # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
+    use_fp8_padding = quant_align_size is not None
 
     model_kwargs = {}
     if "pixel_values" in multi_modal_inputs:
@@ -155,7 +157,7 @@ def gptmodel_forward_model_engine(
     if data_format == "thd":
         attention_mask = None
         thd_kwargs = dict(
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             local_cp_size=local_cp_size,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
@@ -192,7 +194,7 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=True,
-                    use_fp8_padding=use_fp8_padding,
+                    quant_align_size=quant_align_size,
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
@@ -223,7 +225,7 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=(k == "label"),
-                    use_fp8_padding=use_fp8_padding,
+                    quant_align_size=quant_align_size,
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,

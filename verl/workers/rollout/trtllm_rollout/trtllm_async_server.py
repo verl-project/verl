@@ -206,20 +206,8 @@ class TRTLLMHttpServer:
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
-        quantization = self.config.quantization
-        if quantization is not None:
-            if quantization == "fp8":
-                FP8_BLOCK_QUANT_KWARGS = {
-                    "activation_scheme": "dynamic",
-                    "fmt": "e4m3",
-                    "quant_method": "fp8",
-                    "weight_block_size": [128, 128],
-                }
-                engine_kwargs["model_kwargs"] = {"quantization_config": FP8_BLOCK_QUANT_KWARGS}
-                if self.config.load_format != "dummy":
-                    raise ValueError("FP8 quantization is only supported for dummy load format")
-            else:
-                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+        if self.config.quantization.enabled:
+            raise NotImplementedError("rollout.quantization is only supported by vLLM")
 
         llm_kwargs = {
             "model": self.model_config.local_path,
@@ -324,6 +312,7 @@ class TRTLLMHttpServer:
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        session_id: Optional[str] = None,
     ) -> TokenOutput:
         from tensorrt_llm.llmapi import SamplingParams
 

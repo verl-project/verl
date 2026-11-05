@@ -204,7 +204,24 @@ class MegatronEngine(BaseEngine):
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
         if self._qat_enabled:
+            if self.engine_config.override_transformer_config.get("fp8"):
+                raise ValueError(
+                    "QAT and Transformer Engine FP8 training are mutually exclusive: QAT fake-quantizes weights "
+                    "inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs themselves to "
+                    "FP8. Disable one of them."
+                )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
+        self._rollout_weight_quantizer = None
+
+        # override_transformer_config.fp4 trains the routed experts in NVFP4.
+        from verl.utils.megatron.low_precision import bf16_layers_at_start_end
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        overrides = self.engine_config.override_transformer_config
+        self._real_nvfp4_enabled = real_nvfp4_enabled(overrides)
+        self._real_nvfp4_bf16_layers = bf16_layers_at_start_end(overrides)
+        if self._real_nvfp4_enabled:
+            logger.info("NVFP4 routed-expert training: BF16 layers at start/end=%d/%d", *self._real_nvfp4_bf16_layers)
 
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
@@ -282,6 +299,15 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import apply_real_nvfp4_overrides
+
+            apply_real_nvfp4_overrides(
+                override_transformer_config,
+                self.model_config.hf_config,
+                pipeline_size=self.engine_config.pipeline_model_parallel_size,
+                virtual_pipeline_size=self.engine_config.virtual_pipeline_model_parallel_size,
+            )
         if self.is_value_model:
             # A value head cannot share weights with the vocabulary embedding. Force the HF
             # flag off and record it for the checkpoint manager. Apply the
@@ -358,11 +384,6 @@ class MegatronEngine(BaseEngine):
                 provider_overrides["moe_enable_routing_replay"] = True
             else:
                 provider_overrides["enable_routing_replay"] = True
-
-        if self._qat_enabled:
-            from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
-
-            provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
         # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
         # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
@@ -482,7 +503,7 @@ class MegatronEngine(BaseEngine):
         from verl.models.mcore.model_forward_fused import patch_fused_forward
 
         for model in self.module:
-            patch_fused_forward(model)
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
@@ -528,8 +549,20 @@ class MegatronEngine(BaseEngine):
 
         self.module = self._build_megatron_module()
 
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import attest_real_nvfp4_runtime, finish_real_nvfp4_module_init
+
+            models = [unwrap_model(model_chunk) for model_chunk in self.module]
+            finish_real_nvfp4_module_init(models)
+            attest_real_nvfp4_runtime(
+                models,
+                self.tf_config,
+                self.model_config.hf_config,
+                *self._real_nvfp4_bf16_layers,
+            )
+
         if self._qat_enabled and not self.engine_config.forward_only:
-            from verl.utils.modelopt import apply_qat_to_modules
+            from verl.utils.qat.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
 
@@ -759,6 +792,16 @@ class MegatronEngine(BaseEngine):
         """
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.module)
+        if self._is_offload_optimizer:
+            # The optimizer was offloaded right after construction. Megatron's
+            # HybridDeviceOptimizer rebuilds its sub-optimizers inside
+            # ``load_state_dict`` and classifies every parameter by ``is_cuda``:
+            # a shard that is still parked on the CPU gets no pinned copy and is
+            # treated as a CPU-resident parameter, so once it is moved back to the
+            # GPU the first ``step`` fails (KeyError / "assign a gradient with
+            # device type 'cpu' to a tensor with device type 'cuda'"). Bring the
+            # optimizer back to the GPU first; it is offloaded again below.
+            load_megatron_optimizer(self.optimizer)
         self.checkpoint_mananager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
@@ -1000,13 +1043,16 @@ class MegatronEngine(BaseEngine):
                 else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
-        # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
-            from verl.utils.modelopt import export_qat_weights
-
-            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+            per_tensor_param = ((name, tensor) for name, tensor in per_tensor_param if "_quantizer." not in name)
+        if self._rollout_weight_quantizer is not None and not adapter_only:
+            # QAT-trained master weights quantize to the same values the fake quant used in training.
+            per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
 
         return per_tensor_param, peft_config
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
 
     def _mcore_export_index(self):
         """Build (once) the per-parameter delta export index: geometry specs and
@@ -1143,6 +1189,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        cp_layout: str = "zigzag",
+        local_cp_size: int | None = None,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
@@ -1176,7 +1224,19 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
         if distillation_use_topk:
-            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+            from verl.models.mcore.util import get_thd_quant_align_size
+
+            # the teacher's top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
+            ret.update(
+                logits_processor_func(
+                    student_logits=logits_bak,
+                    data=batch,
+                    data_format=data_format,
+                    quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                )
+            )
         if not distillation_only:
             ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
 
@@ -1315,6 +1375,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
 
             response_attention_mask = None

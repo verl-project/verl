@@ -42,6 +42,8 @@ PAD_MODE=${PAD_MODE:-no_padding}
 
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
 
+PAD_TO_LENGTH=${PAD_TO_LENGTH:-False}
+
 FSDP_ENGINE_CONFIG="\
     engine=${backend} \
     model=hf_model \
@@ -111,6 +113,7 @@ TORCHTITAN_ENGINE_CONFIG="\
     engine.pipeline_parallel_size=${PP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
     engine.data_parallel_shard_size=${FSDP_SIZE} \
+    engine.pad_to_length=${PAD_TO_LENGTH} \
     engine.use_torch_compile=False"
 
 AUTOMODEL_ENGINE_CONFIG="\
@@ -141,7 +144,7 @@ elif [ "$backend" = "veomni" ]; then
 elif [ "$backend" = "torchtitan" ]; then
     ENGINE_CONFIG="$TORCHTITAN_ENGINE_CONFIG"
     echo "Using torchtitan engine"
-    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-pad_to_length-${PAD_TO_LENGTH}-mode-${mode}
 elif [ "$backend" = "automodel" ]; then
     ENGINE_CONFIG="$AUTOMODEL_ENGINE_CONFIG"
     echo "Using automodel engine"

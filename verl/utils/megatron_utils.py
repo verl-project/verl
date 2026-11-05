@@ -19,15 +19,13 @@
 import inspect
 import logging
 import os
-import warnings
 from dataclasses import dataclass
 from typing import Any
 
 import torch
-from megatron.core import ModelParallelConfig, mpu, parallel_state, tensor_parallel
+from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
-from megatron.core.enums import ModelType
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.parallel_state import get_global_memory_buffer
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
@@ -144,108 +142,6 @@ def wrap_model_chunks_with_layerwise_aware_ddp(
     return ddp_models
 
 
-def get_model(
-    model_provider_func,
-    model_type=ModelType.encoder_or_decoder,
-    wrap_with_ddp=True,
-    use_distributed_optimizer=True,
-    use_layer_wise_distributed_optimizer=False,
-    transformer_config=None,
-    override_ddp_config=None,
-):
-    """Build the model."""
-    # Build model.
-    if (
-        mpu.get_pipeline_model_parallel_world_size() > 1
-        and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-    ):
-        assert model_type != getattr(ModelType, "encoder_and_decoder", None), (
-            "Interleaved schedule not supported for model with both encoder and decoder"
-        )
-        model = []
-        has_vp_stage = inspect.signature(mpu.is_pipeline_first_stage).parameters.get("vp_stage", None) is not None
-        for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
-            mpu.set_virtual_pipeline_model_parallel_rank(i)
-            # Set pre_process and post_process only after virtual rank is set.
-            extra_kwargs = {} if not has_vp_stage else {"ignore_virtual": False, "vp_stage": i}
-            pre_process = mpu.is_pipeline_first_stage(**extra_kwargs)
-            post_process = mpu.is_pipeline_last_stage(**extra_kwargs)
-            this_model = model_provider_func(pre_process=pre_process, post_process=post_process, vp_stage=i)
-            this_model.model_type = model_type
-            model.append(this_model)
-        mpu.set_virtual_pipeline_model_parallel_rank(0)
-    else:
-        pre_process = mpu.is_pipeline_first_stage()
-        post_process = mpu.is_pipeline_last_stage()
-        add_encoder = True
-        add_decoder = True
-        assert model_type != getattr(ModelType, "encoder_and_decoder", None), (
-            "Model type encoder_and_decoder is not supported"
-        )
-        if model_type == getattr(ModelType, "encoder_and_decoder", None):
-            if mpu.get_pipeline_model_parallel_world_size() > 1:
-                assert mpu.get_pipeline_model_parallel_split_rank() is not None, (
-                    "Split rank needs to be specified for model with both encoder and decoder"
-                )
-                rank = mpu.get_pipeline_model_parallel_rank()
-                split_rank = mpu.get_pipeline_model_parallel_split_rank()
-                world_size = mpu.get_pipeline_model_parallel_world_size()
-                pre_process = rank == 0 or rank == split_rank
-                post_process = (rank == (split_rank - 1)) or (rank == (world_size - 1))
-                add_encoder = mpu.is_pipeline_stage_before_split()
-                add_decoder = mpu.is_pipeline_stage_after_split()
-            model = model_provider_func(
-                pre_process=pre_process, post_process=post_process, add_encoder=add_encoder, add_decoder=add_decoder
-            )
-        else:
-            model = model_provider_func(pre_process=pre_process, post_process=post_process)
-        model.model_type = model_type
-
-    if not isinstance(model, list):
-        model = [model]
-
-    # Set tensor model parallel attributes if not set.
-    # Only parameters that are already tensor model parallel have these
-    # attributes set for them. We should make sure the default attributes
-    # are set for all params so the optimizer can use them.
-    for model_module in model:
-        for param in model_module.parameters():
-            tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
-
-    # Print number of parameters.
-    if mpu.get_data_parallel_rank() == 0:
-        print(
-            " > number of parameters on (tensor, pipeline) model parallel rank ({}, {}): {}".format(
-                mpu.get_tensor_model_parallel_rank(),
-                mpu.get_pipeline_model_parallel_rank(),
-                sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model]),
-            ),
-            flush=True,
-        )
-
-    # GPU allocation.
-    if transformer_config is None or (not transformer_config.use_cpu_initialization):
-        for model_module in model:
-            model_module.to(f"{get_device_name()}:{get_device_id()}")
-
-    # Fp16 conversion.
-    config: TransformerConfig = get_model_config(model[0])
-    config.fp8 = None
-    tfconfig: TransformerConfig = model[0].config
-    if config.fp16 or config.bf16:  # the ModelParallelConfig in GPTModel
-        model = [Float16Module(config, model_module) for model_module in model]
-
-    if wrap_with_ddp:
-        model = wrap_model_chunks_with_layerwise_aware_ddp(
-            model,
-            tfconfig,
-            use_distributed_optimizer=use_distributed_optimizer,
-            use_layer_wise_distributed_optimizer=use_layer_wise_distributed_optimizer,
-            override_ddp_config=override_ddp_config,
-        )
-    return model
-
-
 _HF_CONFIG_CHILD_NAMES = ("text_config", "language_config", "thinker_config", "model_config")
 
 
@@ -351,8 +247,6 @@ def make_megatron_module(
     peft_cls: Any = None,
     peft_config: Any = None,
 ):
-    from verl.models.mcore.config_converter import get_hf_rope_theta
-
     try:
         hf_config.rope_theta = get_hf_rope_theta(hf_config)
     except AttributeError:
@@ -484,7 +378,7 @@ def make_megatron_module(
     # Extract TransformerConfig from the created model
     tf_config = get_model_config(model[0] if isinstance(model, list) else model)
     if isinstance(tf_config, MLATransformerConfig):
-        # Keep the same behavior as hf_to_mcore_config_dpskv3
+        # Apply MLA compatibility patches after model creation.
         from verl.models.mcore.patch import apply_patch
 
         apply_patch()
@@ -513,32 +407,6 @@ def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
     if not return_list:
         return unwrapped_model[0]
     return unwrapped_model
-
-
-def mcore_model_parallel_config(
-    sequence_parallel: bool,
-    params_dtype: torch.dtype,
-) -> ModelParallelConfig:
-    # WARNING: Code should not reach this point. This function is deprecated and will be removed.
-    # Please use hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.
-    warnings.warn(
-        "Code should not reach this point. This function is deprecated and will be removed. Please use "
-        "hf_to_mcore_config_dense() from verl.models.mcore.config_converter instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return ModelParallelConfig(
-        tensor_model_parallel_size=mpu.get_tensor_model_parallel_world_size(),
-        pipeline_model_parallel_size=mpu.get_pipeline_model_parallel_world_size(),
-        virtual_pipeline_model_parallel_size=mpu.get_virtual_pipeline_model_parallel_world_size(),
-        context_parallel_size=mpu.get_context_parallel_world_size(),
-        sequence_parallel=sequence_parallel,
-        params_dtype=params_dtype,
-        pipeline_dtype=params_dtype,
-        bf16=True,
-        fp16=False,
-        timers=None,
-    )
 
 
 def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
@@ -808,6 +676,15 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    """Offload optimizer state to CPU to free GPU memory.
+
+    Note: HybridDeviceOptimizer (HDO) is left untouched. It manages the
+    placement of its own sub-optimizer state (a CPU half plus the GPU-resident
+    half, split by ``optimizer_offload_fraction``). Offloading the GPU half
+    here corrupts the fused optimizer's device assumption and crashes the next
+    step (issue #8237).
+    """
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -817,18 +694,10 @@ def offload_megatron_optimizer(optimizers):
         offload_megatron_copy_params(_opt)
         ## worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
-            # HybridDeviceOptimizer: offload all sub-optimizer states to CPU
-            # TODO: this should be a method in Megatron-LM's HybridDeviceOptimizer
-            hdo = _opt.optimizer
-            if all(hasattr(hdo, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")):
-                for optimizer in hdo.sub_optimizers:
-                    for param, state in optimizer.state.items():
-                        for k, v in state.items():
-                            if not isinstance(v, torch.Tensor):
-                                continue
-                            orig_param = hdo.inner_param_to_orig_param.get(param, param)
-                            hdo.state[orig_param][k] = state[k] = v.to("cpu")
-            else:
+            # Only non-HDO optimizers below; HDO owns its own placement.
+            if not all(
+                hasattr(_opt.optimizer, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")
+            ):
                 opt_state_dict_values = _opt.optimizer.state.values()
                 for v in opt_state_dict_values:
                     if "exp_avg" in v:
@@ -1318,6 +1187,26 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         # Force the provider override so MTP remains disabled after that reload.
         engine_config.override_transformer_config["mtp_num_layers"] = None
         engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+
+        # Reference models may inherit an actor layout containing MTP layers.
+        # Reference scoring only needs next-token log probabilities, not auxiliary
+        # MTP predictions; So we remove MTP layers from the inherited layout.
+        pipeline_layout = engine_config.override_transformer_config.get("pipeline_model_parallel_layout")
+        if pipeline_layout is not None:
+            from megatron.core.transformer.enums import LayerType
+            from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+
+            if not isinstance(pipeline_layout, PipelineParallelLayerLayout):
+                pipeline_layout = PipelineParallelLayerLayout(
+                    pipeline_layout, engine_config.pipeline_model_parallel_size
+                )
+            # Convert [PP][VPP] back to stage order, retaining empty stages and
+            # building new lists so an inherited layout is not modified in place.
+            engine_config.override_transformer_config["pipeline_model_parallel_layout"] = [
+                [layer.name for layer in pipeline_layout.layout[pp_rank][vp_rank] if layer != LayerType.mtp]
+                for vp_rank in range(pipeline_layout.virtual_pipeline_model_parallel_size)
+                for pp_rank in range(pipeline_layout.pipeline_model_parallel_size)
+            ]
         return
 
     elif enable_mtp and not has_mtp:

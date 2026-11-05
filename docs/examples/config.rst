@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 08/24/2026.
+Last updated: 10/01/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -221,10 +221,11 @@ Actor/Rollout/Reference Policy
 **Common config for actor, rollout and reference model**
 
 - ``actor_rollout_ref.hybrid_engine``: Whether actor and rollout colocate
-  on the same GPUs (hybrid engine). Set to ``False`` only with the V1
-  ``separate_async`` trainer: no colocated rollout replicas are created
-  on the training GPUs and rollout is served exclusively by the
-  standalone rollout pool. All other trainers require ``True``
+  on the same GPUs (hybrid engine). In the V1 ``separate_async`` trainer
+  no colocated rollout replicas are created on the training GPUs unless
+  ``trainer.v1.separate_async.hybrid_rollout.enable_switch=True``; setting
+  this flag to ``False`` also disables them then (with a warning).
+  All other trainers require ``True``
 - ``actor_rollout_ref.model.path``: Huggingface model path. This can be
   either local path or HDFS path. For HDFS path, we provide utils to
   download it to DRAM and convert the HDFS path to local path.
@@ -250,12 +251,14 @@ Actor/Rollout/Reference Policy
   used.
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
-    implementation backend for fused kernels. Options: "triton", "torch", or
-    "liger". The "torch" backend always uses verl's native output-head implementation;
-    select "liger" explicitly to use Liger's fused output-head kernel.
-    Default is "torch".
-    While in megatron, we only support "triton" as the
-    implementation backend, so there is no need for this option.
+    implementation backend for fused kernels. Options: "triton", "torch",
+    or "liger". The "torch" backend always uses verl's native
+    output-head implementation; select "liger" explicitly to use Liger's fused
+    output-head kernel. Default is "torch".
+    Megatron does not use this option. With Megatron fused kernels enabled,
+    ``actor_rollout_ref.model.use_liger=False`` keeps Verl's Triton
+    tensor-parallel output head, while ``use_liger=True`` calls Liger's public
+    tensor-parallel fused scaled cross entropy operator.
 
 - ``actor_rollout_ref.model.use_remove_padding``: Whether to use remove
   padding in the model. If set to True, the model will remove padding
@@ -343,7 +346,9 @@ Actor/Rollout/Reference Policy
     writes an HF export through Megatron-Bridge.
 
     For FSDP, ``hf_model`` saves the full HF model on rank 0 in addition to the sharded
-    ``model`` shards.
+    ``model`` shards. Weights are streamed into safetensors shards one tensor at a time, and
+    fp32 parameters are stored in the mixed-precision ``param_dtype``. With LoRA, the adapters are
+    merged into the exported weights. Saving ``hf_model`` is not supported with QAT.
 
   - ``load_contents``: The contents to load in the checkpoint, you can specify different checkpoint loading contents. By default, it is the same with ``save_checkpoint``.
 
@@ -754,4 +759,14 @@ Most parameters for Model are similar to Reward Model.
   default to ``all-linear``. See `peft docs <https://huggingface.co/docs/peft/v0.15.0/en/package_reference/lora#peft.LoraConfig.target_modules>`_ for detail.
 
 - ``use_liger``: Whether to enable Liger kernel, default to False. If True,
-  we apply Liger kernel to the model (depends on ``liger-kernel>=0.8.2``).
+  we apply Liger kernel to the model (pinned to ``liger-kernel==0.8.4``).
+  With Megatron fused kernels enabled, this also selects Liger's public
+  tensor-parallel output-head operator. Installing a compatible
+  ``liger-cute-kernels`` wheel lets Liger select its native implementation.
+  Liger Kernel is pinned to ``0.8.4``. Megatron's native setup requires matching Liger Python/native builds
+  containing the public configuration API from mainline commit
+  ``0043f43309144bb3054518d28efed25fc314edaf`` and the configuration fallback
+  follow-up merged as ``8866e4ee7945bc3cac0e40062e7bde26ecc09f65``
+  (`Liger-Kernel PR #1502 <https://github.com/linkedin/Liger-Kernel/pull/1502>`_);
+  see the Liger section of
+  :doc:`../perf/perf_tuning` for collective setup and capacity requirements.

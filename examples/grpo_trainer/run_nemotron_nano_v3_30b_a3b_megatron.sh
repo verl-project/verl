@@ -88,7 +88,7 @@ FP8=(
     # rollout
     actor_rollout_ref.actor.megatron.dtype=${dtype}
     actor_rollout_ref.rollout.dtype=${dtype}
-    # +actor_rollout_ref.rollout.quantization="fp8"
+    # actor_rollout_ref.rollout.quantization.linear=FP8_BLOCK actor_rollout_ref.rollout.quantization.moe=FP8_BLOCK
 )
 
 DATA=(

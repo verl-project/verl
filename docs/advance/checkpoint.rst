@@ -297,15 +297,17 @@ The arguments for the `merge` sub-command are as follows:
 
 .. code:: bash
 
-    usage: python -m verl.model_merger merge [-h] --backend {fsdp,megatron} [--local_dir LOCAL_DIR] [--tie-word-embedding] [--is-value-model] [--use_cpu_initialization] [--target_dir TARGET_DIR]
-                         [--hf_upload_path HF_UPLOAD_PATH] [--private]
+    usage: python -m verl.model_merger merge [-h] --backend {fsdp,megatron,veomni} [--local_dir LOCAL_DIR] [--base_model_path BASE_MODEL_PATH] [--tie-word-embedding] [--is-value-model]
+                         [--use_cpu_initialization] [--target_dir TARGET_DIR] [--hf_upload_path HF_UPLOAD_PATH] [--private]
 
     options:
     -h, --help            show this help message and exit
-    --backend {fsdp,megatron}
+    --backend {fsdp,megatron,veomni}
                             The backend of the model
     --local_dir LOCAL_DIR
                             Path to the saved model checkpoints
+    --base_model_path BASE_MODEL_PATH
+                            Path to the HuggingFace model the training started from. Required by the veomni backend for models exported in their original quantized layout (DeepSeek-V4).
     --tie-word-embedding  Whether to tie word embedding weights (currently only Megatron supported)
     --is-value-model      Whether the model is a value model (currently only Megatron supported)
     --use_cpu_initialization
@@ -345,27 +347,97 @@ Example usage for merging FSDP checkpoints:
         --local_dir checkpoints/verl_fsdp_gsm8k_examples/qwen2_5_0b5_fsdp_saveload/global_step_1/actor \
         --target_dir /path/to/merged_hf_model
 
+Example usage for merging VeOmni checkpoints:
+
+.. code:: bash
+
+    python -m verl.model_merger merge \
+        --backend veomni \
+        --local_dir checkpoints/${project_name}/${exp_name}/global_step_10/actor \
+        --base_model_path /path/to/DeepSeek-V4-Flash \
+        --target_dir /path/to/merged_hf_model
+
+The VeOmni merger also reassembles expert-parallel shards (routed experts on the ``ep_fsdp`` mesh). It streams
+tensors from memory-mapped rank files, so host memory does not need to hold the whole checkpoint. Weights are
+exported through the model's VeOmni checkpoint tensor converter, the same path used for rollout weight sync, so the
+merger has no model-specific logic. Models whose converter defines ``export_weights`` (e.g. DeepSeek-V4, re-quantized
+into the FP8/FP4 layout of ``--base_model_path``) require ``--base_model_path``; tensors that are not trained (e.g.
+MTP layers) and non-weight files are then copied from the base model, so the output can be served by vLLM like the
+base model. DeepSeek-V4 export needs an SM90+ GPU for quantization. Other models are exported in bf16 HuggingFace
+format.
+
 
 Megatron Merger details
 -----------------------
 
-Current implement of decoder layers uses ``nn.ModuleList`` to store the layers, 
-and thus the model layers on every PP rank and VPP rank starts their index from 0.
+The Megatron merger constructs models and maps their weights with Megatron-Bridge.
+Install the same Megatron-Core/Bridge environment used for training, with a Bridge
+version that supports the model architecture. This includes vision-language models
+when their Bridge implementation supports full HF export.
 
-There are 3 ways to correct this behavior:
+The merger reads v2 checkpoints with weights in ``model/dist_ckpt`` and
+HF artifacts in ``model/huggingface``. Both training checkpoints and
+``scripts/converter_hf_to_mcore.py`` use this layout.
+The merger accepts only the v2 layout. Before merging a legacy Megatron training
+checkpoint, migrate it to v2:
 
-1. Modify the decoder layer's state_dict, add ``offset`` to each layer's index, thus rewrite ``nn.ModuleList`` implementation.
-2. Modify the layer index when saving checkpoint and recover them when loading checkpoint.
-3. The Checkpoint merger do this work, calculate the actual ``offset`` from ``state_dict`` only, a little complex.
+.. code:: bash
 
-Current implementation use solution 2.
+    python scripts/migrate_megatron_checkpoint_layout.py \
+        --checkpoint /path/to/legacy_checkpoint
+
+All ranks participate in conversion. Under ``torchrun``, the merger uses pipeline
+parallelism to distribute the model; MCore loads and reshards the stored weights.
+Bridge owns the parameter mappings, including QKV, MoE experts, and vision weights.
+The output includes HF weights, config, tokenizer, and processor artifacts.
+
+To compare a checkpoint against a reference HF model, including sharded safetensors:
+
+.. code:: bash
+
+    torchrun --standalone --nproc_per_node=4 -m verl.model_merger test \
+        --backend megatron \
+        --local_dir /path/to/mcore_checkpoint \
+        --test_hf_dir /path/to/reference_hf_model
 
 
 HuggingFace to Megatron DistCheckpoint details
 ----------------------------------------------
 
-Through ``megatron-bridge``, we can directly save the mcore model to huggingface format during training.
-No need to convert the model to Megatron dist-checkpoint format.
+The training engine can load HF weights directly through Megatron-Bridge, so an
+initial conversion is optional. For workflows requiring MCore distributed weights,
+the converter uses Bridge to load HF weights and saves a model-only checkpoint
+in verl's v2 directory layout.
+
+The converter accepts ``--tp_size``, ``--pp_size``, ``--ep_size``, and
+``--etp_size``. All four default to 1. When PP is 1, it is inferred as
+``WORLD_SIZE // lcm(TP, ETP * EP)``. The world size must be
+divisible by both ``TP * PP`` and ``ETP * EP * PP``. Virtual pipeline
+parallelism is disabled during conversion.
+
+For example, to convert a MoE model with TP2/PP2/EP4/ETP1 on 8 GPUs:
+
+.. code:: bash
+
+    torchrun --standalone --nproc_per_node=8 scripts/converter_hf_to_mcore.py \
+        --hf_model_path Qwen/Qwen3-30B-A3B \
+        --output_path /path/to/mcore_checkpoint \
+        --tp_size 2 --pp_size 2 --ep_size 4 --etp_size 1 \
+        --test
+
+The converter uses BF16. ``--test`` reloads the saved
+checkpoint and compares every parameter with the HF-loaded Bridge model. It can
+also verify an existing converter output without overwriting it.
+
+The output contains ``model/dist_ckpt`` for the distributed model state and
+``model/huggingface`` for config, tokenizer, and processor artifacts.
+Pass the output root to the merger's ``--local_dir``. For engine initialization,
+set ``actor_rollout_ref.actor.megatron.dist_checkpointing_path`` to
+``/path/to/mcore_checkpoint/model/dist_ckpt`` and enable ``use_dist_checkpointing``.
+The converted checkpoint contains model weights, not optimizer state or training progress.
+
+Both tools retain ``--use_cpu_initialization`` to reduce model allocation on GPU;
+a distributed accelerator environment is still required for conversion collectives.
 
 .. note::
 

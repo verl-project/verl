@@ -61,7 +61,7 @@ Last updated: 05/13/2026.
 | SGLang 参数 | verl 对应通用参数 | 功能说明 |
 |:---|:---|:---|
 | `attention_backend` | `actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend` | **注意力后端选择** — NPU 上应设置为 `ascend` 以调用昇腾优化内核 |
-| `quantization` | `actor_rollout_ref.rollout.quantization` | **量化支持** — 支持模型量化加载与推理 |
+| `quantization` | `actor_rollout_ref.rollout.engine_kwargs.sglang.quantization` | **量化支持** — 支持模型量化加载与推理 |
 
 
 > 更多 SGLang NPU 特性参数请参考 [sglang 社区 NPU 特性支持文档](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
@@ -229,7 +229,7 @@ repatch
 | 模型路径 | `model_path` | `model_path` | `actor_rollout_ref.model.path` |
 | 显存控制 | `gpu_memory_utilization` | `mem_fraction_static` | `actor_rollout_ref.rollout.gpu_memory_utilization` |
 | 图模式 | `enforce_eager` | `disable_cuda_graph` | `actor_rollout_ref.rollout.enforce_eager` |
-| 量化 | `quantization` | `quantization` | `actor_rollout_ref.rollout.quantization` |
+| 量化 | `quantization` | `quantization` | `actor_rollout_ref.rollout.engine_kwargs.{vllm,sglang}.quantization` |
 | 最大序列长度 | `max_model_len` | — | `actor_rollout_ref.rollout.max_model_len` |
 | 最大并发数 | `max_num_seqs` | `max_running_requests` | `actor_rollout_ref.rollout.max_num_seqs` |
 | 分词器 | `skip_tokenizer_init` | `skip_tokenizer_init` | `actor_rollout_ref.rollout.skip_tokenizer_init` |

@@ -137,7 +137,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.10
+          pip install --no-deps TransferQueue==0.1.11
       - name: Check final pip list
         run: |
           pip list
@@ -226,7 +226,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.10
+          pip install --no-deps TransferQueue==0.1.11
       - name: Check final pip list
         run: |
           pip list
@@ -253,7 +253,7 @@ jobs:
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
           MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
-          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 \
+          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=FP8_BLOCK \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \
           global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null "${VLLM_ROCM_OVERRIDE}"
       - name: clean up

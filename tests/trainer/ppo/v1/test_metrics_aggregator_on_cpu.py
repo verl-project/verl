@@ -111,6 +111,14 @@ def test_rollout_probs_diff_valid_keeps_last():
     assert agg.get_aggregated_metrics()["training/rollout_probs_diff_valid"] == 0
 
 
+def test_rollout_logprobs_mismatch_count_sums():
+    # a token count: the gate needs the total over the aggregation window, not the mean per iteration.
+    agg = MetricsAggregator()
+    agg.add_step_metrics({"training/rollout_logprobs_mismatch_count": 0})
+    agg.add_step_metrics({"training/rollout_logprobs_mismatch_count": 3})
+    assert agg.get_aggregated_metrics()["training/rollout_logprobs_mismatch_count"] == 3
+
+
 def test_global_seqlen_minmax_diff_is_recomputed_from_aggregated_min_max():
     # minmax_diff must be recomputed as (aggregated max - aggregated min), not reduced by the
     # "max" substring heuristic over the per-iteration diffs.

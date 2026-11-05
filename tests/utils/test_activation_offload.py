@@ -25,16 +25,13 @@ from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2Config
 
 from verl.utils.activation_offload import enable_activation_offloading
+from verl.utils.attention_utils import unpad_input
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.fsdp_utils import MixedPrecisionPolicy, apply_fsdp2, get_fsdp_wrap_policy
 
 
 def create_random_input_ids(batch_size, seq_len, vocab_size):
-    if get_device_name() == "cuda":
-        from flash_attn.bert_padding import unpad_input
-    elif get_device_name() == "npu":
-        from verl.utils.attention_utils import unpad_input
     from verl.utils.model import compute_position_id_with_mask, create_random_mask
 
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=get_device_name())
