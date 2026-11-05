@@ -60,6 +60,12 @@ pip install accelerate codetiming datasets dill hydra-core peft "pyarrow>=19.0.0
     "${tensordict}" orjson torchdata "${transformers}" wandb "packaging>=20.0" uvicorn "fastapi<0.137" \
     latex2sympy2_extended math_verify tensorboard TransferQueue==0.1.8
 
+# DeepSWE (SWE-bench grading + Kubernetes agent-sandbox-rl client) dependencies
+pip install --no-cache-dir kubernetes swebench==4.1.0
+pip install --no-cache-dir --no-deps \
+    "git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client" \
+    "git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl"
+
 # Later installs may replace these, so reinstall the pinned builds last.
 pip install --no-deps "torch==${torch}+cpu" "torchvision==${torchvision}+cpu" --index-url "${torch_index}"
 pip install --pre --no-deps "torch-tpu==${TORCH_TPU_VERSION}" "tpu-sync-torch==${TPU_SYNC_VERSION}"
