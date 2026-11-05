@@ -85,6 +85,9 @@ RUN git clone --recursive https://github.com/verl-project/verl.git && \
     pip install -v -e . --no-deps && cd .. && \
     # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
+    # Install the FLA NPU backend required during vLLM-Ascend worker initialization
+    pip install --no-deps "flash-linear-attention-npu-a3==26.9.1" \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
