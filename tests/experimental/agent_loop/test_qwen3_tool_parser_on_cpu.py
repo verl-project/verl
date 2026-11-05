@@ -21,6 +21,8 @@ output.
 
 import json
 
+import pytest
+
 from verl.experimental.agent_loop.tool_parser import Qwen3XMLToolParser
 from verl.tools.schemas import (
     OpenAIFunctionParametersSchema,
@@ -110,13 +112,19 @@ def test_missing_tools_defaults_to_empty_list():
     assert json.loads(result.arguments) == {"items": "value"}
 
 
-def test_ellipsis_parameter_keeps_raw_string():
-    """``...`` parses as ``Ellipsis``, which ``json.dumps`` cannot serialize.
+@pytest.mark.parametrize(
+    "raw_value",
+    ["...", "[...]", "[..., 1]", "(...,)", "{'a': ...}", "{1, 2}", "b'abc'"],
+)
+def test_non_json_literal_parameter_keeps_raw_string(raw_value):
+    """Values that ``literal_eval`` accepts but ``json.dumps`` cannot encode.
 
-    The parser must keep the original text instead of raising and dropping the
-    whole tool call.
+    ``...`` parses as ``Ellipsis`` and containers such as ``[...]`` still hold
+    it; sets, bytes and complex numbers are also accepted by ``literal_eval``.
+    Serializing such a value raises later in ``_parse_xml_function_call`` and
+    drops every tool call in the response, so the parser must keep the raw text.
     """
-    result = _parse_single_param("array", "...")
+    result = _parse_single_param("array", raw_value)
 
     assert result is not None
-    assert json.loads(result.arguments) == {"items": "..."}
+    assert json.loads(result.arguments) == {"items": raw_value}
