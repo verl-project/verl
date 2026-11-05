@@ -162,6 +162,10 @@ MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
 MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-2048}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
+# vLLM automatic prefix caching (off by default). Multi-turn agent rollouts resend the whole conversation every turn,
+# so caching the shared prefix skips most of each turn's prefill.
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-False}"
+NO_ENABLE_PREFIX_CACHING=$([[ "${ENABLE_PREFIX_CACHING}" == "True" ]] && echo False || echo True)
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 
 # Rollout & training overlap settings
@@ -301,8 +305,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.seed="${SEED}" \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.seed="${SEED}" \
-    actor_rollout_ref.rollout.enable_prefix_caching=False \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True \
+    actor_rollout_ref.rollout.enable_prefix_caching="${ENABLE_PREFIX_CACHING}" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching="${NO_ENABLE_PREFIX_CACHING}" \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
