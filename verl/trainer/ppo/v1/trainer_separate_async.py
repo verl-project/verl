@@ -228,13 +228,6 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # get server client from standalone rollout
         return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
 
-    def _checkpoint_managers(self) -> list:
-        managers = super()._checkpoint_managers()
-        standalone = getattr(self, "standalone_checkpoint_manager", None)
-        if standalone is not None:
-            managers.append(standalone)
-        return managers
-
     def _rollout_server_managers(self) -> list:
         managers = super()._rollout_server_managers()
         standalone = getattr(self, "standalone_server_manager", None)
@@ -251,10 +244,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)
 
+    def on_train_end(self):
+        self.standalone_checkpoint_manager.wait_for_weight_update()
+
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+        self.standalone_checkpoint_manager.wait_for_weight_update()
 
     def on_step_begin(self):
         self._step_sample_wait_seconds = 0.0
