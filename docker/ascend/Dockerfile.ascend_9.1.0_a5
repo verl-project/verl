@@ -30,6 +30,11 @@ RUN ARCH=$(uname -m) && \
     git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
     git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 
+# Preserve Transformers' native Qwen3-ASR registration.
+COPY docker/ascend/patches/megatron_bridge_qwen3_asr.patch /tmp/megatron_bridge_qwen3_asr.patch
+RUN git -C Megatron-Bridge apply --unidiff-zero /tmp/megatron_bridge_qwen3_asr.patch && \
+    rm /tmp/megatron_bridge_qwen3_asr.patch
+
 # Install repositories with low update frequency
 RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
     export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
@@ -75,6 +80,9 @@ RUN git clone --recursive https://github.com/verl-project/verl.git && \
     pip install -v -e . --no-deps && cd .. && \
     # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
+    # Install the FLA NPU backend required during vLLM-Ascend worker initialization
+    pip install --no-deps "flash-linear-attention-npu-a5==26.9.1" \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge

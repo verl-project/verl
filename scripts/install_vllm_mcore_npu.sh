@@ -1,6 +1,7 @@
 set -ex
 
 USE_MEGATRON=${USE_MEGATRON:-1}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "1. install basic packages"
 pip uninstall -y triton triton-ascend
@@ -35,6 +36,10 @@ if [ $USE_MEGATRON -eq 1 ]; then
     git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
     git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
     git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+
+    # Preserve Transformers' native Qwen3-ASR registration.
+    git -C Megatron-Bridge apply --unidiff-zero \
+        "${SCRIPT_DIR}/../docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
 
     # 安装 Megatron 及 Ascend 适配组件
     pip install -e Megatron-LM
