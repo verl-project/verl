@@ -5,11 +5,8 @@ FROM rayproject/ray:2.56.0-py312
 
 ARG TORCH_TPU_VERSION=0.2.0
 ARG TPU_SYNC_VERSION=0.0.1.dev20261012084241
-# torchtitan main 8ad0bfc (11/03/2026) + the Qwen3.5 TPU optimizations: Tokamax GatedDeltaNet kernels, Pallas
-# causal conv1d / gated RMSNorm, fused CE and grouped-matmul tiles, expert parallelism (EP > 1) and the fast dropless
-# EP dispatcher (Ring-of-Experts, chunked pipelining): head of google-pytorch/torchtitan#142.
-# Use any torchtitan main commit for the dense / EP = 1 recipes.
-ARG TORCHTITAN_COMMIT=4e16e67ae
+# Head of google-pytorch/torchtitan#142 (Qwen3.5 TPU optimizations and fast dropless EP).
+ARG TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4
 
 ARG VLLM_TORCHTPU_COMMIT=732c43464b5d4601d2529f2ee42af20c3be11c99
 
