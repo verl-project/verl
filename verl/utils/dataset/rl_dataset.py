@@ -16,6 +16,7 @@
 
 import asyncio
 import copy
+import hashlib
 import logging
 import os
 import re
@@ -194,6 +195,40 @@ class RLHFDataset(Dataset):
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
+    def _overlong_filter_fingerprint(self) -> str:
+        """Stable fingerprint for the overlong-prompt filter cache.
+
+        ``datasets`` fingerprints the filter callable, whose closure holds the
+        tokenizer/processor and this dataset object; that hash changes between
+        processes, so every launch re-filtered the full dataset. Hash only the
+        inputs that determine the result instead.
+        """
+        parts = [
+            "overlong-prompts-v1",
+            str(self.max_prompt_length),
+            str(self.prompt_key),
+            str(self.image_key),
+            str(self.video_key),
+            str(self.audio_key),
+            repr(self.apply_chat_template_kwargs),
+            repr(self.mm_processor_kwargs),
+            repr(self.tool_schemas),
+        ]
+        for obj in (self.processor, self.tokenizer):
+            if obj is not None:
+                parts.append(str(getattr(obj, "name_or_path", type(obj).__name__)))
+                parts.append(str(getattr(obj, "vocab_size", "")))
+                parts.append(str(getattr(obj, "chat_template", "")))
+        for parquet_file in self.original_data_files:
+            try:
+                stat = os.stat(parquet_file)
+                parts.append(f"{parquet_file}:{stat.st_size}:{stat.st_mtime_ns}")
+            except OSError:
+                parts.append(str(parquet_file))
+        # datasets appends "_{rank:05d}_of_{num_proc:05d}" to the fingerprint and
+        # rejects results longer than 64 chars, so keep the digest short.
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
         if self.filter_overlong_prompts:
@@ -269,6 +304,10 @@ class RLHFDataset(Dataset):
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+                # Reuse the previous filter result across launches instead of
+                # re-rendering and re-tokenizing every prompt.
+                load_from_cache_file=True,
+                new_fingerprint=self._overlong_filter_fingerprint(),
             )
 
             print(f"filter dataset len: {len(dataframe)}")

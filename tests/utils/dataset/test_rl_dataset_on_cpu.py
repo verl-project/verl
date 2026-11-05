@@ -334,3 +334,29 @@ def test_video_rl_data(video_data_file):
     assert "images" not in data_proto.non_tensor_batch
 
     print("raw_prompt", data_proto.non_tensor_batch["raw_prompt"][0])
+
+
+def test_overlong_filter_fingerprint_is_stable(tmp_path):
+    """The filter cache key must depend only on the filtering inputs."""
+    dataset = RLHFDataset.__new__(RLHFDataset)
+    dataset.max_prompt_length = 8192
+    dataset.prompt_key = "prompt"
+    dataset.image_key = "images"
+    dataset.video_key = "videos"
+    dataset.audio_key = "audios"
+    dataset.apply_chat_template_kwargs = {}
+    dataset.mm_processor_kwargs = {}
+    dataset.tool_schemas = None
+    dataset.processor = None
+    dataset.tokenizer = None
+    parquet = tmp_path / "train.parquet"
+    parquet.write_bytes(b"data")
+    dataset.original_data_files = [str(parquet)]
+
+    fingerprint = dataset._overlong_filter_fingerprint()
+    assert fingerprint == dataset._overlong_filter_fingerprint()
+    # datasets appends "_{rank:05d}_of_{num_proc:05d}", so 64 chars is the limit.
+    assert len(fingerprint) == 16
+
+    dataset.max_prompt_length = 4096
+    assert dataset._overlong_filter_fingerprint() != fingerprint
