@@ -375,6 +375,7 @@ jobs:
         run: |
           set -euo pipefail
           LOG_DIR=/root/.cache/temp
+          mkdir -p "$LOG_DIR"
           /root/.cache/verl_ci/submit_and_wait_rayjob.sh \
             multinode-e2e \
             /root/.cache/verl_ci/run_multinode_testing.sh \
