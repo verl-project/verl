@@ -24,9 +24,11 @@ import pytest
 import torch
 import torch.nn as nn
 
+# The Megatron engine imports verl.models.mcore before modelopt's megatron plugin; its patch hides the
+# flash_attn.cute probe that megatron-core's attention module otherwise trips over on cutlass-dsl mismatches.
+import verl.models.mcore  # noqa: F401  # isort: skip
 from verl.utils.qat import compressed_tensors as ct
 from verl.utils.qat.modelopt import _check_mxfp4_experts, apply_qat_to_modules, build_quantize_config
-from verl.workers.config import QATEngineConfig
 
 _DSV4_NATIVE_FP8 = {
     "activation_scheme": "dynamic",
@@ -35,6 +37,11 @@ _DSV4_NATIVE_FP8 = {
     "scale_fmt": "ue8m0",
     "weight_block_size": [128, 128],
 }
+
+
+# What MegatronEngine hands to apply_qat_to_modules (QATEngineConfig fields); a namespace keeps this test free of the
+# worker-config import chain.
+_QAT_CFG = SimpleNamespace(enable=True, mode="mxfp4_experts", group_size=16, ignore_patterns=["lm_head", "embed_tokens", "re:.*mlp.gate$"])
 
 
 def _dispatch(model_type: str, qat_mode: str | None, native=_DSV4_NATIVE_FP8):
@@ -88,7 +95,7 @@ def test_apply_qat_fake_quantizes_routed_experts_only():
     mtq = pytest.importorskip("modelopt.torch.quantization")
     torch.manual_seed(0)
     model = _MoELayer().cuda().bfloat16()
-    apply_qat_to_modules([model], QATEngineConfig(enable=True, mode="mxfp4_experts"))
+    apply_qat_to_modules([model], _QAT_CFG)
 
     enabled = [n for n, q in model.named_modules() if isinstance(q, mtq.nn.TensorQuantizer) and q.is_enabled]
     assert enabled == ["mlp.experts.0.weight_quantizer", "mlp.experts.1.weight_quantizer"]
@@ -112,7 +119,7 @@ def test_apply_qat_fake_quantizes_routed_experts_only():
 def test_check_mxfp4_experts_fails_fast_on_stray_quantizers():
     pytest.importorskip("modelopt.torch.quantization")
     model = _MoELayer().cuda().bfloat16()
-    apply_qat_to_modules([model], QATEngineConfig(enable=True, mode="mxfp4_experts"))
+    apply_qat_to_modules([model], _QAT_CFG)
     _check_mxfp4_experts([model])  # the sanctioned layout passes
 
     model.mlp.shared_experts.weight_quantizer.enable()

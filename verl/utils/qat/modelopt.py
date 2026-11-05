@@ -18,6 +18,7 @@
 import copy
 import logging
 import os
+import re
 
 import modelopt.torch.quantization as mtq
 import torch
@@ -465,6 +466,14 @@ def _get_qat_field(qat_config, key, default=None):
     return getattr(qat_config, key, default)
 
 
+_ROUTED_EXPERT_RE = re.compile(r"(^|\.)mlp\.experts\.")
+
+
+def _is_routed_expert(module_name: str) -> bool:
+    """`mlp.experts.*` at any depth (also at the root of a bare MoE block), never `mlp.shared_experts.*`."""
+    return _ROUTED_EXPERT_RE.search(module_name) is not None
+
+
 def _check_mxfp4_experts(modules):
     """Fail fast if the experts-only MXFP4 config did not land where it should.
 
@@ -480,14 +489,14 @@ def _check_mxfp4_experts(modules):
         for name, q in m.named_modules():
             if not isinstance(q, TensorQuantizer) or not getattr(q, "is_enabled", True):
                 continue
-            if name.endswith("weight_quantizer") and ".mlp.experts." in name:
+            if name.endswith("weight_quantizer") and _is_routed_expert(name):
                 n_expert_w += 1
             else:
                 others.append(name)
         if identity is None:
             for name, sub in m.named_modules():
                 w0, wq = getattr(sub, "weight0", None), getattr(sub, "weight_quantizer", None)
-                if w0 is not None and wq is not None and ".mlp.experts." in name:
+                if w0 is not None and wq is not None and _is_routed_expert(name):
                     try:
                         with torch.no_grad():
                             fq = wq(w0)
@@ -502,7 +511,7 @@ def _check_mxfp4_experts(modules):
         len(others),
         identity,
     )
-    has_experts = any(".mlp.experts." in n for m in modules for n, _ in m.named_modules())
+    has_experts = any(_is_routed_expert(n) for m in modules for n, _ in m.named_modules())
     if has_experts and n_expert_w == 0:
         raise RuntimeError("QAT mxfp4_experts: no routed-expert weight_quantizer enabled -- pattern did not match")
     if others:
