@@ -289,7 +289,9 @@ class Qwen3XMLToolParser(ToolParser):
                     # Use ast.literal_eval instead of eval: the parameter value comes from
                     # untrusted model output, and eval() would allow arbitrary code execution.
                     # literal_eval only parses Python literals (lists, tuples, dicts, numbers, ...).
-                    param_value = ast.literal_eval(param_value)
+                    parsed_value = ast.literal_eval(param_value)
+                    # `...` parses as Ellipsis, which json.dumps cannot serialize; keep the text.
+                    param_value = param_value if parsed_value is Ellipsis else parsed_value
                 except Exception:
                     logger.warning(
                         f"Parsed value '{param_value}' of parameter '{param_name}' cannot be converted "
