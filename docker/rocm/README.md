@@ -111,9 +111,10 @@ DOCKER_BUILDKIT=1 docker build \
     -t verl-rocm:deepseek-v4-true-on-policy .
 ```
 
-The recipe selects the arm with `VLLM_BATCH_INVARIANT` (1: batch-invariant rollout + mLite `impl=vllm` actor;
-0: default vLLM kernels + Megatron-Core actor with FP8 QAT). The full profile is 4 nodes x 8 GPUs: actor
-CP4 x EP32 with FSDP2, rollout TP1 x DP8 x EP8 per node. Multi-node runs need an existing Ray cluster whose
+Both arms train with the mLite `impl=vllm` actor; the recipe selects the arm with `VLLM_BATCH_INVARIANT`
+(1: batch-invariant rollout with the Triton MoE and a deterministic trainer; 0: default vLLM kernels with the AITER
+MoE, determinism off). The full profile is 4 nodes x 8 GPUs: actor CP4 x EP32 with FSDP2, rollout TP1 x DP8 x EP8
+per node. Multi-node runs need an existing Ray cluster whose
 workers run this image, and containers started with `--ulimit nofile=1048576:1048576` (the default open-file
 limit ran out in gloo after ~26 steps).
 

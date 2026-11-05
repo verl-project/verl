@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # GRPO/DAPO | DeepSeek-V4-Flash FP8 | true on-policy | vLLM rollout + Megatron | AMD ROCm (MI355X, gfx950)
 #
-# One recipe and one image; VLLM_BATCH_INVARIANT alone selects the arm:
-#   VLLM_BATCH_INVARIANT=1 (default)  consistent arm: batch-invariant vLLM rollout, Megatron mLite actor with the
-#                                     vLLM-aligned implementation (actor_rollout_ref.actor.engine.impl=ALIGNED_ACTOR_IMPL),
-#                                     rollout log-probs == trainer log-probs bitwise.
-#   VLLM_BATCH_INVARIANT=0            native baseline: default vLLM kernels, Megatron-Core actor (model_engine=megatron)
-#                                     with FP8 QAT and routing replay (R3), as the merged ROCm recipe
-#                                     run_deepseek_v4_flash_megatron_rocm.sh trains it.
-# Algorithm, data, lengths, batch, optimizer hyper-parameters and rollout layout are shared by both arms.
+# One recipe, one image and one trainer (Megatron mLite, model_engine=mlite, with the vLLM-aligned implementation
+# actor_rollout_ref.actor.engine.impl=ALIGNED_ACTOR_IMPL); VLLM_BATCH_INVARIANT alone selects the arm:
+#   VLLM_BATCH_INVARIANT=1 (default)  consistent arm: batch-invariant vLLM rollout (Triton MoE) and deterministic
+#                                     trainer, rollout log-probs == trainer log-probs bitwise.
+#   VLLM_BATCH_INVARIANT=0            native baseline: default vLLM kernels (AITER MoE), batch invariance and full
+#                                     determinism off, same trainer, layout and offload as the consistent arm.
+# Algorithm, data, lengths, batch, optimizer hyper-parameters, trainer layout and rollout layout are shared by both
+# arms. For a Megatron-Core trainer, use run_deepseek_v4_flash_megatron_rocm.sh.
 # Modelled on verl-project/verl#7688 (examples/grpo_trainer/run_deepseek_v4_true_on_policy_preview_megatron.sh).
 #
 # Image: docker/rocm/Dockerfile.rocm.deepseek-v4.true-on-policy (vLLM 0.26.0 + batch-invariance patches, Megatron-LM
@@ -95,8 +95,9 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_NO_USAGE_STATS=1
 export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 # MoE backend (rollout.moe_backend, set per arm below): the batch-invariant arm uses the Triton MoE, whose BI tiles the
-# trainer mirrors; the native arm uses AITER, the fast ROCm MoE. The EP expert-mask bug that once required turning
-# AITER MoE off is fixed in the vLLM branch (294014e28).
+# trainer mirrors; the native arm uses AITER, the fast ROCm MoE (with batch invariance off, the untuned Triton MoE made
+# generation ~23-26 % slower than the batch-invariant arm; AITER is ~3 % faster than it, MI350X/MI355X rollout A/B).
+# The EP expert-mask bug that once required turning AITER MoE off is fixed in the vLLM branch (294014e28).
 
 ARM_ENV_NAMES=(PYTHONHASHSEED VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM
   CUDA_DEVICE_MAX_CONNECTIONS VLLM_ALLOW_INSECURE_SERIALIZATION VLLM_NO_USAGE_STATS VERL_FILE_LOGGER_PATH)
@@ -114,130 +115,80 @@ trap 'rm -rf "${runtime_config_root}"' EXIT
 
 if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
   ARM=consistent
+  FULL_DETERMINISM=True
   export VERL_FULL_DETERMINISM=1
   # Row-count-dependent tiles for vLLM's batch-invariant GEMMs (patches/vllm-bi-13): same output bits on gfx950,
   # faster. The trainer reads it through the same vLLM module, so both sides use the same setting.
   export VLLM_BI_GEMM_TILES="${VLLM_BI_GEMM_TILES:-1}"
   ARM_ENV_NAMES+=(VLLM_BI_GEMM_TILES)
-  : "${ACTOR_PP:=1}" "${ACTOR_EP:=$((NNODES * NGPUS_PER_NODE))}"
-  # Context parallelism of impl=vllm: request-local prefill chunks (impl=vllm_engine supports CP = 1 only).
-  if [[ "${PROFILE}" == full ]]; then : "${ACTOR_CP:=4}"; else : "${ACTOR_CP:=1}"; fi
-  : "${ACTOR_OPTIMIZER:=fsdp2}"
-  : "${CROSS_ENTROPY_FUSION:=True}"
   : "${ROLLOUT_MOE_BACKEND:=triton}"
-  # KV cache of the actor's private vLLM engine (impl=vllm_engine): it only ever holds one micro-batch, so a fixed size
-  # instead of a gpu_memory_utilization share (its default 0.15 share leaves no KV room next to the model and the
-  # profile run). Used by impl=vllm_engine only.
-  : "${ACTOR_ENGINE_KV_CACHE_BYTES:=4000000000}"
-  # Tokens per micro-batch and GPU (dynamic batching). The full profile packs 4096 per CP rank.
-  [[ "${PROFILE}" == full ]] && : "${PPO_MAX_TOKEN_LEN_PER_GPU:=4096}"
-  : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$(((MAX_MODEL_LEN + ACTOR_CP - 1) / ACTOR_CP))}"
-  # verl's default config tree has no mlite model_engine; same construction as #7688.
-  mkdir -p "${runtime_config_root}/critic" "${runtime_config_root}/model_engine"
-  printf '%s\n' '# @package _global_' 'model_engine: mlite' >"${runtime_config_root}/model_engine/mlite.yaml"
-  printf '%s\n' '_target_: verl.workers.config.CriticConfig' 'enable: false' 'strategy: mlite' \
-    >"${runtime_config_root}/critic/mlite_critic.yaml"
-  ENGINE_ARGS=("hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]" model_engine=mlite)
-  ACTOR_ARGS=(
-    actor_rollout_ref.actor.engine.impl="${ALIGNED_ACTOR_IMPL}"
-    actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
-    actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
-    actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
-    +actor_rollout_ref.actor.engine.rollout_ep="${ROLLOUT_EP}"
-    +actor_rollout_ref.actor.engine.rollout_tp="${ROLLOUT_TP}"
-    '~actor_rollout_ref.actor.engine.grad_offload'
-    '~actor_rollout_ref.ref.engine.grad_offload'
-    actor_rollout_ref.actor.engine.attention_backend_override=null
-    +actor_rollout_ref.actor.engine.cross_entropy_fusion="${CROSS_ENTROPY_FUSION}"
-    actor_rollout_ref.actor.engine.resync_format=block_fp8
-    +actor_rollout_ref.actor.engine.resync_config.expert_dtype=fp8
-    # block-FP8 export with the checkpoint's scale rule (ue8m0 -> power-of-two scales), as the rollout loads it
-    +actor_rollout_ref.actor.engine.resync_config.fp8_scale_rule=checkpoint
-    # The private engine reproduces the rollout: same DP = EP layout (one engine rank per actor rank; impl=vllm_engine
-    # requires engine DP = actor EP), same max_model_len, and one prefill step per micro-batch (dynamic batching packs
-    # up to PPO_MAX_TOKEN_LEN_PER_GPU tokens; log-prob micro-batches up to MAX_MODEL_LEN).
-    +actor_rollout_ref.actor.engine.impl_cfg.engine_data_parallel_size="${ACTOR_EP}"
-    +actor_rollout_ref.actor.engine.impl_cfg.engine_max_model_len="${MAX_MODEL_LEN}"
-    +actor_rollout_ref.actor.engine.impl_cfg.engine_max_num_batched_tokens="$((PPO_MAX_TOKEN_LEN_PER_GPU > MAX_MODEL_LEN ? PPO_MAX_TOKEN_LEN_PER_GPU : MAX_MODEL_LEN))"
-    +actor_rollout_ref.actor.engine.impl_cfg.engine_kv_cache_memory_bytes="${ACTOR_ENGINE_KV_CACHE_BYTES}"
-    +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
-    +actor_rollout_ref.actor.engine.impl_cfg.mtp_enable=False
-    +actor_rollout_ref.actor.engine.impl_cfg.mtp_enable_train=False
-    +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
-    actor_rollout_ref.actor.engine.param_offload="${PARAM_OFFLOAD}"
-    actor_rollout_ref.actor.engine.optimizer_offload=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
-    +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
-    +actor_rollout_ref.actor.engine.seed="${SEED}"
-    +actor_rollout_ref.actor.engine.full_determinism=True
-  )
-  ROLLOUT_ARM_ARGS=(
-    # Per-request sampling seeds derived from the request id (verl/workers/rollout/utils.py).
-    actor_rollout_ref.rollout.full_determinism=True
-    actor_rollout_ref.rollout.seed="${SEED}"
-  )
 else
   ARM=native
   # rollout.full_determinism=True makes verl's vLLM server export VLLM_BATCH_INVARIANT=1; it stays off here.
+  FULL_DETERMINISM=False
   export VERL_FULL_DETERMINISM=0
-  if [[ "${PROFILE}" == full ]]; then
-    : "${ACTOR_PP:=4}" "${ACTOR_EP:=8}" "${ACTOR_CP:=1}"
-    : "${PIPELINE_MODEL_PARALLEL_LAYOUT:=Et*11|t*11|t*11|t*10L}"
-  else
-    : "${ACTOR_PP:=1}" "${ACTOR_EP:=$((NNODES * NGPUS_PER_NODE))}" "${ACTOR_CP:=1}"
-  fi
-  # AITER MoE: with batch invariance off, the untuned Triton MoE made generation ~23-26 % slower than the
-  # batch-invariant arm; AITER is ~3 % faster than it (MI350X/MI355X rollout A/B).
   : "${ROLLOUT_MOE_BACKEND:=aiter}"
-  # Transformer Engine grouped GEMM: the BF16 backward of the default kernel can hang on gfx950.
-  export NVTE_USE_GROUPED_GEMM_TRITON=1
-  export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-  ARM_ENV_NAMES+=(NVTE_USE_GROUPED_GEMM_TRITON TORCH_NCCL_AVOID_RECORD_STREAMS)
-  ENGINE_ARGS=(model_engine=megatron)
-  ACTOR_ARGS=(
-    actor_rollout_ref.model.use_remove_padding=True
-    actor_rollout_ref.model.enable_gradient_checkpointing=True
-    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1
-    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${ACTOR_PP}"
-    actor_rollout_ref.actor.megatron.expert_model_parallel_size="${ACTOR_EP}"
-    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
-    actor_rollout_ref.actor.megatron.context_parallel_size="${ACTOR_CP}"
-    actor_rollout_ref.actor.megatron.param_offload="${PARAM_OFFLOAD}"
-    actor_rollout_ref.actor.megatron.optimizer_offload=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1.0
-    +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
-    actor_rollout_ref.actor.megatron.router_replay.mode=R3
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=False
-  )
-  if [[ -n "${PIPELINE_MODEL_PARALLEL_LAYOUT:-}" ]]; then
-    ACTOR_ARGS+=("++actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'")
-  fi
-  # FP8 QAT: weights 128x128 power-of-two scales, inputs 1x128 float scales, STE; the KV latent and the indexer
-  # q/k are rounded as the rollout's FP8 KV cache and FP8 indexer round them. Actor and reference alike.
-  for kv in gradient_accumulation_fusion=False apply_dsa_kernel_fusion=False fp8_fake_quant_kv_cache=True \
-    fp8_fake_quant_indexer_qk=True fp8_fake_quant=True; do
-    ACTOR_ARGS+=("++actor_rollout_ref.actor.megatron.override_transformer_config.${kv}"
-      "++actor_rollout_ref.ref.megatron.override_transformer_config.${kv}")
-  done
-  if (( ACTOR_CP > 1 )); then
-    ACTOR_ARGS+=(
-      ++actor_rollout_ref.actor.megatron.override_transformer_config.cp_partition_mode=contiguous
-      ++actor_rollout_ref.actor.megatron.override_transformer_config.sequence_packing_scheduler=dp_balanced
-      ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank="$((MAX_MODEL_LEN / ACTOR_CP))"
-    )
-  fi
-  ROLLOUT_ARM_ARGS=(
-    actor_rollout_ref.rollout.full_determinism=False
-    actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-  )
 fi
+
+# --- Trainer: Megatron mLite, shared by both arms -----------------------------------------------------------------
+: "${ACTOR_PP:=1}" "${ACTOR_EP:=$((NNODES * NGPUS_PER_NODE))}"
+# Context parallelism of impl=vllm: request-local prefill chunks (impl=vllm_engine supports CP = 1 only).
+if [[ "${PROFILE}" == full ]]; then : "${ACTOR_CP:=4}"; else : "${ACTOR_CP:=1}"; fi
+: "${ACTOR_OPTIMIZER:=fsdp2}"
+: "${CROSS_ENTROPY_FUSION:=True}"
+# KV cache of the actor's private vLLM engine (impl=vllm_engine): it only ever holds one micro-batch, so a fixed size
+# instead of a gpu_memory_utilization share (its default 0.15 share leaves no KV room next to the model and the
+# profile run). Used by impl=vllm_engine only.
+: "${ACTOR_ENGINE_KV_CACHE_BYTES:=4000000000}"
+# Tokens per micro-batch and GPU (dynamic batching). The full profile packs 4096 per CP rank.
+[[ "${PROFILE}" == full ]] && : "${PPO_MAX_TOKEN_LEN_PER_GPU:=4096}"
+: "${PPO_MAX_TOKEN_LEN_PER_GPU:=$(((MAX_MODEL_LEN + ACTOR_CP - 1) / ACTOR_CP))}"
+# verl's default config tree has no mlite model_engine; same construction as #7688.
+mkdir -p "${runtime_config_root}/critic" "${runtime_config_root}/model_engine"
+printf '%s\n' '# @package _global_' 'model_engine: mlite' >"${runtime_config_root}/model_engine/mlite.yaml"
+printf '%s\n' '_target_: verl.workers.config.CriticConfig' 'enable: false' 'strategy: mlite' \
+  >"${runtime_config_root}/critic/mlite_critic.yaml"
+ENGINE_ARGS=("hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]" model_engine=mlite)
+ACTOR_ARGS=(
+  actor_rollout_ref.actor.engine.impl="${ALIGNED_ACTOR_IMPL}"
+  actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
+  actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
+  actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
+  +actor_rollout_ref.actor.engine.rollout_ep="${ROLLOUT_EP}"
+  +actor_rollout_ref.actor.engine.rollout_tp="${ROLLOUT_TP}"
+  '~actor_rollout_ref.actor.engine.grad_offload'
+  '~actor_rollout_ref.ref.engine.grad_offload'
+  actor_rollout_ref.actor.engine.attention_backend_override=null
+  +actor_rollout_ref.actor.engine.cross_entropy_fusion="${CROSS_ENTROPY_FUSION}"
+  actor_rollout_ref.actor.engine.resync_format=block_fp8
+  +actor_rollout_ref.actor.engine.resync_config.expert_dtype=fp8
+  # block-FP8 export with the checkpoint's scale rule (ue8m0 -> power-of-two scales), as the rollout loads it
+  +actor_rollout_ref.actor.engine.resync_config.fp8_scale_rule=checkpoint
+  # The private engine reproduces the rollout: same DP = EP layout (one engine rank per actor rank; impl=vllm_engine
+  # requires engine DP = actor EP), same max_model_len, and one prefill step per micro-batch (dynamic batching packs
+  # up to PPO_MAX_TOKEN_LEN_PER_GPU tokens; log-prob micro-batches up to MAX_MODEL_LEN).
+  +actor_rollout_ref.actor.engine.impl_cfg.engine_data_parallel_size="${ACTOR_EP}"
+  +actor_rollout_ref.actor.engine.impl_cfg.engine_max_model_len="${MAX_MODEL_LEN}"
+  +actor_rollout_ref.actor.engine.impl_cfg.engine_max_num_batched_tokens="$((PPO_MAX_TOKEN_LEN_PER_GPU > MAX_MODEL_LEN ? PPO_MAX_TOKEN_LEN_PER_GPU : MAX_MODEL_LEN))"
+  +actor_rollout_ref.actor.engine.impl_cfg.engine_kv_cache_memory_bytes="${ACTOR_ENGINE_KV_CACHE_BYTES}"
+  +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
+  +actor_rollout_ref.actor.engine.impl_cfg.mtp_enable=False
+  +actor_rollout_ref.actor.engine.impl_cfg.mtp_enable_train=False
+  +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
+  actor_rollout_ref.actor.engine.param_offload="${PARAM_OFFLOAD}"
+  actor_rollout_ref.actor.engine.optimizer_offload=True
+  +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
+  +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
+  +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
+  +actor_rollout_ref.actor.engine.seed="${SEED}"
+  +actor_rollout_ref.actor.engine.full_determinism="${FULL_DETERMINISM}"
+)
+ROLLOUT_ARM_ARGS=(
+  # With full determinism: per-request sampling seeds derived from the request id (verl/workers/rollout/utils.py).
+  actor_rollout_ref.rollout.full_determinism="${FULL_DETERMINISM}"
+  actor_rollout_ref.rollout.seed="${SEED}"
+)
+
 # Dynamic batching: a sequence must fit one CP group's token budget.
 : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$(((MAX_MODEL_LEN + ACTOR_CP - 1) / ACTOR_CP))}"
 
