@@ -16,6 +16,7 @@ import errno
 import inspect
 import logging
 import os
+import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -90,6 +91,29 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
         node_id = specs["bundles_to_node_id"][0]
         pg_ip[pg.id] = node_ip[node_id]
     return sorted(pgs, key=lambda pg: pg_ip[pg.id])
+
+
+@ray.remote
+def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
+    addr = ray.util.get_node_ip_address().strip("[]")
+
+    if master_port_range is None:
+        with socket.socket() as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+    else:
+        port = master_port_range[0]
+        while port < master_port_range[1]:
+            try:
+                with socket.socket() as s:
+                    s.bind(("", port))
+                    break
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+        else:
+            raise RuntimeError(f"Could not find a free port in range {master_port_range}")
+    return addr, str(port)
 
 
 class RayResourcePool(ResourcePool):
