@@ -1,9 +1,9 @@
-# Native NVFP4 training and rollout (experimental)
+# Native NVFP4 training and rollout
 
 This example trains Qwen3-30B-A3B-Base with Megatron/Transformer Engine NVFP4
 and runs vLLM rollout in the matching NVFP4 precision. Training parameters stay
 BF16; each refit exports the routed experts as NVFP4 on the trainer side
-(`rollout.quantization.moe=NVFP4` with `moe_activation=nvfp4_per_token`), and vLLM reloads them into the
+(`rollout.quantization.moe=NVFP4`, with per-token activations), and vLLM reloads them into the
 storage its CUDA graphs captured.
 
 ## Precision and supported configuration

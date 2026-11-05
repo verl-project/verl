@@ -14,7 +14,7 @@
 
 """Regression test for FSDP2 full-parameter model transfers.
 
-Check exact CPU values and the CPU-to-CUDA round trip for a colocated actor.
+Check exact CPU values and the CPU-to-device round trip for a colocated actor.
 Blocking D2H avoids races with FSDP2 CPU repadding; pinned CPU storage is no
 longer required. Keep the historical filename for existing test invocations.
 
@@ -28,7 +28,7 @@ import torch.distributed
 from torch.distributed import init_device_mesh
 from transformers import AutoModelForCausalLM, Qwen2Config
 
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_device_available
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fsdp_utils import (
     MixedPrecisionPolicy,
@@ -51,9 +51,10 @@ def _build_full_parameter_fsdp2_model(device_mesh):
         num_key_value_heads=4,
         vocab_size=512,
     )
-    with torch.device("cuda"):
+    device = get_device_name()
+    with torch.device(device):
         model = AutoModelForCausalLM.from_config(config=config, torch_dtype=torch.bfloat16)
-        model = model.to(device="cuda")
+        model = model.to(device=device)
 
     fsdp_kwargs = {
         "mesh": device_mesh,
@@ -67,12 +68,13 @@ def _build_full_parameter_fsdp2_model(device_mesh):
 
 
 def main():
-    if get_device_name() != "cuda":
-        print("test_fsdp2_pinned_model_transfer skipped: this model test requires CUDA")
+    if not is_device_available():
+        print("test_fsdp2_pinned_model_transfer skipped: no accelerator available")
         return
+    device = get_device_name()
     assert get_torch_device().device_count() >= 2, "need at least 2 GPUs for test"
     _, rank, world_size = initialize_global_process_group()
-    device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=("dp",))
+    device_mesh = init_device_mesh(device, mesh_shape=(world_size,), mesh_dim_names=("dp",))
     model = _build_full_parameter_fsdp2_model(device_mesh)
 
     expected_local_params = [_local_tensor(param).detach().cpu().clone() for param in model.parameters()]
@@ -84,10 +86,10 @@ def main():
         torch.testing.assert_close(local_param, expected, atol=0.0, rtol=0.0)
 
     load_fsdp2_model_to_gpu(model)
-    torch.cuda.synchronize()
+    get_torch_device().synchronize()
     for param, expected in zip(model.parameters(), expected_local_params, strict=True):
         local_param = _local_tensor(param)
-        assert local_param.device.type == "cuda"
+        assert local_param.device.type == device
         torch.testing.assert_close(local_param.cpu(), expected, atol=0.0, rtol=0.0)
 
     torch.distributed.barrier()

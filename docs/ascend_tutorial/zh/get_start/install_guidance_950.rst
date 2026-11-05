@@ -1,7 +1,7 @@
 昇腾安装指南(Ascend 950PR&950DT系列产品)
 =================
 
-Last updated: 09/22/2026.
+Last updated: 11/03/2026.
 
 
 目录
@@ -49,15 +49,25 @@ Last updated: 09/22/2026.
 CANN          ``9.1.0``                                         CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务 
 Python        ``3.12``                                          Python版本                                                 
 torch         ``2.10.0``                                        PyTorch 深度学习框架基础包                                 
-torch_npu     ``2.10.0.post4``                                  NPU PyTorch 适配插件                                       
-triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
-triton-ascend ``3.2.2``                                         NPU Triton 适配                                            
-transformers  ``5.10.4``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
-vLLM          ``0.23.0``                                        高性能 LLM 推理与服务引擎                                  
-vLLM-Ascend   ``0.23.0``                                        NPU vLLM 后端适配                                          
-Megatron-LM   ``core_v0.18.0``                                  大规模分布式训练框架                                       
-MindSpeed     ``core_r0.18.0``                                  Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
+torch_npu     ``2.10.0.post7``                                  NPU PyTorch 适配插件
+torchvision   ``0.25.0``                                        PyTorch 图像处理库
+torchaudio    ``2.10.0``                                        PyTorch 音频处理库
+triton-ascend ``3.6.0.post2``                                   NPU Triton 适配
+transformers  ``5.14.1``                                        Hugging Face 大模型库，提供模型架构与预训练权重
+xgrammar      ``>=0.2.1,<1.0.0``                                 vLLM 结构化输出依赖
+vLLM          ``0.30.0``                                        高性能 LLM 推理与服务引擎
+vLLM-Ascend   ``0.30.0``                                        NPU vLLM 后端适配
+Megatron-LM   ``core_v0.18.0``                                  大规模分布式训练框架
+MindSpeed     ``core_r0.18.0``                                  Megatron-LM 在昇腾 NPU 上的适配和优化组件
 ============= ================================================= ===================
+
+.. note::
+
+   本表的运行依赖与 `vLLM-Ascend 0.30.0 安装依赖 <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_
+   对齐；xgrammar 使用 `vLLM 0.30.0 的依赖范围 <https://github.com/vllm-project/vllm/blob/v0.30.0/requirements/common.txt>`_。
+   使用 triton-ascend 提供的 Triton 实现，无需另行安装 triton 软件包。
+   当前两个上游存在 FastAPI 约束冲突：vLLM 要求 ``>=0.133.0,<0.137.0``，vLLM-Ascend 要求 ``<0.124.0``，
+   没有同时满足两者的版本。需先解决该冲突，再使用 ``pip check`` 检查最终环境并验证运行兼容性。
 
 
 Megatron 训练后端还需安装以下 Bridge 组件：
@@ -108,7 +118,7 @@ vLLM推理后端支持
     #安装vllm
     git clone https://github.com/vllm-project/vllm.git
     cd vllm
-    git checkout v0.23.0
+    git checkout v0.30.0
     VLLM_TARGET_DEVICE=empty pip install -v -e .
     cd ..
 
@@ -116,7 +126,7 @@ vLLM推理后端支持
     #安装之前要先source cann环境： source /usr/local/Ascend/cann/set_env.sh
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
-    git checkout releases/v0.23.0
+    git checkout releases/v0.30.0
     pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     cd ..
 
@@ -138,16 +148,16 @@ Megatron 训练后端支持
 
     # 安装 Megatron 及 Ascend 适配组件
     pip install -e Megatron-LM
-    pip install -e MindSpeed
     pip install -e MegatronAdaptor
     pip install -e TransformerEngineNPU --no-build-isolation
+    pip install -e MindSpeed
     pip install -e MindSpeed-Ops --no-build-isolation --no-deps
     pip install -r MindSpeed-Bridge/requirements.txt
     pip install -e MindSpeed-Bridge --no-deps
     pip install -e Megatron-Bridge --no-build-isolation --no-deps
 
-    # 安装 transformers
-    pip install transformers==5.10.4
+    # 恢复推理依赖版本，避免训练依赖安装时覆盖
+    pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
 
 verl 依赖安装
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -157,12 +167,14 @@ verl 依赖安装
     git clone https://github.com/verl-project/verl.git
     cd verl
     pip install -e .
-    pip install -r requirements-npu.txt
+    pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # 恢复 vLLM 所需的 Triton 版本
+    pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 
 
 日志过滤
 ^^^^^^^^^^^^^^^^^^^^^^^^
-transformers版本升级5.10.4后，可能出现大量别名废弃告警，可添加环境变量过滤冗余日志
+使用 transformers 时，若出现大量别名废弃告警，可添加环境变量过滤冗余日志
 
 .. code:: bash
 

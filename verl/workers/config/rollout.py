@@ -154,8 +154,8 @@ class RolloutQuantizationConfig(BaseConfig):
     linear: Optional[str] = None
     # Preset for routed experts, e.g. FP8_BLOCK.
     moe: Optional[str] = None
-    # Activation override for the routed experts, as vLLM's quantization_config.moe.activation,
-    # e.g. nvfp4_per_token with moe=NVFP4.
+    # Activation override for the routed experts, as vLLM's quantization_config.moe.activation;
+    # moe=NVFP4 defaults to nvfp4_per_token.
     moe_activation: Optional[str] = None
     # Extra "re:" patterns kept in high precision.
     ignore: list[str] = field(default_factory=list)

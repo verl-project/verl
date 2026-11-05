@@ -1,14 +1,15 @@
-# NVFP4 RL on Blackwell (experimental)
+# NVFP4 RL on Blackwell
 
-Last updated: 10/28/2026
+Last updated: 11/02/2026
 
 This recipe trains the routed experts of an MoE model in real NVFP4 with Megatron and Transformer Engine,
 and serves the rollout in the same precision. Activations are quantized per token on both sides.
 Parameters stay BF16; attention, dense MLPs, shared experts, router, norms, embeddings and the LM head run
 in BF16.
 
-For NVFP4 fake-quantization training, see [NVFP4 QAT](nvfp4_qat.md). The rollout quantization interface
-shared by all formats is described in [Low-Precision Rollout and Quantization-Aware Training](qat.md).
+For NVFP4 fake-quantization training, see the NVFP4 QAT section of
+[Low-Precision Rollout and Quantization-Aware Training](qat.md), which also describes the rollout
+quantization interface shared by all formats.
 
 ## Requirements
 
@@ -34,8 +35,7 @@ actor_rollout_ref:
         num_layers_at_end_in_bf16: 4
   rollout:
     quantization:
-      moe: NVFP4
-      moe_activation: nvfp4_per_token   # activations quantized per token, as in training
+      moe: NVFP4   # activations quantized per token, as in training
       ignore: ["re:.*layers\\.(0|1|44|45|46|47)\\.mlp\\.experts\\..*"]  # same layers, 48-layer model
 ```
 
@@ -52,7 +52,7 @@ actor_rollout_ref:
 
 ## Rollout
 
-`moe_activation: nvfp4_per_token` (vLLM's `quantization_config.moe.activation`) exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
+`moe: NVFP4` runs with `moe_activation: nvfp4_per_token` (vLLM's `quantization_config.moe.activation`), the default. It exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
 online `nvfp4_per_token` quantization, and runs them on FlashInfer's TRT-LLM MoE kernel with per-token
 activation scales. Refits load each bucket in place into the storage the CUDA graphs captured, so the extra
 memory is one MoE layer's post-processing. With rollout TP and EP off, each rank holds a slice of every
@@ -66,7 +66,6 @@ Qwen3.5-35B-A3B, EP=4 on 4 GPUs, vLLM rollout TP=1, measured with the script in
 
 | Rollout | Training | Backend | k3_kl |
 |---|---|---|---|
-| NVFP4 MoE | NVFP4 QAT | FlashInfer CUTLASS (MoE; BF16 Linear) | 0.00832 |
 | NVFP4 MoE, `nvfp4_per_token` | BF16 | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.01025 |
 | NVFP4 MoE, `nvfp4_per_token` | native NVFP4 | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00740 |
 

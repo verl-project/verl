@@ -23,6 +23,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    GroupedQuantizer,
+    TensorQuantizer,
     is_registered_quant_backend,
     register_quant_backend,
 )
@@ -85,81 +87,64 @@ def _mxfp4_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     return _Mxfp4FakeQuant.apply(inputs)
 
 
-class _Nvfp4FakeQuant(torch.autograd.Function):
-    """compressed-tensors-compatible NVFP4 QDQ with an explicit global scale."""
+class _GroupedFp8FakeQuant(torch.autograd.Function):
+    """Pointer-table FP8 QDQ with an STE back to separate expert parameters."""
 
     @staticmethod
-    def forward(ctx, x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
-        from compressed_tensors.quantization import QuantizationArgs
-        from compressed_tensors.quantization.lifecycle.forward import fake_quantize
-        from compressed_tensors.quantization.utils import calculate_qparams
+    def forward(ctx, block_rows: int, block_cols: int, scale_fmt: str | None, *weights: torch.Tensor):
+        from verl.utils.qat.fp8 import fp8_grouped_fake_quant
 
-        args = QuantizationArgs(
-            num_bits=4,
-            type="float",
-            symmetric=True,
-            group_size=16,
-            strategy="tensor_group",
-            dynamic=False,
-            scale_dtype="torch.float8_e4m3fn",
-        )
+        return fp8_grouped_fake_quant(weights, (block_rows, block_cols), scale_fmt=scale_fmt)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return None, None, None, *grad.unbind(0)
+
+
+class _GroupedMxfp4FakeQuant(torch.autograd.Function):
+    """Pointer-table MXFP4 QDQ with an STE back to separate expert parameters."""
+
+    @staticmethod
+    def forward(ctx, *weights: torch.Tensor):
+        from verl.utils.qat.fp4 import fp4_grouped_fake_quant
+
+        return fp4_grouped_fake_quant(weights)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return tuple(grad.unbind(0))
+
+
+class _Nvfp4FakeQuant(torch.autograd.Function):
+    """NVFP4 QDQ of the rollout's quantization, with straight-through grad."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, per_token: bool) -> torch.Tensor:
+        from verl.utils.qat.nvfp4 import fake_quantize_nvfp4, fake_quantize_nvfp4_per_token, nvfp4_global_scale
+
         shape = x.shape
         x2d = x.reshape(-1, shape[-1])
-        groups = x2d.unflatten(-1, (-1, 16))
-        min_vals, max_vals = groups.amin(dim=-1), groups.amax(dim=-1)
-        scale, zero_point = calculate_qparams(
-            min_vals.float(),
-            max_vals.float(),
-            args,
-            global_scale=global_scale.float(),
-        )
-        return (
-            fake_quantize(
-                x2d,
-                scale,
-                zero_point,
-                args,
-                global_scale=global_scale.float(),
-            )
-            .reshape(shape)
-            .to(x.dtype)
-        )
+        if per_token:
+            return fake_quantize_nvfp4_per_token(x2d).reshape(shape)
+        return fake_quantize_nvfp4(x2d, nvfp4_global_scale(x2d)).reshape(shape)
 
     @staticmethod
     def backward(ctx, grad):
         return grad, None
 
 
-def _nvfp4_global_scale(inputs: torch.Tensor) -> torch.Tensor:
-    from compressed_tensors.quantization.utils import generate_gparam
-
-    amax = inputs.detach().float().abs().amax()
-    return generate_gparam(-amax, amax).to(device=inputs.device)
-
-
 def _nvfp4_weight_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
+    # One global scale per expert matrix, as the export computes it; the fused linear_fc1
+    # holds gate_proj and up_proj, which the export gives one shared scale.
     if inputs.ndim > 2:
-        # TEGroupedLinear stores one expert matrix per leading entry. The
-        # compressed-tensors checkpoint likewise assigns one global scale per
-        # expert, so quantize each matrix independently.
-        return torch.stack(
-            [_Nvfp4FakeQuant.apply(weight, _nvfp4_global_scale(weight)) for weight in inputs],
-            dim=0,
-        )
-    return _Nvfp4FakeQuant.apply(inputs, _nvfp4_global_scale(inputs))
+        # TEGroupedLinear stores one expert matrix per leading entry.
+        return torch.stack([_Nvfp4FakeQuant.apply(weight, False) for weight in inputs], dim=0)
+    return _Nvfp4FakeQuant.apply(inputs, False)
 
 
 def _nvfp4_input_backend(inputs: torch.Tensor, quantizer) -> torch.Tensor:
-    # vLLM's W4A4 kernel needs one static tensor-level scale while the local
-    # group-16 scales remain dynamic. Keep a running maximum during QAT and use
-    # that exact scale for both fake quant and checkpoint export.
-    current = _nvfp4_global_scale(inputs)
-    previous = getattr(quantizer, "_verl_input_global_scale", None)
-    if previous is not None:
-        # Running max of amax == running min of the global divisor.
-        current = torch.minimum(previous.to(current.device), current)
-    quantizer._verl_input_global_scale = current.detach()
-    return _Nvfp4FakeQuant.apply(inputs, current)
+    # The rollout's per-token MoE kernel quantizes each token with its own global scale.
+    return _Nvfp4FakeQuant.apply(inputs, True)
 
 
 if not is_registered_quant_backend(_FP8_BLOCK_BACKEND):
@@ -200,6 +185,7 @@ _SUPPORTED_QAT_MODES = {*_QUANTIZER_CFGS, "mxfp8", "mxfp4", "mxfp4_mxfp8", "nvfp
 
 _ROUTED_EXPERT_WEIGHT_QUANTIZER = "*mlp.experts*weight_quantizer"
 _ROUTED_EXPERT_INPUT_QUANTIZER = "*mlp.experts*input_quantizer"
+_GROUPABLE_WEIGHT_BACKENDS = {_FP8_BLOCK_BACKEND, _MXFP8_BACKEND, _MXFP4_BACKEND}
 
 
 def _modelopt_quantizer_cfg(preset: dict, quantizer_name: str) -> dict:
@@ -250,7 +236,7 @@ def _mxfp4_quantize_config(*, dense_mxfp8: bool) -> tuple[list[dict], None]:
 
 
 def _nvfp4_quantize_config() -> tuple[list[dict], None]:
-    """NVFP4 W4A4 on routed experts with export-compatible running scales."""
+    """NVFP4 W4A4 on routed experts, with the rollout's per-token activation scales."""
     quant_cfg = mtq.normalize_quant_cfg_list(copy.deepcopy(mtq.NVFP4_EXPERTS_ONLY_CFG["quant_cfg"]))
     for entry in quant_cfg:
         cfg = entry.get("cfg")
@@ -262,22 +248,6 @@ def _nvfp4_quantize_config() -> tuple[list[dict], None]:
         elif name.endswith("input_quantizer"):
             cfg["backend"] = _NVFP4_INPUT_BACKEND
     return quant_cfg, None
-
-
-def collect_nvfp4_input_global_scales(model: nn.Module | list[nn.Module]) -> dict[str, torch.Tensor]:
-    """Collect observed expert activation scales under HF-style canonical keys."""
-    scales = {}
-    chunks = model if isinstance(model, list) else [model]
-    for chunk in chunks:
-        for name, module in chunk.named_modules():
-            scale = getattr(module, "_verl_input_global_scale", None)
-            if scale is None or not name.endswith("input_quantizer") or ".mlp.experts" not in name:
-                continue
-            layer = next((part for part in name.split(".") if part.isdigit()), None)
-            projection = "gate_up" if "linear_fc1" in name else "down" if "linear_fc2" in name else None
-            if layer is not None and projection is not None:
-                scales[f"layers.{layer}.mlp.experts.{projection}"] = scale.detach()
-    return scales
 
 
 def _ignore_patterns_to_quant_cfg(ignore_patterns: list[str]) -> list[dict]:
@@ -326,6 +296,117 @@ def build_quantize_config(
     return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 
 
+# ---------------------------------------------------------------------------
+# Patch ModelOpt's grouped-linear weight fake quant
+# ---------------------------------------------------------------------------
+class _PrequantizedWeightsView:
+    """A grouped-linear view that prevents ModelOpt from quantizing weights twice."""
+
+    def __init__(self, module: nn.Module):
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    @staticmethod
+    def weight_quantizer(weight: torch.Tensor) -> torch.Tensor:
+        return weight
+
+
+def _grouped_weight_quantizers_are_compatible(quantizers: GroupedQuantizer) -> bool:
+    """Whether per-expert quantizers can share one stateless batched invocation."""
+    if not quantizers or not all(isinstance(quantizer, TensorQuantizer) for quantizer in quantizers):
+        return False
+    first = quantizers[0]
+    if first.backend not in _GROUPABLE_WEIGHT_BACKENDS:
+        return False
+    return all(
+        quantizer.is_enabled
+        and quantizer.fake_quant
+        and not getattr(quantizer, "_if_calib", False)
+        and quantizer.backend == first.backend
+        and quantizer.block_sizes == first.block_sizes
+        and quantizer.backend_extra_args == first.backend_extra_args
+        for quantizer in quantizers
+    )
+
+
+def _assert_grouped_scale_boundaries(weights: tuple[torch.Tensor, ...], quantizer: TensorQuantizer) -> None:
+    """Assert that every expert consists of complete, independent scale blocks."""
+    assert weights, "grouped fake quant requires at least one expert weight"
+    shape = weights[0].shape
+    assert len(shape) == 2, f"grouped fake quant expects 2D expert weights, got {shape}"
+    assert all(weight.shape == shape for weight in weights), "grouped fake quant requires equal expert shapes"
+
+    if quantizer.backend == _FP8_BLOCK_BACKEND:
+        block_rows, block_cols = quantizer.backend_extra_args["block_sizes"]
+    else:
+        assert quantizer.backend in (_MXFP8_BACKEND, _MXFP4_BACKEND)
+        assert quantizer.block_sizes.get("type") == "dynamic"
+        block_rows, block_cols = 1, quantizer.block_sizes[-1]
+
+    rows, cols = shape
+    assert rows % block_rows == 0, (
+        f"expert rows ({rows}) must be divisible by scale block rows ({block_rows}); "
+        "a scale block must not cross an expert boundary"
+    )
+    assert cols % block_cols == 0, f"expert columns ({cols}) must be divisible by scale block columns ({block_cols})"
+
+
+def _group_fake_quant_weights(
+    weights: tuple[torch.Tensor, ...],
+    quantizers: GroupedQuantizer,
+) -> tuple[torch.Tensor, ...]:
+    """Fake-quantize separate expert weights in one pointer-table kernel launch."""
+    first = quantizers[0]
+    _assert_grouped_scale_boundaries(weights, first)
+    if first.backend == _FP8_BLOCK_BACKEND:
+        block_rows, block_cols = first.backend_extra_args["block_sizes"]
+        quantized = _GroupedFp8FakeQuant.apply(block_rows, block_cols, None, *weights)
+    elif first.backend == _MXFP8_BACKEND:
+        quantized = _GroupedFp8FakeQuant.apply(1, first.block_sizes[-1], "e8m0", *weights)
+    else:
+        assert first.backend == _MXFP4_BACKEND
+        quantized = _GroupedMxfp4FakeQuant.apply(*weights)
+    assert quantized.shape == (len(weights), *weights[0].shape)
+    return quantized.unbind(0)
+
+
+def _patch_te_grouped_weight_fake_quant() -> None:
+    """Batch verl's stateless expert-weight QDQ backends inside TE grouped linears."""
+    try:
+        from modelopt.torch.quantization.plugins.transformer_engine import _QuantTEGroupedLinear
+    except ImportError:
+        return
+
+    original = _QuantTEGroupedLinear.__dict__.get("_quantized_linear_fn")
+    original_fn = getattr(original, "__func__", original)
+    if original_fn is None or getattr(original_fn, "_verl_grouped_weight_fake_quant", False):
+        return
+
+    def grouped_quantized_linear_fn(package, func_name, module, *args):
+        quantizers = module.weight_quantizer
+        num_gemms = module.num_gemms
+        if (
+            not isinstance(quantizers, GroupedQuantizer)
+            or len(quantizers) != num_gemms
+            or not _grouped_weight_quantizers_are_compatible(quantizers)
+        ):
+            return original_fn(package, func_name, module, *args)
+
+        weights_start = len(args) - 2 * num_gemms
+        weights = tuple(args[weights_start : weights_start + num_gemms])
+        if len(weights) != num_gemms or len({(weight.shape, weight.dtype, weight.device) for weight in weights}) != 1:
+            return original_fn(package, func_name, module, *args)
+
+        quantized_weights = _group_fake_quant_weights(weights, quantizers)
+        new_args = (*args[:weights_start], *quantized_weights, *args[weights_start + num_gemms :])
+        return original_fn(package, func_name, _PrequantizedWeightsView(module), *new_args)
+
+    grouped_quantized_linear_fn._verl_grouped_weight_fake_quant = True
+    _QuantTEGroupedLinear._quantized_linear_fn = staticmethod(grouped_quantized_linear_fn)
+
+
 def apply_qat(
     model: nn.Module,
     qat_mode: str,
@@ -333,6 +414,7 @@ def apply_qat(
 ) -> nn.Module:
     """Apply Quantization-Aware Training to a Megatron model."""
     config = build_quantize_config(qat_mode, ignore_patterns)
+    _patch_te_grouped_weight_fake_quant()
     mtq.quantize(model, config)
     return model
 
@@ -347,6 +429,12 @@ def _get_qat_field(qat_config, key, default=None):
 def apply_qat_to_modules(modules, qat_config):
     """Apply ModelOpt fake quantization to a list of Megatron module chunks."""
     qat_mode = _get_qat_field(qat_config, "mode", "fp8")
+    if qat_mode == "nvfp4":
+        from megatron.core import parallel_state
+
+        # The export computes each expert's global scale over the whole matrix.
+        if parallel_state.get_expert_tensor_parallel_world_size() > 1:
+            raise NotImplementedError("NVFP4 QAT needs expert_tensor_parallel_size=1")
     ignore_patterns = _get_qat_field(qat_config, "ignore_patterns", None)
     if ignore_patterns is not None:
         ignore_patterns = list(ignore_patterns)

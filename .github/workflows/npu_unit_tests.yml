@@ -111,6 +111,11 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Run all NPU unit tests
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
@@ -127,6 +132,8 @@ jobs:
               "--ignore-glob=*_sglang*",
               "--ignore-glob=*_hf_rollout*",
               "--ignore-glob=tests/models/",
+              "--ignore-glob=tests/utils/qat",
+              "--ignore-glob=tests/utils/real_nvfp4",
               "--ignore-glob=tests/special*",
               "--ignore-glob=tests/experimental",
               "--ignore-glob=tests/workers/reward_model",
