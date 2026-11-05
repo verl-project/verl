@@ -18,11 +18,13 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+from contextlib import asynccontextmanager
 from typing import Generator
 
 import ray
 import sglang.srt.entrypoints.engine
 import torch
+from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     MultiprocessingSerializer,
@@ -302,6 +304,34 @@ class ServerAdapter(BaseRollout):
                 tags = ["kv_cache", "weights"]
             await self._engine.release_memory_occupation(tags=tags)
 
+    @asynccontextmanager
+    async def _weight_update_session(self):
+        """Bracket all buckets with one session when the SGLang API requires it."""
+        # Older SGLang releases (including 0.5.20) have no session endpoints.
+        # Check the upstream contract, not our adapter, which implements both APIs.
+        use_session = (
+            hasattr(EngineBase, "begin_weight_update")
+            and hasattr(EngineBase, "end_weight_update")
+            and self._engine is not None
+            and self._is_server_tp_leader()
+        )
+        if use_session:
+            await self._engine.begin_weight_update()
+        try:
+            yield
+        except BaseException:
+            # Preserve the transfer error (including cancellation) if cleanup fails.
+            if use_session:
+                try:
+                    await self._engine.end_weight_update()
+                except Exception:
+                    logger.exception("Failed to end SGLang weight-update session after a transfer error")
+            raise
+        else:
+            # Finalization failure must still fail an otherwise successful update.
+            if use_session:
+                await self._engine.end_weight_update()
+
     async def update_weights(
         self,
         weights: Generator[tuple[str, torch.Tensor], None, None],
@@ -368,27 +398,28 @@ class ServerAdapter(BaseRollout):
                 if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
                 else ()
             )
-            async for params_batch in get_named_tensor_buckets(
-                weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
-            ):
-                load_format = None
+            async with self._weight_update_session():
+                async for params_batch in get_named_tensor_buckets(
+                    weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
+                ):
+                    load_format = None
+                    if use_quantized_refit:
+                        load_format = LOADER_FQN
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=load_format,
+                    )
                 if use_quantized_refit:
-                    load_format = LOADER_FQN
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                    load_format=load_format,
-                )
-            if use_quantized_refit:
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                    load_format=LOADER_FQN,
-                )
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=LOADER_FQN,
+                    )
 
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
@@ -408,10 +439,11 @@ class ServerAdapter(BaseRollout):
         """
         assert self._pd_role is None, "delta checkpoint engine does not support PD disaggregation"
         applied = 0
-        for named, is_last in flushes:
-            await self._update_weights_delta_flush(named, flush_cache=is_last)
-            applied += 1
-            del named
+        async with self._weight_update_session():
+            for named, is_last in flushes:
+                await self._update_weights_delta_flush(named, flush_cache=is_last)
+                applied += 1
+                del named
         if self._engine is not None and self._is_server_tp_leader() and global_steps is not None:
             await self.server_actor.set_global_steps.remote(global_steps)
         logger.info("delta apply v=%s flushes=%d (in-place via sglang loader)", global_steps, applied)
