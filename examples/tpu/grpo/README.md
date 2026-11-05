@@ -158,3 +158,27 @@ To scale further to **2 `v6e-8` slices (16 chips)**, create two multi-host node 
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
 ```
+
+### Qwen3.5-397B-A17B (expert parallelism)
+
+Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) needs torchtitan from [google-pytorch/torchtitan#142](https://github.com/google-pytorch/torchtitan/pull/142), which enables Qwen3.5 with EP on TPU. Build the image at its head commit:
+
+```bash
+docker buildx build -t <IMAGE> --push \
+  --build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4 examples/tpu/grpo
+```
+
+Full-parameter 8K GRPO on 64 TPU v7x chips (a `2x4x4` trainer slice and four `2x2x2` rollout slices):
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env MODEL_NAME=Qwen3.5-397B-A17B \
+  NNODES_TRAINER=8 EXPERT_PARALLEL_SIZE=8 PARAM_DTYPE=bfloat16 FP32_MASTER=True OPTIMIZER_HOST_OFFLOAD=True USE_KL_LOSS=False \
+  EP_DISPATCHER=static EP_TOKEN_CHUNKS=8 EP_PAIRED_GROUPED_MM=True AC_SAVE_SPLASH_AND_ROUTING=True \
+  SPARSECORE_OFFLOAD=True TRAINER_SCOPED_VMEM_LIMIT_KIB=65472 \
+  USE_DYNAMIC_BSZ=True MAX_TOKEN_LEN_PER_GPU=16384 STATIC_MICRO_BATCH_LEN=16384 STATIC_MAX_RESPONSE_LEN=7680 \
+  NUM_WARMUP_BATCHES=3 MAX_NUM_SEQS=512 MAX_NUM_BATCHED_TOKENS=8192 \
+  NNODES_ROLLOUT=8 ROLLOUT_TENSOR_PARALLEL_SIZE=16 ROLLOUT_EXPERT_PARALLEL_SIZE=16 ROLLOUT_LOAD_FORMAT=dummy \
+  TRAIN_BATCH_SIZE=64 ROLLOUT_N=16 MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=7680 \
+  bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```
