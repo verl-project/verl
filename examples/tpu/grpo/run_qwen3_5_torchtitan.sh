@@ -52,20 +52,24 @@ if [[ -n "${TRAINER_SCOPED_VMEM_LIMIT_KIB:-}" ]]; then
     VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_scoped_vmem_limit_kib=${TRAINER_SCOPED_VMEM_LIMIT_KIB}"
 fi
 if [[ "${SPARSECORE_OFFLOAD:-False}" == "True" ]]; then
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_latency_hiding_layer_scheduler=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_enable_async_all_gather=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_prefer_async_allgather_to_allreduce=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_aggregator=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_offloading_gather_to_sparsecore=false"
-    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+    # torchtitan#142 SparseCore collective offload + latency-hiding scheduler flags (MaxText MoE recipe).
+    SPARSECORE_FLAGS=(
+        --xla_tpu_enable_latency_hiding_layer_scheduler=true
+        --xla_enable_async_all_gather=true
+        --xla_tpu_prefer_async_allgather_to_allreduce=true
+        --xla_tpu_enable_sparse_core_collective_aggregator=true
+        --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true
+        --xla_tpu_enable_sparse_core_collective_offload_all_gather=true
+        --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true
+        --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true
+        --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true
+        --xla_tpu_enable_sparse_core_reduce_scatter_v2=true
+        --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false
+        --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true
+        --xla_tpu_enable_offloading_gather_to_sparsecore=false
+        --xla_tpu_enable_offloading_copy_to_sparsecore=false
+    )
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" ${SPARSECORE_FLAGS[*]}"
     VERL_TPU_TRAINER_XLA_FLAGS+=" --xla_enable_hlo_sharding_v3=false"
 fi
 if [[ -n "${TRAINER_EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
