@@ -79,7 +79,8 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.dataloader import (
     DataLoaderExhausted,
     close_dataloaders,
-    create_custom_dataloader,
+    create_custom_dataloaders,
+    resolve_gen_batch_size,
     validate_custom_batch,
 )
 from verl.utils.dataset.rl_dataset import collate_fn
@@ -765,9 +766,24 @@ class PPOTrainer(ABC):
     def _init_dataloader(self):
         """Select the input path and initialize the optimizer scheduling horizon."""
         if self.config.data.get("custom_dataloader") is not None:
-            self._init_custom_dataloaders()
+            if self.trainer_mode != "sync" and not isinstance(self.replay_buffer, ReplayBufferAsync):
+                raise ValueError("Async custom dataloaders require a ReplayBufferAsync sampler for source draining.")
+            self.replay_buffer.input_exhausted = False
+            (
+                self.train_dataloader,
+                self.val_dataloader,
+                self.steps_per_epoch,
+                self._custom_val_batch_size,
+            ) = create_custom_dataloaders(
+                self.config,
+                trainer_mode=self.trainer_mode,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                collate_fn=collate_fn,
+            )
         else:
             self._init_builtin_dataloaders()
+        self.train_dataloader_it = None
 
         total_training_steps = self.config.trainer.total_training_steps
         if total_training_steps is None:
@@ -786,65 +802,6 @@ class PPOTrainer(ABC):
                     self.config.critic.optim.total_training_steps = optim_total_training_steps
         except Exception as e:
             logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
-
-    def _init_custom_dataloaders(self):
-        """Create independent role instances without requiring a dataset or file paths."""
-        if self.trainer_mode != "sync" and not isinstance(self.replay_buffer, ReplayBufferAsync):
-            raise ValueError("Async custom dataloaders require a ReplayBufferAsync sampler for source draining.")
-        self.replay_buffer.input_exhausted = False
-        self.train_dataloader = self.val_dataloader = None
-        self.train_dataloader_it = None
-        train_batch_size = self.config.data.train_batch_size
-        requested_fetch_size = self.config.data.get("gen_batch_size")
-        if requested_fetch_size is not None and (type(requested_fetch_size) is not int or requested_fetch_size <= 0):
-            raise ValueError("data.gen_batch_size must be a positive integer or null.")
-        gen_batch_size = self._resolve_gen_batch_size()
-        if type(train_batch_size) is not int or train_batch_size <= 0:
-            raise ValueError("data.train_batch_size must be a positive integer.")
-        if type(gen_batch_size) is not int or gen_batch_size <= 0 or train_batch_size % gen_batch_size:
-            raise ValueError("Custom dataloader fetch size must be a positive divisor of data.train_batch_size.")
-        total_steps = self.config.trainer.total_training_steps
-        if total_steps is not None and (type(total_steps) is not int or total_steps <= 0):
-            raise ValueError("trainer.total_training_steps must be a positive integer.")
-
-        self.train_dataloader = create_custom_dataloader(
-            self.config.data,
-            split="train",
-            batch_size=gen_batch_size,
-            tokenizer=self.tokenizer,
-            processor=self.processor,
-            collate_fn=collate_fn,
-        )
-        if total_steps is not None:
-            self.steps_per_epoch = None
-            logger.info("Custom dataloader uses step-based training; trainer.total_epochs is not used.")
-        else:
-            try:
-                num_batches = len(self.train_dataloader)
-            except TypeError as error:
-                raise ValueError("Unsized custom dataloaders require trainer.total_training_steps.") from error
-            self.steps_per_epoch = num_batches * gen_batch_size // train_batch_size
-            if self.steps_per_epoch <= 0:
-                raise ValueError("Custom training dataloader must provide at least one full training batch.")
-
-        trainer_config = self.config.trainer
-        if (
-            trainer_config.get("val_before_train", True)
-            or trainer_config.get("val_only", False)
-            or trainer_config.get("test_freq", -1) > 0
-        ):
-            val_batch_size = self.config.data.get("val_batch_size")
-            self._custom_val_batch_size = train_batch_size if val_batch_size is None else val_batch_size
-            self.val_dataloader = create_custom_dataloader(
-                self.config.data,
-                split="val",
-                batch_size=self._custom_val_batch_size,
-                tokenizer=self.tokenizer,
-                processor=self.processor,
-                collate_fn=collate_fn,
-            )
-            if self.val_dataloader is self.train_dataloader:
-                raise ValueError("Custom train and validation dataloaders must be separate instances.")
 
     def close_dataloaders(self):
         """Release custom readers, including after partial trainer initialization."""
@@ -874,7 +831,7 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        gen_batch_size = self._resolve_gen_batch_size()
+        gen_batch_size = resolve_gen_batch_size(self.config, self.trainer_mode)
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=gen_batch_size,
@@ -898,22 +855,6 @@ class PPOTrainer(ABC):
         )
 
         self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
-
-    def _resolve_gen_batch_size(self):
-        """Resolve the trainer's fetch size before invoking a custom loader."""
-        filter_groups = self.config.algorithm.get("filter_groups", None)
-        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
-        sync_refill_failed_groups = bool(self.config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
-        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
-        if requires_exact_refill:
-            user_gen_batch_size = self.config.data.get("gen_batch_size", None)
-            if user_gen_batch_size not in (None, 1):
-                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
-            elif user_gen_batch_size is None:
-                logger.info("data.gen_batch_size defaulted to 1.")
-            with open_dict(self.config):
-                self.config.data.gen_batch_size = 1
-        return self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
 
     def _init_resource_pool_mgr(self):
         config = self.config

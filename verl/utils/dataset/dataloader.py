@@ -22,7 +22,7 @@ from typing import Any, Protocol
 
 from hydra.errors import InstantiationException
 from hydra.utils import get_class, instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,88 @@ class StatefulPromptDataLoader(PromptDataLoader, Protocol):
 
 class DataLoaderExhausted(Exception):
     """A custom training source cannot supply another complete update."""
+
+
+def resolve_gen_batch_size(config: DictConfig, trainer_mode: str) -> int:
+    """Use single-prompt fetches when sampling may request exact replacement counts."""
+    filter_groups = config.algorithm.get("filter_groups", None)
+    dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+    sync_refill_failed_groups = bool(config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
+    requires_exact_refill = trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
+    if requires_exact_refill:
+        user_gen_batch_size = config.data.get("gen_batch_size", None)
+        if user_gen_batch_size not in (None, 1):
+            logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
+        elif user_gen_batch_size is None:
+            logger.info("data.gen_batch_size defaulted to 1.")
+        with open_dict(config):
+            config.data.gen_batch_size = 1
+    return config.data.get("gen_batch_size", None) or config.data.train_batch_size
+
+
+def create_custom_dataloaders(
+    config: DictConfig, *, trainer_mode: str, tokenizer: Any, processor: Any, collate_fn: Any
+) -> tuple[PromptDataLoader, PromptDataLoader | None, int | None, int]:
+    """Build train/validation loaders and return their epoch size and validation fetch size.
+
+    Construction owns cleanup until both loaders are successfully returned to the trainer.
+    """
+    train_batch_size = config.data.train_batch_size
+    requested_fetch_size = config.data.get("gen_batch_size")
+    if requested_fetch_size is not None and (type(requested_fetch_size) is not int or requested_fetch_size <= 0):
+        raise ValueError("data.gen_batch_size must be a positive integer or null.")
+    gen_batch_size = resolve_gen_batch_size(config, trainer_mode)
+    if type(train_batch_size) is not int or train_batch_size <= 0:
+        raise ValueError("data.train_batch_size must be a positive integer.")
+    if type(gen_batch_size) is not int or gen_batch_size <= 0 or train_batch_size % gen_batch_size:
+        raise ValueError("Custom dataloader fetch size must be a positive divisor of data.train_batch_size.")
+    total_steps = config.trainer.total_training_steps
+    if total_steps is not None and (type(total_steps) is not int or total_steps <= 0):
+        raise ValueError("trainer.total_training_steps must be a positive integer.")
+
+    train = val = None
+    try:
+        train = create_custom_dataloader(
+            config.data,
+            split="train",
+            batch_size=gen_batch_size,
+            tokenizer=tokenizer,
+            processor=processor,
+            collate_fn=collate_fn,
+        )
+        if total_steps is not None:
+            steps_per_epoch = None
+            logger.info("Custom dataloader uses step-based training; trainer.total_epochs is not used.")
+        else:
+            try:
+                num_batches = len(train)
+            except TypeError as error:
+                raise ValueError("Unsized custom dataloaders require trainer.total_training_steps.") from error
+            steps_per_epoch = num_batches * gen_batch_size // train_batch_size
+            if steps_per_epoch <= 0:
+                raise ValueError("Custom training dataloader must provide at least one full training batch.")
+
+        val_batch_size = config.data.get("val_batch_size")
+        val_batch_size = train_batch_size if val_batch_size is None else val_batch_size
+        if (
+            config.trainer.get("val_before_train", True)
+            or config.trainer.get("val_only", False)
+            or config.trainer.get("test_freq", -1) > 0
+        ):
+            val = create_custom_dataloader(
+                config.data,
+                split="val",
+                batch_size=val_batch_size,
+                tokenizer=tokenizer,
+                processor=processor,
+                collate_fn=collate_fn,
+            )
+            if val is train:
+                raise ValueError("Custom train and validation dataloaders must be separate instances.")
+        return train, val, steps_per_epoch, val_batch_size
+    except BaseException:
+        close_dataloaders(train, val)
+        raise
 
 
 def create_custom_dataloader(

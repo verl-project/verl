@@ -369,9 +369,7 @@ def trainer_class(replay_types):
     trainer = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "PPOTrainer")
     names = {
         "_init_dataloader",
-        "_init_custom_dataloaders",
         "_init_builtin_dataloaders",
-        "_resolve_gen_batch_size",
         "_fetch_one_gen_batch",
         "_next_train_batch",
         "_submit_batch_to_rollout",
@@ -409,7 +407,8 @@ def trainer_class(replay_types):
         "Role": SimpleNamespace(Critic="critic"),
         "logger": logging.getLogger(__name__),
         "collate_fn": lambda batch: batch,
-        "create_custom_dataloader": bridge.create_custom_dataloader,
+        "create_custom_dataloaders": bridge.create_custom_dataloaders,
+        "resolve_gen_batch_size": bridge.resolve_gen_batch_size,
         "validate_custom_batch": bridge.validate_custom_batch,
         "close_dataloaders": bridge.close_dataloaders,
         "DataLoaderExhausted": bridge.DataLoaderExhausted,
@@ -517,7 +516,9 @@ def test_unsized_loader_requires_step_limit(trainer_class):
     trainer.config.trainer.total_training_steps = None
     with pytest.raises(ValueError, match="Unsized"):
         trainer._init_dataloader()
+    assert FixtureLoader.instances[-1].closed == 1
     trainer.close_dataloaders()
+    assert FixtureLoader.instances[-1].closed == 1
 
 
 def test_sized_loader_epoch_budget_uses_fetch_size_not_fetch_count(trainer_class):
@@ -585,15 +586,33 @@ def test_default_loader_path_is_unchanged(trainer_class):
     assert trainer.total_training_steps == 4
 
 
-def test_partial_initialization_can_close_the_training_loader(trainer_class):
+def test_partial_initialization_closes_the_training_loader_before_returning(trainer_class):
     trainer, _ = trainer_instance(trainer_class)
     trainer.config.trainer.val_before_train = True
     trainer.config.data.custom_dataloader.arg2.fail_val = True
     with pytest.raises(RuntimeError, match="source unavailable"):
         trainer._init_dataloader()
-    train = trainer.train_dataloader
+    train = FixtureLoader.instances[-2]
+    assert train.closed == 1
     trainer.close_dataloaders()
     assert train.closed == 1
+
+
+def test_loader_construction_error_survives_cleanup_failure(monkeypatch):
+    cfg = config()
+    cfg.trainer.val_before_train = True
+    cfg.data.custom_dataloader.arg2.fail_val = True
+
+    def fail_close(loader):
+        loader.closed += 1
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(FixtureLoader, "close", fail_close)
+    with pytest.raises(RuntimeError, match="source unavailable"):
+        bridge.create_custom_dataloaders(
+            cfg, trainer_mode="sync", tokenizer=None, processor=None, collate_fn=lambda batch: batch
+        )
+    assert FixtureLoader.instances[-2].closed == 1
 
 
 def test_init_failure_closes_the_successfully_constructed_loader(trainer_class):
