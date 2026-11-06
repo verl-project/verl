@@ -105,6 +105,6 @@ exec bash "${SCRIPT_DIR}/../grpo/run_qwen3_5_torchtitan.sh" \
     data.truncation=error \
     actor_rollout_ref.rollout.mode=async \
     "${AGENT_OVERRIDES[@]}" \
-    trainer.v1.sampler.max_off_policy_threshold=1 \
+    trainer.v1.sampler.max_off_policy_threshold="${MAX_OFF_POLICY_THRESHOLD:-1}" \
     trainer.v1.sampler.max_off_policy_strategy=wait \
     "$@"
