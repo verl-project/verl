@@ -128,6 +128,44 @@ def test_index_select_tensor_dict():
     tu.assert_tensordict_eq(selected_data, target_select_data)
 
 
+def test_chunk_tensordict_3d_nested_padding_width_is_max_not_sum():
+    """Rebuilt jagged tensors must keep their max seqlen (ragged_idx == 1).
+
+    ``chunk_tensordict`` rebuilds nested tensors via ``nested_tensor_from_tensor_list``.
+    Without an explicit ``max_seqlen``, ``to_padded_tensor`` derives the width from
+    ``values.size(0)`` -- the sum of the per-sample lengths -- so a ``[K, T]``
+    per-sample tensor pads to ``(B, B*K, T)`` instead of ``(B, K, T)``.
+    """
+    B, K, T = 8, 33, 16
+    per_sample = [torch.zeros(K, T, dtype=torch.long) for _ in range(B)]
+    nt = torch.nested.as_nested_tensor(per_sample, layout=torch.jagged)
+    assert nt._ragged_idx == 1
+    td = tu.get_tensordict({"codes": nt})
+
+    padded = tu.chunk_tensordict(td, chunks=1)[0]["codes"].to_padded_tensor(0)
+    assert padded.shape == (B, K, T), f"expected {(B, K, T)}, got {tuple(padded.shape)}"
+
+
+def test_chunk_tensordict_3d_nested_ragged_last_dim_does_not_truncate():
+    """Rebuilt jagged tensors must keep their max seqlen (ragged_idx > 1).
+
+    When the ragged dim is not the first per-sample dim, ``values.size(0)`` is the
+    *non-ragged* dim and bears no relation to the lengths, so the fallback is not
+    even an upper bound: it silently truncates whenever it is below the max seqlen.
+    """
+    K, lengths = 4, [6, 3, 5]
+    per_sample = [torch.arange(K * n).reshape(K, n) + 1 for n in lengths]
+    nt = tu.nested_tensor_from_tensor_list(per_sample, ragged_idx=2)
+    td = tu.get_tensordict({"codes": nt})
+
+    padded = tu.chunk_tensordict(td, chunks=1)[0]["codes"].to_padded_tensor(0)
+    assert padded.shape == (len(lengths), K, max(lengths)), (
+        f"expected {(len(lengths), K, max(lengths))}, got {tuple(padded.shape)}"
+    )
+    for i, n in enumerate(lengths):
+        assert torch.equal(padded[i][:, :n], per_sample[i]), f"row {i} content lost"
+
+
 def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_equal_seq_len():
     position_ids = tu.nested_tensor_from_tensor_list(
         [
