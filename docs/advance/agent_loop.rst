@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 10/01/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -55,6 +55,33 @@ could do whatever user wants, such as
                AgentLoopOutput: Agent loop output.
            """
            raise NotImplementedError
+
+The worker supplies an immutable ``RolloutContext`` when constructing each agent-loop instance.
+Custom loops access it through ``self.rollout_context`` rather than looking for runtime metadata
+in dataset fields. ``RolloutContext`` is exported from ``verl.experimental.agent_loop`` and contains:
+
+- ``is_validation``: ``True`` for evaluation, including initial evaluation before training;
+  ``False`` for training.
+- ``step``: the trainer's dispatch step, not necessarily the model's weight version.
+
+This applies to both the standard and TransferQueue worker paths, even when tracing is disabled.
+Every rollout receives its own context; concurrent rollouts do not share mutable mode state.
+The context uses a frozen Pydantic model, which Hydra preserves as an object during instantiation.
+No runtime fields are injected into or removed from ``run()`` kwargs, and native postprocessing
+is unchanged.
+
+Custom constructors should forward ``rollout_context`` (or ``**kwargs``) to ``AgentLoopBase.__init__``.
+Direct construction without a worker remains supported: the context defaults to ``None``, not an
+inferred training mode. A custom loop that requires runtime metadata should reject a missing
+context explicitly:
+
+.. code:: python
+
+   context = self.rollout_context
+   if context is None:
+       raise RuntimeError("This agent loop requires rollout context.")
+   is_validation = context.is_validation
+   dispatch_step = context.step
 
 After running user defined loop, run method should return ``AgentLoopOutput``, including prompt token ids,
 response token ids, and response mask.
