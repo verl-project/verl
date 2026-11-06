@@ -23,7 +23,7 @@ import torch
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
 
-from verl.utils.import_utils import is_trl_available
+from verl.utils.import_utils import get_trl_value_head_class
 from verl.utils.transformers_compat import is_transformers_version_in_range
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
@@ -349,11 +349,10 @@ def apply_monkey_patch(
         f"kv heads are repeated to ensure correctness."
     )
 
-    if is_trl_available():
-        try:
-            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
-        except ImportError:
-            from trl import AutoModelForCausalLMWithValueHead  # type: ignore
+    # Only when TRL still ships the value-head class: TRL >= 1.13 does not, and failing here
+    # would break every model load, including runs that never build a value head.
+    AutoModelForCausalLMWithValueHead = get_trl_value_head_class()
+    if AutoModelForCausalLMWithValueHead is not None:
 
         def state_dict(self, *args, **kwargs):
             return torch.nn.Module.state_dict(self, *args, **kwargs)
