@@ -1,0 +1,1875 @@
+vLLM general plugin k31lora for the ROCm Kimi-K3.1 model (vLLM f5926fb), used by both arms: LoRA support for the
+dense modules and routed experts (--enable-moe-shared-loras layout); under VLLM_BATCH_INVARIANT=1 batch-invariant dense
+GEMMs, LoRA added in FP32 (K31_BI_LORA_F32ADD=1), batch-invariant MXFP4 MoE with expert LoRA (K31_BI_MOE=1,
+k31lora.bi_moe, also called by the trainer) and pinned AttnRes tiling. Creates kimi-k31/k31lora/ under /opt/k31-plugins.
+Upstream status: not yet proposed.
+
+diff --git a/kimi-k31/k31lora/k31lora-0.1.dist-info/METADATA b/kimi-k31/k31lora/k31lora-0.1.dist-info/METADATA
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8558f1a12a7f19fd6344412b4428e18d9f20fa7
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora-0.1.dist-info/METADATA
+@@ -0,0 +1,3 @@
++Metadata-Version: 2.1
++Name: k31lora
++Version: 0.1
+diff --git a/kimi-k31/k31lora/k31lora-0.1.dist-info/entry_points.txt b/kimi-k31/k31lora/k31lora-0.1.dist-info/entry_points.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..c50041b7f7983139bd84e1f64752f2f551f66110
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora-0.1.dist-info/entry_points.txt
+@@ -0,0 +1,2 @@
++[vllm.general_plugins]
++k31lora = k31lora:register
+diff --git a/kimi-k31/k31lora/k31lora/__init__.py b/kimi-k31/k31lora/k31lora/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4cfcbcc34a62beaffb59821e0b6910b2610b994d
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/__init__.py
+@@ -0,0 +1,124 @@
++"""k31lora: vLLM general plugin that makes the ROCm Kimi-K3/K3.1 model LoRA-capable for DENSE modules
++(vLLM f5926fb, the ROCm Kimi-K3.1 build, declares no SupportsLoRA for the amd/ path).
++Loaded in every vLLM process via the `vllm.general_plugins` entry point; put this directory on PYTHONPATH.
++
++Three patches:
++1. re-register KimiK3{,1}ForConditionalGeneration -> k31lora.model.KimiK3LoRAForConditionalGeneration
++   (SupportsLoRA + packed_modules_mapping);
++2. with LoRA enabled, vLLM marks EVERY FusedMoE as LoRA-enabled, and the MXFP4 kernel oracle then rejects
++   AiterMxfp4Experts ("kernel does not support LoRA") even when the experts are not LoRA targets. Unless
++   K31LORA_EXPERTS=1, force FusedMoEConfig.is_lora_enabled=False: the experts stay on AITER MXFP4 and are never
++   wrapped (keep "experts" out of --lora-target-modules; expert LoRA has no ROCm MXFP4 kernel in this image).
++3. TP>1: the KDA in_proj (_KimiGDNMergedColumnParallelLinear) stores its replicated f_a shard as size*tp_size and appends
++   a zero padding slice. vLLM's LoRA then fails "Cannot determine how to split lora_b ... into 7 slices". Port of the
++   zm vllm/kimi-k3.1 fix (lora/layers/column_parallel_linear.py): replicated slices read rank 0's shard, and a packed
++   adapter list shorter than n_slices is padded with None (padding slice gets no LoRA).
++4. With LoRA enabled, wrapped params are named `<mod>.base_layer.weight`, but amd/linear.py KimiLinearModel.load_weights
++   looks up `params_dict[<mod>.weight]`, so vLLM's in-place `reload_weights()` (sleep(2) wake reload, verl-31) and plain
++   load_weights with checkpoint names fail with KeyError. Alias each `.base_layer.` param under its unwrapped name too.
++5. Opt-in K31_PERSIST_SLEEP=1: vLLM sleep(level=1) backs weights up into ONE persistent, exactly-sized host buffer per
++   allocation (pinned once via cudaHostRegister, reused every sleep) instead of fresh pinned tensors from PyTorch's
++   CachingHostAllocator. Measured on full K3.1 TP8 + LoRA: sleep 80 s -> 7.3 s (first sleep 37 s), host peak 2.7 TB ->
++   1.64 TB held persistently, no _host_emptyCache needed. See k31lora/persist_sleep.py.
++6. Opt-in, BI only (VLLM_BATCH_INVARIANT=1 and K31_BI_LORA_F32ADD=1): single-rounding LoRA expand epilogue
++   bf16(fp32(delta) + fp32(base)). See k31lora/bi_lora.py.
++7. Opt-in, BI only (VLLM_BATCH_INVARIANT=1 and K31_BI_MOE=1, needs VLLM_ROCM_USE_AITER_MOE_SITUV2=0, TP1/EP1): BI MXFP4
++   routed experts = exact dequant + pinned Triton grouped GEMM + expert-id-ascending FP32 tree (k31lora/bi_moe.py,
++   importable by the trainer so trainer == rollout).
++"""
++import os
++
++
++def register():
++    from vllm.platforms import current_platform
++    if not current_platform.is_rocm():
++        return
++    from vllm import ModelRegistry
++    for arch in ("KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration"):
++        ModelRegistry.register_model(arch, "k31lora.model:KimiK3LoRAForConditionalGeneration")
++    if os.environ.get("K31LORA_EXPERTS", "0") != "1":
++        from vllm.model_executor.layers.fused_moe import config as moe_cfg
++        cls = moe_cfg.FusedMoEConfig
++        if not getattr(cls, "_k31lora_patched", False):
++            orig = cls.__init__
++
++            def __init__(self, *a, **k):
++                k["is_lora_enabled"] = False
++                orig(self, *a, **k)
++
++            cls.__init__ = __init__
++            cls._k31lora_patched = True
++    _patch_replicated_shard()
++    _patch_base_layer_alias()
++    if os.environ.get("K31_PERSIST_SLEEP", "0") == "1":
++        from . import persist_sleep
++        persist_sleep.install()
++    from . import bi_lora
++    bi_lora.install()
++    bi_lora.allow_nonbi_attention()
++    bi_lora.force_bi_all_reduce()
++    bi_lora.bi_inplace_addmm()
++    bi_lora.bi_small_m_tiles()   # ROCm BI matmul: small-M tiles, same BLOCK_K (bitwise); opt-out K31_BI_MM_SMALLM=0
++    from . import bi_moe
++    bi_moe.install()
++    from . import bi_attnres
++    bi_attnres.install()     # BI only; opt-out K31_BI_ATTNRES=0 (pins AttnRes tiling to (1, 4) for every batch)
++
++
++def _patch_base_layer_alias():
++    from vllm.models.kimi_k3.amd.linear import KimiLinearModel as KM
++    if getattr(KM, "_k31lora_alias", False):
++        return
++    orig = KM.load_weights
++
++    def load_weights(self, weights):
++        if not any(".base_layer." in n for n, _ in self.named_parameters()):
++            return orig(self, weights)
++        orig_np = self.named_parameters
++
++        # Present ONLY unwrapped names: params_dict lookups by checkpoint name work, and
++        # RoutedExperts.make_expert_params_mapping (which assumes experts are wrapped whenever any
++        # `.base_layer.` param exists) builds the plain expert mapping (experts are never LoRA-wrapped here).
++        def named_parameters(*a, **k):
++            for n, p in orig_np(*a, **k):
++                yield n.replace(".base_layer.", "."), p
++
++        def strip(ws):
++            for w in ws:
++                yield (w[0].replace(".base_layer.", "."),) + tuple(w[1:])
++
++        self.named_parameters = named_parameters
++        try:
++            return orig(self, strip(weights))
++        finally:
++            del self.named_parameters
++
++    KM.load_weights, KM._k31lora_alias = load_weights, True
++
++
++def _patch_replicated_shard():
++    from vllm.lora.layers.column_parallel_linear import MergedColumnParallelLinearWithLoRA as L
++    if getattr(L, "_k31lora_patched", False):
++        return
++    orig_init, orig_set = L.__init__, L.set_lora
++
++    def __init__(self, base_layer, *a, **k):
++        orig_init(self, base_layer, *a, **k)
++        shard = getattr(self.base_layer, "replicated_shard_id", None)
++        rep = (shard,) if shard is not None else ((0, 1) if type(self.base_layer).__name__ == "KimiK3MergedQKVGateLinear" else ())
++        if rep:
++            ids = list(self.output_ids)
++            for s_ in rep:
++                if s_ < self.n_slices:
++                    ids[s_] = 0
++            self.output_ids = tuple(ids)
++
++    def set_lora(self, index, lora_a, lora_b, *a, **k):
++        if (getattr(self.base_layer, "replicated_shard_id", None) is not None and isinstance(lora_b, list)
++                and len(lora_b) < self.n_slices):
++            miss = self.n_slices - len(lora_b)
++            lora_a = list(lora_a) + [None] * miss
++            lora_b = list(lora_b) + [None] * miss
++        return orig_set(self, index, lora_a, lora_b, *a, **k)
++
++    L.__init__, L.set_lora, L._k31lora_patched = __init__, set_lora, True
+diff --git a/kimi-k31/k31lora/k31lora/bi_attnres.py b/kimi-k31/k31lora/k31lora/bi_attnres.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..35901e7052d4fe38b0f01a9644f56f32a73fcd08
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/bi_attnres.py
+@@ -0,0 +1,76 @@
++"""k31lora.bi_attnres (same function names and the same _k31_bi_pinned marker as a standalone k31bi_attnres,
++so the two coexist and installing is idempotent).
++
++Batch-invariant AttnRes for Kimi-K3.1 on ROCm (vLLM f5926fb `amd/ops/attn_res.py`).
++
++Found by a full-model all-BI decode probe: the first diverging tensor is layer 12's MoE INPUT, i.e. the
++output of `_apply_attn_res` at the first AttnRes block boundary (attn_res_block_size 12). `attn_res()` picks the kernel
++tiling from the BATCH size:
++    if num_tokens >= 256 or num_blocks <= 1:  block_l, num_warps = 1, 4
++    else:                                     block_l, num_warps = 4, 8
++BLOCK_L sets how many source blocks each online-softmax step combines, and num_warps the reduction layout, so the FP32
++rounding of a token's row depends on how many OTHER tokens share the step (decode alone M=1 vs a decode token batched with
++prefill chunks, M >= 256). Layers before the first block boundary have num_blocks <= 1 (always tile 1/4), and the 4-layer
++proxy never reaches a boundary, which is why both were bitwise.
++
++Under VLLM_BATCH_INVARIANT=1 this plugin pins the tiling for every batch (default 1 / 4, the long-sequence path;
++override K31_BI_ATTNRES_CFG="block_l,num_warps"). The kernel and its arithmetic are the image's own `_attn_res_kernel`;
++only the launch parameters are fixed. Patches `vllm.models.kimi_k3.amd.ops.attn_res.attn_res` and the name imported into
++`vllm.models.kimi_k3.amd.linear`. Opt-out: K31_BI_ATTNRES=0. The trainer must call the same op with the same pin."""
++import os
++
++
++def _pinned_attn_res(orig_mod):
++    import torch
++    from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
++    from vllm.triton_utils import triton
++
++    kernel = orig_mod._attn_res_kernel
++    bl, nw = (int(v) for v in os.environ.get("K31_BI_ATTNRES_CFG", "1,4").split(","))
++
++    def attn_res(prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight, num_blocks, block_write_idx, eps,
++                 output_norm_eps, *, quant_dtype=None):
++        num_tokens, hidden_size = prefix.shape
++        assert prefix.stride(-1) == 1
++        assert delta is None or delta.stride(-1) == 1
++        assert blocks.stride(-1) == 1
++        assert norm_weight.stride(-1) == 1
++        assert qk_weight.stride(-1) == 1
++        assert output_norm_weight is None or output_norm_weight.stride(-1) == 1
++        if quant_dtype is not None:
++            assert quant_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
++        output = torch.empty_like(prefix, dtype=quant_dtype or prefix.dtype, memory_format=torch.contiguous_format)
++        scale = (torch.empty((num_tokens, 1), device=prefix.device, dtype=torch.float32)
++                 if quant_dtype is not None else None)
++        if num_tokens == 0:
++            return output if scale is None else (output, scale)
++        kernel[(num_tokens,)](
++            prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight, output, scale,
++            prefix.stride(0), 0 if delta is None else delta.stride(0), blocks.stride(0), blocks.stride(1),
++            output.stride(0), num_blocks, hidden_size, block_write_idx, eps, output_norm_eps,
++            HAS_DELTA=delta is not None, WRITE_BLOCK=block_write_idx >= 0,
++            APPLY_OUTPUT_NORM=output_norm_weight is not None,
++            QUANT_MAX=0.0 if quant_dtype is None else get_fp8_min_max()[1],
++            BLOCK_L=bl,                                   # PINNED (default: 1 if num_tokens >= 256 else 4)
++            BLOCK_D=triton.next_power_of_2(hidden_size),
++            num_warps=nw,                                 # PINNED (default: 4 if num_tokens >= 256 else 8)
++            num_stages=2,
++        )
++        return output if scale is None else (output, scale)
++
++    attn_res._k31_bi_pinned = (bl, nw)
++    return attn_res
++
++
++def install():
++    import importlib
++    if os.environ.get("VLLM_BATCH_INVARIANT", "0") != "1" or os.environ.get("K31_BI_ATTNRES", "1") != "1":
++        return False
++    ops = importlib.import_module("vllm.models.kimi_k3.amd.ops.attn_res")
++    if getattr(ops.attn_res, "_k31_bi_pinned", None):
++        return True
++    fn = _pinned_attn_res(ops)
++    ops.attn_res = fn
++    lin = importlib.import_module("vllm.models.kimi_k3.amd.linear")
++    lin.attn_res = fn
++    return True
+diff --git a/kimi-k31/k31lora/k31lora/bi_lora.py b/kimi-k31/k31lora/k31lora/bi_lora.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b41e3c667c2348fd477e3cb09a9b4a2180214195
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/bi_lora.py
+@@ -0,0 +1,156 @@
++"""Overlay patch 6 (opt-in, BI only): single-rounding LoRA epilogue for dense LoRA under VLLM_BATCH_INVARIANT=1.
++
++vLLM's punica expand (vllm/lora/ops/triton_ops/kernel_utils.py do_expand_kernel) does
++    tiled_c = accumulator.to(bf16); tiled_c += bf16(base_out)          -> bf16(bf16(delta) + base)   (two roundings)
++With K31_BI_LORA_F32ADD=1 it becomes
++    tiled_c = (accumulator + fp32(base_out)).to(bf16)                   -> bf16(fp32(delta) + fp32(base)) (one rounding)
++i.e. the zm "LoRA leaf" form minus the fp32 base GEMM output (our base GEMM still rounds to bf16 once). Both forms are
++row-local and batch-invariant once the GEMMs are; this one is just the more accurate contract, and the trainer adapter
++must mirror whichever is chosen. Implemented by re-compiling do_expand_kernel from the installed source with the
++epilogue line changed, and rebinding it in lora_expand_op (Triton resolves the callee from that module's globals)."""
++import inspect
++import os
++import re
++
++
++def install():
++    if os.environ.get("VLLM_BATCH_INVARIANT", "0") != "1" or os.environ.get("K31_BI_LORA_F32ADD", "0") != "1":
++        return "off"
++    from vllm.lora.ops.triton_ops import kernel_utils as KU
++    from vllm.lora.ops.triton_ops import lora_expand_op as LE
++    if getattr(LE, "_k31_f32add", False):   # register() may run twice (k31xlora calls k31lora.register())
++        return "f32add"
++    src = inspect.getsource(KU)
++    old = re.compile(r"(\n(\s*)if ADD_INPUTS:\n\s*tiled_out = tl\.load\(c_ptr, mask=c_mask\)\n)\s*tiled_c \+= tiled_out\n")
++    m = old.search(src)
++    if m is None:
++        raise RuntimeError("k31lora bi_lora: expand epilogue pattern not found; vLLM changed")
++    ind = m.group(2) + "    "
++    new = m.group(1) + f"{ind}tiled_c = (accumulator + tiled_out.to(tl.float32)).to(cur_lora_ptr.dtype.element_ty)\n"
++    src = src[: m.start()] + new + src[m.end():]
++    import importlib.util
++    import tempfile
++    d = os.environ.get("K31_BI_TMP", tempfile.gettempdir())
++    path = os.path.join(d, f"k31_kernel_utils_f32add_{os.getpid()}.py")   # per process: no write races
++    with open(path, "w") as f:   # triton needs a real source file for inspect
++        f.write(src)
++    spec = importlib.util.spec_from_file_location(f"k31_kernel_utils_f32add_{os.getpid()}", path)
++    m2 = importlib.util.module_from_spec(spec); spec.loader.exec_module(m2)
++    LE.do_expand_kernel = m2.do_expand_kernel
++    LE._k31_f32add = True
++    return "f32add"
++
++
++def allow_nonbi_attention():
++    """TEST ONLY (K31_BI_ALLOW_NONBI_ATTN=1 with VLLM_BATCH_INVARIANT=1): the image's ROCm DSA attention backends and MXFP4 MoE experts refuse BI
++    mode (ROCM_AITER_MLA_SPARSE and the AITER-FA MLA prefill: "batch invariance not supported"), so no K3.1 engine starts
++    under BI. This lets them start anyway (they are NOT batch-invariant) so probes can localize the other layers;
++    the DSA layer is then expected to be the first divergence. Never use for real BI runs."""
++    if os.environ.get("VLLM_BATCH_INVARIANT", "0") != "1" or os.environ.get("K31_BI_ALLOW_NONBI_ATTN", "0") != "1":
++        return "off"
++    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import ROCMAiterMLASparseBackend
++    from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import AiterFlashAttnPrefillBackend
++    for cls in (ROCMAiterMLASparseBackend, AiterFlashAttnPrefillBackend):
++        if getattr(cls, "_k31_allow_nonbi", False):
++            continue
++        orig = cls.validate_configuration.__func__
++
++        def validate_configuration(c, *a, _orig=orig, **k):
++            return [r for r in _orig(c, *a, **k) if r != "batch invariance not supported"]
++
++        cls.validate_configuration = classmethod(validate_configuration)
++        if hasattr(cls, "supports_batch_invariance"):
++            cls.supports_batch_invariance = classmethod(lambda c: True)
++        cls._k31_allow_nonbi = True
++    # MoE: the MXFP4 expert oracle also refuses BI ("AiterMxfp4Experts ... does not support batch invariance").
++    # Let the default (non-BI) experts start too; the MoE layers are then an expected divergence.
++    from vllm.model_executor.layers.fused_moe import modular_kernel as MK
++    if not getattr(MK.FusedMoEExperts, "_k31_allow_nonbi", False):
++        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterMxfp4Experts
++        for c in (MK.FusedMoEExperts, AiterMxfp4Experts):
++            c._supports_batch_invariance = staticmethod(lambda: True)
++        MK.FusedMoEExperts._k31_allow_nonbi = True
++    # Every other attention backend that does not declare BI (KDA "KIMI_K3_KDA_ROCM", DSA indexer "DEEPSEEK_V32_INDEXER",
++    # ...): flip the base-class default. Backends that set it explicitly keep their own answer.
++    from vllm.v1.attention.backend import AttentionBackend
++    AttentionBackend.supports_batch_invariance = classmethod(lambda c: True)
++    return "allowed"
++
++
++def force_bi_all_reduce():
++    """DIAGNOSTIC ONLY, not needed (VLLM_BATCH_INVARIANT=1 and K31_BI_AR=1): route every floating-point TP all-reduce
++    through vLLM's all_reduce_batch_invariant (all-gather + ordered sum) instead of the custom all-reduce.
++    Measured 11/05: vLLM's ROCm custom all-reduce gives the SAME bits as all_reduce_batch_invariant at every size
++    (7 KB-14.7 MB, bf16/fp32, all ranks) and is 3-4x faster at decode sizes; full-model BI rollout and the TP8 --bi 1 RL
++    gate (trainer fixed-order-sum VTP) are bitwise with it unset. (The old TP8 bs1-vs-bsN decode divergence was addmm_,
++    see bi_inplace_addmm.)"""
++    if os.environ.get("VLLM_BATCH_INVARIANT", "0") != "1" or os.environ.get("K31_BI_AR", "0") != "1":
++        return "off"
++    from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
++    if getattr(CustomAllreduce, "_k31_bi_ar", False):
++        return "on"
++    orig = CustomAllreduce.should_custom_ar
++
++    def should_custom_ar(self, inp):
++        if inp.is_floating_point():
++            return False
++        return orig(self, inp)
++    CustomAllreduce.should_custom_ar = should_custom_ar
++    CustomAllreduce._k31_bi_ar = True
++    return "on"
++
++
++_ADDMM_LIB = None
++
++
++def bi_inplace_addmm():
++    """VLLM_BATCH_INVARIANT=1 (opt-out K31_BI_ADDMM_=0): vLLM's BI mode overrides aten::addmm / addmm.out but NOT the
++    in-place aten::addmm_, which therefore stays on hipBLASLt (not row-invariant). The Kimi-K3 latent-MoE TP>1 tail uses
++    `hidden_shard.addmm_(latent, up_proj_shard.t())` (amd/latent_moe_runner.py:114): decode bs1 vs bsN diverged there.
++    Route addmm_ through vLLM's batch-invariant addmm."""
++    global _ADDMM_LIB
++    if os.environ.get("VLLM_BATCH_INVARIANT", "0") != "1" or os.environ.get("K31_BI_ADDMM_", "1") != "1":
++        return "off"
++    if _ADDMM_LIB is not None:
++        return "on"
++    import torch
++    from vllm.model_executor.determinism.batch_invariant import _addmm_impl
++    from vllm.platforms import current_platform
++
++    def addmm_(self, mat1, mat2, *, beta=1, alpha=1):
++        return self.copy_(_addmm_impl(self, mat1, mat2, beta, alpha, None))
++
++    _ADDMM_LIB = torch.library.Library("aten", "IMPL")
++    _ADDMM_LIB.impl("aten::addmm_", addmm_, current_platform.dispatch_key)
++    return "on"
++
++
++def bi_small_m_tiles():
++    """VLLM_BATCH_INVARIANT=1 on ROCm (opt-out K31_BI_MM_SMALLM=0): small-M tiles for vLLM's BI persistent matmul.
++    vLLM's M-bucketed config table (batch_invariant_configs._get_matmul_config) is only populated for CUDA arch families, so
++    on gfx950 every BF16 BI GEMM runs 128x128x64 tiles, mostly padding at decode M. This keeps BLOCK_K = 64 (the default,
++    hence the same per-element K-reduction order) and varies only BLOCK_M/N/warps/stages by M. Verified 11/05: all 36
++    candidate configs are bitwise == the default for K in {512..12288} x N in {256..20480} x M in 1..64,96,128; ~2x at decode."""
++    if os.environ.get("VLLM_BATCH_INVARIANT", "0") != "1" or os.environ.get("K31_BI_MM_SMALLM", "1") != "1":
++        return "off"
++    import torch
++    from vllm.platforms import current_platform
++    if not current_platform.is_rocm():
++        return "off"
++    from vllm.model_executor.determinism import batch_invariant as BI
++    if getattr(BI, "_k31_small_m", False):
++        return "on"
++    orig = BI._get_matmul_config
++
++    def _get_matmul_config(M, N, K, dtype, default):
++        if dtype == torch.bfloat16 and M <= 64 and default.get("BLOCK_SIZE_K") == 64:
++            bn = 128 if N >= 16384 else 64
++            bm = 16 if M <= 32 else 64
++            if N >= 16384:
++                bm = 32 if M <= 16 else 64
++            return {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 8,
++                    "num_stages": 3, "num_warps": 4}
++        return orig(M, N, K, dtype, default)
++    BI._get_matmul_config = _get_matmul_config
++    BI._k31_small_m = True
++    return "on"
+diff --git a/kimi-k31/k31lora/k31lora/bi_moe.py b/kimi-k31/k31lora/k31lora/bi_moe.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..15b2c27a07475a5e7a9f524d000988cc103c19e7
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/bi_moe.py
+@@ -0,0 +1,1378 @@
++"""Batch-invariant (BI) MXFP4 routed-expert MoE for Kimi-K3.1 on ROCm, shared by the vLLM rollout and the mLite trainer.
++
++Contract (one token; = the mLite ROCm trainer's rocm_mxfp4_moe.py semantics, with its torch.bmm/matmul replaced by the
++pinned Triton GEMMs below so that trainer == rollout bitwise):
++  W13_e, W2_e = exact MXFP4 -> BF16 dequant (E2M1 x 2^(byte-127); low nibble = even element), in-register
++  gu    = bf16(x_bf16 @ W13_e^T)                   FP32 accumulate in fixed K order, one BF16 rounding
++  pre   = fp32(gu) + d13                           d13 = expert-LoRA delta (FP32), 0 without LoRA
++  act   = bf16(situ_fp32(pre))                     beta*tanh(g/beta)*sigmoid(g) * lbeta*tanh(u/lbeta), FP32
++  y     = bf16(act @ W2_e^T)
++  leaf  = w_route(FP32) * (fp32(y) + d2)
++  out   = adjacent-pair FP32 tree over the top-k slots in EXPERT-ID-ASCENDING order, one BF16 rounding, -0 -> +0
++  d13   = [d1 | d3], d1 = (x @ A1^T)_fp32 @ (B1*s)^T_fp32, d3 = (x @ A3^T)_fp32 @ (B3*s)^T_fp32   (separate gate/up
++          factors as in vLLM --enable-moe-shared-loras and the trainer; FP32 shrink, no BF16 cast; FP32-IEEE expand)
++  d2    = (act @ A2^T)_fp32 @ (B2*s)^T_fp32   (shrink over N in the canonical 8-chunk split)
++  Stable hooks for the trainer: leaf_reduce(slots FP32 [T*k, H]) is called before the tree; expert_map as below.
++Every GEMM row is computed by one pinned Triton tile (BLOCK_M/N/K, warps, stages fixed): the row result does not depend
++on the other rows, the batch size, the grouping of slots by expert, or the run (pinned tl.dot is row-invariant on
++gfx950). Elementwise steps are torch FP32 ops (row-local, deterministic).
++Layout invariance (TP / EP): the W2 contraction over the intermediate dim N is ALWAYS split into N_CHUNKS=8 global chunks
++of N/8 (FP32 partials, adjacent-pair FP32 tree over the 8 chunks in chunk order, then the BF16 rounding of y); the same for
++the expert-LoRA A2 shrink. TP1, TP2/4/8 (chunks gathered across TP ranks) and the trainer at any EP compute identical bits.
++EP: leaves of non-local experts are 0 on a rank; an FP32 all-reduce over the EP group assembles all top-k leaves exactly
++(x + 0), then the expert-ascending tree. The result is then identical on every rank of the group.
++No vLLM imports in the math (the trainer can import bi_moe_forward / mxfp4_grouped_gemm directly)."""
++import os
++
++import torch
++import triton
++import triton.language as tl
++from triton.language.extra import libdevice
++
++# pinned tile: do NOT autotune; trainer and rollout must use the same values
++BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 32, 64, 64, 4, 2
++N_CHUNKS = 8   # canonical split of the intermediate dim (= TP8 shards)
++TUNED = os.environ.get("K31_BI_MOE_TUNED", "1") == "1"
++ENGINE = os.environ.get("K31_BI_MOE_ENGINE", "dequant")      # "dequant" (this file) | any name with ENGINE_FN set
++ENGINE_FN = os.environ.get("K31_BI_MOE_ENGINE_FN", "")        # "module:function", grouped_gemm signature (MXFP4 only)
++_ENGINE_CACHE = {}
++
++
++ENGINE_AUTO_MIN_T = int(os.environ.get("K31_BI_MOE_ENGINE_AUTO_MIN_T", "64"))        # w13 (K=hidden)
++ENGINE_AUTO_MIN_T_W2 = int(os.environ.get("K31_BI_MOE_ENGINE_AUTO_MIN_T_W2", "256"))  # W2 chunks (K=384)
++# gfx950, TP8 rollout shape: a16w4 vs dequant per layer-rank, w13 0.35 vs 0.80 ms at T=64; W2 0.43 vs 0.10 at T=8,
++# 1.19 vs 1.41 at T=512. EP8 decode (E_loc 112, per layer GPU ms, auto-old -> w13 engine always -> + W2 engine):
++# T1 .447/.288/.327, T8 .734/.507/.528, T16 1.059/.674/.638, T32 1.494/.946/.799, T64 1.192/1.207/1.084. MIN_T=1 helped 8 seqs
++# (proxy 4.71 -> 3.96 ms) but cost -7.8% on the full model at 64 seqs -> kept at 64 (a T-dependent rule is a TODO).
++# Engines are bitwise identical at every shape (tests/engine_eq.py), so this choice is free.
++
++
++def _engine_fn(rows=None, K=None):
++    """Pluggable MXFP4 grouped-GEMM engine (e.g. k31xlora's BI aiter moe_gemm_a16w4). Contract: same signature and
++    semantics as grouped_gemm for MXFP4 weights -> FP32 out[r] = a[a_rows[r]] @ deq(w[e(r)])^T (+ add[r]), rows grouped by
++    expert per `tiles` = (tile_e, r0, r1, bm); row results must not depend on other rows (BI). The trainer must use the
++    same engine (bits differ between engines)."""
++    if ENGINE == "dequant" or not ENGINE_FN:
++        return None
++    thr = ENGINE_AUTO_MIN_T_W2 if (K is not None and K <= 1024) else ENGINE_AUTO_MIN_T
++    if ENGINE == "auto" and (rows is None or rows // 16 < thr):
++        return None   # auto: the plug-in engine only for larger batches; legal ONLY because it is bit-identical to dequant
++    if ENGINE_FN not in _ENGINE_CACHE:
++        import importlib
++        mod, fn = ENGINE_FN.split(":")
++        _ENGINE_CACHE[ENGINE_FN] = getattr(importlib.import_module(mod), fn)
++    return _ENGINE_CACHE[ENGINE_FN]
++
++
++FUSED_W2 = os.environ.get("K31_BI_MOE_FUSED_W2", "auto")   # "1" always, "0" never, "auto": only tiny batches (faster
++FUSED_W2_MAX_ROWS = int(os.environ.get("K31_BI_MOE_FUSED_W2_MAX_ROWS", "128"))   # auto: fused 8-chunk W2 up to 128 slot rows (EP decode T<=8: faster; same bits)
++                                                            # there; bits identical either way, tests/fused_check.py)
++
++
++def _pick_cfg(rows, K, N, mx):
++    """Tile per (shape, rows) from a gfx950 sweep: every candidate gave bits IDENTICAL to
++    the pinned reference (0/88 rejected), so the choice only changes speed, never the result."""
++    if not (TUNED and mx):
++        return None
++    T = rows // 16 + 1
++    if K == 384:                                        # W2 canonical chunk
++        return (32, 64, 64, 4, 2) if T <= 1 else (64, 64, 64, 4, 2) if T <= 8 else \
++            (16, 128, 64, 4, 2) if T <= 256 else (32, 128, 64, 4, 2)
++    if N >= 4096:                                       # W13 at TP1/2
++        return (16, 64, 128, 4, 2) if T <= 1 else (16, 256, 64, 8, 2) if T <= 256 else (64, 64, 64, 4, 2)
++    return (64, 64, 256, 8, 2) if T <= 1 else (16, 128, 128, 8, 2) if T <= 8 else \
++        (16, 64, 128, 4, 2) if T <= 64 else (16, 128, 64, 4, 2) if T <= 256 else (64, 128, 128, 8, 2)
++
++
++@triton.jit
++def _e2m1(c):
++    sign = (c >> 3) & 1
++    e = (c >> 1) & 3
++    m = (c & 1).to(tl.float32)
++    p = tl.where(e == 3, 4.0, tl.where(e == 2, 2.0, 1.0))
++    mag = tl.where(e == 0, m * 0.5, (1.0 + m * 0.5) * p)
++    return tl.where(sign == 1, -mag, mag)
++
++
++@triton.jit
++def _grouped_gemm_kernel(A, A_ROWS, W, S, ADD, OUT, TILE_E, TILE_R0, TILE_R1, N, K,
++                         stride_am, stride_we, stride_wn, stride_se, stride_sn, stride_om, stride_addm, WSC,
++                         MXFP4: tl.constexpr, HAS_ADD: tl.constexpr, SHARED_W: tl.constexpr, FP32_DOT: tl.constexpr,
++                         W_TO_F32: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
++    pid_t = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    e = tl.load(TILE_E + pid_t).to(tl.int64)
++    if SHARED_W:
++        e = e * 0
++    r0 = tl.load(TILE_R0 + pid_t)
++    r1 = tl.load(TILE_R1 + pid_t)
++    if r0 >= r1:
++        return                                    # empty (graph-padding) tile
++    offs_m = r0 + tl.arange(0, BM)
++    m_mask = offs_m < r1
++    om = offs_m.to(tl.int64)
++    rows = tl.load(A_ROWS + offs_m, mask=m_mask, other=0).to(tl.int64)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    n_mask = offs_n < N
++    acc = tl.zeros((BM, BN), dtype=tl.float32)
++    for k0 in range(0, K, BK):
++        offs_k = k0 + tl.arange(0, BK)
++        k_mask = offs_k < K
++        a = tl.load(A + rows[:, None] * stride_am + offs_k[None, :], mask=m_mask[:, None] & k_mask[None, :], other=0.0)
++        if MXFP4:
++            offs_kb = k0 // 2 + tl.arange(0, BK // 2)
++            b = tl.load(W + e * stride_we + offs_n[:, None] * stride_wn + offs_kb[None, :],
++                        mask=n_mask[:, None] & (offs_kb[None, :] < K // 2), other=0)
++            offs_ks = k0 // 32 + tl.arange(0, BK // 32)
++            s = tl.load(S + e * stride_se + offs_n[:, None] * stride_sn + offs_ks[None, :],
++                        mask=n_mask[:, None] & (offs_ks[None, :] < K // 32), other=127)
++            lo = _e2m1(b & 0xF)
++            hi = _e2m1((b >> 4) & 0xF)
++            w = tl.reshape(tl.join(lo, hi), (BN, BK))                       # low nibble = even element
++            sc = (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)      # 2^(byte-127), exact
++            w = tl.reshape(tl.reshape(w, (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
++            w = w.to(tl.bfloat16)                                         # exact
++        else:
++            w = tl.load(W + e * stride_we + offs_n[:, None] * stride_wn + offs_k[None, :],
++                        mask=n_mask[:, None] & k_mask[None, :], other=0.0)
++            if W_TO_F32:
++                w = w.to(tl.float32) * WSC                 # == torch (B.float() * scaling): fp32 convert + fp32 mul
++        if FP32_DOT:
++            acc += tl.dot(a, tl.trans(w), input_precision="ieee")
++        else:
++            acc += tl.dot(a, tl.trans(w))
++    if HAS_ADD:
++        acc += tl.load(ADD + om[:, None] * stride_addm + offs_n[None, :], mask=m_mask[:, None] & n_mask[None, :], other=0.0)
++    tl.store(OUT + om[:, None] * stride_om + offs_n[None, :], acc, mask=m_mask[:, None] & n_mask[None, :])
++
++
++@triton.jit
++def _w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, c, CH: tl.constexpr, stride_am, stride_we, stride_wn,
++              stride_se, stride_sn, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
++    acc = tl.zeros((BM, BN), dtype=tl.float32)
++    for kk in range(0, CH, BK):
++        offs_k = c * CH + kk + tl.arange(0, BK)
++        a = tl.load(A + rows[:, None] * stride_am + offs_k[None, :], mask=m_mask[:, None], other=0.0)
++        offs_kb = (c * CH + kk) // 2 + tl.arange(0, BK // 2)
++        b = tl.load(W + e * stride_we + offs_n[:, None] * stride_wn + offs_kb[None, :], mask=n_mask[:, None], other=0)
++        offs_ks = (c * CH + kk) // 32 + tl.arange(0, BK // 32)
++        sc = tl.load(S + e * stride_se + offs_n[:, None] * stride_sn + offs_ks[None, :], mask=n_mask[:, None], other=127)
++        w = tl.reshape(tl.join(_e2m1(b & 0xF), _e2m1((b >> 4) & 0xF)), (BN, BK))
++        f = (sc.to(tl.int32) << 23).to(tl.float32, bitcast=True)
++        w = tl.reshape(tl.reshape(w, (BN, BK // 32, 32)) * f[:, :, None], (BN, BK)).to(tl.bfloat16)
++        acc += tl.dot(a, tl.trans(w))
++    return acc
++
++
++@triton.jit
++def _w2_fused8_kernel(A, W, S, OUT, TILE_E, TILE_R0, TILE_R1, N, stride_am, stride_we, stride_wn, stride_se,
++                      stride_sn, stride_om, CH: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
++    """y = tree8 over the 8 canonical intermediate chunks of act @ W2_e^T, in one kernel: chunk partials are the same
++    tl.dot chains as the per-chunk launches, combined ((p0+p1)+(p2+p3))+((p4+p5)+(p6+p7)) in fp32 -> same bits."""
++    pid_t = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    e = tl.load(TILE_E + pid_t).to(tl.int64)
++    r0 = tl.load(TILE_R0 + pid_t)
++    r1 = tl.load(TILE_R1 + pid_t)
++    if r0 >= r1:
++        return
++    offs_m = r0 + tl.arange(0, BM)
++    m_mask = offs_m < r1
++    rows = offs_m.to(tl.int64)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    n_mask = offs_n < N
++    a = (_w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 0, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK)
++         + _w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 1, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK))
++    b = (_w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 2, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK)
++         + _w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 3, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK))
++    lo = a + b
++    a = (_w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 4, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK)
++         + _w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 5, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK))
++    b = (_w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 6, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK)
++         + _w2_chunk(A, W, S, rows, m_mask, offs_n, n_mask, e, 7, CH, stride_am, stride_we, stride_wn, stride_se, stride_sn, BM, BN, BK))
++    hi = a + b
++    tl.store(OUT + rows[:, None] * stride_om + offs_n[None, :], lo + hi, mask=m_mask[:, None] & n_mask[None, :])
++
++
++@triton.jit
++def _gg_scaled_kernel(A, A_ROWS, W, S, OUT, TILE_E, TILE_R0, TILE_R1, N, K, stride_am, stride_we, stride_wn, stride_se,
++                      stride_sn, stride_oc, stride_om, CH_A, CH_W, CH_S, BM: tl.constexpr, BN: tl.constexpr,
++                      BK: tl.constexpr):
++    """MXFP4 grouped GEMM with tl.dot_scaled (gfx950 hardware fp4 -> bf16 conversion; same MFMA chain as the dequant
++    kernel: bitwise equal, tests/scaled_eq.py). program_id(2) = chunk c: A columns / W, S K-ranges offset by c * CH_*,
++    output plane c (OUT + c * stride_oc). Row r of a chunk = A[A_ROWS[r], c*CH_A : c*CH_A + K] @ W[e, :, chunk]^T."""
++    pid_t = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    c = tl.program_id(2).to(tl.int64)
++    e = tl.load(TILE_E + pid_t).to(tl.int64)
++    r0 = tl.load(TILE_R0 + pid_t)
++    r1 = tl.load(TILE_R1 + pid_t)
++    if r0 >= r1:
++        return
++    offs_m = r0 + tl.arange(0, BM)
++    m_mask = offs_m < r1
++    rows = tl.load(A_ROWS + offs_m, mask=m_mask, other=0).to(tl.int64)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    n_mask = offs_n < N
++    nn = tl.where(n_mask, offs_n, 0).to(tl.int64)
++    pa = A + c * CH_A + rows[:, None] * stride_am + tl.arange(0, BK)[None, :]
++    pw = W + e * stride_we + c * CH_W + nn[None, :] * stride_wn + tl.arange(0, BK // 2)[:, None]
++    ps = S + e * stride_se + c * CH_S + nn[:, None] * stride_sn + tl.arange(0, BK // 32)[None, :]
++    acc = tl.zeros((BM, BN), dtype=tl.float32)
++    for k0 in range(0, K, BK):
++        a = tl.load(pa, mask=m_mask[:, None], other=0.0)
++        w = tl.load(pw)
++        sc = tl.load(ps)
++        acc = tl.dot_scaled(a, None, "bf16", w, sc, "e2m1", acc=acc, fast_math=True)
++        pa += BK
++        pw += BK // 2
++        ps += BK // 32
++    om = offs_m.to(tl.int64)
++    tl.store(OUT + c * stride_oc + om[:, None] * stride_om + offs_n[None, :], acc, mask=m_mask[:, None] & n_mask[None, :])
++
++
++SCALED_CFG = os.environ.get("K31_BI_MOE_SCALED_CFG", "")   # "BN,BK,warps,stages" override (speed only; bits invariant)
++
++
++def scaled_gemm(a, a_rows, w, scale, tiles, n_out, chunks=1, out=None, cfg=None):
++    """FP32 [chunks, R, n_out]: plane c = a[a_rows, c*Kc:(c+1)*Kc] @ deq(w[e, :, chunk c])^T, Kc = K_total / chunks.
++    w uint8 [E, n_out, K_total/2] (raw MXFP4, may be a slice with stride(-1) == 1), scale uint8 [E, n_out, K_total/32].
++    Same values as grouped_gemm on each chunk (dequant engine / a16w4 engine); one launch for all chunks."""
++    tile_e, r0, r1, bm = tiles
++    R = a_rows.numel()
++    Kt = w.shape[2] * 2
++    Kc = Kt // chunks
++    wv, sv = w.view(torch.uint8), scale.view(torch.uint8)
++    assert a.stride(1) == 1 and wv.stride(2) == 1 and sv.stride(2) == 1 and Kc % 32 == 0
++    if out is None:
++        out = torch.empty((chunks, R, n_out), dtype=torch.float32, device=a.device)
++    if R == 0 or tile_e.numel() == 0:
++        return out
++    if cfg is None:
++        cfg = tuple(int(v) for v in SCALED_CFG.split(",")) if SCALED_CFG else (128, 128 if Kc % 128 == 0 else 64, 4, 2)
++    bn, bk, nw, ns = cfg
++    if Kc % bk:
++        bk = 64 if Kc % 64 == 0 else 32
++    grid = (tile_e.numel(), triton.cdiv(n_out, bn), chunks)
++    _gg_scaled_kernel[grid](a, a_rows, wv, sv, out, tile_e, r0, r1, n_out, Kc, a.stride(0), wv.stride(0), wv.stride(1),
++                            sv.stride(0), sv.stride(1), out.stride(0), out.stride(1), Kc, Kc // 2, Kc // 32,
++                            BM=bm, BN=bn, BK=bk, num_warps=nw, num_stages=ns)
++    return out
++
++
++@triton.jit
++def _tree8_rows_kernel(P, OUT, NROWS, N, stride_pc, stride_pm, stride_om, BR: tl.constexpr, BN: tl.constexpr):
++    """OUT[r] = ((P0+P1)+(P2+P3))+((P4+P5)+(P6+P7)) for rows < NROWS (== the progressive chunk tree)."""
++    pid_r = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    nrows = tl.load(NROWS)
++    r0 = pid_r * BR
++    if r0 >= nrows:
++        return
++    offs_r = r0 + tl.arange(0, BR)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    m = (offs_r < nrows)[:, None] & (offs_n < N)[None, :]
++    p = P + offs_r.to(tl.int64)[:, None] * stride_pm + offs_n[None, :]
++    x0 = tl.load(p, mask=m, other=0.0)
++    x1 = tl.load(p + stride_pc, mask=m, other=0.0)
++    x2 = tl.load(p + 2 * stride_pc, mask=m, other=0.0)
++    x3 = tl.load(p + 3 * stride_pc, mask=m, other=0.0)
++    x4 = tl.load(p + 4 * stride_pc, mask=m, other=0.0)
++    x5 = tl.load(p + 5 * stride_pc, mask=m, other=0.0)
++    x6 = tl.load(p + 6 * stride_pc, mask=m, other=0.0)
++    x7 = tl.load(p + 7 * stride_pc, mask=m, other=0.0)
++    y = ((x0 + x1) + (x2 + x3)) + ((x4 + x5) + (x6 + x7))
++    tl.store(OUT + offs_r.to(tl.int64)[:, None] * stride_om + offs_n[None, :], y, mask=m)
++
++
++def tree8_rows(P, nrows):
++    C, R, N = P.shape
++    assert C == 8 and P.stride(2) == 1
++    out = torch.empty((R, N), dtype=torch.float32, device=P.device)
++    if R:
++        BR, BN = 8, 512
++        _tree8_rows_kernel[(triton.cdiv(R, BR), triton.cdiv(N, BN))](P, out, nrows, N, P.stride(0), P.stride(1),
++                                                                    out.stride(0), BR=BR, BN=BN, num_warps=4)
++    return out
++
++
++def w2_fused8(act, w, scale, tiles, n_out):
++    """act BF16 [R, N] (rows in tile order), w uint8 [E, n_out, N/2], scale [E, n_out, N/32] -> FP32 [R, n_out]."""
++    tile_e, r0, r1, bm = tiles
++    R, Nf = act.shape
++    out = (torch.zeros if (GRAPH_SAFE and _ZERO_INIT[0]) else torch.empty)((R, n_out), dtype=torch.float32, device=act.device)
++    if R == 0 or tile_e.numel() == 0:
++        return out
++    ch = Nf // N_CHUNKS
++    p = _pick_cfg(R, ch, n_out, True) or (bm, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES)
++    bn, bk, nw, ns = p[1], p[2], p[3], p[4]
++    if ch % bk:
++        bk = 64
++    wv, sv = w.view(torch.uint8), scale.view(torch.uint8)
++    grid = (tile_e.numel(), triton.cdiv(n_out, bn))
++    _w2_fused8_kernel[grid](act, wv, sv, out, tile_e, r0, r1, n_out, act.stride(0), wv.stride(0), wv.stride(1),
++                            sv.stride(0), sv.stride(1), out.stride(0), CH=ch, BM=bm, BN=bn, BK=bk,
++                            num_warps=nw, num_stages=ns)
++    return out
++
++
++
++@triton.jit
++def _route_kernel(BUCKET, S, K, E_LOC, ORDER, ROWS_SLOT, TOK, COUNTS, TILE_E, TILE_R0, TILE_R1, MAX_TILES,
++                  NB: tl.constexpr, BS: tl.constexpr, BT: tl.constexpr, BMT: tl.constexpr):
++    """One program: stable counting sort of S slots by bucket (0..NB-2 = local experts, NB-1 = non-local, last) ->
++    ORDER (== torch.argsort(bucket, stable=True)), ROWS_SLOT (inverse), TOK = ORDER // K, COUNTS (local experts), and the
++    padded tile table (expert, r0, r1) with BMT-row tiles (== _tiles_device)."""
++    eb = tl.arange(0, NB)
++    cnt = tl.zeros((NB,), dtype=tl.int32)
++    for b0 in range(0, S, BS):
++        sb = b0 + tl.arange(0, BS)
++        bk = tl.load(BUCKET + sb, mask=sb < S, other=NB)            # NB = out of range -> not counted
++        cnt += tl.sum((bk[:, None] == eb[None, :]).to(tl.int32), axis=0)
++    start = tl.cumsum(cnt, 0) - cnt                                   # exclusive offsets per bucket
++    seen = tl.zeros((NB,), dtype=tl.int32)
++    for b0 in range(0, S, BS):
++        sb = b0 + tl.arange(0, BS)
++        valid = sb < S
++        bk = tl.load(BUCKET + sb, mask=valid, other=NB)
++        onehot = (bk[:, None] == eb[None, :]).to(tl.int32)           # [BS, NB]
++        base = tl.sum(onehot * (start + seen)[None, :], axis=1)       # start[b] + seen[b] per slot
++        # rank within this block among earlier slots of the same bucket
++        jj = tl.arange(0, BS)
++        same = (bk[:, None] == bk[None, :]) & (jj[None, :] < jj[:, None])
++        pos = base + tl.sum(same.to(tl.int32), axis=1)
++        tl.store(ORDER + pos, sb, mask=valid)
++        tl.store(ROWS_SLOT + sb, pos, mask=valid)
++        tl.store(TOK + pos, sb // K, mask=valid)
++        seen += tl.sum(onehot, axis=0)
++    loc = eb < NB - 1
++    tl.store(COUNTS + eb, cnt, mask=loc)
++    ntile = tl.where(loc, (cnt + BMT - 1) // BMT, 0)
++    tcum = tl.cumsum(ntile, 0)
++    tfirst = tcum - ntile
++    total = tl.sum(ntile, 0)
++    for t0 in range(0, MAX_TILES, BT):
++        tt = t0 + tl.arange(0, BT)
++        # expert of tile tt = number of experts whose cumulative tile count <= tt (searchsorted right), clamped
++        e = tl.sum((tcum[None, :] <= tt[:, None]).to(tl.int32), axis=1)
++        e = tl.minimum(e, E_LOC - 1)        # padding tiles -> last local expert (== _tiles_device; engines index it)
++        oh = (e[:, None] == eb[None, :]).to(tl.int32)
++        e_start = tl.sum(oh * start[None, :], axis=1)
++        e_cnt = tl.sum(oh * cnt[None, :], axis=1)
++        e_first = tl.sum(oh * tfirst[None, :], axis=1)
++        v = tt < total
++        r0 = tl.where(v, e_start + (tt - e_first) * BMT, 0)
++        r1 = tl.where(v, e_start + e_cnt, 0)
++        m = tt < MAX_TILES
++        tl.store(TILE_E + tt, e, mask=m)
++        tl.store(TILE_R0 + tt, r0, mask=m)
++        tl.store(TILE_R1 + tt, r1, mask=m)
++
++
++def route_fused(bucket, E, k, bm, max_tiles):
++    """bucket int [S] (local expert id, or E = non-local). Returns order (int64), rows_slot (int32), tok (int32),
++    counts (int64 [E]), tiles (e, r0, r1, bm). Single launch; bitwise-equal to the torch routing."""
++    S = bucket.numel()
++    dev = bucket.device
++    NB = triton.next_power_of_2(E + 1)
++    b = bucket.to(torch.int32)
++    if NB != E + 1:   # remap the non-local bucket E to NB-1 so it sorts last
++        b = torch.where(b == E, NB - 1, b)
++    order = torch.empty(S, dtype=torch.int32, device=dev)
++    rows_slot = torch.empty(S, dtype=torch.int32, device=dev)
++    tok = torch.empty(S, dtype=torch.int32, device=dev)
++    counts = torch.empty(NB, dtype=torch.int32, device=dev)
++    te = torch.empty(max_tiles, dtype=torch.int32, device=dev)
++    t0 = torch.empty(max_tiles, dtype=torch.int32, device=dev)
++    t1 = torch.empty(max_tiles, dtype=torch.int32, device=dev)
++    _route_kernel[(1,)](b, S, k, E, order, rows_slot, tok, counts, te, t0, t1, max_tiles,
++                        NB=NB, BS=64, BT=64, BMT=bm, num_warps=8)
++    return order.to(torch.int64), rows_slot, tok, counts[:E].to(torch.int64), (te, t0, t1, bm)
++
++
++@triton.jit
++def _route_count_kernel(BUCKET, S, CNT, NB: tl.constexpr, BS: tl.constexpr):
++    """block b: CNT[b, j] = #slots of bucket j in slots [b*BS, (b+1)*BS)."""
++    b = tl.program_id(0)
++    eb = tl.arange(0, NB)
++    sb = b * BS + tl.arange(0, BS)
++    bk = tl.load(BUCKET + sb, mask=sb < S, other=NB)
++    tl.store(CNT + b * NB + eb, tl.sum((bk[:, None] == eb[None, :]).to(tl.int32), axis=0))
++
++
++@triton.jit
++def _route_scan_kernel(CNT, NBLK, E_LOC, BASE, COUNTS, TILE_E, TILE_R0, TILE_R1, MAX_TILES, NB: tl.constexpr,
++                       BT: tl.constexpr, BMT: tl.constexpr):
++    """program 0: BASE[b, j] = start[j] + #slots of bucket j in blocks < b (stable order), COUNTS; program p >= 1: tile
++    entries [(p-1)*BT, p*BT) of the padded tile table (== _route_kernel)."""
++    pid = tl.program_id(0)
++    eb = tl.arange(0, NB)
++    cnt = tl.zeros((NB,), dtype=tl.int32)
++    for b in range(0, NBLK):
++        cnt += tl.load(CNT + b * NB + eb)
++    start = tl.cumsum(cnt, 0) - cnt
++    loc = eb < NB - 1
++    if pid == 0:
++        run = start
++        for b in range(0, NBLK):
++            tl.store(BASE + b * NB + eb, run)
++            run += tl.load(CNT + b * NB + eb)
++        tl.store(COUNTS + eb, cnt, mask=loc)
++    else:
++        ntile = tl.where(loc, (cnt + BMT - 1) // BMT, 0)
++        tcum = tl.cumsum(ntile, 0)
++        tfirst = tcum - ntile
++        total = tl.sum(ntile, 0)
++        tt = (pid - 1) * BT + tl.arange(0, BT)
++        e = tl.sum((tcum[None, :] <= tt[:, None]).to(tl.int32), axis=1)
++        e = tl.minimum(e, E_LOC - 1)
++        oh = (e[:, None] == eb[None, :]).to(tl.int32)
++        e_start = tl.sum(oh * start[None, :], axis=1)
++        e_cnt = tl.sum(oh * cnt[None, :], axis=1)
++        e_first = tl.sum(oh * tfirst[None, :], axis=1)
++        v = tt < total
++        r0 = tl.where(v, e_start + (tt - e_first) * BMT, 0)
++        r1 = tl.where(v, e_start + e_cnt, 0)
++        m = tt < MAX_TILES
++        tl.store(TILE_E + tt, e, mask=m)
++        tl.store(TILE_R0 + tt, r0, mask=m)
++        tl.store(TILE_R1 + tt, r1, mask=m)
++
++
++@triton.jit
++def _route_scatter_kernel(BUCKET, S, K, BASE, ORDER, ROWS_SLOT, TOK, NB: tl.constexpr, BS: tl.constexpr):
++    b = tl.program_id(0)
++    eb = tl.arange(0, NB)
++    sb = b * BS + tl.arange(0, BS)
++    valid = sb < S
++    bk = tl.load(BUCKET + sb, mask=valid, other=NB)
++    base = tl.load(BASE + b * NB + tl.minimum(bk, NB - 1), mask=valid, other=0)
++    jj = tl.arange(0, BS)
++    same = (bk[:, None] == bk[None, :]) & (jj[None, :] < jj[:, None])
++    pos = base + tl.sum(same.to(tl.int32), axis=1)
++    tl.store(ORDER + pos, sb, mask=valid)
++    tl.store(ROWS_SLOT + sb, pos, mask=valid)
++    tl.store(TOK + pos, sb // K, mask=valid)
++
++
++def route_par(bucket, E, k, bm, max_tiles):
++    """route_fused in three multi-program launches (count per block / scan + tiles / scatter); identical outputs
++    (stable counting sort; tests/route_par_eq.py). For the decode sizes where one program is the bottleneck."""
++    S = bucket.numel()
++    dev = bucket.device
++    NB = triton.next_power_of_2(E + 1)
++    b = bucket.to(torch.int32)
++    if NB != E + 1:
++        b = torch.where(b == E, NB - 1, b)
++    BS = 64
++    nblk = triton.cdiv(S, BS)
++    cnt = torch.empty((nblk, NB), dtype=torch.int32, device=dev)
++    base = torch.empty((nblk, NB), dtype=torch.int32, device=dev)
++    order = torch.empty(S, dtype=torch.int32, device=dev)
++    rows_slot = torch.empty(S, dtype=torch.int32, device=dev)
++    tok = torch.empty(S, dtype=torch.int32, device=dev)
++    counts = torch.empty(NB, dtype=torch.int32, device=dev)
++    te = torch.empty(max_tiles, dtype=torch.int32, device=dev)
++    t0 = torch.empty(max_tiles, dtype=torch.int32, device=dev)
++    t1 = torch.empty(max_tiles, dtype=torch.int32, device=dev)
++    _route_count_kernel[(nblk,)](b, S, cnt, NB=NB, BS=BS, num_warps=4)
++    BT = 32
++    _route_scan_kernel[(1 + triton.cdiv(max_tiles, BT),)](cnt, nblk, E, base, counts, te, t0, t1, max_tiles, NB=NB, BT=BT,
++                                                         BMT=bm, num_warps=4)
++    _route_scatter_kernel[(nblk,)](b, S, k, base, order, rows_slot, tok, NB=NB, BS=BS, num_warps=4)
++    return order.to(torch.int64), rows_slot, tok, counts[:E].to(torch.int64), (te, t0, t1, bm)
++
++
++def _tiles(counts: torch.Tensor, bm: int = None):
++    """counts[e] = #rows of expert e (rows are contiguous per expert, ascending e). -> per-tile (expert, row0, row1)."""
++    dev = counts.device
++    bm = bm or BLOCK_M
++    ntile = (counts + bm - 1) // bm
++    starts = torch.cumsum(counts, 0) - counts
++    tile_e = torch.repeat_interleave(torch.arange(counts.numel(), device=dev), ntile)
++    first = torch.cumsum(ntile, 0) - ntile
++    idx_in = torch.arange(tile_e.numel(), device=dev) - first[tile_e]
++    r0 = starts[tile_e] + idx_in * bm
++    r1 = starts[tile_e] + counts[tile_e]
++    return tile_e.to(torch.int32), r0.to(torch.int32), r1.to(torch.int32), bm
++
++
++def _tiles_device(counts: torch.Tensor, max_tiles: int, bm: int = None):
++    """Graph-safe tiling (no host sync): a STATIC number of tiles (upper bound cdiv(S, bm) + E); tiles past the real
++    count are empty (r0 == r1 -> fully masked in the kernel). Same (expert, r0, r1) list as _tiles, then padding."""
++    bm = bm or BLOCK_M
++    dev = counts.device
++    ntile = (counts + bm - 1) // bm
++    cum = torch.cumsum(ntile, 0)
++    starts = torch.cumsum(counts, 0) - counts
++    t = torch.arange(max_tiles, device=dev)
++    e = torch.searchsorted(cum, t, right=True).clamp_(max=counts.numel() - 1)
++    first = cum[e] - ntile[e]
++    r0 = starts[e] + (t - first) * bm
++    r1 = starts[e] + counts[e]
++    valid = t < cum[-1]
++    r0 = torch.where(valid, r0, torch.zeros_like(r0))
++    r1 = torch.where(valid, r1, torch.zeros_like(r1))
++    return e.to(torch.int32), r0.to(torch.int32), r1.to(torch.int32), bm
++
++
++def grouped_gemm(a, a_rows, w, tiles, n_out, scale=None, add=None, shared_w=False, cfg=None, wscale=None, out=None):
++    """out[r] = a[a_rows[r]] @ w[e(r)]^T in FP32 (+ add[r]). w: MXFP4 packed uint8 [E, N, K/2] with scale uint8
++    [E, N, K/32], or BF16 [E, N, K] (scale None). a: BF16 [*, K]. Rows grouped by expert as described by tiles."""
++    if scale is not None and cfg is None and out is None:
++        eng = _engine_fn(a_rows.numel(), a.shape[1])
++        if eng is not None:
++            return eng(a, a_rows, w, tiles, n_out, scale=scale, add=add, shared_w=shared_w)
++    tile_e, r0, r1 = tiles[:3]
++    R = a_rows.numel()
++    K = a.shape[1]
++    if out is None:
++        out = (torch.zeros if (GRAPH_SAFE and _ZERO_INIT[0]) else torch.empty)((R, n_out), dtype=torch.float32, device=a.device)
++    else:   # caller-provided FP32 view (e.g. one half of the [R, 2N] LoRA delta buffer): same values, no torch.cat
++        assert out.dtype == torch.float32 and tuple(out.shape) == (R, n_out) and out.stride(1) == 1
++    if R == 0 or tile_e.numel() == 0:
++        return out
++    mx = scale is not None
++    wv = w.view(torch.uint8) if mx else w
++    sv = scale.view(torch.uint8) if mx else wv
++    fp32_dot = a.dtype == torch.float32
++    assert a.dtype in (torch.bfloat16, torch.float32) and a.stride(1) == 1 and wv.stride(-1) == 1
++    w_to_f32 = (not mx) and wscale is not None
++    if not mx:
++        assert wv.dtype == a.dtype or (w_to_f32 and a.dtype == torch.float32 and wv.dtype == torch.bfloat16)
++    tbm = tiles[3] if len(tiles) > 3 else BLOCK_M
++    if cfg is None:
++        p = _pick_cfg(R, a.shape[1], n_out, scale is not None)
++        cfg = (tbm,) + p[1:] if p else (tbm, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES)
++    bm, bn, bk0, nw, ns = cfg
++    assert bm == tbm, "tile BM must match the tiling"
++    bk = bk0 if K % bk0 == 0 else 32                    # LoRA expand has K = r = 32
++    assert K % bk == 0, f"K={K} must be a multiple of 32"
++    if add is not None:
++        assert add.dtype == torch.float32 and add.shape == out.shape and add.stride(1) == 1
++    grid = (tile_e.numel(), triton.cdiv(n_out, bn))
++    _grouped_gemm_kernel[grid](
++        a, a_rows, wv, sv, add if add is not None else out, out, tile_e, r0, r1, n_out, K,
++        a.stride(0), wv.stride(0), wv.stride(1), sv.stride(0), sv.stride(1), out.stride(0),
++        add.stride(0) if add is not None else 0, float(wscale) if w_to_f32 else 1.0,
++        MXFP4=mx, HAS_ADD=add is not None, SHARED_W=shared_w, FP32_DOT=fp32_dot, W_TO_F32=w_to_f32,
++        BM=bm, BN=bn, BK=bk, num_warps=nw, num_stages=ns)
++    return out
++
++
++def situ_fp32(gu: torch.Tensor, beta: float, linear_beta: float | None) -> torch.Tensor:
++    """pre FP32 [R, 2N] = [gate | up] -> BF16 [R, N]. Same expression as the trainer (rocm_mxfp4_moe.py:149-153);
++    the trainer should call this function so the torch kernels match."""
++    d = gu.shape[-1] // 2
++    g, u = gu[:, :d], gu[:, d:]
++    g = (beta * torch.tanh(g / beta)) * torch.sigmoid(g)
++    if linear_beta is not None:
++        u = linear_beta * torch.tanh(u / linear_beta)
++    return (g * u).to(torch.bfloat16)
++
++
++@triton.jit
++def _pre_situ_kernel(GU, ADD, MASK, TOK, NROWS, OUT, N, stride_gu, stride_add, stride_o, INV_B, B, INV_L, L,
++                     HAS_ADD: tl.constexpr, HAS_MASK: tl.constexpr, HAS_L: tl.constexpr, BR: tl.constexpr,
++                     BN: tl.constexpr):
++    """act = bf16(situ_fp32(fp32(bf16(gu)) + add * mask[tok])) for rows < NROWS (rows past it are never read: no tile
++    covers them, the combines mask them). Same IEEE ops in the same order as the torch path; launched without FP fusion.
++    torch details reproduced: x / beta == x * fl32(1/beta) (ATen div by a CPU scalar); sigmoid = 1 / (1 + exp(-x)) with
++    a correctly rounded divide; tanh / exp = the OCML functions torch calls (tests/situ_exhaustive.py: all 2^32 inputs)."""
++    pid_r = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    nrows = tl.load(NROWS)
++    r0 = pid_r * BR
++    if r0 >= nrows:
++        return
++    offs_r = r0 + tl.arange(0, BR)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    rm = offs_r < nrows
++    m = rm[:, None] & (offs_n < N)[None, :]
++    orr = offs_r.to(tl.int64)
++    pg = GU + orr[:, None] * stride_gu + offs_n[None, :]
++    g = tl.load(pg, mask=m, other=0.0).to(tl.bfloat16).to(tl.float32)
++    u = tl.load(pg + N, mask=m, other=0.0).to(tl.bfloat16).to(tl.float32)
++    if HAS_ADD:
++        pa = ADD + orr[:, None] * stride_add + offs_n[None, :]
++        ag = tl.load(pa, mask=m, other=0.0)
++        au = tl.load(pa + N, mask=m, other=0.0)
++        if HAS_MASK:
++            mk = tl.load(MASK + tl.load(TOK + offs_r, mask=rm, other=0).to(tl.int64), mask=rm, other=0.0)
++            ag = ag * mk[:, None]
++            au = au * mk[:, None]
++        g = g + ag
++        u = u + au
++    sg = tl.math.div_rn(1.0, 1.0 + libdevice.exp(-g))
++    gg = (B * libdevice.tanh(g * INV_B)) * sg
++    if HAS_L:
++        u = L * libdevice.tanh(u * INV_L)
++    tl.store(OUT + orr[:, None] * stride_o + offs_n[None, :], (gg * u).to(tl.bfloat16), mask=m)
++
++
++def _f32(v):
++    return float(torch.tensor(v, dtype=torch.float32))
++
++
++def pre_situ(gu, add13, mask, tok, nrows, beta, linear_beta):
++    """Fused form of: pre = fp32(bf16(gu)) [+ add13 * mask[tok][:, None]]; situ_fp32(pre, beta, linear_beta). gu FP32
++    [R, 2N] (raw GEMM accumulator), add13 FP32 [R, 2N] or None, mask FP32 [T] or None, tok int32 [R], nrows int64 [1]
++    (device: rows >= nrows are skipped). -> BF16 [R, N] (rows >= nrows uninitialised)."""
++    R, N2 = gu.shape
++    N = N2 // 2
++    out = torch.empty((R, N), dtype=torch.bfloat16, device=gu.device)
++    if R == 0:
++        return out
++    assert gu.stride(1) == 1 and (add13 is None or (add13.stride(1) == 1 and add13.shape == gu.shape))
++    inv = lambda b: _f32(_f32(1.0) / _f32(b))  # noqa: E731   fl32(1/fl32(b)) as ATen computes it on the host
++    BR, BN = 16, 256
++    _pre_situ_kernel[(triton.cdiv(R, BR), triton.cdiv(N, BN))](
++        gu, add13 if add13 is not None else gu, mask if mask is not None else gu, tok, nrows, out, N, gu.stride(0),
++        add13.stride(0) if add13 is not None else 0, out.stride(0), inv(beta), _f32(beta),
++        inv(linear_beta) if linear_beta is not None else 1.0, _f32(linear_beta) if linear_beta is not None else 1.0,
++        HAS_ADD=add13 is not None, HAS_MASK=add13 is not None and mask is not None, HAS_L=linear_beta is not None,
++        BR=BR, BN=BN, num_warps=4, enable_fp_fusion=False)
++    return out
++
++
++@triton.jit
++def _add_rows_kernel(A, B, NROWS, N, stride_a, stride_b, BR: tl.constexpr, BN: tl.constexpr):
++    pid_r = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    nrows = tl.load(NROWS)
++    r0 = pid_r * BR
++    if r0 >= nrows:
++        return
++    offs_r = r0 + tl.arange(0, BR)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    m = (offs_r < nrows)[:, None] & (offs_n < N)[None, :]
++    orr = offs_r.to(tl.int64)
++    pa = A + orr[:, None] * stride_a + offs_n[None, :]
++    a = tl.load(pa, mask=m, other=0.0)
++    b = tl.load(B + orr[:, None] * stride_b + offs_n[None, :], mask=m, other=0.0)
++    tl.store(pa, a + b, mask=m)
++
++
++def add_rows_(a, b, nrows):
++    """a[:nrows] += b[:nrows] (FP32, in place; nrows a device int64 [1]); rows past nrows untouched. Returns a."""
++    R, N = a.shape
++    if R:
++        BR, BN = 16, 512
++        _add_rows_kernel[(triton.cdiv(R, BR), triton.cdiv(N, BN))](a, b, nrows, N, a.stride(0), b.stride(0), BR=BR, BN=BN,
++                                                                    num_warps=4)
++    return a
++
++
++def tree_dim0(x: torch.Tensor) -> torch.Tensor:
++    """adjacent-pair FP32 tree over dim 0 (power of 2): ((x0+x1)+(x2+x3))+..."""
++    while x.shape[0] > 1:
++        assert x.shape[0] % 2 == 0
++        x = x[0::2] + x[1::2]
++    return x[0]
++
++
++def _chunked_contract(a, ar, w, tiles, n_out, chunk, scale=None, gather=None, nrows=None):
++    """FP32 [R, n_out] = tree over the N_CHUNKS global chunks of (a[:, chunk c] @ w[:, :, chunk c]^T); a holds this rank's
++    contiguous N slice (C_local chunks); gather(P [C_local, R, n_out]) -> [N_CHUNKS, R, n_out] across TP ranks in order."""
++    C = a.shape[1] // chunk
++
++    def part(c):
++        ac = a[:, c * chunk:(c + 1) * chunk]
++        if scale is not None:
++            return grouped_gemm(ac, ar, w[:, :, c * chunk // 2:(c + 1) * chunk // 2], tiles, n_out,
++                                scale=scale[:, :, c * chunk // 32:(c + 1) * chunk // 32])
++        return grouped_gemm(ac, ar, w[:, :, c * chunk:(c + 1) * chunk], tiles, n_out)
++
++    if gather is not None:
++        P = gather(torch.stack([part(c) for c in range(C)]))
++        assert P.shape[0] == N_CHUNKS, f"{P.shape[0]} chunks, expected {N_CHUNKS}"
++        return tree_dim0(P)
++    assert C == N_CHUNKS, f"{C} local chunks, expected {N_CHUNKS} (or pass gather)"
++    use_fused = (FUSED_W2 in ("1", True) or (FUSED_W2 == "auto" and a.shape[0] <= FUSED_W2_MAX_ROWS)) and _engine_fn(a.shape[0], chunk) is None
++    if use_fused and scale is not None and len(tiles) > 3:
++        return w2_fused8(a, w, scale, tiles, n_out)
++    # progressive adjacent-pair tree (same sums as tree_dim0, peak = log2(C)+1 partials)
++    stack = []
++    for c in range(C):
++        lvl, t = 0, part(c)
++        while stack and stack[-1][0] == lvl:
++            t = stack.pop()[1] + t if nrows is None else add_rows_(stack.pop()[1], t, nrows)
++            lvl += 1
++        stack.append((lvl, t))
++    assert len(stack) == 1
++    return stack[0][1]
++
++
++
++@triton.jit
++def _leaf(Y, ADD, W, ROWS, j, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD: tl.constexpr, MASK,
++          HAS_MASK: tl.constexpr):
++    r = tl.load(ROWS + t * 16 + j)                       # sorted-row index of this slot (-1: not local)
++    w = tl.load(W + t * 16 + j)
++    rr = tl.maximum(r, 0).to(tl.int64)
++    y = tl.load(Y + rr * stride_y + offs_h, mask=h_mask & (r >= 0), other=0.0)
++    yf = y.to(tl.bfloat16).to(tl.float32)
++    if HAS_ADD:
++        ad = tl.load(ADD + rr * stride_add + offs_h, mask=h_mask & (r >= 0), other=0.0)
++        if HAS_MASK:
++            ad = ad * tl.load(MASK + t)                  # == torch add2 * token_mask[tok][:, None] (launch: no FP fusion)
++        yf = yf + ad
++    w = tl.where(r >= 0, w, 0.0)
++    return w * yf
++
++
++@triton.jit
++def _combine16_kernel(Y, ADD, W, ROWS, IDS, OUT, H, stride_y, stride_add, stride_o, MASK, HAS_ADD: tl.constexpr,
++                      HAS_MASK: tl.constexpr, BH: tl.constexpr):
++    """Fused leaf + expert-ascending adjacent-pair FP32 tree + BF16 + (-0 -> +0) for top-16. Same arithmetic as
++    leaf/slots/tree_combine_expert_ascending in torch (bitwise)."""
++    t = tl.program_id(0)
++    pid_h = tl.program_id(1)
++    offs_h = pid_h * BH + tl.arange(0, BH)
++    h_mask = offs_h < H
++    jj = tl.arange(0, 16)
++    ids = tl.load(IDS + t * 16 + jj).to(tl.int64)
++    # rank of slot j = #slots with smaller expert id (ids distinct within a token) -> position in ascending order
++    # stable rank (== torch.argsort(stable=True) position): ties broken by slot index. Distinct ids (vLLM's global
++    # topk_ids): identical to the plain count. Duplicates (e.g. the trainer's local ids with an E_local "remote" sentinel)
++    # previously made several slots share a rank, so j_r = sum of their indices could exceed 15 -> out-of-bounds slot loads.
++    lt = ids[None, :] < ids[:, None]
++    tie = (ids[None, :] == ids[:, None]) & (jj[None, :] < jj[:, None])
++    rank = tl.sum((lt | tie).to(tl.int32), axis=1)
++    j0 = tl.sum(tl.where(rank == 0, jj, 0))
++    j1 = tl.sum(tl.where(rank == 1, jj, 0))
++    j2 = tl.sum(tl.where(rank == 2, jj, 0))
++    j3 = tl.sum(tl.where(rank == 3, jj, 0))
++    j4 = tl.sum(tl.where(rank == 4, jj, 0))
++    j5 = tl.sum(tl.where(rank == 5, jj, 0))
++    j6 = tl.sum(tl.where(rank == 6, jj, 0))
++    j7 = tl.sum(tl.where(rank == 7, jj, 0))
++    j8 = tl.sum(tl.where(rank == 8, jj, 0))
++    j9 = tl.sum(tl.where(rank == 9, jj, 0))
++    j10 = tl.sum(tl.where(rank == 10, jj, 0))
++    j11 = tl.sum(tl.where(rank == 11, jj, 0))
++    j12 = tl.sum(tl.where(rank == 12, jj, 0))
++    j13 = tl.sum(tl.where(rank == 13, jj, 0))
++    j14 = tl.sum(tl.where(rank == 14, jj, 0))
++    j15 = tl.sum(tl.where(rank == 15, jj, 0))
++    l0 = _leaf(Y, ADD, W, ROWS, j0, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l1 = _leaf(Y, ADD, W, ROWS, j1, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l2 = _leaf(Y, ADD, W, ROWS, j2, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l3 = _leaf(Y, ADD, W, ROWS, j3, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l4 = _leaf(Y, ADD, W, ROWS, j4, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l5 = _leaf(Y, ADD, W, ROWS, j5, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l6 = _leaf(Y, ADD, W, ROWS, j6, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l7 = _leaf(Y, ADD, W, ROWS, j7, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l8 = _leaf(Y, ADD, W, ROWS, j8, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l9 = _leaf(Y, ADD, W, ROWS, j9, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l10 = _leaf(Y, ADD, W, ROWS, j10, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l11 = _leaf(Y, ADD, W, ROWS, j11, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l12 = _leaf(Y, ADD, W, ROWS, j12, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l13 = _leaf(Y, ADD, W, ROWS, j13, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l14 = _leaf(Y, ADD, W, ROWS, j14, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    l15 = _leaf(Y, ADD, W, ROWS, j15, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++    out = ((((l0 + l1) + (l2 + l3)) + ((l4 + l5) + (l6 + l7))) + (((l8 + l9) + (l10 + l11)) + ((l12 + l13) + (l14 + l15))))
++    o = out.to(tl.bfloat16)
++    o = tl.where(o == 0, 0.0, o).to(tl.bfloat16)
++    tl.store(OUT + t * stride_o + offs_h, o, mask=h_mask)
++
++
++def combine16(y, add2, wsel_tok, rows_tok, topk_ids, mask=None):
++    """y FP32 [R, H] (sorted rows); add2 FP32 [R, H] or None; wsel_tok FP32 [T, 16] (0 for non-local); rows_tok int32
++    [T, 16] (row of each slot, -1 = not local); topk_ids [T, 16]. -> BF16 [T, H]."""
++    T = topk_ids.shape[0]
++    H = y.shape[1]
++    out = torch.empty((T, H), dtype=torch.bfloat16, device=y.device)
++    BH = 256
++    _combine16_kernel[(T, triton.cdiv(H, BH))](y, add2 if add2 is not None else y, wsel_tok.contiguous(),
++                                               rows_tok.contiguous(), topk_ids.contiguous(), out, H, y.stride(0),
++                                               add2.stride(0) if add2 is not None else 0, out.stride(0),
++                                               mask if mask is not None else y, HAS_ADD=add2 is not None,
++                                               HAS_MASK=mask is not None, BH=BH, num_warps=4, enable_fp_fusion=False)
++    return out
++
++
++@triton.jit
++def _leaf16_scatter_kernel(Y, ADD, W, ROWS, SLOTS, H, stride_y, stride_add, MASK, HAS_ADD: tl.constexpr,
++                           HAS_MASK: tl.constexpr, BH: tl.constexpr):
++    """EP: every slot's leaf (combine16's _leaf: w * (bf16(y) + add), exactly +0 for non-local slots) in SLOT order into
++    SLOTS FP32 [T*16, H] (replaces zeros + index_put + multiply of the torch path; same values)."""
++    t = tl.program_id(0)
++    pid_h = tl.program_id(1)
++    offs_h = pid_h * BH + tl.arange(0, BH)
++    h_mask = offs_h < H
++    for j in tl.static_range(16):
++        lj = _leaf(Y, ADD, W, ROWS, j, t, offs_h, h_mask, stride_y, stride_add, HAS_ADD, MASK, HAS_MASK)
++        tl.store(SLOTS + (t * 16 + j).to(tl.int64) * H + offs_h, lj, mask=h_mask)
++
++
++@triton.jit
++def _ld_slot(SLOTS, t, j, H, offs_h, h_mask):
++    return tl.load(SLOTS + (t * 16 + j).to(tl.int64) * H + offs_h, mask=h_mask, other=0.0)
++
++
++@triton.jit
++def _tree16_slots_kernel(SLOTS, IDS, OUT, H, stride_o, BH: tl.constexpr):
++    """EP: expert-ascending adjacent-pair FP32 tree over the 16 (all-reduced) leaves of each token + BF16 + (-0 -> +0);
++    the tree half of _combine16_kernel (same order), reading precomputed leaves."""
++    t = tl.program_id(0)
++    pid_h = tl.program_id(1)
++    offs_h = pid_h * BH + tl.arange(0, BH)
++    h_mask = offs_h < H
++    jj = tl.arange(0, 16)
++    ids = tl.load(IDS + t * 16 + jj).to(tl.int64)
++    # stable rank (== torch.argsort(stable=True) position): ties broken by slot index. Distinct ids (vLLM's global
++    # topk_ids): identical to the plain count. Duplicates (e.g. the trainer's local ids with an E_local "remote" sentinel)
++    # previously made several slots share a rank, so j_r = sum of their indices could exceed 15 -> out-of-bounds slot loads.
++    lt = ids[None, :] < ids[:, None]
++    tie = (ids[None, :] == ids[:, None]) & (jj[None, :] < jj[:, None])
++    rank = tl.sum((lt | tie).to(tl.int32), axis=1)
++    l0 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 0, jj, 0)), H, offs_h, h_mask)
++    l1 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 1, jj, 0)), H, offs_h, h_mask)
++    l2 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 2, jj, 0)), H, offs_h, h_mask)
++    l3 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 3, jj, 0)), H, offs_h, h_mask)
++    l4 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 4, jj, 0)), H, offs_h, h_mask)
++    l5 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 5, jj, 0)), H, offs_h, h_mask)
++    l6 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 6, jj, 0)), H, offs_h, h_mask)
++    l7 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 7, jj, 0)), H, offs_h, h_mask)
++    l8 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 8, jj, 0)), H, offs_h, h_mask)
++    l9 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 9, jj, 0)), H, offs_h, h_mask)
++    l10 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 10, jj, 0)), H, offs_h, h_mask)
++    l11 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 11, jj, 0)), H, offs_h, h_mask)
++    l12 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 12, jj, 0)), H, offs_h, h_mask)
++    l13 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 13, jj, 0)), H, offs_h, h_mask)
++    l14 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 14, jj, 0)), H, offs_h, h_mask)
++    l15 = _ld_slot(SLOTS, t, tl.sum(tl.where(rank == 15, jj, 0)), H, offs_h, h_mask)
++    out = ((((l0 + l1) + (l2 + l3)) + ((l4 + l5) + (l6 + l7))) + (((l8 + l9) + (l10 + l11)) + ((l12 + l13) + (l14 + l15))))
++    o = out.to(tl.bfloat16)
++    o = tl.where(o == 0, 0.0, o).to(tl.bfloat16)
++    tl.store(OUT + t * stride_o + offs_h, o, mask=h_mask)
++
++
++def combine16_ep(y, add2, w_tok, rows_tok, topk_ids, leaf_reduce, mask=None):
++    """EP version of combine16: leaves in slot order (one kernel) -> leaf_reduce (FP32 all-reduce over the EP group, exact:
++    one non-zero contributor per element) -> tree (one kernel). rows_tok int32 [T, 16]: sorted row of each slot, -1 = not
++    on this rank; w_tok FP32 [T, 16] (masked to 0 for -1 rows inside). -> BF16 [T, H]."""
++    T = topk_ids.shape[0]
++    H = y.shape[1]
++    BH = 256
++    grid = (T, triton.cdiv(H, BH))
++    slots = torch.empty((T * 16, H), dtype=torch.float32, device=y.device)
++    _leaf16_scatter_kernel[grid](y, add2 if add2 is not None else y, w_tok.contiguous(), rows_tok.contiguous(), slots, H,
++                                 y.stride(0), add2.stride(0) if add2 is not None else 0, mask if mask is not None else y,
++                                 HAS_ADD=add2 is not None, HAS_MASK=mask is not None, BH=BH, num_warps=4,
++                                 enable_fp_fusion=False)
++    slots = leaf_reduce(slots)
++    out = torch.empty((T, H), dtype=torch.bfloat16, device=y.device)
++    _tree16_slots_kernel[grid](slots, topk_ids.contiguous(), out, H, out.stride(0), BH=BH, num_warps=4)
++    return out
++
++
++def tree_combine_expert_ascending(leaf_slots: torch.Tensor, topk_ids: torch.Tensor) -> torch.Tensor:
++    """leaf_slots FP32 [T, k, H] in slot order -> FP32 [T, H]: adjacent-pair tree over the k leaves sorted by expert id
++    ascending (k a power of 2). Matches the trainer's tree16_root contract."""
++    T, k, H = leaf_slots.shape
++    perm = torch.argsort(topk_ids, dim=1, stable=True)
++    x = torch.gather(leaf_slots, 1, perm[:, :, None].expand(T, k, H))
++    while x.shape[1] > 1:
++        assert x.shape[1] % 2 == 0
++        x = x[:, 0::2] + x[:, 1::2]
++    return x[:, 0]
++
++
++@triton.jit
++def _gg_bf16_chunks_kernel(A, A_ROWS, W, OUT, TILE_E, TILE_R0, TILE_R1, N, K, stride_am, stride_we, stride_wn, stride_oc,
++                           stride_om, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
++    """_grouped_gemm_kernel's BF16 path (same loads / dot chain) with a chunk grid axis: plane c = A[:, c*K:(c+1)*K] @
++    W[e, :, c*K:(c+1)*K]^T -> OUT + c * stride_oc. One launch for the 8 canonical chunks of the expert-LoRA A2 shrink."""
++    pid_t = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    c = tl.program_id(2).to(tl.int64)
++    e = tl.load(TILE_E + pid_t).to(tl.int64)
++    r0 = tl.load(TILE_R0 + pid_t)
++    r1 = tl.load(TILE_R1 + pid_t)
++    if r0 >= r1:
++        return
++    offs_m = r0 + tl.arange(0, BM)
++    m_mask = offs_m < r1
++    om = offs_m.to(tl.int64)
++    rows = tl.load(A_ROWS + offs_m, mask=m_mask, other=0).to(tl.int64)
++    offs_n = pid_n * BN + tl.arange(0, BN)
++    n_mask = offs_n < N
++    A += c * K
++    W += c * K
++    acc = tl.zeros((BM, BN), dtype=tl.float32)
++    for k0 in range(0, K, BK):
++        offs_k = k0 + tl.arange(0, BK)
++        k_mask = offs_k < K
++        a = tl.load(A + rows[:, None] * stride_am + offs_k[None, :], mask=m_mask[:, None] & k_mask[None, :], other=0.0)
++        w = tl.load(W + e * stride_we + offs_n[:, None] * stride_wn + offs_k[None, :],
++                    mask=n_mask[:, None] & k_mask[None, :], other=0.0)
++        acc += tl.dot(a, tl.trans(w))
++    tl.store(OUT + c * stride_oc + om[:, None] * stride_om + offs_n[None, :], acc, mask=m_mask[:, None] & n_mask[None, :])
++
++
++def bf16_chunks_gemm(a, a_rows, w, tiles, n_out, chunks):
++    """FP32 [chunks, R, n_out]; plane c == grouped_gemm(a[:, chunk c], a_rows, w[:, :, chunk c], tiles, n_out) (BF16 w)."""
++    tile_e, r0, r1, bm = tiles
++    R = a_rows.numel()
++    Kc = w.shape[2] // chunks
++    assert a.stride(1) == 1 and w.stride(2) == 1 and a.dtype == w.dtype == torch.bfloat16 and Kc % BLOCK_K == 0
++    out = torch.empty((chunks, R, n_out), dtype=torch.float32, device=a.device)
++    if R == 0 or tile_e.numel() == 0:
++        return out
++    _gg_bf16_chunks_kernel[(tile_e.numel(), triton.cdiv(n_out, BLOCK_N), chunks)](
++        a, a_rows, w, out, tile_e, r0, r1, n_out, Kc, a.stride(0), w.stride(0), w.stride(1), out.stride(0), out.stride(1),
++        BM=bm, BN=BLOCK_N, BK=BLOCK_K, num_warps=NUM_WARPS, num_stages=NUM_STAGES)
++    return out
++
++
++_ARANGE = {}
++
++
++def _arange_i32(n, dev):
++    """Constant int32 arange, cached when created outside CUDA-graph capture (a capture-time tensor lives in the graph
++    pool and is only written at replay, so it is never cached; a cached eager one is static memory -> capture-safe)."""
++    key = (n, str(dev))
++    t = _ARANGE.get(key)
++    if t is None:
++        t = torch.arange(n, device=dev, dtype=torch.int32)
++        if n <= 65536 and not torch.cuda.is_current_stream_capturing():
++            _ARANGE[key] = t
++    return t
++
++
++def _token_tiles(T, bm, dev):
++    """Tiles covering rows 0..T-1 of ONE (shared) weight: (0, i*bm, min((i+1)*bm, T)). Constant -> cached like _arange_i32."""
++    key = ("tt", T, bm, str(dev))
++    t = _ARANGE.get(key)
++    if t is None:
++        nt = triton.cdiv(T, bm)
++        r0 = _arange_i32(nt, dev) * bm
++        t = (torch.zeros(nt, device=dev, dtype=torch.int32), r0, torch.clamp(r0 + bm, max=T), bm)
++        if T <= 65536 and not torch.cuda.is_current_stream_capturing():
++            _ARANGE[key] = t
++    return t
++
++
++def _lora_glue(a, a_rows, tiles, A, B, scaling, shared_A, shared_B, chunk=None, out=None, nrows=None, tok_tiles=None):
++    """FUSED_GLUE expert-LoRA delta, same values as _expert_lora_delta:
++    shared A (d1, d3): the shrink a @ A^T is the same for every slot of a token -> computed once per TOKEN (T rows, not
++    T*k) and gathered by the expand (a_rows = tok); chunked A2 shrink: the 8 chunks in one launch + row-bounded tree8."""
++    if chunk is None and shared_A and tok_tiles is not None:
++        T = a.shape[0]
++        t = grouped_gemm(a, _arange_i32(T, a.device), A, tok_tiles, A.shape[1], shared_w=True)
++        rows = a_rows
++    elif chunk is not None and not shared_A and nrows is not None and A.shape[2] == N_CHUNKS * chunk:
++        t = tree8_rows(bf16_chunks_gemm(a, a_rows, A, tiles, A.shape[1], N_CHUNKS), nrows)
++        rows = _arange_i32(t.shape[0], t.device)
++    else:
++        return _expert_lora_delta(a, a_rows, tiles, A, B, scaling, shared_A, shared_B, chunk=chunk, out=out, nrows=nrows)
++    if LORA_INKERNEL_SCALE and B.dtype == torch.bfloat16 and B.stride(-1) == 1:
++        return grouped_gemm(t, rows, B, tiles, B.shape[1], shared_w=shared_B, wscale=scaling, out=out)
++    return grouped_gemm(t, rows, (B.float() * scaling).contiguous(), tiles, B.shape[1], shared_w=shared_B, out=out)
++
++
++def _expert_lora_delta(a, a_rows, tiles, A, B, scaling, shared_A, shared_B, chunk=None, gather=None, out=None, nrows=None):
++    """FP32 delta[r] = (a[a_rows[r]] @ A_e^T)_fp32 @ (B_e * s)^T_fp32  (A [E|1, r, K], B [E|1, N, r] BF16).
++    chunk/gather: contraction over the (TP-sharded) intermediate dim is done in the canonical N_CHUNKS split."""
++    if chunk is None:
++        t = grouped_gemm(a, a_rows, A, tiles, A.shape[1], shared_w=shared_A)          # FP32, no BF16 cast
++    else:
++        assert not shared_A
++        t = _chunked_contract(a, a_rows, A, tiles, A.shape[1], chunk, gather=gather, nrows=nrows)
++    ar = torch.arange(t.shape[0], device=t.device, dtype=torch.int32)
++    if LORA_INKERNEL_SCALE and B.dtype == torch.bfloat16 and B.stride(-1) == 1:
++        # same values as (B.float() * scaling), formed in the kernel's load: no per-call FP32 copy of B
++        return grouped_gemm(t, ar, B, tiles, B.shape[1], shared_w=shared_B, wscale=scaling, out=out)
++    bs = (B.float() * scaling).contiguous()
++    return grouped_gemm(t, ar, bs, tiles, B.shape[1], shared_w=shared_B, out=out)      # FP32-IEEE MFMA
++
++
++FUSED_COMBINE = os.environ.get("K31_BI_MOE_FUSED_COMBINE", "1") == "1"
++# fused glue (graph-safe path, k=16 fused combines): one pre-SiTU kernel (bf16 round + LoRA delta * mask + SiTU), LoRA
++# deltas written in place (no cat), row-bounded W2/A2 chunk-tree adds (only the rows this rank owns), mask folded into the
++# combine leaf, no torch bf16 cast of y (the leaf rounds). Same bits as the torch glue (opt-in until gated).
++FUSED_GLUE = os.environ.get("K31_BI_MOE_FUSED_GLUE", "0") == "1"
++# with FUSED_GLUE: tl.dot_scaled MXFP4 GEMMs (bitwise == dequant / a16w4, tests/scaled_eq.py). W2: all 8 canonical chunks in
++# one launch -> [8, R, H] partials -> row-bounded tree8 (same pairing). w13: scaled kernel, or the plug-in engine where it is
++# faster (gfx950 EP8 per layer: scaled wins T<=8 and T>=128, a16w4 at 16..64). Opt-in until gated in-engine.
++SCALED = os.environ.get("K31_BI_MOE_SCALED", "0") == "1"
++ROUTE_PAR = os.environ.get("K31_BI_MOE_ROUTE_PAR", "1") == "1"   # glue path: multi-program routing (same outputs)
++LORA_TOKEN_SHRINK = os.environ.get("K31_BI_MOE_LORA_TOKEN_SHRINK", "1") == "1"   # glue path: shared-A shrink per token, A2 shrink in one launch
++SCALED_W2_MAX_ROWS = int(os.environ.get("K31_BI_MOE_SCALED_W2_MAX_ROWS", "2048"))   # [8, R, H] FP32 partials bound
++LORA_INKERNEL_SCALE = os.environ.get("K31_BI_MOE_LORA_INKERNEL_SCALE", "1") == "1"   # expand: bf16 B * s in-kernel (same bits)
++LORA_VIEW_ONE_SLOT = os.environ.get("K31_BI_MOE_LORA_VIEW", "1") == "1"            # one-slot LoRA stack: view, not index_select
++FUSED_COMBINE_EP = os.environ.get("K31_BI_MOE_FUSED_COMBINE_EP", "1") == "1"   # EP: leaf scatter + tree kernels (stable tie-break: duplicate topk_ids, e.g. the trainer dispatch sentinel, are safe and == torch)
++FUSED_ROUTE = os.environ.get("K31_BI_MOE_FUSED_ROUTE", "1") == "1"            # one-launch routing (bitwise == torch)
++ROUTE_MAX_SLOTS = int(os.environ.get("K31_BI_MOE_ROUTE_MAX_SLOTS", "1024"))   # fused one-program routing: GPU time wins only for few
++ROUTE_MAX_E = int(os.environ.get("K31_BI_MOE_ROUTE_MAX_E", "128"))            # local experts (EP) and <= 1024 slots; TP-wide E (896) -> torch path
++# (11/05 profiler GPU time, gfx950: EP8 E=112: 41/64/95 us fused vs 98/110/127 torch at 256/512/1024 slots; TP8 E=896: fused 2x slower)
++TOK_CHUNK = int(os.environ.get("K31_BI_MOE_TOK_CHUNK", "1024"))   # bounds memory; rows are independent -> same bits
++# Row tile for large token blocks (trainer: K31_BI_MOE_TOK_CHUNK=8192 K31_BI_MOE_BM_LARGE=128). Bit-free: rows are independent and
++# tl.dot elements are tile-shape invariant on gfx950 (tests/test_moe_chunk_bm.py: bitwise == defaults, base + expert LoRA, EP4).
++BM_LARGE = int(os.environ.get("K31_BI_MOE_BM_LARGE", "64"))
++GRAPH_SAFE = os.environ.get("K31_BI_MOE_GRAPH", "1") == "1"   # device-side tiling, no host syncs (graph-capturable; bitwise == host path)
++# GRAPH_SAFE GEMM outputs: rows not covered by any tile (EP non-local slots at the tail) were zero-filled for the torch combine.
++# The fused combines (k=16, default) mask those rows at the leaf (row -1), so they can stay uninitialised; set per forward.
++_ZERO_INIT = [True]
++ZERO_UNCOVERED = os.environ.get("K31_BI_MOE_ZERO_UNCOVERED", "auto")   # auto | 1 (always zero, old behaviour)
++
++
++@torch.no_grad()
++def bi_moe_forward(x, w13, s13, w2, s2, topk_weights, topk_ids, beta, linear_beta=None, lora=None,
++                   n_global=None, chunk_gather=None, expert_map=None, leaf_reduce=None):
++    """Token-chunked driver of _bi_moe_forward_tokens (every rank of a TP/EP group sees the same T, so the per-chunk
++    collectives stay matched). Arguments as in _bi_moe_forward_tokens."""
++    T = x.shape[0]
++    if T <= TOK_CHUNK:
++        return _bi_moe_forward_tokens(x, w13, s13, w2, s2, topk_weights, topk_ids, beta, linear_beta, lora,
++                                      n_global, chunk_gather, expert_map, leaf_reduce)
++    def lsl(i):
++        if lora is None or "token_mask" not in lora:
++            return lora
++        return dict(lora, token_mask=lora["token_mask"][i:i + TOK_CHUNK])
++    outs = [_bi_moe_forward_tokens(x[i:i + TOK_CHUNK], w13, s13, w2, s2, topk_weights[i:i + TOK_CHUNK],
++                                   topk_ids[i:i + TOK_CHUNK], beta, linear_beta, lsl(i), n_global, chunk_gather,
++                                   expert_map, leaf_reduce) for i in range(0, T, TOK_CHUNK)]
++    return torch.cat(outs)
++
++
++def _bi_moe_forward_tokens(x, w13, s13, w2, s2, topk_weights, topk_ids, beta, linear_beta=None, lora=None,
++                           n_global=None, chunk_gather=None, expert_map=None, leaf_reduce=None):
++    """x BF16 [T, H]; w13 uint8 [E, 2N, H/2], s13 uint8 [E, 2N, H/32]; w2 uint8 [E, H, N/2], s2 [E, H, N/32];
++    topk_weights FP32 [T, k]; topk_ids [T, k]. lora (optional): dict of BF16 factors A1, A3 [E|1, r, H], B1, B3 [E|1, N, r],
++    A2 [E|1, r, N], B2 [E|1, H, r] (N = this rank's intermediate slice), "scaling" float, and shared_<name> bools
++    (default: A1, A3, B2 shared [1, ...]; B1, B3, A2 per expert).
++    n_global: full intermediate size (N_local * tp); chunk_gather: TP all-gather of FP32 chunk partials (TP>1);
++    expert_map: global -> local expert id (-1 = not on this rank) for EP; leaf_reduce: FP32 sum over the EP group.
++    Returns BF16 [T, H] (identical on every rank of the TP / EP group)."""
++    T, H = x.shape
++    k = topk_ids.shape[1]
++    E = w13.shape[0]
++    N2 = w13.shape[1]
++    n_global = n_global or N2 // 2
++    chunk = n_global // N_CHUNKS
++    assert n_global % N_CHUNKS == 0 and (N2 // 2) % chunk == 0 and chunk % BLOCK_K == 0
++    x = x.contiguous()
++    fused_comb = FUSED_COMBINE and k == 16 and (leaf_reduce is None or FUSED_COMBINE_EP)
++    _ZERO_INIT[0] = ZERO_UNCOVERED == "1" or not fused_comb   # torch combine reads every row -> uncovered rows must be 0
++    gids = topk_ids.reshape(-1).to(torch.int64)
++    ids = gids if expert_map is None else expert_map[gids].to(torch.int64)
++    local = ids >= 0
++    bucket = torch.where(local, ids, E)
++    bm = (16 if T <= 256 else (BM_LARGE if T >= 1024 else 64)) if TUNED else BLOCK_M   # one BM per forward (tiles shared by all GEMMs)
++    rows_slot = None
++    if GRAPH_SAFE and FUSED_ROUTE and bucket.numel() <= ROUTE_MAX_SLOTS and E <= ROUTE_MAX_E:
++        # one-launch stable counting sort + tiles (bitwise == the torch routing below; tests/route_check.py)
++        order, rows_slot, tok, counts, tiles = (route_par if (FUSED_GLUE and ROUTE_PAR) else route_fused)(
++            bucket, E, k, bm, triton.cdiv(bucket.numel(), bm) + min(E, bucket.numel()))
++    else:
++        order_all = torch.argsort(bucket, stable=True)  # local slots grouped by expert, ascending
++        counts = torch.zeros(E + 1, dtype=torch.int64, device=x.device).scatter_add_(
++            0, bucket, torch.ones_like(bucket))[:E]                      # = bincount, but no host sync (graph-safe)
++        if GRAPH_SAFE:
++            # all slots stay in the arrays (non-local ones at the tail, never covered by a tile -> rows stay 0)
++            order = order_all
++            tiles = _tiles_device(counts, triton.cdiv(order.numel(), bm) + min(E, order.numel()), bm)
++        else:
++            n_loc = int(local.sum())
++            order = order_all[:n_loc]
++            tiles = _tiles(counts, bm)
++        tok = (order // k).to(torch.int32)
++    if FUSED_GLUE and GRAPH_SAFE and fused_comb:
++        return _glue_tail(x, w13, s13, w2, s2, topk_weights, topk_ids, beta, linear_beta, lora, chunk_gather, expert_map,
++                          leaf_reduce, local, order, rows_slot, tok, counts, tiles, chunk)
++    add13 = add2 = None
++    if lora is not None:
++        sh = lambda n, d: lora.get("shared_" + n, d)
++        d1 = _expert_lora_delta(x, tok, tiles, lora["A1"], lora["B1"], lora["scaling"], sh("A1", True), sh("B1", False))
++        d3 = _expert_lora_delta(x, tok, tiles, lora["A3"], lora["B3"], lora["scaling"], sh("A3", True), sh("B3", False))
++        add13 = torch.cat([d1, d3], dim=1)
++        if "token_mask" in lora:
++            add13 = add13 * lora["token_mask"][tok.long()][:, None]
++    gu = grouped_gemm(x, tok, w13, tiles, N2, scale=s13).to(torch.bfloat16)
++    pre = gu.float() if add13 is None else gu.float() + add13
++    act = situ_fp32(pre, beta, linear_beta)
++    ar = torch.arange(act.shape[0], device=x.device, dtype=torch.int32)
++    if lora is not None:
++        add2 = _expert_lora_delta(act, ar, tiles, lora["A2"], lora["B2"], lora["scaling"],
++                                  lora.get("shared_A2", False), lora.get("shared_B2", True), chunk=chunk, gather=chunk_gather)
++        if "token_mask" in lora:
++            add2 = add2 * lora["token_mask"][tok.long()][:, None]
++    y = _chunked_contract(act, ar, w2, tiles, H, chunk, scale=s2, gather=chunk_gather).to(torch.bfloat16)
++    wsel = topk_weights.reshape(-1)[order].to(torch.float32)
++    if GRAPH_SAFE:
++        wsel = torch.where(local[order], wsel, torch.zeros_like(wsel))   # non-local tail rows contribute exactly 0
++    if FUSED_COMBINE and leaf_reduce is None and k == 16:
++        if rows_slot is None:
++            rows_slot = torch.full((T * k,), -1, dtype=torch.int32, device=x.device)
++            rows_slot[order] = torch.arange(order.numel(), dtype=torch.int32, device=x.device)
++        w_slot = torch.zeros((T * k,), dtype=torch.float32, device=x.device)
++        w_slot[order] = wsel
++        return combine16(y, add2, w_slot.view(T, k), rows_slot.view(T, k), topk_ids)
++    if FUSED_COMBINE and FUSED_COMBINE_EP and leaf_reduce is not None and k == 16:
++        # EP: slot-order leaves (one kernel) -> all-reduce -> tree (one kernel); non-local slots -> row -1 -> exact +0
++        rows_ep = torch.full((T * k,), -1, dtype=torch.int32, device=x.device)
++        rows_ep[order] = torch.where(local[order], torch.arange(order.numel(), dtype=torch.int32, device=x.device),
++                                     torch.full_like(order, -1, dtype=torch.int32))
++        return combine16_ep(y, add2, topk_weights.to(torch.float32).reshape(T, k), rows_ep.view(T, k), topk_ids, leaf_reduce)
++    yf = y.float() if add2 is None else y.float() + add2
++    leaf = wsel[:, None] * yf
++    slots = torch.zeros((T * k, H), dtype=torch.float32, device=x.device)
++    slots[order] = leaf
++    if leaf_reduce is not None:
++        slots = leaf_reduce(slots)          # EP: exactly one rank holds each slot's leaf; x + 0 is exact
++    out = tree_combine_expert_ascending(slots.view(T, k, H), topk_ids).to(torch.bfloat16)
++    return torch.where(out == 0, torch.zeros_like(out), out)          # -0 -> +0 (trainer)
++
++
++def _glue_tail(x, w13, s13, w2, s2, topk_weights, topk_ids, beta, linear_beta, lora, chunk_gather, expert_map,
++               leaf_reduce, local, order, rows_slot, tok, counts, tiles, chunk):
++    """FUSED_GLUE tail of _bi_moe_forward_tokens (after routing): same values as the torch glue, fewer and row-bounded
++    kernels. Rows >= nrows (= this rank's local slots; all rows without EP) are never computed nor read."""
++    T, H = x.shape
++    k = topk_ids.shape[1]
++    N2 = w13.shape[1]
++    R = tok.numel()
++    dev = x.device
++    nrows = counts.sum().reshape(1)
++    nr = nrows if chunk_gather is None else None          # TP gather path: keep the plain tree (all rows are local)
++    mask = lora.get("token_mask") if lora is not None else None
++    add13 = add2 = None
++    if lora is not None:
++        sh = lambda n, d: lora.get("shared_" + n, d)  # noqa: E731
++        add13 = torch.empty((R, N2), dtype=torch.float32, device=dev)
++        tt = _token_tiles(T, tiles[3], dev) if LORA_TOKEN_SHRINK else None
++        _lora_glue(x, tok, tiles, lora["A1"], lora["B1"], lora["scaling"], sh("A1", True), sh("B1", False),
++                   out=add13[:, :N2 // 2], tok_tiles=tt)
++        _lora_glue(x, tok, tiles, lora["A3"], lora["B3"], lora["scaling"], sh("A3", True), sh("B3", False),
++                   out=add13[:, N2 // 2:], tok_tiles=tt)
++    if SCALED:
++        eng = _engine_fn(16 * ENGINE_AUTO_MIN_T, x.shape[1])   # the configured engine regardless of the auto threshold
++        if eng is not None and 16 <= T <= 64:
++            gu = eng(x, tok, w13, tiles, N2, scale=s13)
++        else:
++            gu = scaled_gemm(x, tok, w13, s13, tiles, N2)[0]
++    else:
++        gu = grouped_gemm(x, tok, w13, tiles, N2, scale=s13)
++    act = pre_situ(gu, add13, mask, tok, nrows, beta, linear_beta)
++    del gu, add13
++    ar = _arange_i32(R, dev)
++    if lora is not None:
++        if chunk_gather is None and LORA_TOKEN_SHRINK:
++            add2 = _lora_glue(act, ar, tiles, lora["A2"], lora["B2"], lora["scaling"], lora.get("shared_A2", False),
++                              lora.get("shared_B2", True), chunk=chunk, nrows=nrows)
++        else:
++            add2 = _expert_lora_delta(act, ar, tiles, lora["A2"], lora["B2"], lora["scaling"], lora.get("shared_A2", False),
++                                      lora.get("shared_B2", True), chunk=chunk, gather=chunk_gather, nrows=nr)
++    if SCALED and chunk_gather is None and R <= SCALED_W2_MAX_ROWS and w2.shape[2] * 2 == N_CHUNKS * chunk:
++        y = tree8_rows(scaled_gemm(act, ar, w2, s2, tiles, H, chunks=N_CHUNKS), nrows)
++    else:
++        y = _chunked_contract(act, ar, w2, tiles, H, chunk, scale=s2, gather=chunk_gather, nrows=nr)   # FP32; leaf rounds
++    m2 = mask if add2 is not None else None
++    tw = topk_weights.to(torch.float32).reshape(T, k)
++    if leaf_reduce is None:
++        if rows_slot is None:
++            rows_slot = torch.full((T * k,), -1, dtype=torch.int32, device=dev)
++            rows_slot[order] = torch.arange(order.numel(), dtype=torch.int32, device=dev)
++        if expert_map is not None:                       # (not a vLLM case) non-local slots -> row -1 -> exact +0
++            rows_slot = torch.where(local, rows_slot, -1)
++        return combine16(y, add2, tw, rows_slot.view(T, k), topk_ids, mask=m2)
++    if rows_slot is not None:
++        rows_ep = torch.where(local, rows_slot, -1)
++    else:
++        rows_ep = torch.full((T * k,), -1, dtype=torch.int32, device=dev)
++        rows_ep[order] = torch.where(local[order], torch.arange(order.numel(), dtype=torch.int32, device=dev),
++                                     torch.full_like(order, -1, dtype=torch.int32))
++    return combine16_ep(y, add2, tw, rows_ep.view(T, k), topk_ids, leaf_reduce, mask=m2)
++
++
++# ------------------------------------------------------------------------------------------------ vLLM integration
++def _lora_from_context_graph(ctx, num_tokens):
++    """Graph-safe variant (no host syncs): the adapter slot is chosen on device (max of the token->slot map; RL uses one
++    adapter), the stacked buffers are indexed with that device tensor, and a per-token mask (1 = LoRA token) scales the
++    deltas. With one adapter on every token (RL) this is bit-identical to the host path."""
++    if ctx is None:
++        return None
++    m = getattr(ctx, "local_token_lora_mapping", None)
++    if m is None:
++        m = ctx.punica_wrapper.token_mapping_meta.token_lora_mapping
++    m = m[:num_tokens]
++    slot = m.amax().clamp(min=0).reshape(1).to(torch.int64)
++    # one adapter slot (max_loras=1, the RL case): a view of the only slot, no per-layer copy of the factors (same data);
++    # otherwise gather the device-chosen slot
++    pick = lambda t: t[0] if (LORA_VIEW_ONE_SLOT and t.shape[0] == 1) else t.index_select(0, slot)[0]  # noqa: E731
++    a1, a3 = pick(ctx.w13_lora_a_stacked[0]), pick(ctx.w13_lora_a_stacked[1])
++    b1, b3 = pick(ctx.w13_lora_b_stacked[0]), pick(ctx.w13_lora_b_stacked[1])
++    a2, b2 = pick(ctx.w2_lora_a_stacked[0]), pick(ctx.w2_lora_b_stacked[0])
++    return {"A1": a1, "A3": a3, "B1": b1, "B3": b3, "A2": a2, "B2": b2, "scaling": 1.0,
++            "shared_A1": a1.shape[0] == 1, "shared_A3": a3.shape[0] == 1, "shared_B1": b1.shape[0] == 1,
++            "shared_B3": b3.shape[0] == 1, "shared_A2": a2.shape[0] == 1, "shared_B2": b2.shape[0] == 1,
++            "token_mask": (m == slot[0]).to(torch.float32)}
++
++
++def _lora_from_context(ctx, num_tokens):
++    """vLLM MoELoRAContext -> bi_moe_forward lora dict for the ONE adapter active on this batch (RL: one adapter id).
++    Stacked buffers (image lora/layers/fused_moe.py): w13_lora_a = (w1, w3) each [L, E|1, r, H]; w13_lora_b = (w1, w3)
++    each [L, E, N, r]; w2_lora_a [L, E, r, N]; w2_lora_b [L, E|1, H, r]; B is stored pre-scaled (bf16(B*s)), which is
++    exact for s = alpha/r = 2, so scaling = 1 reproduces the trainer's fp32 B*s bit for bit."""
++    if ctx is None:
++        return None
++    meta = getattr(ctx.punica_wrapper, "token_mapping_meta", None)
++    if meta is not None and bool(meta.no_lora_flag_cpu.item()):
++        return None          # no LoRA in this batch (the mapping tensors are NOT refreshed then: stale)
++    m = getattr(ctx, "local_token_lora_mapping", None)
++    if m is None:
++        m = ctx.punica_wrapper.token_mapping_meta.token_lora_mapping[:num_tokens]
++    m = m[:num_tokens]
++    if m.numel() == 0 or bool((m < 0).all()):
++        return None
++    slot = int(m.max())
++    if not bool(((m == slot) | (m < 0)).all()):
++        raise NotImplementedError("K31_BI_MOE: more than one expert-LoRA adapter in a batch")
++    if bool((m < 0).any()):
++        raise NotImplementedError("K31_BI_MOE: mixed LoRA / no-LoRA tokens in a batch")
++    if hasattr(ctx, "adapter_enabled") and not bool(ctx.adapter_enabled[slot]):
++        return None
++    a1, a3 = ctx.w13_lora_a_stacked[0][slot], ctx.w13_lora_a_stacked[1][slot]
++    b1, b3 = ctx.w13_lora_b_stacked[0][slot], ctx.w13_lora_b_stacked[1][slot]
++    a2, b2 = ctx.w2_lora_a_stacked[0][slot], ctx.w2_lora_b_stacked[0][slot]
++    return {"A1": a1, "A3": a3, "B1": b1, "B3": b3, "A2": a2, "B2": b2, "scaling": 1.0,
++            "shared_A1": a1.shape[0] == 1, "shared_A3": a3.shape[0] == 1, "shared_B1": b1.shape[0] == 1,
++            "shared_B3": b3.shape[0] == 1, "shared_A2": a2.shape[0] == 1, "shared_B2": b2.shape[0] == 1}
++
++
++def enabled() -> bool:
++    return os.environ.get("VLLM_BATCH_INVARIANT", "0") == "1" and os.environ.get("K31_BI_MOE", "0") == "1"
++
++
++def install():
++    """Under VLLM_BATCH_INVARIANT=1 and K31_BI_MOE=1: keep the MXFP4 experts in raw checkpoint layout (no AITER shuffle)
++    and route AiterMxfp4Experts.apply through bi_moe_forward. Requires bf16 routed activations
++    (VLLM_ROCM_USE_AITER_MOE_SITUV2=0). TP>1 and EP>1 (DP=1) via the canonical chunk / leaf reductions."""
++    if not enabled():
++        return "off"
++    import importlib
++    O = importlib.import_module("vllm.model_executor.layers.fused_moe.oracle.mxfp4")
++    if getattr(O, "_k31_bi_moe", False):
++        return "on"
++    orig_convert = O.convert_weight_to_mxfp4_moe_kernel_format
++
++    def convert(mxfp4_backend, layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale,
++                w13_bias=None, w2_bias=None, *a, **kw):
++        if mxfp4_backend == O.Mxfp4MoeBackend.AITER_MXFP4_BF16:
++            return (w13_weight.data, w2_weight.data, w13_weight_scale.data, w2_weight_scale.data, w13_bias, w2_bias)
++        return orig_convert(mxfp4_backend, layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale,
++                            w13_bias, w2_bias, *a, **kw)
++
++    O.convert_weight_to_mxfp4_moe_kernel_format = convert
++
++    # Force the backend: whatever moe_backend is requested (e.g. "emulation" for expert LoRA), under K31_BI_MOE the
++    # experts are the BI ones (AITER_MXFP4_BF16 slot -> raw layout via `convert`, AiterMxfp4Experts.apply -> BI).
++    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterMxfp4Experts as _AE
++    orig_select = O.select_mxfp4_moe_backend
++
++    def select(config, *a, **kw):
++        be, cls = orig_select(config, *a, **kw)
++        if be != O.Mxfp4MoeBackend.AITER_MXFP4_BF16:
++            import logging
++            logging.getLogger("vllm").warning("K31_BI_MOE: overriding MXFP4 MoE backend %s -> AITER_MXFP4_BF16 (BI experts)", be)
++        return O.Mxfp4MoeBackend.AITER_MXFP4_BF16, _AE
++
++    O.select_mxfp4_moe_backend = select
++    for mod in ("vllm.model_executor.layers.quantization.mxfp4",
++                "vllm.model_executor.layers.quantization.online.mxfp4",
++                "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe."
++                "compressed_tensors_moe_w4a4_mxfp4",
++                "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe",
++                "vllm.model_executor.layers.quantization.quark.quark_moe"):
++        try:
++            m = importlib.import_module(mod)
++            if hasattr(m, "convert_weight_to_mxfp4_moe_kernel_format"):
++                m.convert_weight_to_mxfp4_moe_kernel_format = convert
++            if hasattr(m, "select_mxfp4_moe_backend"):
++                m.select_mxfp4_moe_backend = select
++        except Exception:
++            pass
++
++    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterMxfp4Experts
++
++    def apply(self, output, hidden_states, w1, w2, topk_weights, topk_ids, activation, global_num_experts,
++              expert_map, a1q_scale, a2_scale, workspace13, workspace2, expert_tokens_meta,
++              apply_router_weight_on_input):
++        assert hidden_states.dtype == torch.bfloat16 and a1q_scale is None, \
++            "K31_BI_MOE needs bf16 routed activations: set VLLM_ROCM_USE_AITER_MOE_SITUV2=0"
++        assert not apply_router_weight_on_input
++        mc = self.moe_config
++        qc = self.quant_config
++        pc = mc.moe_parallel_config
++        assert pc.dp_size == 1, "K31_BI_MOE: DP>1 (token dispatch) not supported yet"
++        gather = reduce = None
++        rank = 0
++        if expert_map is not None and expert_map.numel() == global_num_experts + 1:
++            # AITER-style 0/1 local-expert mask (+ sentinel): convert to the canonical -1 / local-slot map
++            m = expert_map[:global_num_experts] > 0
++            expert_map = torch.where(m, torch.cumsum(m.to(torch.int32), 0) - 1, torch.full_like(m, -1, dtype=torch.int32))
++        n_global = None
++        if pc.use_ep and pc.ep_size > 1:
++            from vllm.distributed import get_ep_group
++            grp = get_ep_group()
++            rank = pc.ep_rank
++
++            def reduce(t, grp=grp):
++                torch.distributed.all_reduce(t, group=grp.device_group)
++                return t
++        elif pc.tp_size > 1:
++            from vllm.distributed import get_tp_group
++            grp = get_tp_group()
++            rank = pc.tp_rank
++            n_global = (w1.shape[1] // 2) * pc.tp_size
++            unp = getattr(mc, "intermediate_size_per_partition_unpadded", None)
++            assert unp in (None, w1.shape[1] // 2), f"K31_BI_MOE: padded intermediate {unp} vs {w1.shape[1] // 2}"
++
++            def gather(P, grp=grp, ws=pc.tp_size):
++                outp = torch.empty((ws * P.shape[0],) + tuple(P.shape[1:]), dtype=P.dtype, device=P.device)
++                torch.distributed.all_gather_into_tensor(outp, P.contiguous(), group=grp.device_group)
++                return outp
++        if not getattr(AiterMxfp4Experts, "_k31_logged", False):
++            AiterMxfp4Experts._k31_logged = True
++            import logging
++            logging.getLogger("vllm").warning("K31_BI_MOE: bi_moe_forward active (BI MXFP4 experts, graph_safe=%s, "
++                                              "lora_ctx=%s, tp=%d ep=%d)", GRAPH_SAFE,
++                                              getattr(self, "_lora_context", None) is not None, pc.tp_size, pc.ep_size)
++        lora = (_lora_from_context_graph if GRAPH_SAFE else _lora_from_context)(
++            getattr(self, "_lora_context", None), hidden_states.shape[0])
++        out = bi_moe_forward(hidden_states, w1, qc.w1_scale, w2, qc.w2_scale, topk_weights, topk_ids,
++                             mc.activation_situ_beta, mc.activation_situ_linear_beta,
++                             lora=lora, n_global=n_global, chunk_gather=gather,
++                             expert_map=expert_map if (pc.use_ep and pc.ep_size > 1) else None, leaf_reduce=reduce)
++        # the full result is now identical on every rank of the group; the runner sums the group's outputs next, so
++        # rank 0 returns it and the others 0 (x + 0 is exact in any reduction order)
++        if rank == 0:
++            output.copy_(out)
++        else:
++            output.zero_()
++
++    AiterMxfp4Experts.apply = apply
++    # expert LoRA (vLLM FusedMoEWithLoRA hands a MoELoRAContext to LoRA-capable experts); needs K31LORA_EXPERTS=1 so the
++    # MoE config keeps is_lora_enabled, and "experts" in --lora-target-modules (+ --enable-moe-shared-loras)
++    from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import LoRAExpertsMixin
++    # FusedMoEWithLoRA.set_mapping asserts isinstance(fused_experts, LoRAExpertsMixin); that is the module's only
++    # runtime use of the name, so widen it to a tuple that also admits the BI AITER experts (bases can't be changed).
++    import vllm.lora.layers.fused_moe as FML
++    if not isinstance(FML.LoRAExpertsMixin, tuple):
++        FML.LoRAExpertsMixin = (LoRAExpertsMixin, AiterMxfp4Experts)
++    AiterMxfp4Experts.set_lora_context = LoRAExpertsMixin.set_lora_context
++    AiterMxfp4Experts.supports_lora = staticmethod(lambda: True)
++    AiterMxfp4Experts._lora_context = None
++    AiterMxfp4Experts.consumes_expert_mask = False      # get the canonical -1/local-slot expert_map
++    AiterMxfp4Experts._supports_batch_invariance = staticmethod(lambda: True)
++    O._k31_bi_moe = True
++    try:  # loud guard: another plugin (e.g. k31xlora) replacing the experts would bypass the BI MoE
++        import logging
++        logging.getLogger("vllm").warning("K31_BI_MOE installed: AiterMxfp4Experts.apply -> bi_moe_forward. Do NOT also "
++                                          "load k31xlora (its experts class is not BI).")
++    except Exception:
++        pass
++    return "on"
+diff --git a/kimi-k31/k31lora/k31lora/model.py b/kimi-k31/k31lora/k31lora/model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6068dff24bbba33d42f2a927d79b47a389ae0556
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/model.py
+@@ -0,0 +1,18 @@
++import torch
++from vllm.model_executor.models.interfaces import SupportsLoRA
++from vllm.models.kimi_k3.amd.model import KimiK3ForConditionalGeneration as _Base
++
++
++class KimiK3LoRAForConditionalGeneration(_Base, SupportsLoRA):
++    # HF (adapter) module name -> fused vLLM module. Order = output-slice order of the fused layer.
++    #   KDA  in_proj_qkvgfab: [q | k | v | g | f_a | b]   (amd/kda.py split: 3*proj, proj, head_dim, heads)
++    #   DSA  fused_qkv_a_proj: [q_a | kv_a(+rope)]  (amd/dsa.py:656; K3.1's full-attn layers are all DSA, g_proj separate).
++    #   (amd/linear.py's non-DSA MLA may fuse g into it as a 3rd slice; not used by K3.1.)
++    packed_modules_mapping = {
++        "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj"],
++        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
++        "gate_up_proj": ["gate_proj", "up_proj"],
++    }
++    embedding_modules: dict = {}
++    # experts are MXFP4 AITER (no LoRAExpertsMixin on ROCm); keep them out via --lora-target-modules.
++    is_3d_moe_weight = True
+diff --git a/kimi-k31/k31lora/k31lora/persist_sleep.py b/kimi-k31/k31lora/k31lora/persist_sleep.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a12163da56f873b12223cd261c54456aa2ec29c8
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/persist_sleep.py
+@@ -0,0 +1,64 @@
++"""Persistent host backup for vLLM sleep(level=1) (CuMemAllocator), experimental (opt-in).
++
++vLLM's sleep(1) allocates a fresh `torch.empty(size, pin_memory=True)` per weight allocation on EVERY sleep. That is slow
++(~80 s for the full K3.1 at TP8: pinning ~1.6 TB of fresh memory) and goes through PyTorch's CachingHostAllocator,
++which rounds sizes up (2.7 TB peak for 1.6 TB of weights) and keeps the blocks pinned after wake.
++Here each allocation gets ONE exactly-sized pageable host buffer, pinned once with cudaHostRegister and reused on every
++sleep, so later sleeps are a plain D2H copy and wakes a plain H2D copy. Host cost = size of the weights, held persistently.
++install() must run in each worker process (worker extension / plugin)."""
++import time
++import torch
++
++_STATS = {}
++
++
++def install():
++    from vllm.device_allocator import cumem as C
++    A = C.CuMemAllocator
++    if getattr(A, "_k31_persist", False):
++        return "already"
++    try:
++        from vllm.platforms import current_platform
++        cudart = current_platform.cudart()
++    except Exception:
++        cudart = torch.cuda.cudart()
++
++    def sleep(self, offload_tags=None):
++        if offload_tags is None:
++            offload_tags = (A.default_tag,)
++        elif isinstance(offload_tags, str):
++            offload_tags = (offload_tags,)
++        pool = self.__dict__.setdefault("_k31_pool", {})
++        t0 = time.time(); new_bytes = 0; tot = 0; bak = 0; t_alloc = 0.0
++        for ptr, data in self.pointer_to_data.items():
++            if data.is_asleep:
++                continue
++            handle = data.handle
++            tot += handle[1]
++            if data.tag in offload_tags:
++                size = handle[1]; bak += size
++                buf = pool.get(ptr)
++                if buf is None or buf.numel() != size:
++                    ta = time.time()
++                    buf = torch.empty(size, dtype=torch.uint8)
++                    rc = cudart.cudaHostRegister(buf.data_ptr(), size, 0)
++                    if rc not in (0, None) and str(rc) not in ("0", "cudaError_t.cudaSuccess", "hipSuccess"):
++                        raise RuntimeError(f"cudaHostRegister failed: {rc}")
++                    pool[ptr] = buf; new_bytes += size; t_alloc += time.time() - ta
++                C.libcudart.cudaMemcpy(buf.data_ptr(), ptr, size)
++                data.cpu_backup_tensor = buf
++            try:
++                C.unmap_and_release(handle)
++            finally:
++                data.is_asleep = True
++        _STATS.update({"sleep_s": round(time.time() - t0, 2), "alloc_register_s": round(t_alloc, 2),
++                       "new_pinned_GB": round(new_bytes / 1e9, 1), "backup_GB": round(bak / 1e9, 1),
++                       "freed_GB": round(tot / 1e9, 1), "pool_GB": round(sum(b.numel() for b in pool.values()) / 1e9, 1)})
++
++    A.sleep = sleep
++    A._k31_persist = True
++    return "installed"
++
++
++def stats():
++    return dict(_STATS)

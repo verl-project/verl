@@ -1,0 +1,88 @@
+mLite / verl_mlite: export the LoRA adapter without onloading the frozen base. On full Kimi-K3.1 with parameter
+offload, onloading the base to export the adapter does not fit next to the rollout. Upstream status: not yet proposed.
+
+diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+index 03539b7a492aa76640c2062b61e8fe3974aeb046..d82422cae8f869a575c632d440ca5abbb89b7084 100644
+--- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
++++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+@@ -537,7 +537,11 @@ class MegatronLiteEngine(BaseEngine):
+     def get_per_tensor_param(self, **kwargs):
+         self._require_initialized()
+         if self.is_param_offload_enabled:
+-            self.to("cuda", model=True, optimizer=False, grad=False)
++            # Adapter-only export (K31 LoRA): the exporter reads only the trainable factors, so do not move the frozen base
++            # (~110 GiB/rank at PP4xEP4) next to the rollout; onload just the DDP param buffers.
++            loader = getattr(self.runtime, "load_trainable_to_gpu", None)
++            if not (self._exports_adapter_only() and callable(loader) and loader(self.handle)):
++                self.to("cuda", model=True, optimizer=False, grad=False)
+         if not getattr(self, "_initial_sync_cache_cleared", False):
+             aggressive_empty_cache(force_sync=True)
+             self._initial_sync_cache_cleared = True
+@@ -584,6 +588,14 @@ class MegatronLiteEngine(BaseEngine):
+             )
+         return weights, peft_config
+ 
++    def _exports_adapter_only(self) -> bool:
++        if os.environ.get("MLITE_EXPORT_FULL_ONLOAD", "0") == "1":
++            return False
++        proto = self.handle._extras.get("protocol")
++        if not callable(getattr(proto, "export_peft_config", None)):
++            return False
++        return os.environ.get("MLITE_K31_TRAIN", "lora") != "base"
++
+     def get_data_parallel_size(self):
+         if self.handle is None:
+             world_size = dist.get_world_size() if dist.is_initialized() else 1
+diff --git a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+index 4ab571ba8cd749cbdaf7f553ebf5aef53446f76f..edcc59b7a1b9d9e68e59e6d527e724c0e810dc9c 100644
+--- a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
++++ b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+@@ -523,6 +523,12 @@ class MegatronLiteRuntime(RuntimeBase):
+                 else:
+                     load_optimizer(handle._optimizer)
+ 
++    def load_trainable_to_gpu(self, handle: ModelHandle) -> bool:
++        """Adapter export: onload only the trainable (DDP-buffer) parameters; False if unsupported (caller loads all)."""
++        from megatron.lite.runtime.megatron_utils import load_trainable_params_to_gpu
++
++        return load_trainable_params_to_gpu(handle._extras.get("model_chunks", [handle._model]))
++
+     # ── Mode switching ──
+ 
+     def train_mode(self, handle: ModelHandle):
+diff --git a/experimental/lite/megatron/lite/runtime/megatron_utils.py b/experimental/lite/megatron/lite/runtime/megatron_utils.py
+index 5eecca78fb816acdf2b6d060865f6804476215fe..3c6d8c65d017b97c67bd3aef66293048e1ed91e6 100644
+--- a/experimental/lite/megatron/lite/runtime/megatron_utils.py
++++ b/experimental/lite/megatron/lite/runtime/megatron_utils.py
+@@ -260,6 +260,31 @@ def offload_model_to_cpu(
+                 model_chunk.to("cpu")
+ 
+ 
++def load_trainable_params_to_gpu(model_list: list) -> bool:
++    """Restore ONLY the DDP param buffers (the trainable parameters, e.g. LoRA factors) to GPU: no grad buffers, and frozen
++    parameters (offloaded one by one) stay on CPU.  For adapter-only weight export.  Returns False (nothing changed) unless
++    every chunk is a Megatron DDP chunk, so the caller can fall back to ``load_model_to_gpu``.  Consistent with the full
++    paths: ``load_model_to_gpu`` skips already-resident buffers, ``offload_model_to_cpu`` re-offloads them."""
++    # DDP chunks: offload is the same with or without ``persist`` (param buffers + frozen params one by one).
++    # Other non-FSDP2 chunks (plain / persistent host cache): move only the trainable parameters; the persistent offload
++    # re-copies non-frozen tensors and returns CPU-resident frozen ones as they are, the full persistent load moves the rest.
++    if any(not _is_megatron_ddp(c) and _has_fsdp2(c) for c in model_list):
++        return False
++    for model_chunk in model_list:
++        if _is_megatron_ddp(model_chunk):
++            for buffers in (model_chunk.buffers, model_chunk.expert_parallel_buffers):
++                for buffer in buffers:
++                    if buffer.param_data.storage().size() == 0 and hasattr(buffer, "param_data_size"):
++                        buffer.param_data.storage().resize_(buffer.param_data_size)
++                        buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
++        else:
++            for param in model_chunk.parameters():
++                if param.requires_grad and param.device.type != "cuda":
++                    param.data = param.data.to("cuda", non_blocking=True)
++    torch.cuda.synchronize()
++    return True
++
++
+ def load_model_to_gpu(
+     model_list: list,
+     load_grad: bool = True,

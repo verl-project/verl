@@ -175,6 +175,8 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
         from packaging import version
 
         _VLLM_VERSION = version.parse(vllm.__version__)
+        if _VLLM_VERSION.release == (0, 0, 0):  # a source build without version metadata
+            _VLLM_VERSION = version.parse("99.0.0")
         if _VLLM_VERSION >= version.parse("0.19.0"):
             store = create_tcp_store(
                 host=host,

@@ -192,6 +192,36 @@ class ServerAdapter(BaseRollout):
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
 
+    def lora_expert_slice(self) -> Optional[tuple[int, int]]:
+        """``(ep_rank, ep_size)`` of the vLLM worker this rank's weight sync feeds, or None.
+
+        With expert parallelism vLLM's EP group is the replica's DP x TP ranks, and the
+        worker colocated with this trainer rank has EP rank ``rollout_rank`` (PP=1). A
+        LoRA export can then send it only the experts it keeps; the vLLM loader checks the
+        payload against its own placement. None when there is no EP, with PP or PD layouts.
+        """
+        if self.config.expert_parallel_size <= 1 or self._pd_role is not None:
+            return None
+        if self.config.pipeline_model_parallel_size != 1:
+            return None
+        ep_size = self.config.data_parallel_size * self.config.tensor_model_parallel_size
+        return self.rollout_rank, ep_size
+
+    def lora_expert_tp_slice(self) -> Optional[tuple[int, int]]:
+        """``(tp_rank, tp_size)`` of the colocated vLLM worker when its MoE layers shard every
+        expert over TP (no expert parallelism), else None.  With ``VERL_K31_LORA_RANK_SLICE=1`` the adapter sync then
+        sends that worker only its TP shard of the expert LoRA factors (``k31_lora_rank_slice.tp_slice_adapter``); the
+        worker checks the shard against its own layers and refuses on any mismatch.
+        """
+        if self.config.expert_parallel_size > 1 or self._pd_role is not None:
+            return None
+        if self.config.pipeline_model_parallel_size != 1:
+            return None
+        tp = self.config.tensor_model_parallel_size
+        if tp <= 1:
+            return None
+        return self.rollout_rank % tp, tp
+
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
 
