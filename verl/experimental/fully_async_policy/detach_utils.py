@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.ray_trainer import compute_response_mask
+from verl.trainer.ppo.trainer_utils import compute_response_mask
 
 
 @dataclass
