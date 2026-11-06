@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 10/01/2026.
+Last updated: 10/20/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -602,6 +602,7 @@ Trainer
      n_gpus_per_node: 8
      save_freq: -1
      val_before_train: True
+     val_bayes_at_n: False
      test_freq: 2
      critic_warmup: 0
      default_hdfs_dir: null # hdfs checkpoint path
@@ -623,6 +624,8 @@ Trainer
 - ``trainer.save_freq``: The frequency (by iteration) to save checkpoint
   of the actor and critic model.
 - ``trainer.val_before_train``: Whether to run validation before training.
+- ``trainer.val_bayes_at_n``: Report binary Bayes@N posterior mean and standard
+  deviation during complete V1 synchronous validation. Disabled by default.
 - ``trainer.test_freq``: The validation frequency (by iteration).
 - ``trainer.critic_warmup``: The number of iteration to train the critic
   model before actual policy learning.
@@ -644,6 +647,51 @@ Trainer
   checkpoints after loading them. Default is False.
 - ``trainer.ray_wait_register_center_timeout``: The timeout for waiting
   for the ray register center to be ready. Default is 300 seconds.
+
+Bayes@N validation
+~~~~~~~~~~~~~~~~~~
+
+Set ``trainer.val_bayes_at_n=true`` to report uncertainty about average binary
+accuracy over the fixed validation questions. This implements the binary,
+uniform-prior case of `Bayes@N <https://arxiv.org/abs/2510.04265>`_. Each question
+has an independent Beta(1, 1) prior. No earlier validation results are reused as
+prior observations.
+
+.. code:: bash
+
+   python -m verl.trainer.main_ppo ... \
+     trainer.use_v1=true trainer.v1.trainer_mode=sync \
+     trainer.val_bayes_at_n=true \
+     actor_rollout_ref.rollout.val_kwargs.n=4 \
+     actor_rollout_ref.rollout.val_kwargs.do_sample=true \
+     actor_rollout_ref.rollout.val_kwargs.temperature=1.0
+
+The rule reward function must return binary ``acc`` values, for example
+``{"score": 0.8, "acc": 1}``. Continuous training rewards remain unchanged.
+The registered ``naive`` reward manager and built-in ``single_turn_agent`` are
+supported. Custom agent managers or agent config files, per-question agent overrides, model-based
+rewards, legacy trainers, asynchronous training, and full deterministic rollout
+are rejected when this option is enabled.
+Sampling requires finite positive temperature, finite ``top_p`` in ``(0, 1]``,
+and ``top_k != 1``. These parameter checks do not establish sample independence.
+
+For each data source, logs include
+``val-aux/<source>/acc/bayes@4/mean`` and
+``val-aux/<source>/acc/bayes@4/std``. The latter is the posterior standard
+deviation of the average success probability over these questions, in accuracy
+units. It is separate from the existing completion ``std@N`` and bootstrap
+statistics. With ``s_i`` successes in ``N`` trials for question ``i``, the row
+posterior is Beta(``s_i + 1``, ``N - s_i + 1``). The reported mean averages row
+posterior means; the reported SD is ``sqrt(sum(row_variances)) / M``.
+
+Every planned question must retain all ``N`` distinct session IDs and an
+observed finite 0/1 grade for each. Missing sessions or grades raise before
+the ordinary accuracy metric can pad failures with zero. Adaptive allocation,
+fractional grades, and missing questions are unsupported. Keep the model,
+question, rule grader, and any external grading state fixed across these fresh
+samples; a metric cannot establish independence or correctness of an arbitrary
+custom grader. This option does not add categorical weights, prior outcomes,
+or credible intervals.
 
 
 This figure illustrates how the configurations affect the training.

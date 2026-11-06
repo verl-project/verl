@@ -16,8 +16,10 @@ Metrics related to the PPO trainer.
 """
 
 import logging
+import math
 from collections import defaultdict
 from functools import partial
+from numbers import Integral, Real
 from typing import Any, Callable
 
 import numpy as np
@@ -893,12 +895,82 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     return maj_val
 
 
+def _bayes_at_n_metrics(
+    data_sources: list[str],
+    sample_uids: list[str],
+    infos_dict: dict[str, list[Any]],
+    expected_counts: dict[tuple[str, str], int] | None,
+    sample_trial_ids: list[int] | None,
+) -> dict[str, dict[str, float]]:
+    """Compute binary Bayes@N moments from a complete, declared validation cohort.
+
+    Each question has an independent Beta(1, 1) prior. The posterior SD describes
+    the average success probability over these fixed questions. See Algorithm 1
+    of https://arxiv.org/abs/2510.04265; no prior observations are used.
+    """
+    if not expected_counts:
+        raise ValueError("Bayes@N requires the expected pre-rollout question counts")
+    size = len(data_sources)
+    if sample_trial_ids is None or len(sample_trial_ids) != size or len(sample_uids) != size:
+        raise ValueError("Bayes@N requires aligned source, uid, and trial-id arrays")
+    if "acc" not in infos_dict or any(len(values) != size for values in infos_dict.values()):
+        raise ValueError("Bayes@N requires aligned raw binary acc values for every trial")
+
+    source_counts = {}
+    for key, count in expected_counts.items():
+        if not isinstance(key, tuple) or len(key) != 2 or any(not isinstance(x, str) or not x for x in key):
+            raise ValueError("Bayes@N expected question keys must be nonempty (source, uid) strings")
+        if isinstance(count, bool | np.bool_) or not isinstance(count, Integral) or count < 1:
+            raise ValueError("Bayes@N expected trial counts must be positive integers")
+        source = key[0]
+        if source in source_counts and source_counts[source] != count:
+            raise ValueError("Bayes@N requires a fixed trial count within each data source")
+        source_counts[source] = int(count)
+
+    observed = defaultdict(dict)
+    for source, uid, trial, acc in zip(data_sources, sample_uids, sample_trial_ids, infos_dict["acc"], strict=True):
+        if not isinstance(source, str) or not source or not isinstance(uid, str) or not uid:
+            raise ValueError("Bayes@N source and uid must be nonempty strings")
+        key = (source, uid)
+        if key not in expected_counts:
+            raise ValueError(f"Bayes@N observed an unexpected question: {key!r}")
+        if isinstance(trial, bool | np.bool_) or not isinstance(trial, Integral):
+            raise ValueError("Bayes@N trial IDs must be integers")
+        if trial < 0 or trial >= expected_counts[key] or trial in observed[key]:
+            raise ValueError(f"Bayes@N found a duplicate or out-of-range trial for {key!r}")
+        if not isinstance(acc, Real | np.bool_) or acc not in (0, 1) or not math.isfinite(acc):
+            raise ValueError("Bayes@N acc must contain only observed binary 0/1 grades")
+        observed[key][int(trial)] = int(acc)
+
+    source_moments = defaultdict(list)
+    for key, count in expected_counts.items():
+        count = int(count)
+        if len(observed[key]) != count:
+            raise ValueError(f"Bayes@N requires all {count} observed trials for {key!r}")
+        successes = sum(observed[key].values())
+        a, b = successes + 1, count - successes + 1
+        total = count + 2
+        source_moments[key[0]].append((a / total, a * b / (total * total * (total + 1))))
+
+    metrics = {}
+    for source, moments in source_moments.items():
+        count = source_counts[source]
+        questions = len(moments)
+        metrics[source] = {
+            f"bayes@{count}/mean": math.fsum(mean for mean, _ in moments) / questions,
+            f"bayes@{count}/std": math.sqrt(math.fsum(variance for _, variance in moments)) / questions,
+        }
+    return metrics
+
+
 def process_validation_metrics(
     data_sources: list[str],
     sample_uids: list[str],
     infos_dict: dict[str, list[Any]],
     seed: int = 42,
     expected_acc_counts: dict[tuple[str, str], int] | None = None,
+    bayes_at_n: bool = False,
+    sample_trial_ids: list[int] | None = None,
 ) -> dict[str, dict[str, dict[str, float]]]:
     """
     Process validation metrics into a structured format with statistical analysis.
@@ -916,6 +988,11 @@ def process_validation_metrics(
         expected_acc_counts: Expected session count keyed by ``(data_source, uid)``. For data
             sources that emit ``acc``, failure sessions are included with ``acc=0`` while
             ``acc_success_only`` preserves the metric over materialized sessions.
+        bayes_at_n: Add binary Bayes@N posterior mean and SD for each data source.
+            Requires the complete pre-rollout ``expected_acc_counts`` and raw binary
+            ``acc`` grades. Missing trials raise before failure-session padding.
+        sample_trial_ids: Session indices in ``[0, N)`` for Bayes@N. Each declared
+            question must have every trial exactly once. Ignored when disabled.
 
     Returns:
         A nested dictionary with the structure:
@@ -944,6 +1021,12 @@ def process_validation_metrics(
         >>> result = process_validation_metrics(data_sources, sample_uids, infos_dict)
         >>> # result will contain statistics for each data source and variable
     """
+    bayes_metrics = (
+        _bayes_at_n_metrics(data_sources, sample_uids, infos_dict, expected_acc_counts, sample_trial_ids)
+        if bayes_at_n
+        else {}
+    )
+
     # Group metrics by data source, prompt and variable
     data_src2uid2var2vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for sample_idx, data_source in enumerate(data_sources):
@@ -1071,4 +1154,6 @@ def process_validation_metrics(
         for var_name, metric2uid_vals in var2metric2uid_vals.items():
             for metric_name, uid_vals in metric2uid_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
+    for data_source, metrics in bayes_metrics.items():
+        data_src2var2metric2val[data_source]["acc"].update(metrics)
     return data_src2var2metric2val
