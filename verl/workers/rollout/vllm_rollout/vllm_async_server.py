@@ -93,6 +93,12 @@ _VERL_MANAGED_VLLM_ARGS = {
 # Max wait for admissions already past the submission gate to reach the engine.
 _GATE_BARRIER_TIMEOUT_S = 60.0
 
+
+def _keeps_kv_cache(config, rollout_mode) -> bool:
+    # Hybrid/colocated replicas hand GPU memory back to training, so they always recompute.
+    return not getattr(config, "partial_rollout_recompute", True) and rollout_mode == RolloutMode.STANDALONE
+
+
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
 
@@ -720,6 +726,12 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
+        keeps_kv_cache = _keeps_kv_cache(self.config, self.rollout_mode)
+        start_global_steps = self.global_steps
+        if keeps_kv_cache:
+            # The prefix cache is never reset in this mode; salt it so new requests skip old weights' blocks.
+            prompt["cache_salt"] = f"verl-weights-v{start_global_steps}"
+
         with RLInsightLogger.trace_state(
             "vllm_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
@@ -735,6 +747,8 @@ class vLLMHttpServer:
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
+        if keeps_kv_cache:
+            extra_fields["start_global_steps"] = start_global_steps
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -964,7 +978,8 @@ class vLLMHttpServer:
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
-        if self.node_rank == 0:
+        # Kept requests still hold their blocks; new requests are isolated by cache_salt instead.
+        if self.node_rank == 0 and not _keeps_kv_cache(self.config, self.rollout_mode):
             # reset_connector=True drops any attached external KV store
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous model weights. With no connector it
@@ -1117,6 +1132,7 @@ class vLLMHttpServer:
         reset_prefix_cache: bool = True,
         reject_request: bool = False,
         abort_only: bool = False,
+        keep_requests: bool = False,
     ) -> dict[str, Any]:
         """Abort in-flight requests, optionally pausing the replica.
 
@@ -1140,6 +1156,8 @@ class vLLMHttpServer:
                 plain pause (e.g. the one inside a weight sync) restores parking.
             abort_only: Cancel in-flight requests and leave admission open.
                 reset_prefix_cache and reject_request are ignored.
+            keep_requests: Freeze in-flight requests with their KV cache instead of
+                aborting them; resume_generation() continues them.
 
         Returns:
             dict[str, Any]: Dictionary containing:
@@ -1199,7 +1217,9 @@ class vLLMHttpServer:
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
-            if _VLLM_VERSION >= version.parse("0.32.0"):
+            if keep_requests:
+                await self.engine.pause_generation(mode="keep", clear_cache=False)
+            elif _VLLM_VERSION >= version.parse("0.32.0"):
                 await self.engine.pause_generation(mode="abort", clear_cache=reset_prefix_cache)
             else:
                 await self.engine.pause_generation(
@@ -1686,6 +1706,7 @@ class vLLMReplica(RolloutReplica):
         reject_request: bool = False,
         reset_prefix_cache: bool = True,
         abort_only: bool = False,
+        keep_requests: bool = False,
     ) -> dict[str, Any]:
         """Abort in-flight requests on every server.
 
@@ -1699,6 +1720,7 @@ class vLLMReplica(RolloutReplica):
                     reject_request=reject_request,
                     reset_prefix_cache=reset_prefix_cache,
                     abort_only=abort_only,
+                    keep_requests=keep_requests,
                 )
                 for server in self.servers
             ]
@@ -1757,6 +1779,17 @@ class vLLMReplica(RolloutReplica):
         # before we touch engine.release_kv_cache()
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+
+    async def pause_for_weight_sync(self):
+        if not _keeps_kv_cache(self.config, self.rollout_mode):
+            return await super().pause_for_weight_sync()
+        # Skip release_kv_cache(): its engine.sleep() would abort the kept requests.
+        await self.abort_all_requests(reset_prefix_cache=False, keep_requests=True)
+
+    async def resume_after_weight_sync(self):
+        if not _keeps_kv_cache(self.config, self.rollout_mode):
+            return await super().resume_after_weight_sync()
+        await self.resume_generation()
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides

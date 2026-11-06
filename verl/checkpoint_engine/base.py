@@ -631,8 +631,7 @@ class CheckpointEngineManager:
             # Coupled transports allocate receive buffers and start collectives in
             # build_process_group(), so preserve the original ordering: quiesce
             # rollout and release its KV cache before either of those operations.
-            await self.abort_replicas()
-            await self.release_kv_cache_replicas()
+            await asyncio.gather(*[r.pause_for_weight_sync() for r in self.replicas])
 
         # 2. build process group
         self.build_process_group(rollout)
@@ -663,8 +662,7 @@ class CheckpointEngineManager:
     ):
         """Install a published weight version on rollout workers."""
         if self.backend_cls.support_publish_weights:
-            await self.abort_replicas()
-            await self.release_kv_cache_replicas()
+            await asyncio.gather(*[r.pause_for_weight_sync() for r in self.replicas])
 
         rollout_committed = rollout.update_weights(global_steps=global_steps)
         results = await asyncio.gather(*trainer_published, *rollout_committed)
@@ -674,8 +672,7 @@ class CheckpointEngineManager:
             *rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size),
         )
 
-        await self.resume_kv_cache_replicas()
-        await self.resume_generation_replicas()
+        await asyncio.gather(*[r.resume_after_weight_sync() for r in self.replicas])
         return self._merge_sync_metrics(results[: self.actor_wg.world_size])
 
 

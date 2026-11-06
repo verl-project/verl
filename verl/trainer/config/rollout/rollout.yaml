@@ -353,6 +353,10 @@ enable_rollout_routing_replay: False
 # Set to 0 to disable.
 moe_load_balance_metrics_interval: 0
 
+# Partial rollout on weight sync. True: abort requests, drop the KV cache and re-prefill on resume.
+# False: keep requests and their KV cache, and continue decoding (vLLM standalone replicas only).
+partial_rollout_recompute: True
+
 
 # profile the rollout model in `generate_sequence`
 profiler:

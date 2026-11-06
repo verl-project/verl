@@ -23,8 +23,11 @@ They also pin abort_all_requests(reject_request=True), which fails late arrivals
 instead of parking them when the server is leaving the load balancer and no
 resume_generation() is coming soon.
 
-Finally, they pin where generate() runs the request hooks relative to the gate:
+They pin where generate() runs the request hooks relative to the gate:
 _preprocess_sampling_params before admission, _postprocess_output after release.
+
+Finally, they pin rollout.partial_rollout_recompute=False, where a weight sync keeps
+requests and their KV cache behind the same gate instead of aborting them.
 """
 
 import asyncio
@@ -55,11 +58,13 @@ class _FakeEngine:
         self.drain_calls = 0
         self.reset_prefix_calls = 0
         self.outputs = []
+        self.prompts = []
         self.sampling_params = []
         self.closed = 0
 
     async def add_request(self, request_id, prompt, params, lora_request=None, priority=0, data_parallel_rank=None):
         """Like AsyncLLM.add_request(): returns a collector that yields ``outputs``, the last one finished."""
+        self.prompts.append(prompt)
         self.sampling_params.append(params)
         pending = list(self.outputs)
         for i, output in enumerate(pending):
@@ -109,6 +114,7 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._resume_event.set()
     server._rejecting = False
     server._disaggregation_role = "null"
+    server.rollout_mode = vllm_async_server.RolloutMode.STANDALONE
     return server
 
 
@@ -542,5 +548,100 @@ def test_cancelled_request_releases_barrier_and_aborts_in_engine():
         assert server.engine.engine_aborts == [("r1-internal", True)], "cancellation must drop the request"
         assert server.engine.closed == 1
         assert server._admitting == 0
+
+    asyncio.run(main())
+
+
+def _make_keeping_server(monkeypatch, outputs=()):
+    server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, list(outputs))
+    server.config = RolloutConfig(
+        name="vllm", max_model_len=64, prompt_length=32, response_length=16, partial_rollout_recompute=False
+    )
+    return server
+
+
+def test_keep_requests_pauses_without_clearing_kv_cache(monkeypatch):
+    # Kept requests still hold their blocks, so the post-sync clear_kv_cache() must not reset them.
+    async def main():
+        server = _make_keeping_server(monkeypatch)
+
+        await server.abort_all_requests(reset_prefix_cache=False, keep_requests=True)
+        assert server.engine.pause_kwargs == [{"mode": "keep", "clear_cache": False}]
+        assert server._submission_paused is True
+
+        await server.clear_kv_cache()
+        assert server.engine.reset_prefix_calls == 0
+
+        await server.resume_generation()
+        assert server.engine.resume_calls == 1
+        assert server._submission_paused is False
+
+    asyncio.run(main())
+
+
+def test_keeping_kv_cache_salts_prefix_cache_per_weight_version(monkeypatch):
+    # New requests must not hit blocks of older weights; the start version bounds staleness.
+    async def main():
+        server = _make_keeping_server(monkeypatch, [_request_output([5])])
+
+        output = await server.generate([1, 2, 3], {}, "r")
+
+        assert server.engine.prompts[0]["cache_salt"] == "verl-weights-v7"
+        assert output.extra_fields["start_global_steps"] == 7
+
+    asyncio.run(main())
+
+
+class _RemoteMethod:
+    def __init__(self, name, calls):
+        self._name, self._calls = name, calls
+
+    async def remote(self, *args, **kwargs):
+        self._calls.append(self._name + ("(keep)" if kwargs.get("keep_requests") else ""))
+        return {}
+
+
+class _FakeServerHandle:
+    def __init__(self, calls):
+        self._calls = calls
+
+    def __getattr__(self, name):
+        return _RemoteMethod(name, self._calls)
+
+
+@pytest.mark.parametrize(
+    ("recompute", "rollout_mode", "expected_pause", "expected_resume"),
+    [
+        (
+            False,
+            vllm_async_server.RolloutMode.STANDALONE,
+            ["abort_all_requests(keep)"],
+            ["resume_engine_generation", "open_submission_gate"],
+        ),
+        # Hybrid replicas return their GPU memory to training, so they always recompute.
+        (
+            False,
+            vllm_async_server.RolloutMode.HYBRID,
+            ["abort_all_requests", "wait_for_requests_to_drain", "release_kv_cache"],
+            ["resume_kv_cache", "resume_engine_generation", "open_submission_gate"],
+        ),
+    ],
+)
+def test_replica_weight_sync_keeps_kv_cache_only_on_standalone_replicas(
+    recompute, rollout_mode, expected_pause, expected_resume
+):
+    async def main():
+        calls = []
+        replica = object.__new__(vllm_async_server.vLLMReplica)
+        replica.config = RolloutConfig(name="vllm", partial_rollout_recompute=recompute)
+        replica.rollout_mode = rollout_mode
+        replica.servers = [_FakeServerHandle(calls)]
+
+        await replica.pause_for_weight_sync()
+        assert calls == expected_pause
+
+        calls.clear()
+        await replica.resume_after_weight_sync()
+        assert calls == expected_resume
 
     asyncio.run(main())

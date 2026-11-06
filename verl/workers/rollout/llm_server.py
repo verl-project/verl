@@ -304,15 +304,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
-            # On partial rollout resume the model version may differ, so keep
-            # existing routing and only append routing for newly generated tokens.
+            # A resume re-prefills the whole sequence, so its routing replaces the earlier attempt's.
             if output.routed_experts is not None and len(output.token_ids) > 0:
-                if final_output.routed_experts is None:
-                    final_output.routed_experts = output.routed_experts
-                else:
-                    final_output.routed_experts = np.concatenate(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]]
-                    )
+                final_output.routed_experts = output.routed_experts
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             # sampler top-k heads for score centering, one row per newly generated token
@@ -341,7 +335,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
             if min_global_steps is None:
-                min_global_steps = global_steps
+                # A request kept across a weight sync only reports its final version.
+                min_global_steps = output.extra_fields.get("start_global_steps", global_steps)
             max_global_steps = global_steps
 
             # 3. update max_new_tokens
