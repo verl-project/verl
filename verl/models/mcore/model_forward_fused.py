@@ -356,7 +356,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         if "video_grid_thw" in multi_modal_inputs:
             model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
-        if vision_model and takes_full_packed_thd_vlm_inputs(model):
+        full_stream_model = vision_model and takes_full_packed_thd_vlm_inputs(model)
+        if full_stream_model:
             # The model selects its CP shard of the labels together with the token stream.
             labels_rmpad = preprocess_thd_full_stream(labels, packed_seq_params, need_roll=True)
         else:
@@ -402,6 +403,9 @@ def fused_forward_model_engine(vision_model: bool = False):
                 impl_backend=impl_backend,
                 **forward_kwargs,
             )
+        if full_stream_model and isinstance(output_orig, tuple):
+            # The model returns its CP-sliced loss mask alongside the output, as in the unfused forward.
+            output_orig = output_orig[0]
 
         if not post_process:
             return output_orig

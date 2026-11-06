@@ -156,6 +156,48 @@ def test_engine_hands_hook_and_mtp_choice_to_language_model_of_full_stream_vlm(m
     assert "forward" not in vars(model.language_model)
 
 
+@pytest.mark.parametrize("post_process", [True, False])
+def test_full_stream_vlm_output_and_loss_mask_tuple_is_unpacked(monkeypatch, post_process):
+    input_ids = torch.tensor([[1, 2, 3]])
+    labels = torch.tensor([[2, 3, 4]])
+    model_output = SimpleNamespace(log_probs=torch.tensor([[0.1, 0.2]]), entropy=torch.tensor([[0.3, 0.4]]))
+
+    monkeypatch.setattr(mff, "preprocess_thd_engine", lambda value, **kwargs: (value, "packed", None))
+    monkeypatch.setattr(mff, "takes_full_packed_thd_vlm_inputs", lambda model: True)
+    monkeypatch.setattr(
+        mff,
+        "preprocess_vlm_thd_engine",
+        lambda model, ids, rmpad, params, position_ids, pad, **kw: (ids, None, None),
+    )
+    monkeypatch.setattr(mff, "preprocess_thd_full_stream", lambda values, packed_seq_params, need_roll=False: values)
+    monkeypatch.setattr(mff, "postprocess_thd_engine", lambda value, *args, **kwargs: value)
+
+    class LanguageModel:
+        def forward(self, **kwargs):
+            return model_output
+
+    class Wrapper:
+        pre_process = True
+        config = SimpleNamespace(fp8=None)
+
+        def __init__(self):
+            self.post_process = post_process
+            self.language_model = LanguageModel()
+            setattr(self, mff._FUSED_FORWARD_MODE_ATTR, mff._LANGUAGE_MODEL_HOOK_MODE)
+
+        def __call__(self, **kwargs):
+            # GLM-5.3-Flash returns its CP-sliced loss mask next to the output.
+            return self.language_model.forward(**kwargs), torch.ones(2)
+
+    output = mff.fused_forward_model_engine(vision_model=True)(Wrapper(), input_ids, labels, {}, 1.0, True, 0)
+
+    if post_process:
+        assert torch.equal(output["log_probs"], model_output.log_probs)
+        assert torch.equal(output["entropy"], model_output.entropy)
+    else:
+        assert output is model_output
+
+
 def test_legacy_fallback_patch_and_unpatch_are_idempotent():
     class LegacyGPTModel(GPTModel):
         def forward(self, input_ids=None):
