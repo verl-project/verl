@@ -163,7 +163,20 @@ def test_explicit_schema_dict_override_skips_inference():
         "function": {
             "name": "x",
             "description": "custom desc",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "offset": {"type": "integer", "description": "Start line", "minimum": 0},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum lines",
+                        "minimum": 1,
+                        "maximum": 128,
+                    },
+                },
+                "required": ["offset"],
+                "additionalProperties": False,
+            },
         },
     }
 
@@ -177,8 +190,7 @@ def test_explicit_schema_dict_override_skips_inference():
         return ""
 
     schema = FUNCTION_TOOL_REGISTRY["x"].tool_schema.model_dump(exclude_unset=True, exclude_none=True)
-    assert schema["function"]["description"] == "custom desc"
-    assert schema["function"]["parameters"]["properties"] == {}
+    assert schema == custom
 
 
 def test_explicit_schema_object_override():
