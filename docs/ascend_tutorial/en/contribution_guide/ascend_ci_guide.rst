@@ -130,7 +130,7 @@ The main sections to modify include:
        timeout-minutes: 60          # Job timeout threshold (minutes)
        container:
          # Image to run; this example uses the vllm image
-         image: swr.cn-south-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+         image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
          options: >-
            --shm-size 16g  # Shared memory configuration
        env:
