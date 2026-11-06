@@ -886,6 +886,8 @@ transfer_queue:
       global_segment_size: 4294967296
       local_buffer_size: 1073741824
       hard_pin: true
+instance:
+  id: null
 trainer:
   balance_batch: true
   total_epochs: 30
