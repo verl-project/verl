@@ -1718,6 +1718,16 @@ class RayPPOTrainer:
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
+                    # Log extra reward metrics (e.g., format_reward, acc_reward) for training monitoring
+                    if reward_extra_infos_dict:
+                        for key, values in reward_extra_infos_dict.items():
+                            if key != "score" and len(values) > 0:
+                                try:
+                                    metrics[f"training/reward/{key}"] = np.mean(values)
+                                except (TypeError, ValueError):
+                                    # reward_extra_info may carry non-numeric fields; skip those.
+                                    pass
+
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
