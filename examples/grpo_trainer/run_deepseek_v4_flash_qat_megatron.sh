@@ -105,6 +105,9 @@ ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${PPO_MAX_TOKEN
 ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
 ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-512}
 ROUTER_REPLAY_MODE=${ROUTER_REPLAY_MODE:-R3}
+# Fused DSA attention kernels (dev Megatron-Core maps True -> dsa_kernel_backend=cudnn, which needs flash_mla from
+# https://github.com/deepseek-ai/FlashMLA/tree/nv_dev). Set False for the PyTorch fallback when flash_mla is absent.
+DSA_KERNEL_FUSION=${DSA_KERNEL_FUSION:-True}
 
 # Truncated importance sampling over the rollout/trainer logprob ratio. Set to "off" to disable.
 ROLLOUT_IS_MODE=${ROLLOUT_IS_MODE:-token}
@@ -186,7 +189,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.use_distributed_optimizer=True
     actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTER_REPLAY_MODE}
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=${DSA_KERNEL_FUSION}
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
