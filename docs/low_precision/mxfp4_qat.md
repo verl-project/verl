@@ -1,6 +1,6 @@
 # MXFP4 MoE QAT on Blackwell
 
-Last updated: 11/03/2026
+Last updated: 11/06/2026
 
 MXFP4 is the OCP microscaling FP4 format: E2M1 elements with one E8M0 scale per 32-element block. In verl it covers
 the routed experts of MoE models. The rollout serves MXFP4 expert weights, quantized on the trainer side, and
@@ -64,34 +64,50 @@ PRECISION=bf16 TOTAL_TRAINING_STEPS=10 bash examples/mxfp4/run_qwen3_30b_a3b_meg
 
 ### Results
 
-> These runs predate verl's TileLang QAT and export kernels and ModelOpt 0.47 (verl main 2ab35292, with the expert
-> weights of a grouped linear stacked and fake-quantized in one call); they are being rerun on current main.
-
 **Configuration**
 
 - One 4×B300 machine for every arm, the same seed and data order, so steps pair across arms; 10 steps
 - The script's hyper-parameters, as in the MXFP8 example: 64 prompts × 8 responses per step, prompts and responses up
   to 1024 and 8192 tokens, dynamic batching at 20,480 tokens per GPU, learning rate 1e-6; DAPO-Math-17k deduplicated
   to its 17,398 unique prompts
-- The versions verl locks: vLLM 0.32.0, Transformer Engine 2.16.1, Megatron-Core 0.19.2, ModelOpt 0.44.0
+- verl main `e41dd697` plus this PR; the versions verl locks: vLLM 0.32.0, Transformer Engine
+  2.20.2, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2, ModelOpt 0.47.0, TileLang 0.1.15
+- wandb: [QAT](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/z52e8qr2),
+  [MXFP4](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/mzx5r4ys),
+  [BF16](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/xd7yxpnw)
 
 "X/Y" is training precision X, rollout precision Y; BF16+QAT trains in BF16 with MXFP4 QAT on the routed experts.
 
 | mean of steps 1–10 | BF16/BF16 | BF16/MXFP4 | BF16+QAT/MXFP4 |
 |---|---|---|---|
-| step time (s) | 829 | 890 | 1031 |
-| generation (s) | 107 | 113 | 113 |
-| `old_log_prob` (s) | 118 | 126 | 166 |
-| `update_actor` (s) | 475 | 478 | 576 |
-| `update_weights` (s) | 7 | 45 | 46 |
-| `rollout_corr/kl` | 0.0017 | 0.0142 | 0.0031 |
-| score | −0.191 | −0.157 | −0.156 |
+| step time (s) | 827 | 848 | 1000 |
+| generation (s) | 107 | 114 | 115 |
+| `old_log_prob` (s) | 118 | 118 | 149 |
+| `ref` (s) | 113 | 117 | 130 |
+| `update_actor` (s) | 476 | 477 | 582 |
+| `update_weights` (s) | 8 | 18 | 19 |
+| `rollout_corr/kl` | 0.0018 | 0.0150 | 0.0030 |
+| score | −0.195 | −0.161 | −0.183 |
+| response length | 6517 | 6411 | 6438 |
+
+The QAT arm's steps 1–4 overlapped another tenant on the same node (the machine's other four GPUs at 100 %), so they
+are slower than the rest; its steps 5–10 ran on an idle machine. The same six steps for all three arms:
+
+| mean of steps 5–10 | BF16/BF16 | BF16/MXFP4 | BF16+QAT/MXFP4 |
+|---|---|---|---|
+| step time (s) | 818 | 833 | 900 |
+| `old_log_prob` (s) | 117 | 116 | 135 |
+| `update_actor` (s) | 472 | 468 | 511 |
+| `rollout_corr/kl` | 0.0018 | 0.0153 | 0.0030 |
 
 Results and observations:
 
-- QAT cuts the rollout–trainer mismatch of the MXFP4 rollout by 78%, to 1.8× the BF16 arm's. Per step,
-  `rollout_corr/kl` ranged 0.0027–0.0036 with QAT, 0.0127–0.0164 without it and 0.0016–0.0019 in BF16.
-- QAT makes a step 16% longer than the MXFP4 rollout alone: `old_log_prob` +40 s, `update_actor` +97 s.
-- The MXFP4 rollout does not speed this job up: generation takes about as long as in BF16, and exporting the MXFP4
-  expert weights adds about 38 s per step to `update_weights`.
+- QAT cuts the rollout–trainer mismatch of the MXFP4 rollout by 80 %, to 1.7× the BF16 arm's. Per step,
+  `rollout_corr/kl` ranged 0.0028–0.0033 with QAT, 0.0135–0.0173 without it and 0.0016–0.0020 in BF16.
+- On the six idle steps QAT costs 8 % over the MXFP4 rollout alone (900 s vs 833 s; `old_log_prob` +19 s,
+  `update_actor` +43 s); the ten-step means above include four contended QAT steps and show 18 %.
+- The TileLang grouped export of the expert weights is why the MXFP4 arms' `update_weights` is 18–19 s here; the
+  earlier per-expert export cost 45–46 s.
+- The MXFP4 rollout does not speed this job up: generation takes about as long as in BF16 (+6 s) and the expert
+  export adds about 10 s per step.
 - Ten steps are enough for speed and mismatch, not for the score.
