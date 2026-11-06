@@ -52,6 +52,10 @@ def _mindspeed_repatch(engine_config):
             repatch_config["context_parallel_size"] = engine_config.context_parallel_size
         repatch(repatch_config)
 
+    from verl.models.mcore.patch import apply_patch_megatron_npu_p2p_shape
+
+    apply_patch_megatron_npu_p2p_shape()
+
 
 @EngineRegistry.register(model_type="language_model", backend="megatron", device="npu")
 class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
