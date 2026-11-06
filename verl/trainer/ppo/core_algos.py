@@ -463,7 +463,11 @@ def compute_gdpo_outcome_advantage(
         else:
             new_advantage += weights[i] * normalized_score
 
-    advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
+    response_level_advantage = verl_F.masked_mean(new_advantage, response_mask, axis=-1)
+    response_level_mask = response_mask.sum(dim=-1) > 0
+    response_level_advantage = verl_F.masked_whiten(response_level_advantage, response_level_mask)
+
+    advantages = response_level_advantage.unsqueeze(-1) * response_mask
 
     return advantages, advantages
 
