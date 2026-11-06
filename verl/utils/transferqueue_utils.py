@@ -157,6 +157,25 @@ def _find_meta(*args, **kwargs):
     return None
 
 
+def _normalize_tq_position_ids(data: TensorDict) -> None:
+    """Preserve the sequence axis when TransferQueue rebuilds mRoPE tensors.
+
+    TQ's generic collation uses jagged dimension 1 for (rope, sequence)
+    samples. Verl expects dimension 2; changing only _ragged_idx corrupts
+    subsequent micro-batch slicing. Repack values before engine dispatch.
+    """
+    position_ids = data.get("position_ids")
+    if not isinstance(position_ids, torch.Tensor) or not position_ids.is_nested or position_ids.dim() != 3:
+        return
+    if position_ids.layout == torch.jagged and position_ids._ragged_idx == 2:
+        return
+    samples = list(position_ids.unbind(0))
+    values = torch.cat(samples, dim=-1)
+    lengths = torch.tensor([sample.shape[-1] for sample in samples], device=values.device, dtype=torch.long)
+    offsets = torch.cat([lengths.new_zeros(1), lengths.cumsum(0)])
+    data["position_ids"] = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets, jagged_dim=2)
+
+
 async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
     if isinstance(meta, KVBatchMeta):
         meta = await async_kv_batch_meta2batch_meta(meta)
@@ -168,6 +187,7 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
 
     tq_client = tq.get_client()
     tensordict = await tq_client.async_get_data(meta)
+    _normalize_tq_position_ids(tensordict)
 
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):
