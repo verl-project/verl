@@ -31,9 +31,9 @@ Most critic configs are similar to those of actors. Note that the critic model i
 
 - `data.train_batch_size`: The global batch size of prompts used to generate a set of sampled trajectories/rollouts. The number of responses/trajectories is `data.train_batch_size * actor_rollout.ref.rollout.n`
 
-- `actor_rollout_ref.actor.ppo_mini_batch_size`: The set of sampled trajectories is split into multiple mini-batches with batch_size=ppo_mini_batch_size for PPO actor updates. The ppo_mini_batch_size is a global size across all workers
+- `actor_rollout_ref.actor.ppo_mini_batch_size`: Base global PPO actor mini-batch size. V0 and the default V1 `trainer.v1.mini_batch_mode=fixed_rows` use `ppo_mini_batch_size * actor_rollout_ref.rollout.n` as the target trajectory-row count per optimizer update. V1 `fixed_count` instead uses `ppo_mini_batch_size` source-prompt/UID groups and keeps all rows from one UID together.
 
-- `critic.ppo_mini_batch_size`: The set of sampled trajectories is split into multiple mini-batches with batch_size=ppo_mini_batch_size for PPO critic updates. The ppo_mini_batch_size is a global size across all workers
+- `critic.ppo_mini_batch_size`: Base global PPO critic mini-batch size, with the same V0/V1 mode-dependent target row or UID semantics as the actor setting.
 
 - `actor_rollout_ref.actor.clip_ratio`: The PPO clip range. Default to 0.2
 

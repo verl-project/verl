@@ -276,12 +276,30 @@ Actor/Rollout/Reference Policy
 
 **Actor model**
 
+V1 exposes two optimizer mini-batch split modes. The default ``fixed_rows``
+uses trajectory-row boundaries; ``fixed_count`` keeps source-prompt/UID
+groups intact for variable-output rollouts.
+
+.. code-block:: yaml
+
+    trainer:
+      v1:
+        mini_batch_mode: fixed_rows  # fixed_rows | fixed_count
+
 - ``actor_rollout_ref.actor.strategy``: fsdp or megatron. In this
   example, we use fsdp backend.
 
-- ``actor_rollout_ref.actor.ppo_mini_batch_size``: One sample is split
-  into multiple sub-batches with batch_size=ppo_mini_batch_size for PPO
-  updates. The ppo_mini_batch_size is a global num across all workers/gpus
+- ``actor_rollout_ref.actor.ppo_mini_batch_size``: Base global PPO optimizer
+  mini-batch size. With V1 ``fixed_rows``, each full mini-batch targets
+  ``ppo_mini_batch_size * actor_rollout_ref.rollout.n`` trajectory rows, and
+  one UID may cross a boundary. The shared row batch is padded to the least
+  common multiple of the DP size and active actor/critic row mini-batch sizes;
+  each model divides that padded row count by its own size, so actor and critic
+  values need not match. With V1 ``fixed_count``, the value is the number of
+  source-prompt/UID groups: all rows from one UID stay together, so row counts
+  vary while the configured UID count controls the number of optimizer
+  updates. V0 always uses
+  ``ppo_mini_batch_size * actor_rollout_ref.rollout.n`` trajectory rows.
 
 - ``actor_rollout_ref.actor.ppo_micro_batch_size``: [Will be deprecated, use ppo_micro_batch_size_per_gpu] 
   Similar to gradient accumulation, the micro_batch_size_per_gpu for one forward pass,
@@ -309,8 +327,14 @@ Actor/Rollout/Reference Policy
   between cp ranks and cause misalignment between data on these ranks, so we shall manually set the seed to avoid hanging
   issue. if ``actor_rollout_ref.actor.shuffle`` is not null, this must be set.
 
-- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle data when
-  there are multiple epochs
+- ``actor_rollout_ref.actor.shuffle``: Whether to shuffle training data.
+  V1 ``fixed_count`` shuffles UID groups once on the trainer and rejects
+  ``shuffle=true`` with ``ppo_epochs > 1`` because row reshuffling would split
+  UID groups. V1 ``fixed_rows`` balances each trajectory-row mini-batch when
+  boundaries can be preserved; with ``shuffle=true`` and multiple epochs it
+  falls back to whole-batch DP balancing and reshuffles rows independently
+  within each DP rank every epoch. V0 shuffles trajectory rows independently
+  within each DP rank for every epoch.
 
 - ``actor_rollout_ref.actor.optim``: Actor's optimizer parameters
 

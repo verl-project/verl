@@ -15,6 +15,7 @@ import asyncio
 import functools
 import logging
 import os
+from collections.abc import Iterator
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -32,6 +33,7 @@ from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
+from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
@@ -274,99 +276,195 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
 
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
-    def train_mini_batch(self, data: TensorDict) -> TensorDict:
-        """Split a batch into N mini-batches run for multiple epochs
-
-        Args:
-            data:
-
-        Returns:
-
-        """
-        maybe_fix_3d_position_ids(data)
-        batch_size_per_dp = data.shape[0]
-        disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
-        mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
-        num_mini_batch = tu.pop(data, key="num_mini_batch", default=None)
-        epochs = tu.pop(data, key="epochs", default=1)
-        seed = tu.pop(data, key="seed", default=42)
-        dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
-
-        assert mini_batch_size is not None or num_mini_batch is not None
-
-        if mini_batch_size is None:
-            assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
-            mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
-        else:
-            assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
-                f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+    def _build_controller_layout_batches(
+        self,
+        data: TensorDict,
+        *,
+        controller_layout_sizes: list[int],
+        controller_padding_counts: list[int] | None,
+        epochs: int,
+    ) -> tuple[Iterator[TensorDict], int]:
+        """Build batches from controller-owned global boundaries."""
+        if controller_padding_counts is None:
+            raise ValueError("global_mini_batch_padding_counts is required with global_mini_batch_sizes")
+        if len(controller_padding_counts) != len(controller_layout_sizes):
+            raise ValueError(
+                "global_mini_batch_padding_counts must have the same length as global_mini_batch_sizes, "
+                f"got {controller_padding_counts} and {controller_layout_sizes}"
             )
-            mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
+        if any(
+            padding_count < 0 or padding_count > size
+            for padding_count, size in zip(controller_padding_counts, controller_layout_sizes, strict=True)
+        ):
+            raise ValueError(
+                "Each mini-batch padding count must be between zero and its padded size, "
+                f"got padding={controller_padding_counts}, padded={controller_layout_sizes}"
+            )
 
-        # make iterator
-        dataloader = tu.make_iterator(
+        dp_size = self.engine.get_data_parallel_size()
+        if any(size % dp_size != 0 for size in controller_layout_sizes):
+            raise ValueError(
+                f"Every global mini-batch size must be divisible by dp_size={dp_size}, got {controller_layout_sizes}"
+            )
+
+        local_layout_sizes = [size // dp_size for size in controller_layout_sizes]
+        mini_batches = tu.make_variable_batch_iterator(data, mini_batch_sizes=local_layout_sizes, epochs=epochs)
+        real_global_sizes = [
+            max(1, size - padding_count)
+            for size, padding_count in zip(controller_layout_sizes, controller_padding_counts, strict=True)
+        ]
+
+        def batches_with_global_sizes() -> Iterator[TensorDict]:
+            for update_index, mini_batch in enumerate(mini_batches):
+                tu.assign_non_tensor_data(
+                    mini_batch,
+                    "global_batch_size",
+                    real_global_sizes[update_index % len(real_global_sizes)],
+                )
+                yield mini_batch
+
+        return batches_with_global_sizes(), len(controller_layout_sizes) * epochs
+
+    def _build_worker_layout_batches(
+        self,
+        data: TensorDict,
+        *,
+        worker_mini_batch_size: int | None,
+        worker_padding_mask: list[bool] | None,
+        epochs: int,
+        seed: int,
+        dataloader_kwargs: dict,
+    ) -> tuple[Iterator[TensorDict], int]:
+        """Build batches whose boundaries and optional shuffle are worker-owned."""
+        assert worker_mini_batch_size is not None
+        dp_size = self.engine.get_data_parallel_size()
+        assert worker_mini_batch_size % dp_size == 0, (
+            f"mini_batch_size={worker_mini_batch_size} must be divisible by dp_size={dp_size}"
+        )
+        local_mini_batch_size = worker_mini_batch_size // dp_size
+
+        if worker_padding_mask is not None:
+            local_batch_size = data.shape[0]
+            if len(worker_padding_mask) != local_batch_size * dp_size:
+                raise ValueError(
+                    f"{PADDING_MASK_KEY} must describe the global batch, got "
+                    f"{len(worker_padding_mask)} rows for local_batch_size={local_batch_size} and dp_size={dp_size}"
+                )
+            dp_rank = self.engine.get_data_parallel_rank()
+            start = dp_rank * local_batch_size
+            data[PADDING_MASK_KEY] = torch.as_tensor(
+                worker_padding_mask[start : start + local_batch_size], dtype=torch.bool
+            )
+
+        mini_batches = tu.make_iterator(
             data,
-            mini_batch_size=mini_batch_size_per_gpu,
+            mini_batch_size=local_mini_batch_size,
             epochs=epochs,
             seed=seed + self.engine.get_data_parallel_rank(),
             dataloader_kwargs=dataloader_kwargs,
         )
+        num_optimizer_updates = data.shape[0] // local_mini_batch_size * epochs
+        if worker_padding_mask is None:
+            return mini_batches, num_optimizer_updates
+
+        def batches_with_global_sizes() -> Iterator[TensorDict]:
+            for mini_batch in mini_batches:
+                local_padding_mask = mini_batch.pop(PADDING_MASK_KEY)
+                local_valid_rows = int((~local_padding_mask).sum().item())
+                if dp_size > 1:
+                    dp_group = self.engine.get_data_parallel_group()
+                    valid_row_counts = [0] * torch.distributed.get_world_size(dp_group)
+                    torch.distributed.all_gather_object(valid_row_counts, local_valid_rows, dp_group)
+                    global_valid_rows = sum(valid_row_counts)
+                else:
+                    global_valid_rows = local_valid_rows
+                tu.assign_non_tensor_data(mini_batch, "global_batch_size", max(1, global_valid_rows))
+                yield mini_batch
+
+        return batches_with_global_sizes(), num_optimizer_updates
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    def train_mini_batch(self, data: TensorDict) -> TensorDict:
+        """Run all optimizer mini-batches and PPO epochs for one local train-batch shard.
+
+        Controller-owned layouts preserve explicit global boundaries. Worker-owned
+        layouts derive boundaries from ``mini_batch_size`` and may shuffle rows.
+        """
+        maybe_fix_3d_position_ids(data)
+        disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
+        worker_mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
+        controller_layout_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
+        controller_padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
+        worker_padding_mask = tu.pop(data, key=PADDING_MASK_KEY, default=None)
+        epochs = tu.pop(data, key="epochs", default=1)
+        seed = tu.pop(data, key="seed", default=42)
+        dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
+
+        if controller_layout_sizes is not None:
+            if worker_mini_batch_size is not None:
+                raise ValueError("global_mini_batch_sizes cannot be combined with mini_batch_size")
+            if worker_padding_mask is not None:
+                raise ValueError(f"{PADDING_MASK_KEY} cannot be combined with global_mini_batch_sizes")
+            mini_batches, num_optimizer_updates = self._build_controller_layout_batches(
+                data,
+                controller_layout_sizes=controller_layout_sizes,
+                controller_padding_counts=controller_padding_counts,
+                epochs=epochs,
+            )
+        else:
+            mini_batches, num_optimizer_updates = self._build_worker_layout_batches(
+                data,
+                worker_mini_batch_size=worker_mini_batch_size,
+                worker_padding_mask=worker_padding_mask,
+                epochs=epochs,
+                seed=seed,
+                dataloader_kwargs=dataloader_kwargs,
+            )
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
-            # update
-            output_lst = []
-            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
+            update_outputs = []
 
-            for batch_idx, mini_batch_td in enumerate(dataloader):
-                maybe_fix_3d_position_ids(mini_batch_td)
-                # add global token num
-                if "input_ids" in mini_batch_td:
-                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
-                    # allgather from dp rank
-                    global_token_num_output = [None] * torch.distributed.get_world_size(
+            for update_index, mini_batch in enumerate(mini_batches):
+                maybe_fix_3d_position_ids(mini_batch)
+                if "input_ids" in mini_batch:
+                    local_token_counts = mini_batch["input_ids"].offsets().diff().tolist()
+                    token_counts_by_rank = [None] * torch.distributed.get_world_size(
                         self.engine.get_data_parallel_group()
                     )
                     torch.distributed.all_gather_object(
-                        global_token_num_output, global_token_num, self.engine.get_data_parallel_group()
+                        token_counts_by_rank, local_token_counts, self.engine.get_data_parallel_group()
                     )
-                    global_token_num = [x for xs in global_token_num_output for x in xs]
+                    global_token_num = [count for rank_counts in token_counts_by_rank for count in rank_counts]
                 else:
                     global_token_num = None
 
                 tu.assign_non_tensor(
-                    mini_batch_td,
+                    mini_batch,
                     global_token_num=NonTensorData(global_token_num),
-                    update_lr_scheduler=batch_idx == total_num_iterations - 1,
+                    update_lr_scheduler=update_index == num_optimizer_updates - 1,
                     disable_auto_offload=True,
                 )
-                # Name the mini-batch in the trace so each iteration of this otherwise identical
-                # loop is distinguishable when the whole step is recorded (continuous mode).
-                with torch.profiler.record_function(f"mini_batch{batch_idx}"):
-                    actor_output = self.train_batch(mini_batch_td)
-                # Advance the profiler once per mini-batch. This drives any
-                # torch.profiler.schedule (the schedule's unit is one update mini-batch) and,
-                # with no schedule, only labels torch's ProfilerStep#<n> boundary. start()/stop()
-                # happen on the outer worker, but the profiler is process-global so this reaches it.
+                with torch.profiler.record_function(f"mini_batch{update_index}"):
+                    update_output = self.train_batch(mini_batch)
+                # Keep profiler scheduling aligned with optimizer mini-batches.
                 self.profiler.step()
-                output_lst.append(actor_output)
+                update_outputs.append(update_output)
 
             if self.engine.is_mp_src_rank_with_outputs():
-                actor_output = [tu.get(output, "metrics") for output in output_lst]
+                update_metrics = [tu.get(output, "metrics") for output in update_outputs]
                 metrics = {}
-                for output in actor_output:
-                    for key, val in output.items():
-                        # flattn dp and micro batch
-                        if isinstance(val, list):
-                            output[key] = (
-                                Metric.aggregate_dp(val)
-                                if isinstance(val[0], Metric)
-                                else list(chain.from_iterable(val))
+                for output_metrics in update_metrics:
+                    for key, value in output_metrics.items():
+                        if isinstance(value, list):
+                            output_metrics[key] = (
+                                Metric.aggregate_dp(value)
+                                if isinstance(value[0], Metric)
+                                else list(chain.from_iterable(value))
                             )
-                    append_to_dict(metrics, output)
+                    append_to_dict(metrics, output_metrics)
 
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:

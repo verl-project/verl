@@ -109,8 +109,9 @@ class ReplayBuffer:
     In sync mode, DAPO is opt-in and trades generation time for training stability. Each ``k`` evictions add
     ``2k`` logical refill credits, but prompts are fetched only as bounded pending/running slots become available.
     Terminal groups are filtered while other requests remain in flight. Once enough groups are sampleable, inflight
-    requests are drained and discarded. By default, failed groups remain sampleable and missing trajectories are
-    padded downstream. Setting ``sync_refill_failed_groups=True`` allows refilling failed samples.
+    requests are drained and discarded. By default, empty failed groups consume prompt slots without producing
+    training rows. Setting ``sync_refill_failed_groups=True`` replaces them; partially failed groups that produced
+    trajectories remain sampleable in either mode.
     In async mode, ``num_warmup_batches`` absorbs retry cost, so all three paths refill exactly ``k`` prompts.
 
     Args:

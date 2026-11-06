@@ -194,6 +194,7 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     )
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.update_actor.return_value = {"metrics": {"mfu": 0.0}}
+    trainer._get_update_minibatching_info = MagicMock(return_value={})
     batch = SimpleNamespace(extra_info={})
 
     trainer._update_actor(batch, {})
