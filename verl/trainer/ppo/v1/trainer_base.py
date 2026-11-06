@@ -1897,6 +1897,11 @@ class PPOTrainer(ABC):
         ]
         if self.use_critic:
             fields.append("values")
+        if self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False):
+            fields.extend(["old_log_probs", "sum_pi_squared"])
+            rollout_correction = self.config.algorithm.get("rollout_correction")
+            if rollout_correction and rollout_correction.get("rollout_is") is not None:
+                fields.append("rollout_is_weights")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
