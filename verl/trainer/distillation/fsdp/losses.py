@@ -28,6 +28,7 @@ def _chunked_topk_log_probs(
     logits: torch.Tensor,
     topk_ids: torch.Tensor,
     chunk_size: int = 4096,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Compute log_softmax(logits).gather(topk_ids) without materializing [B, T, V].
 
@@ -42,25 +43,26 @@ def _chunked_topk_log_probs(
         chunk_size: number of tokens per chunk; only affects memory, not numerics.
 
     Returns:
-        [B, T, K] tensor with the same dtype as `logits`.
+        [B, T, K] tensor with `dtype`, defaulting to the dtype of `logits`.
     """
     B, T, V = logits.shape
     K = topk_ids.shape[-1]
     flat_logits = logits.reshape(-1, V)  # [N, V]
     flat_topk = topk_ids.reshape(-1, K)  # [N, K]
     N = flat_logits.shape[0]
+    dtype = logits.dtype if dtype is None else dtype
 
     # Edge case: empty input (e.g. fully-padded micro-batch).
     if N == 0:
-        return torch.empty((B, T, K), dtype=logits.dtype, device=logits.device)
+        return torch.empty((B, T, K), dtype=dtype, device=logits.device)
 
-    out = torch.empty((N, K), dtype=logits.dtype, device=logits.device)
+    out = torch.empty((N, K), dtype=dtype, device=logits.device)
     for s in range(0, N, chunk_size):
         e = min(s + chunk_size, N)
         chunk_logits_fp32 = flat_logits[s:e].float()
         log_z = torch.logsumexp(chunk_logits_fp32, dim=-1, keepdim=True)  # [c, 1]
         chunk_topk_logits = torch.gather(chunk_logits_fp32, dim=-1, index=flat_topk[s:e])
-        out[s:e] = (chunk_topk_logits - log_z).to(logits.dtype)
+        out[s:e] = chunk_topk_logits - log_z
     return out.reshape(B, T, K)
 
 
@@ -167,9 +169,10 @@ def compute_forward_kl_topk(
             student_logits,
             teacher_topk_ids,
             chunk_size=getattr(loss_config, "chunked_topk_chunk_size", 4096),
+            dtype=torch.float32 if include_tail else None,
         )
     else:
-        student_log_probs = F.log_softmax(student_logits, dim=-1)
+        student_log_probs = F.log_softmax(student_logits, dim=-1, dtype=torch.float32 if include_tail else None)
         student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
         student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
 
