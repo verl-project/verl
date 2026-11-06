@@ -157,6 +157,8 @@ class McoreEngineConfig(EngineConfig):
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
         dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
+        distributed_timeout_minutes (Optional[int]): Timeout, in minutes, of the Megatron process groups.
+            None keeps Megatron-Core's default (30 minutes).
         max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
@@ -186,6 +188,7 @@ class McoreEngineConfig(EngineConfig):
     virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
     dynamic_context_parallel: bool = False
+    distributed_timeout_minutes: Optional[int] = None
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
     max_seqlen_per_dp_cp_rank: Optional[int] = None
@@ -229,6 +232,12 @@ class McoreEngineConfig(EngineConfig):
             raise ValueError(
                 "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
             )
+        if self.distributed_timeout_minutes is not None and (
+            not isinstance(self.distributed_timeout_minutes, int)
+            or isinstance(self.distributed_timeout_minutes, bool)
+            or self.distributed_timeout_minutes <= 0
+        ):
+            raise ValueError("distributed_timeout_minutes must be a positive integer or None")
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
