@@ -12,18 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
 
 from verl import DataProto
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.experimental.reward_loop.reward_manager.dapo import DAPORewardManager as RewardLoopDAPORewardManager
 from verl.workers.reward_manager.dapo import DAPORewardManager
 
 
 class _DummyTokenizer:
     eos_token = "</s>"
+    eos_token_id = 2
 
     def decode(self, token_ids, skip_special_tokens=True):
         return " ".join(str(int(token_id)) for token_id in token_ids)
@@ -125,3 +130,112 @@ def test_reward_loop_construct_with_overlong_buffer_disabled():
         config=config, tokenizer=_DummyTokenizer(), compute_score=_constant_compute_score
     )
     assert reward_manager.max_resp_len is None
+
+
+@pytest.mark.parametrize(
+    "last_token, valid_len, width, config, truncated",
+    [
+        (1, 4, 4, {}, True),
+        (_DummyTokenizer.eos_token_id, 4, 4, {}, False),
+        (1, 3, 4, {}, False),
+        # The agent loop scores unpadded responses: the batch width equals the valid length.
+        (1, 3, 3, {"actor_rollout_ref": {"rollout": {"response_length": 4}}}, False),
+        (1, 4, 4, {"actor_rollout_ref": {"rollout": {"response_length": 4}}}, True),
+        (1, 3, 3, {"reward": {"reward_kwargs": {"max_resp_len": 4}}}, False),
+    ],
+    ids=[
+        "full_length_without_eos",
+        "full_length_with_eos",
+        "shorter_than_max",
+        "unpadded_shorter_than_rollout_limit",
+        "unpadded_at_rollout_limit",
+        "unpadded_shorter_than_max_resp_len",
+    ],
+)
+def test_reward_loop_passes_truncated_to_compute_score(last_token, valid_len, width, config, truncated):
+    seen = []
+
+    def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
+        seen.append(extra_info)
+        return 0.5
+
+    data = _make_data(batch_size=1, seq_len=width)
+    data.batch["responses"][0, valid_len - 1] = last_token
+    data.batch["attention_mask"][0, width + valid_len :] = 0
+    data.non_tensor_batch["extra_info"] = np.array([{"index": 0}], dtype=object)
+
+    async def score():
+        reward_manager = RewardLoopDAPORewardManager(
+            config=OmegaConf.create({"reward": {}, **config}), tokenizer=_DummyTokenizer(), compute_score=compute_score
+        )
+        return await reward_manager.run_single(data)
+
+    assert asyncio.run(score())["reward_score"] == 0.5
+    assert seen == [{"index": 0, "truncated": truncated}]
+    assert data.non_tensor_batch["extra_info"][0] == {"index": 0}
+
+
+@pytest.mark.parametrize("response_ids, truncated", [([5, 6, 7], False), ([5, 6, 7, 8], True)])
+def test_reward_loop_truncated_through_agent_loop_worker(response_ids, truncated):
+    """AgentLoopWorker._compute_score hands the manager an unpadded response; the limit comes from the config."""
+    seen = []
+
+    def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
+        seen.append(extra_info)
+        return 0.5
+
+    async def score():
+        reward_manager = RewardLoopDAPORewardManager(
+            config=OmegaConf.create({"actor_rollout_ref": {"rollout": {"response_length": 4}}, "reward": {}}),
+            tokenizer=_DummyTokenizer(),
+            compute_score=compute_score,
+        )
+        worker = object.__new__(AgentLoopWorker)
+        worker.processor = None
+        worker.mm_processor_kwargs = None
+        worker.reward_loop_worker_handles = [
+            SimpleNamespace(compute_score=SimpleNamespace(remote=reward_manager.run_single))
+        ]
+        output = AgentLoopOutput(
+            prompt_ids=[1, 1],
+            response_ids=response_ids,
+            response_mask=[1] * len(response_ids),
+            metrics=AgentLoopMetrics(),
+        )
+        kwargs = {"data_source": "unit_test", "reward_model": {"ground_truth": "1"}, "extra_info": {"index": 0}}
+        await AgentLoopWorker._compute_score(worker, [output], kwargs=kwargs)
+        return output
+
+    assert asyncio.run(score()).reward_score == 0.5
+    assert seen == [{"index": 0, "truncated": truncated}]
+
+
+def test_reward_loop_empty_response():
+    """An empty unpadded response has length 0: no IndexError, not truncated, no overlong penalty."""
+    seen = []
+
+    def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
+        seen.append(extra_info)
+        return 0.5
+
+    data = _make_data(batch_size=1, seq_len=4)
+    data.batch["responses"] = torch.ones(1, 0, dtype=torch.long)
+    data.batch["attention_mask"] = torch.ones(1, 4, dtype=torch.long)  # the prompt only
+    config = {
+        "actor_rollout_ref": {"rollout": {"response_length": 4}},
+        "reward": {
+            "reward_kwargs": {
+                "max_resp_len": 4,
+                "overlong_buffer_cfg": {"enable": True, "len": 2, "penalty_factor": 1.0, "log": False},
+            }
+        },
+    }
+
+    async def score():
+        reward_manager = RewardLoopDAPORewardManager(
+            config=OmegaConf.create(config), tokenizer=_DummyTokenizer(), compute_score=compute_score
+        )
+        return await reward_manager.run_single(data)
+
+    assert asyncio.run(score())["reward_score"] == 0.5
+    assert seen == [{"truncated": False}]
