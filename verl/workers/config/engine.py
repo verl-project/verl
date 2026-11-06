@@ -92,6 +92,8 @@ class EngineConfig(BaseConfig):
     optimizer_offload: bool = False
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
+    # Opt-in synchronized wall-clock timers for forward/backward and optimizer phases.
+    enable_update_phase_timing: bool = False
     # the strategy (backend)
     strategy: str = None
     # model dtype

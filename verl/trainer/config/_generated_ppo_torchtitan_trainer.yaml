@@ -22,6 +22,7 @@ actor_rollout_ref:
       min_lr_factor: 0.0
     torchtitan:
       _target_: verl.workers.config.TorchtitanEngineConfig
+      enable_update_phase_timing: false
       param_offload: false
       optimizer_offload: false
       wrap_policy:
@@ -160,6 +161,7 @@ actor_rollout_ref:
       min_lr_factor: 0.0
     torchtitan:
       _target_: verl.workers.config.TorchtitanEngineConfig
+      enable_update_phase_timing: false
       param_offload: false
       optimizer_offload: false
       wrap_policy:
@@ -509,6 +511,7 @@ critic:
     min_lr_factor: 0.0
   torchtitan:
     _target_: verl.workers.config.TorchtitanEngineConfig
+    enable_update_phase_timing: false
     param_offload: false
     optimizer_offload: false
     wrap_policy:
