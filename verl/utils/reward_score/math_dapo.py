@@ -16,6 +16,92 @@
 import re
 from typing import Optional
 
+# Markdown emphasis markers that models commonly wrap around the answer label
+# (e.g. "**Answer:** 42") or around the answer value (e.g. "Answer: **42**").
+# Ordered longest first, so that the longest wrapper is matched.
+_MARKDOWN_EMPHASIS_WRAPPERS = ("***", "___", "**", "__", "*", "_", "`")
+# The characters that markdown uses for emphasis and code markers.
+_MARKDOWN_MARKER_CHARS = "*`_"
+
+
+def _marker_run(text: str, leading: bool) -> str:
+    """Return the run of markdown marker characters at one side of the text.
+
+    Args:
+        text: The text to inspect
+        leading: Whether to inspect the start instead of the end of the text
+
+    Returns:
+        The run of marker characters, empty if that side has none
+    """
+    if leading:
+        rest = text.lstrip(_MARKDOWN_MARKER_CHARS)
+        return text[: len(text) - len(rest)]
+    rest = text.rstrip(_MARKDOWN_MARKER_CHARS)
+    return text[len(rest) :]
+
+
+def _strip_trailing_sentence_period(text: str) -> str:
+    """Remove a trailing sentence period from an answer.
+
+    Models routinely end an answer sentence with a period ("Answer: 42."), and
+    that period is punctuation rather than part of the answer. It is removed
+    before the markdown markers are stripped, so that a decorated answer that
+    is followed by a period ("**Answer:** 42.") still reduces to the bare
+    answer.
+
+    Args:
+        text: The answer text
+
+    Returns:
+        The answer without a trailing period
+    """
+    return text.rstrip(".")
+
+
+def _strip_markdown_emphasis(text: str) -> str:
+    """Remove markdown emphasis/code markers that surround an extracted answer.
+
+    The markers are formatting, not part of the answer. Keeping them makes an
+    otherwise correct answer compare unequal to the ground truth.
+
+    A single "_" is never removed, because it is also the LaTeX subscript
+    operator and answers such as "x_1" must stay untouched. A single trailing
+    "*" is kept for the same reason: it can be part of the answer itself, e.g.
+    "x^*".
+
+    Args:
+        text: The extracted answer text
+
+    Returns:
+        The answer without surrounding markdown emphasis markers
+    """
+    stripped = text.strip()
+
+    # A wrapper that encloses the whole answer, e.g. "**42**" or "__42__".
+    # Nested wrappers are removed as well, e.g. "**_42_**" -> "_42_" -> "42".
+    while True:
+        for wrapper in _MARKDOWN_EMPHASIS_WRAPPERS:
+            if len(stripped) > 2 * len(wrapper) and stripped.startswith(wrapper) and stripped.endswith(wrapper):
+                stripped = stripped[len(wrapper) : -len(wrapper)].strip()
+                break
+        else:
+            break
+
+    # A marker that decorates one side only, e.g. "** 42" (left over from
+    # "**Answer:** 42") or "42**" (left over from "**Answer: 42**"). The run is
+    # taken without a regex, because overlapping alternatives for the marker
+    # lengths would backtrack exponentially on a long run of asterisks.
+    # A single "_" is the LaTeX subscript operator and a single trailing "*" can
+    # be part of the answer itself, so both are kept.
+    leading = _marker_run(stripped, leading=True)
+    if leading and leading != "_":
+        stripped = stripped[len(leading) :].strip()
+    trailing = _marker_run(stripped, leading=False)
+    if trailing and trailing != "*" and "_" not in trailing:
+        stripped = stripped[: len(stripped) - len(trailing)].strip()
+    return stripped
+
 
 def last_boxed_only_string(string: str) -> Optional[str]:
     """Extract the last LaTeX boxed expression from a string.
@@ -163,7 +249,13 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = (
+        r"(?i)Answer(?:\*\*\*|\*\*|\*|___|__|_|`)?\s*:\s*"
+        r"(?:(?:\*\*\*|\*\*|\*|___|__|_|`)(?=\s|$))?\s*([^\n]+)"
+    ),
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -171,21 +263,53 @@ def is_correct_minerva(
         solution_str: The solution string to check
         gt: The ground truth answer
         gt_need_extract: Whether the ground truth needs extraction
-        answer_pattern: Regex pattern to extract the answer
+        answer_pattern: Regex pattern to extract the answer. The default skips an
+            optional markdown emphasis or code marker placed between the label
+            and the answer, so that e.g. "**Answer:**\\n\\n42" and
+            "`Answer:`\\n\\n42" are parsed as "42". A marker between the label
+            and its colon is skipped as well, so that e.g. "**Answer**: 42" is
+            parsed as "42".
 
     Returns:
         Tuple of (is_correct, normalized_prediction)
     """
     # Extract answer from solution
-    match = re.findall(answer_pattern, solution_str)
-    extracted_answer = match[-1] if match else "[INVALID]"
+    matches = list(re.finditer(answer_pattern, solution_str))
+    if matches:
+        match = matches[-1]
+        extracted_answer = match.group(1) if match.re.groups else match.group(0)
+        # A wrapper can span the label and the answer, e.g. "__Answer: 42__". The
+        # label is not part of the capture, so the closing marker still is. It is
+        # removed when the text in front of the label opens the same marker and
+        # the label itself does not close it already, e.g. "__Answer__: 42__"
+        # closes the wrapper at the label. A single "_" is not a wrapper, because
+        # it is the LaTeX subscript operator.
+        opening = _marker_run(solution_str[: match.start()], leading=False)
+        if opening and opening != "_" and extracted_answer.endswith(opening):
+            label = solution_str[match.start() : match.start(1)] if match.re.groups else ""
+            before_colon, _, after_colon = label.partition(":")
+            closes = {
+                _marker_run(before_colon.rstrip(), leading=False),
+                _marker_run(after_colon.strip(), leading=False),
+            }
+            if opening not in closes:
+                extracted_answer = extracted_answer[: -len(opening)].strip()
+    else:
+        extracted_answer = "[INVALID]"
+    # The label may be decorated with markdown emphasis (e.g. "**Answer:** 42")
+    # and the answer itself may be emphasized (e.g. "Answer: **42**").
+    extracted_answer = _strip_markdown_emphasis(_strip_trailing_sentence_period(extracted_answer))
+    if not extracted_answer:
+        # The label carried no answer (e.g. a bare "**Answer:**" line), so fall
+        # back to the `\boxed{}` answer instead of comparing against "".
+        extracted_answer = "[INVALID]"
     pred = normalize_final_answer(extracted_answer)
 
     # Process ground truth
     if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+        gt = normalize_final_answer(_strip_trailing_sentence_period(remove_boxed(last_boxed_only_string(gt))))
     else:
-        gt = normalize_final_answer(gt)
+        gt = normalize_final_answer(_strip_trailing_sentence_period(gt))
 
     return (pred == gt), pred
 
