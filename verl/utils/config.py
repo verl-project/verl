@@ -131,6 +131,10 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    if config.data.get("custom_dataloader") is not None:
+        if not config.trainer.get("use_v1", True):
+            raise ValueError("data.custom_dataloader requires the V1 PPO trainer.")
+
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
