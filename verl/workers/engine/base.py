@@ -96,7 +96,13 @@ class BaseEngine:
         """
         raise NotImplementedError
 
-    def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+    def forward_backward_batch(
+        self,
+        data: TensorDict,
+        loss_function: Callable,
+        forward_only=False,
+        micro_batch_transform: Optional[Callable] = None,
+    ) -> Any:
         """
         Perform a forward pass and optionally a backward pass on a batch of data.
 
