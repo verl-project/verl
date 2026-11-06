@@ -21,6 +21,7 @@ only submits the remaining shortfall.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1 import trainer_base
@@ -106,7 +107,9 @@ def test_separate_async_on_train_begin_tops_up_configured_window():
     stub._add_prompts_to_generate.assert_called_once_with(8)
 
 
-def test_loaded_prompt_count_drives_on_train_begin_top_up(monkeypatch, tmp_path):
+@pytest.mark.parametrize("discard_rollout", [None, False, True])
+@pytest.mark.parametrize("trainer_mode", ["colocate_async", "separate_async"])
+def test_loaded_prompt_count_drives_on_train_begin_top_up(monkeypatch, tmp_path, discard_rollout, trainer_mode):
     checkpoint_dir = tmp_path / "global_step_6"
     tq_checkpoint_dir = checkpoint_dir / "transfer_queue"
     tq_checkpoint_dir.mkdir(parents=True)
@@ -115,12 +118,15 @@ def test_loaded_prompt_count_drives_on_train_begin_top_up(monkeypatch, tmp_path)
     stub.config.trainer.resume_mode = "resume_path"
     stub.config.trainer.resume_from_path = str(checkpoint_dir)
     stub.config.trainer.del_local_ckpt_after_load = False
-    stub.trainer_mode = "colocate_async"
+    if discard_rollout is not None:
+        stub.config.trainer.v1.resume_discard_rollout = discard_rollout
+    stub.trainer_mode = trainer_mode
     stub.use_critic = False
     stub.actor_rollout_wg = MagicMock()
     stub.train_dataloader = MagicMock()
     stub._load_checkpoint = PPOTrainer._load_checkpoint.__get__(stub)
-    stub.on_train_begin = PPOTrainerColocateAsync.on_train_begin.__get__(stub)
+    trainer_cls = PPOTrainerColocateAsync if trainer_mode == "colocate_async" else PPOTrainerSeparateAsync
+    stub.on_train_begin = trainer_cls.on_train_begin.__get__(stub)
 
     load_tq_checkpoint = MagicMock()
     monkeypatch.setattr(trainer_base, "_count_tq_prompt_groups", lambda: 6)
@@ -130,6 +136,22 @@ def test_loaded_prompt_count_drives_on_train_begin_top_up(monkeypatch, tmp_path)
     stub.on_train_begin()
 
     assert stub.global_steps == 6
-    assert stub._restored_tq_prompt_count == 6
-    load_tq_checkpoint.assert_called_once_with(str(tq_checkpoint_dir))
-    stub._add_prompts_to_generate.assert_called_once_with(6)
+    stub.actor_rollout_wg.load_checkpoint.assert_called_once_with(
+        local_path=str(checkpoint_dir / "actor"), del_local_after_load=False
+    )
+    if discard_rollout:
+        assert stub._restored_tq_prompt_count == 0
+        load_tq_checkpoint.assert_not_called()
+        stub._add_prompts_to_generate.assert_called_once_with(12)
+    else:
+        assert stub._restored_tq_prompt_count == 6
+        load_tq_checkpoint.assert_called_once_with(str(tq_checkpoint_dir))
+        stub._add_prompts_to_generate.assert_called_once_with(6)
+
+
+@pytest.mark.parametrize("discard_rollout", ["false", "true", 0, 1, None])
+def test_resume_discard_rollout_rejects_non_boolean(discard_rollout):
+    stub = _stub()
+    stub.config.trainer.v1.resume_discard_rollout = discard_rollout
+    with pytest.raises(ValueError, match="resume_discard_rollout must be a boolean"):
+        PPOTrainer._load_checkpoint(stub)

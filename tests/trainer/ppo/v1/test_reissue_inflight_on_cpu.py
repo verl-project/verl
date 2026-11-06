@@ -33,6 +33,7 @@ round-trip that backs checkpoint consistency (matching ``_save_checkpoint``/
 """
 
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -405,5 +406,96 @@ def test_save_load_terminal_only_counts_prompts_without_reissue(tq_init, partiti
         assert trainer_base._count_tq_prompt_groups(partition_id) == 2
         assert stub._reissue_inflight_prompts(partition_id) == 0
         assert stub.agent_loop_manager.batches == []
+    finally:
+        _clear_partition(partition_id)
+
+
+@pytest.mark.parametrize("discard_rollout", [False, True])
+def test_trainer_resume_restores_or_discards_rollout_checkpoint(
+    tq_init, partition_id, tmp_path, monkeypatch, discard_rollout
+):
+    """Discard skips the real queue snapshot without resubmitting any saved prompt."""
+    running, finished, failure = _uid(), _uid(), _uid()
+    for uid, status in ((running, "running"), (finished, "finished"), (failure, "failure")):
+        _submit_prompt(partition_id, uid, status, global_steps=6)
+    trajectory = _add_trajectory(partition_id, finished, session_id=0, global_steps=6)
+    partial = {"0": {"schema_version": 1, "prefix": [10, 11]}}
+    tq.kv_put(
+        key=running,
+        partition_id=partition_id,
+        fields={"partial_rollout_states": partial},
+        tag={"has_partial_rollout": True},
+    )
+    checkpoint = tmp_path / "global_step_6"
+    checkpoint.mkdir()
+    queue_path = str(checkpoint / "transfer_queue")
+    tq.save_checkpoint(queue_path)
+    dataloader_state = {"cursor": 42}
+    torch.save(dataloader_state, checkpoint / "data.pt")
+    _clear_partition(partition_id)
+
+    stub = _make_trainer_stub(global_steps=0)
+    stub.config = OmegaConf.create(
+        {
+            "trainer": {
+                "resume_mode": "resume_path",
+                "resume_from_path": str(checkpoint),
+                "del_local_ckpt_after_load": False,
+                "v1": {"resume_discard_rollout": discard_rollout},
+            },
+            "skip": {"rollout_tq": {"enable": False}},
+            "data": {"train_batch_size": 3},
+        }
+    )
+    stub.use_critic = True
+    stub.actor_rollout_wg = MagicMock()
+    stub.critic_wg = MagicMock()
+    stub.train_dataloader = MagicMock()
+    stub._add_prompts_to_generate = MagicMock()
+    # Deliberately seed an old count: discard must reset it so warmup supplies new prompts.
+    stub._restored_tq_prompt_count = 99
+    monkeypatch.setattr(
+        trainer_base,
+        "_count_tq_prompt_groups",
+        lambda: len(
+            [tag for tag in tq.kv_list(partition_id).get(partition_id, {}).values() if tag.get("is_prompt", False)]
+        ),
+    )
+    try:
+        PPOTrainer._load_checkpoint(stub)
+        assert stub.global_steps == 6
+        stub.actor_rollout_wg.load_checkpoint.assert_called_once_with(
+            local_path=str(checkpoint / "actor"), del_local_after_load=False
+        )
+        stub.critic_wg.load_checkpoint.assert_called_once_with(
+            local_path=str(checkpoint / "critic"), del_local_after_load=False
+        )
+        stub.train_dataloader.load_state_dict.assert_called_once_with(dataloader_state)
+        stub.global_steps += 1
+        reissued = stub._reissue_inflight_prompts(partition_id)
+        PPOTrainer._add_async_warmup_batches(stub, 1)
+        if discard_rollout:
+            assert stub._restored_tq_prompt_count == 0
+            assert tq.kv_list(partition_id).get(partition_id, {}) == {}
+            assert reissued == 0
+            assert stub.agent_loop_manager.batches == []
+            stub._add_prompts_to_generate.assert_called_once_with(3)
+        else:
+            assert stub._restored_tq_prompt_count == 3
+            assert reissued == 1
+            assert list(stub.agent_loop_manager.batches[0]["uid"]) == [running]
+            assert _prompt_status(partition_id, finished) == "finished"
+            assert _prompt_status(partition_id, failure) == "failure"
+            assert trajectory in tq.kv_list(partition_id).get(partition_id, {})
+            stub._add_prompts_to_generate.assert_not_called()
+
+        # Neither mode changes the saved queue; it remains available to a subsequent normal resume.
+        _clear_partition(partition_id)
+        tq.load_checkpoint(queue_path)
+        assert _prompt_status(partition_id, running) == "running"
+        assert _prompt_status(partition_id, finished) == "finished"
+        assert trajectory in tq.kv_list(partition_id).get(partition_id, {})
+        row = tq.kv_batch_get(keys=[running], partition_id=partition_id)
+        assert tu.unwrap_non_tensor_data(row["partial_rollout_states"][0]) == partial
     finally:
         _clear_partition(partition_id)
