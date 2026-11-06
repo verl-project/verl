@@ -142,6 +142,7 @@ class NsightSystemsProfiler(DistProfiler):
             config = ProfilerConfig(ranks=[])
         if not tool_config:
             assert not config.enable, "tool_config must be provided when profiler is enabled"
+        self.config = config
         self.discrete: bool = tool_config.discrete
 
     def start(self, **kwargs):
@@ -188,7 +189,20 @@ class NsightSystemsProfiler(DistProfiler):
         pid = os.getpid()
         # nsys may emit worker_process_<pid>.nsys-rep and, in discrete/capture-range mode,
         # worker_process_<pid>.<range_id>.nsys-rep, plus intermediate .qdstrm files.
-        matches = sorted(glob.glob(os.path.join(src_dir, f"worker_process_{pid}.*")))
+        patterns = [f"worker_process_{pid}.*"]
+        options = getattr(self.config, "ray_actor_nsight_options", None)
+        if options is not None and save_file_prefix is not None:
+            from .nsight import _render_nsight_output_name
+
+            outputs = [_render_nsight_output_name(options.get("o"), rank=rank, role=save_file_prefix)]
+            # Worker groups use the configured name directly; standalone actors add a role prefix.
+            if options.get("o") is not None:
+                outputs.append(str(options["o"]).replace("%q{RANK}", str(rank)))
+            for output in outputs:
+                if "%p" in output:
+                    output = os.path.basename(output).replace("%p", str(pid)).replace("%h", socket.gethostname())
+                    patterns.append(f"{glob.escape(output)}.*")
+        matches = sorted({path for pattern in patterns for path in glob.glob(os.path.join(src_dir, pattern))})
         if not matches:
             logger.info(
                 "nsys relocate_results: no reports for pid=%s under %s yet (rank=%s); "

@@ -19,6 +19,7 @@ from typing import Optional
 
 from verl.base_config import BaseConfig
 from verl.trainer.config.config import ModuleConfig
+from verl.utils.profiler.config import ProfilerConfig
 
 from .rollout import RolloutConfig
 
@@ -96,6 +97,7 @@ class RewardConfig(BaseConfig):
 
     # reward manager args
     num_workers: int = 8
+    profiler: Optional[ProfilerConfig] = None
     reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
     # reward model args

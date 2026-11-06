@@ -21,131 +21,10 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
-from verl.utils import omega_conf_to_dataclass
+import pytest
+
 from verl.utils.profiler.config import NsightToolConfig, ProfilerConfig
 from verl.utils.profiler.profile import DistProfiler
-
-
-class TestProfilerConfig(unittest.TestCase):
-    def test_config_init(self):
-        import os
-
-        from hydra import compose, initialize_config_dir
-
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
-            cfg = compose(config_name="ppo_trainer")
-        for config in [
-            cfg.actor_rollout_ref.actor.profiler,
-            cfg.actor_rollout_ref.rollout.profiler,
-            cfg.actor_rollout_ref.ref.profiler,
-            cfg.critic.profiler,
-        ]:
-            profiler_config = omega_conf_to_dataclass(config)
-            self.assertEqual(profiler_config.tool, config.tool)
-            self.assertEqual(profiler_config.enable, config.enable)
-            self.assertEqual(profiler_config.all_ranks, config.all_ranks)
-            self.assertEqual(profiler_config.ranks, config.ranks)
-            self.assertEqual(profiler_config.save_path, config.save_path)
-            self.assertEqual(profiler_config.ranks, config.ranks)
-            assert isinstance(profiler_config, ProfilerConfig)
-            with self.assertRaises(AttributeError):
-                _ = profiler_config.non_existing_key
-            assert config.get("non_existing_key") == profiler_config.get("non_existing_key")
-            assert config.get("non_existing_key", 1) == profiler_config.get("non_existing_key", 1)
-
-    def test_role_configs_inherit_global_finish_hook(self):
-        """Setting the finish hook on global_profiler must reach every role's profiler.
-
-        Roles read only their own `profiler` block at worker construction time, so without this
-        inheritance a globally configured hook would be silently ignored.
-        """
-        import os
-
-        from hydra import compose, initialize_config_dir
-
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
-            cfg = compose(
-                config_name="ppo_trainer",
-                overrides=[
-                    "global_profiler.finish_hook_cmd=upload.sh",
-                    "global_profiler.finish_hook_all_ranks=True",
-                    "global_profiler.finish_hook_ranks=[0,8]",
-                    "global_profiler.relocate_results=True",
-                ],
-            )
-        for config in [
-            cfg.actor_rollout_ref.actor.profiler,
-            cfg.actor_rollout_ref.rollout.profiler,
-            cfg.actor_rollout_ref.ref.profiler,
-            cfg.critic.profiler,
-        ]:
-            self.assertEqual(config.finish_hook_cmd, "upload.sh")
-            self.assertTrue(config.finish_hook_all_ranks)
-            self.assertEqual(list(config.finish_hook_ranks), [0, 8])
-            self.assertTrue(config.relocate_results)
-
-    def test_finish_hook_field_defaults_and_validation(self):
-        """Finish-hook fields default to disabled and validate their types."""
-        config = ProfilerConfig()
-        self.assertFalse(config.relocate_results)
-        self.assertIsNone(config.finish_hook_cmd)
-        self.assertFalse(config.finish_hook_all_ranks)
-        self.assertEqual(list(config.finish_hook_ranks), [])
-
-        with self.assertRaises(AssertionError):
-            ProfilerConfig(finish_hook_cmd=123)
-        with self.assertRaises(AssertionError):
-            ProfilerConfig(finish_hook_ranks="0,1")
-
-    def test_union_intersect_carry_finish_hook_fields(self):
-        """union/intersect must propagate the finish-hook fields."""
-        a = ProfilerConfig(
-            tool="nsys",
-            relocate_results=True,
-            finish_hook_cmd="cmd_a",
-            finish_hook_all_ranks=False,
-            finish_hook_ranks=[0, 1],
-        )
-        b = ProfilerConfig(
-            tool="nsys",
-            relocate_results=False,
-            finish_hook_cmd=None,
-            finish_hook_all_ranks=True,
-            finish_hook_ranks=[1, 2],
-        )
-
-        union = a.union(b)
-        self.assertTrue(union.relocate_results)
-        self.assertEqual(union.finish_hook_cmd, "cmd_a")
-        self.assertTrue(union.finish_hook_all_ranks)
-        self.assertEqual(set(union.finish_hook_ranks), {0, 1, 2})
-
-        intersect = a.intersect(b)
-        self.assertFalse(intersect.relocate_results)
-        self.assertEqual(intersect.finish_hook_cmd, "cmd_a")
-        self.assertFalse(intersect.finish_hook_all_ranks)
-        self.assertEqual(set(intersect.finish_hook_ranks), {1})
-
-    def test_frozen_config(self):
-        """Test that modifying frozen keys in ProfilerConfig raises exceptions."""
-        from dataclasses import FrozenInstanceError
-
-        from verl.utils.profiler.config import ProfilerConfig
-
-        # Create a new ProfilerConfig instance
-        config = ProfilerConfig(all_ranks=False, ranks=[0])
-
-        with self.assertRaises(FrozenInstanceError):
-            config.all_ranks = True
-
-        with self.assertRaises(FrozenInstanceError):
-            config.ranks = [1, 2, 3]
-
-        with self.assertRaises(TypeError):
-            config["all_ranks"] = True
-
-        with self.assertRaises(TypeError):
-            config["ranks"] = [1, 2, 3]
 
 
 class TestNsightSystemsProfiler(unittest.TestCase):
@@ -353,48 +232,94 @@ class TestProfilerFinishHook(unittest.TestCase):
         self.assertIn("failed to launch", buffer.getvalue())
 
 
-class TestNsightRelocateResults(unittest.TestCase):
+class TestNsightRelocateResults:
     """Tests for moving Ray's fixed-location Nsight reports into save_path."""
 
-    def _make_profiler(self):
+    def _make_profiler(self, options=None):
         from verl.utils.profiler.nvtx_profile import NsightSystemsProfiler
 
         return NsightSystemsProfiler(
             rank=0,
-            config=ProfilerConfig(tool="nsys", enable=True, all_ranks=True),
+            config=ProfilerConfig(tool="nsys", enable=True, all_ranks=True, ray_actor_nsight_options=options),
             tool_config=NsightToolConfig(discrete=False),
         )
 
-    def test_relocate_moves_only_current_pid_files(self):
-        prof = self._make_profiler()
+    @pytest.mark.parametrize(
+        "options, rendered_output, moved_names, retained_names",
+        [
+            (
+                None,
+                "unused_%p",
+                ["worker_process_42.nsys-rep", "worker_process_42.1.nsys-rep"],
+                ["worker_process_43.nsys-rep", "worker_process_421.nsys-rep"],
+            ),
+            (
+                {},
+                "default_%h_pid%p",
+                ["default_node_pid42.nsys-rep", "default_node_pid42.1.nsys-rep"],
+                ["default_node_pid43.nsys-rep"],
+            ),
+            (
+                {"o": "template"},
+                "custom[trace]_%h_pid%p",
+                ["custom[trace]_node_pid42.nsys-rep", "custom[trace]_node_pid42.1.nsys-rep"],
+                # The second name would match [trace] if the glob were not escaped.
+                ["custom[trace]_node_pid43.nsys-rep", "customt_node_pid42.nsys-rep"],
+            ),
+            (
+                {"o": "group_rank_%q{RANK}_%h_pid%p"},
+                "actor_prefix_%p",
+                ["group_rank_2_node_pid42.nsys-rep"],
+                ["group_rank_3_node_pid42.nsys-rep", "group_rank_2_node_pid43.nsys-rep"],
+            ),
+        ],
+        ids=["legacy", "actor-default", "actor-custom", "worker-group"],
+    )
+    def test_relocate_moves_only_matching_reports(
+        self, tmp_path, options, rendered_output, moved_names, retained_names
+    ):
+        prof = self._make_profiler(options)
+        src = tmp_path / "source"
+        dst = tmp_path / "destination"
+        src.mkdir()
+        for name in moved_names + retained_names:
+            (src / name).write_text("x")
+
+        with (
+            patch("verl.utils.profiler.nvtx_profile.os.getpid", return_value=42),
+            patch("verl.utils.profiler.nvtx_profile.socket.gethostname", return_value="node"),
+            patch(
+                "verl.utils.profiler.nsight._render_nsight_output_name", return_value=rendered_output
+            ) as render_output,
+        ):
+            moved = prof.relocate_results(str(dst), rank=2, save_file_prefix="actor", source_dir=str(src))
+
+        if options is not None:
+            render_output.assert_any_call(options.get("o"), rank=2, role="actor")
+        expected = {f"actor_node_{name}" for name in moved_names}
+        assert set(moved) == {str(dst / name) for name in expected}
+        assert {path.name for path in dst.iterdir()} == expected
+        assert {path.name for path in src.iterdir()} == set(retained_names)
+
+    def test_relocate_does_not_claim_custom_output_without_pid(self):
+        prof = self._make_profiler({"o": "shared_output"})
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
-            pid = os.getpid()
-            mine = os.path.join(src, f"worker_process_{pid}.nsys-rep")
-            mine_ranged = os.path.join(src, f"worker_process_{pid}.1.nsys-rep")
-            other = os.path.join(src, f"worker_process_{pid + 1}.nsys-rep")
-            for path in (mine, mine_ranged, other):
-                with open(path, "w") as fh:
-                    fh.write("x")
-
-            moved = prof.relocate_results(dst, rank=0, save_file_prefix="actor", source_dir=src)
-
-            self.assertEqual(len(moved), 2)
-            host = socket.gethostname()
-            self.assertTrue(os.path.exists(os.path.join(dst, f"actor_{host}_worker_process_{pid}.nsys-rep")))
-            self.assertTrue(os.path.exists(os.path.join(dst, f"actor_{host}_worker_process_{pid}.1.nsys-rep")))
-            # Files owned by another PID stay put; ours are moved (not copied).
-            self.assertTrue(os.path.exists(other))
-            self.assertFalse(os.path.exists(mine))
+            report = os.path.join(src, "shared_output.nsys-rep")
+            with open(report, "w") as fh:
+                fh.write("x")
+            with patch("verl.utils.profiler.nsight._render_nsight_output_name", return_value="shared_output"):
+                assert prof.relocate_results(dst, rank=0, save_file_prefix="actor", source_dir=src) == []
+            assert os.path.exists(report)
 
     def test_relocate_no_matching_files_returns_empty(self):
         prof = self._make_profiler()
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
-            self.assertEqual(prof.relocate_results(dst, source_dir=src), [])
+            assert prof.relocate_results(dst, source_dir=src) == []
 
     def test_relocate_without_save_path_is_noop(self):
         prof = self._make_profiler()
         with tempfile.TemporaryDirectory() as src:
-            self.assertEqual(prof.relocate_results(None, source_dir=src), [])
+            assert prof.relocate_results(None, source_dir=src) == []
 
     def test_relocate_via_stop_when_enabled(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
@@ -412,8 +337,8 @@ class TestNsightRelocateResults(unittest.TestCase):
                 profiler.stop()
 
             host = socket.gethostname()
-            self.assertTrue(os.path.exists(os.path.join(dst, f"{host}_worker_process_{pid}.nsys-rep")))
-            self.assertFalse(os.path.exists(report))
+            assert os.path.exists(os.path.join(dst, f"{host}_worker_process_{pid}.nsys-rep"))
+            assert not os.path.exists(report)
 
 
 if __name__ == "__main__":

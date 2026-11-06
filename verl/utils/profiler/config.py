@@ -273,6 +273,8 @@ class ProfilerConfig(BaseConfig):
         all_ranks (bool): Whether to profile all ranks.
         ranks (list[int]): The ranks that will be profiled. Defaults to [].
         global_tool_config (Any): Global tool configuration for all profiling tools.
+        ray_actor_nsight_options (Any): Shared Nsight launch options. The output name remains a template;
+          role/rank placeholders are rendered separately for each actor before launch.
         relocate_results (bool): When profiling finishes, move backend artifacts that a framework writes
           outside the flat layout into ``save_path``: ``nsys`` reports, which Ray hardcodes under
           ``/tmp/ray/session_latest/logs/nsight`` (the directory is not configurable, see
@@ -300,6 +302,8 @@ class ProfilerConfig(BaseConfig):
     save_path: Optional[str] = MISSING
     tool_config: Any = MISSING  # Just a placeholder, will use configs above directly
     global_tool_config: Optional[Any] = None  # Global tool configuration for all profiling tools
+    # union/intersect keep the left launch options unless they are None, preserving an explicit empty mapping.
+    ray_actor_nsight_options: Optional[Any] = None
     # --- Finish hook (runs when profiling stops) ---
     relocate_results: bool = False
     finish_hook_cmd: Optional[str] = None
@@ -316,6 +320,11 @@ class ProfilerConfig(BaseConfig):
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config or other.global_tool_config,
+            ray_actor_nsight_options=(
+                self.ray_actor_nsight_options
+                if self.ray_actor_nsight_options is not None
+                else other.ray_actor_nsight_options
+            ),
             relocate_results=self.relocate_results or other.relocate_results,
             finish_hook_cmd=self.finish_hook_cmd or other.finish_hook_cmd,
             finish_hook_all_ranks=self.finish_hook_all_ranks or other.finish_hook_all_ranks,
@@ -334,6 +343,11 @@ class ProfilerConfig(BaseConfig):
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config if self.global_tool_config else other.global_tool_config,
+            ray_actor_nsight_options=(
+                self.ray_actor_nsight_options
+                if self.ray_actor_nsight_options is not None
+                else other.ray_actor_nsight_options
+            ),
             relocate_results=self.relocate_results and other.relocate_results,
             finish_hook_cmd=self.finish_hook_cmd if self.finish_hook_cmd else other.finish_hook_cmd,
             finish_hook_all_ranks=self.finish_hook_all_ranks and other.finish_hook_all_ranks,
@@ -501,7 +515,18 @@ def build_vllm_profiler_args(
     Returns:
         dict: A dictionary of arguments to be passed to vLLM's start_profile method.
     """
-    if not profiler_config or not tool_config or not hasattr(tool_config, "contents"):
+    if not profiler_config or not tool_config:
+        return {}
+
+    # Nsight wraps the rollout server process, while vLLM executes CUDA work in
+    # spawned engine workers. Configure vLLM's lightweight CUDA profiler so
+    # start_profile()/stop_profile() issue cudaProfilerStart/Stop in those
+    # worker processes and include their CUDA activity in the parent Nsight
+    # process-tree report.
+    if profiler_config.tool == "nsys":
+        return {"profiler_config": json.dumps({"profiler": "cuda"})}
+
+    if not hasattr(tool_config, "contents"):
         return {}
 
     contents = tool_config.contents
