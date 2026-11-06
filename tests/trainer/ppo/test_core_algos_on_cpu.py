@@ -24,6 +24,8 @@ from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_multi_turn_optimal_token_baseline_advantage,
+    compute_optimal_token_baseline_advantage,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
@@ -379,6 +381,31 @@ def test_kl_penalty_k3_plus_uses_k2_gradient():
     (grad_k2,) = torch.autograd.grad(out_k2, logprob_k2)
 
     assert torch.allclose(grad_plus, grad_k2)
+
+
+@pytest.mark.parametrize(
+    "adv_fn",
+    [compute_optimal_token_baseline_advantage, compute_multi_turn_optimal_token_baseline_advantage],
+)
+def test_otb_nonnegative_path_variance_on_confident_tokens(adv_fn):
+    """When pi_t ~ 1, float32 cancellation in 1 - 2*pi_t + sum_pi_squared must not make W_t negative."""
+    # Exact float32 witness where 1 - 2 * exp(old_log_probs) + sum_pi_squared < 0 without clamping:
+    # pi_t = 1.0 (0x3f800000), sum_pi_squared = 1.0 - 2^-17 (0x3f7fff80) -> 1 - 2*pi_t + sps = -2^-17 < 0.
+    old_log_probs = torch.zeros((4, 2), dtype=torch.float32)
+    sum_pi_squared = torch.full((4, 2), float.fromhex("0x1.ffff00p-1"), dtype=torch.float32)
+    token_level_rewards = torch.tensor([[0.0, 1.0]] * 4, dtype=torch.float32)
+    response_mask = torch.ones((4, 2), dtype=torch.float32)
+    index = np.array(["g0", "g0", "g0", "g0"], dtype=object)
+
+    adv, ret = adv_fn(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        old_log_probs=old_log_probs,
+        sum_pi_squared=sum_pi_squared,
+    )
+    baselines = ret - adv
+    assert torch.all((baselines >= 0.0) & (baselines <= 1.0)), f"Baselines outside [0, 1]: {baselines}"
 
 
 if __name__ == "__main__":
