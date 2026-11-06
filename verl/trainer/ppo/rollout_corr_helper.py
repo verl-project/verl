@@ -60,6 +60,7 @@ tracking metrics to diagnose and correct off-policy issues.
 - Off-policy RL (theoretical basis for IS): https://fengyao.notion.site/off-policy-rl
 """
 
+import logging
 import math
 from typing import Any, Optional
 
@@ -88,6 +89,11 @@ SUPPORTED_ROLLOUT_RS_OPTIONS: set[str] = {
     "seq_max_k3",
 }
 TOKEN_LEVEL_ROLLOUT_RS_OPTIONS: set[str] = {"token_k1", "token_k2", "token_k3"}
+
+logger = logging.getLogger(__name__)
+
+# Whether the all-rejected warning below has already been emitted in this process.
+_warned_all_rejected = False
 
 
 def _parse_rollout_is_threshold(threshold_spec: str | float) -> tuple[float, Optional[float]]:
@@ -750,13 +756,14 @@ def compute_is_metrics(
     else:
         metrics["rollout_is_std"] = 0.0
 
-    # Compute Effective Sample Size (ESS) for truncated weights
+    # Compute Effective Sample Size (ESS) for truncated weights. When IcePop zeroes every
+    # weight (e.g. all sequence ratios fall below the lower bound), the denominator is 0:
+    # report ESS 0.0 (no effective samples) instead of crashing before the caller can warn.
     weights_for_ess: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
     mean_for_ess: torch.Tensor = verl_F.masked_mean(weights_for_ess, response_mask)
     is_weights_normalized: torch.Tensor = weights_for_ess / (mean_for_ess + 1e-8)  # Avoid division by zero
-    metrics["rollout_is_eff_sample_size"] = (
-        1.0 / verl_F.masked_mean(is_weights_normalized.square(), response_mask).item()
-    )
+    ess_denominator: float = verl_F.masked_mean(is_weights_normalized.square(), response_mask).item()
+    metrics["rollout_is_eff_sample_size"] = 1.0 / ess_denominator if ess_denominator > 0.0 else 0.0
 
     # Add sequence-level metrics if weights have batch dimension
     if rollout_is_weights.dim() > 1:
@@ -876,6 +883,31 @@ def compute_rollout_correction_and_rejection_mask(
             rollout_rs_threshold=rollout_rs_threshold,
         )
         metrics.update(rs_metrics)
+
+    # Step 3.5: A batch where the correction rejects every sequence or zeroes every IS weight
+    # contributes no gradient. Beyond genuinely drifted policies, the silent cause is a
+    # truncated sampler (top_p/top_k/min_p) returning sampling-processed log-probs: the ratio
+    # then carries the truncated mass per token, which k1-style bounds (e.g. 0.999_1.001,
+    # 0.5_2.0) reject deterministically. Warn once per process; the masked-fraction metrics
+    # stay visible per step either way.
+    global _warned_all_rejected
+    rs_rejected_all = rollout_rs is not None and not modified_response_mask.any()
+    is_zeroed_all = rollout_is_weights is not None and not rollout_is_weights.any()
+    if (rs_rejected_all or is_zeroed_all) and not _warned_all_rejected:
+        _warned_all_rejected = True
+        logger.warning(
+            "Rollout correction rejected or zero-weighted every sequence in this batch "
+            "(rollout_rs=%s, rollout_rs_threshold=%s, rollout_is=%s, rollout_is_threshold=%s); "
+            "the policy update receives no gradient from it. If the rollout samples with "
+            "truncation (top_p/top_k/min_p) and returns sampling-processed log-probs "
+            "(logprobs_mode='processed_logprobs'), the ratio old/rollout carries the truncated "
+            "mass per token and sequence-level bounds reject everything. Disable truncation, "
+            "switch to raw log-probs, or widen/remove the correction thresholds.",
+            rollout_rs,
+            rollout_rs_threshold,
+            rollout_is,
+            rollout_is_threshold,
+        )
 
     # Step 4: Compute off-policy metrics (KL, PPL, χ², etc.)
     offpolicy_metrics: dict[str, float] = compute_offpolicy_metrics(
