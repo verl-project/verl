@@ -4,20 +4,16 @@ Ascend Installation Guide (Ascend 950PR&950DT products)
 Last updated: 11/03/2026.
 
 
-Table of Contents
-------------------
-
-- `Framework Backend Support <#framework-backend-support>`_
-- `Deployment Guide <#deployment-guide>`_
-   - `Docker Image Acquisition, Build, and Usage <#1-docker-image-acquisition-build-and-usage>`_
-   - `Custom Installation <#2-custom-installation>`_
+.. contents:: Table of Contents
+   :local:
+   :depth: 2
 
 
 
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU for Ascend 950PR&950DT products. You can directly obtain published images from our `Ascend Image Guide <dockerfile_build_guidance.rst>`__ or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU for Ascend 950PR&950DT products. You can directly obtain published images from our :doc:`Ascend Image Guide <dockerfile_build_guidance>` or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -35,7 +31,7 @@ Deployment Guide
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 You can obtain the relevant images from `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, or build them yourself from the Dockerfile. For details, refer to the
-`Ascend Image Guide <dockerfile_build_guidance.rst>`__.
+:doc:`Ascend Image Guide <dockerfile_build_guidance>`.
 
 
 2. Custom Installation

@@ -11,18 +11,9 @@ Key Updates
 - 2025/12/11: verl existing scenarios now support automatic NPU device type detection. GPU scripts running on Ascend no longer need to explicitly set the ``trainer.device=npu`` parameter in principle. New features can still prioritize a specific device by setting ``trainer.device``, with gradual adaptation to automatic detection.
 
 
-Table of Contents
-------------------
-
-- `Hardware Support <#hardware-support>`_
-- `Quick Start <#quick-start>`_
-   - `Environment Preparation <#environment-preparation>`_
-   - `Weight Preparation <#weight-preparation>`_
-   - `Data Preparation <#data-preparation>`_
-   - `How to Run <#how-to-run>`_
-- `Appendix <#appendix>`_
-   - `SGLang Backend Enablement Guide <#sglang-backend-enablement-guide>`_
-   - `Converting vLLM Backend Scripts to SGLang <#converting-vllm-backend-scripts-to-sglang>`_
+.. contents:: Table of Contents
+   :local:
+   :depth: 2
 
 Hardware Support
 -----------------
@@ -54,7 +45,7 @@ Configuration tips:
 Environment Preparation
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Before running the scripts in this document, ensure that the verl Ascend environment has been installed. For installation details, see the `Ascend Installation Guide <./install_guidance.rst>`_.
+Before running the scripts in this document, ensure that the verl Ascend environment has been installed. For installation details, see the :doc:`Ascend Installation Guide <./install_guidance>`.
 
 Weight Preparation
 ~~~~~~~~~~~~~~~~~~~~
@@ -120,9 +111,9 @@ How to Run
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-For detailed parameter descriptions within the scripts, see `Training Configuration Parameters and Metrics <../dev_guide/model_dev/parameter_and_metrics.md>`_.
+For detailed parameter descriptions within the scripts, see :doc:`Training Configuration Parameters and Metrics <../dev_guide/model_dev/parameter_and_metrics>`.
 
-For multi-node task launch, see the `Multi-Machine Task Startup Practice Guide <../model_support/examples/multi-machine_task_startup_practice.rst>`_.
+For multi-node task launch, see the :doc:`Multi-Machine Task Startup Practice Guide <../model_support/examples/multi-machine_task_startup_practice>`.
 
 Appendix
 -------------------------------------------
@@ -130,7 +121,7 @@ Appendix
 SGLang Backend Enablement Guide
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-verl currently parses common inference parameters. For details, see the ``ServerArgs`` initialization parameters in `async_sglang_server.py <../../../../verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_.
+verl currently parses common inference parameters. For details, see the ``ServerArgs`` initialization parameters in `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_.
 
 Other `SGLang parameters <https://github.com/sgl-project/sglang/blob/v0.5.10/docs/advanced_features/server_arguments.md>`_ can be passed through ``engine_kwargs``.
 

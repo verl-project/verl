@@ -32,16 +32,9 @@ Key Updates
    not present in the environment, you still need to explicitly specify
    ``trainer.device=npu``.
 
-Table of Contents
-------------------
-
-- `Hardware Support <#hardware-support>`_
-- `Framework Backend Support <#framework-backend-support>`_
-- `Deployment Guide <#deployment-guide>`_
-   - `Docker Image Acquisition, Build, and Usage <#1-docker-image-acquisition-build-and-usage>`_
-   - `Custom Installation - vLLM + FSDP/Megatron <#2-custom-installation---vllm--fsdpmegatron>`_
-   - `Custom Installation - SGLang + FSDP/Megatron <#3-custom-installation---sglang--fsdpmegatron>`_
-- `Appendix <#appendix>`_
+.. contents:: Table of Contents
+   :local:
+   :depth: 2
 
 Hardware Support
 -----------------
@@ -55,13 +48,13 @@ Atlas 800T A3
 ..
 
    [Note] For software installation on Ascend 950PR&950DT products,
-   refer to `Installation Guide (Ascend 950PR&950DT products) <install_guidance_950.rst>`_.
+   refer to :doc:`Installation Guide (Ascend 950PR&950DT products) <install_guidance_950>`.
 
 
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our `Ascend Image Guide <dockerfile_build_guidance.rst>`__ or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our :doc:`Ascend Image Guide <dockerfile_build_guidance>` or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -80,7 +73,7 @@ Deployment Guide
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 You can obtain the relevant images from `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, or build them yourself from the Dockerfile. For details, refer to the
-`Ascend Image Guide <dockerfile_build_guidance.rst>`__.
+:doc:`Ascend Image Guide <dockerfile_build_guidance>`.
 
 
 2. Custom Installation - vLLM + FSDP/Megatron
@@ -100,7 +93,7 @@ torch          ``2.10.0``                               PyTorch deep learning fr
 torch_npu      ``2.10.0.post7``                         NPU PyTorch adaptation plugin
 torchvision    ``0.25.0``                               PyTorch image processing library
 torchaudio     ``2.10.0``                               PyTorch audio processing library
-triton-ascend  ``3.6.0.post2``                          NPU Triton adaptation; for the installation command, refer to the script `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend  ``3.6.0.post2``                          NPU Triton adaptation; for the installation command, refer to the script `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_
 transformers   ``5.14.1``                               Hugging Face large model library, providing model architecture and pretrained weights
 xgrammar       ``>=0.2.1,<1.0.0``                        vLLM structured output dependency
 vLLM           ``0.30.0``                               High-performance LLM inference and serving engine
@@ -147,7 +140,7 @@ CANN is the heterogeneous computing architecture on NPU. Below are the A3 instal
 Source Installation
 ^^^^^^^^^^^^^^^^^^^^
 
-We provide a conda-based one-stop `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
+We provide a conda-based one-stop `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
 
 .. code:: bash
 
@@ -188,7 +181,7 @@ torch          ``2.8.0``                                PyTorch deep learning fr
 torch_npu      ``2.8.0.post2``                          NPU PyTorch adaptation plugin
 SGLang         ``v0.5.10``                              High-performance LLM inference engine
 triton         ``3.5.0``                                Triton, used for writing custom operators
-triton-ascend  ``3.2.2``                                NPU Triton adaptation; for the installation command, refer to the script `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend  ``3.2.2``                                NPU Triton adaptation; for the installation command, refer to the script `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_
 transformers   ``5.10.4``                               Hugging Face large model library, providing model architecture and pretrained weights
 Megatron-LM    ``core_r0.18.0``                         Large-scale distributed training framework
 MindSpeed      ``core_r0.18.0``                         Megatron-LM adaptation and optimization component for Ascend NPU
@@ -226,7 +219,7 @@ CANN is the heterogeneous computing architecture on NPU. Below are the A3 instal
 Source Installation
 ^^^^^^^^^^^^^^^^^^^^
 
-We provide a conda-based one-stop `Installation Script <../../../../scripts/install_sglang_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
+We provide a conda-based one-stop `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
 
 .. code:: bash
 

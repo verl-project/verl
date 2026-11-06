@@ -11,18 +11,9 @@
 - 2025/12/11：verl 存量场景目前支持自动识别 NPU 设备类型，GPU 脚本在昇腾上运行，原则上不再需要显式设置 ``trainer.device=npu`` 参数，新增特性通过设置 ``trainer.device`` 仍可优先使用，逐步适配自动识别能力。
 
 
-目录
---------
-
-- `硬件支持 <#硬件支持>`_
-- `快速开始 <#快速开始>`_
-   - `环境准备 <#环境准备>`_ 
-   - `权重准备 <#权重准备>`_
-   - `数据准备 <#数据准备>`_
-   - `运行方式 <#运行方式>`_
-- `附录 <#附录>`_
-   - `SGLang 后端使能说明 <#SGLang-后端使能说明>`_
-   - `vLLM 后端脚本转换为 SGLang <#vLLM-后端脚本转换为-SGLang>`_
+.. contents:: 目录
+   :local:
+   :depth: 2
 
 硬件支持
 --------
@@ -54,7 +45,7 @@
 环境准备
 ~~~~~~~~~~~~~~~
 
-运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 `昇腾安装指南 <./install_guidance.rst>`_ 。
+运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 :doc:`昇腾安装指南 <./install_guidance>` 。
 
 权重准备
 ~~~~~~~~~~~~~~~
@@ -120,9 +111,9 @@
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-脚本内具体参数说明详见 `训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics.md>`_。
+脚本内具体参数说明详见 :doc:`训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics>`。
 
-多节点任务拉起详见 `多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice.rst>`_。
+多节点任务拉起详见 :doc:`多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice>`。
 
 附录
 -------------------------------------------
@@ -130,7 +121,7 @@
 SGLang 后端使能说明
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <../../../../verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
+当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
 
 其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/v0.5.10/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
 
