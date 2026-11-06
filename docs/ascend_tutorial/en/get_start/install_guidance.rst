@@ -183,7 +183,7 @@ Dependency     Version                                  Description
 ============== ======================================== ===================
 HDK            ``25.5.0``                               NPU hardware driver and firmware
 CANN           ``>=8.5.0``                              CANN software that helps developers build and run AI services on the Ascend software and hardware platform
-Python         ``>=3.10, <3.12``, recommended ``3.11``                     
+Python         ``>=3.12``, recommended ``3.12``
 torch          ``2.8.0``                                PyTorch deep learning framework base package
 torch_npu      ``2.8.0.post2``                          NPU PyTorch adaptation plugin
 SGLang         ``v0.5.10``                              High-performance LLM inference engine
@@ -235,7 +235,7 @@ We provide a conda-based one-stop `Installation Script <../../../../scripts/inst
    # Enable the CANN environment. If you customized the CANN path, modify the following enable commands accordingly.
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    source /usr/local/Ascend/nnal/atb/set_env.sh
-   conda create -n verl-sgl-npu python=3.11 -y
+   conda create -n verl-sgl-npu python=3.12 -y
    conda activate verl-sgl-npu
    git clone --recursive https://github.com/verl-project/verl.git
    bash verl/scripts/install_sglang_mcore_npu.sh
