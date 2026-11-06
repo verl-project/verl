@@ -147,6 +147,19 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     return output
 
 
+def response_logit_rows(data: TensorDict) -> torch.Tensor:
+    """Packed rows that predict response tokens, i.e. the rows ``no_padding_2_padding`` reads."""
+    prompts = data["prompts"]
+    if prompts.is_nested:
+        response_lens = data["responses"].offsets().diff()
+    else:
+        response_lens = data["attention_mask"][:, prompts.shape[1] :].sum(dim=1)
+    # A sequence ending at packed offset e with R response tokens is read at rows [e - R - 1, e - 1).
+    first_rows = data["input_ids"].offsets()[1:] - response_lens - 1
+    shift = torch.repeat_interleave(first_rows - (response_lens.cumsum(dim=0) - response_lens), response_lens)
+    return torch.arange(shift.numel(), device=shift.device) + shift
+
+
 def build_attention_mask_from_nested(input_ids: torch.Tensor, max_seq_len: int | None = None) -> torch.Tensor:
     """Build a padded full-sequence attention mask from nested input ids."""
     assert input_ids.is_nested, "input_ids must be a nested tensor"

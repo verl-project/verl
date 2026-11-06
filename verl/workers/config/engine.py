@@ -272,6 +272,9 @@ class FSDPEngineConfig(EngineConfig):
             (``max_token_len_per_gpu * ulysses_sequence_parallel_size``) collapses every
             within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
             default 1024
+        response_only_lm_head (bool): Compute the LM head only for the rows that predict response tokens,
+            passed to the model as ``logits_to_keep``. The values the losses read are unchanged. Requires
+            ``use_remove_padding=True`` and a model forward that takes ``logits_to_keep``. default False
     """
 
     # ulysses_sequence_parallel_size is mutable for backward compatibility
@@ -295,6 +298,7 @@ class FSDPEngineConfig(EngineConfig):
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    response_only_lm_head: bool = False
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

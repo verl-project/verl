@@ -68,6 +68,14 @@ def forward_base_model(
     return outputs
 
 
+def _keep_rows(hidden_states, rolled_labels, logits_to_keep):
+    """Select the rows ``logits_to_keep`` names, as Transformers causal LMs do; 0 keeps every row."""
+    if isinstance(logits_to_keep, int) and logits_to_keep == 0:
+        return hidden_states, rolled_labels
+    rows = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+    return hidden_states[:, rows], rolled_labels[:, rows]
+
+
 def forward_with_torch_backend(
     self,
     input_ids: torch.LongTensor = None,
@@ -118,6 +126,7 @@ def forward_with_torch_backend(
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
+    hidden_states, rolled_labels = _keep_rows(hidden_states, rolled_labels, logits_to_keep)
 
     fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
     log_probs, entropy = fused_linear_for_ppo.forward(
@@ -185,6 +194,7 @@ def forward_with_triton_backend(
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
+    hidden_states, rolled_labels = _keep_rows(hidden_states, rolled_labels, logits_to_keep)
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,

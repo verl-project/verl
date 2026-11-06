@@ -72,6 +72,10 @@ pad_to_length: false
 # within-budget micro-batch onto a single shape. Only read when pad_to_length=true.
 pad_to_length_bucket: 1024
 
+# Compute the LM head only for the rows that predict response tokens. Requires use_remove_padding=True
+# and a model forward that takes logits_to_keep.
+response_only_lm_head: false
+
 # Whether to use forward only in fsdp.
 forward_only: false
 

@@ -71,7 +71,7 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-from verl.workers.utils.padding import build_attention_mask_from_nested
+from verl.workers.utils.padding import build_attention_mask_from_nested, response_logit_rows
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import (
@@ -101,6 +101,13 @@ def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bo
     if is_unit_temperature:
         return logits
     return logits / temperature.clamp(min=1e-8).to(logits.dtype)
+
+
+def _scatter_rows(values: torch.Tensor, rows: torch.Tensor, num_rows: int) -> torch.Tensor:
+    """Put the outputs of the kept rows back into the packed layout; the other rows are zero."""
+    if values.shape[0] != rows.numel():
+        raise RuntimeError(f"expected {rows.numel()} rows from logits_to_keep, got {values.shape[0]}")
+    return values.new_zeros((num_rows, *values.shape[1:])).index_copy(0, rows, values)
 
 
 class FSDPEngine(BaseEngine):
@@ -537,9 +544,11 @@ class FSDPEngine(BaseEngine):
         # Load base model with specified configuration and dtype
         module = self._build_module()
         try:
-            self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
+            forward_parameters = signature(module.forward).parameters
         except (TypeError, ValueError):
-            self.pass_packed_cu_seqlens = False
+            forward_parameters = {}
+        self.pass_packed_cu_seqlens = "cu_seqlens" in forward_parameters
+        self.forward_accepts_logits_to_keep = "logits_to_keep" in forward_parameters
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
@@ -1063,6 +1072,31 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
+    def _response_logit_rows(self, micro_batch: TensorDict, use_remove_padding: bool):
+        """Rows for ``logits_to_keep`` when ``response_only_lm_head`` is on, else None."""
+        # VeOmniEngineWithLMHead reuses this with a config that has no such field.
+        if not getattr(self.engine_config, "response_only_lm_head", False):
+            return None
+        unsupported = {
+            "use_remove_padding=False": not use_remove_padding,
+            "Ulysses sequence parallelism": self.use_ulysses_sp,
+            # not validated with FSDP-Turbo's own model classes
+            "FSDP-Turbo": getattr(self.engine_config, "strategy", None) == "fsdp_turbo",
+            "top-K distillation": tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False),
+            "score centering": tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False),
+            # the rows come from the prompt/response split, which RL batches carry and SFT batches do not
+            "a micro-batch without prompts and responses (e.g. SFT)": "prompts" not in micro_batch
+            or "responses" not in micro_batch,
+            # e.g. verl's own forwards for multimodal and Qwen3.5 models, which take **kwargs
+            "a model forward without logits_to_keep": not getattr(self, "forward_accepts_logits_to_keep", False),
+        }
+        reasons = [reason for reason, hit in unsupported.items() if hit]
+        if reasons:
+            raise ValueError(f"response_only_lm_head is not supported with {', '.join(reasons)}")
+        rows = response_logit_rows(micro_batch)
+        # No response tokens leaves no rows to keep, so project every row, as with the option off.
+        return rows if rows.numel() else None
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
@@ -1098,6 +1132,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         temperature = temperature.to(torch.float32)
         assert temperature.shape[0] == input_ids.shape[0]
+
+        response_rows = self._response_logit_rows(micro_batch, use_remove_padding)
 
         # args used to get outputs
         output_args = {"temperature_is_one": temperature_is_one}
@@ -1181,6 +1217,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 "attention_mask": None,
                 "position_ids": position_ids_rmpad,
             }
+            if response_rows is not None:
+                model_inputs["logits_to_keep"] = response_rows
+                output_args["response_logit_rows"] = response_rows
             if packed_cu_seqlens is not None and pass_packed_cu_seqlens:
                 model_cu_seqlens = packed_cu_seqlens
                 if output_args["pad_size"]:
@@ -1287,13 +1326,16 @@ class FSDPEngineWithLMHead(FSDPEngine):
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]
             temperature_rmpad = output_args["temperature_rmpad"]
+            response_rows = output_args.get("response_logit_rows")
+            num_packed_rows = input_ids_rmpad_rolled.shape[0]
 
             if use_fused_kernels:
                 # temperature is singleton
                 log_probs = None
+                # reshape, not squeeze: the torch kernel returns (1, total_nnz), the Triton kernel (total_nnz,)
                 if not distillation_only:
-                    log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
-                entropy_rmpad = output.entropy.squeeze(0) if calculate_entropy else None  # (total_nnz,)
+                    log_probs = output.log_probs.reshape(-1)  # (total_nnz,)
+                entropy_rmpad = output.entropy.reshape(-1) if calculate_entropy else None  # (total_nnz,)
 
                 # When the fused kernel also computed top-K distillation
                 # (veomni's chunk_topk_distill path), extract the per-token
@@ -1312,6 +1354,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits_rmpad, DTensor):
                     logits_rmpad = logits_rmpad.full_tensor()
+                if response_rows is not None:
+                    temperature_rmpad = temperature_rmpad[response_rows]
+                    input_ids_rmpad_rolled = input_ids_rmpad_rolled[response_rows]
                 logits_rmpad = _scale_logits_by_temperature(
                     logits_rmpad,
                     temperature_rmpad.unsqueeze(-1),
@@ -1358,6 +1403,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
                     )
+
+            if response_rows is not None:
+                log_probs = _scatter_rows(log_probs, response_rows, num_packed_rows)
+                if calculate_entropy:
+                    entropy_rmpad = _scatter_rows(entropy_rmpad, response_rows, num_packed_rows)
+                if calculate_sum_pi_squared:
+                    sum_pi_squared_rmpad = _scatter_rows(sum_pi_squared_rmpad, response_rows, num_packed_rows)
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]
