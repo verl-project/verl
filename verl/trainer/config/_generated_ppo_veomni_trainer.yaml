@@ -965,6 +965,14 @@ trainer:
     sync: {}
     colocate_async:
       num_warmup_batches: 1
+    decoupled_async:
+      num_warmup_batches: 1
+      parameter_sync_step: 4
+      min_version_lag: 1
+      poll_interval: 0.5
+      init_timeout: 600
+      max_inflight_prompts: null
+      dispatch_poll_interval: 0.2
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4

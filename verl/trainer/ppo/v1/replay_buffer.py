@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from collections import Counter, defaultdict
+from typing import Callable
 
 import numpy as np
 import transfer_queue as tq
@@ -156,6 +157,9 @@ class ReplayBuffer:
         self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
         self.refill_fn = refill_fn
+        # Optional callable run on every poll while waiting for samples; it raises to abort the wait
+        # when whatever produces samples has failed (e.g. a rollout weight update agent).
+        self.health_check_fn: Callable[[], None] | None = None
         self.filter_groups_metric = filter_groups_metric
         self.train_batch_size = train_batch_size
         self.gen_batch_size = gen_batch_size
@@ -342,6 +346,36 @@ class ReplayBuffer:
         stale_uids, dapo_uids, failed_uids, _dapo_counts = eviction_reasons
         return terminal_uids - (stale_uids | dapo_uids | failed_uids)
 
+    def _uses_weight_version_clock(self) -> bool:
+        # In decoupled_async, replicas load new weights on their own schedule, so the step a prompt
+        # was enqueued at no longer says which weights generated it.
+        return self.trainer_mode == "decoupled_async"
+
+    def _oldest_weight_versions(self, partition_id: str) -> dict[str, int]:
+        """Per prompt group, the oldest weight version any of its trajectories started on."""
+        oldest: dict[str, int] = {}
+        for key, tag in self.partitions[partition_id].items():
+            version = tag.get("min_global_steps")
+            if version is not None:
+                uid = key.split("_", 1)[0]
+                oldest[uid] = min(version, oldest.get(uid, version))
+        return oldest
+
+    def _group_ages(self, global_steps: int, partition_id: str, uids) -> dict[str, int]:
+        """Model versions between each group's generation and `global_steps`, for off-policy control.
+
+        By default a group is as old as the step its prompt was enqueued at, so one enqueued this step has
+        age 1. In decoupled_async, a group is as old as the oldest weights its trajectories started on;
+        version v is published at the end of step v, so a group generated entirely by the newest weights
+        also has age 1. Groups without trajectory tags fall back to the enqueue step.
+        """
+        prompt_global_steps = self.prompt_global_steps[partition_id]
+        ages = {uid: global_steps - prompt_global_steps.get(uid, global_steps) + 1 for uid in uids}
+        if self._uses_weight_version_clock():
+            oldest = self._oldest_weight_versions(partition_id)
+            ages.update({uid: global_steps - oldest[uid] for uid in ages if uid in oldest})
+        return ages
+
     def _evict_terminal_groups(
         self,
         global_steps: int,
@@ -357,11 +391,7 @@ class ReplayBuffer:
         prefix = self._metrics_prefix(partition_id)
         metrics: dict = {}
         if stale_uids:
-            prompt_global_steps = self.prompt_global_steps[partition_id]
-            spans = np.array(
-                [global_steps - prompt_global_steps.get(uid, global_steps) + 1 for uid in stale_uids],
-                dtype=float,
-            )
+            spans = np.array(list(self._group_ages(global_steps, partition_id, stale_uids).values()), dtype=float)
             metrics.update(
                 {
                     f"{prefix}/off_policy/evicted_samples": len(stale_uids),
@@ -406,6 +436,8 @@ class ReplayBuffer:
         return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
 
     def _wait_for_next_poll(self, partition_id: str, last_debug_time: float) -> float:
+        if self.health_check_fn is not None:
+            self.health_check_fn()
         time.sleep(self.poll_interval)
         now = time.time()
         if now - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
@@ -520,13 +552,8 @@ class ReplayBufferAsync(ReplayBuffer):
     def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
         if partition_id == "val" or self.max_off_policy_threshold is None or self.max_off_policy_strategy != "drop":
             return set()
-        prompt_global_steps = self.prompt_global_steps[partition_id]
-        terminal_keys = self.finished_keys[partition_id]
-        return {
-            uid
-            for uid in terminal_keys
-            if global_steps - prompt_global_steps.get(uid, global_steps) + 1 > self.max_off_policy_threshold
-        }
+        ages = self._group_ages(global_steps, partition_id, self.finished_keys[partition_id])
+        return {uid for uid, age in ages.items() if age > self.max_off_policy_threshold}
 
     def _terminal_eviction_reasons(
         self, global_steps: int, partition_id: str
@@ -593,7 +620,7 @@ class ReplayBufferAsync(ReplayBuffer):
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
         """Sample a batch while evicting and replacing stale, DAPO-filtered, or failed groups."""
         sampleable_keys, eviction_metrics = self.wait_for_sampleable(global_steps, partition_id, batch_size)
-        selected_prompt_uids, partition_snapshot, prompt_global_steps_snapshot = self._select_prompt_uids(
+        selected_prompt_uids, partition_snapshot, _prompt_global_steps_snapshot = self._select_prompt_uids(
             partition_id, sampleable_keys, batch_size
         )
 
@@ -602,9 +629,7 @@ class ReplayBufferAsync(ReplayBuffer):
             and self.max_off_policy_threshold is not None
             and self.max_off_policy_strategy == "drop"
         ):
-            selected_spans = [
-                global_steps - prompt_global_steps_snapshot.get(uid, global_steps) + 1 for uid in selected_prompt_uids
-            ]
+            selected_spans = list(self._group_ages(global_steps, partition_id, selected_prompt_uids).values())
             assert all(span <= self.max_off_policy_threshold for span in selected_spans), (
                 f"drop strategy selected stale prompts: spans={selected_spans}, "
                 f"threshold={self.max_off_policy_threshold}"
