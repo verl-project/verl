@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -58,3 +59,36 @@ def test_worker_group_preserves_capture_options(options, expected):
         )
 
     assert group.worker_nsight_options == expected
+
+
+@pytest.mark.parametrize(
+    "rank, options, expected",
+    [
+        (0, {"session-new": "run_{role}_{rank}"}, {"session-new": "run_actor_group_0"}),
+        (3, {"session-new": "run_{role}_{rank}"}, {"session-new": "run_actor_group_3"}),
+        (0, None, None),
+        (0, {"trace": "cuda"}, {"trace": "cuda"}),
+    ],
+    ids=["rank-zero", "other-rank", "no-options", "no-session-template"],
+)
+def test_worker_session_names_are_rendered_without_mutating_template(rank, options, expected):
+    group = RayWorkerGroup(
+        worker_names=["worker"],
+        worker_handles=[object()],
+        name_prefix="actor_group",
+        worker_nsight_options=None,
+        device_name="cuda",
+    )
+    group.profile_steps = [1]
+    group.worker_nsight_options = options
+    group._master_addr = "localhost"
+    group._master_port = "12345"
+    worker_class = Mock()
+    resource_pool = SimpleNamespace(world_size=4, use_gpu=True, store=[4], max_colocate_count=1)
+
+    group._create_worker(rank, 0, object(), rank, resource_pool, worker_class, None, False)
+
+    runtime_env = worker_class.update_options.call_args.args[0]["runtime_env"]
+    assert runtime_env["nsight"] == expected
+    if options is not None and "session-new" in options:
+        assert options["session-new"] == "run_{role}_{rank}"

@@ -66,6 +66,8 @@ The role's `ray_actor_nsight_options` defaults to `global_profiler.global_tool_c
 
 The `o` option is an output-name template. For independent actors, `{role}` and `{rank}` are replaced at launch, while `%q{RANK}` is replaced with the actor's profiling rank. Nsight resolves `%h` and `%p` to the hostname and process ID. An output name with no `{role}` or `{rank}` receives a `<role>_rank_<rank>_` prefix; an omitted output name defaults to `<role>_rank_<rank>_%h_pid%p`. Include `%p` when using automatic report relocation so each process can identify its own reports.
 
+For WorkerGroups, `worker_nsight_options.session-new` also accepts `{role}` and `{rank}`, expanded to the worker-group name and worker rank.
+
 ### Dedicated GPU metrics collection
 
 `global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options` supplies Nsight options for a separate collection process. The creation and control APIs are available; automatic creation and lifecycle integration in the standard verl trainers are follow-up work. For current use, a trainer or downstream integration must call `create_gpu_metrics_profiler(config)` and control the returned manager through its synchronous `start_profile` and `stop_profile` methods. The helper returns `None` when collection is disabled.

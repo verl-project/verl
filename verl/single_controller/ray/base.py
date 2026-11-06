@@ -666,9 +666,15 @@ class RayWorkerGroup(WorkerGroup):
         name = f"{self.name_prefix}{cia_name}_{pg_idx}:{local_rank}"  # e.g. Worker_2:5
 
         if self.profile_steps and self.device_name == "cuda":
+            nsight_options = self.worker_nsight_options
+            if nsight_options is not None and "session-new" in nsight_options:
+                nsight_options = nsight_options.copy()
+                nsight_options["session-new"] = (
+                    nsight_options["session-new"].replace("{role}", self.name_prefix).replace("{rank}", str(rank))
+                )
             runtime_env = {
                 "env_vars": env_vars,
-                "nsight": self.worker_nsight_options,
+                "nsight": nsight_options,
             }
         else:
             runtime_env = {"env_vars": env_vars}
