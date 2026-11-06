@@ -18,6 +18,7 @@ Tests that malformed tool calls return specific, actionable error messages
 instead of generic exception strings.
 """
 
+import asyncio
 import unittest
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,6 +40,8 @@ class FakeAgentData:
     """Minimal AgentData for testing."""
 
     tools_kwargs: dict = field(default_factory=dict)
+    tool_instances: dict = field(default_factory=dict)
+    tool_instance_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class FakeTool:
