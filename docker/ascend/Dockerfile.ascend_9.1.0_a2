@@ -1,5 +1,5 @@
 # Pull base image
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-910b-ubuntu22.04-py3.12
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.2.1-910b-ubuntu22.04-py3.12
 
 ARG SOC_VERSION="ascend910b1"
 
@@ -21,12 +21,12 @@ RUN ARCH=$(uname -m) && \
     # Clone libs
     git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git && \
     git clone -b releases/v0.30.0 https://github.com/vllm-project/vllm-ascend.git && \
-    git clone --branch core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
-    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git && \
-    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
-    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git && \
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git && \
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
+    git clone --branch 26.2.0_core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
+    git clone --depth 1 --branch core_v0.18.2 https://github.com/NVIDIA/Megatron-LM.git && \
+    git clone --depth 1 --branch 26.2.0_core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
+    git clone --depth 1 --branch 26.2.0_release_v2.17 https://gitcode.com/ascend/TransformerEngineNPU.git && \
+    git clone --depth 1 --branch 26.2.0 https://gitcode.com/ascend/MindSpeed-Ops.git && \
+    git clone --depth 1 --branch 26.2.0_v0.5.0 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
     git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 
 # Preserve Transformers' native Qwen3-ASR registration.
@@ -40,9 +40,9 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.2.1/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
     elif [ "$ARCH" = "x86_64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.2.1/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \

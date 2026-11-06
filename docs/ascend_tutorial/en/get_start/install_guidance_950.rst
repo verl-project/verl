@@ -1,7 +1,7 @@
 Ascend Installation Guide (Ascend 950PR&950DT products)
 ===============================================================
 
-Last updated: 11/03/2026.
+Last updated: 11/06/2026.
 
 
 Table of Contents
@@ -47,7 +47,7 @@ Key Version Support and Dependencies
 ============== ================================================== ===================
 Dependency     Version                                            Description
 ============== ================================================== ===================
-CANN           ``9.1.0``                                          CANN software that helps developers build and run AI services on the Ascend software and hardware platform
+CANN           ``9.2.1``                                          CANN software that helps developers build and run AI services on the Ascend software and hardware platform
 Python         ``3.11``                                           Python version
 torch          ``2.10.0``                                         PyTorch deep learning framework base package
 torch_npu      ``2.10.0.post7``                                   NPU PyTorch adaptation plugin
@@ -58,11 +58,16 @@ transformers   ``5.14.1``                                         Hugging Face l
 xgrammar       ``>=0.2.1,<1.0.0``                                  vLLM structured output dependency
 vLLM           ``0.30.0``                                         High-performance LLM inference and serving engine
 vLLM-Ascend    ``0.30.0``                                         NPU vLLM backend adaptation
-Megatron-LM    ``core_v0.18.0``                                   Large-scale distributed training framework
-MindSpeed      ``core_r0.18.0``                                   Megatron-LM adaptation and optimization component for Ascend NPU
+Megatron-LM    ``core_v0.18.2``                                   Large-scale distributed training framework
+MindSpeed      ``26.2.0_core_r0.18.0``                            Megatron-LM adaptation and optimization component for Ascend NPU
 ============== ================================================== ===================
 
 .. note::
+
+   MegatronAdaptor uses ``26.2.0_core_r0.18.0``.
+   MindSpeed-Bridge uses ``26.2.0_v0.5.0``.
+   TransformerEngineNPU uses ``26.2.0_release_v2.17``.
+   MindSpeed-Ops uses ``26.2.0``.
 
    The runtime dependencies follow the
    `vLLM-Ascend 0.30.0 requirements <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_.
@@ -85,14 +90,14 @@ The Megatron training backend also requires the following Bridge components:
      - ``v0.5.0``
      - Model construction and Hugging Face weight conversion
    * - MindSpeed-Bridge
-     - Repository default branch (no pinned tag/commit)
+     - ``26.2.0_v0.5.0``
      - Ascend adaptation of Megatron-Bridge
 
 
 Pre-installation Preparation (CANN)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN is the heterogeneous computing architecture on NPU. Below are the 950PR&DT installation instructions for the arm platform. Follow these commands to download and install HDK and CANN, or download and install from the `CANN Community <https://www.hiascend.com/en/cann/download?versionId=723&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ based on your system hardware model.
+CANN is the heterogeneous computing architecture on NPU. Below are the 950PR&DT installation instructions for the arm platform. Follow these commands to download and install HDK and CANN, or download and install from the `CANN Community <https://www.hiascend.com/en/cann/download>`_ based on your system hardware model.
 
 .. code:: bash
 
@@ -102,8 +107,8 @@ CANN is the heterogeneous computing architecture on NPU. Below are the 950PR&DT 
    sudo yum install -y gcc python3 python3-pip kernel-headers-$(uname -r) kernel-devel-$(uname -r)
    sudo curl https://repo.oepkgs.net/ascend/cann/ascend.repo -o /etc/yum.repos.d/ascend.repo && yum makecache
    # Install Toolkit; use --install-path to customize the installation path
-   sudo yum install Ascend-cann-toolkit-9.1.0
-   sudo yum install Ascend-cann-950-ops-9.1.0
+   sudo yum install Ascend-cann-toolkit-9.2.1
+   sudo yum install Ascend-cann-950-ops-9.2.1
    # Post-install verification
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
@@ -141,24 +146,24 @@ Megatron Training Backend Support
     # Megatron
     git clone https://github.com/NVIDIA/Megatron-LM.git
     cd Megatron-LM
-    git checkout core_v0.18.0
+    git checkout core_v0.18.2
     pip install -e .
     cd ..
 
-    # Install Ascend adapters for Megatron-LM core_v0.18.0
-    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
+    # Install Ascend adapters for Megatron-LM core_v0.18.2
+    git clone --depth 1 --branch 26.2.0_core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
     pip install -e MegatronAdaptor
-    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
+    git clone --depth 1 --branch 26.2.0_release_v2.17 https://gitcode.com/ascend/TransformerEngineNPU.git
     pip install -e TransformerEngineNPU --no-build-isolation
 
     # Install MindSpeed after MA and TENPU
     git clone https://gitcode.com/Ascend/MindSpeed.git
     cd MindSpeed
-    git checkout core_r0.18.0
+    git checkout 26.2.0_core_r0.18.0
     pip install -e .
     cd ..
 
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
+    git clone --depth 1 --branch 26.2.0 https://gitcode.com/ascend/MindSpeed-Ops.git
     pip install -e MindSpeed-Ops --no-build-isolation --no-deps
 
     # Configure environment variables
@@ -169,8 +174,8 @@ Megatron Training Backend Support
     git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
     pip install -e Megatron-Bridge --no-build-isolation --no-deps
 
-    # Install MindSpeed-Bridge (repository default branch)
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    # Install MindSpeed-Bridge (26.2.0_v0.5.0)
+    git clone --depth 1 --branch 26.2.0_v0.5.0 https://gitcode.com/ascend/MindSpeed-Bridge.git
     pip install -r MindSpeed-Bridge/requirements.txt
     pip install -e MindSpeed-Bridge --no-deps
 
