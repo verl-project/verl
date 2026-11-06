@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import random
 import unittest
 
@@ -30,6 +31,7 @@ from verl.trainer.ppo.core_algos import (
     kl_penalty,
     register_adv_est,
 )
+from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics, compute_rollout_rejection_mask
 
 
 def mock_test_fn():
@@ -379,6 +381,106 @@ def test_kl_penalty_k3_plus_uses_k2_gradient():
     (grad_k2,) = torch.autograd.grad(out_k2, logprob_k2)
 
     assert torch.allclose(grad_plus, grad_k2)
+
+
+def _small_k3_reference(log_ratio):
+    """Evaluate exp(x) - 1 - x near zero without subtracting nearly equal values."""
+    x = log_ratio.double()
+    return sum(x**power / math.factorial(power) for power in range(2, 12))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("name", ["k3", "low_var_kl", "k3+", "low_var_kl+"])
+def test_k3_penalty_small_log_ratios(dtype, name):
+    ref_logprob = torch.full((7,), -2.0, dtype=dtype)
+    delta = torch.tensor([-1e-3, -1e-4, -1e-5, 0.0, 1e-5, 1e-4, 1e-3], dtype=dtype)
+    logprob = ref_logprob - delta
+    expected = _small_k3_reference(ref_logprob - logprob)
+
+    actual = kl_penalty(logprob, ref_logprob, name)
+
+    assert actual.dtype == dtype
+    assert (actual >= 0).all()
+    torch.testing.assert_close(actual.double(), expected, rtol=5e-3, atol=0)
+
+
+@pytest.mark.parametrize(
+    "mode,threshold",
+    [("token_k3", 1e-8), ("seq_mean_k3", 1e-8), ("seq_max_k3", 1e-8), ("seq_sum_k3", 2.5e-8)],
+)
+def test_k3_rejection_agrees_with_reference_near_zero(mode, threshold):
+    log_ratio = torch.tensor([[1e-4, -1e-4, 0.5], [2e-4, -2e-4, -0.5]], dtype=torch.float32)
+    mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
+    expected_k3 = _small_k3_reference(log_ratio[:, :2])
+    if mode == "token_k3":
+        expected_keep = expected_k3 <= threshold
+    else:
+        if mode == "seq_sum_k3":
+            statistic = expected_k3.sum(dim=-1)
+        elif mode == "seq_mean_k3":
+            statistic = expected_k3.mean(dim=-1)
+        else:
+            statistic = expected_k3.max(dim=-1).values
+        expected_keep = (statistic <= threshold).unsqueeze(-1).expand(-1, 2)
+
+    keep, metrics = compute_rollout_rejection_mask(log_ratio, mask, mode, threshold)
+
+    torch.testing.assert_close(keep[:, :2].bool(), expected_keep)
+    assert metrics[f"rollout_rs_{mode}_min"] >= 0
+
+
+def test_k3_rejection_accumulates_small_divergences_on_long_sequences():
+    log_ratio = torch.full((1, 32768), -1e-4)
+    mask = torch.ones_like(log_ratio)
+    threshold = 1e-4
+    expected_sum = _small_k3_reference(log_ratio).sum().item()
+    assert expected_sum > threshold
+
+    keep, metrics = compute_rollout_rejection_mask(log_ratio, mask, "seq_sum_k3", threshold)
+
+    assert not keep.any()
+    assert metrics["rollout_rs_seq_sum_k3_mean"] == pytest.approx(expected_sum, rel=5e-3)
+
+
+def test_offpolicy_k3_metric_preserves_small_divergences():
+    rollout_log_prob = torch.full((2, 3), -2.0)
+    old_log_prob = rollout_log_prob + torch.tensor([[-1e-4, 1e-4, 0.5], [-1e-3, 1e-3, -0.5]])
+    mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
+    expected = _small_k3_reference((old_log_prob - rollout_log_prob)[:, :2]).mean().item()
+
+    metrics = compute_offpolicy_metrics(old_log_prob, rollout_log_prob, mask)
+
+    assert metrics["k3_kl"] == pytest.approx(expected, rel=5e-3, abs=0)
+
+
+@pytest.mark.parametrize("name", ["k3", "low_var_kl", "k3+", "low_var_kl+"])
+def test_k3_penalty_preserves_gradients_and_clipping(name):
+    delta = torch.tensor([-30.0, -2.0, -1e-3, 0.0, 1e-3, 1.0, 30.0], dtype=torch.float64)
+    ref_logprob = torch.full_like(delta, -40.0)
+    logprob = (ref_logprob - delta).requires_grad_()
+
+    loss = kl_penalty(logprob, ref_logprob, name).sum()
+    (gradient,) = torch.autograd.grad(loss, logprob)
+
+    if name.endswith("+"):
+        expected = -delta
+    else:
+        expected = 1 - delta.exp()
+        expected[delta.abs() > 20] = 0
+    torch.testing.assert_close(gradient, expected)
+    assert torch.isfinite(gradient).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_k3_penalty_preserves_values_away_from_zero(dtype):
+    delta = torch.tensor([-100.0, -20.0, -2.0, 0.0, 1.0, 3.0, 20.0, 100.0], dtype=dtype)
+    ref_logprob = torch.full_like(delta, -200.0)
+    expected_delta = delta.double().clamp(-20, 20)
+    expected = (expected_delta.exp() - expected_delta - 1).clamp(-10, 10)
+
+    actual = kl_penalty(ref_logprob - delta, ref_logprob, "k3")
+
+    torch.testing.assert_close(actual.double(), expected, rtol=1e-6, atol=0)
 
 
 if __name__ == "__main__":
