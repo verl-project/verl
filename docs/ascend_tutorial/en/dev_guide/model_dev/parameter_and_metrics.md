@@ -177,6 +177,7 @@ The following parameters exist and have the same meaning in both the FSDP and Me
 | `actor_rollout_ref.rollout.trace.backend` | `null` | Trace backend |
 | `actor_rollout_ref.rollout.trace.token2text` | `false` | Whether to convert tokens to text |
 | `actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker` | `null` | Max samples per step per worker |
+| `actor_rollout_ref.rollout.trace.enable_otel` | `false` | Export vLLM request spans to the RL-Insight OTLP endpoint (requires the `rl_insight` logger) |
 
 #### 1.1.10 Prometheus Configuration
 
