@@ -7,7 +7,7 @@ Last updated: 11/03/2026.
 Image Acquisition and Public Image Addresses
 --------------------------------------------
 
-Ascend hosts daily-built A2/A3/950 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built from the `Dockerfile <../../../../docker/ascend>`_.
+Ascend hosts daily-built A2/A3/950 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built from the `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_.
 
 Latest build image name format: latest-{inference backend}-{applicable product info}-{operating system}-{other fields}
 

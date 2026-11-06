@@ -178,7 +178,7 @@ Last updated: 07/13/2026.
 
 **Agent Loop 模式说明**：
 
-在 `Agent Loop <../../../../advance/agent_loop.rst>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
+在 :doc:`Agent Loop <../../../../advance/agent_loop>` 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
 
 1. Rank 定义：Rollout 配置中的 ranks 为全局 GPU rank（与训练角色一致）。由于每个 rollout 实例（replica）跨越 ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` 个 GPU，每个指定的 rank 会被映射到拥有它的实例（``replica = rank // world_size``），并对整个实例进行采集；例如 ``tp=8`` 时，``ranks: [0, 8]`` 会采集持有全局 rank 0 和 8 的实例（即 replica 0 和 replica 1）。
 
