@@ -3,6 +3,10 @@ Ascend Quick Start Guide
 
 **Last updated:** 2026/07/14.
 
+.. contents:: Table of Contents
+   :local:
+   :depth: 2
+
 Key Updates
 -----------
 
@@ -10,10 +14,6 @@ Key Updates
 - 2026/05/13: Separated the quick start and install guidance documents.
 - 2025/12/11: verl existing scenarios now support automatic NPU device type detection. GPU scripts running on Ascend no longer need to explicitly set the ``trainer.device=npu`` parameter in principle. New features can still prioritize a specific device by setting ``trainer.device``, with gradual adaptation to automatic detection.
 
-
-.. contents:: Table of Contents
-   :local:
-   :depth: 2
 
 Hardware Support
 -----------------

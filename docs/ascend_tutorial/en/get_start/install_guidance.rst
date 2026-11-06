@@ -3,6 +3,10 @@ Ascend Installation Guide
 
 Last updated: 11/03/2026.
 
+.. contents:: Table of Contents
+   :local:
+   :depth: 2
+
 Key Updates
 -----------
 
@@ -31,10 +35,6 @@ Key Updates
    runtime environment contains the ``torch_npu`` package. If ``torch_npu`` is
    not present in the environment, you still need to explicitly specify
    ``trainer.device=npu``.
-
-.. contents:: Table of Contents
-   :local:
-   :depth: 2
 
 Hardware Support
 -----------------
