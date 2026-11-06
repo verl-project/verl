@@ -2,7 +2,7 @@
 
 **Author:** [Yingru Li](https://richardli.xyz/)
 
-Last updated: 09/23/2026.
+Last updated: 10/11/2026.
 
 ---
 
@@ -299,7 +299,7 @@ Subtract the expected score under the sampler from every token's score
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
-- FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
+- FSDP or Megatron actor; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
 
 Score centering automatically tries to align with the actual sampling support. When the
 rollout provider verifies that the recorded head covers it, the trainer is normalized over
@@ -672,7 +672,7 @@ algorithm:
   ```
 
 - Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
-- v1 trainer (`trainer.use_v1: true`) with an FSDP actor only; single-turn agent loop only
+- v1 trainer (`trainer.use_v1: true`) with an FSDP or Megatron actor; single-turn agent loop only. Under Megatron tensor parallelism the head log-probs are normalized over the vocab-parallel shards
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
