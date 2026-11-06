@@ -61,9 +61,14 @@ def _generate_weights(weight_specs, seed):
 class _FakeSocket:
     def __init__(self):
         self.messages = []
+        self.poll_calls = []
 
     def send_pyobj(self, message):
         self.messages.append(message)
+
+    def poll(self, timeout, flags):
+        self.poll_calls.append((timeout, flags))
+        return flags
 
     def recv(self):
         return b""
@@ -117,6 +122,7 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert buffer.dtype == torch.uint8
     assert buffer.numel() == weight.nbytes
     assert torch.equal(recovered, weight)
+    assert socket.poll_calls == [(sender.ack_timeout_ms, bucketed_weight_transfer.zmq.POLLIN)]
 
 
 # ---------------------------------------------------------------------------
