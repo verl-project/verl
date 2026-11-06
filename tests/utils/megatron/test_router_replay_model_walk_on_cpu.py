@@ -97,7 +97,13 @@ def tf_config(monkeypatch):
     monkeypatch.setattr(router_replay_utils, "device_name", "cpu")
     monkeypatch.setattr(router_replay_utils, "preprocess_packed_seqs", lambda x, mask, **kwargs: (x, None))
     monkeypatch.setattr(router_replay_utils, "scatter_to_sequence_parallel_region", lambda x: x)
-    return SimpleNamespace(fp8=None, num_layers=NUM_LAYERS, moe_layer_freq=1)
+    return SimpleNamespace(
+        fp8=None,
+        num_layers=NUM_LAYERS,
+        num_moe_experts=8,
+        expert_model_parallel_size=1,
+        moe_layer_freq=1,
+    )
 
 
 def test_targets_are_written_to_the_forwarded_models_own_routers(orphans_then_model, tf_config):
@@ -135,3 +141,72 @@ def test_mtp_routers_are_not_addressed(orphans_then_model):
 
     assert [ln for ln, _ in router_replay_utils.iter_model_routers(model)] == list(range(1, NUM_LAYERS + 1))
     assert model.mtp[0].router_replay.router_replay_action is None
+
+
+@pytest.mark.parametrize(
+    ("num_experts", "expert_parallel_size", "num_padding_rows"),
+    [
+        (256, 64, 8),
+        (256, 32, 5),
+        (256, 32, 32),
+    ],
+)
+def test_padding_routes_preserve_valid_rows_and_balance_experts(
+    num_experts,
+    expert_parallel_size,
+    num_padding_rows,
+):
+    topk = 8
+    num_rows = num_padding_rows + 3
+    routes = torch.arange(num_rows * 2 * topk, dtype=torch.int16).reshape(1, num_rows, 2, topk)
+    routes.remainder_(num_experts)
+    original = routes.clone()
+    valid_rows = torch.zeros((1, num_rows), dtype=torch.bool)
+    valid_rows[:, [0, num_rows // 2, -1]] = True
+
+    router_replay_utils._distribute_router_replay_padding(
+        routes,
+        valid_rows,
+        num_experts=num_experts,
+        expert_parallel_size=expert_parallel_size,
+    )
+
+    torch.testing.assert_close(routes[:, valid_rows[0]], original[:, valid_rows[0]])
+    padding = routes[0, ~valid_rows[0]]
+    assert padding.min() >= 0
+    assert padding.max() < num_experts
+    assert (padding.sort(dim=-1).values.diff(dim=-1) != 0).all()
+
+    experts_per_rank = num_experts // expert_parallel_size
+    for layer_routes in padding.unbind(dim=1):
+        rank_load = torch.bincount((layer_routes // experts_per_rank).flatten(), minlength=expert_parallel_size)
+        expert_load = torch.bincount(layer_routes.flatten(), minlength=num_experts)
+        assert rank_load.max() - rank_load.min() <= 1
+        assert expert_load.max() - expert_load.min() <= 1
+
+
+@pytest.mark.parametrize("capacity_factor", [None, 0.5, 1.0])
+def test_padding_balance_preserves_capacity_limited_routes(orphans_then_model, tf_config, monkeypatch, capacity_factor):
+    """Capacity-limited replay must retain the original zero-filled padding routes."""
+    _, model = orphans_then_model
+    tf_config.moe_expert_capacity_factor = capacity_factor
+    routes = torch.ones((1, NUM_TOKENS, NUM_LAYERS, TOPK), dtype=torch.int64)
+    attention_mask = torch.ones((1, NUM_TOKENS), dtype=torch.bool)
+
+    def preprocess(tensor, _mask, **_kwargs):
+        padded = tensor.new_zeros((1, NUM_TOKENS + 1, *tensor.shape[2:]))
+        padded[:, :NUM_TOKENS] = tensor
+        return padded, None
+
+    monkeypatch.setattr(router_replay_utils, "preprocess_packed_seqs", preprocess)
+    router_replay_utils.set_router_replay_data(routes, attention_mask, tf_config, model=model)
+
+    for router in _routers(model):
+        torch.testing.assert_close(
+            router.target_topk_idx[:NUM_TOKENS], torch.ones((NUM_TOKENS, TOPK), dtype=torch.int64)
+        )
+        padding = router.target_topk_idx[-1]
+        if capacity_factor is None:
+            assert padding.unique().numel() == TOPK
+        else:
+            assert torch.count_nonzero(padding) == 0
