@@ -1,5 +1,5 @@
 # Pull base image
-FROM swr.cn-southwest-2.myhuaweicloud.com/ascendhub/cann:8.5.0-910b-ubuntu22.04-py3.11
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-910b-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 ARG PTA_BASE_VERSION="torch_npu-2.8.0.post2-cp311-cp311-manylinux_2_28"

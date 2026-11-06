@@ -1,5 +1,5 @@
 # Pull base image
-FROM swr.cn-southwest-2.myhuaweicloud.com/ascendhub/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.3.rc1-a3-ubuntu22.04-py3.11
 
 # Prepare required system dependencies
 RUN apt-get update -y && \
