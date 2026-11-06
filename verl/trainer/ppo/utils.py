@@ -115,6 +115,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         data_config: The data config.
         tokenizer (Tokenizer): The tokenizer.
         processor (Processor): The processor.
+        max_samples (int): Subsample the dataset down to this many rows, -1 to keep all.
 
     Returns:
         dataset (Dataset): The dataset.
