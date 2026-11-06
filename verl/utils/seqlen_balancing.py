@@ -100,6 +100,7 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool) 
             for i, (idx, seqlen) in enumerate(items):
                 self.sets[i].add(idx=idx, val=seqlen)
             self.sets = sorted(self.sets, reverse=True)
+            self.spread = self.sets[0].sum - self.sets[-1].sum
 
         def get_partitions(self):
             partitions = []
@@ -114,10 +115,8 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool) 
             for i in range(self.k):
                 self.sets[i].merge(other.sets[self.k - 1 - i])
             self.sets = sorted(self.sets, reverse=True)
-
-        @property
-        def spread(self) -> int:
-            return self.sets[0].sum - self.sets[-1].sum
+            # Merged states are outside the heap; refresh their priority before reinsertion.
+            self.spread = self.sets[0].sum - self.sets[-1].sum
 
         def __lt__(self, other):
             # least heap, let the state with largest spread to be popped first,
