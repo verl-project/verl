@@ -1981,7 +1981,18 @@ def compute_policy_loss_geo_mean(
 
     # Geometric-Mean Policy Optimization
     response_mask_sum = response_mask.sum(dim=-1)
-    ratio = torch.exp((negative_approx_kl_min * response_mask).sum(dim=-1) / (response_mask_sum + 1e-8))
+    # When rollout correction weights are provided, tokens rejected by IcePop
+    # (weight 0) must drop out of the loss entirely: they keep no gradient and
+    # must not change the weight of the other tokens in their sequence.
+    # Folding them in with the plain response_mask would add log(1e-10) to the
+    # geometric mean and leave the rejected token in the policy ratio
+    # (see #8406). The rule mirrors the token-level losses: a rejected token
+    # contributes exactly 0 to every sum while denominators stay unchanged, so
+    # kept tokens keep the gradient they had without the rejection.
+    loss_mask = response_mask
+    if rollout_is_weights is not None:
+        loss_mask = response_mask * (rollout_is_weights > 0).to(response_mask.dtype)
+    ratio = torch.exp((negative_approx_kl_min * loss_mask).sum(dim=-1) / (response_mask_sum + 1e-8))
     # we only support sequence level advantage for now,
     # otherwise, below would be not consistent with the paper
     advantage = (advantages * response_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
@@ -1992,10 +2003,15 @@ def compute_policy_loss_geo_mean(
     if rollout_is_weights is not None:
         # Aggregate token-level weights to sequence level using geometric mean for consistency
         # Note: rollout_is_weights is always 2D regardless of aggregation mode
+        # Rejected tokens contribute 0 to the log-sum (loss_mask), while the
+        # denominator stays the original token count, as above.
         seq_is_weights = torch.exp(
-            (torch.log(rollout_is_weights + 1e-10) * response_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
+            (torch.log(rollout_is_weights + 1e-10) * loss_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
         )
         pg_losses = pg_losses * seq_is_weights
+        # A fully rejected sequence has no kept tokens, so it gets zero weight
+        # rather than a loss built from the sequence advantage alone.
+        pg_losses = pg_losses * (loss_mask.sum(dim=-1) > 0).to(pg_losses.dtype)
 
     pg_loss = torch.mean(pg_losses)
 
