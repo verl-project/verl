@@ -607,7 +607,6 @@ class CheckpointEngineManager:
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
-            await self.resume_generation_replicas()
             return {}
 
         # Wait previous update to be committed
