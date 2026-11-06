@@ -1,7 +1,7 @@
 昇腾快速上手说明
 =================
 
-**Last updated:** 2026/07/14.
+**Last updated:** 2026/11/06.
 
 .. contents:: 目录
    :local:
@@ -10,10 +10,10 @@
 关键更新
 --------
 
+- 2026/11/06：FSDP2 快速上手脚本与 PPO 冒烟脚本支持通过 ``NDEVICES_PER_NODE`` 在小规格节点（如单张 A2 卡）上开箱运行；新增"单卡或小规格节点运行"章节。
 - 2026/06/30：新增覆盖四种常用训推后端组合，便于用户在 quickstart 阶段快速选择合适的启动脚本。
 - 2026/05/13：将 quick start 和 install guidance 分开。
 - 2025/12/11：verl 存量场景目前支持自动识别 NPU 设备类型，GPU 脚本在昇腾上运行，原则上不再需要显式设置 ``trainer.device=npu`` 参数，新增特性通过设置 ``trainer.device`` 仍可优先使用，逐步适配自动识别能力。
-
 
 硬件支持
 --------
@@ -114,6 +114,35 @@
 脚本内具体参数说明详见 :doc:`训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics>`。
 
 多节点任务拉起详见 :doc:`多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice>`。
+
+单卡或小规格节点运行
+~~~~~~~~~~~~~~~~~~~~~~
+
+快速上手脚本默认按 8 设备（die）节点配置。在小规格节点（如单张 Atlas A2/910B 卡）上，
+通过覆盖 ``NDEVICES_PER_NODE`` 即可直接运行：``ROLLOUT_TP`` 会自动收缩为不超过设备数，
+``ppo_mini_batch_size`` 默认即取设备数，无需其他额外覆盖：
+
+.. code-block:: bash
+
+   # 单张 A2 卡（1 die），FSDP2 + vLLM-Ascend 组合冒烟运行
+   NDEVICES_PER_NODE=1 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+       bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+
+   # 单张 A3 卡（2 die）
+   NDEVICES_PER_NODE=2 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+       bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+
+   # 单张 A2 卡上运行 PPO 冒烟脚本（PPO 含 critic，会加载第二个模型，
+   # 因此 ulysses_sequence_parallel_size 也需降为 1）
+   NDEVICES_PER_NODE=1 SP_SIZE=1 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+       bash tests/special_npu/run_qwen3_06b_ppo.sh
+
+说明：
+
+- FSDP2 + SGLang 脚本同样支持 ``NDEVICES_PER_NODE`` 和 ``ROLLOUT_TP`` 覆盖。
+- Megatron 组合固定 ``TP=2、PP=2``，至少需要 4 个设备。
+- 单卡下按默认批量（16 条 prompt x n 采样）跑一个 step 耗时明显更长。快速验证时建议
+  传 ``TOTAL_TRAINING_STEPS=1``，并可选调小批量，如 ``TRAIN_BATCH_SIZE=8 ROLLOUT_N=4``。
 
 附录
 -------------------------------------------

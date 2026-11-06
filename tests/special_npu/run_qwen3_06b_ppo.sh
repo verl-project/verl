@@ -3,6 +3,11 @@ set -x
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
+# Override these two on smaller nodes, e.g. a single A2 card:
+# NDEVICES_PER_NODE=1 SP_SIZE=1 bash tests/special_npu/run_qwen3_06b_ppo.sh
+NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-8}
+SP_SIZE=${SP_SIZE:-2}
+
 SKIP_ENABLE=True
 SKIP_DUMP_DIR=${SKIP_DUMP_DIR:-${HOME}/data/rollout_dump_sync}
 SKIP_STEPS='[1]'
@@ -25,7 +30,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=2 \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=${SP_SIZE} \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
@@ -41,7 +46,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.path="${MODEL_PATH}" \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=1 \
-    critic.ulysses_sequence_parallel_size=2 \
+    critic.ulysses_sequence_parallel_size=${SP_SIZE} \
     critic.fsdp.param_offload=True \
     critic.fsdp.optimizer_offload=True \
     critic.use_dynamic_bsz=True \
@@ -49,7 +54,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console"]' \
     trainer.project_name='verl_ppo_example_gsm8k_qwen3' \
     trainer.experiment_name='qwen3_06b_fsdp' \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=${NDEVICES_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \

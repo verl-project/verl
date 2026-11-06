@@ -34,6 +34,14 @@ TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 ########################### derived defaults ###########################
 n_devices_per_node=${NDEVICES_PER_NODE:-8}
 
+# Clamp the rollout tensor-parallel size to the number of devices per node so
+# the script also works out of the box on smaller nodes (e.g. a single A2
+# card with NDEVICES_PER_NODE=1).
+if [ "${ROLLOUT_TP}" -gt "${n_devices_per_node}" ]; then
+    echo "ROLLOUT_TP=${ROLLOUT_TP} exceeds NDEVICES_PER_NODE=${n_devices_per_node}, clamping to ${n_devices_per_node}"
+    ROLLOUT_TP=${n_devices_per_node}
+fi
+
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
