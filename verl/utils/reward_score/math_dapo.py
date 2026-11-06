@@ -240,9 +240,10 @@ def verify(
     if pred != "[INVALID]":
         return correct, pred
 
-    box_correct, box_pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
+    _, box_pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
     if box_pred is not None:
-        return box_correct == 1, box_pred
+        box_pred = normalize_final_answer(box_pred)
+        return box_pred == normalize_final_answer(answer), box_pred
     return correct, pred
 
 
