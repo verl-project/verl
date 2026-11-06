@@ -21,6 +21,7 @@ import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
+from verl.trainer.ppo.v1.prompt_sharing import PUBLIC_PARTITION, release_public_prompts
 from verl.utils.skip import SkipManager
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,8 @@ class ReplayBuffer:
             return
 
         for partition_id, items in data.items():
+            if partition_id == PUBLIC_PARTITION:
+                continue
             partition = self.partitions[partition_id]
             for key, tag in items.items():
                 if tag.get("is_prompt", False):
@@ -248,6 +251,7 @@ class ReplayBuffer:
             partition_id=partition_id,
             keys=[*uids, *trajectory_keys],
         )
+        release_public_prompts(uids)
 
         # Keep same-poll decisions consistent with tq.
         for key in trajectory_keys:
@@ -395,6 +399,8 @@ class ReplayBuffer:
         self, partition_id: str, selected_prompt_uids: list[str], partition_snapshot: dict[str, dict]
     ) -> KVBatchMeta:
         tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
+        # Public prompts still linked by the selected trajectories stay until the trainer clears those.
+        release_public_prompts(selected_prompt_uids)
 
         keys, tags = [], []
         selected = set(selected_prompt_uids)

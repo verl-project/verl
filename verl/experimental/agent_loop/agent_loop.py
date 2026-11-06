@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
+from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
@@ -257,6 +258,9 @@ class AgentLoopBase(ABC):
     # rollout only when a loop the run can dispatch to sets it.
     merges_context_messages: ClassVar[bool] = False
 
+    # Set by AgentLoopWorker when the sessions of a prompt share their media preprocessing.
+    preprocess_cache: Optional[PromptPreprocessCache] = None
+
     def __init__(
         self,
         trainer_config: DictConfigWrap,
@@ -330,6 +334,15 @@ class AgentLoopBase(ABC):
         Returns:
             dict: Multi-modal data with keys like "images", "videos" and "audios".
         """
+        if self.preprocess_cache is None:
+            return await self._extract_multi_modal_info(messages)
+        multi_modal_data = await self.preprocess_cache.get_or_compute(
+            "multi_modal_data", messages, lambda: self._extract_multi_modal_info(messages)
+        )
+        # Agent loops append tool media to these lists.
+        return {key: list(value) if isinstance(value, list) else value for key, value in multi_modal_data.items()}
+
+    async def _extract_multi_modal_info(self, messages: list[dict]) -> dict:
         multi_modal_data = {}
         if self.processor is not None:
             image_patch_size = getattr(getattr(self.processor, "image_processor", None), "patch_size", 14)
@@ -368,17 +381,31 @@ class AgentLoopBase(ABC):
         it is a builder-lifetime constant captured at construction and applied by
         the builder itself during rendering.
         """
-        prompt_ids = await self.loop.run_in_executor(
-            None,
-            lambda: self.continuous_token_builder.build_initial_tokens(
-                messages,
-                tools=tools,
-                images=images,
-                videos=videos,
-                audios=audios,
-                mm_inputs_out=mm_inputs_out,
-            ),
-        )
+
+        async def build() -> tuple[list[int], dict[str, Any]]:
+            mm_inputs = {}
+            prompt_ids = await self.loop.run_in_executor(
+                None,
+                lambda: self.continuous_token_builder.build_initial_tokens(
+                    messages,
+                    tools=tools,
+                    images=images,
+                    videos=videos,
+                    audios=audios,
+                    mm_inputs_out=mm_inputs,
+                ),
+            )
+            return prompt_ids, mm_inputs
+
+        if self.preprocess_cache is None:
+            prompt_ids, mm_inputs = await build()
+        else:
+            prompt_ids, mm_inputs = await self.preprocess_cache.get_or_compute(
+                "initial_tokens", (messages, tools, images, videos, audios), build
+            )
+            prompt_ids = list(prompt_ids)
+        if mm_inputs_out is not None:
+            mm_inputs_out.update(mm_inputs)
 
         # Mirror the response-side ``response_ids[:response_length]`` cap on the prompt side:
         # every prompt produced by the agent loop must fit in ``rollout.prompt_length`` so that
@@ -779,8 +806,15 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
+            preprocess_cache = self._get_preprocess_cache(kwargs)
+            if preprocess_cache is not None:
+                agent_loop.preprocess_cache = preprocess_cache
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
+
+    def _get_preprocess_cache(self, sample_kwargs: dict[str, Any]) -> Optional[PromptPreprocessCache]:
+        """Cache that the sessions of this sample's prompt share, or None to preprocess every session alone."""
+        return None
 
     def _pad_token_ids(
         self,
