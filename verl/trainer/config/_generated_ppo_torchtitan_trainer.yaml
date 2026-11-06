@@ -905,6 +905,16 @@ trainer:
   resume_mode: auto
   resume_from_path: null
   checkpoint_callback_class: null
+  pre_advantage_hooks:
+    reward_variance_filtering:
+      hook_class: verl.trainer.ppo.reward_variance_filter.RewardVarianceFilteringHook
+      enable: false
+      strategy: top_p
+      top_p: 0.9
+      top_k: 1
+      include_zero: false
+      variance_ddof: 1
+      selection_eps: 0.01
   val_before_train: true
   val_only: false
   test_freq: -1
