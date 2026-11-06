@@ -43,12 +43,15 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+_flash_attn_backend_available = False
+
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
 
     _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
     _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
     _flash_use_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+    _flash_attn_backend_available = True
 
 if is_npu_available:
     from transformers.integrations.npu_flash_attention import npu_flash_attn_func as flash_attn_func
@@ -58,6 +61,20 @@ if is_npu_available:
     _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
     _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
     _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
+    _flash_attn_backend_available = True
+
+if not _flash_attn_backend_available:
+    # Neither the `flash_attn` package nor NPU flash-attn is available (e.g. XPU, or CUDA
+    # without `flash_attn` installed). Loading a flash-attn kernel via HF Hub kernels is still
+    # possible, but is deferred to call time in `_custom_flash_attention_forward` instead of
+    # attempted here, by delegating to transformers' own `lazy_import_flash_attention`
+    # (the same mechanism transformers itself uses to resolve `attn_implementation`). That way
+    # this keeps working as transformers adds kernels/hardware support, rather than this module
+    # tracking the HF Hub kernels API itself, and importing this module doesn't warn for callers
+    # who never reach the patched attention path (use_remove_padding=False, ulysses_sp_size=1).
+    _flash_supports_window_size = False
+    _flash_supports_deterministic = False
+    _flash_use_top_left_mask = False
 
 _flash_deterministic_enabled = os.getenv("FLASH_ATTENTION_DETERMINISTIC", "0") == "1"
 
@@ -215,10 +232,41 @@ def _custom_flash_attention_forward(
     """
     Patches flash attention forward to handle 3D position ids in mrope. (3, batch_size, seq_length)
     """
+    attn_implementation = None
+    flash_varlen_fn = flash_attn_varlen_func if _flash_attn_backend_available else None
+    flash_supports_deterministic = _flash_supports_deterministic
+    if flash_varlen_fn is None:
+        # No CUDA flash_attn package or NPU flash-attn. Delegate kernel resolution to
+        # transformers' own `lazy_import_flash_attention`, the same lazy hub-kernels fallback
+        # transformers uses internally for `attn_implementation="flash_attention_2"` - this
+        # keeps working as transformers adds kernels/hardware support instead of this module
+        # tracking the HF Hub kernels API itself.
+        try:
+            from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
+
+            (_, flash_varlen_fn, _, _, _), _ = lazy_import_flash_attention("flash_attention_2")
+            attn_implementation = "flash_attention_2"
+            # The module-level _flash_supports_deterministic flag reflects only the native (pip
+            # flash_attn / NPU) backends, which aren't in use here - derive it from the kernel
+            # actually resolved above, or a requested deterministic mode would be silently
+            # dropped even though the loaded kernel supports it.
+            flash_supports_deterministic = "deterministic" in inspect.signature(flash_varlen_fn).parameters
+        except Exception as e:  # noqa: BLE001
+            flash_varlen_fn = None
+            logger.warning(f"Could not load a flash-attn backend via HF Hub kernels either: {e}")
+
+    if flash_varlen_fn is None:
+        raise RuntimeError(
+            "GLM-4V attention was monkeypatched to the flash-attn forward (triggered by "
+            "use_remove_padding=True or ulysses_sp_size>1) but no flash-attn backend is available "
+            "on this device (checked: CUDA flash_attn, NPU flash_attn, HF Hub kernels fallback). "
+            "Set use_remove_padding=False and ulysses_sp_size=1 to use the model's native "
+            "attention implementation instead."
+        )
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     flash_kwargs = {}
 
-    if _flash_supports_deterministic:
+    if flash_supports_deterministic:
         flash_kwargs["deterministic"] = deterministic if deterministic is not None else _flash_deterministic_enabled
 
     if kwargs.get("softcap") is not None:
@@ -247,7 +295,7 @@ def _custom_flash_attention_forward(
         q, k, v, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k) = prepare_fa2_from_position_ids(
             query_states, key_states, value_states, position_ids
         )
-        attn_output = flash_attn_varlen_func(
+        attn_output = flash_varlen_fn(
             q=q,
             k=k,
             v=v,
@@ -271,6 +319,7 @@ def _custom_flash_attention_forward(
             is_causal=is_causal,
             use_top_left_mask=use_top_left_mask,
             deterministic=deterministic,
+            attn_implementation=attn_implementation,
             **kwargs,
         )  # do not pass position_ids to old flash_attention_forward
 
