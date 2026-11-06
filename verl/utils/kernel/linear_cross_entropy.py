@@ -232,6 +232,8 @@ def linear_cross_entropy(
 
     Always returns ``(logprobs, entropy)``. On Ascend NPU, dispatches to CANN
     vocab-parallel fused CE when available (``VERL_NPU_LCE_BACKEND=auto|cann``).
+    Entropy is per-token Shannon entropy even without materialized logits;
+    ``reduction`` applies only to logprobs.
     Hybrid backward: CANN CE when ``dentropy==0``; chunked PyTorch CE+entropy
     (Triton-aligned) when ``dentropy!=0``.
     """
