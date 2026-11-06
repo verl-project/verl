@@ -19,8 +19,10 @@ import copy
 import logging
 import os
 import re
+import signal
 import traceback
 from collections import defaultdict
+from contextlib import contextmanager
 from io import BytesIO
 from typing import Any, Optional
 
@@ -36,6 +38,32 @@ from verl.utils.import_utils import load_extern_object
 from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
 logger = logging.getLogger(__name__)
+
+@contextmanager
+def _default_sigterm_in_forked_children(num_proc: int | None):
+    """Prevent forked dataset workers from inheriting a custom SIGTERM handler."""
+    original_handler = signal.getsignal(signal.SIGTERM)
+    if os.name != "posix" or num_proc is None or num_proc <= 1 or not callable(original_handler):
+        yield
+        return
+
+    parent_pid = os.getpid()
+
+    def sigterm_handler(signum, frame):
+        if os.getpid() == parent_pid:
+            original_handler(signum, frame)
+            return
+
+        # Ray installs a SIGTERM handler that raises SystemExit. Forked
+        # datasets workers must use the default behavior when their pool
+        # terminates them, otherwise pool shutdown can hang.
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, original_handler)
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -265,11 +293,12 @@ class RLHFDataset(Dataset):
                         traceback.print_exc()
                         return self.max_prompt_length + 1
 
-            dataframe = dataframe.filter(
-                lambda doc: doc2len(doc) <= self.max_prompt_length,
-                num_proc=self.num_workers,
-                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-            )
+            with _default_sigterm_in_forked_children(self.num_workers):
+                dataframe = dataframe.filter(
+                    lambda doc: doc2len(doc) <= self.max_prompt_length,
+                    num_proc=self.num_workers,
+                    desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+                )
 
             print(f"filter dataset len: {len(dataframe)}")
         return dataframe
