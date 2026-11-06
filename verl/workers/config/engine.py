@@ -29,6 +29,7 @@ from .optimizer import OptimizerConfig
 __all__ = [
     "FSDPEngineConfig",
     "McoreEngineConfig",
+    "MaxTextEngineConfig",
     "TrainingWorkerConfig",
     "TorchtitanEngineConfig",
     "VeOmniEngineConfig",
@@ -232,6 +233,47 @@ class McoreEngineConfig(EngineConfig):
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
+
+
+@dataclass
+class MaxTextEngineConfig(EngineConfig):
+    """JAX MaxText engine, configured with a standard MaxText config.
+
+    One process owns every GPU on the node. Parallelism lives in the MaxText
+    mesh (``ici_fsdp_parallelism``, ``ici_expert_parallelism``), not in
+    Megatron TP/PP/CP fields.
+
+    Attributes:
+        config_path: MaxText YAML file, as passed to ``train.py``. It normally sets
+            ``base_config`` and ``model_name``. Defaults to MaxText's ``base.yml``.
+        overrides: MaxText config keys applied on top of ``config_path``, like
+            ``key=value`` arguments to ``train.py``.
+        maxtext_path: MaxText checkout to import. Defaults to ``$MAXTEXT_PATH`` or
+            the installed package.
+        env: Extra environment variables, set before JAX starts.
+    """
+
+    strategy: str = "maxtext"
+    config_path: Optional[str] = None
+    overrides: dict[str, Any] = field(default_factory=dict)
+    maxtext_path: Optional[str] = None
+    env: dict[str, str] = field(default_factory=dict)
+    # Scanned Qwen3-30B-A3B layout used when exporting live parameters.
+    num_attention_heads: int = 32
+    num_key_value_heads: int = 4
+    head_dim: int = 128
+    # Hugging Face checkpoint to start from. When unset, the model path is used.
+    hf_weights_path: Optional[str] = None
+    load_hf_weights: bool = True
+    # Leave room for the torch tensors the rollout sync materializes.
+    mem_fraction: float = 0.85
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.strategy != "maxtext":
+            raise ValueError(f"MaxTextEngineConfig requires strategy='maxtext', got {self.strategy!r}")
+        if not 0 < self.mem_fraction < 1:
+            raise ValueError(f"mem_fraction must be in (0, 1), got {self.mem_fraction}")
 
 
 @dataclass

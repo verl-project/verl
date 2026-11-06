@@ -813,11 +813,19 @@ class PPOTrainer(ABC):
             self.role_worker_mapping[Role.Critic] = ray.remote(TrainingWorker)
             self.mapping[Role.Critic] = "global_pool"
 
-        # Global resource pool is used for actor, rollout, critic, ref
+        # Global resource pool is used for actor, rollout, critic, ref.
+        # MaxText is one JAX process per node. That process owns every GPU on the
+        # node; the rollout stays a separate pool of one process per GPU.
         global_pool_id = "global_pool"
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        }
+        actor_strategy = config.actor_rollout_ref.actor.strategy
+        gpus_per_process: dict[str, int] = {}
+        if actor_strategy == "maxtext":
+            resource_pool_spec = {global_pool_id: [1] * config.trainer.nnodes}
+            gpus_per_process[global_pool_id] = config.trainer.n_gpus_per_node
+        else:
+            resource_pool_spec = {
+                global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            }
 
         # Add separate resource pool for reward model if enabled
         if config.reward.reward_model.enable_resource_pool:
@@ -845,7 +853,11 @@ class PPOTrainer(ABC):
             resource_pool_spec["teacher_pool"] = teacher_pool
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
-        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        self.resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            gpus_per_process=gpus_per_process,
+        )
 
     def _load_checkpoint(self):
         self.global_steps = 0

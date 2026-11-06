@@ -27,6 +27,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 
 from verl.plugin.platform import get_platform
 from verl.protocol import DataProto, _padding_size_key
+from verl.single_controller.accelerator_count import accelerator_total
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.device import get_device_name
@@ -119,12 +120,16 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        gpus_per_process: int = 1,
     ) -> None:
         # TPU claims a chip exclusively per process, so colocating more than one
         # WorkerGroup builds a placement group that can never be satisfied.
         if not get_platform().supports_colocated_worker_groups():
             max_colocate_count = 1
         super().__init__(process_on_nodes, max_colocate_count)
+        if gpus_per_process < 1:
+            raise ValueError(f"gpus_per_process must be positive, got {gpus_per_process}")
+        self.gpus_per_process = gpus_per_process
         self.use_gpu = use_gpu
         # print(f"in RayProcessDispatchConfiguration: name_prefix = {name_prefix}")
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
@@ -149,7 +154,7 @@ class RayResourcePool(ResourcePool):
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
-            bundle[device_name] = 1
+            bundle[device_name] = self.gpus_per_process
             if self.accelerator_type is None and current_platform.device_name == "tpu":
                 # Ray places each per-node placement group independently, so a multi-host pool can
                 # straddle two TPU slices, which the TPU mesh cannot span. Pin the pool to one slice.
@@ -198,6 +203,7 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
     max_colocate_count: int = 3
+    gpus_per_process: dict[str, int] = field(default_factory=dict)
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -218,11 +224,15 @@ class ResourcePoolManager:
             # For FSDP backend, using max_colocate_count=3: actor_critic_ref, rollout, reward model (optional)
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
+            # A pool with gpus_per_process > 1 is one process per node that owns the
+            # devices exclusively, so no second WorkerGroup can share the bundle.
+            per_process = self.gpus_per_process.get(resource_pool_name, 1)
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
-                max_colocate_count=self.max_colocate_count,
+                max_colocate_count=1 if per_process > 1 else self.max_colocate_count,
                 name_prefix=resource_pool_name,
+                gpus_per_process=per_process,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -234,7 +244,7 @@ class ResourcePoolManager:
 
     def get_n_gpus(self) -> int:
         """Get the number of gpus in this cluster."""
-        return sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+        return accelerator_total(self.resource_pool_spec, self.gpus_per_process)
 
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
@@ -244,9 +254,7 @@ class ResourcePoolManager:
 
         # check total required devices can be satisfied
         total_available = sum(node_info.get(resource_name, 0) for node_info in node_available_resources.values())
-        total_required = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
-        )
+        total_required = accelerator_total(self.resource_pool_spec, self.gpus_per_process)
         if total_available < total_required:
             raise ValueError(
                 f"Total available {resource_name} {total_available} is less than "
@@ -638,7 +646,8 @@ class RayWorkerGroup(WorkerGroup):
         if self.use_gpu and not use_gpu:
             raise ValueError("use_gpu is True but resource_pool.use_gpu is False")
         local_world_size = resource_pool.store[0]
-        num_gpus = 1 / resource_pool.max_colocate_count
+        gpus_per_process = getattr(resource_pool, "gpus_per_process", 1)
+        num_gpus = gpus_per_process / resource_pool.max_colocate_count
 
         # we pass in environment variable at option so that Worker can use environment variable to set
         env_vars = {
@@ -676,6 +685,9 @@ class RayWorkerGroup(WorkerGroup):
                 )
                 raise ValueError(f"Cannot override protected system env: {conflict_env_vars}")
             env_vars.update(worker_env)
+        if gpus_per_process > 1:
+            # One process owns several GPUs: weights are sent from device 0, as the rollout side expects.
+            env_vars.setdefault("VERL_CHECKPOINT_DEVICE", "0")
         import re
 
         cia_name = type(ray_cls_with_init.cls).__name__

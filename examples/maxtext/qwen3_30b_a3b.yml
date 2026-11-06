@@ -1,0 +1,52 @@
+# Qwen3-30B-A3B MaxText trainer for one MI300X node, as a plain MaxText config.
+# JAX owns all 8 GPUs from a single process. Sequence length is the prompt
+# plus the response, padded to max_target_length.
+base_config: base.yml
+
+run_name: qwen3_30b_a3b_grpo
+base_output_directory: /tmp/verl-maxtext
+model_name: qwen3-30b-a3b
+override_model_config: true
+hardware: gpu
+attention: cudnn_flash_te
+use_iota_embed: true
+
+steps: 100000
+log_period: 100
+# Constant small step size from the first update. MaxText's schedule warms
+# up from zero, which makes the first updates no-ops.
+learning_rate: 1.0e-6
+warmup_steps_fraction: 0.0
+profiler: ""
+shardy: true
+
+# The tokenizer is set from the actor model path by the launch script.
+dataset_type: synthetic
+packing: true
+max_segments_per_seq: 32
+enable_checkpointing: false
+async_checkpointing: false
+
+dcn_data_parallelism: -1
+dcn_fsdp_parallelism: 1
+ici_fsdp_parallelism: 1
+ici_data_parallelism: 1
+ici_expert_parallelism: -1
+
+# Global batch is num_devices * per_device_batch_size. On 8 GPUs this is
+# 8, which is ppo_mini_batch_size * rollout.n in the launch script.
+# max_target_length must hold the prompt plus the response.
+max_target_length: 256
+per_device_batch_size: 1
+eval_per_device_batch_size: 1
+gradient_accumulation_steps: 1
+remat_policy: minimal
+scan_layers: true
+param_scan_axis: 1
+dtype: bfloat16
+# fp32 master weights: bf16 would round away most updates at a learning rate of 1e-6.
+weight_dtype: float32
+sparse_matmul: false
+megablox: false
+# -1 = no token dropping. Dropped tokens corrupt RL log-probs.
+capacity_factor: -1

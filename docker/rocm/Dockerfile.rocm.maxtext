@@ -1,0 +1,107 @@
+# MaxText (JAX) trainer plus a vLLM rollout on AMD GPUs. SGLang is intentionally absent.
+# Build:  docker build -f docker/rocm/Dockerfile.rocm.maxtext -t verl-maxtext docker/rocm
+# Usage:  examples/maxtext/run_qwen3_30b_a3b_grpo.sh
+# The base is the public JAX image. Its MaxDiffusion stage installs a
+# ROCm 7.14 torch wheel; replace that with the ROCm 10 wheel used by
+# rocm/primus:v26.7 before building vLLM and AITER.
+ARG BASE_IMAGE=rocm/jax-training:maxtext-v26.7
+FROM ${BASE_IMAGE}
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+WORKDIR /workspace
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV HIP_ARCHITECTURES=gfx942,gfx950
+ENV MAX_JOBS=32
+
+ARG PYTORCH_VERSION=2.12.0+rocm10.0.0
+RUN python -m pip uninstall -y torch torchvision torchaudio \
+        amd-torch-device-gfx942 amd-torch-device-gfx950 \
+        amd-torchvision-device-gfx942 amd-torchvision-device-gfx950 \
+    && python -m pip install --no-cache-dir \
+        --extra-index-url https://stable.repo.amd.com/rocm/pytorch/whl-next/ \
+        --pre \
+        torch==${PYTORCH_VERSION} \
+        amd-torch-device-gfx942==${PYTORCH_VERSION} \
+        amd-torch-device-gfx950==${PYTORCH_VERSION} \
+        torchaudio==2.11.0 \
+        torchvision==0.27 \
+        amd-torchvision-device-gfx942==0.27 \
+        amd-torchvision-device-gfx950==0.27
+
+# AITER at the commit baked into rocm/primus:v26.7.
+ARG AITER_REPO=https://github.com/ROCm/aiter.git
+ARG AITER_COMMIT=0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e
+# Build without isolation: an isolated build environment hides the venv's
+# rocm_sdk_core, so AITER's hipconfig call fails to find the ROCm version.
+# The clone is its own layer: it takes ~10 minutes on the compute nodes.
+RUN git clone --recursive ${AITER_REPO} /workspace/aiter \
+    && cd /workspace/aiter \
+    && git checkout ${AITER_COMMIT} \
+    && git submodule update --init --recursive
+
+# AITER_USE_SYSTEM_TRITON keeps the triton that torch pins. Kernels compile
+# on first use (PREBUILD_KERNELS=0): setup.py's prebuild branch references
+# `core` before defining it when pip only generates metadata.
+RUN pip uninstall -y aiter amd-aiter || true \
+    && pip install --no-cache-dir 'pybind11>=3.0.1' 'setuptools>=45' 'setuptools_scm[toml]>=6.2' \
+        wheel packaging psutil ninja pandas pyyaml einops matplotlib flydsl==0.1.7 \
+    && cd /workspace/aiter \
+    && AITER_USE_SYSTEM_TRITON=1 PREBUILD_KERNELS=0 \
+        pip install --no-cache-dir --no-build-isolation . \
+    && cd /workspace \
+    && rm -rf /workspace/aiter
+
+# vLLM, including the two ROCm patches from verl's Dockerfile.rocm.
+# https://github.com/verl-project/verl/blob/main/docker/rocm/Dockerfile.rocm
+ARG VLLM_TAG=18d87a87dc39c1a50f452b218fdcc3aeec48d18e
+RUN pip install --no-cache-dir setuptools_scm \
+    && git clone https://github.com/vllm-project/vllm /workspace/vllm \
+    && cd /workspace/vllm \
+    && git checkout ${VLLM_TAG} \
+    && sed -i 's|\(  // std::cout << "create_and_map:\)|#ifdef USE_ROCM\n  // ROCm: zero freshly mapped VRAM to avoid stale data (PR #44972)\n  CUDA_CHECK((CUresult)hipMemset(reinterpret_cast<void*>(d_mem), 0, size));\n  if (error_code != 0) {\n    return;\n  }\n#endif\n\1|' csrc/cumem_allocator.cpp \
+    && sed -i 's/layer\.w13_weight\.data = self\._maybe_pad_weight(layer\.w13_weight\.data)/layer.w13_weight.data.copy_(self._maybe_pad_weight(layer.w13_weight.data))/' \
+        vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py \
+    && sed -i 's/layer\.w2_weight\.data = self\._maybe_pad_weight(layer\.w2_weight\.data)/layer.w2_weight.data.copy_(self._maybe_pad_weight(layer.w2_weight.data))/' \
+        vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py \
+    && sed -i 's/return w13_weight\.contiguous(), w2_weight\.contiguous()/return w13_weight, w2_weight/' \
+        vllm/model_executor/layers/fused_moe/oracle/unquantized.py \
+    && pip install --no-cache-dir -r requirements/rocm.txt \
+    && MAX_JOBS=32 python3 setup.py develop --no-deps \
+    && pip uninstall -y tilelang \
+    && pip install --no-cache-dir --no-deps xgrammar==0.1.32
+
+# veRL's runtime dependencies. veRL itself is not baked in: install your tree
+# afterwards (pip install --no-deps -e .) or put it on PYTHONPATH.
+RUN pip install --no-cache-dir \
+        'tensordict>=0.8.0,<=0.10.0,!=0.9.0' \
+        'ray[default]>=2.41.0' \
+        hydra-core omegaconf antlr4-python3-runtime \
+        codetiming dill 'pyarrow>=19.0.0' pandas peft pylatexenc \
+        accelerate datasets packaging wandb pybind11 \
+        'TransferQueue==0.1.11' pyzmq msgspec 'prometheus_client>=0.20.0' \
+        cachetools einops fastapi uvicorn torchdata tensorboard \
+        cupy-rocm-7-0==14.1.1
+
+ENV NVTE_USE_GROUPED_GEMM_TRITON=1
+ENV NCCL_DEBUG=ERROR
+ENV HSA_ENABLE_IPC_MODE_LEGACY=1
+# JAX owns most of the device memory and torch only stages weights for the
+# rollout, so keep torch's allocator on plain segments.
+ENV PYTORCH_ALLOC_CONF=expandable_segments:False
+ENV PYTORCH_HIP_ALLOC_CONF=expandable_segments:False
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+
+# JAX on ROCm does not use libtpu. With it installed, vLLM activates its TPU
+# platform next to ROCm and refuses to pick one.
+RUN pip uninstall -y libtpu libtpu-nightly || true
+
+# vLLM finds ROCm through the amdsmi python module, which the image only
+# carries inside the rocm-sdk tree. Expose that package and its shared library.
+ENV ROCM_SDK=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+RUN mkdir -p /opt/amdsmi_lib && ln -sf ${ROCM_SDK}/lib/libamd_smi.so* /opt/amdsmi_lib/
+ENV PYTHONPATH=${ROCM_SDK}/share/amd_smi:/workspace/maxtext/src
+ENV LD_LIBRARY_PATH=/opt/amdsmi_lib:${LD_LIBRARY_PATH}
+
+RUN rm -rf /root/.cache /workspace/vllm/.git
+CMD ["/usr/bin/bash"]

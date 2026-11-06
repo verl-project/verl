@@ -23,6 +23,7 @@ from verl.utils.profiler.config import ProfilerConfig
 
 from .engine import (
     FSDPEngineConfig,
+    MaxTextEngineConfig,
     McoreEngineConfig,
     TorchtitanEngineConfig,
     VeOmniEngineConfig,
@@ -36,6 +37,7 @@ __all__ = [
     "ActorConfig",
     "FSDPActorConfig",
     "McoreActorConfig",
+    "MaxTextActorConfig",
     "VeOmniActorConfig",
     "TorchTitanActorConfig",
 ]
@@ -277,6 +279,34 @@ class McoreActorConfig(ActorConfig):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
         self.engine = self.megatron
+
+
+@dataclass
+class MaxTextActorConfig(ActorConfig):
+    """Actor using the JAX MaxText engine."""
+
+    strategy: str = "maxtext"
+    maxtext: MaxTextEngineConfig = field(default_factory=MaxTextEngineConfig)
+    profile: dict[str, Any] = field(default_factory=dict)
+    use_rollout_log_probs: bool = False
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.engine = self.maxtext
+        unsupported = []
+        if self.policy_loss.loss_mode != "vanilla":
+            unsupported.append(f"policy_loss.loss_mode={self.policy_loss.loss_mode!r}")
+        if self.loss_agg_mode != "token-mean":
+            unsupported.append(f"loss_agg_mode={self.loss_agg_mode!r}")
+        if self.entropy_coeff != 0:
+            unsupported.append(f"entropy_coeff={self.entropy_coeff}")
+        if self.use_kl_loss:
+            unsupported.append("use_kl_loss=True")
+        if unsupported:
+            raise ValueError(
+                "strategy=maxtext only supports the vanilla token-mean loss; got " + ", ".join(unsupported)
+            )
 
 
 @dataclass

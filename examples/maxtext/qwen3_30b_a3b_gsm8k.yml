@@ -1,0 +1,7 @@
+# GSM8K variant: 32 sequences of 640 tokens per step (1 per GPU per micro-batch, 4 accumulated).
+base_config: qwen3_30b_a3b.yml
+
+run_name: qwen3_30b_a3b_gsm8k
+max_target_length: 640
+eval_per_device_batch_size: 4
+gradient_accumulation_steps: 4

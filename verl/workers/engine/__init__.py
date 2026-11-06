@@ -62,6 +62,15 @@ except ImportError as e:
     MindspeedEngineWithValueHead = None
 
 try:
+    from .maxtext import MaxTextEngineWithLMHead, MaxTextEngineWithValueHead
+
+    __all__ += ["MaxTextEngineWithLMHead", "MaxTextEngineWithValueHead"]
+except ImportError as e:
+    warnings.warn(f"maxtext engine is not available: {e!r}", stacklevel=1)
+    MaxTextEngineWithLMHead = None
+    MaxTextEngineWithValueHead = None
+
+try:
     from .megatron import MegatronEngine, MegatronEngineWithLMHead, MegatronEngineWithValueHead
 
     __all__ += ["MegatronEngine", "MegatronEngineWithLMHead", "MegatronEngineWithValueHead"]
