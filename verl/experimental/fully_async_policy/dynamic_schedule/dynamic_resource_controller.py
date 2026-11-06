@@ -149,7 +149,9 @@ class DynamicResourceController:
 
         # Order is critical: remove from LB first so retry loop can't re-route to dying replicas.
         await self.rollouter.remove_replicas.remote(hybrid_resource_ids)
-        await self.hybrid_checkpoint_manager.abort_replicas()
+        # A request may already hold a server handle when routing is removed.
+        # Let the client retry elsewhere instead of waiting for this GPU to return.
+        await self.hybrid_checkpoint_manager.abort_replicas(reject_request=True)
         await self.hybrid_checkpoint_manager.sleep_replicas()
 
         self._hybrid_active = False

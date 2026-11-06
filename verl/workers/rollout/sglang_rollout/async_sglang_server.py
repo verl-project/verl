@@ -188,6 +188,11 @@ class SGLangHttpServer:
         self.base_gpu_id = base_gpu_id
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
+        self._submission_paused = False
+        self._rejecting = False
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
+        self._generation_control_lock = asyncio.Lock()
 
         # PD peer linkage populated post-launch by SGLangPDReplica.set_pd_peer.
         self._pd_decode_peers: list[ActorHandle] = []
@@ -559,6 +564,10 @@ class SGLangHttpServer:
         bootstrap_room: Optional[int] = None,
         session_id: Optional[str] = None,
     ) -> TokenOutput:
+        rejected = await self._park_until_admitted(request_id)
+        if rejected is not None:
+            return rejected
+
         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
         # paired local-prefill + remote-decode calls; decode returns the tokens
         # (prefill only materialises KV and pushes via NIXL). Random peer
@@ -734,15 +743,47 @@ class SGLangHttpServer:
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
-    async def abort_all_requests(self):
+    def _set_submission_state(self, paused: bool, rejecting: bool):
+        self._submission_paused = paused
+        self._rejecting = rejecting
+        if paused and not rejecting:
+            self._resume_event.clear()
+        else:
+            # Wake parked callers when a temporary pause becomes a deactivation.
+            self._resume_event.set()
+
+    async def _park_until_admitted(self, request_id: str) -> Optional[TokenOutput]:
+        while self._submission_paused:
+            if self._rejecting:
+                logger.debug("rejecting request %s on a deactivated SGLang replica", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            await self._resume_event.wait()
+        return None
+
+    async def abort_all_requests(self, reject_request: bool = False):
         if self.node_rank != 0:
             return
-        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+        async with self._generation_control_lock:
+            self._set_submission_state(paused=True, rejecting=reject_request)
+            try:
+                await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+            except BaseException:
+                # A failed control call may already have paused the native manager.
+                # Keep requests out until an explicit resume succeeds.
+                self._set_submission_state(paused=True, rejecting=True)
+                raise
 
     async def resume_generation(self):
         if self.node_rank != 0:
             return
-        await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+        async with self._generation_control_lock:
+            await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+            self._set_submission_state(paused=False, rejecting=False)
 
     async def start_profile(self, **kwargs):
         if (
@@ -900,16 +941,7 @@ class SGLangReplica(RolloutReplica):
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
-        if reject_request:
-            # SGLang blocks new requests inside its own tokenizer manager, so verl has no
-            # admission point to fail them at. Requests routed here after the pause wait
-            # until continue_generation(). TODO: add a verl-side gate in front of
-            # tokenizer_manager.pause_generation() so this replica can reject them too.
-            logger.warning(
-                "SGLang rollout ignores reject_request=True: requests arriving while generation "
-                "is paused will wait for the next resume_generation() instead of failing over."
-            )
-        await self.servers[0].abort_all_requests.remote()
+        await self.servers[0].abort_all_requests.remote(reject_request=reject_request)
 
     async def resume_generation(self):
         """Resume generation on the primary server after abort_all_requests."""
