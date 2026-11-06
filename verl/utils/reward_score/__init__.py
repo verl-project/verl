@@ -24,6 +24,7 @@ def default_compute_score(
     sandbox_fusion_url=None,
     concurrent_semaphore=None,
     memory_limit_mb=None,
+    method="strict",
     **kwargs,
 ):
     """Compute the score for a given solution based on the data source.
@@ -33,6 +34,9 @@ def default_compute_score(
         solution_str (str): The solution string to be evaluated.
         ground_truth (str): The ground truth answer for comparison.
         extra_info (dict, optional): Additional information that might be needed for scoring. Defaults to None.
+        method (str, optional): Answer extraction method for scorers that support it (currently the GSM8K scorer),
+            either "strict" (requires the `#### <answer>` marker) or "flexible" (takes the last number in the
+            response). Defaults to "strict". Configurable through the `reward.compute_score_kwargs` config field.
 
     Returns:
         float: The computed score as a floating point number. If the result is a dictionary,
@@ -44,7 +48,7 @@ def default_compute_score(
     if data_source == "openai/gsm8k":
         from . import gsm8k
 
-        res = gsm8k.compute_score(solution_str, ground_truth)
+        res = gsm8k.compute_score(solution_str, ground_truth, method=method)
     elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
         from . import math_reward
 
