@@ -13,6 +13,7 @@
 # limitations under the License.
 from typing import TypedDict
 
+import torch
 from codetiming import Timer
 from tensordict import TensorDict
 
@@ -145,8 +146,9 @@ class TinkerTrainingWorker(TrainingWorker):
 
         # Tinker returns per-token log-probs to the client after backward.
         # FSDP normally discards model_output to reduce peak memory, so
-        # explicitly opt this split-training path into retaining it.
-        tu.assign_non_tensor(data, return_model_output=True)
+        # retain it by default, while allowing metrics-only callers to opt out.
+        if "return_model_output" not in data.keys():
+            tu.assign_non_tensor(data, return_model_output=True)
 
         maybe_fix_3d_position_ids(data)
 
@@ -182,7 +184,10 @@ class TinkerTrainingWorker(TrainingWorker):
 
         metrics = {}
         if grad_norm is not None and self.engine.is_mp_src_rank_with_outputs():
-            metrics["grad_norm"] = grad_norm
+            # Keep this a host scalar: the dict crosses Ray's object store, and a
+            # CUDA tensor is re-materialized on the driver's GPU during
+            # deserialization, which OOMs while the trainer occupies that device.
+            metrics["grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
         return metrics
 
 

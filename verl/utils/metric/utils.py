@@ -47,6 +47,9 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
         {"loss": 2.0, "accuracy": 0.8, "max_reward": 8.0, "min_error": 0.05}
     """
     for key, val in metrics.items():
+        # DP all-gather in the worker can return one Metric per rank.
+        if isinstance(val, list) and val and isinstance(val[0], Metric):
+            val = Metric.aggregate_dp(val)
         if isinstance(val, Metric):
             metrics[key] = val.aggregate()
         elif "max" in key:
