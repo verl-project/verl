@@ -970,7 +970,25 @@ class FSDPEngine(BaseEngine):
                 )
                 for name, param in params.items()
             )
-            per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
+            hf_config = self.model_config.hf_config
+            text_config = getattr(hf_config, "text_config", hf_config)
+            # The NPU patch swaps the Transformers experts module for a grouped-GEMM
+            # one that keeps the experts transposed. Its installation is best-effort
+            # (trust_remote_code models, or a patch that failed and was logged keep
+            # the packed HF layout), so read the layout from the constructed module
+            # instead of inferring it from the config. FSDP2 rebuilds the class of every
+            # sharded module ("FSDP<Name>", still deriving from the original one), so
+            # search the MRO instead of comparing the concrete class name.
+            npu_gmm_layout = any(
+                "NPUQwen3VLMoeTextExperts" in {base.__name__ for base in type(module).__mro__}
+                for module in self.module.modules()
+            )
+            per_tensor_param = unfuse_moe_params(
+                per_tensor_param,
+                hf_config.model_type,
+                hidden_size=getattr(text_config, "hidden_size", None),
+                npu_gmm_layout=npu_gmm_layout,
+            )
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
