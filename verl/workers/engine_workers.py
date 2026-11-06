@@ -832,6 +832,29 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         get_torch_device().empty_cache()
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
+        # An engine that can export per-rank expert slices of a LoRA adapter sends each
+        # colocated vLLM worker only the experts its EP rank keeps.
+        export_kwargs = {}
+        lora_expert_slice = getattr(self.rollout, "lora_expert_slice", None)
+        if callable(lora_expert_slice) and getattr(self.actor.engine, "supports_lora_expert_slice", False):
+            expert_slice = lora_expert_slice()
+            if expert_slice is not None:
+                export_kwargs["lora_expert_slice"] = expert_slice
+
+        # VERL_K31_LORA_RANK_SLICE=1: without rollout EP, vLLM shards every expert over TP; send each colocated
+        # worker only its TP shard of the expert LoRA factors instead of the whole adapter.
+        tp_slice = None
+        if os.environ.get("VERL_K31_LORA_RANK_SLICE", "0") == "1" and "lora_expert_slice" not in export_kwargs:
+            lora_expert_tp_slice = getattr(self.rollout, "lora_expert_tp_slice", None)
+            tp_slice = lora_expert_tp_slice() if callable(lora_expert_tp_slice) else None
+
+        def _rank_slice(params, peft_cfg):
+            if tp_slice is None or peft_cfg is None:
+                return params
+            from verl.workers.rollout.vllm_rollout.k31_lora_rank_slice import tp_slice_adapter
+
+            return tp_slice_adapter(params, *tp_slice)
+
         # 1. resume rollout memory (weights were released during sleep)
         # sleep_level=1 (adapter mode) in SGLang never released weights, so do not resume them.
         # vLLM is different: its level-1 sleep goes through CuMemAllocator.sleep(offload_tags=("weights",))
@@ -847,8 +870,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
         )
+        per_tensor_param = _rank_slice(per_tensor_param, peft_config)
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
@@ -867,6 +891,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
+        del per_tensor_param
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
