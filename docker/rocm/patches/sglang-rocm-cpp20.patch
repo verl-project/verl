@@ -1,0 +1,12 @@
+diff --git a/sgl-kernel/setup_rocm.py b/sgl-kernel/setup_rocm.py
+--- a/sgl-kernel/setup_rocm.py
++++ b/sgl-kernel/setup_rocm.py
+@@ -90,7 +90,7 @@
+     "-O3",
+     "-Xcompiler",
+     "-fPIC",
+-    "-std=c++17",
++    "-std=c++20",
+     "--offload-arch=gfx942",
+     "--offload-arch=gfx950",
+     "-DENABLE_BF16",
