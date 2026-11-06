@@ -66,7 +66,9 @@ class RewardManagerBase(ABC):
             data: The concatenated batch passed to :meth:`run_single`.
                 ``data.batch["prompts"]``, ``data.batch["responses"]`` and
                 ``data.batch["attention_mask"]`` are expected to be present
-                for the default implementation.
+                for the default implementation. If ``response_mask`` is present,
+                scores are placed on the last generated, non-padding token. Rows
+                without generated tokens retain the last valid-token placement.
             scores: List of scalar reward scores, one per sample in ``data``.
 
         Returns:
@@ -74,9 +76,15 @@ class RewardManagerBase(ABC):
             ``len(data)``.
         """
         prompt_length = data.batch["prompts"].size(1)
-        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
+        response_attention_mask = data.batch["attention_mask"][:, prompt_length:]
+        score_indices = response_attention_mask.sum(dim=1) - 1
         rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        rm_scores[torch.arange(rm_scores.size(0), device=rm_scores.device), valid_response_length - 1] = (
-            rm_scores.new_tensor(scores)
+        if "response_mask" in data.batch:
+            generated_mask = data.batch["response_mask"].bool() & response_attention_mask.bool()
+            positions = torch.arange(rm_scores.size(1), device=rm_scores.device).expand_as(generated_mask)
+            last_generated = positions.masked_fill(~generated_mask, -1).amax(dim=1)
+            score_indices = torch.where(last_generated >= 0, last_generated, score_indices)
+        rm_scores[torch.arange(rm_scores.size(0), device=rm_scores.device), score_indices] = rm_scores.new_tensor(
+            scores
         )
         return rm_scores
