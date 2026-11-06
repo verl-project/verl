@@ -20,9 +20,19 @@ import concurrent.futures
 import functools
 import inspect
 import os
+from copy import deepcopy
 from typing import Any, Optional
 
 import ray
+
+
+def merge_runtime_env(base: dict, override: dict) -> dict:
+    """Merge Ray options without dropping inherited environment variables or mutating inputs."""
+    result = deepcopy(dict(base))
+    result.update(deepcopy(dict(override)))
+    if "env_vars" in base or "env_vars" in override:
+        result["env_vars"] = {**base.get("env_vars", {}), **override.get("env_vars", {})}
+    return result
 
 
 def ray_noset_visible_devices(env_vars=os.environ):

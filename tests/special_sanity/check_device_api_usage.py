@@ -52,6 +52,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/workers/engine/torchtitan/utils.py",  # appear in torch.cuda.empty_cache()
     "verl/workers/engine/automodel/transformer_impl.py",  # appear in default device_name
     "verl/workers/rollout/vllm_rollout/vllm_async_server.py",  # appear in config.cudagraph_capture_sizes
+    "verl/workers/rollout/vllm_replica.py",  # extracted vLLM controller; CUDA/NCCL runtime support gate
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/replica.py",  # appear in default device_name
