@@ -364,7 +364,11 @@ class SGLangHttpServer:
                 {
                     "enable_lora": True,
                     "max_lora_rank": lora_rank_of(self.model_config),
-                    "lora_target_modules": sglang_lora_target_modules(self.model_config.target_modules),
+                    "lora_target_modules": (
+                        engine_kwargs["lora_target_modules"]
+                        if "lora_target_modules" in engine_kwargs
+                        else sglang_lora_target_modules(self.model_config.target_modules)
+                    ),
                 }
             )
         # Only set dist_init_addr for multi-node; for single-node, let SGLang

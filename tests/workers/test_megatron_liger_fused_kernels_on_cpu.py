@@ -101,10 +101,24 @@ def test_engine_delegates_all_virtual_chunks(monkeypatch, engine_config):
     engine.module = [_model(False), _model(True)]
     calls = []
     monkeypatch.setattr(
-        mff, "patch_fused_forward", lambda model, config, **kwargs: calls.append((model, config, kwargs))
+        mff, "patch_fused_forward", lambda model, config, **kwargs: calls.append((model, config, kwargs)) or True
     )
     engine._maybe_enable_fused_kernels()
     assert calls == [(model, engine.model_config, {"engine_config": engine_config}) for model in engine.module]
+
+
+def test_engine_disables_fused_kernels_when_a_chunk_is_unsupported(monkeypatch, engine_config):
+    engine = object.__new__(transformer_impl.MegatronEngine)
+    engine.engine_config = engine_config
+    engine.model_config = SimpleNamespace(use_liger=True, mtp=SimpleNamespace(enable=False))
+    engine.is_value_model = False
+    engine.module = [_model(False), _model(True)]
+    unpatched = []
+    monkeypatch.setattr(mff, "patch_fused_forward", lambda model, config, **kwargs: model is engine.module[0])
+    monkeypatch.setattr(mff, "unpatch_fused_forward", unpatched.append)
+    engine._maybe_enable_fused_kernels()
+    assert engine_config.use_fused_kernels is False
+    assert unpatched == engine.module
 
 
 def _colocated_config():
