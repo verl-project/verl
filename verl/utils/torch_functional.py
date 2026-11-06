@@ -25,6 +25,7 @@ import torch.distributed
 import torch.nn.functional as F
 from tensordict import TensorDict
 from torch import nn
+from torch.autograd.function import once_differentiable
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import PreTrainedTokenizer
@@ -152,10 +153,48 @@ def logprobs_from_logits_torch_npu(logits: torch.Tensor, labels: torch.Tensor) -
     return -loss.view(*batch_dim)
 
 
-def logprobs_from_logits_naive(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Compute log-probabilities using standard log-softmax approach.
+class _LabelLogprobs(torch.autograd.Function):
+    """Compute ``log_softmax(logits)[label]`` as ``-softplus(logsumexp_{j != label}(logits) - logits[label])``.
 
-    Simple implementation using PyTorch's log_softmax followed by gathering.
+    Gathering from log_softmax rounds a confident label's log-probability, and its gradient, to exactly 0 once
+    its margin over the other logits passes ~16.6 in fp32, while the gradients of the other logits stay nonzero.
+    Excluding the label from the logsumexp keeps both accurate down to exp underflow. See Barron et al.,
+    "A Fix for Softmax and Cross-Entropy", arXiv:2610.31642.
+
+    Computed in at least float32 and returned in the dtype of the logits. Only the input logits and per-label
+    values are saved for backward, which recomputes the softmax, so no logits-sized copy is kept between forward
+    and backward.
+    """
+
+    @staticmethod
+    def forward(ctx, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        compute_dtype = torch.promote_types(logits.dtype, torch.float32)
+        label_logits = gather_from_labels(logits, labels).to(compute_dtype)
+        other_logits = logits.to(compute_dtype, copy=True).scatter_(-1, labels.unsqueeze(-1), -torch.inf)
+        other_logsumexp = torch.logsumexp(other_logits, dim=-1)
+        label_logprobs = -F.softplus(other_logsumexp - label_logits)
+        # Backward needs the full logsumexp; rebuilt as label_logits - label_logprobs it is NaN for a -inf label
+        logsumexp = torch.logaddexp(other_logsumexp, label_logits)
+        ctx.save_for_backward(logits, labels, logsumexp, label_logprobs)
+        return label_logprobs.to(logits.dtype)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        logits, labels, logsumexp, label_logprobs = ctx.saved_tensors
+        grad_output = grad_output.to(label_logprobs.dtype)
+        # -p_j for the other logits, and 1 - p_label = -expm1(logp_label), which stays accurate as p_label -> 1
+        grad_logits = logits.to(label_logprobs.dtype, copy=True).sub_(logsumexp.unsqueeze(-1)).exp_()
+        grad_logits.mul_(-grad_output.unsqueeze(-1))
+        label_grad = grad_output * -torch.expm1(label_logprobs)
+        grad_logits.scatter_(-1, labels.unsqueeze(-1), label_grad.unsqueeze(-1))
+        return grad_logits.to(logits.dtype), None
+
+
+def logprobs_from_logits_naive(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute log-probabilities without specialized kernels.
+
+    Simple implementation over the full logits; see ``_LabelLogprobs`` for the numerics.
     Less memory-efficient than specialized implementations but works on all devices.
 
     Args:
@@ -165,19 +204,17 @@ def logprobs_from_logits_naive(logits: torch.Tensor, labels: torch.Tensor) -> to
     Returns:
         torch.Tensor: Log-probabilities for target labels, same shape as labels.
     """
-    logp = F.log_softmax(logits, dim=-1)
-    logpy = gather_from_labels(logp, labels)
-    return logpy
+    return _LabelLogprobs.apply(logits, labels)
 
 
 def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> torch.Tensor:
     """Memory-efficient log-probability computation using row-wise processing.
 
     Computes log-probabilities by processing one row at a time to reduce peak
-    memory consumption. Uses logsumexp for float32/float64, falls back to
-    log_softmax for bfloat16 due to numerical stability concerns.
+    memory consumption, in at least float32 for every input dtype.
 
-    The mathematical identity used is: log_softmax(x_i) = x_i - logsumexp(x)
+    The mathematical identity used is:
+    log_softmax(x)_t = -softplus(logsumexp_{j != t}(x_j) - x_t); see ``_LabelLogprobs``.
 
     Args:
         logits: Model output logits of shape (batch_size, seq_len, vocab_size)
@@ -191,20 +228,10 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> 
         This implementation trades compute for memory by iterating over batch
         dimension, making it suitable for large vocabulary sizes.
     """
-    if logits.dtype in [torch.float32, torch.float64]:
-        logits_labels = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
-        # loop to reduce peak mem consumption
-        logsumexp_values = torch.stack([torch.logsumexp(logit, dim=-1) for logit in logits])
-        logprobs_labels = logits_labels - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
-    else:
-        # logsumexp approach is unstable with bfloat16, fall back to slightly less efficent approach
-        logprobs_labels = []
-        for row_logits, row_labels in zip(logits, labels, strict=True):  # loop to reduce peak mem consumption
-            row_logprobs = F.log_softmax(row_logits, dim=-1)
-            row_logprobs_labels = row_logprobs.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
-            logprobs_labels.append(row_logprobs_labels)
-        logprobs_labels = torch.stack(logprobs_labels)
-    return logprobs_labels
+    # loop to reduce peak mem consumption
+    return torch.stack(
+        [_LabelLogprobs.apply(row_logits, row_labels) for row_logits, row_labels in zip(logits, labels, strict=True)]
+    )
 
 
 def clip_by_value(x: torch.Tensor, tensor_min: torch.Tensor, tensor_max: torch.Tensor) -> torch.Tensor:
