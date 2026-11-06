@@ -31,6 +31,7 @@ def test_as_torch_index_basic_integers():
     # Values should be contiguous 0..G-1, keeping equal labels equal
     assert g.tolist()[0] == g.tolist()[1]
     assert len(torch.unique(g)) == 3  # {2,5,7} -> 3 groups
+    assert g.tolist() == [0, 0, 1, 2, 1, 0]
 
 
 def test_as_torch_index_near_integer_floats():
@@ -38,6 +39,75 @@ def test_as_torch_index_near_integer_floats():
     g = as_torch_index(arr)  # should round to integers then factorize
     assert g.dtype == torch.long
     assert len(torch.unique(g)) == 3  # {1,2,3}
+    assert g.tolist() == [0, 1, 0, 2]
+
+
+@pytest.mark.parametrize(
+    "label,index",
+    [
+        ("python int list", [2, 2, 5, 7, 5, 2]),
+        ("numpy int array", np.array([10, 10, 20, 20, 30])),
+        ("torch int tensor", torch.tensor([3, 3, 9, 9, 12])),
+        ("torch bool tensor", torch.tensor([True, True, False, False, True])),
+        ("near-integer floats", np.array([1.0000001, 2.0, 1.0, 3.0])),
+        ("numeric strings", np.array(["7", "7", "9", "9"], dtype=object)),
+        ("uuid-like strings", np.array(["uid-a", "uid-a", "uid-b", "uid-b"], dtype=object)),
+        ("negative ints", np.array([-1, -1, 3, 3])),
+        ("sparse ints", np.array([1000, 1000, 1001, 1001])),
+    ],
+)
+def test_as_torch_index_always_returns_dense_ids(label, index):
+    """Every recognized label kind must satisfy the documented [0..G-1] contract.
+
+    The integer / near-integer-float / numeric-string fast paths used to return the raw
+    label values, which are not usable as the positional group indices that
+    ``group_mean_std`` indexes against.
+    """
+    g = as_torch_index(index)
+    values = g.tolist()
+    n_groups = len(set(values))
+    assert g.dtype == torch.long, label
+    assert sorted(set(values)) == list(range(n_groups)), f"{label}: {values} is not contiguous [0..G-1]"
+
+
+def test_as_torch_index_preserves_label_equality():
+    g = as_torch_index(np.array([-5, 7, -5, 7, 100]))
+    assert g[0] == g[2]
+    assert g[1] == g[3]
+    assert g[4] not in (g[0].item(), g[1].item())
+
+
+def test_group_mean_std_output_is_sized_by_group_count_not_label_magnitude():
+    """G must be the number of groups, not max(label) + 1."""
+    scores = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32)
+    gidx = as_torch_index([1000, 1000, 1001, 1001])
+
+    mean_g, std_g, cnt_g = group_mean_std(scores, gidx)
+
+    assert mean_g.numel() == 2
+    assert std_g.numel() == 2
+    assert torch.allclose(mean_g, torch.tensor([1.5, 3.5]))
+    assert torch.equal(cnt_g, torch.tensor([2.0, 2.0]))
+
+
+def test_group_mean_std_handles_negative_labels_via_as_torch_index():
+    """Negative raw labels used to raise IndexError from index_add_."""
+    scores = torch.tensor([1.0, 3.0, 10.0, 20.0], dtype=torch.float32)
+    gidx = as_torch_index(np.array([-1, -1, 3, 3]))
+
+    mean_g, _, cnt_g = group_mean_std(scores, gidx)
+
+    assert torch.allclose(mean_g, torch.tensor([2.0, 15.0]))
+    assert torch.equal(cnt_g, torch.tensor([2.0, 2.0]))
+
+
+def test_group_mean_std_rejects_raw_negative_indices():
+    """A caller bypassing as_torch_index gets an actionable error, not IndexError."""
+    scores = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    gidx = torch.tensor([-1, 0], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="as_torch_index"):
+        group_mean_std(scores, gidx)
 
 
 def test_as_torch_index_factorization_mixed():
