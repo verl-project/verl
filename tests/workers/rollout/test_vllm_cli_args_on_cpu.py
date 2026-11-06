@@ -25,6 +25,7 @@ pytest.importorskip("vllm")
 from verl.workers.rollout.vllm_rollout.utils import (
     _optional_bool_vllm_args,
     _resolve_vllm_weight_sync_local_rank,
+    apply_deterministic_inductor_defaults,
     build_cli_args_from_config,
     vLLMColocateWorkerExtension,
 )
@@ -326,3 +327,32 @@ class TestVllmColocateZmqHandle:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestApplyDeterministicInductorDefaults:
+    """full_determinism must not leave vLLM benchmarking combo kernels under Inductor's deterministic mode."""
+
+    def test_sets_combo_kernels_without_benchmarking(self):
+        config = {"cudagraph_mode": "FULL_AND_PIECEWISE"}
+        apply_deterministic_inductor_defaults(config)
+        assert config == {
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+            "inductor_compile_config": {"combo_kernels": True, "benchmark_combo_kernel": False},
+        }
+
+    def test_keeps_other_inductor_options(self):
+        config = {"inductor_compile_config": {"max_autotune": False}}
+        apply_deterministic_inductor_defaults(config)
+        assert config["inductor_compile_config"] == {
+            "max_autotune": False,
+            "combo_kernels": True,
+            "benchmark_combo_kernel": False,
+        }
+
+    @pytest.mark.parametrize(
+        "user_config", [{"combo_kernels": False}, {"benchmark_combo_kernel": True}, {"combo_kernels": True}]
+    )
+    def test_user_combo_kernel_settings_win(self, user_config):
+        config = {"inductor_compile_config": dict(user_config)}
+        apply_deterministic_inductor_defaults(config)
+        assert config["inductor_compile_config"] == user_config
