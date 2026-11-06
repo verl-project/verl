@@ -103,6 +103,13 @@ def run_ppo(config, task_runner_class) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
+def set_default_tq_storage_units(config: DictConfig) -> None:
+    """Size SimpleStorage at two units per node unless the user set a count."""
+    simple_storage = config.transfer_queue.backend.SimpleStorage
+    if simple_storage.num_data_storage_units is None:
+        simple_storage.num_data_storage_units = 2 * config.trainer.nnodes
+
+
 @ray.remote
 class TaskRunnerV1:
     """V1 TaskRunner for PPO training."""
@@ -145,6 +152,7 @@ class TaskRunnerV1:
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
 
         config.transfer_queue.enable = True
+        set_default_tq_storage_units(config)
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
         self.config = config
