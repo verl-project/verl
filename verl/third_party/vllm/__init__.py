@@ -29,6 +29,10 @@ def get_version(pkg):
 
 package_name = "vllm"
 package_version = get_version(package_name)
+# Source builds of vLLM without version metadata (e.g. "0.0.0+<sha>", as in the Kimi-K3.1 ROCm image) report
+# release 0.0.0; treat them as current main rather than refusing them.
+if package_version is not None and vs.parse(package_version).release == (0, 0, 0):
+    package_version = "99.0.0+" + package_version.replace("+", ".")
 vllm_version = None
 VLLM_SLEEP_LEVEL = 1
 
