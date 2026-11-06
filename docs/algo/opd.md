@@ -251,9 +251,12 @@ auto-fills it as `pool_size // per_replica_world_size`.
 ### `distillation.teacher_models.<name>.inference.*`
 
 Inference-engine config for this teacher; see [`RolloutConfig`](../../verl/workers/config/rollout.py). Same shape as
-`actor_rollout_ref.rollout.*`. Notable defaults inherited from the YAML:
+`actor_rollout_ref.rollout.*`. Teacher inference uses checkpoint-loading defaults rather than the actor rollout's
+weight-sync defaults. Notable settings include:
 
 - `inference.name` — e.g. `vllm` or `sglang`.
+- `inference.load_format` — defaults to `auto`. Dummy load formats are rejected because teacher weights are loaded once
+  at startup and are not synchronized from the actor later.
 - `inference.tensor_model_parallel_size` — default `2`.
 - `inference.gpu_memory_utilization` — default `0.5`.
 - `inference.max_model_len` — must accommodate `student_prompt_length +
