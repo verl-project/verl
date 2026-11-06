@@ -33,6 +33,13 @@
 name: NPU unit tests
 
 on:
+  workflow_call:
+    inputs:
+      coverage_mode:
+        description: Collect per-target branch coverage for the NPU unit-test suite
+        type: boolean
+        required: false
+        default: false
   # Trigger on pull requests targeting main or v0.* branches.
   pull_request:
     branches:
@@ -51,14 +58,16 @@ on:
       - "!recipe/**"
       # Entrypoints
       - .github/workflows/npu_unit_tests.yml
+      - "scripts/ci/npu_pytest_suites.json"
+      - "scripts/ci/collect_npu_coverage.py"
       - "tests/**test_*.py"
       # Ignore CPU tests
       - "!tests/*_on_cpu.py"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: npu-unit-tests-${{ inputs.coverage_mode == true && 'coverage' || 'pr' }}-${{ github.ref }}
+  cancel-in-progress: ${{ inputs.coverage_mode != true && github.ref != 'refs/heads/main' }}
 
 # Declare permissions just read content.
 permissions:
@@ -68,7 +77,7 @@ jobs:
   npu_unit_tests:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
-    timeout-minutes: 60 # Increase this timeout value as needed
+    timeout-minutes: ${{ inputs.coverage_mode == true && 240 || 60 }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
@@ -101,6 +110,7 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+          ref: ${{ github.sha }}
       - name: Install the current repository
         run: |
           # Match the GPU CI ModelOpt version and keep the shared quantization tests unchanged.
@@ -117,69 +127,29 @@ jobs:
               printf "%-16s %10.3f GiB\n", $1, $2/1048576
           }' /proc/meminfo
       - name: Run all NPU unit tests
+        if: inputs.coverage_mode != true
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
           # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
-          python -c '
-          import pytest
-
-          raise SystemExit(pytest.main([
-              "-s",
-              "-x",
-              "--ignore-glob=*test_special_*.py",
-              "--ignore-glob=*on_cpu.py",
-              "--ignore-glob=*test_vllm*",
-              "--ignore-glob=*_sglang*",
-              "--ignore-glob=*_hf_rollout*",
-              "--ignore-glob=tests/models/",
-              "--ignore-glob=tests/utils/qat",
-              "--ignore-glob=tests/utils/real_nvfp4",
-              "--ignore-glob=tests/special*",
-              "--ignore-glob=tests/experimental",
-              "--ignore-glob=tests/workers/reward_model",
-              "--ignore-glob=*test_rvdz*",
-              "--ignore-glob=*test_ray_collectives*",
-              "--ignore-glob=*test_nvtx_profile*",
-              "--ignore-glob=tests/checkpoint_engine",
-              "--ignore-glob=*test_shared_memory*",
-              "--ignore-glob=tests/workers/rollout/rollout_trtllm",
-              "--ignore-glob=*test_fsdp_lora_merge*",
-              "--ignore-glob=*test_optimizer_offload_and_load.py*",
-              "tests/",
-              "-k",
-              "not test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu and not test_sender_accepts_strided_tensor",
-          ]))
-          '
+          python -c 'from scripts.ci.collect_npu_coverage import run_pytest_suite; run_pytest_suite("unit")'
       - name: Running NPU profiling unit tests
+        if: inputs.coverage_mode != true
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
           # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
-          python -c '
-          import pytest
-
-          raise SystemExit(pytest.main([
-              "-s",
-              "-x",
-              "tests/utils/test_special_mstx_profile.py",
-          ]))
-          '
+          python -c 'from scripts.ci.collect_npu_coverage import run_pytest_suite; run_pytest_suite("profiling")'
       - name: Running FSDP2 NPU model transfer regression
+        if: inputs.coverage_mode != true
         run: |
           PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=2 tests/special_distributed/test_fsdp2_model_cpu_offload.py
       - name: Running NPU checkpoint_engine unit tests
+        if: inputs.coverage_mode != true
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
           # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
-          python -c '
-          import pytest
-
-          raise SystemExit(pytest.main([
-              "-s",
-              "-x",
-              "tests/checkpoint_engine/test_correctness_on_npu.py",
-          ]))
-          '
+          python -c 'from scripts.ci.collect_npu_coverage import run_pytest_suite; run_pytest_suite("checkpoint_npu")'
       - name: Running CPU checkpoint_engine unit tests
+        if: inputs.coverage_mode != true
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
           # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
@@ -192,3 +162,31 @@ jobs:
               "tests/checkpoint_engine/test_global_steps_on_cpu.py",
           ]))
           '
+      - name: Install coverage dependencies
+        if: inputs.coverage_mode == true
+        run: uv pip install "coverage==7.8.2"
+      - name: Collect per-target NPU coverage
+        if: inputs.coverage_mode == true
+        env:
+          NPU_COVERAGE_DIR: ${{ runner.temp }}/npu-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python scripts/ci/collect_npu_coverage.py
+      - name: Package coverage tarball
+        id: package-coverage
+        if: ${{ always() && inputs.coverage_mode == true }}
+        env:
+          NPU_COVERAGE_DIR: ${{ runner.temp }}/npu-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          NPU_ARCHIVE_DIR: ${{ runner.temp }}/npu-coverage-archive-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          # Preserve partial collections for diagnosis; the manifest records completeness.
+          test -f "$NPU_COVERAGE_DIR/manifest.json"
+          mkdir -p "$NPU_ARCHIVE_DIR"
+          tar -czf "$NPU_ARCHIVE_DIR/coverage.tar.gz" -C "$NPU_COVERAGE_DIR" .
+      - name: Upload coverage tarball
+        if: ${{ always() && inputs.coverage_mode == true && steps.package-coverage.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: npu-coverage-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/npu-coverage-archive-${{ github.run_id }}-${{ github.run_attempt }}/coverage.tar.gz
+          compression-level: 0 # The tarball is already compressed.
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,30 @@
+name: Coverage Collection (NPU)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/coverage-collection-npu.yml
+      - .github/workflows/npu_unit_tests.yml
+      - scripts/ci/collect_npu_coverage.py
+      - scripts/ci/npu_pytest_suites.json
+  schedule:
+    # 05:00 UTC+8 every 2 days
+    # Day-of-month stepping resets each month; this is not a strict 48h timer.
+    - cron: "0 21 */2 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npu-coverage-collection-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    if: github.repository_owner == 'verl-project'
+    uses: ./.github/workflows/npu_unit_tests.yml
+    with:
+      coverage_mode: true
