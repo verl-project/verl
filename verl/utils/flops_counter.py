@@ -420,6 +420,84 @@ def _estimate_deepseek_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
     return flops_achieved
 
 
+def _dsv4_layer_compress_ratios(config, num_hidden_layers):
+    # 0 = sliding-window only, 4 = CSA (compressed sparse attention, with lightning indexer),
+    # other = HCA (heavily compressed attention, no indexer). Accepts the checkpoint format
+    # (`compress_ratios`) and the HF transformers format (`layer_types` + `compress_rates`).
+    ratios = getattr(config, "compress_ratios", None)
+    if ratios:
+        return list(ratios)[:num_hidden_layers]  # may carry a trailing entry for the MTP layer
+    layer_types = getattr(config, "layer_types", None)
+    if layer_types:
+        rates = getattr(config, "compress_rates", None) or {}
+        csa = rates.get("compressed_sparse_attention", 4)
+        hca = rates.get("heavily_compressed_attention", 128)
+        return [
+            0 if lt == "sliding_attention" else (csa if lt == "compressed_sparse_attention" else hca)
+            for lt in layer_types[:num_hidden_layers]
+        ]
+    return [0] * num_hidden_layers
+
+
+def _causal_floor_sum(seqlen, ratio):
+    # sum over query positions t of floor(t / ratio)
+    q, r = divmod(seqlen, ratio)
+    return ratio * q * (q - 1) / 2 + q * (r + 1)
+
+
+def _causal_window_sum(seqlen, window):
+    # sum over query positions t of min(window, t + 1)
+    if seqlen <= window:
+        return seqlen * (seqlen + 1) / 2
+    return window * (window + 1) / 2 + (seqlen - window) * window
+
+
+def _estimate_deepseek_v4_flops(config, tokens_sum, batch_seqlens, delta_time):
+    # DeepSeek-V4: hybrid SWA/CSA/HCA attention with shared-KV MQA (K == V), lightning
+    # indexer, grouped low-rank output projection, mHC hyper-connections and DeepSeekMoE.
+    # Symbols: d = hidden_size, c = head_dim, n_h = num_attention_heads, win = sliding_window,
+    # topk = index_topk, hc = hc_mult. MTP layers are not counted.
+    if not hasattr(config, "hidden_size") and hasattr(config, "text_config"):
+        config = config.text_config
+    d, c, n_h = config.hidden_size, config.head_dim, config.num_attention_heads
+    q_lora, o_lora, o_groups = config.q_lora_rank, config.o_lora_rank, config.o_groups
+    win, topk = config.sliding_window, config.index_topk
+    n_idx, c_idx = config.index_n_heads, config.index_head_dim
+    moe_inter, moe_topk = config.moe_intermediate_size, config.num_experts_per_tok
+    hc = getattr(config, "hc_mult", 4)
+    ratios = _dsv4_layer_compress_ratios(config, config.num_hidden_layers)
+
+    # params per layer: attention wq_a + wq_b + wkv + wo_a + wo_b, MoE router gate + SwiGLU
+    # experts (routed top-k + shared), mHC projections; CSA adds a 2x compressor plus the
+    # indexer, HCA adds a single-block compressor.
+    attn_N = d * q_lora + q_lora * n_h * c + d * c + n_h * c * o_lora + o_groups * o_lora * d
+    moe_N = d * config.n_routed_experts + d * moe_inter * (moe_topk + config.n_shared_experts) * 3
+    mhc_N = 2 * (2 + hc) * hc * d + 2 * hc * hc * d
+    csa_N = 4 * d * c + q_lora * n_idx * c_idx + d * n_idx + 4 * d * c_idx
+    hca_N = 2 * d * c
+    head_N = 2 * config.vocab_size * d + hc * hc * d
+    layer_N = sum(attn_N + moe_N + mhc_N + (csa_N if r == 4 else hca_N if r else 0) for r in ratios)
+
+    # 6 flops per param per token (2 fwd + 4 bwd); core attention costs 3 * 2 dots of c per
+    # causal KV entry: window entries in every layer, then top-k compressed entries (CSA) or all
+    # compressed entries (HCA). The indexer scores every query against the whole compressed pool
+    # (top-k selection is a masked matmul, not a gather).
+    attn_flops = 0
+    for seqlen in batch_seqlens:
+        for r in ratios:
+            s = _causal_window_sum(seqlen, win)
+            if r == 4:
+                s += _causal_floor_sum(min(seqlen, r * topk), r) + max(seqlen - r * topk, 0) * topk
+            elif r:
+                s += _causal_floor_sum(seqlen, r)
+            attn_flops += 3 * 2 * s * 2 * c * n_h
+            if r == 4:
+                attn_flops += 3 * 2 * seqlen * (seqlen // r) * n_idx * c_idx
+
+    flops_all_token = 6 * (layer_N + head_N) * tokens_sum + attn_flops
+    return flops_all_token * (1.0 / delta_time) / 1e12
+
+
 def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
@@ -696,6 +774,7 @@ ESTIMATE_FUNC = {
     "qwen3_5_moe": _estimate_qwen3_5_flops,
     "qwen3_5_moe_text": _estimate_qwen3_5_flops,
     "deepseek_v3": _estimate_deepseek_v3_flops,
+    "deepseek_v4": _estimate_deepseek_v4_flops,
     "minicpmv": _estimate_qwen2_flops,
     "minicpmo": _estimate_qwen2_flops,
     "mistral": _estimate_qwen2_flops,
