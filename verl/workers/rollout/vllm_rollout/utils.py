@@ -260,6 +260,68 @@ class vLLMColocateWorkerExtension:
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
 
+    def validate_ascend_weight_update(self, mode, peft_config=None, use_shm=False):
+        """Check worker capabilities without starting a transfer or touching weights."""
+        import inspect
+
+        if mode not in ("npu_ipc", "hccl"):
+            raise ValueError(f"Unsupported Ascend weight update mode: {mode!r}")
+        if get_device_name() != "npu":
+            raise ValueError(f"Weight update mode {mode!r} requires Ascend NPU workers")
+        if getattr(self, "_ascend_weight_update_failed", False):
+            raise RuntimeError("Previous weight update failed; restart this rollout worker before retrying")
+        if mode != "hccl" and use_shm:
+            raise ValueError("Ascend IPC/reload requires colocated NPU IPC, not shared memory")
+        if peft_config or getattr(self, "_is_qat_model", False) or getattr(self, "_is_modelopt_qat", False):
+            raise ValueError("Ascend native updates currently support unquantized full weights only")
+        if is_quantized_model(self.model_runner.vllm_config) or self._use_mtp_drafter_weight_sync():
+            raise ValueError("Ascend native updates do not support quantized weights or a separate MTP drafter")
+        if mode in ("npu_ipc",):
+            from vllm_ascend.distributed.weight_transfer.packed_tensor import packed_npu_ipc_consumer
+
+            if not callable(packed_npu_ipc_consumer):
+                raise RuntimeError("Installed vLLM-Ascend lacks packed IPC support; check the pinned version")
+            try:
+                inspect.signature(packed_npu_ipc_consumer).bind(
+                    ipc_handle={},
+                    physical_npu_id="",
+                    names=[],
+                    shapes=[],
+                    dtype_names=[],
+                    tensor_sizes=[],
+                    device_index=0,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Incompatible packed NPU IPC consumer; check the pinned version") from exc
+        transfer = getattr(self.model_runner.vllm_config, "weight_transfer_config", None)
+        if getattr(transfer, "backend", None) != mode:
+            raise ValueError(f"Receiver weight_transfer_config.backend must match {mode!r}")
+        calls = {
+            "init_weight_transfer_engine": {"init_info": {}},
+            "start_weight_update": {},
+            "update_weights": {"update_info": {}},
+            "finish_weight_update": {},
+        }
+        for name, arguments in calls.items():
+            method = getattr(self, name, None)
+            if not callable(method):
+                raise RuntimeError(f"Installed vLLM worker does not provide {name}; check the pinned version")
+            try:
+                inspect.signature(method).bind(**arguments)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Incompatible vLLM worker method {name}; check the pinned version") from exc
+
+    def update_weights_from_ascend_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+        """Load full NPU weights through vLLM-Ascend's native transfer lifecycle."""
+        self.validate_ascend_weight_update("npu_ipc", peft_config, use_shm)
+        from verl.workers.rollout.vllm_rollout.ascend_weight_transfer import receive_ascend_native_weights
+
+        try:
+            receive_ascend_native_weights(self, self._get_zmq_handle())
+        except BaseException:
+            self._ascend_weight_update_failed = True
+            raise
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         if self.device is None:
