@@ -34,6 +34,7 @@ try:
 except ImportError:
     from verl.utils.transferqueue_utils import KVBatchMeta, tq
 
+from verl.trainer.ppo.score_centering import dummy_rollout_topk
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -101,6 +102,23 @@ def construct_minimal_padding_template(
     response_mask = torch.zeros_like(responses)
     position_ids = build_padding_position_ids(template_sample.get("position_ids"), attention_mask)
     routed_experts = build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
+
+    sequence_length = input_ids.size(0)
+    teacher_ids = template_sample.get("teacher_ids")
+    if teacher_ids is not None:
+        template_sample["teacher_ids"] = teacher_ids.new_full((sequence_length, *teacher_ids.shape[1:]), eos_token_id)
+
+    teacher_logprobs = template_sample.get("teacher_logprobs")
+    if teacher_logprobs is not None:
+        template_sample["teacher_logprobs"] = teacher_logprobs.new_zeros((sequence_length, *teacher_logprobs.shape[1:]))
+
+    rollout_topk_ids = template_sample.get("rollout_topk_ids")
+    if rollout_topk_ids is not None:
+        ids, log_probs = dummy_rollout_topk(sequence_length, rollout_topk_ids.shape[-1])
+        template_sample["rollout_topk_ids"] = ids
+        template_sample["rollout_topk_log_probs"] = log_probs
+        if "rollout_support_complete" in template_sample:
+            template_sample["rollout_support_complete"] = torch.ones(sequence_length, dtype=torch.bool)
 
     # Update the fields and remove redundant parts
     template_sample.update(

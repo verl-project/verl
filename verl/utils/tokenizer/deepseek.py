@@ -284,8 +284,9 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
-        del images, videos, audios
+        del images, videos, audios, mm_inputs_out
         return self._encode(messages, tools=tools, add_bos_token=True)
 
     def tokenize_context_incremental_messages(

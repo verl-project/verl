@@ -92,7 +92,7 @@ class DistProfiler:
     - nsys: NsightSystemsProfiler
     - npu: NPUProfiler (Ascend)
     - torch: PyTorch torch.profiler wrapper
-    - torch_memory: Torch CUDA memory snapshot dump
+    - torch_memory: Torch CUDA/NPU memory snapshot dump
     - precision_debugger: msprobe precision debugger
     """
 

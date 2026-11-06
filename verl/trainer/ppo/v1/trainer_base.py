@@ -29,7 +29,6 @@ import ray
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
-from packaging.version import InvalidVersion, Version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -94,6 +93,7 @@ from verl.workers.utils.padding import response_from_nested, response_to_nested
 
 
 def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+    params.pop("topk_log_probs", None)
     params["top_p"] = 1.0
     params["top_k"] = -1
     params["temperature"] = 0
@@ -103,17 +103,12 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
-def _tq_supports_checkpoint() -> bool:
-    """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
-    try:
-        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
-    except InvalidVersion:
-        return False
-    return (
-        version_supported
-        and callable(getattr(tq, "save_checkpoint", None))
-        and callable(getattr(tq, "load_checkpoint", None))
-    )
+def _count_tq_prompt_groups(partition_id: str = "train") -> int:
+    """Number of prompt groups currently registered in a TransferQueue partition."""
+    data = tq.kv_list(partition_id)
+    if not data:
+        return 0
+    return sum(1 for tag in data.get(partition_id, {}).values() if tag.get("is_prompt", False))
 
 
 class PPOTrainer(ABC):
@@ -140,6 +135,7 @@ class PPOTrainer(ABC):
         )
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
+        self._restored_tq_prompt_count = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -236,8 +232,18 @@ class PPOTrainer(ABC):
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
+        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
         # 1. define actor and rollout class
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        if Role.Actor in self.role_worker_mapping:
+            actor_role = Role.Actor
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        else:
+            actor_role = Role.ActorRollout
         actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
@@ -246,6 +252,15 @@ class PPOTrainer(ABC):
             role=str(actor_role),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
+
+        if actor_role == Role.Actor and self.use_reference_policy and not self.ref_in_actor:
+            ref_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            ref_policy_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.RefPolicy],
+                config=self.config.actor_rollout_ref,
+                role=str(Role.RefPolicy),
+            )
+            self.resource_pool_to_cls[ref_resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         # 2. define critic class
         if self.use_critic:
@@ -315,13 +330,12 @@ class PPOTrainer(ABC):
         self.actor_rollout_wg.init_model()
         logger.info("actor and ref model engine initialized")
 
-        # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         if self.use_reference_policy and not self.ref_in_actor:
-            self.ref_policy_wg = all_wg[str(actor_role)]
+            if actor_role == Role.Actor:
+                self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
+                self.ref_policy_wg.init_model()
+            else:
+                self.ref_policy_wg = all_wg[str(actor_role)]
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
@@ -350,9 +364,19 @@ class PPOTrainer(ABC):
             self.distillation_config = None
 
         # 9. initialize agent loop manager
-        self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
-        )
+        # Trainers that opt out of colocated rollout replicas on the training
+        # GPUs (v1 separate_async with actor_rollout_ref.hybrid_engine=False)
+        # set ``self._enable_hybrid_replicas = False`` before super()._setup();
+        # they get an empty manager here and serve rollout from their
+        # standalone replicas only.
+        if getattr(self, "_enable_hybrid_replicas", True):
+            self.llm_server_manager: LLMServerManager = LLMServerManager.create(
+                config=self.config,
+                worker_group=self.actor_rollout_wg,
+                rollout_resource_pool=actor_rollout_resource_pool,
+            )
+        else:
+            self.llm_server_manager = LLMServerManager.create_empty(config=self.config)
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -429,7 +453,6 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
-        # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
         self.prev_step_profile = False
@@ -499,14 +522,13 @@ class PPOTrainer(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
-                self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
-                return
+                break
 
         self.on_train_end()
-        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
+        self._shutdown_train_dataloader()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         train_batch_size = self.config.data.train_batch_size
@@ -598,6 +620,35 @@ class PPOTrainer(ABC):
     def on_train_begin(self):
         """Called before the training loop starts."""
         return
+
+    def _add_async_warmup_batches(self, num_warmup_batches: int | float) -> None:
+        """Fill the async prefetch window without duplicating checkpointed prompt groups.
+
+        Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
+        one full batch (64 prompts) plus half a batch (32 prompts); the fractional
+        part is rounded down to a whole number of gen_batch_size chunks (prompts
+        are fetched per gen_batch_size).
+        """
+        if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
+            return
+
+        restored_prompts = self._restored_tq_prompt_count
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        target_chunks = math.floor(num_warmup_batches * self.config.data.train_batch_size / gen_batch_size)
+        target_prompts = target_chunks * gen_batch_size
+        missing_prompts = max(0, target_prompts - restored_prompts)
+        if missing_prompts == 0:
+            logger.info(
+                f"Skipping async warmup: {restored_prompts} restored prompt groups already fill the "
+                f"{target_prompts}-prompt prefetch window"
+            )
+            return
+
+        self._add_prompts_to_generate(missing_prompts)
+        logger.info(
+            f"Added {missing_prompts} warmup prompts after restoring {restored_prompts} of "
+            f"{target_prompts} target prompt groups"
+        )
 
     def on_train_end(self):
         """Called after the training loop ends."""
@@ -747,9 +798,15 @@ class PPOTrainer(ABC):
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
+        if not getattr(self, "_enable_hybrid_replicas", True):
+            role = Role.Actor
+        else:
+            role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
         self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
         self.mapping[role] = "global_pool"
+        if role == Role.Actor and need_reference_policy(config) and not ref_in_actor:
+            self.role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            self.mapping[Role.RefPolicy] = "global_pool"
 
         # Add critic worker to mapping.
         if need_critic(config):
@@ -842,15 +899,17 @@ class PPOTrainer(ABC):
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync":
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
                 tq.load_checkpoint(tq_ckpt_path)
+                self._restored_tq_prompt_count = _count_tq_prompt_groups()
+                logger.info(f"Restored {self._restored_tq_prompt_count} training prompt groups from TransferQueue")
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
-        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
+        if self.trainer_mode == "sync":
             return 0
         data = tq.kv_list(partition_id)
         if not data:
@@ -942,8 +1001,7 @@ class PPOTrainer(ABC):
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
-        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint).
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync":
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
@@ -984,12 +1042,25 @@ class PPOTrainer(ABC):
         dump_all_outputs: list[str] = []
         dump_all_keys: list[str] = []
         session_to_sample_idx: dict[str, int] = {}
+        # To avoid failure sessions
+        expected_acc_counts: dict[tuple[str, str], int] = {}
 
         for batch_dict in self.val_dataloader:
             # 1. put batch to agent loop manager
             batch_dict["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object
             )
+            batch_size = len(batch_dict["uid"])
+            batch_data_sources = batch_dict.get("data_source", ["unknown"] * batch_size)
+            batch_rollout_ns = batch_dict.get(
+                "__rollout_n__", [self.config.actor_rollout_ref.rollout.val_kwargs.n] * batch_size
+            )
+            for uid, data_source, rollout_n in zip(
+                batch_dict["uid"], batch_data_sources, batch_rollout_ns, strict=True
+            ):
+                rollout_n = int(rollout_n)
+                expected_acc_counts[(str(data_source), str(uid))] = rollout_n
+
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
@@ -1123,7 +1194,13 @@ class PPOTrainer(ABC):
                 dump_path=val_data_dir,
             )
 
-        return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+        return self._val_metrics_update(
+            data_sources,
+            sample_uids,
+            reward_extra_infos_dict,
+            sample_turns,
+            expected_acc_counts=expected_acc_counts,
+        )
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -1217,6 +1294,17 @@ class PPOTrainer(ABC):
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
 
+    def _shutdown_train_dataloader(self):
+        """Stop the train dataloader's worker processes.
+
+        StatefulDataLoader keeps its last iterator, so the workers would outlive fit(). At process exit Ray kills them
+        with the actor, and the trainer then reports "DataLoader worker (pid ...) is killed by signal: Killed".
+        """
+        iterator, self.train_dataloader_it = self.train_dataloader_it, None
+        shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+        if shutdown_workers is not None:
+            shutdown_workers()
+
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
@@ -1262,8 +1350,20 @@ class PPOTrainer(ABC):
                 dump_path=rollout_data_dir,
             )
 
-    def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict[str, float]:
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+    def _val_metrics_update(
+        self,
+        data_sources,
+        sample_uids,
+        reward_extra_infos_dict,
+        sample_turns,
+        expected_acc_counts: dict[tuple[str, str], int] | None = None,
+    ) -> dict[str, float]:
+        data_src2var2metric2val = process_validation_metrics(
+            data_sources,
+            sample_uids,
+            reward_extra_infos_dict,
+            expected_acc_counts=expected_acc_counts,
+        )
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -1298,6 +1398,16 @@ class PPOTrainer(ABC):
         managers = [getattr(self, "llm_server_manager", None)]
         return [manager for manager in managers if manager is not None]
 
+    def _start_rollout_profiling(self) -> None:
+        """Start rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.start_profile()
+
+    def _stop_rollout_profiling(self) -> None:
+        """Stop rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.stop_profile()
+
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         do_profile = (
@@ -1325,11 +1435,7 @@ class PPOTrainer(ABC):
             if self.use_critic and id(self.critic_wg) not in seen:
                 seen.add(id(self.critic_wg))
                 self.critic_wg.start_profile(profile_step=self.global_steps)
-            # Rollout generation is decoupled from the training step in V1 (prompts are served
-            # asynchronously and consumed from the replay buffer), so the inference engines are
-            # profiled across the whole step rather than around a single generation call.
-            for manager in self._rollout_server_managers():
-                manager.start_profile()
+            self._start_rollout_profiling()
 
     def _stop_profiling(self) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
@@ -1367,8 +1473,6 @@ class PPOTrainer(ABC):
             if self.use_critic and id(self.critic_wg) not in seen:
                 seen.add(id(self.critic_wg))
                 self.critic_wg.stop_profile(run_command=run_command)
-            for manager in self._rollout_server_managers():
-                manager.stop_profile()
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""
@@ -1649,7 +1753,9 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]
+        if self.use_critic:
+            fields.append("values")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
@@ -1751,10 +1857,14 @@ class PPOTrainer(ABC):
                 and not distillation_loss_cfg.use_task_rewards
                 and not distillation_loss_cfg.use_policy_gradient
             )
+        score_centering = bool(
+            self.config.actor_rollout_ref.actor.policy_loss.get("rollout_correction", {}).get("score_centering", False)
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
             "distillation_only": distillation_only,
+            "score_centering": score_centering,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
@@ -1779,13 +1889,14 @@ class PPOTrainer(ABC):
             "prompts",
             "responses",
             "response_mask",
-            "values",
             "advantages",
             "returns",
             "rm_scores",
             "token_level_rewards",
             "num_turns",
         ]
+        if self.use_critic:
+            fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
@@ -1831,6 +1942,12 @@ class PPOTrainer(ABC):
         data["response_length"] = response_length.float()
         batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
         metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
+        # Expose per-row turn counts under the V0 schema (agent_loop writes
+        # ``__num_turns__`` into the non-tensor batch) so compute_data_metrics
+        # emits the V0-compatible ``num_turns/{mean,max,min}`` tags in addition
+        # to the ``training/num_turns/*`` names computed below.
+        num_turns_for_metrics = num_turns[non_padding_mask] if non_padding_mask.any() else num_turns
+        metrics_batch.non_tensor_batch["__num_turns__"] = np.asarray(num_turns_for_metrics, dtype=np.int32)
 
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})

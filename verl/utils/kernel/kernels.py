@@ -180,6 +180,9 @@ def set_backward_method(backward_method: BackwardEnum):
     _config._backward = backward_method
 
 
+# The inner strides are deliberately left unannotated so that Triton specializes them to 1 and can prove
+# contiguity (an annotated int argument is never specialized). The outer strides keep `tl.int64` for 64-bit
+# address arithmetic.
 @triton.autotune(
     configs=[triton.Config({"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32}, num_stages=3, num_warps=8)],
     key=["num_tokens", "hidden_size", "vocab_size"],
@@ -195,20 +198,20 @@ def efficient_entropy_kernel_general_mainloop(
     vocab_size,
     vocab_per_split,
     stride_hidden_m: tl.int64,
-    stride_hidden_k: tl.int64,
+    stride_hidden_k,
     stride_weight_n: tl.int64,
-    stride_weight_k: tl.int64,
+    stride_weight_k,
     max_ptr,
     stride_max_m: tl.int64,
-    stride_max_n: tl.int64,
+    stride_max_n,
     accu_ptr,
     stride_accu_m: tl.int64,
-    stride_accu_n: tl.int64,
+    stride_accu_n,
     entropy_b_ptr,
     stride_entropy_b_m: tl.int64,
-    stride_entropy_b_n: tl.int64,
+    stride_entropy_b_n,
     global_logprobs_ptr,
-    stride_global_logprobs: tl.int64,
+    stride_global_logprobs,
     global_logprobs_scalar_ptr,
     rcp_temperature: tl.float32,
     # Meta-parameters
@@ -351,25 +354,25 @@ def efficient_entropy_kernel_general_mainloop(
 def efficient_entropy_triton_kernel_epilogue(
     max_ptr,
     stride_max_m: tl.int64,
-    stride_max_n: tl.int64,
+    stride_max_n,
     num_tokens,
     num_splits,
     global_max_ptr,
-    stride_global_max: tl.int64,
+    stride_global_max,
     accu_ptr,
     stride_accu_m: tl.int64,
-    stride_accu_n: tl.int64,
+    stride_accu_n,
     global_accu_ptr,
-    stride_global_accu: tl.int64,
+    stride_global_accu,
     entropy_b_ptr,
     stride_entropy_b_m: tl.int64,
-    stride_entropy_b_n: tl.int64,
+    stride_entropy_b_n,
     global_entropy_b_ptr,
-    stride_global_entropy_b: tl.int64,
+    stride_global_entropy_b,
     global_entropy_ptr,
-    stride_global_entropy: tl.int64,
+    stride_global_entropy,
     global_logprobs_ptr,
-    stride_global_logprobs: tl.int64,
+    stride_global_logprobs,
     global_logprobs_scalar_ptr,
     reduction: int,
     BLOCK_SIZE_M: tl.constexpr,
@@ -445,22 +448,22 @@ def efficient_entropy_triton_kernel_epilogue_tp(
     num_splits,
     reduced_max_ptr,
     stride_reduced_max_m: tl.int64,
-    stride_reduced_max_n: tl.int64,
+    stride_reduced_max_n,
     original_max_ptr,
     stride_original_max_m: tl.int64,
-    stride_original_max_n: tl.int64,
+    stride_original_max_n,
     accu_ptr,
     stride_accu_m: tl.int64,
-    stride_accu_n: tl.int64,
+    stride_accu_n,
     entropy_b_ptr,
     stride_entropy_b_m: tl.int64,
-    stride_entropy_b_n: tl.int64,
+    stride_entropy_b_n,
     global_max_ptr,
-    stride_global_max: tl.int64,
+    stride_global_max,
     global_accu_ptr,
-    stride_global_accu: tl.int64,
+    stride_global_accu,
     global_entropy_b_ptr,
-    stride_global_entropy_b: tl.int64,
+    stride_global_entropy_b,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
@@ -519,15 +522,15 @@ def efficient_entropy_triton_kernel_epilogue_tp(
 def efficient_entropy_triton_epilogue_tp_update(
     num_tokens,
     logprobs_ptr,
-    stride_logprobs: tl.int64,
+    stride_logprobs,
     maximum_ptr,
-    stride_maximum: tl.int64,
+    stride_maximum,
     accumulate_ptr,
-    stride_accumulate: tl.int64,
+    stride_accumulate,
     entropy_b_ptr,
-    stride_entropy_b: tl.int64,
+    stride_entropy_b,
     entropy_ptr,
-    stride_entropy: tl.int64,
+    stride_entropy,
     logprobs_scalar_ptr,
     reduction: int,
     BLOCK_SIZE_M: tl.constexpr,
@@ -574,7 +577,7 @@ def efficient_entropy_forward(
     """
     forward host function
     """
-    assert hidden.is_cuda and weight.is_cuda and labels.is_cuda
+    assert hidden.device.type != "cpu" and weight.device.type != "cpu" and labels.device.type != "cpu"
     assert weight.device == hidden.device and labels.device == hidden.device
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
@@ -631,7 +634,7 @@ def efficient_entropy_forward(
         _logprobs = torch.empty((num_tokens,), device=hidden.device, dtype=torch.float32)
 
     assert _accu.is_contiguous() and _entropy_b.is_contiguous() and _max.is_contiguous()
-    assert _accu.is_cuda and _entropy_b.is_cuda and _max.is_cuda
+    assert _accu.device.type != "cpu" and _entropy_b.device.type != "cpu" and _max.device.type != "cpu"
 
     if _config._use_triton:
         # 1D kernel launch, then split the tile
@@ -775,29 +778,29 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(
     rank: int,
     hidden_ptr,
     stride_hidden_m: tl.int64,
-    stride_hidden_k: tl.int64,
+    stride_hidden_k,
     weight_ptr,
     stride_weight_n: tl.int64,
-    stride_weight_k: tl.int64,
+    stride_weight_k,
     labels_ptr,
-    stride_labels: tl.int64,
+    stride_labels,
     maximum_ptr,
-    stride_maximum: tl.int64,
+    stride_maximum,
     accu_ptr,
-    stride_accu: tl.int64,
+    stride_accu,
     d_entropy_ptr,
-    stride_d_entropy: tl.int64,
+    stride_d_entropy,
     d_logprobs_ptr,
-    stride_d_logprobs: tl.int64,
+    stride_d_logprobs,
     reduction: int,
     entropy_b_ptr,
-    stride_entropy_b: tl.int64,
+    stride_entropy_b,
     d_hidden_ptr,
     stride_d_hidden_m: tl.int64,
-    stride_d_hidden_k: tl.int64,
+    stride_d_hidden_k,
     d_weight_ptr,
     stride_d_weight_n: tl.int64,
-    stride_d_weight_k: tl.int64,
+    stride_d_weight_k,
     rcp_temperature: tl.float32,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -984,26 +987,26 @@ def efficient_entropy_backward_kernel_d_hidden(
     rank: int,
     hidden_ptr,
     stride_hidden_m: tl.int64,
-    stride_hidden_k: tl.int64,
+    stride_hidden_k,
     weight_ptr,
     stride_weight_n: tl.int64,
-    stride_weight_k: tl.int64,
+    stride_weight_k,
     labels_ptr,
-    stride_labels: tl.int64,
+    stride_labels,
     maximum_ptr,
-    stride_maximum: tl.int64,
+    stride_maximum,
     accu_ptr,
-    stride_accu: tl.int64,
+    stride_accu,
     d_entropy_ptr,
-    stride_d_entropy: tl.int64,
+    stride_d_entropy,
     d_logprobs_ptr,
-    stride_d_logprobs: tl.int64,
+    stride_d_logprobs,
     reduction: int,
     entropy_b_ptr,
-    stride_entropy_b: tl.int64,
+    stride_entropy_b,
     d_hidden_ptr,
     stride_d_hidden_m: tl.int64,
-    stride_d_hidden_k: tl.int64,
+    stride_d_hidden_k,
     rcp_temperature: tl.float32,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -1111,26 +1114,26 @@ def efficient_entropy_backward_kernel_d_weight(
     rank: int,
     hidden_ptr,
     stride_hidden_m: tl.int64,
-    stride_hidden_k: tl.int64,
+    stride_hidden_k,
     weight_ptr,
     stride_weight_n: tl.int64,
-    stride_weight_k: tl.int64,
+    stride_weight_k,
     labels_ptr,
-    stride_labels: tl.int64,
+    stride_labels,
     maximum_ptr,
-    stride_maximum: tl.int64,
+    stride_maximum,
     accu_ptr,
-    stride_accu: tl.int64,
+    stride_accu,
     d_entropy_ptr,
-    stride_d_entropy: tl.int64,
+    stride_d_entropy,
     d_logprobs_ptr,
-    stride_d_logprobs: tl.int64,
+    stride_d_logprobs,
     reduction: int,
     entropy_b_ptr,
-    stride_entropy_b: tl.int64,
+    stride_entropy_b,
     d_weight_ptr,
     stride_d_weight_n: tl.int64,
-    stride_d_weight_k: tl.int64,
+    stride_d_weight_k,
     rcp_temperature: tl.float32,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -1231,26 +1234,26 @@ def efficient_entropy_backward_kernel_general_d_logits(
     rank: int,
     hidden_ptr,
     stride_hidden_m: tl.int64,
-    stride_hidden_k: tl.int64,
+    stride_hidden_k,
     weight_ptr,
     stride_weight_n: tl.int64,
-    stride_weight_k: tl.int64,
+    stride_weight_k,
     labels_ptr,
-    stride_labels: tl.int64,
+    stride_labels,
     maximum_ptr,
-    stride_maximum: tl.int64,
+    stride_maximum,
     accu_ptr,
-    stride_accu: tl.int64,
+    stride_accu,
     d_entropy_ptr,
-    stride_d_entropy: tl.int64,
+    stride_d_entropy,
     d_logprobs_ptr,
-    stride_d_logprobs: tl.int64,
+    stride_d_logprobs,
     reduction: int,
     entropy_b_ptr,
     stride_entropy_b,
     d_logits_ptr,
     stride_d_logits_m: tl.int64,
-    stride_d_logits_n: tl.int64,
+    stride_d_logits_n,
     rcp_temperature: tl.float32,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -1394,26 +1397,26 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     rank: int,
     hidden_ptr,
     stride_hidden_m: tl.int64,
-    stride_hidden_k: tl.int64,
+    stride_hidden_k,
     weight_ptr,
     stride_weight_n: tl.int64,
-    stride_weight_k: tl.int64,
+    stride_weight_k,
     labels_ptr,
-    stride_labels: tl.int64,
+    stride_labels,
     maximum_ptr,
-    stride_maximum: tl.int64,
+    stride_maximum,
     accu_ptr,
-    stride_accu: tl.int64,
+    stride_accu,
     d_entropy_ptr,
-    stride_d_entropy: tl.int64,
+    stride_d_entropy,
     d_logprobs_ptr,
-    stride_d_logprobs: tl.int64,
+    stride_d_logprobs,
     reduction: int,
     entropy_b_ptr,
     stride_entropy_b,
     d_logits_ptr,
     stride_d_logits_m: tl.int64,
-    stride_d_logits_n: tl.int64,
+    stride_d_logits_n,
     rcp_temperature: tl.float32,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -1529,7 +1532,7 @@ def efficient_entropy_backward(
     """
     backward host function
     """
-    assert hidden.is_cuda and weight.is_cuda and labels.is_cuda
+    assert hidden.device.type != "cpu" and weight.device.type != "cpu" and labels.device.type != "cpu"
     assert weight.device == hidden.device and labels.device == hidden.device
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
@@ -1551,7 +1554,7 @@ def efficient_entropy_backward(
         assert dlogprobs.dim() == 0
 
     assert dlogprobs.is_contiguous() and dentropy.is_contiguous()
-    assert dlogprobs.is_cuda and dentropy.is_cuda
+    assert dlogprobs.device.type != "cpu" and dentropy.device.type != "cpu"
     assert dlogprobs.device == hidden.device and dlogprobs.device == dentropy.device
     assert dentropy.shape == (num_tokens,)
 
@@ -1567,13 +1570,13 @@ def efficient_entropy_backward(
     assert maximum.is_contiguous() and acc.is_contiguous()
     assert maximum.device == hidden.device and acc.device == hidden.device
     assert maximum.shape == labels.shape == acc.shape
-    assert maximum.is_cuda and acc.is_cuda
+    assert maximum.device.type != "cpu" and acc.device.type != "cpu"
 
     vocab_per_split = 1024
     assert vocab_per_split % 128 == 0
     num_splits = (vocab_size + vocab_per_split - 1) // vocab_per_split
 
-    assert entropy_b.is_contiguous() and entropy_b.is_cuda
+    assert entropy_b.is_contiguous() and entropy_b.device.type != "cpu"
     assert entropy_b.shape == (num_tokens,)
 
     if _config._backward == BackwardEnum._Total_Fuse_MN:

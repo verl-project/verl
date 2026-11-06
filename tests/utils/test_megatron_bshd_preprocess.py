@@ -134,6 +134,39 @@ def test_preprocess_thd_engine_rounds_packed_length_to_bucket_without_cp(monkeyp
     assert packed.shape == (1, 1024)
 
 
+def test_vlm_thd_repacking_preserves_bucketed_lengths(monkeypatch):
+    """Qwen VLM repacking must agree with the outer THD metadata."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4, cp_size=1)
+    rows = [torch.arange(7) + 1, torch.arange(2212) + 20]
+    input_ids = _nested_tensor(rows)
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, pad_to_length_bucket=512)
+
+    dense_ids, attention_mask = mcore_util.build_vlm_attn_mask_thd(
+        input_ids,
+        pad_token_id=0,
+        packed_seq_params=packed_seq_params,
+    )
+    repacked_ids, repacked_params = mcore_util.preprocess_packed_seqs(dense_ids, attention_mask)
+
+    assert dense_ids.shape == (2, 2552)
+    assert attention_mask.sum(dim=-1).tolist() == [8, 2552]
+    assert repacked_ids.shape == (1, 2560)
+    torch.testing.assert_close(repacked_params.cu_seqlens_q_padded, packed_seq_params.cu_seqlens_q_padded)
+    restored = mcore_util.postprocess_thd_engine(repacked_ids, packed_seq_params, input_ids, batch_size=2)
+    for actual, expected in zip(restored.unbind(), rows, strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+def test_vlm_thd_mask_without_packed_metadata_keeps_original_lengths(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    input_ids = _nested_tensor([torch.tensor([1, 2, 3]), torch.tensor([4, 5])])
+
+    dense_ids, attention_mask = mcore_util.build_vlm_attn_mask_thd(input_ids, pad_token_id=0)
+
+    assert dense_ids.tolist() == [[1, 2, 3], [4, 5, 0]]
+    assert attention_mask.tolist() == [[True, True, True], [True, True, False]]
+
+
 def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_cpu(monkeypatch):
     _check_topk_preprocess(monkeypatch, torch.device("cpu"))
 
@@ -161,6 +194,24 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
 
 
+def test_thd_router_replay_drops_record_padding_and_restores_expert_zero(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=2, cp_size=1)
+    input_ids = _nested_tensor([torch.arange(7, dtype=torch.long)])
+    recorded_routes = torch.tensor([[[[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]], [[9]]]], dtype=torch.uint8)
+
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids)
+    exported_routes = mcore_util.postprocess_thd_engine(
+        recorded_routes,
+        packed_seq_params,
+        input_ids,
+        batch_size=1,
+    )
+    replay_routes, _, _ = mcore_util.preprocess_thd_engine(exported_routes)
+
+    torch.testing.assert_close(replay_routes[0, :7], recorded_routes[0, :7])
+    assert replay_routes[0, 7].item() == 0
+
+
 @pytest.mark.parametrize("cp_rank", [0, 1])
 def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp_rank):
     mcore_util = _load_mcore_util_with_stubbed_megatron(
@@ -182,10 +233,12 @@ def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp
     torch.testing.assert_close(local_routes[0], expected)
 
 
+# [1..7] is padded to [1, 2, 3, 4, 5, 6, 7, 0], and rolling it by -1 gives [2, 3, 4, 5, 6, 7, 0, 1].
+# Zigzag gives rank 0 the global rows {0, 1, 6, 7} and rank 1 the rows {2, 3, 4, 5}.
 @pytest.mark.parametrize(
     ("cp_rank", "expected"),
     [
-        (0, [2, 3, 1, 1]),
+        (0, [2, 3, 0, 1]),
         (1, [4, 5, 6, 7]),
     ],
 )

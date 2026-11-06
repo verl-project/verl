@@ -52,7 +52,11 @@ defaults:
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
-  # Whether it's a hybrid engine, currently only supports hybrid engine
+  # Whether actor and rollout colocate on the same GPUs (hybrid engine).
+  # Set to False only with the v1 separate_async trainer: no colocated
+  # rollout replicas are created on the training GPUs and rollout is served
+  # exclusively by the standalone rollout pool.
+  # All other trainers require True.
   hybrid_engine: true
 
   # Timeout for operations executed against the process group
@@ -85,8 +89,8 @@ algorithm:
     # Whether to enable group filtering
     enable: False
 
-    # Metric used to identify groups with uniform rewards, acc / score / seq_reward / seq_final_reward / ...
-    metric: null
+    # "reward" selects canonical pre-KL rm_scores; other names like "acc" select a reward_extra_info field.
+    metric: reward
 
     # Maximum number of generation batches; non-positive values mean no upper limit
     max_num_gen_batches: 0
@@ -239,13 +243,19 @@ trainer:
     # Asynchronous PPO trainer with colocated trainer and rollout
     colocate_async:
 
-      # Number of warmup batches to add before training loop starts
+      # Number of warmup batches to add before training loop starts.
+      # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
+      # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
+      # part is rounded down to a whole number of gen_batch_size chunks.
       num_warmup_batches: 1
 
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
-      # Number of warmup batches to add before training loop starts
+      # Number of warmup batches to add before training loop starts.
+      # Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
+      # one full batch (64 prompts) plus half a batch (32 prompts); the fractional
+      # part is rounded down to a whole number of gen_batch_size chunks.
       num_warmup_batches: 1
 
       # Frequency of parameter synchronization between trainer and rollout
@@ -281,7 +291,10 @@ trainer:
     # Replay buffer sampling strategy
     sampler:
 
-      # Maximum number of model versions that trajectory can span
+      # Maximum number of model versions that trajectory can span.
+      # null disables off-policy version control entirely: no samples are
+      # dropped or awaited for staleness (off-policy degree is then only
+      # bounded by rollout concurrency and feed/consume balance).
       max_off_policy_threshold: 8
 
       # How to handle trajectory that exceeds the maximum number of model versions
@@ -400,7 +413,7 @@ global_profiler:
         # Send signal to the target application's process group. We let the program to exit by itself.
         kill: none
 
-    # enable memory visualization for debugging memory usage
+    # Enable memory visualization and automatic CUDA/NPU OOM snapshots for debugging memory usage.
     torch_memory:
 
       #  Maximum number of allocation entries to record
@@ -408,6 +421,9 @@ global_profiler:
 
       # The depth of the call stack to capture for each allocation
       stack_depth: 32
+
+      # Number of profiled RL steps to retain before dumping a memory snapshot.
+      memory_snapshot_num_steps: 1
 
       # 'alloc': records only allocation events || 'state': records memory state changes || 'all': records both.
       context: "all"

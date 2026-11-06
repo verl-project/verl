@@ -15,7 +15,7 @@ Last updated: 05/14/2026
 
 ### 1.2 模型权重
 
-BF16 为 VeRL 框架中 FSDP 与 Megatron 等训练后端**默认混合精度训练数据类型**。昇腾 NPU 环境统一采用 **BF16** 作为基准精度格式，权重需对齐反量化为 BF16。目前 A2、A3 机型**暂不支持 FP8 精度训练**，仅支持 BF16 精度；Ascend 950 系列产品 后续版本将开放 FP8 低精度训练能力。
+BF16 为 VeRL 框架中 FSDP 与 Megatron 等训练后端**默认混合精度训练数据类型**。昇腾 NPU 环境统一采用 **BF16** 作为基准精度格式，权重需对齐反量化为 BF16。目前 A2、A3 机型**暂不支持 FP8 精度训练**，仅支持 BF16 精度；Ascend 950PR&950DT系列产品 后续版本将开放 FP8 低精度训练能力。
 
 ### 1.3 数据准备
 
@@ -43,7 +43,6 @@ Megatron-Bridge 主要用于在 VeRL 框架下，完成推理引擎依赖的 Hug
 
 ```
 actor_rollout_ref.actor.megatron.use_mbridge=True
-actor_rollout_ref.actor.megatron.vanilla_mbridge=False
 ```
 
 Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表可参考：[supported model](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docs/models/README.md)，在昇腾 NPU 环境开展模型迁移适配时，可基于社区现有能力完成基础配置，但仍有部分模型特殊结构与场景需要补充定制化适配。

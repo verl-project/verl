@@ -81,8 +81,8 @@ Note that `--platform` on `buildx create` only declares what the node
 advertises; it does not make an x86_64 node build arm64 natively.
 
 **No arm64 machine at all: QEMU emulation.** Works, but slow — the apt install,
-the GDRCopy build and the `prefetch` stage's `megatron-core` / `mbridge` source
-builds all run emulated:
+the GDRCopy build and the `prefetch` stage's `megatron-core` source build
+all run emulated:
 
 ```sh
 docker run --privileged --rm tonistiigi/binfmt --install arm64
@@ -233,4 +233,3 @@ pip3 install -e .[sglang]
 - 2026/01/17: update vllm stable image to torch==2.9.1, cudnn==9.16, deepep==1.2.1
 - 2025/12/23: update vllm stable image to vllm==0.12.0; update sglang stable image to sglang==0.5.6
 - 2025/11/18: update vllm stable image to vllm==0.11.1; update sglang stable image to sglang==0.5.5
-

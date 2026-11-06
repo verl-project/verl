@@ -18,10 +18,11 @@ e2e test verl.single_controller.ray
 import ray
 import torch
 
+from verl.plugin.platform import get_platform
 from verl.single_controller.base.decorator import Dispatch, Execute, collect_all_to_all, register
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, is_device_available
 
 
 def two_to_all_dispatch_fn(worker_group, *args, **kwargs):
@@ -39,16 +40,13 @@ def two_to_all_dispatch_fn(worker_group, *args, **kwargs):
     return args, kwargs
 
 
-def get_ray_remote_options() -> str:
-    """Function that gets the torch.device based on the current machine.
-    This currently only supports CPU, CUDA, NPU.
-    Returns:
-        device
+def get_ray_remote_options() -> dict:
+    """Ray actor options for a fractional accelerator, as the current platform requests them.
+
+    Falls back to a fractional CPU when no accelerator is available.
     """
-    if get_device_name() == "cuda":
-        return dict(num_gpus=0.1)
-    elif get_device_name() == "npu":
-        return dict(resources={"NPU": 0.1})
+    if is_device_available():
+        return get_platform().ray_resource_options(0.1)
     return dict(num_cpus=0.1)
 
 

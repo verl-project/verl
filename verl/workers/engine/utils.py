@@ -130,6 +130,31 @@ def prepare_micro_batches(
     return micro_batches, batch_idx_list
 
 
+def detach_tree(obj):
+    """Strip the autograd graph from reported tensors, keeping the data.
+
+    Every backend accumulates one per-micro-batch output entry for the whole
+    mini-batch -- ``output_lst`` in the single-program engines, Megatron's
+    ``forward_data_store`` (megatron/core/pipeline_parallel/schedules.py) -- and
+    only consumes it in :func:`postprocess_batch_func`, long after each backward
+    has run. Anything grad-attached that lands there pins that micro-batch's
+    entire autograd graph, so residency grows with the micro-batch count instead
+    of staying flat: under PEFT's ``enable_input_require_grads`` the checkpointed
+    embedding output and its gradient buffer, and under Megatron 1F1B also the
+    graph's input, which is a freshly allocated P2P receive buffer
+    (p2p_communication.py::create_tensor_recv_prev).
+
+    Gradients are unaffected: backward runs on the separately returned live loss.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.detach() if obj.requires_grad else obj
+    if isinstance(obj, dict):
+        return {k: detach_tree(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return type(obj)(detach_tree(v) for v in obj)
+    return obj
+
+
 def postprocess_batch_func(output_lst, indices, data: TensorDict):
     """postprocess the output of a forward_backward_batch.
     output_lst is a list of dict containing outputs for each micro-batch
