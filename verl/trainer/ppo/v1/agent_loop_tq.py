@@ -18,6 +18,8 @@
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any
 
 import ray
@@ -30,6 +32,15 @@ from verl.experimental.agent_loop import (
     AgentLoopOutput,
     AgentLoopWorker,
     get_trajectory_info,
+)
+from verl.experimental.agent_loop.preprocess_cache import PromptPreprocessCache
+from verl.trainer.ppo.v1.prompt_sharing import (
+    PUBLIC_PARTITION,
+    multi_modal_inputs_equal,
+    prompt_sharing_enabled,
+    prompt_sharing_requested,
+    public_multi_modal_key,
+    shared_prompt_fields,
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
@@ -46,6 +57,23 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["temperature"] = 0
 
 
+@dataclass
+class _PublicMultiModalInputs:
+    lock: asyncio.Lock = dataclass_field(default_factory=asyncio.Lock)
+    value: dict | None = None
+
+
+def _shareable_multi_modal_keys(processor) -> frozenset[str]:
+    """Keys of ``multi_modal_inputs`` that depend only on the media, not on the prompt and response text."""
+    keys = {"images_seqlens"}
+    for name in ("image_processor", "video_processor", "feature_extractor"):
+        keys.update(getattr(getattr(processor, name, None), "model_input_names", None) or ())
+    # _compute_position_ids rebuilds mm_token_type_ids from input_ids and drops it, but only for M-RoPE processors.
+    if hasattr(processor, "get_rope_index"):
+        keys.add("mm_token_type_ids")
+    return frozenset(keys)
+
+
 async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return [result for result in results if isinstance(result, BaseException)]
@@ -57,11 +85,24 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        self.share_prompt_fields = prompt_sharing_enabled(self.config.transfer_queue)
+        self.share_preprocessing = prompt_sharing_requested(self.config.transfer_queue)
+        # uid => fields its trajectories link from the public prompt the trainer put under uid
+        self.public_prompt_fields: dict[str, list[str]] = {}
+        # uid => multi_modal_inputs the first finished session of uid put under public_multi_modal_key(uid)
+        self.public_multi_modal_inputs: dict[str, _PublicMultiModalInputs] = {}
+        # uid => media preprocessing the sessions of uid share
+        self.preprocess_caches: dict[str, PromptPreprocessCache] = {}
+        self.shareable_multi_modal_keys = _shareable_multi_modal_keys(self.processor)
+
+    def _get_preprocess_cache(self, sample_kwargs: dict[str, Any]) -> PromptPreprocessCache | None:
+        return self.preprocess_caches.get(sample_kwargs.get("uid"))
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
+        public_fields = shared_prompt_fields(batch) if self.share_prompt_fields else []
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -104,15 +145,33 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
             # “fire-and-forget” background tasks
             task = asyncio.create_task(
-                self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
+                self._run_prompt(
+                    prompt,
+                    sampling_params,
+                    trajectory=trajectory_info[i],
+                    trace=trace_this_sample,
+                    public_fields=public_fields,
+                )
             )
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
 
-    async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
+    async def _run_prompt(
+        self,
+        prompt: dict,
+        sampling_params: dict,
+        trajectory: dict,
+        trace: bool = False,
+        public_fields: list[str] | None = None,
+    ) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        if self.share_preprocessing:
+            self.preprocess_caches[uid] = PromptPreprocessCache()
+        if public_fields:
+            self.public_prompt_fields[uid] = public_fields
+            self.public_multi_modal_inputs[uid] = _PublicMultiModalInputs()
         tasks = []
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
@@ -151,6 +210,53 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             if tasks:
                 await _settle_session_tasks(tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+        finally:
+            self.preprocess_caches.pop(uid, None)
+            self.public_prompt_fields.pop(uid, None)
+            self.public_multi_modal_inputs.pop(uid, None)
+
+    async def _get_multi_modal_inputs(self, uid: str, output: AgentLoopOutput, input_ids: torch.Tensor) -> dict:
+        """``multi_modal_inputs`` of an output, computed once for the sessions of uid that saw the same media."""
+        cache = self.preprocess_caches.get(uid)
+        if cache is None or not output.multi_modal_data:
+            return self._compute_multi_modal_inputs(output, input_ids)
+
+        computed = None
+
+        async def compute() -> dict | None:
+            nonlocal computed
+            computed = self._compute_multi_modal_inputs(output, input_ids)
+            # None tells the other sessions to compute their own, since some features depend on the text.
+            return dict(computed) if computed.keys() <= self.shareable_multi_modal_keys else None
+
+        shared = await cache.get_or_compute(
+            "multi_modal_inputs", (output.multi_modal_data, output.mm_processor_kwargs), compute
+        )
+        if computed is not None:
+            return computed
+        if shared is None:
+            return self._compute_multi_modal_inputs(output, input_ids)
+        # _compute_position_ids pops keys from the returned dict.
+        return dict(shared)
+
+    async def _share_multi_modal_inputs(self, uid: str, multi_modal_inputs: list[dict]) -> bool:
+        """Whether the outputs of a session can link ``multi_modal_inputs`` from the public key of uid.
+
+        The first session to finish puts its inputs; the others link them only if equal, since multi-turn
+        sessions may see different images.
+        """
+        shared = self.public_multi_modal_inputs.get(uid)
+        if shared is None or not multi_modal_inputs[0]:
+            return False
+        async with shared.lock:
+            if shared.value is None:
+                await tq.async_kv_batch_put(
+                    keys=[public_multi_modal_key(uid)],
+                    partition_id=PUBLIC_PARTITION,
+                    fields=list_of_dict_to_tensordict([{"multi_modal_inputs": multi_modal_inputs[0]}]),
+                )
+                shared.value = multi_modal_inputs[0]
+        return all(multi_modal_inputs_equal(inputs, shared.value) for inputs in multi_modal_inputs)
 
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
@@ -184,13 +290,15 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
-        keys, fields, tags = [], [], []
+        # Dataset fields are linked from the public prompt rather than stored n times.
+        public_fields = [key for key in self.public_prompt_fields.get(uid, ()) if key in kwargs]
+        keys, fields, tags, all_multi_modal_inputs = [], [], [], []
         for i, output in enumerate(outputs):
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
             attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+            multi_modal_inputs = await self._get_multi_modal_inputs(uid, output, input_ids)
             position_ids = self._compute_position_ids(
                 input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
             ).squeeze(0)
@@ -200,11 +308,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             field.update(kwargs)
             # do not store raw image/video
             field.pop("multi_modal_data", None)
+            for key in public_fields:
+                field.pop(key)
             # TODO: uniform response_mask and loss_mask
             field["loss_mask"] = field["response_mask"]
             field["input_ids"] = input_ids
             field["position_ids"] = position_ids
-            field["multi_modal_inputs"] = multi_modal_inputs
+            all_multi_modal_inputs.append(multi_modal_inputs)
             fields.append(field)
             prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
             tags.append(
@@ -224,11 +334,24 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 }
             )
 
+        partition_id = "train" if not validate else "val"
+        if public_fields:
+            await tq.async_kv_link(keys=keys, partition_id=partition_id, public_key=uid, fields=public_fields)
+        if await self._share_multi_modal_inputs(uid, all_multi_modal_inputs):
+            await tq.async_kv_link(
+                keys=keys,
+                partition_id=partition_id,
+                public_key=public_multi_modal_key(uid),
+                fields="multi_modal_inputs",
+            )
+        else:
+            for field, multi_modal_inputs in zip(fields, all_multi_modal_inputs, strict=True):
+                field["multi_modal_inputs"] = multi_modal_inputs
         await tq.async_kv_batch_put(
             keys=keys,
             fields=list_of_dict_to_tensordict(fields),
             tags=tags,
-            partition_id="train" if not validate else "val",
+            partition_id=partition_id,
         )
 
 
