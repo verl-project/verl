@@ -85,15 +85,17 @@ def test_configuration_requires_token_capacity(engine_config):
 def test_patch_owns_backend_selection_and_runtime_setup(monkeypatch, engine_config, use_liger, dtype, post_process):
     model = _model(post_process, dtype=dtype)
     calls = []
-    monkeypatch.setattr(mff, "_get_patching_model", lambda value: value)
-    monkeypatch.setattr(mff, "_resolve_fused_forward_mode", lambda value: mff._HOOK_MODE)
+    monkeypatch.setattr(mff, "has_output_processor", lambda value: True)
+    monkeypatch.setattr(mff, "supports_fused_readiness", lambda value: True)
     monkeypatch.setattr(mff, "_configure_liger_runtime", lambda model, config: calls.append((model, config)) or True)
     mff.patch_fused_forward(model, SimpleNamespace(use_liger=use_liger), engine_config=engine_config)
     assert getattr(model, mff._FUSED_IMPL_BACKEND_ATTR) == ("liger" if use_liger else "triton")
     assert calls == ([(model, engine_config)] if use_liger and dtype == torch.bfloat16 else [])
 
 
-def test_engine_delegates_all_virtual_chunks(monkeypatch, engine_config):
+@pytest.mark.parametrize("remove_padding", [False, True])
+def test_engine_delegates_all_virtual_chunks(monkeypatch, engine_config, remove_padding):
+    engine_config.use_remove_padding = remove_padding
     engine = object.__new__(transformer_impl.MegatronEngine)
     engine.engine_config = engine_config
     engine.model_config = SimpleNamespace(use_liger=True, mtp=SimpleNamespace(enable=False))
@@ -101,7 +103,7 @@ def test_engine_delegates_all_virtual_chunks(monkeypatch, engine_config):
     engine.module = [_model(False), _model(True)]
     calls = []
     monkeypatch.setattr(
-        mff, "patch_fused_forward", lambda model, config, **kwargs: calls.append((model, config, kwargs))
+        mff, "patch_fused_forward", lambda model, config, **kwargs: calls.append((model, config, kwargs)) or True
     )
     engine._maybe_enable_fused_kernels()
     assert calls == [(model, engine.model_config, {"engine_config": engine_config}) for model in engine.module]
@@ -263,3 +265,16 @@ def test_other_moe_dispatchers_do_not_load_deepep_v1(monkeypatch, backend):
     model.config.moe_flex_dispatcher_backend = backend
     monkeypatch.setitem(sys.modules, "deep_ep", None)
     mff._validate_liger_moe_runtime(model)
+
+
+def test_engine_falls_back_to_eager_for_provider_without_callbacks(engine_config):
+    engine = object.__new__(transformer_impl.MegatronEngine)
+    engine.engine_config = engine_config
+    engine.model_config = SimpleNamespace(use_liger=False, mtp=SimpleNamespace(enable=False))
+    engine.is_value_model = False
+    model = torch.nn.Linear(2, 2)
+    original = model.forward.__func__
+    engine.module = [model]
+    engine._maybe_enable_fused_kernels()
+    assert engine_config.use_fused_kernels is False
+    assert model.forward.__func__ is original
