@@ -41,6 +41,7 @@ from verl.utils.device import is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
+from verl.workers.rollout.vllm_rollout.weight_update import resolve_weight_update_mode
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -219,29 +220,37 @@ class ServerAdapter(BaseRollout):
         Full-tensor updates may fall back to shared memory; delta updates
         require colocated CUDA IPC.
         """
+        mode = resolve_weight_update_mode(self.config)
         if wire_format == "delta_flush":
+            if mode is not None:
+                raise ValueError("Native Ascend weight updates cannot be combined with delta_flush")
             return await self._update_delta_weights(weights, global_steps=global_steps)
         assert wire_format == "named_tensors", (
             f"vLLM rollout supports wire_format='named_tensors' or 'delta_flush'; got {wire_format!r}"
         )
         start_time = time.time()
 
-        future = await self._execute_method(
-            "update_weights_from_ipc",
-            non_block=True,
-            kwargs={**kwargs, "use_shm": self.use_shm},
-        )
+        if mode is not None:
+            from verl.workers.rollout.vllm_rollout.ascend_weight_transfer import update_ascend_weights
 
-        bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
-        sender = BucketedWeightSender(
-            zmq_handle=self.zmq_handle,
-            bucket_size_mb=bucket_size_mb,
-            use_shm=self.use_shm,
-        )
-        await sender.async_send_weights(weights)
+            await update_ascend_weights(self, weights, mode=mode, **kwargs)
+        else:
+            future = await self._execute_method(
+                "update_weights_from_ipc",
+                non_block=True,
+                kwargs={**kwargs, "use_shm": self.use_shm},
+            )
 
-        if future is not None:
-            await future
+            bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
+            sender = BucketedWeightSender(
+                zmq_handle=self.zmq_handle,
+                bucket_size_mb=bucket_size_mb,
+                use_shm=self.use_shm,
+            )
+            await sender.async_send_weights(weights)
+
+            if future is not None:
+                await future
 
         # reset caches after updating weights
         if self._has_server:
