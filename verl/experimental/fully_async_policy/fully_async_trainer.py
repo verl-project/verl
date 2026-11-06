@@ -28,6 +28,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.fully_async_policy.detach_utils import (
     MetricsAggregator,
     assemble_batch_from_rollout_samples,
+    format_rollout_error_signal,
 )
 from verl.experimental.fully_async_policy.dynamic_schedule import DynamicScheduleContext
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
@@ -402,6 +403,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         while len(queue_samples) < self.required_samples:
             # Get a single sample and wait until there is a sample or None is received
             sample, queue_len = await self.message_queue_client.get_sample()
+
+            rollout_error_message = format_rollout_error_signal(sample)
+            if rollout_error_message is not None:
+                print(f"[FullyAsyncTrainer] {rollout_error_message}")
+                return None, None
 
             if sample is None:
                 print(
