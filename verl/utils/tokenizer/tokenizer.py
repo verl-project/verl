@@ -194,6 +194,7 @@ def hf_processor(name_or_path, **kwargs):
 
     try:
         processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
+        processor.name_or_path = name_or_path
         # In newer transformers, AutoProcessor may legitimately fall back to a
         # tokenizer backend (e.g. TokenizersBackend) for text-only models.
         # Treat it as "no multimodal processor" and let callers use hf_tokenizer.
