@@ -1,0 +1,174 @@
+# vLLM v0.26.0 patch 14/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# DeepSeek-V4 on ROCm: deterministic indexer top-k with 4-bit radix rounds.
+#
+# Finds the same cutoff key as patch 03 most-significant-bit first, 4 bits per
+# round, with rows of <= 4096 columns held in registers. The final pass is
+# unchanged, so the output is bitwise the same (393-case gate on MI355X); it is
+# a decode latency change (53.6 us/call at B=4 before).
+#
+# Upstream: not yet proposed (same DeepSeek-V4 ROCm RFC as patch 02).
+#
+# Source commits:
+#   [ROCm][DSv4][BI] Deterministic indexer top-k: 4-bit radix rounds, row in registers
+#
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+index d1af204b9c..95b954de58 100644
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -824,14 +824,13 @@ def _ordered_u32(x):
+ 
+ 
+ @triton.jit
+-def _det_topk_count_ge(row_ptr, stride1, start, end, cand, BLOCK: tl.constexpr):
+-    cnt = tl.zeros((), dtype=tl.int32)
+-    for c0 in range(start, end, BLOCK):
+-        cols = c0 + tl.arange(0, BLOCK)
+-        m = cols < end
+-        u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
+-        cnt += tl.sum((m & (u >= cand)).to(tl.int32), axis=0)
+-    return cnt
++def _det_topk_digit(u, m, thr, shift, DBITS: tl.constexpr):
++    # Largest digit d (DBITS bits at ``shift``) with #(u >= thr | d << shift)
++    # >= sel; the counts fall as d grows, so d = #(digits passing) - 1.
++    d = tl.arange(0, 1 << DBITS).to(tl.uint32)
++    cand = thr | (d << shift)
++    ge = m[:, None] & (u[:, None] >= cand[None, :])
++    return tl.sum(ge.to(tl.int32), axis=0)
+ 
+ 
+ @triton.jit
+@@ -846,12 +845,20 @@ def _dsv4_det_topk_kernel(
+     n_cols,
+     TOPK: tl.constexpr,
+     BLOCK: tl.constexpr,
++    RES: tl.constexpr,
++    DBITS: tl.constexpr,
+ ):
+     """Exact, fully specified top-k of row ``logits[row, row_start:row_end]``.
+ 
+     Order: by score (fp32 total order of the bit patterns), ties to the larger
+     column. Output: the selected row-local columns ascending, then -1 to
+     width TOPK. One program per row; every decision depends on the row only.
++
++    The cutoff key T (the sel-th largest key) is found by an MSB-first radix
++    select, DBITS bits per round; rows of at most RES columns are loaded once
++    and selected in registers, longer rows are streamed in BLOCK tiles each
++    round. T is unique, so the selected set and its order do not depend on
++    DBITS, RES or BLOCK.
+     """
+     row = tl.program_id(0)
+     rs = tl.load(row_starts_ptr + row)
+@@ -863,35 +870,62 @@ def _dsv4_det_topk_kernel(
+     out_row = out_ptr + row.to(tl.int64) * out_stride
+ 
+     if nv > TOPK:
+-        # T = the sel-th largest key: the largest t with #(u >= t) >= sel.
+-        thr = tl.zeros((), dtype=tl.uint32)
+-        for bit in tl.static_range(31, -1, -1):
+-            cand = thr | tl.full((), 1 << bit, tl.uint32)
+-            if _det_topk_count_ge(row_ptr, stride1, start, end, cand, BLOCK) >= sel:
+-                thr = cand
+-        n_gt = tl.zeros((), dtype=tl.int32)
+-        n_eq = tl.zeros((), dtype=tl.int32)
+-        for c0 in range(start, end, BLOCK):
+-            cols = c0 + tl.arange(0, BLOCK)
+-            m = cols < end
+-            u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
+-            n_gt += tl.sum((m & (u > thr)).to(tl.int32), axis=0)
+-            n_eq += tl.sum((m & (u == thr)).to(tl.int32), axis=0)
+-        # Of the n_eq tied columns take the (sel - n_gt) largest.
+-        skip_eq = n_eq - (sel - n_gt)
+-        eq_seen = tl.zeros((), dtype=tl.int32)
+-        written = tl.zeros((), dtype=tl.int32)
+-        for c0 in range(start, end, BLOCK):
+-            cols = c0 + tl.arange(0, BLOCK)
++        if nv <= RES:
++            cols = start + tl.arange(0, RES)
+             m = cols < end
+             u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++            thr = tl.zeros((), dtype=tl.uint32)
++            for r in tl.static_range(32 // DBITS):
++                shift = 32 - DBITS * (r + 1)
++                cnt = _det_topk_digit(u, m, thr, shift, DBITS)
++                nd = tl.sum((cnt >= sel).to(tl.int32), axis=0)
++                thr = thr | ((nd - 1).to(tl.uint32) << shift)
++            gt = m & (u > thr)
+             eq = m & (u == thr)
+-            eq_rank = eq_seen + tl.cumsum(eq.to(tl.int32), axis=0) - 1
+-            take = (m & (u > thr)) | (eq & (eq_rank >= skip_eq))
+-            pos = written + tl.cumsum(take.to(tl.int32), axis=0) - 1
++            n_gt = tl.sum(gt.to(tl.int32), axis=0)
++            n_eq = tl.sum(eq.to(tl.int32), axis=0)
++            skip_eq = n_eq - (sel - n_gt)
++            eq_rank = tl.cumsum(eq.to(tl.int32), axis=0) - 1
++            take = gt | (eq & (eq_rank >= skip_eq))
++            pos = tl.cumsum(take.to(tl.int32), axis=0) - 1
+             tl.store(out_row + pos, cols - rs, mask=take)
+-            eq_seen += tl.sum(eq.to(tl.int32), axis=0)
+-            written += tl.sum(take.to(tl.int32), axis=0)
++        else:
++            thr = tl.zeros((), dtype=tl.uint32)
++            for r in tl.static_range(32 // DBITS):
++                shift = 32 - DBITS * (r + 1)
++                cnt = tl.zeros((1 << DBITS,), dtype=tl.int32)
++                for c0 in range(start, end, BLOCK):
++                    cols = c0 + tl.arange(0, BLOCK)
++                    m = cols < end
++                    u = _ordered_u32(
++                        tl.load(row_ptr + cols * stride1, mask=m, other=0.0)
++                    )
++                    cnt += _det_topk_digit(u, m, thr, shift, DBITS)
++                nd = tl.sum((cnt >= sel).to(tl.int32), axis=0)
++                thr = thr | ((nd - 1).to(tl.uint32) << shift)
++            n_gt = tl.zeros((), dtype=tl.int32)
++            n_eq = tl.zeros((), dtype=tl.int32)
++            for c0 in range(start, end, BLOCK):
++                cols = c0 + tl.arange(0, BLOCK)
++                m = cols < end
++                u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++                n_gt += tl.sum((m & (u > thr)).to(tl.int32), axis=0)
++                n_eq += tl.sum((m & (u == thr)).to(tl.int32), axis=0)
++            # Of the n_eq tied columns take the (sel - n_gt) largest.
++            skip_eq = n_eq - (sel - n_gt)
++            eq_seen = tl.zeros((), dtype=tl.int32)
++            written = tl.zeros((), dtype=tl.int32)
++            for c0 in range(start, end, BLOCK):
++                cols = c0 + tl.arange(0, BLOCK)
++                m = cols < end
++                u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++                eq = m & (u == thr)
++                eq_rank = eq_seen + tl.cumsum(eq.to(tl.int32), axis=0) - 1
++                take = (m & (u > thr)) | (eq & (eq_rank >= skip_eq))
++                pos = written + tl.cumsum(take.to(tl.int32), axis=0) - 1
++                tl.store(out_row + pos, cols - rs, mask=take)
++                eq_seen += tl.sum(eq.to(tl.int32), axis=0)
++                written += tl.sum(take.to(tl.int32), axis=0)
+     else:
+         for c0 in range(0, sel, BLOCK):
+             j = c0 + tl.arange(0, BLOCK)
+@@ -901,6 +935,11 @@ def _dsv4_det_topk_kernel(
+         tl.store(out_row + j, -1, mask=(j >= sel) & (j < TOPK))
+ 
+ 
++# Launch configuration of _dsv4_det_topk_kernel. Performance only: the
++# selected indices and their order do not depend on it.
++_DET_TOPK_CFG = {"BLOCK": 2048, "RES": 4096, "DBITS": 4, "num_warps": 16}
++
++
+ def dsv4_det_topk_per_row(
+     logits: torch.Tensor,
+     row_starts: torch.Tensor,
+@@ -932,8 +971,10 @@ def dsv4_det_topk_per_row(
+         topk_indices.stride(0),
+         logits.shape[1],
+         TOPK=topk_tokens,
+-        BLOCK=1024,
+-        num_warps=8,
++        BLOCK=_DET_TOPK_CFG["BLOCK"],
++        RES=_DET_TOPK_CFG["RES"],
++        DBITS=_DET_TOPK_CFG["DBITS"],
++        num_warps=_DET_TOPK_CFG["num_warps"],
+     )
+ 
+ 

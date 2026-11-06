@@ -1,0 +1,193 @@
+# syntax=docker/dockerfile:1.7
+# DeepSeek-V4-Flash true-on-policy RL on AMD MI355X (gfx950), ROCm 7.2.3:
+# examples/grpo_trainer/run_deepseek_v4_flash_true_on_policy_rocm.sh
+#
+# Same base and pins as Dockerfile.rocm.deepseek-v4, plus
+#   - vLLM 0.26.0 batch-invariance patches for DeepSeek-V4 on ROCm (patches/vllm-bi-*.patch, applied after the
+#     four DeepSeek-V4 patches that Dockerfile.rocm.deepseek-v4 applies), and
+#   - Megatron-LM with mLite's vLLM-aligned DeepSeek-V4 implementation (impl=vllm) on ROCm: ISEEKYAN/Megatron-LM
+#     ds4_vllm_align_preview plus patches/megatron-dsv4-*.patch, and
+#   - upstream rdma-core in /opt/rdma-core for hosts with AMD ionic 26.x NIC drivers (see ionic-rdma-env.sh).
+# With VLLM_BATCH_INVARIANT=1 the rollout log-probs and the trainer log-probs of the same tokens are bitwise equal.
+# Every patched file is checked against patches/deepseek-v4-true-on-policy.sha256 at build time.
+#
+# Build from the repository root:
+#   DOCKER_BUILDKIT=1 docker build -f docker/rocm/Dockerfile.rocm.deepseek-v4.true-on-policy \
+#     -t verl-rocm:deepseek-v4-true-on-policy .
+
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.26.0
+# What the v0.26.0 tag resolved to on 2026-10-19.
+ARG BASE_IMAGE_DIGEST=sha256:5709fafe47123becb2f5e61c32d0b97beff1a629bb40bb753c15464f69a97a18
+FROM ${BASE_IMAGE}@${BASE_IMAGE_DIGEST}
+
+# Keep the base image's ROCm torch/Triton: later pip steps must not replace them (TransferQueue -> tensordict 0.15
+# -> torch>=2.13 otherwise pulls a CUDA torch over the ROCm one).
+RUN python3 -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('torch','triton','torchvision','torchaudio') if any(d.metadata['Name'].lower()==p for d in m.distributions())]" > /opt/base-constraints.txt && cat /opt/base-constraints.txt
+ENV PIP_CONSTRAINT=/opt/base-constraints.txt
+
+# --- Binary dependencies, verified by sha256 ---------------------------------------------------------------------
+ARG APEX_WHEEL_URL="https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/apex-1.9.0%2Brocm7.2.3.git355db9b8-cp312-cp312-linux_x86_64.whl"
+ARG APEX_WHEEL_SHA256=d1341f79447a30fa4ac951511ade506d3c4afc66c6f8c9f4660126a20dd62109
+# Transformer Engine (ROCm) 2.18.0.dev0+8c116a51b: Triton grouped GEMM (avoids the BF16 grouped-GEMM backward hang
+# on gfx950) and the float-scale blockwise FP8 GEMM.
+ARG TE_WHEEL=transformer_engine-2.18.0.dev0+8c116a51b-cp312-cp312-linux_x86_64.whl
+ARG TE_WHEEL_URL="https://github.com/PeterYang12/Daily_LLM/releases/download/v0.0.2/${TE_WHEEL}"
+ARG TE_WHEEL_SHA256=214b5e3e5c304e3ab193770def965cf88d5faafd1d5c882f82390b7e311b66f5
+# ROCm 7.2.x does not return memory for large allocations with expandable_segments; this libhsa build fixes that.
+ARG LIBHSA_URL="https://github.com/PeterYang12/Daily_LLM/releases/download/v0.0.1/libhsa-runtime64.so.1.18.0"
+ARG LIBHSA_SHA256=07e53330baa28ef4d50a8ec5d34edbcc2c2f1b889fc80d3d3fc564f499273e4f
+RUN --mount=type=cache,target=/root/.cache/pip <<'EOF'
+set -eux
+mkdir -p /tmp/dl
+wget -q -O "/tmp/dl/apex-1.9.0+rocm7.2.3.git355db9b8-cp312-cp312-linux_x86_64.whl" "${APEX_WHEEL_URL}"
+wget -q -O "/tmp/dl/${TE_WHEEL}" "${TE_WHEEL_URL}"
+wget -q -O /tmp/dl/libhsa-runtime64.so.1.18.0 "${LIBHSA_URL}"
+printf '%s  %s\n' \
+  "${APEX_WHEEL_SHA256}" "/tmp/dl/apex-1.9.0+rocm7.2.3.git355db9b8-cp312-cp312-linux_x86_64.whl" \
+  "${TE_WHEEL_SHA256}" "/tmp/dl/${TE_WHEEL}" \
+  "${LIBHSA_SHA256}" /tmp/dl/libhsa-runtime64.so.1.18.0 | sha256sum -c -
+pip install /tmp/dl/apex-*.whl
+pip install --no-build-isolation "/tmp/dl/${TE_WHEEL}"
+install -m 0644 /tmp/dl/libhsa-runtime64.so.1.18.0 /opt/rocm-7.2.3/lib/libhsa-runtime64.so.1.18.70203
+rm -rf /tmp/dl
+EOF
+
+# --- Python dependencies ------------------------------------------------------------------------------------------
+ARG MBRIDGE_COMMIT=0cd4ae23f2425da77a80cb3f517828452fa8e984
+# Megatron-Bridge with the UE8M0 export fix (FP8 weight export keeps the power-of-two scale grid).
+ARG MEGATRON_BRIDGE_COMMIT=658c695c560b5cfcb6ccfedc35bf9d3f6f747ffe
+RUN --mount=type=cache,target=/root/.cache/pip <<'EOF'
+set -eux
+pip install "git+https://github.com/ISEEKYAN/mbridge.git@${MBRIDGE_COMMIT}" mathruler==0.1.0 qwen-vl-utils==0.0.14 \
+  flash-linear-attention==0.5.2
+pip install --no-deps nvidia-modelopt==0.47.0 PuLP==3.3.2
+pip install --no-deps --no-build-isolation --ignore-requires-python \
+  "git+https://github.com/PeterYang12/Megatron-Bridge@${MEGATRON_BRIDGE_COMMIT}"
+pip install transformers==5.12.1 TransferQueue==0.1.11 tensordict==0.10.0
+# verl's install_requires that are not in the base image (verl itself is installed --no-deps below).
+pip install --no-deps codetiming==1.4.0 pylatexenc==2.11 torchdata==0.11.0 tensorboard==2.21.0 \
+  tensorboard-data-server==0.7.2 absl-py==2.5.1 Markdown==3.11.1 wandb==0.31.0
+EOF
+
+COPY docker/rocm/patches /opt/patches
+
+# --- vLLM 0.26.0: DeepSeek-V4 fixes, then batch invariance on ROCm (see the header of each patch) -----------------
+# -F0: a patch that no longer applies exactly fails the build instead of applying with fuzz.
+RUN <<'EOF'
+set -eux
+cd "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+for p in vllm-dsv4-rocm-sparse-topk-guard vllm-cumem-wake-empty-cache vllm-dsv4-indexer-blockflat-layout \
+         vllm-dsv4-triton-moe-swiglu-clamp; do
+  patch -p1 -F0 --no-backup-if-mismatch < "/opt/patches/${p}.patch"
+done
+for p in /opt/patches/vllm-bi-*.patch; do
+  patch -p1 -F0 --no-backup-if-mismatch < "${p}"
+done
+grep '  vllm/' /opt/patches/deepseek-v4-true-on-policy.sha256 | sha256sum -c --quiet -
+EOF
+
+# --- Megatron-LM: mLite impl=vllm on ROCm -------------------------------------------------------------------------
+ARG MEGATRON_LM_REPO="https://github.com/ISEEKYAN/Megatron-LM.git"
+# ds4_vllm_align_preview
+ARG MEGATRON_LM_COMMIT=327a238239448de6771beea185dc6902a8de3eaa
+RUN --mount=type=cache,target=/root/.cache/pip <<'EOF'
+set -eux
+git init -q /opt/Megatron-LM
+cd /opt/Megatron-LM
+git fetch -q --depth 1 "${MEGATRON_LM_REPO}" "${MEGATRON_LM_COMMIT}"
+git -c advice.detachedHead=false checkout -q FETCH_HEAD
+for p in /opt/patches/megatron-dsv4-*.patch; do
+  git apply --whitespace=nowarn "${p}"
+done
+grep -v -e '^#' -e '  vllm/' /opt/patches/deepseek-v4-true-on-policy.sha256 | sha256sum -c --quiet -
+pip install --no-deps -e /opt/Megatron-LM
+# mLite (megatron.lite) and its verl integration (verl_mlite) are not packaged at this commit: register their source
+# roots with a path file, as an editable install would.
+site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+printf '%s\n' /opt/Megatron-LM/experimental/lite /opt/Megatron-LM/experimental/lite/examples/verl \
+  > "${site}/megatron_lite_verl_mlite.pth"
+EOF
+
+# --- RDMA userspace for AMD ionic (Pollara / AINIC) NICs ------------------------------------------------------------
+# The base image's libionic 54 (rdma-core 39) speaks ionic provider ABI 4. ionic 26.x host drivers (e.g. 26.08)
+# provide ABI 1, which only upstream rdma-core's ionic provider (v61+) speaks; with the wrong one RCCL silently uses
+# TCP sockets. Upstream rdma-core goes to /opt/rdma-core next to the base userspace, which stays the default;
+# ionic-rdma-env.sh selects the one that opens the host's NICs (the recipe runs it).
+ARG RDMA_CORE_VERSION=65.0
+ARG RDMA_CORE_SHA256=8eb93c14740146e04c28ac25874e106b61c7d3ab66a36d07099e938985ef0680
+RUN <<'EOF'
+set -eux
+apt-get update
+apt-get install -y --no-install-recommends cmake ninja-build pkg-config \
+  libnl-3-dev libnl-route-3-dev libudev-dev
+cd /tmp
+wget -q "https://github.com/linux-rdma/rdma-core/releases/download/v${RDMA_CORE_VERSION}/rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+echo "${RDMA_CORE_SHA256}  rdma-core-${RDMA_CORE_VERSION}.tar.gz" | sha256sum -c -
+tar xzf "rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+cmake -S "rdma-core-${RDMA_CORE_VERSION}" -B rdma-build -GNinja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/opt/rdma-core -DCMAKE_INSTALL_LIBDIR=lib -DNO_MAN_PAGES=1 -DNO_PYVERBS=1 -DENABLE_STATIC=0
+ninja -C rdma-build install
+rm -rf /tmp/rdma-build "/tmp/rdma-core-${RDMA_CORE_VERSION}"* /var/lib/apt/lists/*
+test -e /opt/rdma-core/lib/libibverbs/libionic-rdmav*.so
+EOF
+COPY --chmod=755 docker/rocm/ionic-rdma-env.sh /usr/local/bin/ionic-rdma-env.sh
+
+# --- verl (this checkout) -----------------------------------------------------------------------------------------
+COPY . /opt/verl
+RUN pip install --no-deps -e /opt/verl
+
+ENV VLLM_ROCM_USE_AITER=1
+ENV VLLM_ROCM_USE_AITER_MOE=1
+# MoRI JIT-builds for the first entry of MORI_GPU_ARCHS; the base image lists "gfx942;gfx950".
+ENV MORI_GPU_ARCHS=gfx950
+
+# --- Closure checks: the image runs as built, without source mounts or start-up overlays -------------------------
+WORKDIR /opt/verl
+RUN <<'EOF'
+set -eux
+python3 - <<'PY'
+import importlib.metadata as md
+import importlib.util
+import os
+
+from packaging.requirements import Requirement
+
+import torch
+
+assert torch.version.hip, torch.__version__
+
+
+def origin(mod):
+    spec = importlib.util.find_spec(mod)
+    assert spec is not None and spec.origin, mod
+    return os.path.realpath(spec.origin)
+
+
+paths = {m: origin(m) for m in ("vllm", "megatron.core", "megatron.lite", "verl_mlite", "verl")}
+assert paths["vllm"].startswith("/usr/local/lib/python3.12/dist-packages/vllm/"), paths
+assert paths["megatron.core"].startswith("/opt/Megatron-LM/"), paths
+assert paths["megatron.lite"].startswith("/opt/Megatron-LM/experimental/lite/"), paths
+assert paths["verl_mlite"].startswith("/opt/Megatron-LM/experimental/lite/examples/verl/"), paths
+assert paths["verl"].startswith("/opt/verl/"), paths
+# No start-up overlay: the only sitecustomize may be the distribution's own, and no usercustomize.
+sc = importlib.util.find_spec("sitecustomize")
+assert sc is None or sc.origin == "/usr/lib/python3.12/sitecustomize.py", sc.origin
+assert importlib.util.find_spec("usercustomize") is None
+assert not [k for k in os.environ if k.startswith("TIC_")]
+
+
+def installed(name):
+    try:
+        return md.version(name) is not None
+    except md.PackageNotFoundError:
+        return False
+
+
+missing = [str(r) for r in map(Requirement, md.requires("verl") or []) if r.marker is None and not installed(r.name)]
+assert not missing, f"verl install_requires missing from the image: {missing}"
+print(paths)
+PY
+pip check || true
+EOF
+
+CMD ["/bin/bash"]

@@ -733,14 +733,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
 
+            from verl.workers.engine import BaseEngine
+
             engine_config = getattr(self.actor.engine, "engine_config", None)
             overrides = getattr(engine_config, "override_transformer_config", None) or {}
-            weight_quantizer = dispatch_rollout_weight_quantizer(
-                model_config=model_config,
-                rollout_config=self.config.rollout,
-                qat_config=getattr(engine_config, "qat", None),
-                real_nvfp4_bf16_layers=bf16_layers_at_start_end(overrides) if real_nvfp4_enabled(overrides) else None,
-            )
+            if type(self.actor.engine).set_rollout_weight_quantizer is BaseEngine.set_rollout_weight_quantizer:
+                # Engines that do not implement trainer-side rollout quantization (e.g. Megatron-LM mLite) export
+                # rollout-ready weights themselves; dispatching would fail on their QAT config or the stub.
+                logger.warning(
+                    "%s does not implement set_rollout_weight_quantizer; using the engine's own weight export.",
+                    type(self.actor.engine).__name__,
+                )
+                weight_quantizer = None
+            else:
+                weight_quantizer = dispatch_rollout_weight_quantizer(
+                    model_config=model_config,
+                    rollout_config=self.config.rollout,
+                    qat_config=getattr(engine_config, "qat", None),
+                    real_nvfp4_bf16_layers=bf16_layers_at_start_end(overrides)
+                    if real_nvfp4_enabled(overrides)
+                    else None,
+                )
             if weight_quantizer is not None:
                 self.actor.engine.set_rollout_weight_quantizer(weight_quantizer)
 

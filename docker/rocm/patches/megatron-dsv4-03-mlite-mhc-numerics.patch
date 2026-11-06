@@ -1,0 +1,735 @@
+# Megatron-LM patch 03/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# mLite HyperConnection follows vLLM's mHC numerics (post contraction, FP32
+# pre VJP with the forward's RMS scaling).
+#
+# Upstream: prepared for ISEEKYAN/Megatron-LM ds4_vllm_align_preview, not yet proposed.
+#
+# Source commits:
+#   [mLite][DSv4] HyperConnection: follow vLLM's mHC numerics (B5)
+#   [mLite][DSv4] impl=vllm: differentiate vLLM's mHC post contraction, not its transpose
+#   [mLite][DSv4] impl=vllm tests: mHC post reference uses vLLM's contraction
+#   [mLite][DSv4] impl=vllm: mHC pre VJP in FP32 with the forward's RMS scaling
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py b/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py
+index 47da1cee3..629665abc 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/lite/model.py
+@@ -161,10 +161,18 @@ class DeepseekV4Layer(nn.Module):
+         )
+         # DS4 ONLY: per-layer multi-head hyper-connections wrapping attn + ffn.
+         self.attn_hc = HyperConnection(
+-            config.hidden_size, config.hc_mult, config.hc_sinkhorn_iters, config.hc_eps
++            config.hidden_size,
++            config.hc_mult,
++            config.hc_sinkhorn_iters,
++            config.hc_eps,
++            rms_eps=config.rms_norm_eps,
+         )
+         self.ffn_hc = HyperConnection(
+-            config.hidden_size, config.hc_mult, config.hc_sinkhorn_iters, config.hc_eps
++            config.hidden_size,
++            config.hc_mult,
++            config.hc_sinkhorn_iters,
++            config.hc_eps,
++            rms_eps=config.rms_norm_eps,
+         )
+ 
+     def _build_attention(
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
+index 423cc3c93..68e541b8f 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/model.py
+@@ -136,6 +136,7 @@ class DeepseekV4Layer(LiteDeepseekV4Layer):
+             iters=self.config.hc_sinkhorn_iters,
+             eps=self.config.hc_eps,
+             norm_eps=self.config.rms_norm_eps,
++            rms_eps=self.config.rms_norm_eps,
+         )
+ 
+     @staticmethod
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py
+index b0f9a72e4..339dea6cf 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/vllm/primitive/dense.py
+@@ -2,7 +2,6 @@
+ 
+ from __future__ import annotations
+ 
+-import math
+ from collections.abc import Callable, Iterable
+ from typing import Any
+ 
+@@ -16,11 +15,6 @@ from vllm.model_executor.kernels.mhc.tilelang import (
+     mhc_pre_tilelang,
+ )
+ 
+-from megatron.lite.primitive.modules.attention.hca import (
+-    HyperConnection,
+-    split_sinkhorn,
+-)
+-
+ 
+ _MHC_ENTRIES = {
+     "pre": mhc_pre_tilelang,
+@@ -439,22 +433,44 @@ def fused_qkv_rms_norm(visible_op: Callable, q, kv, q_weight, kv_weight, eps):
+     )
+ 
+ 
+-def _pre_graph(x, fn, scale, base, *, mult, iters, eps):
++def _pre_graph(x, fn, scale, base, *, mult, iters, eps, rms_eps):
++    # vLLM's mHC pre (``mhc_pre_torch`` / TileLang): FP32 on the residual,
++    # rsqrt(mean(x^2) + rms_eps) mixes, ``sigmoid + eps`` pre weights and the
++    # add-eps Sinkhorn.  The graph _mhc_pre_vjp differentiates in closed form.
+     residual = x
+     if residual.ndim == 2:
+         residual = residual.unsqueeze(-2).expand(
+             *residual.shape[:-1], mult, residual.shape[-1]
+         )
+-    flat = residual.flatten(-2)
+-    rms_inv = 1.0 / (flat.norm(dim=-1, keepdim=True) / math.sqrt(flat.shape[-1]) + eps)
+-    mixes = F.linear(flat, fn.to(flat.dtype)) * rms_inv
+-    pre, post, comb = split_sinkhorn(mixes, scale, base, mult, iters, eps)
+-    hidden = torch.sum(pre.unsqueeze(-1) * residual, dim=-2)
++    value = residual.float()
++    flat = value.flatten(-2)
++    rms_inv = torch.rsqrt(flat.square().mean(dim=-1, keepdim=True) + rms_eps)
++    mixes = F.linear(flat, fn.float()) * rms_inv
++    split_sizes = [mult, mult, mult * mult]
++    pre_mix, post_mix, comb_mix = mixes.split(split_sizes, dim=-1)
++    base_pre, base_post, base_comb = base.float().split(split_sizes, dim=-1)
++    scale_value = scale.float()
++    pre = torch.sigmoid(pre_mix * scale_value[0] + base_pre) + eps
++    post = 2 * torch.sigmoid(post_mix * scale_value[1] + base_post)
++    comb_logits = (comb_mix * scale_value[2] + base_comb).view(
++        *comb_mix.shape[:-1], mult, mult
++    )
++    comb = torch.softmax(comb_logits, dim=-1) + eps
++    comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
++    for _ in range(iters - 1):
++        comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
++        comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
++    hidden = torch.sum(pre.unsqueeze(-1) * value, dim=-2)
+     return residual, post.unsqueeze(-1), comb, hidden
+ 
+ 
+ def _post_graph(x, residual, post, comb):
+-    return HyperConnection.post(x, residual, post.squeeze(-1), comb)
++    # The contraction _MHCPostVJP differentiates, vLLM's mHC post (its torch
++    # reference ``mhc_post_torch`` and the TileLang kernel): residual stream j
++    # receives sum_i comb[i, j] * residual_i.
++    dtype = x.dtype
++    placed = post.squeeze(-1).to(dtype).unsqueeze(-1) * x.unsqueeze(-2)
++    return placed + torch.matmul(comb.to(dtype).transpose(-2, -1), residual.to(dtype))
+ 
+ 
+ def _normalization_vjp(
+@@ -463,16 +479,10 @@ def _normalization_vjp(
+     dim: int,
+     eps: float,
+ ) -> torch.Tensor:
+-    total = value.sum(dim=dim, keepdim=True)
+-    denominator = total.clamp(min=eps)
+-    grad_value = grad_output / denominator
+-    active = total >= eps
++    # VJP of value / (value.sum(dim) + eps).
++    denominator = value.sum(dim=dim, keepdim=True) + eps
+     correction = (grad_output * value).sum(dim=dim, keepdim=True)
+-    return grad_value - torch.where(
+-        active,
+-        correction / denominator.square(),
+-        torch.zeros_like(correction),
+-    )
++    return grad_output / denominator - correction / denominator.square()
+ 
+ 
+ def _sinkhorn_vjp(
+@@ -481,25 +491,21 @@ def _sinkhorn_vjp(
+     iters: int,
+     eps: float,
+ ) -> torch.Tensor:
+-    maximum, maximum_indices = logits.max(dim=-1, keepdim=True)
+-    values = [torch.exp(logits - maximum)]
+-    comb = values[0]
+-    for _ in range(iters):
+-        comb = comb / comb.sum(dim=-1, keepdim=True).clamp(min=eps)
+-        values.append(comb)
+-        comb = comb / comb.sum(dim=-2, keepdim=True).clamp(min=eps)
+-        values.append(comb)
++    # vLLM's Sinkhorn: softmax(logits) + eps, a column normalization, then
++    # (iters - 1) row/column pairs, each dividing by (sum + eps).
++    probs = torch.softmax(logits, dim=-1)
++    inputs = [(probs + eps, -2)]
++    comb = inputs[0][0] / (inputs[0][0].sum(dim=-2, keepdim=True) + eps)
++    for _ in range(iters - 1):
++        inputs.append((comb, -1))
++        comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
++        inputs.append((comb, -2))
++        comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+ 
+     grad = grad_output
+-    for iteration in reversed(range(iters)):
+-        after_row = values[2 * iteration + 1]
+-        before_row = values[2 * iteration]
+-        grad = _normalization_vjp(grad, after_row, -2, eps)
+-        grad = _normalization_vjp(grad, before_row, -1, eps)
+-
+-    grad_logits = grad * values[0]
+-    grad_maximum = -grad_logits.sum(dim=-1, keepdim=True)
+-    return grad_logits.scatter_add(-1, maximum_indices, grad_maximum)
++    for value, dim in reversed(inputs):
++        grad = _normalization_vjp(grad, value, dim, eps)
++    return probs * (grad - (grad * probs).sum(dim=-1, keepdim=True))
+ 
+ 
+ _compiled_sinkhorn_vjp = torch.compile(
+@@ -523,47 +529,48 @@ def _mhc_pre_vjp(
+     iters,
+     eps,
+     norm_eps,
++    rms_eps,
+ ):
+-    residual = x
+-    broadcast = residual.ndim == 2
++    # The visible mHC pre runs in FP32 on the BF16 residual (see _pre_graph):
++    # recompute and differentiate in FP32 and round only the returned
++    # gradients to their parameter/input dtypes.
++    broadcast = x.ndim == 2
++    residual = x.float()
+     if broadcast:
+         residual = residual.unsqueeze(-2).expand(
+             *residual.shape[:-1], mult, residual.shape[-1]
+         )
+     flat = residual.flatten(-2)
+-    flat_norm = flat.norm(dim=-1, keepdim=True)
+-    rms_inv = 1.0 / (flat_norm / math.sqrt(flat.shape[-1]) + eps)
+-    fn_value = fn.to(flat.dtype)
++    rms_inv = torch.rsqrt(flat.square().mean(dim=-1, keepdim=True) + rms_eps)
++    fn_value = fn.float()
+     linear = F.linear(flat, fn_value)
+     mixes = linear * rms_inv
+     split_sizes = [mult, mult, mult * mult]
+     pre_mix, post_mix, comb_mix = mixes.split(split_sizes, dim=-1)
+-    base_pre, base_post, base_comb = base.to(mixes.dtype).split(
+-        split_sizes, dim=-1
+-    )
+-    scale_value = scale.to(mixes.dtype)
+-    pre = torch.sigmoid(pre_mix * scale_value[0] + base_pre)
++    base_pre, base_post, base_comb = base.float().split(split_sizes, dim=-1)
++    scale_value = scale.float()
++    pre_sigmoid = torch.sigmoid(pre_mix * scale_value[0] + base_pre)
++    pre = pre_sigmoid + eps
+     post = 2 * torch.sigmoid(post_mix * scale_value[1] + base_post)
+     comb_logits = (
+         comb_mix * scale_value[2] + base_comb
+     ).view(*comb_mix.shape[:-1], mult, mult)
+ 
+     hidden = torch.sum(pre.unsqueeze(-1) * residual, dim=-2)
++    # FP32 hidden -> FP32 input gradient (the weight gradient is cast).
+     grad_hidden_input, grad_norm_weight = _rms_norm_vjp(
+         grad_hidden, hidden, norm_weight, norm_eps
+     )
+     grad_pre = (grad_hidden_input.unsqueeze(-2) * residual).sum(dim=-1)
+     grad_residual_value = grad_hidden_input.unsqueeze(-2) * pre.unsqueeze(-1)
+     if grad_residual is not None:
+-        grad_residual_value = grad_residual_value + grad_residual.to(
+-            grad_residual_value.dtype
+-        )
++        grad_residual_value = grad_residual_value + grad_residual.float()
+ 
+-    grad_pre_logits = grad_pre * pre * (1.0 - pre)
+-    grad_post_value = grad_post.squeeze(-1).to(post.dtype)
++    grad_pre_logits = grad_pre * pre_sigmoid * (1.0 - pre_sigmoid)
++    grad_post_value = grad_post.squeeze(-1).float()
+     grad_post_logits = grad_post_value * post * (1.0 - post * 0.5)
+     grad_comb_logits = _sinkhorn_vjp(
+-        grad_comb.to(comb_logits.dtype), comb_logits, iters, eps
++        grad_comb.float(), comb_logits, iters, eps
+     )
+     grad_comb_flat = grad_comb_logits.flatten(-2)
+     grad_mixes = torch.cat(
+@@ -592,14 +599,9 @@ def _mhc_pre_vjp(
+         grad_linear_2d.transpose(0, 1), flat_2d
+     ).to(fn.dtype)
+     grad_flat = torch.matmul(grad_linear, fn_value)
++    # d rsqrt(mean(x^2) + rms_eps) / dx = -rms_inv^3 * x / n
+     grad_rms_inv = (grad_mixes * linear).sum(dim=-1, keepdim=True)
+-    norm_scale = math.sqrt(flat.shape[-1])
+-    grad_norm = -grad_rms_inv * rms_inv.square() / norm_scale
+-    grad_flat = grad_flat + torch.where(
+-        flat_norm > 0,
+-        grad_norm * flat / flat_norm.clamp_min(torch.finfo(flat.dtype).tiny),
+-        torch.zeros_like(flat),
+-    )
++    grad_flat = grad_flat - grad_rms_inv * rms_inv.pow(3) * flat / flat.shape[-1]
+     grad_residual_value = grad_residual_value + grad_flat.view_as(residual)
+     grad_x = (
+         grad_residual_value.sum(dim=-2)
+@@ -630,6 +632,7 @@ class _MHCPreVJP(torch.autograd.Function):
+         iters,
+         eps,
+         norm_eps,
++        rms_eps,
+     ):
+         outputs = visible_op(x, fn, scale, base, norm_weight)
+         ctx.save_for_backward(x, fn, scale, base, norm_weight)
+@@ -637,6 +640,7 @@ class _MHCPreVJP(torch.autograd.Function):
+         ctx.iters = int(iters)
+         ctx.eps = float(eps)
+         ctx.norm_eps = float(norm_eps)
++        ctx.rms_eps = float(rms_eps)
+         ctx.versions = parameter_versions((fn, scale, base, norm_weight))
+         return outputs
+ 
+@@ -666,6 +670,7 @@ class _MHCPreVJP(torch.autograd.Function):
+             ctx.iters,
+             ctx.eps,
+             ctx.norm_eps,
++            ctx.rms_eps,
+         )
+         grad_x, grad_fn, grad_scale, grad_base, grad_norm_weight = results
+         return (
+@@ -679,6 +684,7 @@ class _MHCPreVJP(torch.autograd.Function):
+             None,
+             None,
+             None,
++            None,
+         )
+ 
+ 
+@@ -702,20 +708,22 @@ class _MHCPostVJP(torch.autograd.Function):
+         grad_post = (grad * x.to(dtype).unsqueeze(-2)).sum(dim=-1)
+         if post.ndim == grad_post.ndim + 1:
+             grad_post = grad_post.unsqueeze(-1)
++        # out_j = post_j * x + sum_i comb[i, j] * residual_i, so
++        # d residual_i = sum_j comb[i, j] * d out_j and
++        # d comb[i, j] = <residual_i, d out_j>.  The kernel contracts with
++        # comb's transpose, so it evaluates d residual from comb^T.
+         if grad.is_cuda:
+             grad_residual = mhc_kernel(
+                 "post",
+                 torch.zeros_like(x),
+                 grad,
+                 torch.zeros_like(post, dtype=torch.float32),
+-                comb_value.float().contiguous(),
++                comb_value.float().transpose(-2, -1).contiguous(),
+             ).to(residual.dtype)
+         else:
+-            grad_residual = torch.matmul(
+-                comb_value.transpose(-2, -1), grad
+-            ).to(residual.dtype)
++            grad_residual = torch.matmul(comb_value, grad).to(residual.dtype)
+         grad_comb = torch.matmul(
+-            grad, residual_value.transpose(-2, -1)
++            residual_value, grad.transpose(-2, -1)
+         ).to(comb.dtype)
+         return None, grad_x, grad_residual, grad_post.to(post.dtype), grad_comb
+ 
+@@ -732,7 +740,14 @@ def mhc_pre_broadcast(
+     iters: int,
+     eps: float,
+     norm_eps: float,
++    rms_eps: float,
+ ):
++    """mHC pre with the visible kernel's values and an FP32 closed-form VJP.
++
++    ``eps`` is the pre-weight and Sinkhorn epsilon (``hc_eps``), ``rms_eps``
++    the epsilon of the mixes' RMS scaling, ``norm_eps`` that of the RMSNorm
++    of the layer input -- the same three the visible kernel receives.
++    """
+     if not torch.is_grad_enabled():
+         return visible_op(x, fn, scale, base, norm_weight)
+     return _MHCPreVJP.apply(
+@@ -746,6 +761,7 @@ def mhc_pre_broadcast(
+         iters,
+         eps,
+         norm_eps,
++        rms_eps,
+     )
+ 
+ 
+diff --git a/experimental/lite/megatron/lite/primitive/modules/attention/hca.py b/experimental/lite/megatron/lite/primitive/modules/attention/hca.py
+index 359689d87..1393ec3e1 100644
+--- a/experimental/lite/megatron/lite/primitive/modules/attention/hca.py
++++ b/experimental/lite/megatron/lite/primitive/modules/attention/hca.py
+@@ -1,9 +1,9 @@
+ # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+-import math
+-
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
++
++# vLLM's DeepSeek-V4 decoder layers hard-code hc_post_alpha = 2.0; the HF config has no field for it.
++DEFAULT_HC_POST_MULT = 2.0
+ 
+ 
+ def split_sinkhorn(
+@@ -30,14 +30,108 @@ def split_sinkhorn(
+     return pre, post, comb
+ 
+ 
++def mhc_pre(
++    residual: torch.Tensor,
++    fn: torch.Tensor,
++    hc_scale: torch.Tensor,
++    hc_base: torch.Tensor,
++    rms_eps: float,
++    hc_pre_eps: float,
++    hc_sinkhorn_eps: float,
++    hc_post_mult_value: float,
++    sinkhorn_repeat: int,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """mHC pre block with the semantics of vLLM's DeepSeek-V4 ``mhc_pre`` (its torch reference, op by op).
++
++    FP32 math on a BF16 residual ``[..., hc_mult, hidden]``: RMS-scaled mixes, ``sigmoid + eps`` pre weights,
++    ``sigmoid * post_mult`` post weights, softmax + Sinkhorn comb (``sinkhorn_repeat`` column normalizations).
++    Differentiable. Returns ``(post [..., hc, 1] fp32, comb [..., hc, hc] fp32, layer_input [..., hidden] bf16)``.
++    """
++    hc_mult, hidden_size = residual.shape[-2:]
++    outer_shape = residual.shape[:-2]
++    residual_flat = residual.reshape(-1, hc_mult, hidden_size)
++    num_tokens = residual_flat.shape[0]
++
++    x = residual_flat.reshape(num_tokens, hc_mult * hidden_size).to(torch.float32)
++    mixes = torch.matmul(x, fn.t())
++    sqrsum = x.square().sum(dim=-1, keepdim=True)
++    mixes = mixes * torch.rsqrt(sqrsum / (hc_mult * hidden_size) + rms_eps)
++
++    pre_mix = torch.sigmoid(mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + hc_pre_eps
++    post_logits = mixes[:, hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult]
++    post_mix = torch.sigmoid(post_logits) * hc_post_mult_value
++    comb_logits = mixes[:, 2 * hc_mult :].view(num_tokens, hc_mult, hc_mult) * hc_scale[2] + hc_base[
++        2 * hc_mult :
++    ].view(1, hc_mult, hc_mult)
++    comb_mix = torch.softmax(comb_logits, dim=-1) + hc_sinkhorn_eps
++    comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
++    for _ in range(sinkhorn_repeat - 1):
++        comb_mix = comb_mix / (comb_mix.sum(dim=-1, keepdim=True) + hc_sinkhorn_eps)
++        comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
++
++    layer_input = torch.sum(pre_mix.unsqueeze(-1) * residual_flat.to(torch.float32), dim=1).to(
++        torch.bfloat16
++    )
++    return (
++        post_mix.view(*outer_shape, hc_mult, 1),
++        comb_mix.view(*outer_shape, hc_mult, hc_mult),
++        layer_input.view(*outer_shape, hidden_size),
++    )
++
++
++def mhc_post(
++    x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor
++) -> torch.Tensor:
++    """mHC post block with vLLM's semantics: stream ``j`` gets ``sum_i comb[i, j] * residual_i + post_j * x``,
++    in FP32, cast to the residual dtype. ``post`` is ``[..., hc, 1]`` or ``[..., hc]``."""
++    if post.dim() == residual.dim() - 1:
++        post = post.unsqueeze(-1)
++    mixed = torch.einsum("...ij,...ih->...jh", comb.float(), residual.float())
++    return (mixed + post.float() * x.unsqueeze(-2).float()).to(residual.dtype)
++
++
++def mhc_head(
++    x: torch.Tensor,
++    fn: torch.Tensor,
++    scale: torch.Tensor,
++    base: torch.Tensor,
++    rms_eps: float,
++    hc_eps: float,
++) -> torch.Tensor:
++    """HC head with vLLM's semantics (FP32): ``sum_i (sigmoid(rms-scaled mixes * scale + base) + eps)_i * x_i``."""
++    tokens, hc_mult, hidden_size = x.shape
++    xf = x.reshape(tokens, hc_mult * hidden_size).float()
++    rs = torch.rsqrt(xf.square().sum(-1, keepdim=True) / (hc_mult * hidden_size) + rms_eps)
++    pre = torch.sigmoid((xf @ fn.t()) * rs * scale + base) + hc_eps
++    return (pre.unsqueeze(-1) * x.float()).sum(1).to(torch.bfloat16)
++
++
+ class HyperConnection(nn.Module):
+-    def __init__(self, hidden_size: int, hc_mult: int, sinkhorn_iters: int, eps: float):
++    """DeepSeek-V4 manifold-constrained hyper-connection (mHC), with vLLM's numerics.
++
++    ``forward`` is vLLM's ``mhc_pre`` and ``post`` its ``mhc_post`` (FP32 mixes, Sinkhorn comb, comb applied as
++    ``comb^T`` across the residual streams). The RMS epsilon (``rms_eps`` = config.rms_norm_eps) and the
++    pre / Sinkhorn epsilon (``eps`` = config.hc_eps) are separate, as in vLLM.
++    """
++
++    def __init__(
++        self,
++        hidden_size: int,
++        hc_mult: int,
++        sinkhorn_iters: int,
++        eps: float,
++        *,
++        rms_eps: float | None = None,
++        post_mult: float = DEFAULT_HC_POST_MULT,
++    ):
+         super().__init__()
+         mix = (2 + hc_mult) * hc_mult
+         self.hidden_size = hidden_size
+         self.hc_mult = hc_mult
+         self.sinkhorn_iters = sinkhorn_iters
+         self.eps = eps
++        self.rms_eps = eps if rms_eps is None else rms_eps
++        self.post_mult = post_mult
+         self.fn = nn.Parameter(torch.empty(mix, hc_mult * hidden_size, dtype=torch.float32))
+         self.base = nn.Parameter(torch.empty(mix, dtype=torch.float32))
+         self.scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+@@ -51,21 +145,31 @@ class HyperConnection(nn.Module):
+     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+         if x.dim() == 3:
+             x = x.unsqueeze(2).expand(*x.shape[:2], self.hc_mult, x.size(-1))
+-        shape, dtype = x.shape, x.dtype
+-        xf = x.flatten(2)
+-        rms_inv = 1.0 / (xf.norm(dim=-1, keepdim=True) / math.sqrt(xf.shape[-1]) + self.eps)
+-        mixes = F.linear(xf, self.fn.to(device=x.device, dtype=dtype)) * rms_inv
+-        pre, post, comb = split_sinkhorn(
+-            mixes, self.scale, self.base, self.hc_mult, self.sinkhorn_iters, self.eps
++        post, comb, y = mhc_pre(
++            x.to(torch.bfloat16),
++            self.fn.float(),
++            self.scale.float(),
++            self.base.float(),
++            self.rms_eps,
++            self.eps,
++            self.eps,
++            self.post_mult,
++            self.sinkhorn_iters,
+         )
+-        y = torch.sum(pre.unsqueeze(-1) * xf.view(shape), dim=2)
+-        return y.to(dtype), post, comb
++        return y.to(x.dtype), post.squeeze(-1), comb
+ 
+     @staticmethod
+     def post(
+         x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor
+     ) -> torch.Tensor:
+-        dtype = x.dtype
+-        placed = post.to(dtype).unsqueeze(-1) * x.unsqueeze(-2)
+-        mixed = torch.matmul(comb.to(dtype), residual.to(dtype))
+-        return placed + mixed
++        return mhc_post(x, residual, post, comb)
++
++
++__all__ = [
++    "DEFAULT_HC_POST_MULT",
++    "HyperConnection",
++    "mhc_head",
++    "mhc_post",
++    "mhc_pre",
++    "split_sinkhorn",
++]
+diff --git a/experimental/lite/tests/unit/model/deepseek_v4/vllm/backward/test_modules_backward.py b/experimental/lite/tests/unit/model/deepseek_v4/vllm/backward/test_modules_backward.py
+index 8939940d5..e04939273 100644
+--- a/experimental/lite/tests/unit/model/deepseek_v4/vllm/backward/test_modules_backward.py
++++ b/experimental/lite/tests/unit/model/deepseek_v4/vllm/backward/test_modules_backward.py
+@@ -8,6 +8,7 @@ import torch.nn.functional as F
+ 
+ from megatron.lite.model.deepseek_v4.vllm.primitive.dense import (
+     _dispatch_rms_norm_vjp,
++    _post_graph,
+     _pre_graph,
+     block_fp8_linear,
+     fused_block_fp8_linear,
+@@ -25,7 +26,6 @@ from megatron.lite.model.deepseek_v4.vllm.primitive.attention.module import (
+ from megatron.lite.model.deepseek_v4.vllm.primitive.moe.module import (
+     _fixed_route_vjp,
+ )
+-from megatron.lite.primitive.modules.attention.hca import HyperConnection
+ from megatron.lite.primitive.recompute import wrap_checkpoint
+ 
+ pytestmark = pytest.mark.gpus(1)
+@@ -40,10 +40,6 @@ def _grad_like(value: torch.Tensor) -> torch.Tensor:
+     )
+ 
+ 
+-def _post_graph(x, residual, post, comb):
+-    return HyperConnection.post(x, residual, post.squeeze(-1), comb)
+-
+-
+ @pytest.mark.parametrize("fused", [False, True])
+ def test_visible_linear_value_and_master_vjp(fused: bool) -> None:
+     torch.manual_seed(1)
+@@ -251,10 +247,14 @@ def test_mhc_visible_values_use_functional_vjps() -> None:
+     )
+ 
+     def pre(*values):
+-        residual, post, comb, x = _pre_graph(*values[:4], mult=mult, iters=3, eps=eps)
++        residual, post, comb, x = _pre_graph(
++            *values[:4], mult=mult, iters=3, eps=eps, rms_eps=eps
++        )
+         return residual, post, comb, F.rms_norm(x, (hidden,), values[4], eps)
+ 
+-    outputs = mhc_pre_broadcast(pre, *inputs, mult=mult, iters=3, eps=eps, norm_eps=eps)
++    outputs = mhc_pre_broadcast(
++        pre, *inputs, mult=mult, iters=3, eps=eps, norm_eps=eps, rms_eps=eps
++    )
+     grads = tuple(_grad_like(value) for value in outputs)
+     torch.autograd.backward(outputs, grads)
+     refs = tuple(value.detach().requires_grad_(True) for value in inputs)
+@@ -276,6 +276,74 @@ def test_mhc_visible_values_use_functional_vjps() -> None:
+         torch.testing.assert_close(actual.grad, reference.grad, rtol=1e-5, atol=1e-6)
+ 
+ 
++def _mhc_pre_float64(x, fn, scale, base, norm_weight, *, mult, iters, eps, rms_eps):
++    # vLLM's mhc_pre_torch (FP32 there, FP64 here) + the RMSNorm of the layer input.
++    residual = x.unsqueeze(-2).expand(*x.shape[:-1], mult, x.shape[-1]) if x.ndim == 2 else x
++    flat = residual.flatten(-2)
++    mixes = F.linear(flat, fn) * torch.rsqrt(flat.square().mean(-1, keepdim=True) + rms_eps)
++    pre_mix, post_mix, comb_mix = mixes.split([mult, mult, mult * mult], dim=-1)
++    base_pre, base_post, base_comb = base.split([mult, mult, mult * mult], dim=-1)
++    pre = torch.sigmoid(pre_mix * scale[0] + base_pre) + eps
++    post = 2 * torch.sigmoid(post_mix * scale[1] + base_post)
++    logits = (comb_mix * scale[2] + base_comb).view(*comb_mix.shape[:-1], mult, mult)
++    comb = torch.softmax(logits, dim=-1) + eps
++    comb = comb / (comb.sum(-2, keepdim=True) + eps)
++    for _ in range(iters - 1):
++        comb = comb / (comb.sum(-1, keepdim=True) + eps)
++        comb = comb / (comb.sum(-2, keepdim=True) + eps)
++    hidden = (pre.unsqueeze(-1) * residual).sum(-2)
++    normed = F.rms_norm(hidden, (hidden.shape[-1],), norm_weight, eps)
++    return residual, post.unsqueeze(-1), comb, normed
++
++
++@pytest.mark.parametrize("broadcast", [True, False])
++@pytest.mark.parametrize("magnitude", [1e-2, 1.0])
++def test_mhc_pre_vjp_is_fp32_and_uses_the_forward_rms(broadcast, magnitude) -> None:
++    # BF16 residual at embedding scale: a BF16 recomputation or the
++    # 1 / (|x| / sqrt(n) + eps) scaling misses this FP64 reference by >1e-2.
++    torch.manual_seed(5)
++    mult, hidden, eps, rms_eps, iters = 4, 256, 1e-6, 1e-6, 20
++    mix = (2 + mult) * mult
++    shape = (33, hidden) if broadcast else (33, mult, hidden)
++    inputs = (
++        (torch.randn(shape) * magnitude).to(torch.bfloat16).requires_grad_(True),
++        (torch.randn(mix, mult * hidden) * 0.05).requires_grad_(True),
++        torch.rand(3).requires_grad_(True),
++        (torch.randn(mix) * 0.1).requires_grad_(True),
++        (1 + 0.1 * torch.randn(hidden)).to(torch.bfloat16).requires_grad_(True),
++    )
++    refs = tuple(value.detach().double().requires_grad_(True) for value in inputs)
++    reference = _mhc_pre_float64(
++        *refs, mult=mult, iters=iters, eps=eps, rms_eps=rms_eps
++    )
++
++    def visible(*values):
++        with torch.no_grad():
++            out = _mhc_pre_float64(
++                *(value.double() for value in values),
++                mult=mult, iters=iters, eps=eps, rms_eps=rms_eps,
++            )
++        return (
++            out[0].to(values[0].dtype),
++            out[1].float(),
++            out[2].float(),
++            out[3].to(torch.bfloat16),
++        )
++
++    outputs = mhc_pre_broadcast(
++        visible, *inputs, mult=mult, iters=iters, eps=eps, norm_eps=eps, rms_eps=rms_eps
++    )
++    grads = tuple(torch.randn(value.shape).to(value.dtype) for value in outputs)
++    torch.autograd.backward(outputs, grads)
++    torch.autograd.backward(reference, tuple(grad.double() for grad in grads))
++    # x and the norm weight carry one BF16 rounding; fn / scale / base are FP32.
++    for actual, expected, tolerance in zip(
++        inputs, refs, (3e-3, 2e-4, 2e-4, 2e-4, 3e-3), strict=True
++    ):
++        error = (actual.grad.double() - expected.grad).norm() / expected.grad.norm()
++        assert error < tolerance, (actual.shape, float(error))
++
++
+ @pytest.mark.gpus(1)
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA GPU")
+ def test_mhc_post_cuda_vjp_matches_reference() -> None:
+diff --git a/experimental/lite/tests/unit/primitive/modules/attention/test_hca_vllm_semantics_unit.py b/experimental/lite/tests/unit/primitive/modules/attention/test_hca_vllm_semantics_unit.py
+new file mode 100644
+index 000000000..b50af10ef
+--- /dev/null
++++ b/experimental/lite/tests/unit/primitive/modules/attention/test_hca_vllm_semantics_unit.py
+@@ -0,0 +1,85 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""Lite's DeepSeek-V4 HyperConnection follows vLLM's mHC numerics.
++
++The rollout's mHC is vLLM's ``mhc_pre`` / ``mhc_post``; the Lite (native) trainer must compute the same function:
++FP32 mixes, separate RMS / pre / Sinkhorn epsilons, ``post_mult`` = 2.0, and the comb applied so that stream ``j``
++receives ``sum_i comb[i, j] * residual_i``.
++"""
++import pytest
++import torch
++
++from megatron.lite.primitive.modules.attention.hca import HyperConnection, mhc_post
++
++HIDDEN, HC, ITERS = 256, 4, 20
++RMS_EPS, HC_EPS = 1e-6, 1e-6
++
++
++def _module(rms_eps=RMS_EPS):
++    torch.manual_seed(0)
++    module = HyperConnection(HIDDEN, HC, ITERS, HC_EPS, rms_eps=rms_eps)
++    with torch.no_grad():
++        for param in module.parameters():
++            param.copy_(torch.randn_like(param) * 0.02)
++    return module
++
++
++def test_post_mixes_streams_by_comb_columns():
++    torch.manual_seed(1)
++    x = torch.randn(5, 1, HIDDEN, dtype=torch.bfloat16)
++    residual = torch.randn(5, 1, HC, HIDDEN, dtype=torch.bfloat16)
++    post = torch.rand(5, 1, HC)
++    comb = torch.rand(5, 1, HC, HC)
++    out = HyperConnection.post(x, residual, post, comb)
++    expected = torch.stack(
++        [
++            sum(comb[..., i, j, None] * residual[..., i, :].float() for i in range(HC))
++            + post[..., j, None] * x.float()
++            for j in range(HC)
++        ],
++        dim=-2,
++    ).to(residual.dtype)
++    assert torch.equal(out, expected)
++
++
++def test_rms_eps_is_separate_from_hc_eps():
++    x = torch.randn(3, 1, HC, HIDDEN, dtype=torch.bfloat16) * 1e-4
++    a, _, _ = _module(rms_eps=1e-6)(x)
++    b, _, _ = _module(rms_eps=1e-2)(x)
++    assert not torch.equal(a, b)
++
++
++def test_matches_vllm_torch_reference_bitwise():
++    vllm_mhc = pytest.importorskip("vllm.model_executor.kernels.mhc.torch")
++    module = _module()
++    x = torch.randn(37, 1, HC, HIDDEN, dtype=torch.bfloat16)
++    with torch.no_grad():
++        y, post, comb = module(x)
++        post_ref, comb_ref, y_ref = vllm_mhc.mhc_pre_torch(
++            x,
++            module.fn.float(),
++            module.scale.float(),
++            module.base.float(),
++            RMS_EPS,
++            HC_EPS,
++            HC_EPS,
++            2.0,
++            ITERS,
++        )
++        assert torch.equal(y, y_ref.to(y.dtype))
++        assert torch.equal(post, post_ref.squeeze(-1))
++        assert torch.equal(comb, comb_ref)
++        layer_out = torch.randn(37, 1, HIDDEN, dtype=torch.bfloat16)
++        assert torch.equal(
++            mhc_post(layer_out, x, post, comb),
++            vllm_mhc.mhc_post_torch(layer_out, x, post_ref, comb_ref),
++        )
++
++
++def test_is_differentiable_in_all_parameters():
++    module = _module()
++    x = torch.randn(7, 1, HC, HIDDEN, dtype=torch.bfloat16, requires_grad=True)
++    y, post, comb = module(x)
++    (y.float().sum() + post.sum() + comb.sum()).backward()
++    assert x.grad is not None
++    for param in module.parameters():
++        assert param.grad is not None and torch.isfinite(param.grad).all()

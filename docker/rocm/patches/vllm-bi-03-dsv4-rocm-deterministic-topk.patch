@@ -1,0 +1,483 @@
+# vLLM v0.26.0 patch 03/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# DeepSeek-V4 on ROCm: batch-invariant indexer top-k as one deterministic kernel.
+#
+# Under VLLM_BATCH_INVARIANT=1 the indexer selects its top-k (prefill chunks and
+# sparse decode) with _dsv4_det_topk_kernel: the index_topk largest scores
+# under the fp32 bit order, ties to the larger column, ascending row-local
+# indices. Includes a tidy-up of the sparse-decode code (line lengths,
+# docstrings, int32 seq_lens).
+#
+# Why BI needs it: top_k_per_row_prefill's output order is not fixed run to run
+# and its candidate at the cutoff depends on the launch shape; sparse attention
+# sums in index order, so both change bits.
+#
+# Upstream: not yet proposed (same DeepSeek-V4 ROCm RFC as patch 02).
+#
+# Source commits:
+#   [ROCm][DSv4] Batch-invariant indexer top-k as one deterministic kernel
+#   [ROCm][DSv4] Sparse decode: tidy (line lengths, docstrings, int32 seq_lens)
+#
+diff --git a/vllm/models/deepseek_v4/amd/rocm.py b/vllm/models/deepseek_v4/amd/rocm.py
+index 85d3d79d31..96e597fc35 100644
+--- a/vllm/models/deepseek_v4/amd/rocm.py
++++ b/vllm/models/deepseek_v4/amd/rocm.py
+@@ -169,39 +169,52 @@ def combine_topk_swa_indices(
+     return combined_indices, combined_lens
+ 
+ 
+-
+ @triton.jit
+-def _dsv4_dequant_token(
+-    out_row_ptr,
++def _dsv4_dequant_rows(
++    out_ptr,
++    out_stride,
++    rows,
+     k_cache_ptr,
+     block_table_row_ptr,
+     pos,
++    mask,
+     block_stride,
+     CACHE_BLOCK_SIZE: tl.constexpr,
+     USE_FNUZ: tl.constexpr,
+ ):
+-    # One token of the fp8_ds_mla paged cache -> 512 bf16, with exactly the
+-    # arithmetic of _dequantize_and_gather_k_kernel (UE8M0 scale per 64 fp8
+-    # values, then the 64 bf16 rope values copied).
+-    block = tl.load(block_table_row_ptr + pos // CACHE_BLOCK_SIZE)
++    # Tokens ``pos`` of an fp8_ds_mla paged cache -> bf16 ``rows`` of out, with
++    # exactly the arithmetic of _dequantize_and_gather_k_kernel (UE8M0 scale
++    # per 64 fp8 values, then the 64 bf16 rope values copied).
++    block = tl.load(
++        block_table_row_ptr + pos // CACHE_BLOCK_SIZE, mask=mask, other=0
++    )
+     pos_in_block = pos % CACHE_BLOCK_SIZE
+     block_ptr = k_cache_ptr + block.to(tl.int64) * block_stride
+     token_ptr = block_ptr + pos_in_block * 576
+     scale_ptr = block_ptr + CACHE_BLOCK_SIZE * 576 + pos_in_block * 8
++    out_rows = out_ptr + rows.to(tl.int64) * out_stride
++    d = tl.arange(0, 64)
++    m2 = mask[:, None]
+     for qb in tl.static_range(7):
+-        offs = qb * 64 + tl.arange(0, 64)
+-        x_uint8 = tl.load(token_ptr + offs)
++        x_uint8 = tl.load(token_ptr[:, None] + (qb * 64 + d)[None, :], mask=m2)
+         if USE_FNUZ:
+             x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+         else:
+             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+         x_float = x_fp8.to(tl.float32)
+-        encoded_scale = tl.load(scale_ptr + qb)
++        encoded_scale = tl.load(scale_ptr + qb, mask=mask, other=127)
+         scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+-        tl.store(out_row_ptr + offs, (x_float * scale).to(tl.bfloat16))
+-    rope = tl.arange(0, 64)
+-    bf16_ptr = (token_ptr + 448).to(tl.pointer_type(tl.bfloat16))
+-    tl.store(out_row_ptr + 448 + rope, tl.load(bf16_ptr + rope))
++        tl.store(
++            out_rows[:, None] + (qb * 64 + d)[None, :],
++            (x_float * scale[:, None]).to(tl.bfloat16),
++            mask=m2,
++        )
++    rope_ptr = (token_ptr + 448).to(tl.pointer_type(tl.bfloat16))
++    tl.store(
++        out_rows[:, None] + (448 + d)[None, :],
++        tl.load(rope_ptr[:, None] + d[None, :], mask=m2),
++        mask=m2,
++    )
+ 
+ 
+ @triton.jit
+@@ -231,6 +244,7 @@ def _dsv4_sparse_decode_prep_kernel(
+     COMP_BLOCK_SIZE: tl.constexpr,
+     SWA_BLOCK_SIZE: tl.constexpr,
+     SWA_FNUZ: tl.constexpr,
++    ROWS: tl.constexpr,
+     BLOCK_R: tl.constexpr,
+ ):
+     """Gather + index build for one-token decode requests (sparse decode).
+@@ -244,10 +258,10 @@ def _dsv4_sparse_decode_prep_kernel(
+     of the list lengths, computed from seq_lens on the device.
+     TOPK_MODE: 0 = SWA only, 1 = request-local top-k indices (C4A),
+     2 = all compressed tokens in order (C128A, the prefill local indices).
++    Grid: (num_reqs, cdiv(TOPW + WINDOW_SIZE, ROWS)).
+     """
+     b = tl.program_id(0)
+-    worker = tl.program_id(1)
+-    num_workers = tl.num_programs(1)
++    tile = tl.program_id(1)
+ 
+     seq_len = tl.load(seq_lens_ptr + b)
+     if TOPK_MODE == 0:
+@@ -269,44 +283,51 @@ def _dsv4_sparse_decode_prep_kernel(
+                 sl, WINDOW_SIZE
+             )
+         start += tl.sum(lens, axis=0)
+-    if worker == 0:
++    if tile == 0:
+         tl.store(indptr_ptr + b + 1, start + topk_len + swa_len)
+         if b == 0:
+             tl.store(indptr_ptr, 0)
+ 
+     row_base = b * (TOPW + WINDOW_SIZE)
+     kv_req_ptr = kv_ptr + b.to(tl.int64) * kv_stride0
++    j = tile * ROWS + tl.arange(0, ROWS)
+     if TOPK_MODE != 0:
+-        comp_bt_row = comp_block_table_ptr + b * comp_block_table_stride
+-        for j in range(worker, topk_len, num_workers):
+-            if TOPK_MODE == 1:
+-                t = tl.load(topk_ptr + b * topk_stride + j)
+-            else:
+-                t = j
+-            valid = (t >= 0) & (t < N)
+-            tl.store(indices_ptr + start + j, tl.where(valid, row_base + j, -1))
+-            if valid & (t < n_comp):
+-                _dsv4_dequant_token(
+-                    kv_req_ptr + j * kv_stride1,
+-                    comp_cache_ptr,
+-                    comp_bt_row,
+-                    t,
+-                    comp_block_stride,
+-                    COMP_BLOCK_SIZE,
+-                    False,
+-                )
+-    swa_bt_row = swa_block_table_ptr + b * swa_block_table_stride
+-    for s in range(worker, swa_len, num_workers):
+-        tl.store(indices_ptr + start + topk_len + s, row_base + TOPW + s)
+-        _dsv4_dequant_token(
+-            kv_req_ptr + (TOPW + s) * kv_stride1,
+-            swa_cache_ptr,
+-            swa_bt_row,
+-            seq_len - swa_len + s,
+-            swa_block_stride,
+-            SWA_BLOCK_SIZE,
+-            SWA_FNUZ,
++        in_topk = j < topk_len
++        if TOPK_MODE == 1:
++            t = tl.load(topk_ptr + b * topk_stride + j, mask=in_topk, other=-1)
++        else:
++            t = j
++        valid = (t >= 0) & (t < N)
++        tl.store(
++            indices_ptr + start + j, tl.where(valid, row_base + j, -1), mask=in_topk
++        )
++        _dsv4_dequant_rows(
++            kv_req_ptr,
++            kv_stride1,
++            j,
++            comp_cache_ptr,
++            comp_block_table_ptr + b * comp_block_table_stride,
++            t,
++            in_topk & valid & (t < n_comp),
++            comp_block_stride,
++            COMP_BLOCK_SIZE,
++            False,
+         )
++    s = j - TOPW
++    in_swa = (s >= 0) & (s < swa_len)
++    tl.store(indices_ptr + start + topk_len + s, row_base + j, mask=in_swa)
++    _dsv4_dequant_rows(
++        kv_req_ptr,
++        kv_stride1,
++        j,
++        swa_cache_ptr,
++        swa_block_table_ptr + b * swa_block_table_stride,
++        seq_len - swa_len + s,
++        in_swa,
++        swa_block_stride,
++        SWA_BLOCK_SIZE,
++        SWA_FNUZ,
++    )
+ 
+ 
+ @triton.jit
+@@ -874,7 +895,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+         )
+         indptr = torch.empty(num_decodes + 1, dtype=torch.int32, device=q.device)
+         swa_block_table = swa_metadata.block_table
+-        _dsv4_sparse_decode_prep_kernel[(num_decodes, 128)](
++        rows_per_program = 16
++        _dsv4_sparse_decode_prep_kernel[
++            (num_decodes, triton.cdiv(row_width, rows_per_program))
++        ](
+             kv,
+             kv.stride(0),
+             kv.stride(1),
+@@ -900,6 +924,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
+             COMP_BLOCK_SIZE=comp_block_size,
+             SWA_BLOCK_SIZE=swa_metadata.block_size,
+             SWA_FNUZ=current_platform.is_fp8_fnuz(),
++            ROWS=rows_per_program,
+             BLOCK_R=128,
+         )
+         _rocm_sparse_attn_prefill_ragged_triton(
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+index cdc02a328a..82f299a681 100644
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -3,6 +3,7 @@
+ import functools
+ import importlib
+ import math
++import sys
+ from importlib.util import find_spec
+ 
+ import torch
+@@ -808,6 +809,129 @@ def use_dsv4_sparse_decode() -> bool:
+     return envs.VLLM_DS4_DECODE_KERNEL.lower() == "sparse"
+ 
+ 
++@triton.jit
++def _ordered_u32(x):
++    # fp32 bits -> uint32 with the order of the float values (negative: all
++    # bits flipped; non-negative: sign bit set).
++    bits = x.to(tl.int32, bitcast=True)
++    u = bits.to(tl.uint32, bitcast=True)
++    return tl.where(bits < 0, ~u, u | tl.full((), 0x80000000, tl.uint32))
++
++
++@triton.jit
++def _det_topk_count_ge(row_ptr, stride1, start, end, cand, BLOCK: tl.constexpr):
++    cnt = tl.zeros((), dtype=tl.int32)
++    for c0 in range(start, end, BLOCK):
++        cols = c0 + tl.arange(0, BLOCK)
++        m = cols < end
++        u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++        cnt += tl.sum((m & (u >= cand)).to(tl.int32), axis=0)
++    return cnt
++
++
++@triton.jit
++def _dsv4_det_topk_kernel(
++    logits_ptr,
++    stride0,
++    stride1,
++    row_starts_ptr,
++    row_ends_ptr,
++    out_ptr,
++    out_stride,
++    n_cols,
++    TOPK: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    """Exact, fully specified top-k of row ``logits[row, row_start:row_end]``.
++
++    Order: by score (fp32 total order of the bit patterns), ties to the larger
++    column. Output: the selected row-local columns ascending, then -1 to
++    width TOPK. One program per row; every decision depends on the row only.
++    """
++    row = tl.program_id(0)
++    rs = tl.load(row_starts_ptr + row)
++    start = tl.maximum(rs, 0)
++    end = tl.minimum(tl.load(row_ends_ptr + row), n_cols)
++    nv = tl.maximum(end - start, 0)
++    sel = tl.minimum(nv, TOPK)
++    row_ptr = logits_ptr + row.to(tl.int64) * stride0
++    out_row = out_ptr + row.to(tl.int64) * out_stride
++
++    if nv > TOPK:
++        # T = the sel-th largest key: the largest t with #(u >= t) >= sel.
++        thr = tl.zeros((), dtype=tl.uint32)
++        for bit in tl.static_range(31, -1, -1):
++            cand = thr | tl.full((), 1 << bit, tl.uint32)
++            if _det_topk_count_ge(row_ptr, stride1, start, end, cand, BLOCK) >= sel:
++                thr = cand
++        n_gt = tl.zeros((), dtype=tl.int32)
++        n_eq = tl.zeros((), dtype=tl.int32)
++        for c0 in range(start, end, BLOCK):
++            cols = c0 + tl.arange(0, BLOCK)
++            m = cols < end
++            u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++            n_gt += tl.sum((m & (u > thr)).to(tl.int32), axis=0)
++            n_eq += tl.sum((m & (u == thr)).to(tl.int32), axis=0)
++        # Of the n_eq tied columns take the (sel - n_gt) largest.
++        skip_eq = n_eq - (sel - n_gt)
++        eq_seen = tl.zeros((), dtype=tl.int32)
++        written = tl.zeros((), dtype=tl.int32)
++        for c0 in range(start, end, BLOCK):
++            cols = c0 + tl.arange(0, BLOCK)
++            m = cols < end
++            u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++            eq = m & (u == thr)
++            eq_rank = eq_seen + tl.cumsum(eq.to(tl.int32), axis=0) - 1
++            take = (m & (u > thr)) | (eq & (eq_rank >= skip_eq))
++            pos = written + tl.cumsum(take.to(tl.int32), axis=0) - 1
++            tl.store(out_row + pos, cols - rs, mask=take)
++            eq_seen += tl.sum(eq.to(tl.int32), axis=0)
++            written += tl.sum(take.to(tl.int32), axis=0)
++    else:
++        for c0 in range(0, sel, BLOCK):
++            j = c0 + tl.arange(0, BLOCK)
++            tl.store(out_row + j, start + j - rs, mask=j < sel)
++    for c0 in range(0, TOPK, BLOCK):
++        j = c0 + tl.arange(0, BLOCK)
++        tl.store(out_row + j, -1, mask=(j >= sel) & (j < TOPK))
++
++
++def dsv4_det_topk_per_row(
++    logits: torch.Tensor,
++    row_starts: torch.Tensor,
++    row_ends: torch.Tensor,
++    topk_indices: torch.Tensor,
++    num_rows: int,
++    topk_tokens: int,
++) -> None:
++    """Deterministic DSv4 indexer top-k (VLLM_BATCH_INVARIANT=1 with
++    VLLM_DS4_DECODE_KERNEL=sparse), for prefill and decode rows alike.
++
++    Selects, per row, the ``topk_tokens`` columns of
++    ``logits[row, row_starts[row]:row_ends[row]]`` with the largest scores,
++    ties going to the larger column, and writes their row-local indices in
++    ascending order followed by -1 padding. The result depends only on the
++    row's own scores, so it does not change with the batch, the launch shape
++    or the row's position.
++    """
++    if num_rows == 0:
++        return
++    assert topk_indices.shape[-1] == topk_tokens
++    _dsv4_det_topk_kernel[(num_rows,)](
++        logits,
++        logits.stride(0),
++        logits.stride(1),
++        row_starts,
++        row_ends,
++        topk_indices,
++        topk_indices.stride(0),
++        logits.shape[1],
++        TOPK=topk_tokens,
++        BLOCK=1024,
++        num_warps=8,
++    )
++
++
+ def dsv4_sparse_decode_indexer_workspace(
+     num_reqs: int, capacity: int, head_dim: int
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+@@ -859,9 +983,10 @@ def _dsv4_decode_indexer_k_gather_kernel(
+     off = t % CACHE_BLOCK_SIZE
+     src = k_cache_ptr + block * cache_block_stride
+     d = tl.arange(0, HEAD_DIM)
+-    vals = tl.load(src[:, None] + off[:, None] * HEAD_DIM + d[None, :], mask=mask[:, None])
++    m2 = mask[:, None]
++    vals = tl.load(src[:, None] + off[:, None] * HEAD_DIM + d[None, :], mask=m2)
+     row = b.to(tl.int64) * capacity + t
+-    tl.store(k_out_ptr + row[:, None] * HEAD_DIM + d[None, :], vals, mask=mask[:, None])
++    tl.store(k_out_ptr + row[:, None] * HEAD_DIM + d[None, :], vals, mask=m2)
+     scale_src = (src + CACHE_BLOCK_SIZE * HEAD_DIM).to(tl.pointer_type(tl.int32))
+     scale = tl.load(scale_src + off, mask=mask)
+     tl.store(scale_out_ptr + row, scale, mask=mask)
+@@ -884,8 +1009,6 @@ def _aiter_fp8_mqa_logits_into(
+     computed independently of the others, so the scores equal those of the
+     wrapper. Returns False when that kernel is not the one the wrapper uses.
+     """
+-    import sys
+-
+     from vllm._aiter_ops import rocm_aiter_ops
+ 
+     if not (_ON_GFX950 and rocm_aiter_ops.is_enabled()):
+@@ -940,6 +1063,12 @@ def _aiter_fp8_mqa_logits_into(
+     return True
+ 
+ 
++def use_dsv4_det_topk() -> bool:
++    """DSv4 indexer top-k on dsv4_det_topk_per_row, for prefill and decode
++    rows: VLLM_BATCH_INVARIANT=1 with VLLM_DS4_DECODE_KERNEL=sparse."""
++    return envs.VLLM_BATCH_INVARIANT and use_dsv4_sparse_decode()
++
++
+ def dsv4_sparse_decode_indexer_topk(
+     kv_cache: torch.Tensor,
+     q_fp8: torch.Tensor,
+@@ -958,9 +1087,10 @@ def dsv4_sparse_decode_indexer_topk(
+     ``[b * C, b * C + seq_len_b)`` of a request-major workspace, its logits
+     are written to the same positions of a ``[B * C]`` buffer (AITER's
+     prefill logits kernel with row stride 0, so no ``B x B * C`` matrix), and
+-    ``top_k_per_row_prefill`` selects on the ``[B, C]`` view with row-local
+-    columns. Scores and selection are elementwise / row-local, so the indices
+-    equal those of the same token scored in a prefill.
++    the prefill selector (dsv4_det_topk_per_row in batch-invariant mode,
++    top_k_per_row_prefill otherwise) runs on the ``[B, C]`` view with
++    row-local columns. Scores and selection are elementwise / row-local, so
++    the indices equal those of the same token scored in a prefill.
+ 
+     Args:
+         kv_cache: DSv4 indexer cache ``[num_blocks, block_size, head_dim + 4]``
+@@ -977,7 +1107,7 @@ def dsv4_sparse_decode_indexer_topk(
+             the batch's context; ``None`` (and any capture) uses capacity.
+     """
+     num_reqs, _, head_dim = q_fp8.shape
+-    seq_lens = seq_lens.reshape(-1)[:num_reqs]
++    seq_lens = seq_lens.reshape(-1)[:num_reqs].to(torch.int32)
+     capacity = max_model_len
+     if max_seq_len is not None and not torch.cuda.is_current_stream_capturing():
+         capacity = max(1, min(capacity, max_seq_len))
+@@ -1015,16 +1145,21 @@ def dsv4_sparse_decode_indexer_topk(
+             (full.stride(0) + capacity * full.stride(1), full.stride(1)),
+             full.storage_offset(),
+         )
+-    torch.ops._C.top_k_per_row_prefill(
+-        logits_2d,
+-        row_starts,
+-        seq_lens,
+-        topk_indices,
+-        num_reqs,
+-        logits_2d.stride(0),
+-        logits_2d.stride(1),
+-        topk_tokens,
+-    )
++    if use_dsv4_det_topk():
++        dsv4_det_topk_per_row(
++            logits_2d, row_starts, seq_lens, topk_indices, num_reqs, topk_tokens
++        )
++    else:
++        torch.ops._C.top_k_per_row_prefill(
++            logits_2d,
++            row_starts,
++            seq_lens,
++            topk_indices,
++            num_reqs,
++            logits_2d.stride(0),
++            logits_2d.stride(1),
++            topk_tokens,
++        )
+ 
+ 
+ def rocm_aiter_sparse_attn_indexer_fake(
+@@ -1188,16 +1323,26 @@ def rocm_aiter_sparse_attn_indexer(
+ 
+             num_rows = logits.shape[0]
+ 
+-            torch.ops._C.top_k_per_row_prefill(
+-                logits,
+-                chunk.cu_seqlen_ks,
+-                chunk.cu_seqlen_ke,
+-                topk_indices,
+-                num_rows,
+-                logits.stride(0),
+-                logits.stride(1),
+-                topk_tokens,
+-            )
++            if skip_k_cache_insert and use_dsv4_det_topk():
++                dsv4_det_topk_per_row(
++                    logits,
++                    chunk.cu_seqlen_ks,
++                    chunk.cu_seqlen_ke,
++                    topk_indices,
++                    num_rows,
++                    topk_tokens,
++                )
++            else:
++                torch.ops._C.top_k_per_row_prefill(
++                    logits,
++                    chunk.cu_seqlen_ks,
++                    chunk.cu_seqlen_ke,
++                    topk_indices,
++                    num_rows,
++                    logits.stride(0),
++                    logits.stride(1),
++                    topk_tokens,
++                )
+ 
+     if has_decode and skip_k_cache_insert and use_dsv4_sparse_decode():
+         decode_metadata = layer_attn_metadata.decode
