@@ -122,9 +122,11 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     hook_kwargs = hook_model.calls[-1]
     assert output.log_probs.tolist() == [1.0]
     assert "temperature" not in hook_kwargs
+    assert "labels" not in hook_kwargs
     assert hook_kwargs["output_processor"] is mff.fused_output_processor
     assert hook_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
     assert hook_kwargs["output_processor_context"].impl_backend == "liger"
+    assert torch.equal(hook_kwargs["output_processor_context"].labels, labels)
     assert preprocess_calls == [
         {
             "pre_process": True,
@@ -151,6 +153,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     legacy_kwargs = legacy_model.calls[-1]
     assert legacy_kwargs["temperature"] == pytest.approx(0.5)
     assert legacy_kwargs["impl_backend"] == "liger"
+    assert torch.equal(legacy_kwargs["labels"], labels)
     assert "output_processor" not in legacy_kwargs
     assert "output_processor_context" not in legacy_kwargs
 
@@ -240,6 +243,29 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
     assert seen["temperature"] == pytest.approx(0.7)
     assert seen["weight"] is model.output_layer.weight
     assert seen["options"] == {"impl_backend": "liger"}
+
+
+def test_output_processor_falls_back_to_context_labels(monkeypatch):
+    context_labels = torch.tensor([3])
+    seen = {}
+
+    def fake_linear_cross_entropy(_hidden, _weight, labels_arg, *_args, **_kwargs):
+        seen["labels"] = labels_arg
+        return torch.tensor([1.0]), torch.tensor([2.0])
+
+    monkeypatch.setattr(mff, "linear_cross_entropy", fake_linear_cross_entropy)
+    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
+
+    mff.fused_output_processor(
+        hidden_states=torch.tensor([[1.0]]),
+        output_layer=SimpleNamespace(weight=torch.tensor([[1.0]])),
+        output_weight=torch.tensor([[1.0]]),
+        labels=None,
+        context=mff.FusedOutputProcessorContext(temperature=1.0, labels=context_labels),
+        config=SimpleNamespace(sequence_parallel=False),
+    )
+
+    assert seen["labels"] is context_labels
 
 
 def test_output_processor_preserves_config_logger_payload(monkeypatch):
