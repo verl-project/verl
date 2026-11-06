@@ -1,0 +1,101 @@
+# sha256 of every file the Kimi-K3.1 true-on-policy patches change (after all patches are applied) and of every
+# plugin file. Paths starting with vllm/ are relative to the site-packages directory that holds vllm, experimental/
+# to /opt/Megatron-LM, kimi-k31/ to /opt/k31-plugins. docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy checks
+# them at build time (sha256sum -c).
+# The comment above each entry is the md5 of that file in the validated runs. Where it differs from the shipped file,
+# only comments and docstrings differ (Python AST with docstrings stripped is identical), except in experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py:
+# there, three string constants were also made neutral: the return value of _bi_lora_epilogue (now "default";
+# its only caller discards it) and two RuntimeError messages. Behavior-neutral.
+
+# validated-run md5 501de5d92180a203c3936924d6df35bd
+abc7efb18abef522055e6c5b358234e7cabc3da87db58432fef1563783268084  experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+# validated-run md5 1909fc0826fec8231ee782bba064dac7
+49e9a1a34c44fe14c0b3a0a4baec6a7389aa2862e4154a21cdd461d2e7131157  experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
+# validated-run md5 2db59f3a2bb7a0a5900812ee9ed540cb (shipped md5 6e3af76377f4e3942d533afe965ad59b: comments/docstrings only)
+245623960078f2c593c3de722ed75d8fab5e5a024e5445626b4a191073c1377f  experimental/lite/megatron/lite/model/k31/vllm/dsa.py
+# validated-run md5 bb292907a38bd5c5adef3364703c4d9d
+b9f14d6305b5336db9165998187195434c50135dc5d646ef85e99388b0c7f1d1  experimental/lite/megatron/lite/model/k31/vllm/kda.py
+# validated-run md5 9ff68070a3b5afb847a7bbc4c063947b
+e12f552db50cf12770ee691cc017d8063967797b2a125c5ac502aa377be12f86  experimental/lite/megatron/lite/model/k31/vllm/model.py
+# validated-run md5 6708b679fba67071e066f4b3d2860b0a
+88ebd111f20c5c4f4551548baf49d6ce7fe480af74e6fc700683b93bdcbbbe0f  experimental/lite/megatron/lite/model/k31/vllm/moe.py
+# validated-run md5 072ca17f3d658c5acaec15fee95290c1
+1742d3c108dc64d384a4119aab3bcae1a6706775f8b2c07131c36a164cb4e1b7  experimental/lite/megatron/lite/model/k31/vllm/primitive/attention.py
+# validated-run md5 f59c9c1db631583a614135c9c2547401 (shipped md5 c3cb3df960872930b9116feda8574e97: comments/docstrings only)
+4f3c90b27de8d88b5242f8d75afc2da17c392b5f8934c9a27763ef5f26d8ee20  experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py
+# validated-run md5 fa28e1fe534bee9da143b75e13dc3682 (shipped md5 9c2783ea0d2cdd8978105cd3099a2b4c: comments/docstrings only)
+8fd82988e6782247f16670112fc4d69419949ae29eba8d1485260814207b6635  experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
+# validated-run md5 9e7e602d3bde56a69cd18b13abdb2b59
+0d8003a9ede95a6a7761189f15de953c90cd7891fc4d0cf258e22f273d009810  experimental/lite/megatron/lite/model/k31/vllm/primitive/linear.py
+# validated-run md5 37e97d26100678bbadd9fb365083e303
+f55b2a07b245ef47ba2707ea00032008ea5a1d7323811183b03a7b86d917e147  experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
+# validated-run md5 6e0b198216e19ef1c38a6e63df095a8b (shipped md5 60e782e66b85babb14dd5db2bd22c174: comments/docstrings only)
+e462810a54d86bdedd1442eb4e1ff364c648288902193bccf6f57163c55a6d67  experimental/lite/megatron/lite/model/k31/vllm/protocol.py
+# validated-run md5 7c92029bc7f6b0fbb44d96f78c1996e9 (shipped md5 c12703d450a76168a81321b60517441d: comments/docstrings only)
+c725579b62dda56421903793579bc1330dce03cd62b2757c3805e00413690a01  experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
+# validated-run md5 ab80a49f2e551127ccf18f86ddbd9bb6 (shipped md5 1c87c363766c7ccb7da82f9ac5008c97: comments/docstrings only)
+44904171260497ad6d67b30180893bf412a3cff896a9cfa397e562ab070f1267  experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py
+# validated-run md5 5e83c48931deb0a046e49726dd1838ec (shipped md5 9f997e92b2889467bb7c501e938aa4bc: comments/docstrings only)
+99301cec2f260821a9ec8d5aa687e9e73ebc38e872abd7cfa5184577c58e7272  experimental/lite/megatron/lite/primitive/kernels/k31_backend.py
+# validated-run md5 cd09fbe8cc77c09d8b5e5142f99d3222 (shipped md5 26d8d9c5a999b462ee3459ceebed2a30: comments/docstrings + 3 neutral string constants)
+76fd785a90495eca8dc55274f32bd2756e249df9289774770ee7dca7000aa3db  experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py
+# validated-run md5 e631624c82147748161164a771318ca1
+2aae9a3e85da6d9aff7abcb4dd7ca47edb9dcc504d916a7b09e37c01948ded4f  experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py
+# validated-run md5 92c74472371453fa29cb0791b4dedfca
+4635707611dd262dd86f4f1f1b794f9efe5ba590fea9227cb26e3d3828d3aa85  experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
+# validated-run md5 6f6766355af6dfd0efe38cb41aef811c
+9a6a2706c05c9c385399b9e410f147ea9e2001a1ef8cee69d3f24f576d8d613e  experimental/lite/megatron/lite/runtime/megatron_utils.py
+# validated-run md5 5f1d1b13a2e4f04c1b3c54a1599ed0eb (shipped md5 169b5f6c5f5aecae57528996f7c42709: comments/docstrings only)
+fdbb6bbd5770639635b1683d6c28828c8d2e46d5a068e44af59e1c0620a489cb  experimental/lite/tests/unit/model/k31/vllm/test_dsa_rocm_cpu.py
+# validated-run md5 f21bd20d547a5623f1d30606ac538fe4
+0f2d5221ba6f312392d16edc1066a51f1c6d68d5466e40a4dd333a72640c9f14  kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/METADATA
+# validated-run md5 b660a3d83d5d5bd77c41f6b80e812f0f
+1d682748217a413cdfc9bcf0ab281a8359d84518c2ffc7fe0f9dbbad1240d00a  kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/entry_points.txt
+# validated-run md5 c2308c6612f523a56d00fc3e72729459 (shipped md5 c9b14fb4e650326759fa116f05246f8d: comments/docstrings only)
+3aa01db55381219565dc6a69d1d44df96acefabc72ed612f28db3051b9292c07  kimi-k31/k31kdabi/k31kdabi/__init__.py
+# validated-run md5 7342ca888a4335253ba747634dbfc5b3 (shipped md5 0f7292bc686963fae4ba64e7a08fe9c8: comments/docstrings only)
+9003da731e71f2b73a2cb099a7affb54bcbfd7ca288f31b74e25b9ba97bc4b37  kimi-k31/k31kdabi/k31kdabi/graphdec.py
+# validated-run md5 9d4e77597c096e9ece2533d7aa3d91ed
+830af137d23c2845974f8799e888a011a65fcef70ddc933811070a3167247b9e  kimi-k31/k31kdabi/k31kdabi/rowdec.py
+# validated-run md5 194e104ad7783a20846a16011b2963dc
+27a8c42854bc49869e5dcabc3d57db0e9336e4b39dbe5049f7884104327a2139  kimi-k31/k31kdabi/k31kdabi/rowkern.py
+# validated-run md5 3cf32880cb8d77b132c2256b05de9ce3
+92c5a48aa2e5aa85775583948fe918e7facb9f2568cf9fddb8d24f6b2e7171b1  kimi-k31/k31lora/k31lora-0.1.dist-info/METADATA
+# validated-run md5 4c2bcf82d259fd2c41076c82e506d017
+6cc4a51bf90915130052da17c921459848255f0f01b6de31681486b8263d4596  kimi-k31/k31lora/k31lora-0.1.dist-info/entry_points.txt
+# validated-run md5 5525d99266705324425e768c9a678b77 (shipped md5 dd6a51a6308a2e9aa82292e79cf886d1: comments/docstrings only)
+74fa180d86bc91c6761aaf96e8727e9cc9b57ccfabd9962f42d1091f9f8f6fbf  kimi-k31/k31lora/k31lora/__init__.py
+# validated-run md5 d0f8dab907e5d53c379d36eef183e84d (shipped md5 85d0e5390ed581d68244cc828460e893: comments/docstrings only)
+17e0cf92b6e38c09be97b691e60b5440f9663962ed9fd85c17a73e62e9d824a1  kimi-k31/k31lora/k31lora/bi_attnres.py
+# validated-run md5 f7c4cdb0835ac59fc1ac4cbd452191a3 (shipped md5 295dbcf8fe1e41d0895093d7345b4ed4: comments/docstrings only)
+2613d73b36bcb36f44c93742e8879d8f21053f999f6286a23599e8da24682ee1  kimi-k31/k31lora/k31lora/bi_lora.py
+# validated-run md5 cfb467747e39adb5db4b65906ad3d367 (shipped md5 ca2b8088e859f82761a34e0678128fcb: comments/docstrings only)
+e1cf96bc0dc7a53acdd7602926de4a39ae5a1a60f3306b0a039aa9a224eacbd5  kimi-k31/k31lora/k31lora/bi_moe.py
+# validated-run md5 93e4dbb389949fe8264c8aa8bdb34502
+4e08c6660afae3c09011cf2ec2f982ad6a5a2f4933b095c6c6ac4d6fa0d00823  kimi-k31/k31lora/k31lora/model.py
+# validated-run md5 a7282893bb7c78af78413f4ba02c7bca (shipped md5 9c4fc5461f49c44440f93fe2dd8bfecb: comments/docstrings only)
+a85e7b226290435a2fbb7677e6dad6d948f6ab7956d92ffd694f181a0f7d9726  kimi-k31/k31lora/k31lora/persist_sleep.py
+# validated-run md5 9a0d82eeefeda9f909de06de9cfe0f93
+2896bde76e068c76edc5a1c2ac0196a8e6a8bc26e5b03a8f88d15de4e2331dd8  kimi-k31/k31xlora/k31xlora-0.1.dist-info/METADATA
+# validated-run md5 5f5927d3eef725a31f216eca567f566d
+4d542f4d64dba22809d6a5504e28f8b18f7f1622b7b2ff8adbc91da991a59334  kimi-k31/k31xlora/k31xlora-0.1.dist-info/entry_points.txt
+# validated-run md5 140d51eba22d6a5941332db8466d91b7 (shipped md5 fbadc9a993b344f40ba0bf64d50d749a: comments/docstrings only)
+7e19a1127723eb2d3864e4d2a00d121f90ecba1bb75fda6ece5467b7b96020d2  kimi-k31/k31xlora/k31xlora/__init__.py
+# validated-run md5 069f6ddb88bc4c0764790d073f40ca50 (shipped md5 a9516b0f215e763c1a8cc755075e1e3a: comments/docstrings only)
+905bc861c1005f18971cad770700818d0f6832bdb7057721ecff1d8244fbd8e7  kimi-k31/k31xlora/k31xlora/a16w4_gemm.py
+# validated-run md5 e43b229ae60eba32eb7b6ef08f06e9c2
+6b1469d49ab89c1324cbd305f3edf041f7bca3fe085a90537eb7cef749a4a841  kimi-k31/k31xlora/k31xlora/aiter_lora_experts.py
+# validated-run md5 b514f8a4fb493019604bb35e8349483d
+6587024435e43e52bd0acd0a90c630d184da9b513996f36694a2a1b3ebd05665  vllm/_aiter_ops.py
+# validated-run md5 340f65146fd43761f942d069b26833a7
+246723c6b9ae447b359eb1f1b2a3f2340473351ede6f0e91d8fcb54890b4bbe2  vllm/model_executor/models/config.py
+# validated-run md5 1590b8e43dc91464b30236187733f41c
+387ee296434d5884df3d43d904c11ca4a140d3d213f7e5180992674f9c7bac91  vllm/models/kimi_k3/amd/dsa.py
+# validated-run md5 38f851d6cb164cf07e89c8734e392fe0
+64455fa7b1d7d65bc28ed807df8d174e2d1f0c8f72578f30c0250de183de0cfe  vllm/v1/attention/backends/mla/indexer.py
+# validated-run md5 0dfe522a9572751f3c1e0786dc600146
+a7ad06171df5fd50e90ab930473de667cbacc29f16ce5f1c4e035bafdba46ea9  vllm/v1/attention/backends/mla/prefill/aiter_flash_attn.py
+# validated-run md5 c5c5e69e0f7dabee04edc11d6a86ff7f
+4ee3f7e08e15fc58d902f124f03189605fc762c5564735a252278684630af135  vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+# validated-run md5 92e4c9bdd64bb8821d9411a47fab8493
+9d3694523554b6afbb7896f1b525e67f5db98a4c289eb9fe2e3a55790e1d61b6  vllm/v1/attention/ops/rocm_aiter_mla_sparse.py

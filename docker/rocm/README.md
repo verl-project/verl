@@ -89,6 +89,39 @@ DOCKER_BUILDKIT=1 docker build \
     -t verl-rocm:mi300 .
 ```
 
+## Kimi-K3.1 true on-policy (MI355X)
+
+[`Dockerfile.rocm.kimi-k31.true-on-policy`](Dockerfile.rocm.kimi-k31.true-on-policy) builds the image for
+[`examples/grpo_trainer/run_kimi_k3_1_true_on_policy_rocm.sh`](../../examples/grpo_trainer/run_kimi_k3_1_true_on_policy_rocm.sh):
+LoRA GRPO on Kimi-K3.1 (MXFP4 routed experts) where the vLLM rollout log-probs and the trainer log-probs of the same
+tokens are bitwise equal (`rollout_probs_diff_max` = 0).
+
+- Base: a ROCm vLLM build with Kimi-K3.1 support (vLLM 0.0.0+f5926fb with AITER), passed with
+  `--build-arg BASE_IMAGE=<image>@sha256:<digest>` (no default; pin it by digest).
+- vLLM: `patches/vllm-k31-bi-*.patch` (DSA batch invariance for Kimi-K3.1 on ROCm).
+- Megatron-LM: `megatron.core` from NVIDIA/Megatron-LM, mLite (`experimental/lite`) with its Kimi-K3.1
+  implementation from the public zero-mismatch-rl branch, plus `patches/megatron-k31-*.patch` (mLite's vLLM-aligned
+  Kimi-K3.1 implementation, `impl=vllm`, on ROCm, with its batch-invariant paths).
+- vLLM general plugins in `/opt/k31-plugins/kimi-k31` (`patches/k31-plugin-*.patch`): `k31lora` (LoRA for the ROCm
+  Kimi-K3.1 model; batch-invariant dense GEMMs, LoRA epilogue, MXFP4 MoE with expert LoRA and AttnRes),
+  `k31kdabi` (batch-invariant KDA with FULL decode graphs) and `k31xlora` (W4A16 expert LoRA for the batch-variant
+  arm). They are not on `PYTHONPATH` by default; the recipe adds the arm's plugins (`K31_PLUGIN_PATH`).
+- The build checks every patched file and every plugin file against `patches/kimi-k31-true-on-policy.sha256`.
+
+```sh
+DOCKER_BUILDKIT=1 docker build \
+    -f docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy \
+    --build-arg BASE_IMAGE=<image>@sha256:<digest> \
+    -t verl-rocm:kimi-k31-true-on-policy .
+```
+
+The recipe selects the arm with `VLLM_BATCH_INVARIANT` (1: batch-invariant rollout + mLite `impl=vllm` actor; 0:
+default vLLM kernels with token-level truncated IS). The validated layout is 2 nodes x 8 GPUs: actor PP4 x EP4, one
+TP8 + EP8 rollout engine per node. Export the arm's environment before `ray start` on every node, and start the
+containers with `--device /dev/infiniband --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576`. RDMA over AMD ionic
+NICs works as for the DeepSeek-V4 image: run `eval "$(ionic-rdma-env.sh)"` before `ray start` and pass the cluster's
+RCCL/RoCE settings into the containers.
+
 ## Release History
 
 - 2026/07/20: ROCm 7.14 stack — torch==2.12.0, triton==3.7.0, vLLM @`18d87a87d`,   SGLang @`0801cc05ed`, 

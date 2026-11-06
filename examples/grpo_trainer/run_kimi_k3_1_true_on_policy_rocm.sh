@@ -24,18 +24,17 @@
 #           (VERL_K31_WAKE_RELOAD=1); the adapter is exported while vLLM still sleeps (VERL_LORA_EXPORT_BEFORE_WAKE=1)
 #           and each rollout worker receives only the expert factors of its EP rank (VERL_K31_LORA_RANK_SLICE=1).
 #
-# Dependencies (not part of verl; see the PR description):
-#   - a ROCm image with the Kimi-K3.1 vLLM build (VLLM_ROCM_USE_AITER=1) plus the DSA batch-invariance patch;
-#   - Megatron-LM with experimental/lite and its ROCm Kimi-K3.1 port (MEGATRON_ROOT);
-#   - the rollout plugins on K31_PLUGIN_PATH: the Kimi-K3.1 LoRA plugin (batch-invariant dense GEMMs, LoRA f32 add,
-#     batch-invariant MXFP4 MoE with expert LoRA) and the batch-invariant KDA plugin.
+# Image: docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy (the ROCm vLLM build with Kimi-K3.1 support + the DSA
+# batch-invariance patch, Megatron-LM mLite with its Kimi-K3.1 ROCm port, and the vLLM plugins in K31_PLUGIN_ROOT:
+# k31lora and k31kdabi for the consistent arm, k31lora and k31xlora for the baseline arm).
 #
 # Containers: --device /dev/kfd --device /dev/dri --device /dev/infiniband --ulimit memlock=-1:-1
 #             --ulimit nofile=1048576:1048576. Export this arm's environment before `ray start` on every node as well:
 #             some of it is read at import time in Ray-spawned processes.
 #
 # Required env: MODEL_PATH (Kimi-K3.1 HF directory, node-local on every node), LORA_ADAPTER_PATH, TRAIN_FILES,
-# VAL_FILES, VERL_ROOT, MEGATRON_ROOT, K31_PLUGIN_PATH; RAY_ADDRESS of an existing Ray cluster for NNODES > 1.
+# VAL_FILES; VERL_ROOT, MEGATRON_ROOT and K31_PLUGIN_ROOT (set by the image); RAY_ADDRESS of an existing Ray cluster
+# for NNODES > 1. K31_PLUGIN_PATH overrides the arm's plugin directories.
 # Modes: DRY_RUN=1 prints the arm environment and the full command; COMPOSE_ONLY=1 prints the resolved Hydra config.
 # Extra arguments are passed to verl.trainer.main_ppo as Hydra overrides (last wins).
 set -euo pipefail
@@ -60,7 +59,12 @@ HYDRA_OVERRIDES=("$@")
 : "${VAL_FILES:?set VAL_FILES to the DAPO-format validation parquet}"
 : "${VERL_ROOT:?set VERL_ROOT to this verl checkout}"
 : "${MEGATRON_ROOT:?set MEGATRON_ROOT to the Megatron-LM checkout with experimental/lite}"
-: "${K31_PLUGIN_PATH:?set K31_PLUGIN_PATH to the Kimi-K3.1 rollout plugin directories (colon separated)}"
+: "${K31_PLUGIN_ROOT:=/opt/k31-plugins/kimi-k31}"
+if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+  : "${K31_PLUGIN_PATH:=${K31_PLUGIN_ROOT}/k31lora:${K31_PLUGIN_ROOT}/k31kdabi}"
+else
+  : "${K31_PLUGIN_PATH:=${K31_PLUGIN_ROOT}/k31lora:${K31_PLUGIN_ROOT}/k31xlora}"
+fi
 [[ -s "${MODEL_PATH}/config.json" ]] || die "missing ${MODEL_PATH}/config.json"
 
 # --- Workload (shared by both arms) -------------------------------------------------------------------------------

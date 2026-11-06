@@ -1,0 +1,147 @@
+# syntax=docker/dockerfile:1.7
+# Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_true_on_policy_rocm.sh
+#
+# Base: the ROCm vLLM build with Kimi-K3.1 support (vLLM 0.0.0+f5926fb, AITER), plus
+#   - a vLLM DSA batch-invariance patch (patches/vllm-k31-bi-*.patch);
+#   - Megatron-LM: megatron.core from NVIDIA/Megatron-LM with mLite (experimental/lite) and its Kimi-K3.1
+#     implementation from the public zero-mismatch-rl branch, plus patches/megatron-k31-*.patch, which run mLite's
+#     vLLM-aligned Kimi-K3.1 implementation (impl=vllm) on ROCm with batch-invariant paths;
+#   - vLLM general plugins in /opt/k31-plugins/kimi-k31 (patches/k31-plugin-*.patch): k31lora (LoRA for the ROCm Kimi-K3.1 model,
+#     batch-invariant dense GEMMs / LoRA epilogue / MXFP4 MoE with expert LoRA / AttnRes), k31kdabi (batch-invariant
+#     KDA, FULL decode graphs) and k31xlora (W4A16 expert LoRA for the batch-variant arm). The recipe puts the arm's
+#     plugins on PYTHONPATH; nothing is on it by default;
+#   - upstream rdma-core in /opt/rdma-core for hosts with AMD ionic 26.x NIC drivers (as #8505, ionic-rdma-env.sh).
+# With VLLM_BATCH_INVARIANT=1 the rollout log-probs and the trainer log-probs of the same tokens are bitwise equal.
+# Every patched file and every plugin file is checked against patches/kimi-k31-true-on-policy.sha256 at build time.
+#
+# Build from the repository root, with BASE_IMAGE = a ROCm vLLM build with Kimi-K3.1 support (vLLM f5926fb with AITER;
+# pin it by digest, <image>@sha256:<digest>):
+#   DOCKER_BUILDKIT=1 docker build -f docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy \
+#     --build-arg BASE_IMAGE=<image>@sha256:<digest> -t verl-rocm:kimi-k31-true-on-policy .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+SHELL ["/bin/bash", "-ceuxo", "pipefail"]
+ENTRYPOINT []
+
+# Keep the base image's ROCm torch/Triton: later pip steps must not replace them.
+RUN python3 -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('torch','triton','torchvision','torchaudio') if any(d.metadata['Name'].lower()==p for d in m.distributions())]" > /opt/base-constraints.txt && cat /opt/base-constraints.txt
+ENV PIP_CONSTRAINT=/opt/base-constraints.txt
+
+# --- Python dependencies (verl's install_requires that are not in the base; verl itself is installed --no-deps) -----
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install flash-linear-attention==0.5.2 mathruler==0.1.0 codetiming==1.4.0 pylatexenc==2.11 \
+      torchdata==0.11.0 tensorboard wandb hydra-core omegaconf dill "ray[default]>=2.41.0" tensordict==0.10.0 \
+      peft accelerate pyarrow pandas "datasets>=4.0"
+
+COPY docker/rocm/patches /opt/patches
+
+# --- vLLM: DSA batch invariance for Kimi-K3.1 (see the header of each patch) ----------------------------------------
+# -F0: a patch that no longer applies exactly fails the build instead of applying with fuzz.
+RUN <<'EOF'
+set -eux
+cd "$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(os.path.realpath(vllm.__file__))))')"
+for p in /opt/patches/vllm-k31-bi-*.patch; do
+  patch -p1 -F0 --no-backup-if-mismatch < "${p}"
+done
+grep '  vllm/' /opt/patches/kimi-k31-true-on-policy.sha256 | sha256sum -c --quiet -
+EOF
+
+# --- Megatron-LM: megatron.core (NVIDIA) + mLite Kimi-K3.1 (zero-mismatch-rl) + ROCm patches ------------------------
+ARG MEGATRON_LM_REPO="https://github.com/NVIDIA/Megatron-LM.git"
+ARG MEGATRON_LM_COMMIT=f78809f6d9c88f8638ea7822966f35057a63fd5c
+ARG MLITE_K31_REPO="https://github.com/Inferact/zero-mismatch-rl.git"
+ARG MLITE_K31_COMMIT=8dd1d2bcb8561380c0341391ecd5d1bda9a55380
+RUN <<'EOF'
+set -eux
+git init -q /opt/Megatron-LM
+cd /opt/Megatron-LM
+git fetch -q --depth 1 "${MEGATRON_LM_REPO}" "${MEGATRON_LM_COMMIT}"
+git -c advice.detachedHead=false checkout -q FETCH_HEAD
+git init -q /tmp/mlite-k31
+git -C /tmp/mlite-k31 fetch -q --depth 1 "${MLITE_K31_REPO}" "${MLITE_K31_COMMIT}"
+git -C /tmp/mlite-k31 -c advice.detachedHead=false checkout -q FETCH_HEAD
+rm -rf /opt/Megatron-LM/experimental/lite
+cp -a /tmp/mlite-k31/experimental/lite /opt/Megatron-LM/experimental/lite
+rm -rf /tmp/mlite-k31
+for p in /opt/patches/megatron-k31-*.patch; do
+  git apply --whitespace=nowarn "${p}"
+done
+grep '  experimental/' /opt/patches/kimi-k31-true-on-policy.sha256 | sha256sum -c --quiet -
+pip install --no-deps -e /opt/Megatron-LM
+# mLite (megatron.lite) and its verl integration (verl_mlite) are not packaged: register their source roots.
+site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+printf '%s\n' /opt/Megatron-LM/experimental/lite /opt/Megatron-LM/experimental/lite/examples/verl \
+  > "${site}/megatron_lite_verl_mlite.pth"
+EOF
+
+# --- vLLM general plugins (selected per arm by the recipe through K31_PLUGIN_PATH) ----------------------------------
+RUN <<'EOF'
+set -eux
+mkdir -p /opt/k31-plugins
+cd /opt/k31-plugins
+for p in /opt/patches/k31-plugin-*.patch; do
+  git apply "${p}"
+done
+grep '  kimi-k31/' /opt/patches/kimi-k31-true-on-policy.sha256 | sha256sum -c --quiet -
+EOF
+
+# --- RDMA userspace for AMD ionic (Pollara / AINIC) NICs (as #8505) -------------------------------------------------
+ARG RDMA_CORE_VERSION=65.0
+ARG RDMA_CORE_SHA256=8eb93c14740146e04c28ac25874e106b61c7d3ab66a36d07099e938985ef0680
+RUN <<'EOF'
+set -eux
+apt-get update
+apt-get install -y --no-install-recommends cmake ninja-build pkg-config wget \
+  libnl-3-dev libnl-route-3-dev libudev-dev
+cd /tmp
+wget -q "https://github.com/linux-rdma/rdma-core/releases/download/v${RDMA_CORE_VERSION}/rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+echo "${RDMA_CORE_SHA256}  rdma-core-${RDMA_CORE_VERSION}.tar.gz" | sha256sum -c -
+tar xzf "rdma-core-${RDMA_CORE_VERSION}.tar.gz"
+cmake -S "rdma-core-${RDMA_CORE_VERSION}" -B rdma-build -GNinja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/opt/rdma-core -DCMAKE_INSTALL_LIBDIR=lib -DNO_MAN_PAGES=1 -DNO_PYVERBS=1 -DENABLE_STATIC=0
+ninja -C rdma-build install
+rm -rf /tmp/rdma-build "/tmp/rdma-core-${RDMA_CORE_VERSION}"* /var/lib/apt/lists/*
+test -e /opt/rdma-core/lib/libibverbs/libionic-rdmav*.so
+EOF
+COPY --chmod=755 docker/rocm/ionic-rdma-env.sh /usr/local/bin/ionic-rdma-env.sh
+
+# --- verl (this checkout) -----------------------------------------------------------------------------------------
+COPY . /opt/verl
+RUN pip install --no-deps -e /opt/verl
+
+ENV VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE_SITUV2=0 VLLM_USE_BREAKABLE_CUDAGRAPH=1 \
+    VLLM_ENGINE_READY_TIMEOUT_S=7200 HSA_NO_SCRATCH_RECLAIM=1 VLLM_BATCH_INVARIANT=0 \
+    VERL_ROOT=/opt/verl MEGATRON_ROOT=/opt/Megatron-LM K31_PLUGIN_ROOT=/opt/k31-plugins/kimi-k31
+
+# --- Closure checks (no GPU at build time: nothing that imports aiter at module scope) ------------------------------
+WORKDIR /opt/verl
+RUN <<'EOF'
+set -eux
+python3 - <<'PY'
+import importlib.util
+import os
+
+import torch
+
+assert torch.version.hip, torch.__version__
+
+
+def origin(mod):
+    spec = importlib.util.find_spec(mod)
+    assert spec is not None, mod
+    return os.path.realpath(spec.origin or next(iter(spec.submodule_search_locations)))
+
+
+paths = {m: origin(m) for m in ("vllm", "megatron.core", "megatron.lite", "verl_mlite", "verl", "fla.ops.kda")}
+assert paths["megatron.core"].startswith("/opt/Megatron-LM/"), paths
+assert paths["megatron.lite"].startswith("/opt/Megatron-LM/experimental/lite/"), paths
+assert paths["verl_mlite"].startswith("/opt/Megatron-LM/experimental/lite/examples/verl/"), paths
+assert paths["verl"].startswith("/opt/verl/"), paths
+# The plugins are not importable unless the recipe puts them on PYTHONPATH.
+assert importlib.util.find_spec("k31lora") is None and importlib.util.find_spec("k31xlora") is None
+print(paths)
+PY
+EOF
+
+CMD ["/bin/bash"]
