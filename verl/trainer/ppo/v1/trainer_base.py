@@ -1756,12 +1756,23 @@ class PPOTrainer(ABC):
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]
         if self.use_critic:
             fields.append("values")
+        adv_estimator = self.config.algorithm.adv_estimator
+        adv_name = str(getattr(adv_estimator, "value", adv_estimator))
+        if adv_name == "grpo_segment":
+            fields.extend(["segment_boundaries", "combined_rewards"])
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
+        segment_boundaries = combined_rewards = None
+        if "segment_boundaries" in data.keys():
+            segment_boundaries = data.pop("segment_boundaries").tolist()
+            combined_rewards = data.pop("combined_rewards").tolist()
         response_mask = data["response_mask"]
         data = DataProto(batch=data.to_padded_tensor())
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
+        if segment_boundaries is not None:
+            data.non_tensor_batch["segment_boundaries"] = np.array(segment_boundaries, dtype=object)
+            data.non_tensor_batch["combined_rewards"] = np.array(combined_rewards, dtype=object)
 
         # 1. apply kl penalty to rewards
         if self.config.algorithm.use_kl_in_reward:
