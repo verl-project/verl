@@ -299,6 +299,8 @@ class HttpServerAdapter(EngineBase):
         method: str = "POST",
         timeout: float = DEFAULT_TIMEOUT,
         only_master: bool = True,
+        *,
+        max_attempts: Optional[int] = None,
     ) -> dict[str, Any]:
         """Make a HTTP request with retry logic and consistent error handling.
 
@@ -307,6 +309,9 @@ class HttpServerAdapter(EngineBase):
             payload (Optional[Dict[str, Any]], optional): The JSON payload to send.
                 Defaults to empty dict if None.
             method (str, optional): HTTP method to use. Defaults to "POST".
+            max_attempts (Optional[int]): Per-request attempt limit; defaults to
+                the adapter setting. Set to 1 for non-idempotent requests to
+                propagate transport failures immediately without retrying.
 
         Returns:
             Dict[str, Any]: The JSON response from the server
@@ -325,7 +330,8 @@ class HttpServerAdapter(EngineBase):
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
 
-        for attempt in range(self.max_attempts):
+        attempts = self.max_attempts if max_attempts is None else max_attempts
+        for attempt in range(attempts):
             try:
                 if method.upper() == "GET":
                     response = requests.get(url, timeout=self.timeout)
@@ -336,21 +342,36 @@ class HttpServerAdapter(EngineBase):
                 return _read_response(response)
 
             except requests.exceptions.Timeout:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Request to {endpoint} timed out (attempt {attempt + 1})")
             except requests.exceptions.ConnectionError:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except requests.exceptions.HTTPError as e:
                 _log_error_body(endpoint, e.response.status_code, e.response.text)
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
-                if attempt == self.max_attempts - 1:
+                if attempt == attempts - 1:
                     raise
 
-            if attempt < self.max_attempts - 1:
+            if attempt < attempts - 1:
                 time.sleep(self.retry_delay * (2**attempt))
 
-        raise RuntimeError(f"Failed to complete request to {endpoint} after {self.max_attempts} attempts")
+        raise RuntimeError(f"Failed to complete request to {endpoint} after {attempts} attempts")
+
+    def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        """Open a session once; a lost response leaves server state uncertain.
+
+        Do not retry or infer ownership of a session after a transport failure.
+        """
+        return self._make_request("begin_weight_update", {"selector": selector}, max_attempts=1)
+
+    def end_weight_update(self) -> dict[str, Any]:
+        """Finalize the weights in the current session."""
+        return self._make_request("end_weight_update", {})
 
     def update_weights_from_tensor(self, req: UpdateWeightsFromTensorReqInput) -> dict[str, Any]:
         """Update model weights from tensor data.
@@ -667,6 +688,8 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         method: str = "POST",
         timeout: float = DEFAULT_TIMEOUT,
         only_master: bool = True,
+        *,
+        max_attempts: Optional[int] = None,
     ) -> dict[str, Any]:
         """Make an async HTTP request with retry logic and consistent error handling.
 
@@ -675,6 +698,9 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             payload (Optional[Dict[str, Any]], optional): The JSON payload to send.
                 Defaults to empty dict if None.
             method (str, optional): HTTP method to use. Defaults to "POST".
+            max_attempts (Optional[int]): Per-request attempt limit; defaults to
+                the adapter setting. Set to 1 for non-idempotent requests to
+                propagate transport failures immediately without retrying.
 
         Returns:
             Dict[str, Any]: The JSON response from the server
@@ -693,7 +719,8 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
 
-        for attempt in range(self.max_attempts):
+        attempts = self.max_attempts if max_attempts is None else max_attempts
+        for attempt in range(attempts):
             try:
                 async with self._get_session() as session:
                     if method.upper() == "GET":
@@ -712,21 +739,25 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                             return await _read_async_response(response)
 
             except asyncio.TimeoutError:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Async request to {endpoint} timed out (attempt {attempt + 1})")
             except aiohttp.ClientConnectorError:
+                if max_attempts == 1:
+                    raise
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except aiohttp.ClientResponseError as e:
                 logger.error(f"HTTP error for {endpoint}: {e}")
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
-                if attempt == self.max_attempts - 1:
+                if attempt == attempts - 1:
                     raise
 
-            if attempt < self.max_attempts - 1:
+            if attempt < attempts - 1:
                 await asyncio.sleep(self.retry_delay * (2**attempt))
 
-        raise RuntimeError(f"Failed to complete async request to {endpoint} after {self.max_attempts} attempts")
+        raise RuntimeError(f"Failed to complete async request to {endpoint} after {attempts} attempts")
 
     async def release_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
         """Release GPU memory occupation temporarily (async version).
@@ -754,6 +785,17 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             Dict[str, Any]: Server response indicating memory resume status
         """
         return await self._make_async_request("resume_memory_occupation", {"tags": tags})
+
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        """Open a session once; a lost response leaves server state uncertain.
+
+        Do not retry or infer ownership of a session after a transport failure.
+        """
+        return await self._make_async_request("begin_weight_update", {"selector": selector}, max_attempts=1)
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        """Finalize the weights in the current session."""
+        return await self._make_async_request("end_weight_update", {})
 
     async def update_weights_from_tensor(
         self,
