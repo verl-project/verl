@@ -148,6 +148,10 @@ class vLLMHttpServer:
         self._pd_prefill_engine_id: Optional[str] = None
         self._pd_peer_idx: int = 0
 
+        runtime_context = ray.get_runtime_context()
+        ray_job_id = runtime_context.get_job_id()
+        actor_name = runtime_context.get_actor_name()
+
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
         # Forward the Ray job id into the vLLM worker subprocess so the
@@ -156,7 +160,9 @@ class vLLMHttpServer:
         # the same /tmp/rl-colocate-zmq-replica-0-rank-0.sock and one fails
         # with EADDRINUSE; a stale socket from a crashed run trips the same
         # error on restart.
-        os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
+        os.environ["VERL_RAY_JOB_ID"] = ray_job_id
+        lookup_rpc_identity = f"{ray_job_id}:{actor_name}"
+        self._mooncake_lookup_rpc_port = (zlib.crc32(lookup_rpc_identity.encode()) & 0x7FFFFFFF) or 1
 
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
@@ -1415,6 +1421,22 @@ class vLLMHttpServer:
                 "rollout.engine_kwargs.vllm may not set args that verl derives from its config: "
                 + "; ".join(f"{key} (set {_VERL_MANAGED_VLLM_ARGS[key.replace('-', '_')]})" for key in managed)
             )
+
+        transfer_key = next(
+            (key for key in engine_kwargs if key.replace("-", "_") == "kv_transfer_config"),
+            None,
+        )
+        if transfer_key is not None:
+            transfer_config = engine_kwargs[transfer_key]
+            if isinstance(transfer_config, str):
+                transfer_config = json.loads(transfer_config)
+            if transfer_config.get("kv_connector") == "MooncakeStoreConnector":
+                transfer_config = dict(transfer_config)
+                extra_config = dict(transfer_config.get("kv_connector_extra_config") or {})
+                extra_config.setdefault("lookup_rpc_port", self._mooncake_lookup_rpc_port)
+                transfer_config["kv_connector_extra_config"] = extra_config
+            engine_kwargs[transfer_key] = transfer_config
+
         if _VLLM_VERSION < version.parse("0.22.0"):
             # Work around multimodal processor cache desync across pause/resume.
             # See: https://github.com/vllm-project/vllm/pull/43001/
