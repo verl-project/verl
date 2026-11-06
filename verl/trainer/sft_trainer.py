@@ -241,6 +241,12 @@ class SFTTrainer:
         self.train_batch_size_per_dp = self.global_batch_size // dp_size
         self.collate_fn = SFTTensorCollator(config.data.pad_mode)
 
+        # Without an explicit generator, every iterator construction draws its base seed from the
+        # global CPU RNG. On resume that draw happens right after the checkpointed RNG state is
+        # restored, so training continues from a different RNG state than an uninterrupted run.
+        # Seed per dp rank (ranks in one dp group load the same data_{dp_rank}.pt) and keep the
+        # validation stream separate so building a val iterator never shifts the train one.
+        seed = config.trainer.seed
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.train_batch_size_per_dp,
@@ -250,6 +256,7 @@ class SFTTrainer:
             pin_memory=False,
             drop_last=True,
             pin_memory_device=device_name,
+            generator=torch.Generator().manual_seed(seed + dp_rank),
         )
 
         if self.val_dataset:
@@ -265,6 +272,7 @@ class SFTTrainer:
                 pin_memory=False,
                 drop_last=True,
                 pin_memory_device=device_name,
+                generator=torch.Generator().manual_seed(seed + dp_size + dp_rank),
             )
         else:
             self.val_dataloader = None
