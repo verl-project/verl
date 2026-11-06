@@ -1,0 +1,62 @@
+DSA with virtual TP (MLITE_K31_BI_VTP=N): run the attention in the head groups of a TP=N rollout rank, so the result
+cannot depend on the kernel's head count. Upstream status: not yet proposed.
+
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/dsa.py b/experimental/lite/megatron/lite/model/k31/vllm/dsa.py
+index 989967b9b43609ddfe994efea8f3e0cbdb4b2385..05786f6e6bd5369c8555ca46cc84379b22de7421 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/dsa.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/dsa.py
+@@ -108,6 +108,9 @@ class K31DSAAttention(nn.Module):
+         )
+         self.g_proj = K31Linear(h, (heads * config.v_head_dim,), ("g_proj",), lora=lora)
+         self.o_proj = K31Linear(heads * config.v_head_dim, (h,), ("o_proj",), lora=lora)
++        # vLLM RowParallelLinear: under MLITE_K31_BI_VTP=N (TP=N BI rollout, K31_BI_AR=1) the virtual TP reproduces
++        # its per-rank partials + fixed-order sum; inert otherwise.
++        self.o_proj.row_parallel = True
+         self.indexer = _Indexer(config)
+ 
+     def forward(
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py
+index fee09d21acb50ec58349e7e23e4f5aaef01d9e88..31eb7cc2f7c011e780d75991b874c256dc94c74e 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py
+@@ -505,6 +505,17 @@ def rollout_bi_indexer_topk(
+     return out
+ 
+ 
++def _vtp_groups(heads: int) -> int:
++    """Head groups of a TP=N BI rollout (MLITE_K31_BI_VTP; 1 = TP1)."""
++    try:
++        n = importlib.import_module("megatron.lite.primitive.kernels.rocm_k31").vtp_size()
++    except (ImportError, AttributeError):
++        n = 1
++    if n > 1 and heads % n:
++        raise ValueError(f"MLITE_K31_BI_VTP={n} does not divide {heads} attention heads")
++    return n
++
++
+ class BISparseMLAFunction(torch.autograd.Function):
+     """Forward value: the BI rollout's sparse MLA (fp8_ds_mla cache + aiter Triton sparse_mla_fwd, kv_splits=1
+     under VLLM_BATCH_INVARIANT); backward: the FP32 reference VJP on the cache's rounded KV (STE through the fp8
+@@ -526,9 +537,19 @@ class BISparseMLAFunction(torch.autograd.Function):
+         indptr[1:] = valid.sum(1).cumsum(0).to(torch.int32)
+         indices = packed[valid].to(torch.int32)  # row-major: each row's top-k in its (ascending) order
+         o = torch.empty((T, H, kv_c.shape[-1]), dtype=q.dtype, device=q.device)
+-        aiter_ops.triton_sparse_mla_fwd(q.detach().contiguous(), cache.view(-1, 656).unsqueeze(1), o, scale,
+-                                        indptr, indices, kv_lora_rank=kv_c.shape[-1],
+-                                        qk_rope_head_dim=k_pe.shape[-1], has_invalid=False)
++        kv_buf = cache.view(-1, 656).unsqueeze(1)
++        # Virtual TP (MLITE_K31_BI_VTP=N): a TP=N rollout rank runs H/N heads per kernel call; run the same head
++        # groups so the result cannot depend on the kernel's head count.
++        groups = _vtp_groups(H)
++        hg = H // groups
++        for g in range(groups):
++            sl = slice(g * hg, (g + 1) * hg)
++            og = torch.empty((T, hg, kv_c.shape[-1]), dtype=q.dtype, device=q.device) if groups > 1 else o
++            aiter_ops.triton_sparse_mla_fwd(q[:, sl].detach().contiguous(), kv_buf, og, scale,
++                                            indptr, indices, kv_lora_rank=kv_c.shape[-1],
++                                            qk_rope_head_dim=k_pe.shape[-1], has_invalid=False)
++            if groups > 1:
++                o[:, sl] = og
+         ctx.save_for_backward(q, kv_c, k_pe, packed)
+         ctx.scale = scale
+         return o
