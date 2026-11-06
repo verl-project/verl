@@ -283,6 +283,14 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
    has finished, and the loaded NVSHMEM host runtime must be compatible with
    the device library used to build the native wheel.
 
+.. note::
+
+    The generic fused output-head implementation does not support models with
+    ``final_logit_softcapping`` enabled, including Gemma variants that use it.
+    Set ``actor_rollout_ref.model.use_fused_kernels=False`` for these models to
+    preserve their log-probabilities and gradients. Selecting another fused
+    backend does not remove this limitation.
+
 Forward prefetch in FSDP training backend
 ----------------------
 
