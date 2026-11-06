@@ -1,0 +1,772 @@
+vLLM (ROCm Kimi-K3.1 build, f5926fb) DSA batch invariance for Kimi-K3.1 under VLLM_BATCH_INVARIANT=1: the DSA
+layers force sparse MQA and disable ShardQ; the indexer computes decode logits like prefill (row-bounded [ks, ke)
+kernels) and selects top-k deterministically; sparse MLA decode runs with one KV split; the AITER FA MLA prefill and
+the indexer backend accept batch-invariant mode for this model only. Applied to site-packages with patch -p1 -F0.
+Upstream status: not yet proposed.
+
+diff --git a/vllm/_aiter_ops.py b/vllm/_aiter_ops.py
+index b395113..0814a47 100644
+--- a/vllm/_aiter_ops.py
++++ b/vllm/_aiter_ops.py
+@@ -3930,6 +3930,9 @@ class rocm_aiter_ops:
+             and out_mxfp8 is None
+             and inv_rope_positions is None
+             and inv_rope_cos_sin_cache is None
++            # Batch-invariant: one kernel at every token count (FlyDSL only
++            # takes batches above a token threshold).
++            and not envs.VLLM_BATCH_INVARIANT
+         )
+         if flydsl_eligible:
+             handled, lse = rocm_aiter_ops._flydsl_sparse_mla_fwd(
+@@ -3956,6 +3959,10 @@ class rocm_aiter_ops:
+ 
+         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+ 
++        # Batch-invariant: no split-K. The default split count follows the
++        # number of query rows (_mla_num_splits) and the bf16 partials are
++        # combined per split, so a row's output would depend on its batch.
++        bi_kwargs = {"kv_splits": 1} if envs.VLLM_BATCH_INVARIANT else {}
+         _, lse = sparse_mla_fwd(
+             q,
+             kv_buffer,
+@@ -3977,6 +3984,7 @@ class rocm_aiter_ops:
+             inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
+             out_mxfp8=out_mxfp8,
+             return_lse=return_lse,
++            **bi_kwargs,
+         )
+         return lse
+ 
+diff --git a/vllm/model_executor/models/config.py b/vllm/model_executor/models/config.py
+index 3744e14..6389436 100644
+--- a/vllm/model_executor/models/config.py
++++ b/vllm/model_executor/models/config.py
+@@ -624,6 +624,20 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+         ):
+             cache_config.cache_dtype = "fp8_ds_mla"
+             logger.info("Using custom fp8 kv-cache format for Kimi K3 DSA")
++        import vllm.envs as envs
++
++        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
++            # Batch-invariant DSA on ROCm: prefill rows take the sparse MQA
++            # kernel decode rows take (dense / masked MHA prefill for
++            # max_seq_len <= index_topk is another reduction), and each TP
++            # rank attends whole steps (no ShardQ token split).
++            attention_config = vllm_config.attention_config
++            if not attention_config.sparse_mla_force_mqa:
++                attention_config.sparse_mla_force_mqa = True
++                logger.info("VLLM_BATCH_INVARIANT=1: Kimi K3 DSA forces sparse MQA")
++            if getattr(attention_config, "sparse_mla_shard_q", False):
++                attention_config.sparse_mla_shard_q = False
++                logger.info("VLLM_BATCH_INVARIANT=1: Kimi K3 DSA disables ShardQ")
+         if vllm_config.speculative_config is not None:
+             from vllm.models.kimi_k3.nvidia.dense_draft import configure_dense_draft
+ 
+diff --git a/vllm/models/kimi_k3/amd/dsa.py b/vllm/models/kimi_k3/amd/dsa.py
+index d6246bb..54a4143 100644
+--- a/vllm/models/kimi_k3/amd/dsa.py
++++ b/vllm/models/kimi_k3/amd/dsa.py
+@@ -16,6 +16,7 @@ import torch
+ import torch.nn.functional as F
+ from torch import nn
+ 
++import vllm.envs as envs
+ from vllm._aiter_ops import rocm_aiter_ops
+ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+@@ -414,6 +415,16 @@ class KimiK3DSAIndexer(nn.Module):
+             index_head_dim != 128 or index_num_heads not in (16, 32, 64)
+         ):
+             raise ValueError("Kimi MXFP4 requires head_dim=128 and 16/32/64 heads")
++        if envs.VLLM_BATCH_INVARIANT and (
++            self.use_fp4 or vllm_config.parallel_config.decode_context_parallel_size > 1
++        ):
++            # The batch-invariant indexer (rocm_aiter_sparse_attn_indexer) covers
++            # the FP8 key cache without DCP; MXFP4 scoring and the DCP merge
++            # paths keep their batch-dependent kernels.
++            raise NotImplementedError(
++                "VLLM_BATCH_INVARIANT=1: the ROCm Kimi K3.1 DSA indexer supports "
++                "the FP8 index cache without decode context parallelism only"
++            )
+         self.cp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+         # MLAModules contract: MultiHeadLatentAttention asserts the indexer
+         # exposes topk_tokens.
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index cf4e95e..0eaf6de 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -227,6 +227,22 @@ class DeepseekV32IndexerBackend(AttentionBackend):
+             _supports_flattened_device_query_lens()
+         )
+ 
++    @classmethod
++    def supports_batch_invariance(cls) -> bool:
++        # ROCm Kimi-K3.1 DSA only (dsa_config): under VLLM_BATCH_INVARIANT its indexer runs the
++        # deterministic top-k for prefill and decode, with decode logits through the prefill logits kernel
++        # (v1/attention/ops/rocm_aiter_mla_sparse.py, _use_bi_indexer). Other indexer models stay refused.
++        if not current_platform.is_rocm():
++            return False
++        from vllm.config import get_current_vllm_config_or_none
++
++        cfg = get_current_vllm_config_or_none()
++        if cfg is None or cfg.model_config is None:
++            # Worker-side KV-cache grouping may run outside the config context; the BI indexer is only
++            # present in images carrying this patch, which target K3.1.
++            return True
++        return getattr(cfg.model_config.hf_text_config, "dsa_config", None) is not None
++
+     @staticmethod
+     def get_name() -> str:
+         return "DEEPSEEK_V32_INDEXER"
+diff --git a/vllm/v1/attention/backends/mla/prefill/aiter_flash_attn.py b/vllm/v1/attention/backends/mla/prefill/aiter_flash_attn.py
+index 3df81ef..fb8d107 100644
+--- a/vllm/v1/attention/backends/mla/prefill/aiter_flash_attn.py
++++ b/vllm/v1/attention/backends/mla/prefill/aiter_flash_attn.py
+@@ -53,7 +53,7 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
+         invalid_reasons = super().validate_configuration(
+             device_capability, selector_config
+         )
+-        if envs.VLLM_BATCH_INVARIANT:
++        if envs.VLLM_BATCH_INVARIANT and not _bi_prefill_unused():
+             invalid_reasons.append("batch invariance not supported")
+         return invalid_reasons
+ 
+@@ -138,3 +138,18 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
+             return_lse=True,
+         )
+         return out, lse
++
++def _bi_prefill_unused() -> bool:
++    """Batch-invariant runs may select this backend only when it can never run: a model whose MLA
++    layers are all DSA (sparse) with sparse_mla_force_mqa, so every prefill goes through the sparse
++    MQA kernel (Kimi-K3.1 on ROCm under VLLM_BATCH_INVARIANT, see models/config.py)."""
++    from vllm.config import get_current_vllm_config_or_none
++
++    cfg = get_current_vllm_config_or_none()
++    if cfg is None or cfg.model_config is None:
++        return False
++    text = cfg.model_config.hf_text_config
++    return bool(
++        getattr(text, "dsa_config", None) is not None
++        and getattr(cfg.attention_config, "sparse_mla_force_mqa", False)
++    )
+diff --git a/vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py b/vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+index e245ffc..4beec52 100644
+--- a/vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+@@ -650,6 +650,13 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
+     def is_sparse(cls) -> bool:
+         return True
+ 
++    @classmethod
++    def supports_batch_invariance(cls) -> bool:
++        # Under VLLM_BATCH_INVARIANT the fp8_ds_mla path runs one fixed kernel per row: the Triton sparse MLA
++        # with kv_splits=1 (no FlyDSL, _aiter_ops.triton_sparse_mla_fwd), prefill forced through the same
++        # sparse MQA kernel (sparse_mla_force_mqa, models/config.py) and a deterministic indexer top-k.
++        return True
++
+     @classmethod
+     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+         return (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
+diff --git a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+index d241e0a..a86e418 100644
+--- a/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
++++ b/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+@@ -1,9 +1,11 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import functools
++import os
+ import importlib
+ import inspect
+ import math
++import sys
+ from collections.abc import Callable
+ from importlib.util import find_spec
+ 
+@@ -1279,6 +1281,501 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+     return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
+ 
+ 
++# ---------------------------------------------------------------------------
++# Batch-invariant DSA indexer (VLLM_BATCH_INVARIANT=1), ported from the
++# DeepSeek-V4 ROCm BI patches (vllm-bi-02 sparse decode, vllm-bi-03 / -14
++# deterministic top-k). Covers the uncompressed block-flat (NORMAL) FP8 index
++# cache without DCP or candidate blocks (Kimi-K3.1). For a token row the
++# logits are one fixed kernel configuration in prefill chunks and decode
++# steps alike, and the top-k is one deterministic kernel, so the selected
++# indices (set and order) depend only on the row.
++# ---------------------------------------------------------------------------
++
++
++def _use_bi_indexer(
++    compress_ratio: int,
++    candidate_blocks: torch.Tensor | None,
++    cache_layout: str | None,
++    dcp_world_size: int,
++) -> bool:
++    return (
++        envs.VLLM_BATCH_INVARIANT
++        and compress_ratio == 1
++        and candidate_blocks is None
++        and cache_layout == "NORMAL"
++        and dcp_world_size == 1
++    )
++
++
++@triton.jit
++def _ordered_u32(x):
++    # fp32 bits -> uint32 with the order of the float values (negative: all
++    # bits flipped; non-negative: sign bit set).
++    bits = x.to(tl.int32, bitcast=True)
++    u = bits.to(tl.uint32, bitcast=True)
++    return tl.where(bits < 0, ~u, u | tl.full((), 0x80000000, tl.uint32))
++
++
++@triton.jit
++def _det_topk_digit(u, m, thr, shift, DBITS: tl.constexpr):
++    # Largest digit d (DBITS bits at ``shift``) with #(u >= thr | d << shift)
++    # >= sel; the counts fall as d grows, so d = #(digits passing) - 1.
++    d = tl.arange(0, 1 << DBITS).to(tl.uint32)
++    cand = thr | (d << shift)
++    ge = m[:, None] & (u[:, None] >= cand[None, :])
++    return tl.sum(ge.to(tl.int32), axis=0)
++
++
++@triton.jit
++def _dsv4_det_topk_kernel(
++    logits_ptr,
++    stride0,
++    stride1,
++    row_starts_ptr,
++    row_ends_ptr,
++    out_ptr,
++    out_stride,
++    n_cols,
++    TOPK: tl.constexpr,
++    BLOCK: tl.constexpr,
++    RES: tl.constexpr,
++    DBITS: tl.constexpr,
++):
++    """Exact, fully specified top-k of row ``logits[row, row_start:row_end]``.
++
++    Order: by score (fp32 total order of the bit patterns), ties to the larger
++    column. Output: the selected row-local columns ascending, then -1 to
++    width TOPK. One program per row; every decision depends on the row only.
++
++    The cutoff key T (the sel-th largest key) is found by an MSB-first radix
++    select, DBITS bits per round; rows of at most RES columns are loaded once
++    and selected in registers, longer rows are streamed in BLOCK tiles each
++    round. T is unique, so the selected set and its order do not depend on
++    DBITS, RES or BLOCK.
++    """
++    row = tl.program_id(0)
++    rs = tl.load(row_starts_ptr + row)
++    start = tl.maximum(rs, 0)
++    end = tl.minimum(tl.load(row_ends_ptr + row), n_cols)
++    nv = tl.maximum(end - start, 0)
++    sel = tl.minimum(nv, TOPK)
++    row_ptr = logits_ptr + row.to(tl.int64) * stride0
++    out_row = out_ptr + row.to(tl.int64) * out_stride
++
++    if nv > TOPK:
++        if nv <= RES:
++            cols = start + tl.arange(0, RES)
++            m = cols < end
++            u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++            thr = tl.zeros((), dtype=tl.uint32)
++            for r in tl.static_range(32 // DBITS):
++                shift = 32 - DBITS * (r + 1)
++                cnt = _det_topk_digit(u, m, thr, shift, DBITS)
++                nd = tl.sum((cnt >= sel).to(tl.int32), axis=0)
++                thr = thr | ((nd - 1).to(tl.uint32) << shift)
++            gt = m & (u > thr)
++            eq = m & (u == thr)
++            n_gt = tl.sum(gt.to(tl.int32), axis=0)
++            n_eq = tl.sum(eq.to(tl.int32), axis=0)
++            skip_eq = n_eq - (sel - n_gt)
++            eq_rank = tl.cumsum(eq.to(tl.int32), axis=0) - 1
++            take = gt | (eq & (eq_rank >= skip_eq))
++            pos = tl.cumsum(take.to(tl.int32), axis=0) - 1
++            tl.store(out_row + pos, cols - rs, mask=take)
++        else:
++            thr = tl.zeros((), dtype=tl.uint32)
++            for r in tl.static_range(32 // DBITS):
++                shift = 32 - DBITS * (r + 1)
++                cnt = tl.zeros((1 << DBITS,), dtype=tl.int32)
++                for c0 in range(start, end, BLOCK):
++                    cols = c0 + tl.arange(0, BLOCK)
++                    m = cols < end
++                    u = _ordered_u32(
++                        tl.load(row_ptr + cols * stride1, mask=m, other=0.0)
++                    )
++                    cnt += _det_topk_digit(u, m, thr, shift, DBITS)
++                nd = tl.sum((cnt >= sel).to(tl.int32), axis=0)
++                thr = thr | ((nd - 1).to(tl.uint32) << shift)
++            n_gt = tl.zeros((), dtype=tl.int32)
++            n_eq = tl.zeros((), dtype=tl.int32)
++            for c0 in range(start, end, BLOCK):
++                cols = c0 + tl.arange(0, BLOCK)
++                m = cols < end
++                u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++                n_gt += tl.sum((m & (u > thr)).to(tl.int32), axis=0)
++                n_eq += tl.sum((m & (u == thr)).to(tl.int32), axis=0)
++            # Of the n_eq tied columns take the (sel - n_gt) largest.
++            skip_eq = n_eq - (sel - n_gt)
++            eq_seen = tl.zeros((), dtype=tl.int32)
++            written = tl.zeros((), dtype=tl.int32)
++            for c0 in range(start, end, BLOCK):
++                cols = c0 + tl.arange(0, BLOCK)
++                m = cols < end
++                u = _ordered_u32(tl.load(row_ptr + cols * stride1, mask=m, other=0.0))
++                eq = m & (u == thr)
++                eq_rank = eq_seen + tl.cumsum(eq.to(tl.int32), axis=0) - 1
++                take = (m & (u > thr)) | (eq & (eq_rank >= skip_eq))
++                pos = written + tl.cumsum(take.to(tl.int32), axis=0) - 1
++                tl.store(out_row + pos, cols - rs, mask=take)
++                eq_seen += tl.sum(eq.to(tl.int32), axis=0)
++                written += tl.sum(take.to(tl.int32), axis=0)
++    else:
++        for c0 in range(0, sel, BLOCK):
++            j = c0 + tl.arange(0, BLOCK)
++            tl.store(out_row + j, start + j - rs, mask=j < sel)
++    for c0 in range(0, TOPK, BLOCK):
++        j = c0 + tl.arange(0, BLOCK)
++        tl.store(out_row + j, -1, mask=(j >= sel) & (j < TOPK))
++
++
++# Launch configuration of _dsv4_det_topk_kernel. Performance only: the
++# selected indices and their order do not depend on it.
++_DET_TOPK_CFG = {"BLOCK": 2048, "RES": 4096, "DBITS": 4, "num_warps": 16}
++
++
++def dsv4_det_topk_per_row(
++    logits: torch.Tensor,
++    row_starts: torch.Tensor,
++    row_ends: torch.Tensor,
++    topk_indices: torch.Tensor,
++    num_rows: int,
++    topk_tokens: int,
++) -> None:
++    """Deterministic indexer top-k (VLLM_BATCH_INVARIANT=1), for prefill
++    chunks and decode rows alike.
++
++    Selects, per row, the ``topk_tokens`` columns of
++    ``logits[row, row_starts[row]:row_ends[row]]`` with the largest scores,
++    ties going to the larger column, and writes their row-local indices in
++    ascending order followed by -1 padding. The result depends only on the
++    row's own scores, so it does not change with the batch, the launch shape
++    or the row's position.
++    """
++    if num_rows == 0:
++        return
++    assert topk_indices.shape[-1] == topk_tokens
++    _dsv4_det_topk_kernel[(num_rows,)](
++        logits,
++        logits.stride(0),
++        logits.stride(1),
++        row_starts,
++        row_ends,
++        topk_indices,
++        topk_indices.stride(0),
++        logits.shape[1],
++        TOPK=topk_tokens,
++        BLOCK=_DET_TOPK_CFG["BLOCK"],
++        RES=_DET_TOPK_CFG["RES"],
++        DBITS=_DET_TOPK_CFG["DBITS"],
++        num_warps=_DET_TOPK_CFG["num_warps"],
++    )
++
++
++def _bi_fp8_mqa_logits_into(
++    q: torch.Tensor,
++    k: torch.Tensor,
++    k_scale: torch.Tensor,
++    weights: torch.Tensor,
++    ks: torch.Tensor,
++    ke: torch.Tensor,
++    logits: torch.Tensor,
++    stride_logits_s: int,
++) -> bool:
++    """AITER's gfx950 Gluon fp8_mqa_logits kernel at one fixed configuration.
++
++    The fp8_mqa_logits wrapper picks BLOCK_M (one or two query rows per
++    program), and with it NUM_CHAINS (the head-sum fold) and BLOCK_KV /
++    num_warps, from the number of query rows, so a row's logits depend on its
++    chunk. This launch always takes the wrapper's BLOCK_M = 1 configuration
++    (2 warps, BLOCK_KV 64, its MFMA shape and head chunking, which follow only
++    the model's head count and head size). One program owns one row, walks
++    [ks, ke) in BLOCK_KV tiles aligned at ks and stores only inside it, so a
++    logit depends on its row's q, weights and key only, not on the batch, the
++    row's position or ``stride_logits_s`` (0 packs rows with disjoint ranges
++    into one buffer). KV splits are tile aligned and only partition the walk.
++    Returns False when that kernel is not available.
++    """
++    from vllm._aiter_ops import rocm_aiter_ops
++
++    if not (_ON_GFX950 and rocm_aiter_ops.is_enabled()):
++        return False
++    module = mqa_logits_module()
++    if module is None or not hasattr(module, "fp8_mqa_logits"):
++        return False
++    m = sys.modules[module.fp8_mqa_logits.__module__]
++    kernel = getattr(m, "_gluon_fp8_mqa_logits_kernel", None)
++    if (
++        kernel is None
++        or not getattr(m, "TRITON_GE_36", False)
++        or getattr(m, "arch", None) != "gfx950"
++    ):
++        return False
++    seq_len, num_heads, head_size = q.shape
++    if seq_len == 0:
++        return True
++    num_warps = 2
++    waves_per_eu = 2 if getattr(m, "TRITON_GE_38", False) else 3
++    kv_splits_fn = getattr(m, "_gfx950_kv_splits", None)
++    num_kv_splits = (
++        kv_splits_fn(seq_len, k.shape[0], 1, num_warps, waves_per_eu)
++        if kv_splits_fn is not None
++        else 1
++    )
++    mfma_nonk_dim = 32 if (head_size <= 64 or num_heads >= 32) else 16
++    num_chains = (
++        1 if getattr(m, "FOLDED_REDUCTED_SUPPORT", False) and num_heads > 16 else 0
++    )
++    m_chunk = (
++        mfma_nonk_dim
++        if num_chains >= 1 and num_heads > mfma_nonk_dim and mfma_nonk_dim == 32
++        else 0
++    )
++    kernel[(seq_len, num_kv_splits)](
++        Q_ptr=q,
++        KV_ptr=k,
++        kv_scales_ptr=k_scale,
++        weights_ptr=weights,
++        cu_start_ptr=ks,
++        cu_end_ptr=ke,
++        logits_ptr=logits,
++        seq_len=seq_len,
++        seq_len_kv=k.shape[0],
++        num_kv_splits=num_kv_splits,
++        NUM_HEADS=num_heads,
++        HEAD_SIZE=head_size,
++        stride_q_s=q.stride(0),
++        stride_q_h=q.stride(1),
++        stride_q_d=q.stride(2),
++        stride_kv_s=k.stride(0),
++        stride_kv_d=k.stride(1),
++        stride_w_s=weights.stride(0),
++        stride_w_h=weights.stride(1),
++        stride_logits_s=stride_logits_s,
++        stride_logits_k=1,
++        BLOCK_KV=64,
++        NUM_WARPS=num_warps,
++        NUM_BUFFERS=2,
++        NUM_CHAINS=num_chains,
++        USE_BUFFER_LOAD=True,
++        USE_BUFFER_STORE=True,
++        USE_PADDED_SHARED_LAYOUT=getattr(m, "ASYNC_COPY_SUPPORTS_DISTRIBUTED", False),
++        BLOCK_M=1,
++        MFMA_NONK_DIM=mfma_nonk_dim,
++        M_CHUNK=m_chunk,
++        UNROLL=2,
++        RELAXED_STORE=0,
++        HAS_KV_SPLIT=1 if num_kv_splits > 1 else 0,
++        num_warps=num_warps,
++        waves_per_eu=waves_per_eu,
++        enable_fp_fusion=True,
++    )
++    return True
++
++
++def _bi_fp8_mqa_logits(
++    q: torch.Tensor,
++    kv: tuple[torch.Tensor, torch.Tensor],
++    weights: torch.Tensor,
++    cu_seqlen_ks: torch.Tensor,
++    cu_seqlen_ke: torch.Tensor,
++) -> torch.Tensor:
++    """rocm_fp8_mqa_logits for batch-invariant prefill chunks: the logits of
++    _bi_fp8_mqa_logits_into, those the decode path computes. Positions outside
++    a row's [ks, ke) are unspecified, as with clean_logits=False."""
++    k_fp8, k_scale = kv
++    n = k_fp8.shape[0]
++    logits = torch.empty(
++        (q.shape[0], triton.cdiv(n, 256) * 256), dtype=torch.float32, device=q.device
++    )[:, :n]
++    if _bi_fp8_mqa_logits_into(
++        q, k_fp8, k_scale, weights, cu_seqlen_ks, cu_seqlen_ke, logits, logits.stride(0)
++    ):
++        return logits
++    logger.warning_once(
++        "VLLM_BATCH_INVARIANT=1: AITER's gfx950 Gluon fp8_mqa_logits kernel is "
++        "unavailable; the DSA indexer logits use the default wrapper and are "
++        "not guaranteed batch invariant."
++    )
++    return rocm_fp8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
++
++
++# Batch-invariant decode indexer workspace, in gathered index-cache tokens:
++# requests are laid out at a fixed per-request capacity (max_model_len), so a
++# CUDA graph capture and every replay take the same launches. The budget is
++# max_num_seqs x capacity, capped (VLLM_K31_BI_DSA_DECODE_WS_TOKENS, default 4M
++# tokens = ~570 MB) and never below the prefill gather workspace; rows beyond it
++# run in further groups. Set once by the profiling pass (before any capture).
++_BI_DECODE_WS_TOKENS: dict[tuple[int, int], int] = {}
++
++
++def _bi_decode_ws_tokens(total_seq_lens: int, capacity: int) -> int:
++    key = (total_seq_lens, capacity)
++    if key not in _BI_DECODE_WS_TOKENS:
++        try:
++            from vllm.config import get_current_vllm_config
++
++            max_seqs = int(get_current_vllm_config().scheduler_config.max_num_seqs)
++        except Exception:
++            max_seqs = 1
++        cap = int(os.environ.get("VLLM_K31_BI_DSA_DECODE_WS_TOKENS", str(1 << 22)))
++        _BI_DECODE_WS_TOKENS[key] = max(
++            total_seq_lens, min(max_seqs * capacity, max(cap, capacity))
++        )
++    return _BI_DECODE_WS_TOKENS[key]
++
++
++def _bi_decode_indexer_workspace(
++    num_tokens: int, head_dim: int, num_reqs: int
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Workspace views (K fp8, K scales, logits, row bounds) of the
++    batch-invariant decode indexer: ``num_tokens`` gathered index-cache tokens
++    and ``num_reqs`` request rows."""
++    return current_workspace_manager().get_simultaneous(
++        ((num_tokens, head_dim), FP8_DTYPE),
++        ((num_tokens,), torch.float32),
++        ((num_tokens,), torch.float32),
++        ((3 * num_reqs,), torch.int32),
++    )
++
++
++@triton.jit
++def _bi_decode_indexer_k_gather_kernel(
++    k_cache_ptr,
++    block_table_ptr,
++    block_table_stride,
++    seq_lens_ptr,
++    k_out_ptr,
++    scale_out_ptr,
++    row_bounds_ptr,
++    num_reqs,
++    capacity,
++    cache_block_stride,
++    CACHE_BLOCK_SIZE: tl.constexpr,
++    HEAD_DIM: tl.constexpr,
++    BLOCK_T: tl.constexpr,
++):
++    # Copies the first seq_len[b] tokens (fp8 bytes + fp32 scale bits) of
++    # request b from the NORMAL-layout indexer cache to rows
++    # [b * capacity, b * capacity + seq_len[b]), the bytes
++    # _cp_gather_indexer_quant_cache_kernel copies for a prefill, and writes
++    # row_bounds = [starts (b * capacity) | ends | zeros] for the logits and
++    # top-k kernels.
++    b = tl.program_id(0)
++    seq_len = tl.load(seq_lens_ptr + b)
++    if tl.program_id(1) == 0:
++        tl.store(row_bounds_ptr + b, b * capacity)
++        tl.store(row_bounds_ptr + num_reqs + b, b * capacity + seq_len)
++        tl.store(row_bounds_ptr + 2 * num_reqs + b, 0)
++    t = tl.program_id(1) * BLOCK_T + tl.arange(0, BLOCK_T)
++    mask = t < seq_len
++    block = tl.load(
++        block_table_ptr + b * block_table_stride + t // CACHE_BLOCK_SIZE,
++        mask=mask,
++        other=0,
++    ).to(tl.int64)
++    off = t % CACHE_BLOCK_SIZE
++    src = k_cache_ptr + block * cache_block_stride
++    d = tl.arange(0, HEAD_DIM)
++    m2 = mask[:, None]
++    vals = tl.load(src[:, None] + off[:, None] * HEAD_DIM + d[None, :], mask=m2)
++    row = b.to(tl.int64) * capacity + t
++    tl.store(k_out_ptr + row[:, None] * HEAD_DIM + d[None, :], vals, mask=m2)
++    scale_src = (src + CACHE_BLOCK_SIZE * HEAD_DIM).to(tl.pointer_type(tl.int32))
++    scale = tl.load(scale_src + off, mask=mask)
++    tl.store(scale_out_ptr + row, scale, mask=mask)
++
++
++def _bi_decode_indexer_topk(
++    kv_cache: torch.Tensor,
++    q_fp8: torch.Tensor,
++    weights: torch.Tensor,
++    seq_lens: torch.Tensor,
++    block_table: torch.Tensor,
++    topk_indices: torch.Tensor,
++    max_model_len: int,
++    topk_tokens: int,
++    workspace_tokens: int,
++) -> None:
++    """Decode indexer on the prefill score + top-k kernels (DSv4 sparse decode).
++
++    Request b's keys are gathered to rows ``[b * C, b * C + seq_len_b)`` of a
++    request-major workspace, its logits are written to the same positions of
++    a ``[B * C]`` buffer (_bi_fp8_mqa_logits_into with row stride 0, so no
++    ``B x B * C`` matrix) and dsv4_det_topk_per_row selects on the ``[B, C]``
++    view with row-local columns. The arithmetic is that of the same token
++    scored in a prefill chunk, so the indices are too. Rows are processed in
++    groups that fit the prefill gather workspace (``workspace_tokens``).
++
++    Args:
++        kv_cache: ``[num_blocks, block_size, head_dim + 4]`` uint8 index
++            cache, block-flat NORMAL layout.
++        q_fp8: ``[B, H, D]`` fp8 decode queries (one token per request).
++        weights: ``[B, H]`` fp32 head weights.
++        seq_lens: ``[B]`` (or ``[B, 1]``) context length of each decode token.
++        block_table: ``[B, max_blocks]`` index-cache block table.
++        topk_indices: ``[B, topk_tokens]`` int32 output (request-local, -1
++            padded).
++        max_model_len: fixed per-request capacity C.
++        workspace_tokens: static workspace size (_bi_decode_ws_tokens).
++
++    CUDA-graph safe (FULL decode graphs run this inside the capture): every
++    shape, group and launch grid follows from ``B``, ``C`` and
++    ``workspace_tokens`` only, nothing is read from the host per step, and
++    eager steps take the same launches. Rows with ``seq_len == 0`` (vLLM's
++    padding to the capture size) gather nothing, score nothing and get -1
++    indices. A row's values do not depend on C or its group: the logits kernel
++    walks only ``[ks, ke)`` and the top-k reads only its row.
++    """
++    num_reqs, _, head_dim = q_fp8.shape
++    if num_reqs == 0:
++        return
++    seq_lens = seq_lens.reshape(-1)[:num_reqs].to(torch.int32)
++    capacity = max_model_len
++    assert capacity <= workspace_tokens
++    group = max(1, min(num_reqs, workspace_tokens // capacity))
++    block_t = 32
++    for lo in range(0, num_reqs, group):
++        hi = min(lo + group, num_reqs)
++        n = hi - lo
++        k_fp8, k_scale, logits, row_bounds = _bi_decode_indexer_workspace(
++            n * capacity, head_dim, n
++        )
++        ks, ke, row_starts = row_bounds.view(3, n)
++        _bi_decode_indexer_k_gather_kernel[(n, triton.cdiv(capacity, block_t))](
++            kv_cache,
++            block_table[lo:hi],
++            block_table.stride(0),
++            seq_lens[lo:hi],
++            k_fp8.view(torch.uint8),
++            k_scale.view(torch.int32),
++            row_bounds,
++            n,
++            capacity,
++            kv_cache.stride(0),
++            CACHE_BLOCK_SIZE=kv_cache.shape[1],
++            HEAD_DIM=head_dim,
++            BLOCK_T=block_t,
++        )
++        if _bi_fp8_mqa_logits_into(
++            q_fp8[lo:hi], k_fp8, k_scale, weights[lo:hi], ks, ke, logits, 0
++        ):
++            logits_2d = logits.view(n, capacity)
++        else:
++            # Other archs: the full [n, n * C] logits of the prefill wrapper,
++            # diagonal view.
++            full = _bi_fp8_mqa_logits(
++                q_fp8[lo:hi], (k_fp8, k_scale), weights[lo:hi], ks, ke
++            )
++            logits_2d = full.as_strided(
++                (n, capacity),
++                (full.stride(0) + capacity * full.stride(1), full.stride(1)),
++                full.storage_offset(),
++            )
++        dsv4_det_topk_per_row(
++            logits_2d, row_starts, seq_lens[lo:hi], topk_indices[lo:hi], n, topk_tokens
++        )
++
++
+ def _score_rows_over_global_keys(
+     q_fp8: torch.Tensor,
+     weights: torch.Tensor,
+@@ -1433,6 +1930,13 @@ def rocm_aiter_sparse_attn_indexer(
+             ((total_seq_lens, head_dim), FP8_DTYPE),
+             ((total_seq_lens, 4), torch.uint8),
+         )
++        if _use_bi_indexer(
++            compress_ratio, candidate_blocks, cache_layout, dcp_world_size
++        ):
++            # Batch-invariant decode: K, scales, logits and row bounds of the
++            # static decode workspace (_bi_decode_indexer_topk).
++            ws = _bi_decode_ws_tokens(total_seq_lens, decode_max_model_len)
++            _bi_decode_indexer_workspace(ws, head_dim, ws // decode_max_model_len + 1)
+ 
+         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+@@ -1522,6 +2026,9 @@ def rocm_aiter_sparse_attn_indexer(
+     resolved_cache_layout = cache_layout
+     if resolved_cache_layout is None and _indexer_k_is_c4a_block_flat(compress_ratio):
+         resolved_cache_layout = "NORMAL"
++    use_bi = _use_bi_indexer(
++        compress_ratio, candidate_blocks, resolved_cache_layout, dcp_world_size
++    )
+ 
+     if has_prefill:
+         prefill_metadata = layer_attn_metadata.prefill
+@@ -1663,7 +2170,7 @@ def rocm_aiter_sparse_attn_indexer(
+                 token_to_seq=token_to_seq,
+                 cache_layout=resolved_cache_layout,
+             )
+-            logits = rocm_fp8_mqa_logits(
++            logits = (_bi_fp8_mqa_logits if use_bi else rocm_fp8_mqa_logits)(
+                 q_fp8[chunk.token_start : chunk.token_end],
+                 (k_fp8, k_scale.view(torch.float32)),
+                 weights[chunk.token_start : chunk.token_end],
+@@ -1700,7 +2207,16 @@ def rocm_aiter_sparse_attn_indexer(
+ 
+             num_rows = logits.shape[0]
+ 
+-            if rocm_aiter_ops.is_indexer_top_k_supported(
++            if use_bi:
++                dsv4_det_topk_per_row(
++                    logits,
++                    chunk.cu_seqlen_ks,
++                    chunk.cu_seqlen_ke,
++                    topk_indices,
++                    num_rows,
++                    topk_tokens,
++                )
++            elif rocm_aiter_ops.is_indexer_top_k_supported(
+                 is_prefill=True,
+                 compress_ratio=compress_ratio,
+                 num_rows=num_rows,
+@@ -1752,7 +2268,31 @@ def rocm_aiter_sparse_attn_indexer(
+                 ].reshape(-1, exchanged.shape[-1])[: token_end - token_start]
+                 offset += per_rank
+ 
+-    if has_decode:
++    if has_decode and use_bi:
++        decode_metadata = layer_attn_metadata.decode
++        assert decode_metadata is not None
++        if decode_metadata.requires_padding:
++            # Multi-token decode rows (speculative decoding) are packed per
++            # request; the batch-invariant path scores one token per row.
++            raise NotImplementedError(
++                "VLLM_BATCH_INVARIANT=1: the ROCm DSA decode indexer supports one "
++                "token per decode request (no speculative decoding)"
++            )
++        # One row per decode token; under a CUDA graph this is the padded
++        # capture size and the padded rows carry seq_len 0 (no-ops).
++        assert decode_metadata.seq_lens.numel() >= num_decode_tokens
++        _bi_decode_indexer_topk(
++            kv_cache,
++            q_fp8[:num_decode_tokens],
++            weights[:num_decode_tokens],
++            decode_metadata.seq_lens,
++            decode_metadata.block_table,
++            topk_indices_buffer[:num_decode_tokens, :topk_tokens],
++            decode_max_model_len,
++            topk_tokens,
++            _bi_decode_ws_tokens(total_seq_lens, decode_max_model_len),
++        )
++    elif has_decode:
+         decode_metadata = layer_attn_metadata.decode
+         assert decode_metadata is not None
+         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
