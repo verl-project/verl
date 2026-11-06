@@ -89,6 +89,39 @@ def pad_packed_inputs(
     return input_ids_rmpad, position_ids_rmpad
 
 
+def build_flash_attn_varlen_kwargs(cu_seqlens: torch.Tensor, pad_size: int = 0) -> dict:
+    """Varlen ``FlashAttentionKwargs`` for a packed ``(1, total_nnz)`` micro-batch.
+
+    The packed boundaries are already known from the nested-tensor offsets. Without these kwargs,
+    transformers re-derives them from ``position_ids`` inside every attention layer and flash-attn
+    converts the tensor ``max_seqlen`` to an int, which forces several host-device syncs per layer
+    (again in the activation-checkpoint recompute and in the backward). Here they cost one sync per
+    micro-batch, and the attention inputs stay identical.
+
+    Args:
+        cu_seqlens: ``(num_seqs + 1,)`` cumulative sequence lengths of the packed micro-batch.
+        pad_size: right-padding appended by :func:`pad_packed_inputs`. Its ``position_ids`` restart
+            from 0, so it is one trailing segment, as transformers would infer from ``position_ids``.
+
+    Returns:
+        dict with ``cu_seq_lens_q``/``cu_seq_lens_k`` (int32, on the device of ``cu_seqlens``) and
+        ``max_length_q``/``max_length_k`` (python ints), or an empty dict for an empty micro-batch.
+    """
+    if cu_seqlens.numel() < 2:
+        return {}
+    cu_seqlens = cu_seqlens.to(torch.int32)
+    max_seqlen = int(cu_seqlens.diff().max().item())
+    if pad_size > 0:
+        cu_seqlens = torch.cat([cu_seqlens, cu_seqlens[-1:] + pad_size])
+        max_seqlen = max(max_seqlen, pad_size)
+    return {
+        "cu_seq_lens_q": cu_seqlens,
+        "cu_seq_lens_k": cu_seqlens,
+        "max_length_q": max_seqlen,
+        "max_length_k": max_seqlen,
+    }
+
+
 def prepare_micro_batches(
     data: TensorDict,
     dp_group=None,
