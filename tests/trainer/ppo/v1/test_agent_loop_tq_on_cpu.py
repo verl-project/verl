@@ -53,12 +53,17 @@ class _DummyWorker:
     _compute_position_ids = AgentLoopWorker._compute_position_ids
     _compute_score = AgentLoopWorker._compute_score
     _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+    _share_multi_modal_inputs = _WorkerTQ._share_multi_modal_inputs
+    _get_multi_modal_inputs = _WorkerTQ._get_multi_modal_inputs
     distillation_enabled = False
 
     def __init__(self, topk_log_probs: int):
         self.rollout_config = OmegaConf.create({"topk_log_probs": topk_log_probs})
         self.processor = None
         self.reward_loop_worker_handles = None
+        self.public_prompt_fields = {}
+        self.public_multi_modal_inputs = {}
+        self.preprocess_caches = {}
 
 
 def _output(extra_fields: dict) -> AgentLoopOutput:
