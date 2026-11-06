@@ -202,6 +202,13 @@ fi
 if [[ -n "${STATIC_MAX_RESPONSE_LEN:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
 fi
+# VLLM_BLOCK_SIZE: vLLM KV cache block size (default: unset, vLLM picks). Qwen3.5 is a hybrid (GatedDeltaNet +
+# attention) model, so vLLM TorchTPU sizes the block to hold one GatedDeltaNet state (e.g. 272 tokens for
+# Qwen3.5-35B-A3B at TP8) and treats this value only as a lower bound. A multiple of 128 at or above that size
+# (e.g. 512) keeps the ragged paged attention kernel on 128-aligned pages.
+if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.block_size=${VLLM_BLOCK_SIZE}")
+fi
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
