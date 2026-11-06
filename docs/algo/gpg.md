@@ -1,12 +1,13 @@
 # GPG: Group Policy Gradient
 
-Last updated: 07/03/2025.
+Last updated: 10/21/2026.
 
 Group Policy Gradient (GPG) is a minimalist reinforcement learning (RL) method that enhances the reasoning ability of large language models without relying on supervised fine-tuning or complex tricks. GPG revisits traditional policy gradients and directly optimizes the RL objective—no surrogate losses, no KL penalties, no critic, and no reference model. Compared to GRPO, GPG is simpler, more efficient, and achieves better results on many tasks. For more details, please refer to the original paper [GPG: A Simple and Strong Reinforcement Learning Baseline for Model Reasoning
 ](https://arxiv.org/abs/2504.02546).
 
 ## Key Components
 - Use a corrected advantage function to improve policy gradient accuracy and training efficiency.
+  The advantage is the group-centered reward scaled by $\alpha = \frac{B}{B-M}$, where $B$ is the number of responses in the training batch and $M$ is the number of responses in groups of two or more whose rewards are all identical (single-response groups are not mean-centered, so only those with zero reward count towards $M$). These samples have zero advantage and contribute no gradient, so $\alpha$ rescales the gradient to the $B-M$ valid samples. verl computes $\alpha$ over the whole training batch and does not implement the paper's optional resampling threshold $\beta_{th}$.
 - By eliminating the critic and reference models, avoiding KL divergence constraints, significantly simplifies the training process compared to Group Relative Policy Optimization (GRPO)
 
 ## Configuration
