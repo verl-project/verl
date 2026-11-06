@@ -16,6 +16,7 @@ KL_LOSS_COEF=${KL_LOSS_COEF:-0.01}
 ENTROPY_COEFF=${ENTROPY_COEFF:-0}
 
 SP_SIZE=${SP_SIZE:-1}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-15}
@@ -31,11 +32,19 @@ TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 ########################### derived defaults ###########################
 n_devices_per_node=${NDEVICES_PER_NODE:-8}
 
+# Clamp the rollout tensor-parallel size to the number of devices per node so
+# the script also works out of the box on smaller nodes (e.g. a single A2
+# card with NDEVICES_PER_NODE=1).
+if [ "${ROLLOUT_TP}" -gt "${n_devices_per_node}" ]; then
+    echo "ROLLOUT_TP=${ROLLOUT_TP} exceeds NDEVICES_PER_NODE=${n_devices_per_node}, clamping to ${n_devices_per_node}"
+    ROLLOUT_TP=${n_devices_per_node}
+fi
+
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ASCEND_RT_VISIBLE_DEVICES=$(seq -s, 0 $((n_devices_per_node - 1)))
 
 
 ########################### parameter arrays ###########################
@@ -71,7 +80,7 @@ ACTOR=(
 ROLLOUT=(
     actor_rollout_ref.rollout.name=sglang
     +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend="ascend"
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.n=2
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1)

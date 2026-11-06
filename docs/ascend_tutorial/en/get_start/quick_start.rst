@@ -1,7 +1,7 @@
 Ascend Quick Start Guide
 ==========================
 
-**Last updated:** 2026/07/14.
+**Last updated:** 2026/11/06.
 
 .. contents:: Table of Contents
    :local:
@@ -10,10 +10,10 @@ Ascend Quick Start Guide
 Key Updates
 -----------
 
+- 2026/11/06: The FSDP2 quick-start scripts and the PPO smoke-test script now run on small nodes (e.g. a single A2 card) out of the box via ``NDEVICES_PER_NODE``; added a "Running on a Single Card or a Small Node" section.
 - 2026/06/30: Added coverage for four common training and inference backend combinations, making it easier for users to quickly select the appropriate launch script during the quickstart phase.
 - 2026/05/13: Separated the quick start and install guidance documents.
 - 2025/12/11: verl existing scenarios now support automatic NPU device type detection. GPU scripts running on Ascend no longer need to explicitly set the ``trainer.device=npu`` parameter in principle. New features can still prioritize a specific device by setting ``trainer.device``, with gradual adaptation to automatic detection.
-
 
 Hardware Support
 -----------------
@@ -114,6 +114,41 @@ How to Run
 For detailed parameter descriptions within the scripts, see :doc:`Training Configuration Parameters and Metrics <../dev_guide/model_dev/parameter_and_metrics>`.
 
 For multi-node task launch, see the :doc:`Multi-Machine Task Startup Practice Guide <../model_support/examples/multi-machine_task_startup_practice>`.
+
+Running on a Single Card or a Small Node
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The quick-start scripts assume an 8-device (die) node by default. They also work
+on smaller nodes, such as a single Atlas A2 (910B) card, by overriding
+``NDEVICES_PER_NODE``. ``ROLLOUT_TP`` is clamped to the device count
+automatically, and ``ppo_mini_batch_size`` already defaults to the device count,
+so no other overrides are required:
+
+.. code-block:: bash
+
+   # Single A2 card (1 die), smoke run of the FSDP2 + vLLM-Ascend combo
+   NDEVICES_PER_NODE=1 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+       bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+
+   # Single A3 card (2 dies)
+   NDEVICES_PER_NODE=2 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+       bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+
+   # PPO smoke test on a single A2 card (the critic adds a second model, so
+   # ulysses_sequence_parallel_size must also drop to 1)
+   NDEVICES_PER_NODE=1 SP_SIZE=1 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+       bash tests/special_npu/run_qwen3_06b_ppo.sh
+
+Notes:
+
+- The FSDP2 + SGLang script accepts the same ``NDEVICES_PER_NODE`` and
+  ``ROLLOUT_TP`` overrides.
+- The Megatron combos hardcode ``TP=2, PP=2`` and therefore need at least 4
+  devices.
+- On a single card, one training step with the default batch (16 prompts x n
+  samples) takes noticeably longer. For a quick validation, pass
+  ``TOTAL_TRAINING_STEPS=1`` and optionally reduce the batch, e.g.
+  ``TRAIN_BATCH_SIZE=8 ROLLOUT_N=4``.
 
 Appendix
 -------------------------------------------
