@@ -96,6 +96,24 @@ def test_hybrid_wrapper_without_hook_uses_its_language_model_hook():
     assert "forward" not in vars(wrapper)
 
 
+def test_engine_disables_fused_kernels_when_a_chunk_is_unsupported(monkeypatch):
+    from verl.workers.engine.megatron import transformer_impl
+
+    engine = object.__new__(transformer_impl.MegatronEngine)
+    engine.engine_config = SimpleNamespace(use_fused_kernels=True, use_remove_padding=True)
+    engine.model_config = SimpleNamespace(use_liger=False, mtp=SimpleNamespace(enable=False))
+    engine.is_value_model = False
+    engine.module = [object(), object()]
+    unpatched = []
+    monkeypatch.setattr(mff, "patch_fused_forward", lambda model, config, **kwargs: model is engine.module[0])
+    monkeypatch.setattr(mff, "unpatch_fused_forward", unpatched.append)
+
+    engine._maybe_enable_fused_kernels()
+
+    assert engine.engine_config.use_fused_kernels is False
+    assert unpatched == engine.module
+
+
 def test_engine_hands_hook_and_mtp_choice_to_language_model_of_full_stream_vlm(monkeypatch):
     input_ids = torch.tensor([[1, 2, 3]])
     labels = torch.tensor([[2, 3, 4]])
@@ -154,6 +172,48 @@ def test_engine_hands_hook_and_mtp_choice_to_language_model_of_full_stream_vlm(m
     assert language_model_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
     assert language_model_kwargs["compute_mtp_loss"] is False
     assert "forward" not in vars(model.language_model)
+
+
+@pytest.mark.parametrize("post_process", [True, False])
+def test_full_stream_vlm_output_and_loss_mask_tuple_is_unpacked(monkeypatch, post_process):
+    input_ids = torch.tensor([[1, 2, 3]])
+    labels = torch.tensor([[2, 3, 4]])
+    model_output = SimpleNamespace(log_probs=torch.tensor([[0.1, 0.2]]), entropy=torch.tensor([[0.3, 0.4]]))
+
+    monkeypatch.setattr(mff, "preprocess_thd_engine", lambda value, **kwargs: (value, "packed", None))
+    monkeypatch.setattr(mff, "takes_full_packed_thd_vlm_inputs", lambda model: True)
+    monkeypatch.setattr(
+        mff,
+        "preprocess_vlm_thd_engine",
+        lambda model, ids, rmpad, params, position_ids, pad, **kw: (ids, None, None),
+    )
+    monkeypatch.setattr(mff, "preprocess_thd_full_stream", lambda values, packed_seq_params, need_roll=False: values)
+    monkeypatch.setattr(mff, "postprocess_thd_engine", lambda value, *args, **kwargs: value)
+
+    class LanguageModel:
+        def forward(self, **kwargs):
+            return model_output
+
+    class Wrapper:
+        pre_process = True
+        config = SimpleNamespace(fp8=None)
+
+        def __init__(self):
+            self.post_process = post_process
+            self.language_model = LanguageModel()
+            setattr(self, mff._FUSED_FORWARD_MODE_ATTR, mff._LANGUAGE_MODEL_HOOK_MODE)
+
+        def __call__(self, **kwargs):
+            # GLM-5.3-Flash returns its CP-sliced loss mask next to the output.
+            return self.language_model.forward(**kwargs), torch.ones(2)
+
+    output = mff.fused_forward_model_engine(vision_model=True)(Wrapper(), input_ids, labels, {}, 1.0, True, 0)
+
+    if post_process:
+        assert torch.equal(output["log_probs"], model_output.log_probs)
+        assert torch.equal(output["entropy"], model_output.entropy)
+    else:
+        assert output is model_output
 
 
 def test_legacy_fallback_patch_and_unpatch_are_idempotent():
