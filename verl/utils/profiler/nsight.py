@@ -124,6 +124,8 @@ def _render_ray_actor_nsight_options(profiler_config, *, rank: int, role: str) -
         OmegaConf.to_container(options_template) if OmegaConf.is_config(options_template) else options_template
     )
     options["o"] = _render_nsight_output_name(options.get("o"), rank=rank, role=role)
+    if "session-new" in options:
+        options["session-new"] = options["session-new"].replace("{role}", role).replace("{rank}", str(rank))
     return options
 
 
