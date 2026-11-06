@@ -729,6 +729,7 @@ reward:
     n_gpus_per_node: 8
     nnodes: 0
     model_path: null
+    request_timeout: 300.0
     rollout:
       _target_: verl.workers.config.RolloutConfig
       name: ???

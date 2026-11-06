@@ -5,7 +5,7 @@ Reward Loop
 
 Author: `Yuyang Ding <https://yyding1.github.io>`_
 
-Last updated: 2/10/2026.
+Last updated: 11/04/2026.
 
 Introduction
 ------------
@@ -46,6 +46,14 @@ The number of parallel workers can be configured via ``config.reward.num_workers
 
 Upon receiving a batch reward request, the batch is partitioned into smaller chunks and distributed to each reward worker for parallel execution.
 User only need to invoke ``compute_rm_score``.
+
+HTTP requests to the built-in discriminative reward model have a per-attempt
+deadline of 300 seconds. Set ``reward.reward_model.request_timeout`` to a finite,
+positive number of seconds to adjust it for your backend. The deadline covers
+connection establishment and reading the complete response body. A timeout uses
+the existing retry policy (up to 16 attempts with capped exponential backoff);
+it is not a deadline for the whole batch. After all attempts fail, the error
+propagates to the caller. Custom reward functions manage their own HTTP deadlines.
 
 .. code:: python
 
