@@ -391,6 +391,50 @@ actor_rollout_ref:
       transfer_backend: nixl
       bootstrap_port: null
       ib_device: null
+    cache_pool:
+      enabled: false
+      backend: mooncake
+      python_hash_seed: 0
+      kv_load_failure_policy: null
+      extra_config: {}
+      master:
+        auto_start: true
+        address: null
+        port: null
+        eviction_high_watermark_ratio: null
+        eviction_ratio: null
+        default_kv_lease_ttl: null
+        client_ttl: null
+        log_master_output: false
+        enable_multi_tenants: false
+        tenant_quota_connector_type: null
+        tenant_quota_connector_uri: null
+      store:
+        config_path: null
+        mode: embedded
+        protocol: null
+        metadata_server: P2PHANDSHAKE
+        global_segment_size: 4GB
+        local_buffer_size: 4GB
+        device_name: ''
+        tenant_id: default
+        enable_offload: false
+        ssd_offload_path: null
+        preferred_segment: false
+        prefer_alloc_in_same_node: true
+      connector:
+        load_async: null
+        lookup_async: false
+        cache_prefix: ''
+        save_decode_cache: false
+        store_tp_size: null
+        enable_store_tp_lcm: null
+        prefill_tp_sizes: null
+        consumer_is_to_put: false
+        consumer_is_to_load: false
+        use_layerwise: false
+        prefill_pp_size: null
+        prefill_pp_layer_partition: null
   model:
     _target_: verl.workers.config.HFModelConfig
     path: ~/models/deepseek-llm-7b-chat
@@ -781,6 +825,50 @@ reward:
         transfer_backend: nixl
         bootstrap_port: null
         ib_device: null
+      cache_pool:
+        enabled: false
+        backend: mooncake
+        python_hash_seed: 0
+        kv_load_failure_policy: null
+        extra_config: {}
+        master:
+          auto_start: true
+          address: null
+          port: null
+          eviction_high_watermark_ratio: null
+          eviction_ratio: null
+          default_kv_lease_ttl: null
+          client_ttl: null
+          log_master_output: false
+          enable_multi_tenants: false
+          tenant_quota_connector_type: null
+          tenant_quota_connector_uri: null
+        store:
+          config_path: null
+          mode: embedded
+          protocol: null
+          metadata_server: P2PHANDSHAKE
+          global_segment_size: 4GB
+          local_buffer_size: 4GB
+          device_name: ''
+          tenant_id: default
+          enable_offload: false
+          ssd_offload_path: null
+          preferred_segment: false
+          prefer_alloc_in_same_node: true
+        connector:
+          load_async: null
+          lookup_async: false
+          cache_prefix: ''
+          save_decode_cache: false
+          store_tp_size: null
+          enable_store_tp_lcm: null
+          prefill_tp_sizes: null
+          consumer_is_to_put: false
+          consumer_is_to_load: false
+          use_layerwise: false
+          prefill_pp_size: null
+          prefill_pp_layer_partition: null
   sandbox_fusion:
     _target_: verl.workers.config.SandboxFusionConfig
     url: null

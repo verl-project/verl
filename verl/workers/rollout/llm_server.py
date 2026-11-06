@@ -35,6 +35,7 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.router import GlobalRequestLoadBalancer  # noqa: F401
 from verl.workers.rollout.utils import update_prometheus_config
+from verl.workers.rollout.vllm_rollout.kv_cache_pool import setup_kv_cache_pool
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -418,6 +419,7 @@ class LLMServerManager:
     async def create(cls, *args, **kwargs):
         """Create the LLMServerManager."""
         instance = cls(*args, **kwargs)
+        setup_kv_cache_pool(instance.rollout_config)
         await instance._initialize_llm_servers()
         await instance._init_global_load_balancer()
         return instance

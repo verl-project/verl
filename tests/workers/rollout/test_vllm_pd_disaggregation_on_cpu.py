@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -533,14 +533,18 @@ def test_pd_replica_init_requires_disaggregation_enabled(patched_replica_cls):
 class _DispatchStub:
     """Minimal vLLMHttpServer-like instance for unbound-method tests."""
 
-    def __init__(self, decode_peers, role="prefill", connector="NixlConnector"):
+    def __init__(self, decode_peers, role="prefill", connector="NixlConnector", kv_transfer_config=None):
         self._disaggregation_role = role
         self._pd_decode_peers = list(decode_peers)
         self._pd_peer_idx = 0
-        # Used by _pd_dispatch to branch between NIXL (read kv_transfer_params
-        # back from prefill) and Mooncake (construct it locally from prefill
-        # engine_id + bootstrap addr).
-        self._disaggregation_kv_transfer_config = {"kv_connector": connector}
+        # Used by _pd_dispatch to branch between NIXL / MooncakeConnectorV2
+        # (read kv_transfer_params back from prefill) and GPU Mooncake
+        # (construct it locally from prefill engine_id + bootstrap addr).
+        # A full MultiConnector dict overrides the short connector name.
+        if kv_transfer_config is not None:
+            self._disaggregation_kv_transfer_config = kv_transfer_config
+        else:
+            self._disaggregation_kv_transfer_config = {"kv_connector": connector}
         self._pd_prefill_engine_id = "eid-prefill"
         self._pd_prefill_side_channel_host = "127.0.0.1"
         self._pd_prefill_side_channel_port = 5559
@@ -741,3 +745,330 @@ def _make_awaitable_token_output(token_ids):
         return out
 
     return _coro()
+
+
+def _multi_connector_cfg(p2p_name, store_name="MooncakeStoreConnector"):
+    return {
+        "kv_connector": "MultiConnector",
+        "kv_connector_extra_config": {
+            "connectors": [{"kv_connector": p2p_name}, {"kv_connector": store_name}],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_pd_dispatch_multiconnector_mooncake_constructs_decode_kv_params_locally():
+    """MultiConnector with connectors[0]=MooncakeConnector must still build
+    decode kv params locally, same as the flat MooncakeConnector path."""
+    from unittest.mock import MagicMock
+
+    server_cls = _import_http_server()
+
+    decode_peer = MagicMock()
+    decode_peer.generate.remote = MagicMock(return_value=_make_awaitable_token_output([7]))
+    captured_prefill = []
+
+    async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
+        captured_prefill.append(kw["kv_transfer_params"])
+        from verl.workers.rollout.replica import TokenOutput
+
+        return TokenOutput(token_ids=[42], stop_reason="completed", extra_fields={})
+
+    stub = _DispatchStub(
+        decode_peers=[decode_peer],
+        kv_transfer_config=_multi_connector_cfg("MooncakeConnector"),
+    )
+    stub.generate = fake_generate
+
+    await server_cls._pd_dispatch(
+        stub,
+        prompt_ids=[1, 2],
+        sampling_params={"max_tokens": 16, "temperature": 0.0},
+        request_id="req-mc-multi",
+    )
+
+    assert len(captured_prefill) == 1
+    transfer_id = captured_prefill[0]["transfer_id"]
+    dkv = decode_peer.generate.remote.call_args.kwargs["kv_transfer_params"]
+    assert dkv["do_remote_prefill"] is True
+    assert dkv["do_remote_decode"] is False
+    assert dkv["remote_engine_id"] == stub._pd_prefill_engine_id
+    assert dkv["remote_bootstrap_addr"] == f"http://127.0.0.1:{stub._pd_prefill_side_channel_port}"
+    assert dkv["transfer_id"] == transfer_id
+
+
+@pytest.mark.asyncio
+async def test_pd_dispatch_multiconnector_mooncake_v2_uses_prefill_kv_params():
+    """MooncakeConnectorV2 inside MultiConnector must use prefill-returned
+    kv_transfer_params, not the GPU Mooncake bootstrap protocol."""
+    from unittest.mock import MagicMock
+
+    server_cls = _import_http_server()
+
+    decode_peer = MagicMock()
+    expected_decode_token_ids = [10, 20, 30]
+    decode_peer.generate.remote = MagicMock(return_value=_make_awaitable_token_output(expected_decode_token_ids))
+    server_decode_kv = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "eid-prefill",
+        "remote_block_ids": [0, 1, 2],
+        "remote_host": "10.0.0.1",
+        "remote_port": 5559,
+        "remote_request_id": "req-v2_P",
+        "tp_size": 1,
+    }
+
+    async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
+        from verl.workers.rollout.replica import TokenOutput
+
+        return TokenOutput(
+            token_ids=[42],
+            stop_reason="completed",
+            extra_fields={"kv_transfer_params": server_decode_kv},
+        )
+
+    stub = _DispatchStub(
+        decode_peers=[decode_peer],
+        kv_transfer_config=_multi_connector_cfg("MooncakeConnectorV2", "AscendStoreConnector"),
+    )
+    stub.generate = fake_generate
+
+    result = await server_cls._pd_dispatch(
+        stub,
+        prompt_ids=[1, 2, 3],
+        sampling_params={"max_tokens": 64, "temperature": 0.0},
+        request_id="req-v2",
+    )
+
+    dkw = decode_peer.generate.remote.call_args
+    assert dkw.kwargs["kv_transfer_params"] == server_decode_kv
+    assert result.token_ids == expected_decode_token_ids
+
+
+@pytest.mark.asyncio
+async def test_pd_dispatch_multiconnector_missing_connectors_raises():
+    server_cls = _import_http_server()
+    from verl.workers.rollout.replica import TokenOutput
+
+    async def empty_prefill(prompt_ids, sampling_params, request_id, **kw):
+        return TokenOutput(token_ids=[0], stop_reason="completed", extra_fields={})
+
+    stub = _DispatchStub(
+        decode_peers=["peer0"],
+        kv_transfer_config={"kv_connector": "MultiConnector", "kv_connector_extra_config": {}},
+    )
+    stub.generate = empty_prefill
+
+    with pytest.raises(RuntimeError, match=r"connectors\[0\]"):
+        await server_cls._pd_dispatch(
+            stub,
+            prompt_ids=[1],
+            sampling_params={"max_tokens": 8},
+            request_id="req-no-child",
+        )
+
+
+def test_kv_handshake_port_span():
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    assert vLLMPDReplica._kv_handshake_port_span(use_ascend_mooncake=True, tp=8) == 9
+    assert vLLMPDReplica._kv_handshake_port_span(use_ascend_mooncake=False, tp=8) == 1
+    with pytest.raises(ValueError, match="tp"):
+        vLLMPDReplica._kv_handshake_port_span(use_ascend_mooncake=True, tp=0)
+
+
+def test_reserve_handshake_ports_span_four():
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    reserved = []
+    start = vLLMPDReplica._reserve_handshake_ports("127.0.0.1", 4, reserved)
+    try:
+        assert len(reserved) == 4
+        assert [s.getsockname()[1] for s in reserved] == [start + i for i in range(4)]
+    finally:
+        for sock in reserved:
+            sock.close()
+
+
+def test_launch_servers_decode_bootstrap_is_prefill_block_start():
+    """Decode mooncake_bootstrap_port must be the prefill handshake block start."""
+    pytest.importorskip("vllm")
+    from unittest.mock import MagicMock
+
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    cfg = _make_pd_config(
+        tensor_model_parallel_size=4,
+        decode_tensor_model_parallel_size=2,
+        decode_replicas=1,
+        transfer_backend="mooncake",
+    )
+    replica = vLLMPDReplica.__new__(vLLMPDReplica)
+    replica.replica_rank = 0
+    replica.name_suffix = ""
+    replica.config = cfg
+    replica._prefill_tp = 4
+    replica._decode_tp = 2
+    replica._n_decode = 1
+    replica.world_size = 6
+    replica._prefill_servers = []
+    replica._decode_servers = []
+
+    async def worker_info(*_a, **_k):
+        return ("node-id", "0", "127.0.0.1")
+
+    workers = []
+    for _ in range(6):
+        worker = MagicMock()
+        worker.__ray_call__ = MagicMock()
+        worker.__ray_call__.remote = lambda *_a, **_k: worker_info()
+        workers.append(worker)
+    replica.workers = workers
+
+    spawn_kwargs = []
+
+    async def _done(*_a, **_k):
+        return None
+
+    async def _addr(*_a, **_k):
+        return ("127.0.0.1", 8000)
+
+    def fake_spawn(**kwargs):
+        spawn_kwargs.append(kwargs)
+        server = MagicMock()
+        server.launch_server.remote = _done
+        server.set_pd_peer.remote = _done
+        server.get_server_address.remote = _addr
+        return server
+
+    real_span = vLLMPDReplica._kv_handshake_port_span
+
+    def spy_span(*, use_ascend_mooncake, tp):
+        return real_span(use_ascend_mooncake=use_ascend_mooncake, tp=tp)
+
+    with (
+        patch.object(vLLMPDReplica, "_is_ascend_platform", return_value=True),
+        patch.object(vLLMPDReplica, "_kv_handshake_port_span", side_effect=spy_span) as span_spy,
+        patch.object(
+            vLLMPDReplica,
+            "_reserve_handshake_ports",
+            wraps=vLLMPDReplica._reserve_handshake_ports,
+        ) as reserve_spy,
+        patch.object(replica, "_spawn_pd_server", side_effect=fake_spawn),
+        patch.object(replica, "_collect_cuda_devices", return_value="0"),
+    ):
+        asyncio.run(replica.launch_servers())
+
+    span_spy.assert_any_call(use_ascend_mooncake=True, tp=4)
+    span_spy.assert_any_call(use_ascend_mooncake=True, tp=2)
+    assert span_spy.call_count == 2
+    assert reserve_spy.call_count == 2
+    assert [(c.args[0], c.args[1]) for c in reserve_spy.call_args_list] == [
+        ("127.0.0.1", 5),
+        ("127.0.0.1", 3),
+    ]
+
+    prefill = next(kwargs for kwargs in spawn_kwargs if kwargs["role"] == "prefill")
+    decode = next(kwargs for kwargs in spawn_kwargs if kwargs["role"] == "decode")
+    assert prefill["side_channel_port"] == prefill["mooncake_bootstrap_port"]
+    assert decode["mooncake_bootstrap_port"] == prefill["side_channel_port"]
+    assert decode["side_channel_port"] != prefill["side_channel_port"]
+    for kwargs in spawn_kwargs:
+        assert "reserved_socks" not in kwargs
+
+
+def _launch_servers_replica(*, transfer_backend, cache_pool):
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    cfg = _make_pd_config(
+        tensor_model_parallel_size=1,
+        decode_replicas=1,
+        transfer_backend=transfer_backend,
+        cache_pool=cache_pool,
+    )
+    replica = vLLMPDReplica.__new__(vLLMPDReplica)
+    replica.replica_rank = 0
+    replica.name_suffix = ""
+    replica.config = cfg
+    replica._prefill_tp = 1
+    replica._decode_tp = 1
+    replica._n_decode = 1
+    replica.world_size = 2
+    replica._prefill_servers = []
+    replica._decode_servers = []
+
+    async def worker_info(*_a, **_k):
+        return ("node-id", "0", "127.0.0.1")
+
+    workers = []
+    for _ in range(2):
+        worker = MagicMock()
+        worker.__ray_call__ = MagicMock()
+        worker.__ray_call__.remote = lambda *_a, **_k: worker_info()
+        workers.append(worker)
+    replica.workers = workers
+    return replica
+
+
+def test_launch_servers_gpu_pool_rejects_nixl():
+    from unittest.mock import MagicMock
+
+    replica = _launch_servers_replica(
+        transfer_backend="nixl",
+        cache_pool={"enabled": True},
+    )
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    with (
+        patch.object(vLLMPDReplica, "_is_ascend_platform", return_value=False),
+        pytest.raises(ValueError, match="mooncake"),
+    ):
+        asyncio.run(replica.launch_servers())
+
+
+def test_launch_servers_npu_pool_nixl_falls_back_to_mooncake():
+    pytest.importorskip("vllm")
+    from unittest.mock import MagicMock
+
+    from verl.workers.rollout.vllm_rollout.vllm_pd_replica import vLLMPDReplica
+
+    replica = _launch_servers_replica(
+        transfer_backend="nixl",
+        cache_pool={"enabled": True},
+    )
+    spawn_kwargs = []
+
+    async def _done(*_a, **_k):
+        return None
+
+    async def _addr(*_a, **_k):
+        return ("127.0.0.1", 8000)
+
+    def fake_spawn(**kwargs):
+        spawn_kwargs.append(kwargs)
+        server = MagicMock()
+        server.launch_server.remote = _done
+        server.set_pd_peer.remote = _done
+        server.get_server_address.remote = _addr
+        return server
+
+    with (
+        patch.object(vLLMPDReplica, "_is_ascend_platform", return_value=True),
+        patch.object(replica, "_spawn_pd_server", side_effect=fake_spawn),
+        patch.object(replica, "_collect_cuda_devices", return_value="0"),
+    ):
+        asyncio.run(replica.launch_servers())
+
+    assert spawn_kwargs
+    for kwargs in spawn_kwargs:
+        assert "engine_id" not in kwargs
+        assert "transfer_backend" not in kwargs
+        assert "use_ascend_mooncake" not in kwargs
+        kv = kwargs["kv_transfer_config"]
+        assert kv["kv_connector"] == "MultiConnector"
+        connectors = kv["kv_connector_extra_config"]["connectors"]
+        assert connectors[0]["kv_connector"] == "MooncakeConnectorV2"
+        assert connectors[1]["kv_connector_extra_config"]["lookup_rpc_port"] == kv["engine_id"]
