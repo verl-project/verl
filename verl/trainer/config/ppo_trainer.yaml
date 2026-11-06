@@ -222,6 +222,35 @@ trainer:
   # Maximum number of critic checkpoints to keep
   max_critic_ckpt_to_keep: null
 
+  # Score-aware retention of whole global_step_{N} directories (v1 trainer only). Checkpoints are
+  # still saved every save_freq steps; after each validation only the latest, the best, the
+  # earliest converged, and sparse milestone checkpoints are kept, the rest are deleted. Requires
+  # max_actor_ckpt_to_keep / max_critic_ckpt_to_keep to be null, and save_freq to be a multiple
+  # of test_freq so every checkpoint gets a score.
+  checkpoint_retention:
+
+    # Whether to enable score-aware retention
+    enable: False
+
+    # Validation metric key or list of keys (score = their mean), e.g. val-core/aime24/acc/mean@32
+    metric: null
+
+    # "max" if a higher score is better, "min" otherwise
+    mode: max
+
+    # Number of most recent checkpoints always kept for resuming
+    keep_last: 1
+
+    # Number of latest validation points averaged into a checkpoint's score, to damp evaluation noise
+    window: 1
+
+    # Also keep the earliest checkpoint whose score is within this distance of the best; null disables
+    converge_tolerance: null
+
+    # Permanently keep a new-best checkpoint when at least this many steps have passed since the
+    # previous one kept this way (or the start of the run), as sparse rollback points; null disables
+    milestone_interval: null
+
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
