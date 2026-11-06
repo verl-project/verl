@@ -2,7 +2,7 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 10/03/2026.
+Last updated: 10/30/2026.
 
 ## Background
 
@@ -339,13 +339,29 @@ How the distillation signal is applied. `true` corresponds to PG OPD, `false` to
 
 **Validation:**
 
-- `use_policy_gradient=False` + `loss_mode="k1"` $\to$ `ValueError`. The k1 loss
-  has no gradient through the teacher logprob, so backpropagating it directly
-  is meaningless.
+- `use_policy_gradient=False` + `loss_mode="k1"` or `"kl"` $\to$ `ValueError`.
+  The direct loss gradient is independent of the teacher log probabilities.
+- `use_policy_gradient=True` + `loss_mode="k3"` or `"low_var_kl"` $\to$ `ValueError`.
+  Use `k1` or `kl` for reverse-KL policy-gradient distillation. Although the k1
+  and k3 estimators have the same on-policy expectation, using a detached k3
+  reward omits a parameter-dependent term. With student distribution $p$ and
+  teacher distribution $q$, at a fixed state with all clamps and PPO clipping
+  inactive, the expected on-policy loss gradient is
+  $\nabla_\theta \mathrm{KL}(p\|q) - \nabla_\theta \mathrm{KL}(q\|p)$,
+  which can point against the reverse-KL gradient.
 - `use_policy_gradient=True` with either teacher-top-k forward KL mode $\to$
   warning. The
   PG update only moves $\nabla_\theta\log\pi_\theta(y_t|s_t)$ for the sampled token $y_t$, so the top-$k$
   distributional signal is largely unused.
+
+**Compatibility:** The Python `DistillationLossConfig` default for
+`use_policy_gradient` is now `False`, matching the existing YAML default and
+retaining `loss_mode="k3"`. Previously accepted k3/low_var_kl PG configurations
+now fail at construction. For reverse-KL PG, set both `loss_mode="k1"` (or
+`"kl"`) and `use_policy_gradient=True`. Direct supervised k3 remains available;
+it is a different update, not an equivalent replacement for reverse-KL PG.
+This validation does not change the loss formulas, PPO clipping, or other
+estimators' behavior.
 
 ### `distillation.distillation_loss.policy_loss_mode` (str)
 

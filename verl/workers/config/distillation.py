@@ -50,7 +50,8 @@ class DistillationLossConfig(BaseConfig):
         ``forward_kl_topk_tail`` numerical stability.
     use_policy_gradient (bool):
         Whether to incorporate distillation loss as a reward, as done
-        by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
+        by https://thinkingmachines.ai/blog/on-policy-distillation/. Use loss_mode=k1 or kl for
+        reverse-KL policy gradients; k3 and low_var_kl are rejected.
         Otherwise, distillation loss is directly backpropagated as a supervised loss,
         as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
     policy_loss_mode (str):
@@ -85,7 +86,7 @@ class DistillationLossConfig(BaseConfig):
     # overhead (saved-tensor total stays constant either way).
     chunked_topk_chunk_size: int = 4096
 
-    use_policy_gradient: bool = True
+    use_policy_gradient: bool = False
     policy_loss_mode: str = "vanilla"
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
@@ -121,10 +122,17 @@ class DistillationLossConfig(BaseConfig):
                 "should move) is largely unused."
             )
 
-        if not self.use_policy_gradient and self.loss_mode == "k1":
+        if self.use_policy_gradient and self.loss_mode in ("k3", "low_var_kl"):
             raise ValueError(
-                "Directly backpropagating k1 loss is incorrect since gradient of k1 loss"
+                f"Using {self.loss_mode} with use_policy_gradient=True does not give the reverse-KL policy gradient. "
+                "Use loss_mode='k1' or 'kl' for reverse-KL policy-gradient distillation."
+            )
+
+        if not self.use_policy_gradient and self.loss_mode in ("k1", "kl"):
+            raise ValueError(
+                f"Directly backpropagating {self.loss_mode} loss is incorrect since its gradient"
                 " wrt model weights does not depend on teacher log probabilities."
+                " Set use_policy_gradient=True for k1 or kl."
             )
 
         if self.loss_mode == "forward_kl_topk_tail":
