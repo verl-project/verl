@@ -36,6 +36,7 @@ from transformers import PretrainedConfig
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
+from verl.utils.megatron.param_sync import register_ddp_param_ready_callbacks
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
 logger = logging.getLogger(__file__)
@@ -247,6 +248,11 @@ def make_megatron_module(
     peft_cls: Any = None,
     peft_config: Any = None,
 ):
+    """Build and wrap model chunks, returning them with their TransformerConfig.
+
+    Apply model and PEFT hooks before wrapping, then register fused parameter
+    readiness callbacks against the final DDP bucket owners.
+    """
     try:
         hf_config.rope_theta = get_hf_rope_theta(hf_config)
     except AttributeError:
@@ -382,6 +388,8 @@ def make_megatron_module(
         from verl.models.mcore.patch import apply_patch
 
         apply_patch()
+    # Fused LM-head consumers access parameters without output_layer's pre-hook.
+    register_ddp_param_ready_callbacks(model)
     return model, tf_config
 
 
