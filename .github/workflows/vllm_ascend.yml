@@ -53,7 +53,8 @@ on:
       # Entrypoints
       - ".github/workflows/vllm_ascend.yml"
       - "tests/special_e2e/generation"
-      - "tests/workers/rollout"
+      - "tests/workers/rollout/**"
+      - "tests/experimental/agent_loop/**"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
 
@@ -121,6 +122,11 @@ jobs:
           }' /proc/meminfo
       - name: Test the latest vLLM Rollout async with deterministic agent loop
         env:
+          # Match the single-node 16-NPU runner instead of the 8-GPU test defaults.
+          VERL_TEST_N_GPUS_PER_NODE: "16"
+          VERL_TEST_NNODES: "1"
+          # At least 32 trajectories for the eight TP=2 rollout replicas.
+          VERL_TEST_ROLLOUT_N: "16"
           PYTHONHASHSEED: "0"
           AGENT_LOOP_TOOL_AGENT_ROLLOUT_CONFIG: |
             temperature: 0.0
