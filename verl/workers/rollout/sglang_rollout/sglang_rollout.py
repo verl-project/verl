@@ -21,6 +21,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Generator
 
+import aiohttp
 import ray
 import sglang.srt.entrypoints.engine
 import torch
@@ -178,6 +179,8 @@ class ServerAdapter(BaseRollout):
         # IPC handles stay on the GPU where they were created. Offset math
         # assumes prefill_replicas == 1 (enforced by SGLangPDReplica); if that
         # ever lifts, update both this block and SGLangPDReplica.launch_servers.
+        # Cleared once the server turns out to have no weight-update session endpoints.
+        self._weight_update_sessions_supported = True
         self._pd_role = None
         self._pd_server_index = None
         self._pd_tp_local_rank = None
@@ -281,8 +284,19 @@ class ServerAdapter(BaseRollout):
         # SGLang restores packed parameters once before a refit and repacks only
         # after every bucket (including the quantized finalizer) has arrived.
         engine = self._engine if self._engine is not None and self._is_server_tp_leader() else None
+        if engine is not None and not self._weight_update_sessions_supported:
+            engine = None
         if engine is not None:
-            await engine.begin_weight_update()
+            try:
+                await engine.begin_weight_update()
+            except aiohttp.ClientResponseError as e:
+                if e.status != 404:
+                    raise
+                # Released SGLang (e.g. the pinned 0.5.20) has no session endpoints and
+                # loads each bucket as it arrives, so sync without a session as before.
+                logger.warning("SGLang server has no weight-update session endpoints; syncing without a session")
+                self._weight_update_sessions_supported = False
+                engine = None
         try:
             yield
         finally:

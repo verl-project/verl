@@ -68,6 +68,9 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 2.0
+# Weight-update session calls are sent once: a resent begin/end fails as a duplicate while the
+# first one is still running, so finalizing a large quantized refit gets its own deadline instead.
+WEIGHT_UPDATE_SESSION_TIMEOUT = 600.0
 DEFAULT_MAX_CONNECTIONS = 2000
 DEFAULT_MAX_WAIT_TIME = 300.0
 # Cap on how much of a failed response body reaches the log.
@@ -667,6 +670,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         method: str = "POST",
         timeout: float = DEFAULT_TIMEOUT,
         only_master: bool = True,
+        max_attempts: Optional[int] = None,
     ) -> dict[str, Any]:
         """Make an async HTTP request with retry logic and consistent error handling.
 
@@ -675,6 +679,8 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             payload (Optional[Dict[str, Any]], optional): The JSON payload to send.
                 Defaults to empty dict if None.
             method (str, optional): HTTP method to use. Defaults to "POST".
+            max_attempts (Optional[int], optional): Attempts for this request; defaults to
+                ``self.max_attempts``. Pass 1 for requests that must not be sent twice.
 
         Returns:
             Dict[str, Any]: The JSON response from the server
@@ -692,8 +698,9 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             return {}
 
         url = f"http://{self.server_args.host}:{self.server_args.port}/{endpoint}"
+        attempts = self.max_attempts if max_attempts is None else max_attempts
 
-        for attempt in range(self.max_attempts):
+        for attempt in range(attempts):
             try:
                 async with self._get_session() as session:
                     if method.upper() == "GET":
@@ -720,13 +727,13 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
-                if attempt == self.max_attempts - 1:
+                if attempt == attempts - 1:
                     raise
 
-            if attempt < self.max_attempts - 1:
+            if attempt < attempts - 1:
                 await asyncio.sleep(self.retry_delay * (2**attempt))
 
-        raise RuntimeError(f"Failed to complete async request to {endpoint} after {self.max_attempts} attempts")
+        raise RuntimeError(f"Failed to complete async request to {endpoint} after {attempts} attempts")
 
     async def release_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
         """Release GPU memory occupation temporarily (async version).
@@ -756,12 +763,25 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         return await self._make_async_request("resume_memory_occupation", {"tags": tags})
 
     async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
-        """Restore the server's packed parameters before a complete weight refit."""
-        return await self._make_async_request("begin_weight_update", {"selector": selector})
+        """Restore the server's packed parameters before a complete weight refit.
+
+        Sent once: the server rejects a second begin while a session is open.
+        """
+        return await self._make_async_request(
+            "begin_weight_update",
+            {"selector": selector},
+            timeout=WEIGHT_UPDATE_SESSION_TIMEOUT,
+            max_attempts=1,
+        )
 
     async def end_weight_update(self) -> dict[str, Any]:
-        """Finalize the complete refit after its last tensor bucket."""
-        return await self._make_async_request("end_weight_update")
+        """Finalize the complete refit after its last tensor bucket.
+
+        Sent once: the server rejects an end once the session is closed.
+        """
+        return await self._make_async_request(
+            "end_weight_update", timeout=WEIGHT_UPDATE_SESSION_TIMEOUT, max_attempts=1
+        )
 
     async def update_weights_from_tensor(
         self,
