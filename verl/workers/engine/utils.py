@@ -57,6 +57,9 @@ def enable_full_determinism(seed: int):
     device_manual_seed(seed)
     device_manual_seed_all(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
+    # Opt-in rollout experiment; keep actor allocation diagnostics unchanged.
+    if os.environ.get("VERL_SEED") is not None and os.environ.get("VERL_ROLLOUT_DISABLE_DEBUG_FILL") == "1":
+        torch.utils.deterministic.fill_uninitialized_memory = False
     # Enable CUDNN deterministic mode
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
