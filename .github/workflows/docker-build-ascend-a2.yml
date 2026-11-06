@@ -2,7 +2,7 @@ name: docker-build-ascend-a2
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     branches: ["main"]
     paths:
       - "docker/ascend/Dockerfile.ascend_9.1.0_a2"
@@ -22,13 +22,12 @@ jobs:
   # ============================================================
   build-push-digest:
     name: build-${{ matrix.tag }}
-    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
+    if: ${{ github.repository_owner == 'verl-project' }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.tag }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     runs-on: ${{ matrix.runner }}
     permissions:
-      packages: write
       contents: read
     strategy:
       fail-fast: false
@@ -50,6 +49,8 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -82,6 +83,7 @@ jobs:
 
       # Build 阶段只推送到临时仓库，只需登录临时仓库
       - name: Login to Quay Temp
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@v3
         with:
           registry: quay.io
@@ -99,8 +101,8 @@ jobs:
           context: .
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.1.0_a2
-          push: true
-          outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=true
+          push: ${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.QUAY_TEMP_REPO) }}
           provenance: false
           cache-from: type=gha,scope=ascend-a2-${{ matrix.tag }}
           cache-to: type=gha,mode=max,scope=ascend-a2-${{ matrix.tag }}
@@ -109,18 +111,21 @@ jobs:
 
       # Quay.io 约 1 小时自动清理未打 tag 的 digest，构建后立即打临时 tag 防止 GC
       - name: Tag digest to prevent GC
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           docker buildx imagetools create \
             -t "${{ env.QUAY_TEMP_REPO }}:tmp-a2-${{ matrix.tag }}" \
             "${{ env.QUAY_TEMP_REPO }}@${{ steps.build_main.outputs.digest }}"
 
       - name: Export digest (main image)
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           mkdir -p ${{ runner.temp }}/digests
           digest="${{ steps.build_main.outputs.digest }}"
           touch "${{ runner.temp }}/digests/main-${digest#sha256:}"
 
       - name: Upload digest (main image)
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: digests-main-${{ matrix.tag }}
@@ -133,13 +138,12 @@ jobs:
   # ============================================================
   build-push-digest-v091:
     name: build-v0.9.1-${{ matrix.tag }}
-    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
+    if: ${{ github.repository_owner == 'verl-project' }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-v0.9.1-${{ matrix.tag }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     runs-on: ${{ matrix.runner }}
     permissions:
-      packages: write
       contents: read
     strategy:
       fail-fast: false
@@ -159,6 +163,8 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -173,6 +179,7 @@ jobs:
           use: true
 
       - name: Login to Quay Temp
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@v3
         with:
           registry: quay.io
@@ -190,8 +197,8 @@ jobs:
           context: .
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.1.0_a2_v0.9.1
-          push: true
-          outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=true
+          push: ${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.QUAY_TEMP_REPO) }}
           provenance: false
           cache-from: type=gha,scope=ascend-a2-v091-${{ matrix.tag }}
           cache-to: type=gha,mode=max,scope=ascend-a2-v091-${{ matrix.tag }}
@@ -199,18 +206,21 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
 
       - name: Tag digest to prevent GC
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           docker buildx imagetools create \
             -t "${{ env.QUAY_TEMP_REPO }}:tmp-a2-v091-${{ matrix.tag }}" \
             "${{ env.QUAY_TEMP_REPO }}@${{ steps.build_v091.outputs.digest }}"
 
       - name: Export digest (v0.9.1 image)
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           mkdir -p ${{ runner.temp }}/digests-v091
           digest="${{ steps.build_v091.outputs.digest }}"
           touch "${{ runner.temp }}/digests-v091/v091-${digest#sha256:}"
 
       - name: Upload digest (v0.9.1 image)
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: digests-v091-${{ matrix.tag }}
@@ -222,6 +232,7 @@ jobs:
   # 第二阶段：合并多架构 manifest（main 镜像）
   # ============================================================
   merge-image:
+    if: ${{ github.event_name != 'pull_request' }}
     name: merge
     runs-on: ubuntu-latest
     needs: build-push-digest
@@ -276,6 +287,7 @@ jobs:
   # 第二阶段（v0.9.1）：合并多架构 manifest
   # ============================================================
   merge-image-v091:
+    if: ${{ github.event_name != 'pull_request' }}
     name: merge-v0.9.1
     runs-on: ubuntu-latest
     needs: build-push-digest-v091
