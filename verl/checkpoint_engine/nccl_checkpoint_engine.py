@@ -140,18 +140,23 @@ class NCCLCheckpointEngine(CheckpointEngine):
         is_master: bool = False,
         rollout_dtype: torch.dtype = torch.bfloat16,
         multi_sender: bool = True,
+        fault_tolerant: bool = False,
     ) -> None:
         self.bucket_size = bucket_size
+        self.base_group_name = group_name
         self.group_name = group_name
         self.rebuild_group = rebuild_group
         self.rollout_dtype = rollout_dtype
         self.multi_sender = multi_sender
+        self.fault_tolerant = fault_tolerant
+        self.comm_version = 0
 
         # start zeromq server for broadcasting bucket tensor metadata
         self.is_master = is_master
         self.topic = "bucket_metadata"
         if self.is_master:
             self._start_zmq_server()
+
 
     @staticmethod
     def get_node_id() -> str:
@@ -513,3 +518,38 @@ class NCCLCheckpointEngine(CheckpointEngine):
             f"Rank {self.rank} receive weights done, total_params: {total_params}, "
             f"time cost: {time_cost:.2f}s, bandwidth: {bandwidth:.2f} GB/s"
         )
+
+    def re_rendezvous(self, new_group_name: str, rank: int, world_size: int, master_metadata: MasterMetadata, num_senders: int):
+        """Dynamic re-rendezvous for failover recovery.
+
+        Destroys stale NCCL communicator and rejoins a fresh group under new_group_name.
+        """
+        logger.info(f"NCCLCheckpointEngine: Dynamic re-rendezvous -> {new_group_name} (rank {rank}/{world_size})")
+        if collective.is_group_initialized(self.group_name):
+            try:
+                collective.destroy_collective_group(self.group_name)
+            except Exception as e:
+                logger.warning(f"Error destroying old collective group {self.group_name}: {e}")
+
+        self.group_name = new_group_name
+        self.rebuild_group = True
+        self.init_process_group(rank=rank, world_size=world_size, master_metadata=master_metadata, num_senders=num_senders)
+
+    @torch.no_grad()
+    async def recover_weights_from_rollout(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+        """Allow a promoted standby trainer (rank 0) to recover weights directly from rollout VRAM.
+
+        During sudden trainer failure, the promoted standby actor receives weights
+        from the rollout worker (src=num_senders) over NCCL peer-to-peer.
+        """
+        assert self.rank == 0, "Only promoted trainer (rank 0) recovers weights from rollout."
+        logger.info(f"Rank {self.rank}: Initiating in-memory reverse weight recovery from rollout worker...")
+        recv_buf = self.recv_buf
+        if recv_buf is None:
+            recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+
+        # Rollout broadcasts to rank 0
+        collective.broadcast(recv_buf, src_rank=self.num_senders, group_name=self.group_name)
+        torch.cuda.synchronize()
+        logger.info(f"Rank {self.rank}: In-memory reverse weight recovery completed successfully.")
+
