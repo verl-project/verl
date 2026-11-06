@@ -921,9 +921,14 @@ class FSDPEngine(BaseEngine):
         # FSDP2 state_dict() only collects DTensor refs and the generator below already
         # stages each shard lazily via .to(device).full_tensor(), so the whole-shard
         # round trip is only needed for FSDP1 (state_dict unshards on-device) and LoRA
-        # (adapter merge does real weight math on the module).
+        # (adapter merge does real weight math on the module). A LoRA base export streams
+        # DTensor refs the same way; staging it would leave those refs holding the GPU copy
+        # of the whole local shard after the offload, for the length of the sync.
         _is_peft = hasattr(getattr(self.module, "_fsdp_wrapped_module", self.module), "peft_config")
-        _skip_staging = fsdp_version(self.module) == 2 and not _is_peft
+        _lora_base_export = (
+            _is_peft and not self.model_config.lora.get("merge", False) and not base_sync_done and not layered_summon
+        )
+        _skip_staging = fsdp_version(self.module) == 2 and (not _is_peft or _lora_base_export)
         if not self._uses_fsdp2_cpu_offload_policy and not _skip_staging:
             load_fsdp_model_to_gpu(self.module)
 
