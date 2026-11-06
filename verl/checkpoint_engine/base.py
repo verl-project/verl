@@ -614,7 +614,6 @@ class CheckpointEngineManager:
         # weights, so the current salt still matches what the external KV store holds.
         if self.backend == "naive":
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
-            await self.resume_generation_replicas()
             return {}
 
         if getattr(getattr(self, "backend_cls", None), "is_vllm_native", False):
