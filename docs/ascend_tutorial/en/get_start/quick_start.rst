@@ -134,13 +134,19 @@ so no other overrides are required:
    NDEVICES_PER_NODE=2 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
        bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
-   # PPO smoke test on a single A2 card (the critic adds a second model, so
-   # ulysses_sequence_parallel_size must also drop to 1)
-   NDEVICES_PER_NODE=1 SP_SIZE=1 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+   # PPO smoke test on a single A2 card. The critic adds a second model, so
+   # ulysses_sequence_parallel_size must drop to 1, and the default rollout
+   # memory utilization (0.8) OOMs once cudagraph capture starts — 0.5 is
+   # verified on a single card.
+   NDEVICES_PER_NODE=1 SP_SIZE=1 ROLLOUT_GPU_MEM_UTIL=0.5 \
+       SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
        bash tests/special_npu/run_qwen3_06b_ppo.sh
 
 Notes:
 
+- vLLM-Ascend 0.30.x rejects FRACTAL_NZ weights in RL scenarios (weight
+  sync after sleep/wake raises an error), so the scripts explicitly pass
+  ``additional_config.weight_nz_mode=0`` to the rollout engine.
 - The FSDP2 + SGLang script accepts the same ``NDEVICES_PER_NODE`` and
   ``ROLLOUT_TP`` overrides.
 - The Megatron combos hardcode ``TP=2, PP=2`` and therefore need at least 4

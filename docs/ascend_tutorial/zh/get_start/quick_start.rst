@@ -132,13 +132,18 @@
    NDEVICES_PER_NODE=2 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
        bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
-   # 单张 A2 卡上运行 PPO 冒烟脚本（PPO 含 critic，会加载第二个模型，
-   # 因此 ulysses_sequence_parallel_size 也需降为 1）
-   NDEVICES_PER_NODE=1 SP_SIZE=1 SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
+   # 单张 A2 卡上运行 PPO 冒烟脚本。PPO 含 critic，会加载第二个模型，
+   # 因此 ulysses_sequence_parallel_size 需降为 1；默认 rollout 显存占比
+   # （0.8）在 cudagraph 捕获阶段会 OOM，单卡实测 0.5 可用。
+   NDEVICES_PER_NODE=1 SP_SIZE=1 ROLLOUT_GPU_MEM_UTIL=0.5 \
+       SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
        bash tests/special_npu/run_qwen3_06b_ppo.sh
 
 说明：
 
+- vLLM-Ascend 0.30.x 在 RL 场景（sleep/wake 后的权重同步）会拒绝
+  FRACTAL_NZ 权重并报错，脚本已显式向 rollout 引擎传
+  ``additional_config.weight_nz_mode=0``。
 - FSDP2 + SGLang 脚本同样支持 ``NDEVICES_PER_NODE`` 和 ``ROLLOUT_TP`` 覆盖。
 - Megatron 组合固定 ``TP=2、PP=2``，至少需要 4 个设备。
 - 单卡下按默认批量（16 条 prompt x n 采样）跑一个 step 耗时明显更长。快速验证时建议
