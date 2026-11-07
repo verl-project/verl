@@ -85,6 +85,9 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
+    # vLLM-Ascend 0.30.x hard-fails RL weight sync when FRACTAL_NZ weights are
+    # enabled, so keep the rollout engine in ND mode.
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.calculate_log_probs=True
