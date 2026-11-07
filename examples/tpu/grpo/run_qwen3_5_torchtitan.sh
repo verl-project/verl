@@ -162,6 +162,10 @@ MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-512}"
 MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-2048}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
+# vLLM automatic prefix caching (off by default). Multi-turn agent rollouts resend the whole conversation every turn,
+# so caching the shared prefix skips most of each turn's prefill.
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-False}"
+NO_ENABLE_PREFIX_CACHING=$([[ "${ENABLE_PREFIX_CACHING}" == "True" ]] && echo False || echo True)
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 
 # Rollout & training overlap settings
@@ -197,6 +201,19 @@ if [[ -n "${STATIC_MICRO_BATCH_LEN:-}" ]]; then
 fi
 if [[ -n "${STATIC_MAX_RESPONSE_LEN:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
+fi
+# VLLM_BLOCK_SIZE: vLLM KV cache block size (default: unset, vLLM picks). Qwen3.5 is a hybrid (GatedDeltaNet +
+# attention) model, so vLLM TorchTPU sizes the block to hold one GatedDeltaNet state (e.g. 272 tokens for
+# Qwen3.5-35B-A3B at TP8) and treats this value only as a lower bound. A multiple of 128 at or above that size
+# (e.g. 512) keeps the ragged paged attention kernel on 128-aligned pages.
+if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.block_size=${VLLM_BLOCK_SIZE}")
+fi
+# VLLM_ATTENTION_BACKEND: vLLM attention backend (default: unset, vLLM TorchTPU picks its ragged paged attention
+# backend). CUSTOM selects vLLM TorchTPU's experimental batched ragged paged attention backend
+# (PallasBatchedRPAAttentionBackend).
+if [[ -n "${VLLM_ATTENTION_BACKEND:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.attention_backend=${VLLM_ATTENTION_BACKEND}")
 fi
 
 python3 -m verl.trainer.main_ppo \
@@ -301,8 +318,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.seed="${SEED}" \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.seed="${SEED}" \
-    actor_rollout_ref.rollout.enable_prefix_caching=False \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True \
+    actor_rollout_ref.rollout.enable_prefix_caching="${ENABLE_PREFIX_CACHING}" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching="${NO_ENABLE_PREFIX_CACHING}" \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
