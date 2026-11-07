@@ -118,16 +118,17 @@ For multi-node task launch, see the :doc:`Multi-Machine Task Startup Practice Gu
 Running on a Single Card or a Small Node
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The quick-start scripts assume an 8-device (die) node by default. They also work
-on smaller nodes, such as a single Atlas A2 (910B) card, by overriding
-``NDEVICES_PER_NODE`` — no other overrides are required. The scripts derive
+The FSDP2 quick-start scripts and the PPO smoke test assume an 8-device (die)
+node by default. They also work on smaller nodes, such as a single Atlas A2
+(910B) card, by overriding ``NDEVICES_PER_NODE`` — no other overrides are
+required. (The Megatron combos need at least 4 devices.) The scripts derive
 compatible defaults automatically:
 
 - ``ROLLOUT_TP`` falls back to the largest tensor-parallel size that divides
   the device count (e.g. 1 on a 1- or 3-device node, 2 on 6 devices);
 - ``train_batch_size`` defaults to 16 floored down to a multiple of the
-  data-parallel size (e.g. 12 on 6 devices);
-- ``ppo_mini_batch_size`` defaults to the device count.
+  total data-parallel size across nodes (e.g. 12 on 6 devices);
+- ``ppo_mini_batch_size`` defaults to the total device count.
 
 .. code-block:: bash
 
