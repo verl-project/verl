@@ -10,6 +10,14 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-8}
 SP_SIZE=${SP_SIZE:-2}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.8}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-2}
+
+# train_batch_size must be a multiple of the data-parallel size
+# (NDEVICES_PER_NODE / SP_SIZE): the trainer asserts equal-size chunks per
+# rank. Floor the default 16 accordingly (16 for all standard 8/16-device
+# setups).
+dp_size=$(( NDEVICES_PER_NODE / SP_SIZE ))
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-$(( (16 / dp_size) * dp_size ))}
 
 SKIP_ENABLE=True
 SKIP_DUMP_DIR=${SKIP_DUMP_DIR:-${HOME}/data/rollout_dump_sync}
@@ -20,7 +28,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
-    data.train_batch_size=16 \
+    data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=512 \
     data.max_response_length=128 \
     data.shuffle=False \
@@ -28,7 +36,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_BATCH_SIZE} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -63,7 +71,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=2 \
+    trainer.total_training_steps=${TOTAL_TRAINING_STEPS} \
     skip.rollout.enable=${SKIP_ENABLE} \
     skip.rollout.dump_dir=${SKIP_DUMP_DIR} \
     skip.rollout.steps=${SKIP_STEPS} \

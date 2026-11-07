@@ -119,8 +119,12 @@
 ~~~~~~~~~~~~~~~~~~~~~~
 
 快速上手脚本默认按 8 设备（die）节点配置。在小规格节点（如单张 Atlas A2/910B 卡）上，
-通过覆盖 ``NDEVICES_PER_NODE`` 即可直接运行：``ROLLOUT_TP`` 会自动收缩为不超过设备数，
-``ppo_mini_batch_size`` 默认即取设备数，无需其他额外覆盖：
+通过覆盖 ``NDEVICES_PER_NODE`` 即可直接运行，无需其他额外覆盖。脚本会自动派生兼容的
+默认值：
+
+- ``ROLLOUT_TP`` 自动回退到能整除设备数的最大张量并行值（如 1/3 设备用 1，6 设备用 2）；
+- ``train_batch_size`` 默认取 16 向下取整到数据并行数的倍数（如 6 设备取 12）；
+- ``ppo_mini_batch_size`` 默认取设备数。
 
 .. code-block:: bash
 
@@ -134,8 +138,10 @@
 
    # 单张 A2 卡上运行 PPO 冒烟脚本。PPO 含 critic，会加载第二个模型，
    # 因此 ulysses_sequence_parallel_size 需降为 1；默认 rollout 显存占比
-   # （0.8）在 cudagraph 捕获阶段会 OOM，单卡实测 0.5 可用。
+   # （0.8）在 cudagraph 捕获阶段会 OOM，单卡实测 0.5 可用。该脚本默认从
+   # ModelScope 缓存读权重，需用 MODEL_PATH 指向上文下载的权重目录。
    NDEVICES_PER_NODE=1 SP_SIZE=1 ROLLOUT_GPU_MEM_UTIL=0.5 \
+       MODEL_PATH=$HOME/models/Qwen/Qwen3-0.6B \
        SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
        bash tests/special_npu/run_qwen3_06b_ppo.sh
 
@@ -144,10 +150,13 @@
 - vLLM-Ascend 0.30.x 在 RL 场景（sleep/wake 后的权重同步）会拒绝
   FRACTAL_NZ 权重并报错，脚本已显式向 rollout 引擎传
   ``additional_config.weight_nz_mode=0``。
-- FSDP2 + SGLang 脚本同样支持 ``NDEVICES_PER_NODE`` 和 ``ROLLOUT_TP`` 覆盖。
+- FSDP2 + SGLang 脚本同样支持 ``NDEVICES_PER_NODE`` / ``ROLLOUT_TP`` /
+  ``TRAIN_BATCH_SIZE`` 覆盖（其采样数 n 固定为 2）。
 - Megatron 组合固定 ``TP=2、PP=2``，至少需要 4 个设备。
 - 单卡下按默认批量（16 条 prompt x n 采样）跑一个 step 耗时明显更长。快速验证时建议
-  传 ``TOTAL_TRAINING_STEPS=1``，并可选调小批量，如 ``TRAIN_BATCH_SIZE=8 ROLLOUT_N=4``。
+  传 ``TOTAL_TRAINING_STEPS=1``，可选调小批量（``TRAIN_BATCH_SIZE=8``，vLLM 脚本还可
+  ``ROLLOUT_N=4``），并用 ``TEST_FREQ=-1`` 跳过验证（quick-start 的验证会跑完整
+  GSM8K 测试集）。
 
 附录
 -------------------------------------------
