@@ -734,6 +734,38 @@ async def test_pd_dispatch_raises_when_prefill_returns_no_kv_params():
         )
 
 
+@pytest.mark.asyncio
+async def test_pd_dispatch_returns_aborted_prefill_without_decode():
+    """An aborted prefill has no kv_transfer_params. Hand it back so the
+    v1 client retries after resume instead of failing the prompt group."""
+    server_cls = _import_http_server()
+    from unittest.mock import MagicMock
+
+    from verl.workers.rollout.replica import TokenOutput
+
+    decode_peer = MagicMock()
+    aborted = TokenOutput(token_ids=[], stop_reason="aborted", extra_fields={})
+
+    async def aborted_prefill(prompt_ids, sampling_params, request_id, **kw):
+        return aborted
+
+    stub = _DispatchStub(
+        decode_peers=[decode_peer],
+        kv_transfer_config=_multi_connector_cfg("MooncakeConnectorV2", "AscendStoreConnector"),
+    )
+    stub.generate = aborted_prefill
+
+    result = await server_cls._pd_dispatch(
+        stub,
+        prompt_ids=[1, 2],
+        sampling_params={"max_tokens": 8},
+        request_id="req-aborted",
+    )
+
+    assert result is aborted
+    decode_peer.generate.remote.assert_not_called()
+
+
 def _make_awaitable_token_output(token_ids):
     """Wrap a TokenOutput in an awaitable so the test can ``await`` the
     decode_peer.generate.remote(...) MagicMock return value."""

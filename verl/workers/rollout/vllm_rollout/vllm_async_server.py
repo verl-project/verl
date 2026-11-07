@@ -911,6 +911,8 @@ class vLLMHttpServer:
             kv_transfer_params=prefill_kv_params,
             session_id=session_id,
         )
+        if prefill_out.stop_reason in ("aborted", "abort"):
+            return prefill_out
         if is_mooncake:
             # Mooncake does not return decode params from the prefill leg.
             decode_kv_params = {
