@@ -1198,14 +1198,22 @@ class vLLMHttpServer:
             #    MooncakeStoreConnector) is invalidated along with the
             #    local prefix cache — RL-correct hard-reset at every
             #    weight update boundary, no extra kwargs needed.
+            #
+            # With weight_sync_pause_mode="wait", step 2 instead lets in-flight requests
+            # finish under the current weights. A replica leaving for training
+            # (reject_request=True) still aborts.
+            wait = self.config.weight_sync_pause_mode == "wait" and not reject_request
             if _VLLM_VERSION >= version.parse("0.32.0"):
-                await self.engine.pause_generation(mode="abort", clear_cache=reset_prefix_cache)
+                await self.engine.pause_generation(mode="wait" if wait else "abort", clear_cache=reset_prefix_cache)
             else:
                 await self.engine.pause_generation(
-                    wait_for_inflight_requests=False,
+                    wait_for_inflight_requests=wait,
                     clear_cache=reset_prefix_cache,
                 )
 
+            if wait:
+                logger.info(f"Paused after {len(request_ids)} in-flight requests finished")
+                return {"aborted_count": 0, "request_ids": []}
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
 

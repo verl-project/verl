@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from verl.workers.config.rollout import RolloutConfig
 
 
@@ -22,3 +24,12 @@ def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():
     config.max_model_len = 32768
     config.max_num_batched_tokens = config.max_model_len
     assert config.max_num_batched_tokens == 32768
+
+
+def test_weight_sync_pause_mode_validation():
+    assert RolloutConfig(name="vllm").weight_sync_pause_mode == "abort"
+    assert RolloutConfig(name="vllm", weight_sync_pause_mode="wait").weight_sync_pause_mode == "wait"
+    with pytest.raises(ValueError, match="weight_sync_pause_mode"):
+        RolloutConfig(name="vllm", weight_sync_pause_mode="keep")
+    with pytest.raises(NotImplementedError, match="only implemented for vllm"):
+        RolloutConfig(name="sglang", weight_sync_pause_mode="wait")
