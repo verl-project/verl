@@ -209,6 +209,12 @@ fi
 if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
     EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.block_size=${VLLM_BLOCK_SIZE}")
 fi
+# VLLM_ATTENTION_BACKEND: vLLM attention backend (default: unset, vLLM TorchTPU picks its ragged paged attention
+# backend). CUSTOM selects vLLM TorchTPU's experimental batched ragged paged attention backend
+# (PallasBatchedRPAAttentionBackend).
+if [[ -n "${VLLM_ATTENTION_BACKEND:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.attention_backend=${VLLM_ATTENTION_BACKEND}")
+fi
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
