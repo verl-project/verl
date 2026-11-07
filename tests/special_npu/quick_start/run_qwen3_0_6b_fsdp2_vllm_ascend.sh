@@ -5,7 +5,7 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
 NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${NDEVICES_PER_NODE:-8}}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
@@ -34,13 +34,25 @@ TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 ########################### derived defaults ###########################
 n_devices_per_node=${NDEVICES_PER_NODE:-8}
 
-# Clamp the rollout tensor-parallel size to the number of devices per node so
-# the script also works out of the box on smaller nodes (e.g. a single A2
-# card with NDEVICES_PER_NODE=1).
-if [ "${ROLLOUT_TP}" -gt "${n_devices_per_node}" ]; then
-    echo "ROLLOUT_TP=${ROLLOUT_TP} exceeds NDEVICES_PER_NODE=${n_devices_per_node}, clamping to ${n_devices_per_node}"
-    ROLLOUT_TP=${n_devices_per_node}
+# The rollout tensor-parallel size must divide the number of devices per
+# node, and train_batch_size must be a multiple of it (the trainer asserts
+# equal-size chunks per data-parallel rank). Derive compatible defaults so
+# the script also works out of the box on small nodes (e.g. a single A2
+# card with NDEVICES_PER_NODE=1): pick the largest TP <= ROLLOUT_TP that
+# divides the device count, and floor the default batch of 16 down to a
+# multiple of the device count. Standard 1/2/4/8/16-device setups keep
+# batch=16 / TP=2.
+rollout_tp=${ROLLOUT_TP}
+if [ "${rollout_tp}" -gt "${n_devices_per_node}" ]; then
+    rollout_tp=${n_devices_per_node}
 fi
+while [ "${rollout_tp}" -gt 1 ] && [ $(( n_devices_per_node % rollout_tp )) -ne 0 ]; do
+    rollout_tp=$(( rollout_tp - 1 ))
+done
+if [ "${rollout_tp}" -ne "${ROLLOUT_TP}" ]; then
+    echo "ROLLOUT_TP=${ROLLOUT_TP} is not a valid tensor-parallel size for NDEVICES_PER_NODE=${n_devices_per_node}, using ${rollout_tp} instead"
+fi
+train_batch_size=${TRAIN_BATCH_SIZE:-$(( (16 / n_devices_per_node) * n_devices_per_node ))}
 
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
@@ -56,7 +68,7 @@ DATA=(
     algorithm.use_kl_in_reward=False
     data.train_files=${TRAIN_FILE}
     data.val_files=${TEST_FILE}
-    data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.train_batch_size=${train_batch_size}
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.filter_overlong_prompts=True
@@ -83,7 +95,7 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     # vLLM-Ascend 0.30.x hard-fails RL weight sync when FRACTAL_NZ weights are
     # enabled, so keep the rollout engine in ND mode.

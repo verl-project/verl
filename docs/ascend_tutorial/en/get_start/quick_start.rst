@@ -120,9 +120,14 @@ Running on a Single Card or a Small Node
 
 The quick-start scripts assume an 8-device (die) node by default. They also work
 on smaller nodes, such as a single Atlas A2 (910B) card, by overriding
-``NDEVICES_PER_NODE``. ``ROLLOUT_TP`` is clamped to the device count
-automatically, and ``ppo_mini_batch_size`` already defaults to the device count,
-so no other overrides are required:
+``NDEVICES_PER_NODE`` — no other overrides are required. The scripts derive
+compatible defaults automatically:
+
+- ``ROLLOUT_TP`` falls back to the largest tensor-parallel size that divides
+  the device count (e.g. 1 on a 1- or 3-device node, 2 on 6 devices);
+- ``train_batch_size`` defaults to 16 floored down to a multiple of the
+  data-parallel size (e.g. 12 on 6 devices);
+- ``ppo_mini_batch_size`` defaults to the device count.
 
 .. code-block:: bash
 
@@ -135,10 +140,12 @@ so no other overrides are required:
        bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
    # PPO smoke test on a single A2 card. The critic adds a second model, so
-   # ulysses_sequence_parallel_size must drop to 1, and the default rollout
-   # memory utilization (0.8) OOMs once cudagraph capture starts — 0.5 is
-   # verified on a single card.
+   # ulysses_sequence_parallel_size must drop to 1; the default rollout memory
+   # utilization (0.8) OOMs once cudagraph capture starts — 0.5 is verified on
+   # a single card. The PPO script reads weights from the ModelScope cache by
+   # default, so point MODEL_PATH at the weights downloaded above.
    NDEVICES_PER_NODE=1 SP_SIZE=1 ROLLOUT_GPU_MEM_UTIL=0.5 \
+       MODEL_PATH=$HOME/models/Qwen/Qwen3-0.6B \
        SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 \
        bash tests/special_npu/run_qwen3_06b_ppo.sh
 
@@ -147,14 +154,17 @@ Notes:
 - vLLM-Ascend 0.30.x rejects FRACTAL_NZ weights in RL scenarios (weight
   sync after sleep/wake raises an error), so the scripts explicitly pass
   ``additional_config.weight_nz_mode=0`` to the rollout engine.
-- The FSDP2 + SGLang script accepts the same ``NDEVICES_PER_NODE`` and
-  ``ROLLOUT_TP`` overrides.
+- The FSDP2 + SGLang script accepts the same ``NDEVICES_PER_NODE`` /
+  ``ROLLOUT_TP`` / ``TRAIN_BATCH_SIZE`` overrides (its rollout sample count
+  ``n`` is fixed at 2).
 - The Megatron combos hardcode ``TP=2, PP=2`` and therefore need at least 4
   devices.
 - On a single card, one training step with the default batch (16 prompts x n
   samples) takes noticeably longer. For a quick validation, pass
-  ``TOTAL_TRAINING_STEPS=1`` and optionally reduce the batch, e.g.
-  ``TRAIN_BATCH_SIZE=8 ROLLOUT_N=4``.
+  ``TOTAL_TRAINING_STEPS=1``, optionally reduce the batch
+  (``TRAIN_BATCH_SIZE=8``, plus ``ROLLOUT_N=4`` in the vLLM script), and skip
+  the validation pass with ``TEST_FREQ=-1`` (the quick-start validation runs
+  the full GSM8K test split).
 
 Appendix
 -------------------------------------------
