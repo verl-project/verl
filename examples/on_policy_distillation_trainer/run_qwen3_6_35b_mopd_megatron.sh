@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # On-policy distillation | multi-teacher (reasoning_gym caesar_cipher + simple_geometry) | vLLM rollout with MTP
-# | Megatron EP4 training | separate_async one-step overlap | 8 NVIDIA GPUs
+# | Megatron EP4 training | fully async, at most one step stale, no partial rollout | 8 NVIDIA GPUs
 #
 # Qwen3.6-35B-A3B is distilled from two GRPO teachers, one per task, routed by `data_source`.
 # Layout (8 GPUs): trainer EP4 on 4, two TP1 rollout engines on 2, one TP1 engine per teacher on 2.
+# Rollout runs ahead of training by at most one batch (staleness_threshold=1); a weight sync waits for
+# in-flight requests (weight_sync_pause_mode=wait), so every response comes from one policy version.
 # The resource pools fit one 8-GPU node or 2 nodes x 4 GPUs; for more than one node, start a Ray
 # cluster first and run this script on the head node.
 # Data, models and results: qwen3_6_35b_mopd/README.md.
@@ -35,7 +37,7 @@ test_freq=${TEST_FREQ:-10}
 save_freq=${SAVE_FREQ:--1}
 
 project_name=${PROJECT_NAME:-verl_distill_mopd_reasoning_gym}
-experiment_name=${EXPERIMENT_NAME:-qwen3_6_35b_a3b_mopd_megatron_ep4_async}
+experiment_name=${EXPERIMENT_NAME:-qwen3_6_35b_a3b_mopd_megatron_ep4_fully_async}
 # ---- end user-adjustable ----
 
 max_model_len=$(( max_prompt_length + max_response_length + 1 ))
@@ -46,10 +48,11 @@ reward_fn=$(dirname "$(realpath "$0")")/qwen3_6_35b_mopd/reward.py
 DATA=(
     algorithm.adv_estimator=grpo
     algorithm.use_kl_in_reward=False
+    # fully async streams single prompts; a training step takes ppo_mini_batch_size samples.
     data.train_files="$DATA_DIR/train.parquet"
     data.val_files="['$DATA_DIR/caesar_cipher-dev.parquet', '$DATA_DIR/simple_geometry-dev.parquet']"
-    data.train_batch_size=${train_batch_size}
-    data.gen_batch_size=${train_batch_size}
+    data.train_batch_size=0
+    data.gen_batch_size=1
     data.max_prompt_length=${max_prompt_length}
     data.max_response_length=${max_response_length}
     data.filter_overlong_prompts=False
@@ -109,8 +112,6 @@ ACTOR=(
 ROLLOUT=(
     actor_rollout_ref.hybrid_engine=False
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.nnodes=1
-    actor_rollout_ref.rollout.n_gpus_per_node=${ROLLOUT_GPUS}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6
     actor_rollout_ref.rollout.n=1
@@ -127,7 +128,8 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${max_token_len_per_gpu}
     actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
-    # Weight syncs wait for in-flight requests, so every response comes from one policy version.
+    # Weight syncs wait for in-flight requests instead of aborting them, so every response comes
+    # from one policy version and long responses are not cut at a sync.
     actor_rollout_ref.rollout.weight_sync_pause_mode=wait
     # MTP speculative decoding on the rollout only. The drafter is not in the trained model and is
     # never synced, so it must be loaded from the checkpoint (load_format=auto, not dummy).
@@ -146,12 +148,21 @@ ALGO=(
     algorithm.rollout_correction.bypass_mode=True
 )
 
+# One weight sync per training step; rollout may generate up to one extra batch ahead of the trainer.
+# partial_rollout=False: nothing is resumed across a sync (with `wait`, nothing is aborted either).
+ASYNC=(
+    async_training.trigger_parameter_sync_step=1
+    async_training.require_batches=1
+    async_training.staleness_threshold=1
+    async_training.partial_rollout=False
+    # Two TP1 replicas x 64 keeps one 128-prompt batch in flight.
+    async_training.concurrent_samples_per_replica=$(( train_batch_size * rollout_tp / ROLLOUT_GPUS ))
+    rollout.nnodes=1
+    rollout.n_gpus_per_node=${ROLLOUT_GPUS}
+    rollout.total_rollout_steps=$(( total_training_steps * train_batch_size ))
+)
+
 TRAINER=(
-    trainer.use_v1=True
-    trainer.v1.trainer_mode=separate_async
-    trainer.v1.separate_async.parameter_sync_step=1
-    trainer.v1.separate_async.num_warmup_batches=1
-    trainer.v1.sampler.max_off_policy_threshold=2
     trainer.logger='["console","wandb"]'
     trainer.project_name=${project_name}
     trainer.experiment_name=${experiment_name}
@@ -160,7 +171,6 @@ TRAINER=(
     trainer.val_before_train=True
     trainer.test_freq=${test_freq}
     trainer.save_freq=${save_freq}
-    trainer.total_training_steps=${total_training_steps}
     trainer.total_epochs=1
     trainer.resume_mode=disable
 )
@@ -182,7 +192,6 @@ teacher() {
 mapfile -t TEACHERS < <(teacher caesar caesar_cipher "$CAESAR_TEACHER_MODEL"; \
     teacher geometry simple_geometry "$GEOMETRY_TEACHER_MODEL")
 EXTRA=(
-    model_engine=megatron
     distillation.enabled=True
     distillation.nnodes=1
     distillation.n_gpus_per_node=2
@@ -208,12 +217,14 @@ if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
     LAUNCH=(uv run --frozen --all-packages --extra vllm --extra megatron python3)
     RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra vllm --extra megatron")
 fi
-"${LAUNCH[@]}" -m verl.trainer.main_ppo \
+"${LAUNCH[@]}" -m verl.experimental.fully_async_policy.fully_async_main \
+    --config-name=fully_async_ppo_megatron_trainer \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
     "${ROLLOUT[@]}" \
     "${ALGO[@]}" \
+    "${ASYNC[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
     "${RAY[@]}" \
