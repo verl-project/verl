@@ -1026,6 +1026,7 @@ trainer:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
       sync_refill_failed_groups: false
+      poll_interval: 2.0
       custom_sampler:
         path: null
         name: null

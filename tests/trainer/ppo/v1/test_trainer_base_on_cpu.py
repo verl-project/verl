@@ -98,6 +98,63 @@ def test_custom_sampler_skips_builtin_filter_groups_validation():
     assert "sync_refill_failed_groups" not in sampler.kwargs
 
 
+@pytest.mark.parametrize("trainer_mode", ["sync", "colocate_async", "separate_async"])
+def test_builtin_sampler_poll_interval_defaults_to_two_seconds(trainer_mode):
+    sampler = _trainer_with_filter_groups({"enable": False}, trainer_mode=trainer_mode)._build_replay_buffer()
+
+    assert sampler.poll_interval == 2.0
+
+
+@pytest.mark.parametrize("trainer_mode", ["sync", "colocate_async", "separate_async"])
+def test_builtin_sampler_uses_configured_poll_interval(trainer_mode):
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode=trainer_mode)
+    trainer.config.trainer.v1.sampler.poll_interval = 0.1
+
+    assert trainer._build_replay_buffer().poll_interval == 0.1
+
+
+@pytest.mark.parametrize("poll_interval", [0, -1.0])
+def test_builtin_sampler_rejects_non_positive_poll_interval(poll_interval):
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    trainer.config.trainer.v1.sampler.poll_interval = poll_interval
+
+    with pytest.raises(ValueError, match="poll_interval must be positive"):
+        trainer._build_replay_buffer()
+
+
+def test_custom_sampler_does_not_receive_poll_interval():
+    trainer = _trainer_with_filter_groups({"enable": False})
+    trainer.config.trainer.v1.sampler.custom_sampler = {"path": "custom.py", "name": "CustomSampler"}
+    trainer.config.trainer.v1.sampler.poll_interval = 0.1
+
+    with patch("verl.trainer.ppo.v1.trainer_base.load_extern_type", return_value=_CustomSampler):
+        sampler = trainer._build_replay_buffer()
+
+    assert "poll_interval" not in sampler.kwargs
+
+
+def test_configured_poll_interval_matches_a_custom_subclass_that_sets_it():
+    """poll_interval=0.1 builds the same async replay buffer as a ReplayBufferAsync subclass passing 0.1."""
+
+    class _FastPollReplayBufferAsync(ReplayBufferAsync):
+        def __init__(self, *args, poll_interval: float = 0.1, **kwargs):
+            super().__init__(*args, poll_interval=poll_interval, **kwargs)
+
+    configured = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    configured.config.trainer.v1.sampler.poll_interval = 0.1
+    custom = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
+    custom.config.trainer.v1.sampler.custom_sampler = {"path": "custom.py", "name": "FastPoll"}
+
+    built_in = configured._build_replay_buffer()
+    with patch("verl.trainer.ppo.v1.trainer_base.load_extern_type", return_value=_FastPollReplayBufferAsync):
+        subclass = custom._build_replay_buffer()
+
+    assert type(built_in) is ReplayBufferAsync
+    assert built_in.poll_interval == subclass.poll_interval == 0.1
+    state = {k: v for k, v in vars(built_in).items() if k != "refill_fn"}
+    assert state == {k: v for k, v in vars(subclass).items() if k != "refill_fn"}
+
+
 def test_builtin_filter_groups_uses_default_inflight_limit():
     trainer = _trainer_with_filter_groups({"enable": True, "metric": "acc"})
 
