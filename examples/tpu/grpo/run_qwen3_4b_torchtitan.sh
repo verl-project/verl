@@ -57,8 +57,17 @@ if (( TENSOR_PARALLEL_SIZE < 1 || CONTEXT_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHI
 fi
 DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
 # The tpu-sync checkpoint engine supports a single rollout replica, so the rollout TP spans all rollout chips.
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
 FUSE_QKV="${FUSE_QKV:-True}"
+
+ROLLOUT_ENGINE_ARGS=()
+if [[ "${ROLLOUT_NAME}" == "vllm" ]]; then
+    ROLLOUT_ENGINE_ARGS+=(
+        "++actor_rollout_ref.rollout.engine_kwargs.vllm.seed=${SEED}"
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True"
+    )
+fi
 
 # Training & validation settings
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
@@ -168,7 +177,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.torchtitan.seed="${SEED}" \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=True \
     actor_rollout_ref.ref.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TENSOR_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.data_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
@@ -179,9 +188,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.dtype=bfloat16 \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.seed="${SEED}" \
-    ++actor_rollout_ref.rollout.engine_kwargs.vllm.seed="${SEED}" \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True \
+    "${ROLLOUT_ENGINE_ARGS[@]}" \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096 \

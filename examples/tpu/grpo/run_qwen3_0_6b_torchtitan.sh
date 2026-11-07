@@ -46,6 +46,7 @@ if (( TENSOR_PARALLEL_SIZE < 1 || CONTEXT_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHI
 fi
 DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
 # The tpu-sync checkpoint engine supports a single rollout replica, so the rollout TP spans all rollout chips.
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
 FUSE_QKV="${FUSE_QKV:-True}"
 
@@ -133,7 +134,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.actor.torchtitan.pad_to_length=True \
     actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TENSOR_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \

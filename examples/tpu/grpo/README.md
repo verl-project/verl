@@ -1,6 +1,6 @@
 # GRPO on Cloud TPU with `verl` + `verl-hardware-plugin`
 
-GRPO on GSM8K with Qwen3 on Cloud TPU: a TorchTitan trainer on one slice, a vLLM rollout on the other, and `tpu-sync` weight sync between them. TPU support comes from [`verl-hardware-plugin`](https://github.com/verl-project/verl-hardware-plugin).
+GRPO on GSM8K with Qwen3 on Cloud TPU: a TorchTitan trainer on one slice, a vLLM or SGLang (`ROLLOUT_NAME=sglang`, via [`sglang-torchtpu`](https://github.com/sgl-project/sglang-torchtpu)) rollout on the other, and `tpu-sync` weight sync between them. TPU support comes from [`verl-hardware-plugin`](https://github.com/verl-project/verl-hardware-plugin).
 
 By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1` slices: 1 trainer chip and 1 rollout chip) for the Qwen3-0.6B smoke test. See [Section 6](#6-run-qwen3-4b-on-2-v6e-4-slices-8-chips) for scaling up to Qwen3-4B on 2 `v6e-4` slices (8 chips) or 2 `v6e-8` slices (16 chips).
 
@@ -139,8 +139,12 @@ The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HO
 
 4. **Submit the 4B job** (or run the 0.6B smoke test across all 8 chips):
    ```bash
-   # 100-step Qwen3-4B run on 2 v6e-4 slices (defaults to N_CHIPS_TRAINER=4 N_CHIPS_ROLLOUT=4):
+   # 100-step Qwen3-4B run on 2 v6e-4 slices (defaults to ROLLOUT_NAME=vllm, N_CHIPS_TRAINER=4 N_CHIPS_ROLLOUT=4):
    ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh
+
+   # Switch rollout engine to SGLang (requires sglang-torchtpu installed in the worker image):
+   ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+     ROLLOUT_NAME=sglang bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh
 
    # Optional: 5-step Qwen3-0.6B smoke test on 2 v6e-4 slices:
    ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
