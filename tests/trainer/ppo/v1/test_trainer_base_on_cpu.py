@@ -16,8 +16,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
+from transfer_queue import KVBatchMeta
 
+from verl.trainer.ppo.v1 import trainer_base
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
 
@@ -199,3 +203,40 @@ def test_update_actor_passes_score_centering_flag(score_centering):
     trainer._update_actor(batch, {})
 
     assert batch.extra_info["score_centering"] is score_centering
+
+
+def test_ref_lora_flag_does_not_reach_critic_values(monkeypatch):
+    """With a LoRA actor the ref pass disables the adapter; the critic values pass must not inherit that."""
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"temperature": 1.0}}})
+    trainer.ref_in_actor = True
+    batch = KVBatchMeta(keys=["a", "b"], tags=[{}, {}], partition_id="train")
+
+    seen = {}
+
+    def record(stage, output):
+        def call(meta):
+            seen[stage] = dict(meta.extra_info)
+            return output
+
+        return call
+
+    trainer.actor_rollout_wg = MagicMock()
+    trainer.actor_rollout_wg.compute_log_prob.side_effect = record("ref", [None, None])
+    trainer.critic_wg = MagicMock()
+    trainer.critic_wg.infer_batch.side_effect = record("values", SimpleNamespace(futures=[]))
+
+    def kv_batch_get(keys, partition_id, select_fields):
+        return TensorDict({field: torch.ones(len(keys), 3) for field in select_fields}, batch_size=[len(keys)])
+
+    monkeypatch.setattr(trainer_base.tq, "kv_batch_get", kv_batch_get)
+    monkeypatch.setattr(trainer_base.tq, "kv_batch_put", MagicMock())
+    monkeypatch.setattr(trainer_base, "response_from_nested", lambda values, mask: values)
+    monkeypatch.setattr(trainer_base.ray, "get", lambda futures: futures)
+
+    trainer._compute_ref_log_prob(batch, {})
+    trainer._compute_values(batch, {})
+
+    assert seen["ref"]["no_lora_adapter"] is True
+    assert "no_lora_adapter" not in seen["values"]
+    assert "no_lora_adapter" not in batch.extra_info
