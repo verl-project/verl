@@ -6,7 +6,7 @@ NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${NDEVICES_PER_NODE:-8}}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
@@ -33,15 +33,18 @@ TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 
 ########################### derived defaults ###########################
 n_devices_per_node=${NDEVICES_PER_NODE:-8}
+total_devices=$(( NNODES * n_devices_per_node ))
 
 # The rollout tensor-parallel size must divide the number of devices per
-# node, and train_batch_size must be a multiple of it (the trainer asserts
-# equal-size chunks per data-parallel rank). Derive compatible defaults so
-# the script also works out of the box on small nodes (e.g. a single A2
-# card with NDEVICES_PER_NODE=1): pick the largest TP <= ROLLOUT_TP that
-# divides the device count, and floor the default batch of 16 down to a
-# multiple of the device count. Standard 1/2/4/8/16-device setups keep
-# batch=16 / TP=2.
+# node, and train_batch_size must be a multiple of the total data-parallel
+# size across nodes (the trainer asserts equal-size chunks per rank; the
+# GRPO mini-batch of prompts*n samples is split the same way). Derive
+# compatible defaults so the script also works out of the box on small
+# nodes (e.g. a single A2 card with NDEVICES_PER_NODE=1): pick the largest
+# TP <= ROLLOUT_TP that divides the device count, floor the default batch
+# of 16 down to a multiple of the total device count, and default the
+# mini-batch to the total device count. Standard 1/2/4/8/16-device
+# single-node setups keep batch=16 / TP=2 / mini=devices.
 rollout_tp=${ROLLOUT_TP}
 if [ "${rollout_tp}" -gt "${n_devices_per_node}" ]; then
     rollout_tp=${n_devices_per_node}
@@ -52,7 +55,8 @@ done
 if [ "${rollout_tp}" -ne "${ROLLOUT_TP}" ]; then
     echo "ROLLOUT_TP=${ROLLOUT_TP} is not a valid tensor-parallel size for NDEVICES_PER_NODE=${n_devices_per_node}, using ${rollout_tp} instead"
 fi
-train_batch_size=${TRAIN_BATCH_SIZE:-$(( (16 / n_devices_per_node) * n_devices_per_node ))}
+train_batch_size=${TRAIN_BATCH_SIZE:-$(( (16 / total_devices) * total_devices ))}
+ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-${total_devices}}
 
 export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
@@ -84,7 +88,7 @@ MODEL=(
 ACTOR=(
     actor_rollout_ref.actor.strategy=fsdp2
     actor_rollout_ref.actor.optim.lr=${ACTOR_LR}
-    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
     actor_rollout_ref.actor.use_kl_loss=True

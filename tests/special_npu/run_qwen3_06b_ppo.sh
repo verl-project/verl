@@ -12,6 +12,13 @@ SP_SIZE=${SP_SIZE:-2}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-2}
 
+# Ulysses sequence parallelism must divide the device count; drop the
+# default SP=2 to 1 on nodes where it does not fit (e.g. a single card).
+if [ $(( NDEVICES_PER_NODE % SP_SIZE )) -ne 0 ]; then
+    echo "SP_SIZE=${SP_SIZE} does not divide NDEVICES_PER_NODE=${NDEVICES_PER_NODE}, using 1"
+    SP_SIZE=1
+fi
+
 # train_batch_size must be a multiple of the data-parallel size
 # (NDEVICES_PER_NODE / SP_SIZE): the trainer asserts equal-size chunks per
 # rank. Floor the default 16 accordingly (16 for all standard 8/16-device
