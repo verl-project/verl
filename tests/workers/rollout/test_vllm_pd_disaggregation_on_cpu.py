@@ -469,24 +469,27 @@ def _sleep_bounds(log: list[tuple[str, str, str]], name: str) -> tuple[int, int]
     return starts[0], ends[0]
 
 
-def test_npu_pd_sleeps_every_decode_before_prefill(patched_replica_cls):
+def test_npu_pd_sleeps_decode_and_prefill_servers_serially(patched_replica_cls):
     replica = object.__new__(patched_replica_cls)
     log: list[tuple[str, str, str]] = []
-    prefill = _SleepServerStub("prefill", log)
+    prefill_0 = _SleepServerStub("prefill-0", log)
+    prefill_1 = _SleepServerStub("prefill-1", log)
     decode_0 = _SleepServerStub("decode-0", log)
     decode_1 = _SleepServerStub("decode-1", log)
-    replica._prefill_servers = [prefill]
+    replica._prefill_servers = [prefill_0, prefill_1]
     replica._decode_servers = [decode_0, decode_1]
-    replica.servers = [prefill, decode_0, decode_1]
+    replica.servers = [prefill_0, prefill_1, decode_0, decode_1]
 
     with patch.object(patched_replica_cls, "_is_ascend_platform", return_value=True):
         asyncio.run(replica.sleep())
 
-    assert log[0] == ("start", "prefill", "drain")
+    assert log[0] == ("start", "prefill-0", "drain")
     _, decode_0_end = _sleep_bounds(log, "decode-0")
-    _, decode_1_end = _sleep_bounds(log, "decode-1")
-    prefill_start, _ = _sleep_bounds(log, "prefill")
-    assert max(decode_0_end, decode_1_end) < prefill_start
+    decode_1_start, decode_1_end = _sleep_bounds(log, "decode-1")
+    prefill_0_start, prefill_0_end = _sleep_bounds(log, "prefill-0")
+    prefill_1_start, _ = _sleep_bounds(log, "prefill-1")
+    assert decode_0_end < decode_1_start < decode_1_end < prefill_0_start
+    assert prefill_0_end < prefill_1_start
 
 
 def test_resume_generation_resumes_every_engine_before_opening_gates():
