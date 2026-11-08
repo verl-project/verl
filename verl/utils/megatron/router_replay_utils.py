@@ -242,6 +242,7 @@ def merge_router_topk_indices(
     vp_rank=None,
     local_cp_size=None,
     model=None,
+    routers=None,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -269,7 +270,9 @@ def merge_router_topk_indices(
             raise RuntimeError("router replay RECORD requires attention_mask for non-nested BSHD inputs.")
         vp_rank = 0 if vp_rank is None else vp_rank
         if model is not None:
-            model_routers = sorted(iter_model_routers(model), key=lambda item: item[0])
+            model_routers = sorted(
+                routers if routers is not None else iter_model_routers(model), key=lambda item: item[0]
+            )
             layer_numbers = [layer_number for layer_number, _ in model_routers]
             if len(layer_numbers) != len(set(layer_numbers)):
                 raise RuntimeError(
@@ -440,6 +443,7 @@ def set_router_replay_data(
     replay_mask=None,
     local_cp_size=None,
     model=None,
+    routers=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -524,7 +528,7 @@ def set_router_replay_data(
         index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
 
         if model is not None:
-            model_routers = list(iter_model_routers(model))
+            model_routers = list(routers) if routers is not None else list(iter_model_routers(model))
             if not model_routers:
                 raise RuntimeError("router_replay REPLAY found no routers in the forwarded model.")
 
@@ -586,7 +590,7 @@ def iter_model_routers(model):
                 yield module.layer_number, router
 
 
-def set_model_router_replay_action(model, router_replay_action):
+def set_model_router_replay_action(model, router_replay_action, routers=None):
     """Set the router replay action on the forwarded model's own routers.
 
     Mirrors the module walk in ``set_router_replay_data``. Toggling through the positional slice can
@@ -594,7 +598,7 @@ def set_model_router_replay_action(model, router_replay_action):
     stale cross-micro-batch ``target_topk_idx`` instead of popping its own entry from
     ``replay_backward_list``.
     """
-    for _, router in iter_model_routers(model):
+    for _, router in routers if routers is not None else iter_model_routers(model):
         router.set_router_replay_action(router_replay_action)
 
 
@@ -822,44 +826,44 @@ class RouterReplayHelper:
         return RouterReplay.router_instances[offset : offset + local_counts[vp_rank]]
 
     @staticmethod
-    def _get_action_router_list(tf_config, vp_rank=None, model=None):
+    def _get_action_router_list(tf_config, vp_rank=None, model=None, routers=None):
         if model is not None:
-            return [router for _, router in iter_model_routers(model)]
+            return [router for _, router in (routers if routers is not None else iter_model_routers(model))]
         return RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
     @staticmethod
-    def is_r2_record_action(tf_config, vp_rank=None, model=None) -> bool:
+    def is_r2_record_action(tf_config, vp_rank=None, model=None, routers=None) -> bool:
         """Return True if the current router_replay_action is RECORD (R2) for the local router instances.
 
         This inspects the first local RouterReplay instance's router_replay_action and compares it to
         RouterReplayAction.RECORD.
         """
-        router_instances_list = RouterReplayHelper._get_action_router_list(tf_config, vp_rank, model)
+        router_instances_list = RouterReplayHelper._get_action_router_list(tf_config, vp_rank, model, routers)
         return bool(router_instances_list) and (
             router_instances_list[0].router_replay_action == RouterReplayAction.RECORD
         )
 
     @staticmethod
-    def is_replay_forward_action(tf_config, vp_rank=None, model=None) -> bool:
+    def is_replay_forward_action(tf_config, vp_rank=None, model=None, routers=None) -> bool:
         """Return True if the current router_replay_action is REPLAY_FORWARD for the local router instances.
 
         This inspects the first local RouterReplay instance's router_replay_action and compares it to
         RouterReplayAction.REPLAY_FORWARD.
         """
-        router_instances_list = RouterReplayHelper._get_action_router_list(tf_config, vp_rank, model)
+        router_instances_list = RouterReplayHelper._get_action_router_list(tf_config, vp_rank, model, routers)
         return (
             bool(router_instances_list)
             and router_instances_list[0].router_replay_action == RouterReplayAction.REPLAY_FORWARD
         )
 
     @staticmethod
-    def is_replay_backward_action(tf_config, vp_rank=None, model=None) -> bool:
+    def is_replay_backward_action(tf_config, vp_rank=None, model=None, routers=None) -> bool:
         """Return True if the current router_replay_action is REPLAY_BACKWARD for the local router instances.
 
         This inspects the first local RouterReplay instance's router_replay_action and compares it to
         RouterReplayAction.REPLAY_BACKWARD.
         """
-        router_instances_list = RouterReplayHelper._get_action_router_list(tf_config, vp_rank, model)
+        router_instances_list = RouterReplayHelper._get_action_router_list(tf_config, vp_rank, model, routers)
         return (
             bool(router_instances_list)
             and router_instances_list[0].router_replay_action == RouterReplayAction.REPLAY_BACKWARD

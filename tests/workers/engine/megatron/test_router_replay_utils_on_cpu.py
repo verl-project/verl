@@ -34,6 +34,9 @@ class _FakeRouter:
         self.target_topk_idx = topk_indices
         self.target_replay_mask = replay_mask
 
+    def set_router_replay_action(self, action):
+        self.router_replay_action = action
+
 
 @pytest.fixture(autouse=True)
 def _restore_router_registry():
@@ -474,3 +477,51 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_set_model_router_replay_action_uses_cached_routers(monkeypatch):
+    r1, r2 = _FakeRouter(), _FakeRouter()
+
+    def fail(_model):
+        raise AssertionError("iter_model_routers should not be called when routers are supplied")
+
+    monkeypatch.setattr(rr_utils, "iter_model_routers", fail)
+    rr_utils.set_model_router_replay_action(object(), RouterReplayAction.REPLAY_FORWARD, routers=[(1, r1), (2, r2)])
+
+    assert r1.router_replay_action == RouterReplayAction.REPLAY_FORWARD
+    assert r2.router_replay_action == RouterReplayAction.REPLAY_FORWARD
+
+
+def test_action_query_uses_cached_routers(monkeypatch):
+    router = _FakeRouter(router_replay_action=RouterReplayAction.REPLAY_FORWARD)
+
+    def fail(_model):
+        raise AssertionError("iter_model_routers should not be called when routers are supplied")
+
+    monkeypatch.setattr(rr_utils, "iter_model_routers", fail)
+    assert rr_utils.RouterReplayHelper.is_replay_forward_action(_config(), model=object(), routers=[(1, router)])
+
+
+def test_set_router_replay_data_uses_cached_routers(monkeypatch):
+    router = _FakeRouter()
+    tf_config = _config(num_layers=1)
+    routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)
+
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "preprocess_packed_seqs", lambda tensor, _mask, **_kwargs: (tensor, object()))
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(
+        rr_utils,
+        "iter_model_routers",
+        lambda _model: (_ for _ in ()).throw(AssertionError("unexpected walk")),
+    )
+
+    rr_utils.set_router_replay_data(
+        routed_experts,
+        torch.ones(1, 3, dtype=torch.bool),
+        tf_config,
+        model=object(),
+        routers=[(1, router)],
+    )
+
+    assert router.target_topk_idx is not None
