@@ -474,3 +474,26 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_router_replay_debug_env(monkeypatch):
+    monkeypatch.delenv("VERL_ROUTER_REPLAY_DEBUG", raising=False)
+    assert not rr_utils.is_router_replay_debug_enabled()
+
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "1")
+    assert rr_utils.is_router_replay_debug_enabled()
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "yes")
+    assert rr_utils.is_router_replay_debug_enabled()
+    monkeypatch.setenv("VERL_ROUTER_REPLAY_DEBUG", "0")
+    assert not rr_utils.is_router_replay_debug_enabled()
+
+
+def test_summarize_replay_mask():
+    mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils.summarize_replay_mask(mask) == {
+        "total_rows": 4,
+        "replay_rows": 2,
+        "native_rows": 2,
+    }
+    assert rr_utils.summarize_replay_mask(None) == {}
