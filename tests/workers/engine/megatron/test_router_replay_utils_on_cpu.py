@@ -474,3 +474,26 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
             tf_config,
             model=object(),
         )
+
+
+def test_target_replay_mask_is_normalized_to_bool():
+    router = RouterReplay()
+    indices = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
+    mask = torch.tensor([1, 0], dtype=torch.int64)
+
+    router.set_target_indices(indices, replay_mask=mask)
+
+    assert router.target_replay_mask.dtype == torch.bool
+    assert router.replay_backward_mask_list[0].dtype == torch.bool
+
+    router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+    scores = torch.randn(2, 8)
+
+    def native_topk(_scores, topk, **_kwargs):
+        return torch.topk(_scores, k=topk, dim=1)
+
+    _, replayed_indices = router.get_replay_topk(scores, 2, default_compute_topk=native_topk)
+
+    # First row replays the recorded route; second row keeps the native route.
+    assert torch.equal(replayed_indices[0], indices[0])
+    assert torch.equal(replayed_indices[1], torch.topk(scores[1], k=2, dim=0).indices)

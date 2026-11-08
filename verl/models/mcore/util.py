@@ -267,6 +267,7 @@ def preprocess_thd_engine(
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
+    need_position_ids: bool = True,
 ) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
 
@@ -275,9 +276,14 @@ def preprocess_thd_engine(
     one consecutive interval of the *global padded THD buffer*. The latter is
     required by attention variants whose CP kernels address rows through one
     rank-local ``global_start``.
+
+    Set ``need_position_ids=False`` when the caller only needs the packed rows
+    (e.g. router replay packing) to skip building a full position-id tensor.
     """
     if cp_layout not in ("zigzag", "contiguous"):
         raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
+    if need_roll and not need_position_ids:
+        raise ValueError("need_roll requires need_position_ids=True")
 
     batch_size = input_ids.shape[0]
 
@@ -351,7 +357,9 @@ def preprocess_thd_engine(
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
-        position_ids_rmpad = torch.zeros(shape[0], dtype=torch.long, device=input_ids.device)
+        position_ids_rmpad = (
+            torch.zeros(shape[0], dtype=torch.long, device=input_ids.device) if need_position_ids else None
+        )
         if need_roll:
             saved_roll_dict = {}
             saved_position_roll_dict = {}
@@ -379,9 +387,10 @@ def preprocess_thd_engine(
                     position_ids_rmpad[destination_start:destination_end] = source_indices
                 else:
                     input_ids_rmpad[destination_start:destination_end] = d[source_start:source_end]
-                    position_ids_rmpad[destination_start:destination_end] = torch.arange(
-                        source_start, source_end, dtype=torch.long, device=input_ids.device
-                    )
+                    if need_position_ids:
+                        position_ids_rmpad[destination_start:destination_end] = torch.arange(
+                            source_start, source_end, dtype=torch.long, device=input_ids.device
+                        )
                 continue
 
             if cp_size <= 1:
@@ -389,9 +398,10 @@ def preprocess_thd_engine(
                 start_idx = cu_seqlens_padded_cpu[i]
                 input_ids_rmpad[start_idx : start_idx + seqlen] = input_ids[i]
                 # Build position_ids: 0, 1, 2, ..., seqlen-1 for this sequence
-                position_ids_rmpad[start_idx : start_idx + seqlen] = torch.arange(
-                    seqlen, dtype=torch.long, device=input_ids.device
-                )
+                if need_position_ids:
+                    position_ids_rmpad[start_idx : start_idx + seqlen] = torch.arange(
+                        seqlen, dtype=torch.long, device=input_ids.device
+                    )
                 continue
 
             seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
@@ -418,9 +428,10 @@ def preprocess_thd_engine(
             ]
 
             # Build position_ids for the first chunk
-            position_ids_rmpad[start_idx : start_idx + half_seqlen] = torch.arange(
-                half_seqlen * cp_rank, half_seqlen * (cp_rank + 1), dtype=torch.long, device=input_ids.device
-            )
+            if need_position_ids:
+                position_ids_rmpad[start_idx : start_idx + half_seqlen] = torch.arange(
+                    half_seqlen * cp_rank, half_seqlen * (cp_rank + 1), dtype=torch.long, device=input_ids.device
+                )
 
             remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
             remain_end = seqlen_padded_i - half_seqlen * cp_rank
@@ -432,12 +443,13 @@ def preprocess_thd_engine(
                 ]
                 # Build position_ids for the remaining chunk: use remain_start as base,
                 # clamped to original seqlen to avoid exceeding seqlen-1 for padded positions
-                pos_end = min(remain_end, seqlen_orig_i)
-                valid_pos_len = pos_end - remain_start
-                if valid_pos_len > 0:
-                    position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + valid_pos_len] = (
-                        torch.arange(remain_start, pos_end, dtype=torch.long, device=input_ids.device)
-                    )
+                if need_position_ids:
+                    pos_end = min(remain_end, seqlen_orig_i)
+                    valid_pos_len = pos_end - remain_start
+                    if valid_pos_len > 0:
+                        position_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + valid_pos_len] = (
+                            torch.arange(remain_start, pos_end, dtype=torch.long, device=input_ids.device)
+                        )
 
             if need_roll:
                 # Handle roll for cp_size > 1 case
@@ -485,7 +497,8 @@ def preprocess_thd_engine(
         **extra_packed_args,
     )
     if pre_process:
-        return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
+        position_ids_out = position_ids_rmpad.unsqueeze(0) if need_position_ids else None
+        return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_out
     else:
         return input_ids, packed_seq_params, None
 
