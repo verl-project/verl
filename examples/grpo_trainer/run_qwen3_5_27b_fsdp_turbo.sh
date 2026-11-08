@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# dependency: GPU vllm==0.18.0, transformers@<cc7ab9be>
-# dependency: NPU vllm==0.18.0, vllm-ascend@<54879467>, transformers@<cc7ab9be>
+# dependency: GPU vllm==0.30.0, transformers==5.21.0
+# dependency: NPU vllm==0.30.0, vllm-ascend@<g15ec56012>, transformers==5.21.0
 
 set -xeuo pipefail
 
@@ -39,6 +39,11 @@ case "${DEVICE}" in
         export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
         export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+        export CPU_AFFINITY_CONF=1
+        export VLLM_ASCEND_TASK_QUEUE_ENABLE=1
+        export TASK_QUEUE_ENABLE=2
+        export MULTI_STREAM_MEMORY_REUSE=1
+        export HCCL_OP_EXPANSION_MODE="AIV"
         n_devices_per_node=16
         fsdp_size=16
         ;;
@@ -54,6 +59,8 @@ mkdir -p logs
 ########################### shared turbo config values ###########################
 ACTOR_TURBO="actor_rollout_ref.actor.fsdp_config.turbo_config"
 REF_TURBO="actor_rollout_ref.ref.fsdp_config.turbo_config"
+
+MODEL_NAME="qwen3_5"
 
 FSDP_APPLY_MODULES='{model.visual.blocks.\{*\}:{},'\
 'model.visual.patch_embed:{},'\
@@ -74,7 +81,7 @@ LOSS_FUNCTION_PATCHES="[{target_functions:['transformers.loss.loss_utils.ForCaus
 "type:causal_lm_loss}]"
 
 MODULE_PATCHES="[{target:transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Model.forward,"\
-"replacement:fsdp_turbo.models.qwen.qwen3_5.qwen3_5_model_forward}]"
+"replacement:fsdp_turbo.models.qwen.qwen3_5_moe.qwen3_5.qwen3_5_model_forward}]"
 
 ########################### parameter arrays ###########################
 
@@ -115,6 +122,9 @@ ACTOR=(
     "+${ACTOR_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
     "+${ACTOR_TURBO}.memory.recompute=True"
     "+${ACTOR_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
+    "+${ACTOR_TURBO}.model.use_fused_causal_conv1d=True"
+    "+${ACTOR_TURBO}.model.use_fused_gdn=True"
+    "+${ACTOR_TURBO}.model.model_name_or_path=${MODEL_NAME}"
     actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
     actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=True
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True
@@ -133,6 +143,9 @@ REF=(
     "+${REF_TURBO}.distributed.fsdp_plan.hook_modules=${HOOK_MODULES}"
     "+${REF_TURBO}.memory.recompute=True"
     "+${REF_TURBO}.memory.recompute_plan=${RECOMPUTE_PLAN}"
+    "+${REF_TURBO}.model.use_fused_causal_conv1d=True"
+    "+${REF_TURBO}.model.use_fused_gdn=True"
+    "+${REF_TURBO}.model.model_name_or_path=${MODEL_NAME}"
     actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True
     actor_rollout_ref.ref.use_torch_compile=False

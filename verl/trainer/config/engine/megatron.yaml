@@ -149,7 +149,3 @@ qat:
   ignore_patterns:
     - "lm_head"
     - "*mlp.gate"
-  # Activation observer strategy (W4A4 only): "static_minmax", "memoryless_minmax", "minmax"
-  activation_observer: null
-  # Path to quantization config JSON for vLLM weight export
-  quantization_config_path: null

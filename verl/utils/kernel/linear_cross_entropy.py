@@ -35,6 +35,8 @@ import typing
 import torch
 import torch.distributed as dist
 
+from verl.plugin.platform import get_platform
+
 _LIGER_FUNCTION = None
 
 
@@ -163,7 +165,7 @@ class LinearCrossEntropy(torch.autograd.Function):
 
         assert isinstance(temperature, float), f"temperature must be a float, but got {type(temperature)}"
         assert isinstance(reduction, str), f"reduction must be a str, but got {type(reduction)}"
-        with torch.cuda.nvtx.range("LinearCrossEntropy-forward"):
+        with get_platform().nvtx_range("LinearCrossEntropy-forward"):
             from . import kernels
 
             REDUCTION = kernels.get_entropy_reduction_enum_number(reduction.lower())
@@ -190,7 +192,7 @@ class LinearCrossEntropy(torch.autograd.Function):
     def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> list[torch.Tensor]:
         from . import kernels
 
-        with torch.cuda.nvtx.range("LinearCrossEntropy-backward"):
+        with get_platform().nvtx_range("LinearCrossEntropy-backward"):
             (hidden, weight, labels, _maximum, _accumulate, _entropy_b) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION
             dist_process_group = ctx.dist_process_group

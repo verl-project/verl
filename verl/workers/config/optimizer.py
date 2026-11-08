@@ -72,6 +72,8 @@ class VeOmniOptimizerConfig(OptimizerConfig):
         lr_start (float): Starting learning rate for warmup.
         lr_decay_ratio (float): LR decay ratio.
         lr_scheduler_type (str): LR scheduler type: "constant" or "cosine".
+        override_optimizer_config (dict): Extra keyword arguments for VeOmni's ``build_optimizer``,
+            e.g. ``{"fused": True}``.
     """
 
     _mutable_fields = OptimizerConfig._mutable_fields.copy()

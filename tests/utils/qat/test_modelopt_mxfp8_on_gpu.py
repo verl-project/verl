@@ -26,9 +26,11 @@ pytest.importorskip("modelopt")
 import verl.models.mcore  # noqa: F401
 import modelopt.torch.quantization as mtq
 from verl.utils.qat.modelopt import (
+    _Fp8FakeQuant,
     _Mxfp4FakeQuant,
-    _Nvfp4FakeQuant,
-    _nvfp4_global_scale,
+    _assert_grouped_scale_boundaries,
+    _group_fake_quant_weights,
+    _patch_te_grouped_weight_fake_quant,
     _nvfp4_input_backend,
     _nvfp4_weight_backend,
     build_quantize_config,
@@ -45,20 +47,26 @@ from verl.utils.qat.compressed_tensors import (
 # isort: on
 
 
+@pytest.fixture(autouse=True)
+def _allow_test_models_without_enabled_weight_quantizers(monkeypatch):
+    # Several unit tests intentionally ignore every weight-bearing module.
+    monkeypatch.setenv("MODELOPT_SKIP_WEIGHT_QUANT_CHECK", "1")
+
+
 def _entry(config: dict, name: str):
     return next(entry for entry in config["quant_cfg"] if entry["quantizer_name"] == name)
 
 
-def test_mxfp8_qat_uses_modelopt_native_preset():
+def test_mxfp8_qat_uses_tilelang_backend_with_modelopt_numerics():
     config = build_quantize_config("mxfp8")
-    expected = mtq.normalize_quant_cfg_list(mtq.MXFP8_DEFAULT_CFG["quant_cfg"])
 
-    assert config["quant_cfg"] == expected
     assert config["algorithm"] is None
     weight_cfg = _entry(config, "*weight_quantizer")["cfg"]
+    input_cfg = _entry(config, "*input_quantizer")["cfg"]
     assert weight_cfg["num_bits"] == (4, 3)
     assert weight_cfg["block_sizes"] == {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
-    assert weight_cfg.get("backend") is None
+    assert weight_cfg["backend"] == "verl_mxfp8"
+    assert input_cfg["backend"] == "verl_mxfp8"
 
 
 def test_mxfp8_qat_appends_user_ignores_without_mutating_modelopt_preset():
@@ -69,13 +77,13 @@ def test_mxfp8_qat_appends_user_ignores_without_mutating_modelopt_preset():
     model = torch.nn.Module()
     model.linear_attn = torch.nn.Module()
     model.linear_attn.in_proj_a = torch.nn.Linear(128, 32, bias=False)
-    model.linear_attn.in_proj_ab = torch.nn.Linear(128, 128, bias=False)
+    model.linear_attn.in_proj_c = torch.nn.Linear(128, 128, bias=False)
     mtq.quantize(model, config)
 
     assert not model.linear_attn.in_proj_a.input_quantizer.is_enabled
     assert not model.linear_attn.in_proj_a.weight_quantizer.is_enabled
-    assert model.linear_attn.in_proj_ab.input_quantizer.is_enabled
-    assert model.linear_attn.in_proj_ab.weight_quantizer.is_enabled
+    assert model.linear_attn.in_proj_c.input_quantizer.is_enabled
+    assert model.linear_attn.in_proj_c.weight_quantizer.is_enabled
     assert mtq.normalize_quant_cfg_list(mtq.MXFP8_DEFAULT_CFG["quant_cfg"]) == original
 
 
@@ -131,6 +139,96 @@ def test_fp8_ignored_module_preserves_forward_and_backward():
     torch.testing.assert_close(inputs.grad, reference_inputs.grad, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8"])
+def test_tilelang_qat_backend_runs_linear_forward_and_backward(mode):
+    model = torch.nn.Module()
+    model.projection = torch.nn.Linear(256, 256, bias=False, device="cuda", dtype=torch.bfloat16)
+    mtq.quantize(model, build_quantize_config(mode))
+    inputs = torch.randn(8, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    model.projection(inputs).float().square().mean().backward()
+
+    assert inputs.grad is not None
+    assert model.projection.weight.grad is not None
+
+
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8", "mxfp4"])
+def test_modelopt_qat_uses_grouped_kernel_for_te_expert_weight_fake_quant(mode):
+    import transformer_engine.pytorch as te
+
+    _patch_te_grouped_weight_fake_quant()
+    model = torch.nn.Module()
+    model.mlp = torch.nn.Module()
+    model.mlp.experts = torch.nn.Module()
+    model.mlp.experts.projection = te.GroupedLinear(
+        2,
+        256,
+        256,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    )
+    mtq.quantize(model, build_quantize_config(mode))
+    projection = model.mlp.experts.projection
+    weight_calls = [[], []]
+    hooks = [
+        quantizer.register_forward_hook(
+            lambda module, inputs, output, expert=expert: weight_calls[expert].append(inputs[0].shape)
+        )
+        for expert, quantizer in enumerate(projection.weight_quantizer)
+    ]
+    inputs = torch.randn(16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    output = projection(inputs, torch.tensor([7, 9], dtype=torch.int64))
+    output.float().square().mean().backward()
+    for hook in hooks:
+        hook.remove()
+
+    # The pointer-table kernel bypasses the per-expert quantizer modules.
+    assert weight_calls == [[], []]
+    assert inputs.grad is not None
+    assert projection.weight0.grad is not None
+    assert projection.weight1.grad is not None
+
+
+@pytest.mark.parametrize("mode", ["fp8", "mxfp8", "mxfp4"])
+def test_grouped_expert_weight_fake_quant_matches_per_expert(mode):
+    import transformer_engine.pytorch as te
+
+    model = torch.nn.Module()
+    model.mlp = torch.nn.Module()
+    model.mlp.experts = torch.nn.Module()
+    model.mlp.experts.projection = te.GroupedLinear(
+        3,
+        256,
+        256,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    )
+    mtq.quantize(model, build_quantize_config(mode))
+    projection = model.mlp.experts.projection
+    quantizers = projection.weight_quantizer
+    weights = tuple(getattr(projection, f"weight{i}") for i in range(3))
+
+    expected = tuple(quantizer(weight) for quantizer, weight in zip(quantizers, weights, strict=True))
+    actual = _group_fake_quant_weights(weights, quantizers)
+
+    for grouped, per_expert in zip(actual, expected, strict=True):
+        torch.testing.assert_close(grouped, per_expert, rtol=0, atol=0)
+
+
+def test_grouped_fp8_weight_fake_quant_rejects_cross_expert_scale_blocks():
+    quantizer = SimpleNamespace(
+        backend="verl_fp8_block",
+        backend_extra_args={"block_sizes": [128, 128]},
+    )
+    weights = (torch.empty(192, 256), torch.empty(192, 256))
+
+    with pytest.raises(AssertionError, match="cross an expert boundary"):
+        _assert_grouped_scale_boundaries(weights, quantizer)
+
+
 def test_mxfp8_rollout_requires_explicit_shape_ignore():
     pattern = r"re:.*linear_attn\.in_proj_[ab]$"
 
@@ -181,7 +279,7 @@ def test_mxfp4_rollout_quantizes_packed_experts():
         config_file=None,
     )
     quantizer = CompressedTensorsWeightQuantizer(config)
-    weights = torch.linspace(-1, 1, 2 * 64 * 32, dtype=torch.bfloat16).reshape(2, 64, 32)
+    weights = torch.linspace(-1, 1, 2 * 64 * 32, device="cuda", dtype=torch.bfloat16).reshape(2, 64, 32)
 
     result = dict(quantizer([("model.layers.0.mlp.experts.gate_up_proj", weights)]))
 
@@ -210,13 +308,15 @@ def test_native_fp8_config_export_uses_vllm_scale_names():
             "modules_to_not_convert": ["model.layers.0.mlp.gate"],
         }
     )
-    weight = torch.linspace(-1, 1, 256 * 256, dtype=torch.bfloat16).reshape(256, 256)
+    weight = torch.linspace(-1, 1, 256 * 256, device="cuda", dtype=torch.bfloat16).reshape(256, 256)
+    expert = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn(16, 256, dtype=torch.bfloat16)
 
     result = dict(
         quantizer(
             [
                 ("model.layers.0.self_attn.q_proj.weight", weight),
+                ("model.layers.0.block_sparse_moe.experts.0.w1.weight", expert),
                 ("model.layers.0.mlp.gate.weight", gate),
             ]
         )
@@ -225,10 +325,13 @@ def test_native_fp8_config_export_uses_vllm_scale_names():
     assert set(result) == {
         "model.layers.0.self_attn.q_proj.weight",
         "model.layers.0.self_attn.q_proj.weight_scale_inv",
+        "model.layers.0.block_sparse_moe.experts.0.w1.weight",
+        "model.layers.0.block_sparse_moe.experts.0.w1.weight_scale_inv",
         "model.layers.0.mlp.gate.weight",
     }
     assert result["model.layers.0.self_attn.q_proj.weight"].dtype == torch.float8_e4m3fn
     assert result["model.layers.0.self_attn.q_proj.weight_scale_inv"].shape == (2, 2)
+    assert result["model.layers.0.block_sparse_moe.experts.0.w1.weight"].dtype == torch.float8_e4m3fn
     assert result["model.layers.0.mlp.gate.weight"] is gate
 
 
@@ -271,15 +374,31 @@ def test_native_fp8_config_export_unpacks_fused_experts():
             "weight_block_size": [128, 128],
         }
     )
-    weights = torch.randn(2, 256, 128, dtype=torch.bfloat16)
+    down = torch.randn(2, 256, 128, device="cuda", dtype=torch.bfloat16)
+    gate_up = torch.randn(2, 256, 128, device="cuda", dtype=torch.bfloat16)
 
-    result = dict(quantizer([("model.layers.0.mlp.experts.down_proj", weights)]))
+    result = dict(
+        quantizer(
+            [
+                ("model.layers.0.mlp.experts.down_proj", down),
+                ("model.layers.0.mlp.experts.gate_up_proj", gate_up),
+            ]
+        )
+    )
 
     assert set(result) == {
         "model.layers.0.mlp.experts.0.down_proj.weight",
         "model.layers.0.mlp.experts.0.down_proj.weight_scale_inv",
         "model.layers.0.mlp.experts.1.down_proj.weight",
         "model.layers.0.mlp.experts.1.down_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.0.up_proj.weight",
+        "model.layers.0.mlp.experts.0.up_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.1.gate_proj.weight",
+        "model.layers.0.mlp.experts.1.gate_proj.weight_scale_inv",
+        "model.layers.0.mlp.experts.1.up_proj.weight",
+        "model.layers.0.mlp.experts.1.up_proj.weight_scale_inv",
     }
     assert result["model.layers.0.mlp.experts.0.down_proj.weight"].dtype == torch.float8_e4m3fn
 
@@ -385,6 +504,7 @@ def test_mxfp4_qat_combines_mxfp4_weights_with_mxfp8_inputs(qat_mode, dense_mxfp
     assert weight_cfg["backend"] == "verl_mxfp4"
     assert input_cfg["num_bits"] == (4, 3)
     assert input_cfg["block_sizes"] == {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+    assert input_cfg["backend"] == "verl_mxfp8"
     assert config["algorithm"] is None
 
     generic_weight_entries = [entry for entry in config["quant_cfg"] if entry["quantizer_name"] == "*weight_quantizer"]
@@ -395,20 +515,42 @@ def test_mxfp4_qat_weight_qdq_exactly_matches_export():
     from compressed_tensors.compressors import BaseCompressor
     from compressed_tensors.compressors.format import infer_module_format
 
-    weight = torch.randn(64, 64, dtype=torch.bfloat16)
+    weight = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     fake_quantized = _Mxfp4FakeQuant.apply(weight)
     scheme = _scheme_for_preset("MXFP4", ["Linear"])
     compressed = _compress_weight(weight, scheme)
     compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
     exported_qdq = compressor.decompress(compressed, scheme)["weight"]
 
-    torch.testing.assert_close(fake_quantized, exported_qdq, rtol=0, atol=0)
+    torch.testing.assert_close(fake_quantized, exported_qdq.to(weight.dtype), rtol=0, atol=0)
 
 
-def test_nvfp4_rollout_is_moe_only_w4a4():
+@pytest.mark.parametrize(
+    ("preset", "block_shape", "scale_fmt"),
+    [
+        ("FP8_BLOCK", (128, 128), None),
+        ("MXFP8", (1, 32), "e8m0"),
+    ],
+)
+def test_fp8_qat_qdq_exactly_matches_export(preset, block_shape, scale_fmt):
+    from compressed_tensors.compressors import BaseCompressor
+    from compressed_tensors.compressors.format import infer_module_format
+
+    weight = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+    fake_quantized = _Fp8FakeQuant.apply(weight, *block_shape, scale_fmt)
+    scheme = _scheme_for_preset(preset, ["Linear"])
+    compressed = _compress_weight(weight, scheme)
+    compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
+    exported_qdq = compressor.decompress(compressed, scheme)["weight"]
+
+    torch.testing.assert_close(fake_quantized, exported_qdq.to(weight.dtype), rtol=0, atol=0)
+
+
+def test_nvfp4_rollout_is_moe_only_w4a4_per_token():
     config = build_compressed_tensors_config(
         linear=None,
         moe="NVFP4",
+        moe_activation="nvfp4_per_token",
         ignore=[],
         config_file=None,
     )
@@ -419,7 +561,7 @@ def test_nvfp4_rollout_is_moe_only_w4a4():
     assert scheme["weights"]["group_size"] == 16
     assert scheme["weights"]["scale_dtype"] == "torch.float8_e4m3fn"
     assert scheme["input_activations"]["strategy"] == "tensor_group"
-    assert scheme["input_activations"]["dynamic"] == "local"
+    assert scheme["input_activations"]["dynamic"] is True
     assert qat_modes_for_config(config) == {"nvfp4"}
 
     with pytest.raises(ValueError, match="only for routed MoE experts"):
@@ -433,81 +575,37 @@ def test_nvfp4_rollout_is_moe_only_w4a4():
 
 def test_nvfp4_qat_uses_experts_only_export_compatible_backends():
     config = build_quantize_config("nvfp4")
-    weight_cfg = _entry(config, "*mlp.experts*weight_quantizer")["cfg"]
-    input_cfg = _entry(config, "*mlp.experts*input_quantizer")["cfg"]
-
-    assert weight_cfg["backend"] == "verl_nvfp4_weight"
-    assert input_cfg["backend"] == "verl_nvfp4_input"
-    assert weight_cfg["block_sizes"] == {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
-    assert input_cfg["block_sizes"] == {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+    # ModelOpt's experts-only preset names the routed experts differently across versions.
+    enabled = [entry for entry in config["quant_cfg"] if entry.get("enable", True) and entry.get("cfg")]
+    assert enabled and all(
+        "experts" in entry["quantizer_name"] or "moe" in entry["quantizer_name"] for entry in enabled
+    )
+    for entry in enabled:
+        kind = "weight" if entry["quantizer_name"].endswith("weight_quantizer") else "input"
+        assert entry["cfg"]["backend"] == f"verl_nvfp4_{kind}"
+        assert entry["cfg"]["block_sizes"][-1] == 16
     assert config["algorithm"] is None
     assert not any(
         entry["quantizer_name"] == "*weight_quantizer" and entry.get("enable", True) for entry in config["quant_cfg"]
     )
 
 
-def test_nvfp4_qat_weight_qdq_exactly_matches_export():
-    from compressed_tensors.compressors import BaseCompressor
-    from compressed_tensors.compressors.format import infer_module_format
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 fake quantization runs a Triton kernel")
+def test_nvfp4_qat_backends_quantize_like_the_rollout():
+    from verl.utils.qat.nvfp4 import fake_quantize_nvfp4, fake_quantize_nvfp4_per_token, nvfp4_global_scale
 
-    weight = torch.randn(64, 64, dtype=torch.bfloat16)
-    global_scale = _nvfp4_global_scale(weight)
-    fake_quantized = _Nvfp4FakeQuant.apply(weight, global_scale)
-    scheme = _scheme_for_preset("NVFP4", ["Linear"])
-    compressed = _compress_weight(weight, scheme, global_scale=global_scale)
-    compressor = BaseCompressor.get_value_from_registry(infer_module_format(torch.nn.Linear, scheme).value)
-    exported_qdq = compressor.decompress(compressed, scheme)["weight"]
+    # TEGroupedLinear weights: one global scale per expert, as the export computes it.
+    weight = torch.randn(3, 64, 32, device="cuda", dtype=torch.bfloat16)
+    expected = torch.stack([fake_quantize_nvfp4(expert, nvfp4_global_scale(expert)) for expert in weight])
+    assert torch.equal(_nvfp4_weight_backend(weight, None), expected)
 
-    torch.testing.assert_close(fake_quantized, exported_qdq, rtol=0, atol=0)
-
-
-def test_nvfp4_grouped_expert_qdq_uses_one_global_scale_per_expert():
-    weight = torch.randn(3, 64, 32, dtype=torch.bfloat16)
-    actual = _nvfp4_weight_backend(weight, None)
-    expected = torch.stack([_Nvfp4FakeQuant.apply(expert, _nvfp4_global_scale(expert)) for expert in weight])
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def test_nvfp4_input_backend_initializes_from_first_observation_then_tracks_minimum():
+    # Inputs: one global scale per token, with no state on the quantizer.
     quantizer = SimpleNamespace()
-    first = torch.full((16, 16), 0.5, dtype=torch.bfloat16)
-    second = first * 2
+    inputs = torch.randn(2, 5, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = _nvfp4_input_backend(inputs, quantizer)
+    assert torch.equal(out, fake_quantize_nvfp4_per_token(inputs.detach().reshape(-1, 64)).reshape(2, 5, 64))
+    assert vars(quantizer) == {}
 
-    _nvfp4_input_backend(first, quantizer)
-    first_scale = _nvfp4_global_scale(first)
-    torch.testing.assert_close(quantizer._verl_input_global_scale, first_scale)
-
-    _nvfp4_input_backend(second, quantizer)
-    torch.testing.assert_close(
-        quantizer._verl_input_global_scale,
-        torch.minimum(first_scale, _nvfp4_global_scale(second)),
-    )
-
-
-def test_nvfp4_export_uses_neutral_then_observed_input_scales():
-    config = build_compressed_tensors_config(
-        linear=None,
-        moe="NVFP4",
-        ignore=[],
-        config_file=None,
-    )
-    weights = torch.randn(2, 64, 32, dtype=torch.bfloat16)
-    quantizer = CompressedTensorsWeightQuantizer(config)
-    neutral = dict(quantizer([("model.layers.0.mlp.experts.gate_up_proj", weights)]))
-    assert neutral["model.layers.0.mlp.experts.0.gate_proj.input_global_scale"].item() == 1.0
-
-    quantizer.set_input_global_scales(
-        {
-            "layers.0.mlp.experts.gate_up": torch.tensor([0.25]),
-            "layers.0.mlp.experts.down": torch.tensor([0.5]),
-        }
-    )
-    result = dict(quantizer([("model.layers.0.mlp.experts.gate_up_proj", weights)]))
-    gate_prefix = "model.layers.0.mlp.experts.0.gate_proj."
-    up_prefix = "model.layers.0.mlp.experts.0.up_proj."
-    assert result[gate_prefix + "input_global_scale"].item() == 0.25
-    assert result[up_prefix + "input_global_scale"].item() == 0.25
-    torch.testing.assert_close(
-        result[gate_prefix + "weight_global_scale"],
-        result[up_prefix + "weight_global_scale"],
-    )
+    # Straight-through gradient.
+    out.backward(torch.ones_like(out))
+    assert torch.equal(inputs.grad, torch.ones_like(inputs))

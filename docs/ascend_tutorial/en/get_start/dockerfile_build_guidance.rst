@@ -1,13 +1,13 @@
 Ascend Image Guide
 ===================================
 
-Last updated: 09/28/2026.
+Last updated: 11/03/2026.
 
 
 Image Acquisition and Public Image Addresses
 --------------------------------------------
 
-Ascend hosts daily-built A2/A3/950 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built from the `Dockerfile <../../../../docker/ascend>`_.
+Ascend hosts daily-built A2/A3/950 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built from the `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_.
 
 Latest build image name format: latest-{inference backend}-{applicable product info}-{operating system}-{other fields}
 
@@ -33,55 +33,68 @@ Atlas 800T A3
 Ascend 950PR&950DT products
 
 
-Currently, the A2/A3 Megatron environment is based on ``scripts/install_vllm_mcore_npu.sh``:
-Megatron-LM, MindSpeed, and MegatronAdaptor use ``core_r0.18.0``,
+The current A2/A3/950 vLLM Megatron build environment is based on ``scripts/install_vllm_mcore_npu.sh``:
+Megatron-LM uses ``core_v0.18.0``; MindSpeed and MegatronAdaptor use ``core_r0.18.0``,
 Megatron-Bridge uses ``v0.5.0``; MindSpeed-Bridge uses the repository default branch (no pinned tag/commit),
-and TransformerEngineNPU and MindSpeed-Ops are also installed. The SGLang CI image needs to be rebuilt before this combination can be used.
+and TransformerEngineNPU and MindSpeed-Ops are also installed.
 
-A2/A3 vLLM Latest Image Component Version Inventory
+The tables below list this branch's latest Dockerfile targets. Images must be rebuilt and validated.
+The ``_v0.9.1`` builds and their image tags retain the original dependencies and install verl from ``release/v0.9.1``. Existing published images and historical releases retain their original versions.
+
+The current A2/A3/950 vLLM latest Dockerfiles use ``requirements-npu.txt`` from the cloned repository, then install ``triton-ascend==3.6.0.post2`` after installing verl.
+For example, build from the repository root with ``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``.
+
+A2/A3 vLLM Current Dockerfile Target Component Versions
 -------------------------------------------------------------------
 
-================= ============
+================= ===================
 Component         Version
-================= ============
+================= ===================
 Base image        Ubuntu 22.04
 Python            3.12
 CANN              9.1.0
 torch             2.10.0
-torch_npu         2.10.0.post4
+torch_npu         2.10.0.post7
 torchvision       0.25.0
-vLLM              0.23.0
-vLLM-ascend       0.23.0
-Megatron-LM       core_r0.18.0
+torchaudio        2.10.0
+transformers      5.14.1
+xgrammar          >=0.2.1,<1.0.0
+vLLM              0.30.0
+vLLM-ascend       0.30.0
+Megatron-LM       core_v0.18.0
 MindSpeed         core_r0.18.0
 Megatron-Bridge   0.5.0
-triton-ascend     3.2.2
-================= ============
+triton-ascend     3.6.0.post2
+================= ===================
 
 
 The A2/A3 SGLang image uses CANN ``8.5.0``, Python ``3.11``, torch ``2.8.0``,
 torch_npu ``2.8.0.post2``, SGLang ``v0.5.10``, and sgl-kernel-npu ``2026.02.01``.
-Megatron-related components use the unified dependency combination above, and transformers uses ``5.10.4``.
+The SGLang training components retain their original Dockerfile versions and are excluded from this update; transformers uses ``5.10.4``.
 
 
-Ascend 950PR&950DT products Latest Image Component Version Inventory
+Ascend 950PR&950DT Current Dockerfile Target Component Versions
 ---------------------------------------------------------------------------
 
-================= ============
+================= ===================
 Component         Version
-================= ============
+================= ===================
 Base image        Ubuntu 22.04
 Python            3.12
 CANN              9.1.0
 torch             2.10.0
-torch_npu         2.10.0.post4
+torch_npu         2.10.0.post7
 torchvision       0.25.0
-vLLM              0.23.0
-vLLM-ascend       0.23.0
-Megatron-LM       core_r0.12.0
-MindSpeed         0c6c0c(master)
-triton-ascend     3.2.2
-================= ============
+torchaudio        2.10.0
+transformers      5.14.1
+xgrammar          >=0.2.1,<1.0.0
+vLLM              0.30.0
+vLLM-ascend       0.30.0
+Megatron-LM       core_v0.18.0
+MindSpeed         core_r0.18.0
+Megatron-Bridge   0.5.0
+triton-ascend     3.6.0.post2
+================= ===================
 
 
 
@@ -149,12 +162,12 @@ Image Build Command Examples
 
 .. code:: bash
 
-   # Navigate to the directory containing the Dockerfile 
-   cd {verl-root-path}/docker/ascend
+   # Build the latest vLLM image from the repository root
+   cd {verl-root-path}
+   docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
 
-   # Build the image
-   # vLLM
-   docker build -f Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
+   # Release and SGLang images retain their original build context
+   cd {verl-root-path}/docker/ascend
    # vLLM (verl release/v0.9.1)
    docker build -f Dockerfile.ascend_9.1.0_a2_v0.9.1 -t verl-ascend:v0.9.1-9.1.0-a2 .
    # SGLang

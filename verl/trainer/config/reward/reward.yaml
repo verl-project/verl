@@ -76,6 +76,7 @@ reward_model:
       _target_: verl.workers.config.RolloutQuantizationConfig
       linear: null
       moe: null
+      moe_activation: null
       ignore: []
       config_file: null
     mtp: null
