@@ -26,6 +26,8 @@ from verl.utils.torch_functional import (
     distributed_mean_max_min_std,
     expand_as_nested,
     masked_mean,
+    masked_var,
+    masked_whiten,
 )
 
 
@@ -70,6 +72,45 @@ def test_masked_mean(value, mask, gt):
     res = masked_mean(torch.tensor(value), torch.tensor(mask))
     gt = torch.tensor(gt)
     assert torch.allclose(res, gt) or (torch.isnan(res) and torch.isnan(gt))
+
+
+@pytest.mark.parametrize("mask_dtype", [torch.bool, torch.int64, torch.float32])
+@pytest.mark.parametrize("shift_mean", [True, False])
+def test_masked_whiten_matches_existing_reduction_order(mask_dtype, shift_mean):
+    generator = torch.Generator().manual_seed(42)
+    values = torch.randn(8, 32, generator=generator)
+    mask = (torch.rand(8, 32, generator=generator) > 0.2).to(mask_dtype)
+    if mask_dtype == torch.float32:
+        mask[0, 0] = 0.5
+
+    mean = masked_mean(values, mask)
+    centered_values = values - mean
+    variance = masked_mean(centered_values**2, mask)
+    mask_sum = mask.sum()
+    expected_var = variance * (mask_sum / (mask_sum - 1))
+    expected = centered_values * torch.rsqrt(expected_var + 1e-8)
+    if not shift_mean:
+        expected += mean
+
+    assert torch.equal(masked_var(values, mask), expected_var)
+    assert torch.equal(masked_whiten(values, mask, shift_mean=shift_mean), expected)
+
+
+@pytest.mark.parametrize(
+    ("mask", "message"),
+    [
+        ([0, 0], "At least one element"),
+        ([1, 0], "sum of the mask is one"),
+    ],
+)
+def test_masked_variance_rejects_too_few_values(mask, message):
+    values = torch.tensor([1.0, 2.0])
+    mask = torch.tensor(mask)
+
+    with pytest.raises(ValueError, match=message):
+        masked_var(values, mask)
+    with pytest.raises(ValueError, match=message):
+        masked_whiten(values, mask)
 
 
 @pytest.mark.parametrize("world_size", [2, 4])

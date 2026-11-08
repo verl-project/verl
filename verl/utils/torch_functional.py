@@ -270,6 +270,16 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     return entropy
 
 
+def _masked_sum(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    mask_bool: torch.Tensor,
+    axis: int | tuple[int, ...] | None = None,
+) -> torch.Tensor:
+    valid_values = torch.where(mask_bool, values, 0.0)
+    return (valid_values * mask).sum(axis=axis)
+
+
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, axis: int | tuple[int, ...] | None = None) -> torch.Tensor:
     """Compute sum of tensor values where mask is True.
 
@@ -287,8 +297,7 @@ def masked_sum(values: torch.Tensor, mask: torch.Tensor, axis: int | tuple[int, 
     """
     # If NaNs exist out of mask, replace NaNs in values with a value that
     # won't affect the sum (e.g., 0 for masked regions)
-    valid_values = torch.where(mask.bool(), values, 0.0)
-    return (valid_values * mask).sum(axis=axis)
+    return _masked_sum(values, mask, mask.bool(), axis)
 
 
 def masked_mean(values, mask, axis=None):
@@ -308,21 +317,29 @@ def masked_mean(values, mask, axis=None):
     return s / (mask.sum(axis=axis) + 1e-8)
 
 
+def _masked_mean_var(values: torch.Tensor, mask: torch.Tensor):
+    mask_bool = mask.bool()
+    mask_sum = mask.sum()
+    mean = _masked_sum(values, mask, mask_bool) / (mask_sum + 1e-8)
+    centered_values = values - mean
+    variance = _masked_sum(centered_values**2, mask, mask_bool) / (mask_sum + 1e-8)
+    return mean, centered_values, variance, mask_sum
+
+
+def _apply_bessel_correction(variance: torch.Tensor, mask_sum: torch.Tensor) -> torch.Tensor:
+    mask_count = mask_sum.item()
+    if mask_count == 0:
+        raise ValueError("At least one element in the mask has to be 1.")
+    if mask_count == 1:
+        raise ValueError("The sum of the mask is one, which can cause a division by zero.")
+    return variance * (mask_sum / (mask_sum - 1))
+
+
 def masked_var(values, mask, unbiased=True):
     """Compute variance of tensor with masked values."""
-    mean = masked_mean(values, mask)
-    centered_values = values - mean
-    variance = masked_mean(centered_values**2, mask)
+    _, _, variance, mask_sum = _masked_mean_var(values, mask)
     if unbiased:
-        mask_sum = mask.sum()
-        if mask_sum == 0:
-            raise ValueError("At least one element in the mask has to be 1.")
-        # note that if mask_sum == 1, then there is a division by zero issue
-        # to avoid it you just need to use a larger minibatch_size
-        if mask_sum == 1:
-            raise ValueError("The sum of the mask is one, which can cause a division by zero.")
-        bessel_correction = mask_sum / (mask_sum - 1)
-        variance = variance * bessel_correction
+        variance = _apply_bessel_correction(variance, mask_sum)
     return variance
 
 
@@ -339,8 +356,9 @@ def masked_whiten(values, mask, shift_mean=True):
     Returns:
         torch.Tensor: Whitened tensor of same shape as `values`.
     """
-    mean, var = masked_mean(values, mask), masked_var(values, mask)
-    whitened = (values - mean) * torch.rsqrt(var + 1e-8)
+    mean, centered_values, var, mask_sum = _masked_mean_var(values, mask)
+    var = _apply_bessel_correction(var, mask_sum)
+    whitened = centered_values * torch.rsqrt(var + 1e-8)
     if not shift_mean:
         whitened += mean
     return whitened
