@@ -191,6 +191,25 @@ class vLLMHttpServer:
         # Set by abort_all_requests(reject_request=True) when no resume is coming soon.
         self._rejecting = False
 
+        self._partial_kv = None
+        if getattr(self.config, "partial_rollout_kv_offload", False):
+            from vllm.platforms import current_platform
+
+            from verl.workers.rollout.vllm_rollout.partial_kv import PartialKVOffload
+
+            if not current_platform.is_cuda() or not version.parse("0.32.0") <= _VLLM_VERSION < version.parse("0.34.0"):
+                raise ValueError("Partial KV offload requires CUDA vLLM 0.32.x or 0.33.x")
+            if self.rollout_mode != RolloutMode.HYBRID:
+                raise ValueError("Partial KV offload requires a hybrid training replica")
+            if self.model_config.lora_rank or self.model_config.lora.get("rank", 0):
+                raise ValueError("Partial KV offload initially requires full weights without LoRA")
+            if self.config.quantization.enabled or getattr(self.model_config.hf_config, "quantization_config", None):
+                raise ValueError("Partial KV offload initially requires unquantized model weights")
+            if self.config.mtp.enable or self.model_config.mtp.enable:
+                raise ValueError("Partial KV offload initially excludes speculative decoding/MTP")
+            if self.node_rank == 0:
+                self._partial_kv = PartialKVOffload(self)
+
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
@@ -565,6 +584,8 @@ class vLLMHttpServer:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
         self.engine = engine_client
+        if getattr(self, "_partial_kv", None) is not None:
+            self._partial_kv.install()
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
@@ -719,11 +740,19 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
+        partial_kv = getattr(self, "_partial_kv", None)
+        if partial_kv is not None and (
+            image_data is not None or video_data is not None or audio_data is not None or sampling_params.n != 1
+        ):
+            self._admitting -= 1
+            raise ValueError("Partial KV offload supports text-only requests with one physical sample")
+        generate = partial_kv.generate if partial_kv is not None else self._generate_admitted
+
         with RLInsightLogger.trace_state(
             "vllm_generate",
             state_lane_id=ray.get_runtime_context().get_actor_name(),
         ):
-            final_res = await self._generate_admitted(
+            final_res = await generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
@@ -731,9 +760,18 @@ class vLLMHttpServer:
                 priority=priority,
                 data_parallel_rank=self._dp_rank_for_session(session_id),
             )
+            segments = None
+            if partial_kv is not None:
+                final_res, segments = final_res
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
+        if segments is not None:
+            extra_fields["policy_version_segments"] = segments
+            if segments:
+                extra_fields["global_steps"] = segments[-1]["policy_version"]
+                extra_fields["min_global_steps"] = segments[0]["policy_version"]
+                extra_fields["max_global_steps"] = segments[-1]["policy_version"]
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
@@ -927,6 +965,8 @@ class vLLMHttpServer:
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
+        if getattr(self, "_partial_kv", None) is not None:
+            return await self._partial_kv.wake(tags)
 
         if self.rollout_mode == RolloutMode.HYBRID:
             # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
@@ -951,6 +991,8 @@ class vLLMHttpServer:
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if getattr(self, "_partial_kv", None) is not None:
+            return await self._partial_kv.sleep()
 
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
@@ -963,6 +1005,13 @@ class vLLMHttpServer:
         "clear_kv_cache", state_lane_id=lambda self: ray.get_runtime_context().get_actor_name()
     )
     async def clear_kv_cache(self):
+        if getattr(self, "_partial_kv", None) is not None:
+            self._partial_kv._healthy()
+            if not self._partial_kv.paused:
+                raise RuntimeError("Partial KV weight update requires a paused scheduler")
+            # Discard boundaries already reset caches before offload. Keep
+            # boundaries deliberately retain block tables and the full KV pool.
+            return
         if self.node_rank == 0:
             # reset_connector=True drops any attached external KV store
             # (e.g. MooncakeStoreConnector) whose entries were computed
@@ -981,6 +1030,8 @@ class vLLMHttpServer:
         # TODO: use the real release_kv_cache() method after vllm supports it (vllm#44890/46438)
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if getattr(self, "_partial_kv", None) is not None:
+            raise RuntimeError("Partial KV offload requires the colocated naive weight-transfer path")
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.sleep(level=self._resolve_sleep_level())
@@ -993,6 +1044,8 @@ class vLLMHttpServer:
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if getattr(self, "_partial_kv", None) is not None:
+            return await self._partial_kv.wake(["kv_cache"])
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.wake_up(tags=["kv_cache"])
@@ -1106,10 +1159,22 @@ class vLLMHttpServer:
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
+        if getattr(self, "_partial_kv", None) is not None:
+            await self._partial_kv.commit_version(global_steps)
         self.global_steps = global_steps
 
     async def wait_for_requests_to_drain(self):
+        if getattr(self, "_partial_kv", None) is not None:
+            return await self._partial_kv.drain()
         await self.engine.wait_for_requests_to_drain()
+
+    async def prepare_partial_rollout(self, preserve_kv: bool):
+        """Fence requests before a colocated full-pool CPU handoff."""
+        if self.node_rank != 0:
+            return
+        if self._partial_kv is None:
+            raise RuntimeError("Enable partial_rollout_kv_offload before preserving requests")
+        await self._partial_kv.pause(preserve_kv)
 
     async def abort_all_requests(
         self,
@@ -1152,6 +1217,17 @@ class vLLMHttpServer:
         # engine object to abort through on those actors.
         if self.node_rank != 0:
             return {"aborted_count": 0, "request_ids": []}
+
+        partial_kv = getattr(self, "_partial_kv", None)
+        if partial_kv is not None and not abort_only:
+            request_ids = list(self.engine.output_processor.request_states)
+            await partial_kv.pause(False)
+            self._rejecting = reject_request
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
+        if partial_kv is not None:
+            partial_kv._healthy()
+            if partial_kv.state != "awake":
+                raise RuntimeError("Do not abort requests against unmapped partial KV pools")
 
         if abort_only:
             processor = self.engine.output_processor
@@ -1218,6 +1294,8 @@ class vLLMHttpServer:
     async def resume_engine_generation(self):
         """Resume the DP engines while request admission remains closed."""
         if self.node_rank == 0:
+            if getattr(self, "_partial_kv", None) is not None:
+                return await self._partial_kv.resume()
             await self.engine.resume_generation()
 
     async def open_submission_gate(self):
@@ -1409,6 +1487,22 @@ class vLLMHttpServer:
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
         """Mutate engine_kwargs in-place before the CLI args dict is built."""
+        if getattr(self.config, "partial_rollout_kv_offload", False):
+            options = {key.replace("-", "_"): value for key, value in engine_kwargs.items()}
+            unsupported = ("kv_transfer_config", "speculative_config", "quantization", "weight_transfer_config")
+            if any(options.get(key) for key in unsupported):
+                raise ValueError(
+                    "Partial KV offload excludes connectors, speculation, quantization and custom transfer"
+                )
+            if any(
+                int(options.get(key) or 1) != 1
+                for key in ("decode_context_parallel_size", "prefill_context_parallel_size", "pipeline_parallel_size")
+            ):
+                raise ValueError("Partial KV offload requires DCP1/PCP1/PP1")
+            if options.get("enable_cumem_allocator") is False:
+                raise ValueError("Partial KV offload requires the CuMem allocator")
+            if options.get("sleep_mode_backend") not in (None, "cumem"):
+                raise ValueError("Partial KV offload requires sleep_mode_backend=cumem")
         managed = [key for key in engine_kwargs if key.replace("-", "_") in _VERL_MANAGED_VLLM_ARGS]
         if managed:
             raise ValueError(
@@ -1497,6 +1591,8 @@ class vLLMHttpServer:
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""
+        if getattr(self.config, "partial_rollout_kv_offload", False):
+            return "verl.workers.rollout.vllm_rollout.partial_kv_worker.PartialKVWorkerExtension"
         return "verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension"
 
     def _get_cli_modules(self) -> list:
@@ -1662,6 +1758,10 @@ class vLLMReplica(RolloutReplica):
         # Drain DP engines for safe sleep.
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+
+    async def prepare_partial_rollout(self, preserve_kv: bool):
+        """Pause the native scheduler while retaining or discarding partial work."""
+        await self.servers[0].prepare_partial_rollout.remote(preserve_kv=preserve_kv)
 
     async def abort_all_requests(
         self,

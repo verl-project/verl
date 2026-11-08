@@ -138,6 +138,9 @@ jobs:
         run: |
           $UV_RUN ray stop --force
           $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
+      - name: Test colocated partial KV CPU preservation
+        run: |
+          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_partial_kv_gpu.py -v -s
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           ROLLOUT_NAME=vllm $UV_RUN pytest -svvv tests/experimental/agent_loop

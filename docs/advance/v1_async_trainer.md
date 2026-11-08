@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 11/09/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -58,6 +58,96 @@ Partial rollout is part of the V1 async client behavior rather than a V1 configu
 4. The KV cache is reconstructed for the retained prefix before decoding continues.
 
 This avoids dropping long-running trajectories during rollout/trainer transitions, at the cost of extra prefill work and within-trajectory policy-version changes.
+
+### Experimental colocated partial KV offload
+
+For `colocate_async`, an opt-in path preserves unfinished requests in the running
+vLLM engine while moving its full KV allocation pool to CPU during Actor training:
+
+```yaml
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: colocate_async
+actor_rollout_ref:
+  hybrid_engine: true
+  rollout:
+    name: vllm
+    partial_rollout_kv_offload: true
+    partial_rollout_kv_offload_headroom_gb: 64.0
+    free_cache_engine: true
+    enable_sleep_mode: true
+    data_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    calculate_log_probs: true
+    checkpoint_engine:
+      backend: naive
+```
+
+The lifecycle is `keep pause → GPU-to-CPU pool backup → Actor training → weight
+restore/refit → CPU-to-GPU KV restore → resume`. The scheduler and its block
+tables stay alive. Direct worker sleep/wake RPCs avoid the engine-level sleep
+that would clear request caches or resume scheduling prematurely. The existing
+naive weight-transfer path waits for all trainer ranks to offload before KV wakes.
+
+This is a **stale-KV approximation**: new tokens use updated weights with KV
+computed under earlier weights. It is not equivalent to re-prefilling the prefix
+with the new policy, and token-level importance sampling does not make those
+cached hidden states equal. Original token IDs, sampling logprobs, top-k heads
+and routed experts stay on their native output paths. `policy_version_segments`
+in response `extra_fields` records the actual EngineCore version for every token
+range; the async client carries it and the minimum/maximum versions across retries.
+Each physical request receives a unique prefix-cache salt, so unrelated requests
+cannot reuse its historical KV. Ordinary vLLM memory-pressure preemption can still
+recompute a prefix; this option avoids recomputation at the training handoff.
+
+All allocated KV blocks are backed up, including unused capacity; no blocks are
+compacted or renumbered, and allocations return to their original virtual
+addresses. Non-weight pools, including graphs and unknown workspace tags, are
+also retained. CuMem tags identify allocation contexts rather than ownership:
+V2 `model_state` and `sampler` tensors can share `weights` allocations. The worker
+finds their addresses and preserves whole mixed allocations under a runtime tag
+before discarding obsolete weights. Reported runtime bytes can therefore include
+model parameters and allocator padding. Pool accounting excludes the separate
+native model-buffer/special-parameter backups performed by `Worker.sleep`.
+
+The CPU budget is the full physical pool size across **all ranks on the node**,
+plus native buffers and the configured headroom. Copies serialize per node and
+recheck both host and cgroup memory availability; the lock does not enclose NCCL
+synchronization. Insufficient CPU memory, missing TP acknowledgements, an incomplete
+backup/refit/restore, or cancellation at a memory handoff prevents generation
+from resuming. Restart an engine after an uncertain handoff rather than retrying
+against partially mapped pools.
+
+Initial scope: NVIDIA CUDA, inspected vLLM 0.32.x/0.33.x CuMem interfaces, V1
+`colocate_async`, the `naive` checkpoint engine, and full-weight, unquantized,
+single-turn text requests through verl's Ray clients. TP is supported; rollout
+DP/PP/DCP/PCP must be 1. LoRA, MTP/speculative decoding, PD disaggregation,
+external KV connectors and alternative sleep backends are rejected. Custom agent
+loops and direct OpenAI-server requests are outside this initial contract.
+
+Checkpoint, scheduled evaluation and final-step boundaries use abort/discard
+instead of preserving in-flight KV. The CPU backups are **not durable checkpoints**
+and do not survive an engine restart. Existing async prompt/sample checkpoint
+semantics remain unchanged. The default `partial_rollout_kv_offload: false`
+retains the existing abort/retry/re-prefill behavior.
+
+Focused checks:
+
+```bash
+python -m pytest tests/workers/rollout/rollout_vllm/test_partial_kv_on_cpu.py \
+  tests/workers/rollout/rollout_vllm/test_partial_kv_memory_on_cpu.py -q
+# Two CUDA GPUs, in the vLLM environment; creates a tiny random model locally.
+python -m pytest tests/workers/rollout/rollout_vllm/test_partial_kv_gpu.py -v -s
+```
+
+The GPU regression compares four in-flight continuations to uninterrupted
+same-weight generation and separately performs a real HF Adam update on a GPU
+shared with the sleeping TP2 engine. It checks native weight checksums, full-pool
+KV and runtime-state hashes, original token/logprob prefixes and version segments,
+with graphs enabled. This small HF actor test does not establish a complete V1
+trainer run, training quality, long-context peak capacity, checkpoint recovery or
+a throughput improvement.
 
 ### Off-policy control
 

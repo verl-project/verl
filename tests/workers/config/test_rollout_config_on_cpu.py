@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl.workers.config.rollout import RolloutConfig
+import pytest
+
+from verl.workers.config.rollout import CheckpointEngineConfig, RolloutConfig
 
 
 def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():
@@ -22,3 +24,37 @@ def test_max_num_batched_tokens_raised_when_chunked_prefill_disabled():
     config.max_model_len = 32768
     config.max_num_batched_tokens = config.max_model_len
     assert config.max_num_batched_tokens == 32768
+
+
+def test_partial_kv_offload_is_opt_in():
+    config = RolloutConfig(name="vllm")
+    assert config.partial_rollout_kv_offload is False
+    assert config.partial_rollout_kv_offload_headroom_gb == 64.0
+    config = RolloutConfig(name="vllm", partial_rollout_kv_offload=True)
+    assert config.partial_rollout_kv_offload is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": "sglang"},
+        {"free_cache_engine": False},
+        {"enable_sleep_mode": False},
+        {"data_parallel_size": 2},
+        {"pipeline_model_parallel_size": 2},
+        {"checkpoint_engine": CheckpointEngineConfig(backend="nccl")},
+        {"partial_rollout_kv_offload_headroom_gb": -1},
+        {"partial_rollout_kv_offload_headroom_gb": float("nan")},
+        {"partial_rollout_kv_offload_headroom_gb": float("inf")},
+        {"partial_rollout_kv_offload_headroom_gb": True},
+    ],
+)
+def test_partial_kv_offload_rejects_unsupported_configs(kwargs):
+    with pytest.raises(ValueError):
+        RolloutConfig(**{"name": "vllm", "partial_rollout_kv_offload": True, **kwargs})
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1])
+def test_partial_kv_flag_requires_a_boolean(value):
+    with pytest.raises(ValueError, match="boolean"):
+        RolloutConfig(name="vllm", partial_rollout_kv_offload=value)

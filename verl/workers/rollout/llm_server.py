@@ -301,6 +301,12 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             )
 
             # 2. merge output into final_output
+            response_offset = len(final_output.token_ids)
+            segments = output.extra_fields.get("policy_version_segments")
+            if segments is not None:
+                combined = final_output.extra_fields.setdefault("policy_version_segments", [])
+                for segment in segments:
+                    combined.append({**segment, "offset": response_offset + segment["offset"]})
             final_output.token_ids.extend(output.token_ids)
             if output.log_probs is not None:
                 final_output.log_probs.extend(output.log_probs)
@@ -341,8 +347,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
             if min_global_steps is None:
-                min_global_steps = global_steps
-            max_global_steps = global_steps
+                min_global_steps = (
+                    output.extra_fields.get("min_global_steps", global_steps) if segments else global_steps
+                )
+            max_global_steps = output.extra_fields.get("max_global_steps", global_steps) if segments else global_steps
 
             # 3. update max_new_tokens
             if original_max_tokens is not None:

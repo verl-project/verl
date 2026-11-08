@@ -30,6 +30,8 @@ class PPOTrainerColocateAsync(PPOTrainer):
     def on_init_end(self):
         # update weights after loading checkpoint
         self.checkpoint_manager.update_weights(self.global_steps)
+        if self.config.actor_rollout_ref.rollout.get("partial_rollout_kv_offload", False):
+            self.checkpoint_manager.resume_generation_replicas()
 
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.colocate_async.num_warmup_batches)
@@ -42,8 +44,19 @@ class PPOTrainerColocateAsync(PPOTrainer):
             self.checkpoint_manager.resume_generation_replicas()
 
     def on_sample_end(self):
-        # abort all unfinished requests and pause generation
-        self.checkpoint_manager.abort_replicas()
+        if self.config.actor_rollout_ref.rollout.get("partial_rollout_kv_offload", False):
+            from verl.workers.rollout.vllm_rollout.partial_kv import keep_partial_requests
+
+            preserve = keep_partial_requests(
+                self.global_steps,
+                self.total_training_steps,
+                self.config.trainer.save_freq,
+                self.config.trainer.test_freq,
+            )
+            self.checkpoint_manager.prepare_partial_rollout(preserve_kv=preserve)
+        else:
+            # Default: abort unfinished requests and re-prefill their tokens later.
+            self.checkpoint_manager.abort_replicas()
         # sleep all replicas to discard weights and kv cache
         self.checkpoint_manager.sleep_replicas()
         if self.curr_step_profile:

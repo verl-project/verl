@@ -29,6 +29,7 @@ _preprocess_sampling_params before admission, _postprocess_output after release.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -110,6 +111,45 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._rejecting = False
     server._disaggregation_role = "null"
     return server
+
+
+def test_partial_kv_server_uses_worker_handoff_and_keeps_scheduling_paused():
+    from verl.workers.rollout.vllm_rollout.partial_kv import PROTOCOL, PartialKVOffload
+
+    async def main():
+        server = _make_server()
+        server.config = RolloutConfig(name="vllm", partial_rollout_kv_offload=True)
+        server._partial_kv = PartialKVOffload(server)
+        server.engine.engine_core = SimpleNamespace(set_weight_version_async=AsyncMock())
+
+        async def rpc(method, args=()):
+            if method == "offload_partial_kv":
+                return [dict(protocol=PROTOCOL, kv_preserved=True, asleep=True) for _ in range(2)]
+            if method == "restore_partial_kv":
+                return [
+                    dict(protocol=PROTOCOL, kv_preserved=True, tags=args[0], runtime_restored=True) for _ in range(2)
+                ]
+            return []
+
+        server.engine.collective_rpc = AsyncMock(side_effect=rpc)
+        await server.prepare_partial_rollout(preserve_kv=True)
+        await server.wait_for_requests_to_drain()
+        assert server.engine.drain_calls == 0
+        await server.sleep()
+        await server.wake_up(tags=["weights"])
+        await server.clear_kv_cache()
+        assert server.engine.reset_prefix_calls == 0
+        with pytest.raises(RuntimeError, match="refit"):
+            await server.resume_engine_generation()
+        await server.set_global_steps(8)
+        await server.wake_up(tags=["kv_cache"])
+        assert server.engine.resume_calls == 0 and server._submission_paused
+        await server.resume_engine_generation()
+        assert server.engine.resume_calls == 1 and server._submission_paused
+        await server.open_submission_gate()
+        assert not server._submission_paused and server._resume_event.is_set()
+
+    asyncio.run(main())
 
 
 def test_abort_does_not_pause_until_inflight_admissions_land():

@@ -276,6 +276,8 @@ actor_rollout_ref:
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
+    partial_rollout_kv_offload: false
+    partial_rollout_kv_offload_headroom_gb: 64.0
     tensor_model_parallel_size: 2
     data_parallel_size: 1
     expert_parallel_size: 1

@@ -96,6 +96,58 @@ def _client() -> FullyAsyncLLMServerClient:
 
 
 @pytest.mark.asyncio
+async def test_native_weight_segments_and_sampler_data_survive_an_abort_retry(monkeypatch):
+    first_segments = [
+        dict(offset=0, length=1, policy_version=0),
+        dict(offset=1, length=1, policy_version=1),
+    ]
+    last_segments = [dict(offset=0, length=1, policy_version=2)]
+    pieces = [
+        TokenOutput(
+            token_ids=[101, 102],
+            log_probs=[-0.25, -0.5],
+            stop_reason="aborted",
+            extra_fields=dict(
+                global_steps=1,
+                min_global_steps=0,
+                max_global_steps=1,
+                policy_version_segments=first_segments,
+                response_topk_ids=np.array([[101, 9], [102, 10]]),
+                response_topk_log_probs=np.array([[-0.25, -2.0], [-0.5, -3.0]]),
+            ),
+        ),
+        TokenOutput(
+            token_ids=[103],
+            log_probs=[-0.75],
+            stop_reason="completed",
+            extra_fields=dict(
+                global_steps=2,
+                min_global_steps=2,
+                max_global_steps=2,
+                policy_version_segments=last_segments,
+                response_topk_ids=np.array([[103, 11]]),
+                response_topk_log_probs=np.array([[-0.75, -4.0]]),
+            ),
+        ),
+    ]
+    _install_segments(monkeypatch, pieces)
+    result = await _client().generate(request_id="partial", prompt_ids=[1, 2], sampling_params={})
+    assert result.token_ids == [101, 102, 103]
+    assert result.log_probs == [-0.25, -0.5, -0.75]
+    assert result.extra_fields["policy_version_segments"] == [
+        *first_segments,
+        dict(offset=2, length=1, policy_version=2),
+    ]
+    assert last_segments[0]["offset"] == 0
+    assert result.extra_fields["min_global_steps"] == 0
+    assert result.extra_fields["max_global_steps"] == 2
+    np.testing.assert_array_equal(result.extra_fields["response_topk_ids"], [[101, 9], [102, 10], [103, 11]])
+    np.testing.assert_array_equal(
+        result.extra_fields["response_topk_log_probs"], [[-0.25, -2.0], [-0.5, -3.0], [-0.75, -4.0]]
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend):
     """Two resumes: each attempt re-sends the accumulated prompt and returns routing for

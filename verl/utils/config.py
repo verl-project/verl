@@ -131,6 +131,16 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    if config.actor_rollout_ref.rollout.get("partial_rollout_kv_offload", False):
+        if not config.trainer.get("use_v1", True) or config.trainer.v1.trainer_mode != "colocate_async":
+            raise ValueError(
+                "Partial KV offload requires trainer.use_v1=True and trainer.v1.trainer_mode=colocate_async"
+            )
+        if not config.actor_rollout_ref.get("hybrid_engine", True):
+            raise ValueError("Partial KV offload requires actor_rollout_ref.hybrid_engine=True")
+        agent = config.actor_rollout_ref.rollout.get("agent", {})
+        if agent.get("default_agent_loop", "single_turn_agent") != "single_turn_agent":
+            raise ValueError("Partial KV offload initially supports single_turn_agent")
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
