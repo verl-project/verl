@@ -29,7 +29,7 @@ _preprocess_sampling_params before admission, _postprocess_output after release.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -148,6 +148,33 @@ def test_partial_kv_server_uses_worker_handoff_and_keeps_scheduling_paused():
         assert server.engine.resume_calls == 1 and server._submission_paused
         await server.open_submission_gate()
         assert not server._submission_paused and server._resume_event.is_set()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("partial_kv", [False, True])
+def test_single_abort_keeps_other_partial_prefixes_and_reports_success(partial_kv):
+    async def main():
+        server = _make_server()
+        states = server.engine.output_processor.request_states
+        output = object()
+        queue = SimpleNamespace(put=Mock())
+        states["cancel"] = SimpleNamespace(queue=queue, make_request_output=Mock(return_value=output))
+        states["survivor"] = object()
+        server.engine.output_processor.abort_requests = Mock(side_effect=lambda ids: states.pop(ids[0]))
+        server.engine.engine_core = SimpleNamespace(abort_requests_async=AsyncMock())
+        server.engine.reset_mm_cache = AsyncMock()
+        server.engine.reset_encoder_cache = AsyncMock()
+        if partial_kv:
+            server._partial_kv = SimpleNamespace(paused=False, _healthy=Mock())
+
+        result = await server.abort_request("cancel")
+
+        assert result == {"aborted": True, "request_id": "cancel"}
+        queue.put.assert_called_once_with(output)
+        server.engine.engine_core.abort_requests_async.assert_awaited_once_with(["cancel"])
+        assert list(states) == ["survivor"]
+        assert server.engine.reset_prefix_calls == (0 if partial_kv else 1)
 
     asyncio.run(main())
 

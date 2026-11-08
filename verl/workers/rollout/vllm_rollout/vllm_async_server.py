@@ -1428,8 +1428,9 @@ class vLLMHttpServer:
             self.engine.output_processor.abort_requests([request_id])
             await self.engine.engine_core.abort_requests_async([request_id])
 
-            # Try to reset prefix cache to ensure clean state
-            if reset_prefix_cache:
+            # A single cancellation must not reset surviving partial requests.
+            # Their unique physical-request salts already isolate their prefixes.
+            if reset_prefix_cache and getattr(self, "_partial_kv", None) is None:
                 await self.clear_kv_cache()
                 logger.info(f"Prefix cache reset after abort request {request_id}")
 
