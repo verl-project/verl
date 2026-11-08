@@ -208,3 +208,11 @@ def test_reorder_and_merge_vpp_layers_keeps_dense_chunk_placeholder(monkeypatch)
 
     assert routes.shape == moe_chunk.shape
     torch.testing.assert_close(routes, moe_chunk)
+
+
+def test_r3_alignment_rejects_more_than_one_missing_route():
+    input_ids = _nested([torch.arange(5)])
+    routes = _nested([torch.full((3, 1, 1), 1, dtype=torch.int16)])
+
+    with pytest.raises(RuntimeError, match="expected equal lengths or exactly one missing final route"):
+        router_utils.align_r3_router_replay_data(routes, input_ids)
