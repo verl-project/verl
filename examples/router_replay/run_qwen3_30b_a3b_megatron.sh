@@ -89,8 +89,8 @@ MODEL=(
 )
 
 ACTOR=(
+    model_engine=megatron
     actor_rollout_ref.actor.strategy=megatron
-    actor_rollout_ref.actor.model_engine=megatron
     actor_rollout_ref.actor.optim.lr=${actor_lr}
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_bs}
