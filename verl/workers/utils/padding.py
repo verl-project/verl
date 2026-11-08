@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import torch
-import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
@@ -135,15 +134,12 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     assert sequence_offsets[-1].item() == values.shape[0]
     assert not prompt_lens.eq(0).any(), f"seq_offset - resp_len - 1 assumes prompt_len > 0. Got {prompt_lens}"
 
-    response_list = []
-    # Skip padding dimensions after sequence dimensions, if any.
-    skip_padding = (0, 0) * (values.ndim - 1)
-    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
-        pad_size = max_response_len - resp_len
+    output = values.new_zeros((len(response_lens), max_response_len, *values.shape[1:]))
+    lengths_and_offsets = torch.stack((response_lens, sequence_offsets), dim=1).tolist()
+    for row, (resp_len, seq_offset) in enumerate(lengths_and_offsets):
         # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (*skip_padding, 0, pad_size)))
+        output[row, :resp_len] = values[seq_offset - resp_len - 1 : seq_offset - 1]
 
-    output = torch.stack(response_list, dim=0)
     return output
 
 

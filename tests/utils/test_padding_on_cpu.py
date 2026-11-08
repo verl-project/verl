@@ -302,6 +302,43 @@ def test_no_padding_2_padding_varying_lengths():
     print("All varied length tests passed")
 
 
+def test_no_padding_2_padding_preserves_trailing_dims_and_gradients():
+    prompt_lens = [2, 3, 1, 2]
+    response_lens = [3, 1, 2, 0]
+    prompt_width, response_width = 3, 4
+    prompt_mask = torch.zeros(len(prompt_lens), prompt_width, dtype=torch.long)
+    response_mask = torch.zeros(len(response_lens), response_width, dtype=torch.long)
+    for row, (prompt_len, response_len) in enumerate(zip(prompt_lens, response_lens, strict=True)):
+        prompt_mask[row, -prompt_len:] = 1
+        response_mask[row, :response_len] = 1
+
+    data = TensorDict(
+        {
+            "prompts": torch.zeros((len(prompt_lens), prompt_width), dtype=torch.long),
+            "responses": torch.zeros((len(response_lens), response_width), dtype=torch.long),
+            "attention_mask": torch.cat((prompt_mask, response_mask), dim=1),
+        },
+        batch_size=[len(prompt_lens)],
+    )
+    total_tokens = sum(prompt_lens) + sum(response_lens)
+    values = torch.arange(total_tokens * 3, dtype=torch.float32).reshape(total_tokens, 3).requires_grad_()
+
+    output = no_padding_2_padding(values, data)
+    expected = values.new_zeros((len(prompt_lens), response_width, 3))
+    expected_grad = torch.zeros_like(values)
+    weights = torch.randn_like(output)
+    offset = 0
+    for row, (prompt_len, response_len) in enumerate(zip(prompt_lens, response_lens, strict=True)):
+        start = offset + prompt_len - 1
+        expected[row, :response_len] = values.detach()[start : start + response_len]
+        expected_grad[start : start + response_len] = weights[row, :response_len]
+        offset += prompt_len + response_len
+
+    torch.testing.assert_close(output, expected)
+    (output * weights).sum().backward()
+    torch.testing.assert_close(values.grad, expected_grad)
+
+
 def test_build_attention_mask_from_nested_uses_full_sequence_lengths():
     input_ids = torch.nested.as_nested_tensor(
         [
