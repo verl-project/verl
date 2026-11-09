@@ -167,8 +167,11 @@ class PPOTrainer(ABC):
             filter_groups_metric = self._resolve_filter_groups_metric()
             sync_refill_failed_groups = bool(sampler_config.get("sync_refill_failed_groups", False))
             poll_interval = float(sampler_config.get("poll_interval", 2.0))
-            if not poll_interval > 0:
-                raise ValueError(f"trainer.v1.sampler.poll_interval must be positive, got {poll_interval}")
+            # Fail here rather than in the poll loop, where time.sleep() raises on inf (OverflowError) and nan.
+            if not (math.isfinite(poll_interval) and poll_interval > 0):
+                raise ValueError(
+                    f"trainer.v1.sampler.poll_interval must be a finite number of seconds > 0, got {poll_interval}"
+                )
             replay_buffer_kwargs.update(
                 filter_groups_metric=filter_groups_metric,
                 sync_refill_failed_groups=sync_refill_failed_groups,

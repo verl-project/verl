@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -113,13 +114,35 @@ def test_builtin_sampler_uses_configured_poll_interval(trainer_mode):
     assert trainer._build_replay_buffer().poll_interval == 0.1
 
 
-@pytest.mark.parametrize("poll_interval", [0, -1.0])
-def test_builtin_sampler_rejects_non_positive_poll_interval(poll_interval):
+@pytest.mark.parametrize("trainer_mode", ["sync", "separate_async"])
+@pytest.mark.parametrize(
+    "poll_interval", [0, 0.0, -1.0, -math.inf, math.inf, math.nan, "inf", "nan"], ids=lambda v: f"{v!r}"
+)
+def test_builtin_sampler_rejects_invalid_poll_interval(poll_interval, trainer_mode):
+    """0, negative, infinite and nan intervals fail before the replay buffer is constructed."""
+    trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode=trainer_mode)
+    trainer.config.trainer.v1.sampler.poll_interval = poll_interval
+    buffer_cls = "ReplayBuffer" if trainer_mode == "sync" else "ReplayBufferAsync"
+
+    with (
+        patch(f"verl.trainer.ppo.v1.trainer_base.{buffer_cls}") as constructor,
+        pytest.raises(ValueError, match=r"poll_interval must be a finite number of seconds > 0"),
+    ):
+        trainer._build_replay_buffer()
+
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("poll_interval", [1e-3, 0.5, 30, "0.25"], ids=lambda v: f"{v!r}")
+def test_builtin_sampler_accepts_finite_positive_poll_interval(poll_interval):
     trainer = _trainer_with_filter_groups({"enable": False}, trainer_mode="separate_async")
     trainer.config.trainer.v1.sampler.poll_interval = poll_interval
 
-    with pytest.raises(ValueError, match="poll_interval must be positive"):
-        trainer._build_replay_buffer()
+    sampler = trainer._build_replay_buffer()
+
+    assert type(sampler) is ReplayBufferAsync
+    assert sampler.poll_interval == float(poll_interval)
+    assert isinstance(sampler.poll_interval, float)
 
 
 def test_custom_sampler_does_not_receive_poll_interval():
