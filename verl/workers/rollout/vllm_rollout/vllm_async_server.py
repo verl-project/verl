@@ -1537,7 +1537,10 @@ class vLLMHttpServer:
             try:
                 spec_config = json.loads(spec_config)
             except json.JSONDecodeError:
-                return bool(spec_config.strip())
+                # Not JSON: treat the string as a bare method name, so weightless
+                # names such as "ngram" keep level 2 and anything else stays on the
+                # weight-preserving level 1.
+                spec_config = {"method": spec_config}
         if isinstance(spec_config, Mapping):
             model = spec_config.get("model") or spec_config.get("draft_model") or spec_config.get("draft_model_config")
             method = spec_config.get("method")

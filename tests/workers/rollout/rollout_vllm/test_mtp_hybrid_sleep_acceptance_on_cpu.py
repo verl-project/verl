@@ -173,6 +173,7 @@ def test_mtp_hybrid_sleep_keeps_drafter_available_for_nonzero_acceptance(monkeyp
         {"method": "eagle", "model": "Qwen/Qwen3-0.6B-Eagle", "num_speculative_tokens": 3},
         {"method": "eagle3", "num_speculative_tokens": 3},
         '{"model": "Qwen/Qwen3-0.6B-Draft", "num_speculative_tokens": 3}',
+        "eagle3",
         SimpleNamespace(model="Qwen/Qwen3-0.6B-Draft", method=None),
     ],
 )
@@ -213,6 +214,9 @@ def test_separate_draft_model_hybrid_sleep_selects_level_1(monkeypatch, speculat
         {"vllm": {"speculative_config": {"method": "ngram", "num_speculative_tokens": 3}}},
         {"vllm": {"speculative_config": {"model": "[ngram]", "num_speculative_tokens": 3}}},
         {"vllm": {"speculative_config": {"method": "suffix", "num_speculative_tokens": 3}}},
+        {"vllm": {"speculative_config": '{"method": "ngram", "num_speculative_tokens": 3}'}},
+        {"vllm": {"speculative_config": "ngram"}},
+        {"vllm": {"speculative_config": "   "}},
     ],
 )
 def test_resolve_sleep_level_without_separate_draft_weights_returns_level_2(monkeypatch, engine_kwargs):
