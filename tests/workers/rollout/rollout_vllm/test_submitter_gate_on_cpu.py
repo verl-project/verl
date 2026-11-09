@@ -39,6 +39,7 @@ pytest.importorskip("vllm")
 from vllm.logprobs import Logprob
 
 from verl.workers.config import RolloutConfig
+from verl.workers.config.model import MtpConfig
 from verl.workers.rollout.vllm_rollout import vllm_async_server
 
 
@@ -111,6 +112,38 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._rejecting = False
     server._disaggregation_role = "null"
     return server
+
+
+@pytest.mark.parametrize("model_mtp", [False, True])
+def test_partial_kv_constructor_accepts_null_rollout_mtp(monkeypatch, model_mtp):
+    """A null rollout MTP block is valid; an enabled model MTP must still be rejected."""
+    import ray
+    from vllm.platforms import current_platform
+
+    from verl.workers.rollout.replica import RolloutMode
+
+    cls = vllm_async_server.vLLMHttpServer
+    for key in ("CUDA_VISIBLE_DEVICES", "VERL_REPLICA_RANK", "VERL_RAY_JOB_ID"):
+        monkeypatch.setenv(key, "")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "partial-mtp-test"))
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+    monkeypatch.setattr(cls, "_init_model_config", lambda self, config: config)
+    monkeypatch.setattr(cls, "_validate_configs", lambda self: None)
+    monkeypatch.setattr(cls, "_post_init", lambda self, devices: None)
+    monkeypatch.setattr(vllm_async_server, "build_rollout_dist_profiler", lambda *args, **kwargs: None)
+    config = RolloutConfig(name="vllm", partial_rollout_kv_offload=True, mtp=None)
+    model = SimpleNamespace(lora_rank=0, lora={}, hf_config=SimpleNamespace(), mtp=MtpConfig(enable=model_mtp))
+
+    def construct():
+        return cls(config, model, RolloutMode.HYBRID, [], 0, 1, 1, 2, "")
+
+    if model_mtp:
+        with pytest.raises(ValueError, match="MTP"):
+            construct()
+    else:
+        server = construct()
+        assert server.config.mtp is None
 
 
 def test_partial_kv_server_uses_worker_handoff_and_keeps_scheduling_paused():

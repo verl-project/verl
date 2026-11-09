@@ -205,7 +205,7 @@ class vLLMHttpServer:
                 raise ValueError("Partial KV offload initially requires full weights without LoRA")
             if self.config.quantization.enabled or getattr(self.model_config.hf_config, "quantization_config", None):
                 raise ValueError("Partial KV offload initially requires unquantized model weights")
-            if self.config.mtp.enable or self.model_config.mtp.enable:
+            if (self.config.mtp is not None and self.config.mtp.enable) or self.model_config.mtp.enable:
                 raise ValueError("Partial KV offload initially excludes speculative decoding/MTP")
             if self.node_rank == 0:
                 self._partial_kv = PartialKVOffload(self)

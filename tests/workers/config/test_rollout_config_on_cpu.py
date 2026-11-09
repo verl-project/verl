@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import pytest
+from omegaconf import OmegaConf
 
+from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config.rollout import CheckpointEngineConfig, RolloutConfig
 
 
@@ -58,3 +60,36 @@ def test_partial_kv_offload_rejects_unsupported_configs(kwargs):
 def test_partial_kv_flag_requires_a_boolean(value):
     with pytest.raises(ValueError, match="boolean"):
         RolloutConfig(name="vllm", partial_rollout_kv_offload=value)
+
+
+@pytest.mark.parametrize("dict_config", [False, True])
+def test_partial_kv_offload_normalizes_disaggregation_before_validation(dict_config):
+    """Hydra's mapping-shaped disaggregation block must not crash an enabled rollout."""
+    disaggregation = {"enabled": False}
+    if dict_config:
+        disaggregation = OmegaConf.create(disaggregation)
+    config = RolloutConfig(name="vllm", partial_rollout_kv_offload=True, disaggregation=disaggregation)
+    assert config.disaggregation.enabled is False
+    with pytest.raises(ValueError, match="disaggregation"):
+        RolloutConfig(name="vllm", partial_rollout_kv_offload=True, disaggregation={"enabled": True})
+
+
+def test_partial_kv_offload_accepts_the_hydra_instantiation_path():
+    """The server instantiates nested targetless blocks with Hydra's partial conversion."""
+    config = omega_conf_to_dataclass(
+        OmegaConf.create(
+            {
+                "_target_": "verl.workers.config.rollout.RolloutConfig",
+                "name": "vllm",
+                "partial_rollout_kv_offload": True,
+                "disaggregation": {"enabled": False},
+                "checkpoint_engine": {
+                    "_target_": "verl.workers.config.rollout.CheckpointEngineConfig",
+                    "backend": "naive",
+                },
+                "mtp": None,
+            }
+        )
+    )
+    assert isinstance(config, RolloutConfig)
+    assert config.disaggregation.enabled is False

@@ -325,6 +325,22 @@ class RolloutConfig(BaseConfig):
         """Validate the rollout config"""
         if type(self.partial_rollout_kv_offload) is not bool:
             raise ValueError("partial_rollout_kv_offload must be an explicit boolean")
+        # Hydra passes this as dict/DictConfig; coerce to dataclass so
+        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
+        if isinstance(self.disaggregation, dict):
+            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
+        elif not isinstance(self.disaggregation, DisaggregationConfig):
+            if not isinstance(self.disaggregation, DictConfig):
+                raise TypeError(
+                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
+                    f"got {type(self.disaggregation).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "disaggregation",
+                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
+            )
+
         if self.partial_rollout_kv_offload:
             import math
 
@@ -381,22 +397,6 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
-
-        # Hydra passes this as dict/DictConfig; coerce to dataclass so
-        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
-        if isinstance(self.disaggregation, dict):
-            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
-        elif not isinstance(self.disaggregation, DisaggregationConfig):
-            if not isinstance(self.disaggregation, DictConfig):
-                raise TypeError(
-                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
-                    f"got {type(self.disaggregation).__name__}."
-                )
-            object.__setattr__(
-                self,
-                "disaggregation",
-                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
-            )
 
         if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
             raise ValueError(
