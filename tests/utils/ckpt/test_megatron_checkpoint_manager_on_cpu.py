@@ -487,6 +487,7 @@ class TestLoadCheckpointDispatch:
         mgr = _make_manager(load_contents=["model"])
 
         with patch.object(mgr, "_load_model_as_hf_via_bridge") as mock_bridge_load:
+            mgr.optimizer.reload_model_params.side_effect = lambda: mock_bridge_load.assert_called_once()
             mgr.load_checkpoint(self.ckpt_path)
 
         mock_bridge_load.assert_called_once()
@@ -501,6 +502,7 @@ class TestLoadCheckpointDispatch:
         mock_load_dc.return_value = {"model": {"layer.weight": torch.zeros(1)}}
         mgr = _make_manager(load_contents=["model"], use_dist_checkpointing=True)
 
+        mgr.optimizer.reload_model_params.side_effect = lambda: mgr.model[0].load_state_dict.assert_called_once()
         mgr.load_checkpoint(self.ckpt_path)
 
         mgr.model[0].load_state_dict.assert_called_once()
