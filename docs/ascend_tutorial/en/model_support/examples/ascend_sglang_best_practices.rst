@@ -19,11 +19,11 @@ The example model script and its required hardware conditions are as follows:
 
 - Note: verl recently performed script cleanup and naming changes. It is recommended to build based on the documentation and scripts corresponding to commit id c98cb8cc `doclink`_ to avoid broken links.
 
-+----------------------+---------------------+--------+------------------------------+
-| Model                | NPU Model           | Nodes  | Training/Inference Backend   |
-+======================+=====================+========+==============================+
-| `Qwen3-30B`_         | Atlas 800T A3       | 1      | SGLang + Megatron            |
-+----------------------+---------------------+--------+------------------------------+
++----------------------+--------------------------+--------+------------------------------+
+| Model                | NPU Model                | Nodes  | Training/Inference Backend   |
++======================+==========================+========+==============================+
+| `Qwen3-30B`_         | Atlas A3 series products | 1      | SGLang + Megatron            |
++----------------------+--------------------------+--------+------------------------------+
 
 Environment Setup
 -----------------------------------

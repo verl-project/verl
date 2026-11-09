@@ -61,7 +61,7 @@ For the code involving these parameters, refer to: [Recipe: Decoupled Clip and D
 ## Hardware Requirements
 
 
-Currently, Atlas 800T A3 and Atlas 900 A3 SuperPoD are supported. Completing this best practice requires 1 Atlas 900 A3 SuperPoD. For key software versions, refer to: [Ascend Quick Start Guide](../../get_start/quick_start.rst)
+Currently, Atlas A3 series products are supported. Completing this best practice requires 1 Atlas A3 series system. For key software versions, refer to: [Ascend Quick Start Guide](../../get_start/quick_start.rst)
 
 
 ## Installing the Base Environment

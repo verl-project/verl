@@ -24,11 +24,9 @@ verl v0.9.1 的 vLLM 镜像使用 CANN 9.1.0、Python 3.12 和 vLLM 0.23.0，支
 镜像硬件支持
 -----------------------------------
 
-Atlas 200T A2 Box16
+Atlas A2 系列产品
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3 系列产品
 
 Ascend 950PR&950DT系列产品
 

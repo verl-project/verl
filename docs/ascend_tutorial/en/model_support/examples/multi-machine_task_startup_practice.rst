@@ -177,7 +177,7 @@ The following script can be executed uniformly on all nodes. It automatically de
    * - ``NNODES``
      - Number of nodes participating in training
    * - ``NPUS_PER_NODE``
-     - Number of NPUs per node, for example Atlas 800T A3 typically has 16
+     - Number of NPUs per node, for example Atlas A3 series products typically have 16
    * - ``MASTER_ADDR``
      - Master node IP, this parameter must be the same on all nodes
    * - ``SOCKET_IFNAME``

@@ -34,7 +34,7 @@ actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响�
 
 ## 基础环境
 
-当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成本次最佳实践需要 4台Atlas 800T A3。
+当前支持 Atlas A3 系列产品。完成本次最佳实践需要 4 台 Atlas A3 系列产品。
 
 ### 安装基础环境
 

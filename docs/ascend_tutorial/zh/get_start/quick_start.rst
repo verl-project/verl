@@ -18,9 +18,8 @@
 硬件支持
 --------
 
-- Atlas 200T A2 Box16
-- Atlas 900 A2 PoD
-- Atlas 800T A3
+- Atlas A2 系列产品
+- Atlas A3 系列产品
 
 
 

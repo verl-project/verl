@@ -24,11 +24,9 @@ The vLLM image for verl v0.9.1 uses CANN 9.1.0, Python 3.12, and vLLM 0.23.0, su
 Image Hardware Support
 -----------------------------------
 
-Atlas 200T A2 Box16
+Atlas A2 series products
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3 series products
 
 Ascend 950PR&950DT products
 
