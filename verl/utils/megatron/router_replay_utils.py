@@ -539,6 +539,10 @@ def set_router_replay_data(
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
                 layers_topk_idx, attention_mask, pre_process=True, quant_align_size=quant_align_size
             )
+            if replay_mask is not None:
+                replay_mask_rmpad, _ = preprocess_packed_seqs(
+                    replay_mask, attention_mask, pre_process=True, quant_align_size=quant_align_size
+                )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
         # 1, dynamic_bs_split, layer_num, topk
@@ -563,12 +567,17 @@ def set_router_replay_data(
         if is_router_replay_debug_enabled():
             if replay_mask is None:
                 coverage = {}
-            elif layers_topk_idx.is_nested:
-                packed_rows = int(replay_mask_rmpad.numel()) if replay_mask_rmpad is not None else None
-                coverage = summarize_replay_mask(replay_mask, packed_rows=packed_rows)
             else:
-                valid_rows = int(attention_mask.sum().item()) if attention_mask is not None else None
-                coverage = summarize_replay_mask(replay_mask, valid_rows=valid_rows)
+                if layers_topk_idx.is_nested:
+                    cp_size = local_cp_size if local_cp_size is not None else mpu.get_context_parallel_world_size()
+                else:
+                    cp_size = mpu.get_context_parallel_world_size()
+                packed_rows = int(replay_mask_rmpad.numel()) * cp_size if replay_mask_rmpad is not None else None
+                if layers_topk_idx.is_nested:
+                    coverage = summarize_replay_mask(replay_mask, packed_rows=packed_rows)
+                else:
+                    valid_rows = int(attention_mask.sum().item()) if attention_mask is not None else None
+                    coverage = summarize_replay_mask(replay_mask, valid_rows=valid_rows, packed_rows=packed_rows)
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
             logger.warning(
                 "router replay REPLAY: rank=%d, layers=%d, vp_rank=%s, coverage=%s",

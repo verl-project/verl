@@ -476,6 +476,30 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
         )
 
 
+def test_set_router_replay_data_applies_bshd_replay_mask(monkeypatch):
+    """BSHD replay masks are packed and installed, not silently dropped."""
+    router = _FakeRouter()
+    tf_config = _config(num_layers=1)
+    routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)
+    replay_mask = torch.tensor([[True, True, False]])
+
+    monkeypatch.setattr(rr_utils, "device_name", "cpu")
+    monkeypatch.setattr(rr_utils, "preprocess_packed_seqs", lambda tensor, _mask, **_kwargs: (tensor, object()))
+    monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(1, router)]))
+
+    rr_utils.set_router_replay_data(
+        routed_experts,
+        torch.ones(1, 3, dtype=torch.bool),
+        tf_config,
+        replay_mask=replay_mask,
+        model=object(),
+    )
+
+    assert router.target_replay_mask is not None
+    assert torch.equal(router.target_replay_mask, replay_mask.squeeze(0))
+
+
 def test_router_replay_debug_env(monkeypatch):
     monkeypatch.delenv("VERL_ROUTER_REPLAY_DEBUG", raising=False)
     assert not rr_utils.is_router_replay_debug_enabled()
