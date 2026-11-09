@@ -442,13 +442,16 @@ class MegatronEngine(BaseEngine):
     def _get_replay_routers(self, model):
         """Return the cached ``(layer_number, RouterReplay)`` list for a forwarded model chunk."""
         key = tuple(id(chunk) for chunk in model) if isinstance(model, list | tuple) else id(model)
-        routers = self._replay_routers_cache.get(key)
-        if routers is None:
-            routers = list(iter_model_routers(model))
-            self._replay_routers_cache[key] = routers
-        return routers
+        entry = self._replay_routers_cache.get(key)
+        if entry is None:
+            # Keep a strong reference to the chunk(s) so their id() cannot be reused
+            # while this cache entry is alive.
+            entry = (model, list(iter_model_routers(model)))
+            self._replay_routers_cache[key] = entry
+        return entry[1]
 
     def _build_megatron_module(self):
+        """Build the Megatron module(s) and load the HF weights for this engine."""
         from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
@@ -555,6 +558,7 @@ class MegatronEngine(BaseEngine):
         )
 
     def initialize(self):
+        """Build/load the model and set up the optimizer, scheduler and checkpointer."""
         self._hf_export_tasks = None
         self._build_tf_config()
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
@@ -577,6 +581,7 @@ class MegatronEngine(BaseEngine):
             from verl.utils.qat.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
+            self._replay_routers_cache.clear()
 
         self._maybe_enable_fused_kernels()
 
@@ -1257,6 +1262,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
     ):
+        """Run one micro-batch forward step and install replay targets when needed."""
         batch: TensorDict = next(batch_iter)
 
         batch = batch.to(get_device_id())

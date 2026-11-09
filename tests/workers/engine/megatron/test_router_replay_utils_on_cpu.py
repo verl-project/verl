@@ -480,6 +480,7 @@ def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
 
 
 def test_set_model_router_replay_action_uses_cached_routers(monkeypatch):
+    """Setting actions with a cached router list must not walk the model."""
     r1, r2 = _FakeRouter(), _FakeRouter()
 
     def fail(_model):
@@ -493,6 +494,7 @@ def test_set_model_router_replay_action_uses_cached_routers(monkeypatch):
 
 
 def test_action_query_uses_cached_routers(monkeypatch):
+    """Action queries with a cached router list must not walk the model."""
     router = _FakeRouter(router_replay_action=RouterReplayAction.REPLAY_FORWARD)
 
     def fail(_model):
@@ -503,6 +505,7 @@ def test_action_query_uses_cached_routers(monkeypatch):
 
 
 def test_set_router_replay_data_uses_cached_routers(monkeypatch):
+    """Installing replay targets with a cached router list must not walk the model."""
     router = _FakeRouter()
     tf_config = _config(num_layers=1)
     routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)

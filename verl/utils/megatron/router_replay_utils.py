@@ -827,6 +827,7 @@ class RouterReplayHelper:
 
     @staticmethod
     def _get_action_router_list(tf_config, vp_rank=None, model=None, routers=None):
+        """Return the replay routers used for the current model or positional layout."""
         if model is not None:
             return [router for _, router in (routers if routers is not None else iter_model_routers(model))]
         return RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)

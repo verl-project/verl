@@ -25,6 +25,7 @@ def _make_engine():
 
 
 def test_engine_caches_router_walk_for_a_chunk(monkeypatch):
+    """The engine walks a single chunk once and reuses the cached routers."""
     calls = []
     routers = [(1, object())]
 
@@ -42,9 +43,12 @@ def test_engine_caches_router_walk_for_a_chunk(monkeypatch):
     assert first is second
     assert first == routers
     assert calls == [model]
+    # The entry keeps a strong reference so the id() cannot be reused.
+    assert engine._replay_routers_cache[id(model)][0] is model
 
 
 def test_engine_caches_router_walk_for_chunk_lists(monkeypatch):
+    """VPP chunk lists are cached by their chunk identities."""
     calls = []
     routers = [(1, object())]
 
@@ -61,9 +65,11 @@ def test_engine_caches_router_walk_for_chunk_lists(monkeypatch):
 
     assert first is second
     assert calls == [chunks]
+    assert engine._replay_routers_cache[tuple(id(chunk) for chunk in chunks)][0] is chunks
 
 
 def test_engine_rebuild_clears_router_cache():
+    """A model rebuild drops cache entries that refer to old chunks."""
     engine = _make_engine()
     engine._replay_routers_cache["stale"] = [(1, object())]
     engine.engine_config = object()
