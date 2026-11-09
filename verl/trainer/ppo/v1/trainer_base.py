@@ -527,8 +527,18 @@ class PPOTrainer(ABC):
                 break
 
         self.on_train_end()
+        self._notify_train_end_callback(success=True)
         self._shutdown_dump_executor()
         self._shutdown_train_dataloader()
+
+    def _notify_train_end_callback(self, success: bool) -> None:
+        """Invoke the run-end checkpoint callback once per trainer run."""
+        self.checkpoint_callback.on_train_end(
+            trainer=self,
+            final_global_step=max(self.global_steps - 1, 0),
+            output_dir=self.config.trainer.default_local_dir,
+            success=success,
+        )
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         train_batch_size = self.config.data.train_batch_size

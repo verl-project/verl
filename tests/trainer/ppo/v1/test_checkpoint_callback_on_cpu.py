@@ -38,6 +38,9 @@ class _RecordingCallback(CheckpointCallback):
     def on_save(self, trainer, global_step, checkpoint_dir, async_save=False, **kwargs):
         self.events.append(("on_save", global_step, checkpoint_dir, async_save))
 
+    def on_train_end(self, trainer, final_global_step, output_dir, success=True, **kwargs):
+        self.events.append(("on_train_end", final_global_step, output_dir, success))
+
 
 def _make_trainer(tmp_path, events, async_save=False):
     trainer = _StubTrainer.__new__(_StubTrainer)
@@ -111,3 +114,21 @@ def test_callback_exception_propagates(tmp_path):
 
     with pytest.raises(RuntimeError, match="callback failed"):
         trainer._save_checkpoint()
+
+
+def test_train_end_fires_on_train_end_callback(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+
+    trainer._notify_train_end_callback(success=True)
+
+    assert events == [("on_train_end", 2, str(tmp_path), True)]
+
+
+def test_train_end_callback_exception_propagates(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+    trainer.checkpoint_callback.on_train_end = MagicMock(side_effect=RuntimeError("train-end callback failed"))
+
+    with pytest.raises(RuntimeError, match="train-end callback failed"):
+        trainer._notify_train_end_callback(success=True)
