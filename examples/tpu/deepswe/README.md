@@ -316,3 +316,38 @@ kubectl exec -n "${NAMESPACE}" "${HEAD_POD}" -- \
 # Check warm pools and active sandbox claims in your namespace
 kubectl get sandboxwarmpools,sandboxclaims -n "${NAMESPACE}"
 ```
+
+## 9. Optimized TPU v7x Configuration
+
+`run_qwen3_5_35b_deepswe_v7x_optimized.sh` wraps the recipe above with the settings measured fastest on TPU v7x:
+a 2x2x2 trainer slice and three 2x2x1 rollout slices, 32k context (8192 prompt + 24576 response), and
+16 issues x 16 attempts = 256 trajectories per step.
+
+| Configuration | Steady-state step time |
+| --- | --- |
+| Recipe defaults (MAX_NUM_SEQS 64, CONCURRENCY 256, half-batch prefetch) | ~490 s |
+| + MAX_NUM_SEQS 128, CONCURRENCY 384, full-batch prefetch, skip-padded MoE, GDN dynamic tiling | ~370 s |
+| + rollout expert parallelism (EP 8) with the fused EP MoE kernel | ~320 s |
+
+Step times alternate between a long step (waits for a full rollout) and a short step (its batch was prefetched while
+the previous step trained); the numbers above average consecutive pairs from step 3 on. The rollout is the critical
+path; the trainer phase (old log-probs + update) is ~115 s per step.
+
+Rollout correction is the base recipe's sequence rejection (`rollout_rs=seq_mean_k1`, a keep-band on the geometric-mean
+`pi_train / pi_rollout` ratio) with the band's lower edge widened from 0.999 to 0.998: on this stack the trainer and
+rollout log-probs differ by a small systematic bias (`rollout_corr/log_ppl_diff` ~ +0.0009), which makes the 0.999 edge
+reject ~45% of sequences; 0.998 brings that to ~5% at no speed cost. Set `ROLLOUT_RS_THRESHOLD=0.999_1.002` to use the
+base recipe's band.
+
+The script needs the verl-hardware-plugin TPU engine options `gdn_row_slot_len`, `splash_max_block_size` and
+`frozen_param_regex`, and a vLLM-TorchTPU build with `USE_MOE_FUSED_EP_KERNEL` (the Dockerfile's default
+`VLLM_TORCHTPU_COMMIT` has it). Build the image from `examples/tpu/grpo/Dockerfile` with
+`--build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4` (google-pytorch/torchtitan#142, as for
+Qwen3.5-397B in `examples/tpu/grpo/README.md`): `gdn_row_slot_len` uses its `gated_delta_document_resets`, which the
+Dockerfile's default torchtitan commit does not have. The numbers above were measured with that build. Launch it the same way as the base
+recipe (section 8), after setting the dataset, model and sandbox variables:
+
+```bash
+ray job submit --address=http://127.0.0.1:8265 --no-wait -- \
+  bash examples/tpu/deepswe/run_qwen3_5_35b_deepswe_v7x_optimized.sh
+```
