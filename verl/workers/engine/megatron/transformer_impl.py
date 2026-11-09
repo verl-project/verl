@@ -488,6 +488,7 @@ class MegatronEngine(BaseEngine):
         return override_ddp_config
 
     def _build_megatron_module(self):
+        """Build the Megatron module(s) and load the HF weights for this engine."""
         from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
@@ -874,6 +875,11 @@ class MegatronEngine(BaseEngine):
         return torch.tensor(input_ids.numel(), device=input_ids.device)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        """Run the Megatron forward/backward schedule over the prepared micro-batches.
+
+        Router replay actions are armed before the schedule and cleared on both
+        the success and failure paths.
+        """
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
@@ -1019,9 +1025,7 @@ class MegatronEngine(BaseEngine):
         except Exception:
             # Keep router replay state from leaking into the next step after an error.
             if enable_routing_replay:
-                self.mini_layer_topk_idx_list = []
-                clear_model_router_replay_indices(self.module)
-                clear_model_router_replay_action(self.module)
+                self._clear_replay_state_after_error()
             raise
 
         if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -1073,6 +1077,22 @@ class MegatronEngine(BaseEngine):
             clear_model_router_replay_indices(self.module)
             clear_model_router_replay_action(self.module)
         return output
+
+    def _clear_replay_state_after_error(self) -> None:
+        """Best-effort clear of router replay state after a failed schedule.
+
+        Cleanup failures are logged instead of replacing the original schedule error,
+        and the action clear still runs if the index clear fails.
+        """
+        self.mini_layer_topk_idx_list = []
+        try:
+            clear_model_router_replay_indices(self.module)
+        except Exception:
+            logger.exception("Failed to clear router replay indices after a step error")
+        try:
+            clear_model_router_replay_action(self.module)
+        except Exception:
+            logger.exception("Failed to clear router replay actions after a step error")
 
     def _mbridge_export_tasks(self):
         """Cache static export tasks while preserving Bridge's specialized FP8 task planning."""

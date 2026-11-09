@@ -409,6 +409,7 @@ def apply_router_replay_patch():
 
         @wraps(original_hash_routing)
         def hash_routing_with_recording(self, logits, input_ids):
+            """Record hash-router indices during the patched forward."""
             output = original_hash_routing(self, logits, input_ids)
             if self.router_replay is not None and self.router_replay.router_replay_action == RouterReplayAction.RECORD:
                 indices = self.tid2eid[input_ids.T.reshape(-1)].long()

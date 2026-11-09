@@ -46,6 +46,7 @@ def _configs(mode="R3", **overrides):
 
 
 def test_disabled_mode_skips_all_checks():
+    """Disabled mode must skip every replay setup check."""
     engine_config, tf_config = _configs(
         mode="disabled", moe_permute_fusion=True, moe_router_fusion=True, moe_router_topk=1
     )
@@ -62,6 +63,7 @@ def test_disabled_mode_skips_all_checks():
     ],
 )
 def test_rejects_unsupported_setup(override):
+    """Unsupported fusion/topk combinations must be rejected."""
     engine_config, tf_config = _configs(**override)
 
     with pytest.raises(ValueError, match="router_replay"):
@@ -69,6 +71,7 @@ def test_rejects_unsupported_setup(override):
 
 
 def test_warns_for_non_alltoall_dispatcher(monkeypatch):
+    """A non-alltoall dispatcher is accepted but emits a warning."""
     engine_config, tf_config = _configs(moe_token_dispatcher_type="flex")
     messages = []
 
@@ -80,7 +83,28 @@ def test_warns_for_non_alltoall_dispatcher(monkeypatch):
 
 
 def test_patch_rejects_degraded_import(monkeypatch):
+    """Enabling replay with missing MoE helpers must fail clearly."""
     monkeypatch.setattr(replay_patch, "_REPLAY_IMPORT_ERROR", ImportError("missing moe_utils"))
 
     with pytest.raises(RuntimeError, match="MoE helpers are unavailable"):
         replay_patch.apply_router_replay_patch()
+
+
+def test_clear_replay_state_after_error_keeps_action_cleanup_on_index_failure(monkeypatch):
+    """A failing index clear must not skip action cleanup (and must not escape)."""
+    engine = object.__new__(transformer_impl.MegatronEngine)
+    engine.module = object()
+    engine.mini_layer_topk_idx_list = [object()]
+    cleared = []
+
+    def fail(_model):
+        raise RuntimeError("index clear failed")
+
+    monkeypatch.setattr(transformer_impl.logger, "exception", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transformer_impl, "clear_model_router_replay_indices", fail)
+    monkeypatch.setattr(transformer_impl, "clear_model_router_replay_action", lambda _model: cleared.append(True))
+
+    engine._clear_replay_state_after_error()
+
+    assert engine.mini_layer_topk_idx_list == []
+    assert cleared == [True]
