@@ -1415,7 +1415,7 @@ class vLLMHttpServer:
                 "rollout.engine_kwargs.vllm may not set args that verl derives from its config: "
                 + "; ".join(f"{key} (set {_VERL_MANAGED_VLLM_ARGS[key.replace('-', '_')]})" for key in managed)
             )
-        if _VLLM_VERSION >= version.parse("0.30.0") and is_torch_npu_available(check_device=False):
+        if _VLLM_VERSION >= version.parse("0.27.1") and is_torch_npu_available(check_device=False):
             # Ascend RL defaults disable NZ weights for sleep/wake and weight updates.
             additional_config = dict(engine_kwargs.get("additional_config") or {})
             rl_config = dict(additional_config.get("rl_config") or {})
