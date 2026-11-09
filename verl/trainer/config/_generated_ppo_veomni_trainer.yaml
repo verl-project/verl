@@ -29,7 +29,11 @@ actor_rollout_ref:
       fsdp_size: -1
       ulysses_parallel_size: 1
       expert_parallel_size: 1
+      ple_parallel_size: 1
+      freeze_ple_embeddings: false
+      frozen_ple_dtype: null
       mixed_precision: true
+      enable_autocast: true
       low_precision_reduce_scatter_comm: false
       seed: 42
       full_determinism: false
@@ -222,7 +226,11 @@ actor_rollout_ref:
       fsdp_size: ${oc.select:actor_rollout_ref.actor.veomni.fsdp_size,-1}
       ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
       expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
+      ple_parallel_size: 1
+      freeze_ple_embeddings: false
+      frozen_ple_dtype: null
       mixed_precision: true
+      enable_autocast: true
       low_precision_reduce_scatter_comm: false
       seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
       full_determinism: false
@@ -542,7 +550,11 @@ critic:
     fsdp_size: -1
     ulysses_parallel_size: 1
     expert_parallel_size: 1
+    ple_parallel_size: 1
+    freeze_ple_embeddings: false
+    frozen_ple_dtype: null
     mixed_precision: true
+    enable_autocast: true
     low_precision_reduce_scatter_comm: false
     seed: 42
     full_determinism: false
