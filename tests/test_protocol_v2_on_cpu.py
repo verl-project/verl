@@ -22,6 +22,7 @@ import random
 import numpy as np
 import pytest
 import torch
+from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl.utils import tensordict_utils as tu
@@ -910,6 +911,23 @@ def test_chunk_tensordict_keeps_tensordict_0_8_fallback(monkeypatch):
         torch.equal(actual, expected)
         for chunk, expected_rows in zip(chunks, (rows[:2], rows[2:]), strict=True)
         for actual, expected in zip(chunk["input_ids"].unbind(), expected_rows, strict=True)
+    )
+
+
+def test_chunk_tensordict_rebuilds_jagged_tensors_with_explicit_lengths():
+    values = torch.arange(20)
+    offsets = torch.tensor([0, 5, 10, 15, 20])
+    lengths = torch.tensor([3, 4, 2, 5])
+    input_ids = torch.nested.nested_tensor_from_jagged(values, offsets, lengths)
+    td = TensorDict({"input_ids": input_ids}, batch_size=[4])
+
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    expected_rows = [values[offset : offset + length] for offset, length in zip(offsets[:-1], lengths, strict=True)]
+    assert all(
+        torch.equal(actual, expected)
+        for chunk, expected_chunk in zip(chunks, (expected_rows[:2], expected_rows[2:]), strict=True)
+        for actual, expected in zip(chunk["input_ids"].unbind(), expected_chunk, strict=True)
     )
 
 

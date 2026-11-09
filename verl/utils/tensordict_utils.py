@@ -319,8 +319,8 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     """Split a TensorDict into equal-sized chunks with special nested tensor handling.
 
     Divides a TensorDict into the specified number of chunks along the batch
-    dimension. Uses native views for 2D jagged tensors and rebuilds
-    higher-dimensional jagged tensors.
+    dimension. Uses native views for contiguous 2D jagged tensors and rebuilds
+    other jagged tensors.
 
     Args:
         td: The TensorDict to split.
@@ -334,8 +334,9 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             evenly divisible by chunks.
 
     Note:
-        TensorDict 0.10+ handles 2D jagged tensors without rebuilding their
-        rows. PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
+        TensorDict 0.10+ handles contiguous 2D jagged tensors without rebuilding
+        their rows. Tensors with explicit lengths retain the reconstruction path.
+        PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
         ``split_with_sizes`` is applied to the wrong dimension of the internal
         ``_values`` tensor.  For example, mRoPE ``position_ids`` with per-sample
         shape ``(4, seq_len)`` becomes a 3D jagged NestedTensor
@@ -360,7 +361,11 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     )
     chunk_size = len(td) // chunks
     nested_keys = {key for key, val in td.items() if isinstance(val, torch.Tensor) and val.is_nested}
-    if nested_keys and _TENSORDICT_SUPPORTS_NESTED_CHUNK and all(td[key].dim() == 2 for key in nested_keys):
+    if (
+        nested_keys
+        and _TENSORDICT_SUPPORTS_NESTED_CHUNK
+        and all(td[key].dim() == 2 and td[key].is_contiguous() for key in nested_keys)
+    ):
         return td.chunk(chunks=chunks)
 
     new_td = TensorDict(
