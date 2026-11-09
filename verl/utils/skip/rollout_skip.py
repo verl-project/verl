@@ -170,9 +170,9 @@ class RolloutTqSkip(RolloutSkip):
     """Rollout skip for V1 TransferQueue-based trainer (``skip.rollout_tq``).
 
     Unlike V0's decorator pattern, V1's split architecture (submit prompts to TQ,
-    then sample trajectories) requires direct method calls from the trainer:
-    - Phase one (no cache): trainer calls ``prepare_data`` after the V1 dataloader samples a batch
-    - Phase two (cache exists): trainer calls ``load_dump_data`` in ``_add_batch_to_generate``
+    then sample trajectories) uses the streaming dataloader sampling boundary:
+    - Phase one (no cache): the sample decorator calls ``prepare_data`` after sampling a batch
+    - Phase two (cache exists): the sample decorator calls ``load_v1_sample`` instead of live sampling
 
     When ``parameter_sync_step > 1`` (separate async), one global step performs multiple
     ``sample`` calls.  Each mini-batch is saved to a separate inner sub-directory

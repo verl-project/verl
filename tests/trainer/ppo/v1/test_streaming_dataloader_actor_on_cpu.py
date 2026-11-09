@@ -706,3 +706,9 @@ def test_submission_registers_prompts_before_dispatch():
 
     assert actor._submit_batch_to_rollout(["prompt-a", "prompt-b"], "val") == 2
     assert events == [("register", "val"), ("dispatch",)]
+
+
+def test_outstanding_cap_must_allow_full_training_batch():
+    actor = _refill_policy_stub(watermark_batches=0.5, max_outstanding_batches=0.5)
+    with pytest.raises(ValueError, match="must be >= 1"):
+        actor._init_refill_policy()

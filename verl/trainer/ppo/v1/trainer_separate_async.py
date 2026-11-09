@@ -29,6 +29,7 @@ from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.skip import SkipManager
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -280,6 +281,16 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def _wait_for_sampleable_and_switch(self) -> dict:
         if self.current_mode != HybridEngineMode.ROLLOUT:
+            return {}
+
+        skip_instance = SkipManager.skip_instances.get("rollout_tq")
+        if (
+            skip_instance is not None
+            and skip_instance.is_enabled()
+            and self.global_steps in skip_instance.steps
+            and skip_instance.has_v1_cache(self.global_steps)
+        ):
+            self._timed_switch_to_trainer()
             return {}
 
         logger.info(f"Lending hybrid engine to generation until {self._step_threshold} groups are sampleable")

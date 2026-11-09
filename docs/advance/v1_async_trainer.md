@@ -175,9 +175,9 @@ Each session creates one metadata-only `{uid}_{session_id}` entry with `status=r
 In `separate_async` the two limits govern different regimes. Prompt staleness (steps from dispatch to training) is roughly the number of unconsumed groups divided by `train_batch_size`:
 
 - When rollout is slower than training, groups are sampled as soon as they finish, the watermark binds, and staleness stays near `watermark_batches`.
-- When rollout outpaces training, finished groups wait for the trainer. Without a cap they would accumulate indefinitely, growing staleness and TransferQueue memory and, under `drop`, wasting generation on groups that are later evicted. The cap holds the unconsumed groups near `max_outstanding_batches` batches, so staleness settles near that value while the trainer still always finds a full mini-batch.
+- When rollout outpaces training, finished groups wait for the trainer. Without a cap they would accumulate indefinitely, growing staleness and TransferQueue memory and, under `drop`, wasting generation on groups that are later evicted. The cap holds the unconsumed groups near `max_outstanding_batches` batches, so staleness settles near that value while leaving capacity for a full training batch.
 
-Keep `max_outstanding_batches` at least `watermark_batches` (enforced) and preferably one batch above it, so groups waiting for a full batch do not reduce rollout concurrency. Keep it at most `max_off_policy_threshold - 1` so steady-state staleness stays within the off-policy threshold (a warning is logged otherwise). Set it to `null` to disable the cap.
+Keep `max_outstanding_batches` at least `max(1, watermark_batches)` (enforced), so sampling and hybrid switching can wait for a full training batch without exhausting capacity and preferably one batch above it, so groups waiting for a full batch do not reduce rollout concurrency. Keep it at most `max_off_policy_threshold - 1` so steady-state staleness stays within the off-policy threshold (a warning is logged otherwise). Set it to `null` to disable the cap.
 
 Each coordinator pass synchronizes TransferQueue metadata once and reuses that snapshot for request handling and refill.
 

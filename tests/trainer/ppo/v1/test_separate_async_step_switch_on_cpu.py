@@ -601,3 +601,12 @@ def test_setup_standalone_memory_from_hydra_override(monkeypatch, model_engine, 
     assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == expected
     assert trainer.config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
     assert OmegaConf.to_container(trainer.config, resolve=False) == original
+
+
+def test_cached_replay_reclaims_engine_without_waiting(monkeypatch):
+    trainer = _trainer()
+    skip = SimpleNamespace(steps=[1], is_enabled=lambda: True, has_v1_cache=lambda step: True)
+    monkeypatch.setitem(trainer_module.SkipManager.skip_instances, "rollout_tq", skip)
+    trainer._wait_for_sampleable = lambda *args: pytest.fail("cached replay must not wait for live groups")
+    assert trainer._wait_for_sampleable_and_switch() == {}
+    assert trainer.current_mode == HybridEngineMode.TRAINER

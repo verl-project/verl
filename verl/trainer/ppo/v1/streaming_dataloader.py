@@ -344,6 +344,17 @@ class StreamingDataloader:
         elif partition_id == "train":
             self._refill_exact(batch_size)
 
+    def shutdown(self):
+        """Stop the train dataloader's worker processes.
+
+        StatefulDataLoader keeps its last iterator, so the workers would outlive fit(). At process exit Ray kills them
+        with the actor, and the trainer then reports "DataLoader worker (pid ...) is killed by signal: Killed".
+        """
+        iterator, self.train_dataloader_it = self.train_dataloader_it, None
+        shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+        if shutdown_workers is not None:
+            shutdown_workers()
+
     def save_checkpoint(self, local_global_step_folder: str, global_steps: int) -> None:
         """Persist the dataloader cursor."""
         del global_steps
@@ -872,6 +883,8 @@ class StreamingDataloaderAsync(StreamingDataloader):
                 f"max_outstanding_batches ({max_outstanding_batches}) must be >= watermark_batches "
                 f"({watermark_batches}), otherwise the in-flight watermark is never reached"
             )
+        if max_outstanding_batches < 1:
+            raise ValueError("max_outstanding_batches must be >= 1 to allow a full training batch to become ready")
         self.max_outstanding_groups = round(max_outstanding_batches * train_batch_size)
         if self.max_off_policy_threshold is not None and max_outstanding_batches + 1 > self.max_off_policy_threshold:
             logger.warning(

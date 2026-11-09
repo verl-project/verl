@@ -164,7 +164,10 @@ class TaskRunnerV1:
             finally:
                 try:
                     if self.streaming_dataloader is not None:
-                        ray.kill(self.streaming_dataloader)
+                        try:
+                            ray.get(self.streaming_dataloader.shutdown.remote())
+                        finally:
+                            ray.kill(self.streaming_dataloader)
                 finally:
                     tq.close()
 
