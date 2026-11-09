@@ -306,7 +306,6 @@ class vLLMHttpServer:
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
 
         self._preprocess_engine_kwargs(engine_kwargs)
-        self._set_native_quantization(engine_kwargs)
 
         # Override default generation config from hugging face model config,
         # user can still override them by passing kwargs in each request.
@@ -1485,10 +1484,6 @@ class vLLMHttpServer:
             max_new_tokens=self.config.response_length,
         )
 
-    def _set_native_quantization(self, engine_kwargs: dict) -> None:
-        if isinstance(self.config.quantization, str):
-            engine_kwargs["quantization"] = self.config.quantization
-
     def _apply_quantization(self) -> dict:
         """hf_overrides for a rollout quantization set in the rollout config.
 
@@ -1496,8 +1491,6 @@ class vLLMHttpServer:
         workers install the refit patches from the resulting vLLM ``quant_config``.
         """
         quantization = self.config.quantization
-        if isinstance(quantization, str):
-            return {}
         if not quantization.enabled:
             return {}
 

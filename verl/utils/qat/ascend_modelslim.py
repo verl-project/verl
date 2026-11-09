@@ -30,8 +30,14 @@ def detect_ascend_modelslim(model_path: str) -> bool:
     return detect_quantization_method(model_path) == "ascend"
 
 
-class AscendMxfp8WeightQuantizer:
-    """Export trainer weights in vLLM-Ascend's native W8A8_MXFP8 layout."""
+class ModelSlimMxfp8WeightExporter:
+    """Export trainer weights using an existing ModelSlim MXFP8 recipe.
+
+    This class adapts the per-layer metadata in ``quant_model_description.json``
+    to the weight format expected by vLLM-Ascend. It is not a new quantization
+    algorithm: NPU kernels perform the numeric conversion, while this exporter
+    selects tensors marked ``W8A8_MXFP8`` and emits their weights and scales.
+    """
 
     def __init__(self, quant_description: Mapping[str, Any]):
         self.quant_description = dict(quant_description)

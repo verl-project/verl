@@ -350,8 +350,11 @@ class vLLMColocateWorkerExtension:
         if peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
         elif is_quantized_model(self.model_runner.vllm_config):
-            for model, reload_state in quant_reload_states:
-                process_quanted_weights_after_loading(model, reload_state)
+            from vllm.config import set_current_vllm_config
+
+            with set_current_vllm_config(self.model_runner.vllm_config):
+                for model, reload_state in quant_reload_states:
+                    process_quanted_weights_after_loading(model, reload_state)
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading

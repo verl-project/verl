@@ -730,7 +730,7 @@ def dispatch_rollout_weight_quantizer(
     ``rollout.quantization`` explicitly overrides it. Both native and override
     compressed-tensors configs use :class:`CompressedTensorsWeightQuantizer`;
     native ``Fp8Config`` uses :class:`Fp8ConfigWeightQuantizer`; native Ascend
-    ModelSlim MXFP8 uses :class:`verl.utils.qat.ascend.AscendMxfp8WeightQuantizer`. DeepSeek-V4
+    ModelSlim MXFP8 uses :class:`verl.utils.qat.ascend_modelslim.ModelSlimMxfp8WeightExporter`. DeepSeek-V4
     still gets an FP8 quantizer object, but it passes through the private mixed
     FP8/FP4 layout already produced by Megatron-Bridge.
     Per-token NVFP4 routed experts use :class:`NVFP4PerTokenWeightQuantizer`. NVFP4 training
@@ -753,16 +753,23 @@ def dispatch_rollout_weight_quantizer(
         getattr(hf_config, "model_type", None),
         getattr(getattr(hf_config, "text_config", None), "model_type", None),
     }
-    use_ascend = rollout_quantization == "ascend"
+    engine_kwargs = getattr(rollout_config, "engine_kwargs", None) or {}
+    vllm_engine_kwargs = engine_kwargs.get("vllm", {}) or {}
+    engine_quantization = vllm_engine_kwargs.get("quantization")
+    use_ascend = engine_quantization == "ascend"
+    if use_ascend and has_override:
+        raise ValueError(
+            "rollout.quantization and rollout.engine_kwargs.vllm.quantization=ascend specify conflicting "
+            "quantization paths; use only the native Ascend ModelSlim path or the compressed-tensors path"
+        )
     if (
-        not use_ascend
-        and not isinstance(rollout_quantization, str)
+        not engine_quantization
         and not has_override
         and native is None
         and getattr(rollout_config, "name", None) == "vllm"
         and getattr(model_config, "local_path", None) is not None
     ):
-        from verl.utils.qat.ascend import detect_ascend_modelslim
+        from verl.utils.qat.ascend_modelslim import detect_ascend_modelslim
 
         use_ascend = detect_ascend_modelslim(model_config.local_path)
     if use_ascend:
@@ -831,10 +838,10 @@ def dispatch_rollout_weight_quantizer(
         else:
             quantizer = CompressedTensorsWeightQuantizer(quantization_config)
     elif quant_method == "ascend":
-        from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+        from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
 
         qat_modes = set()
-        quantizer = AscendMxfp8WeightQuantizer.from_model_path(model_config.local_path)
+        quantizer = ModelSlimMxfp8WeightExporter.from_model_path(model_config.local_path)
     elif "fp8" in quant_method:
         qat_modes = {"fp8"}
         quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)

@@ -38,7 +38,7 @@ def _patch_torch_npu(monkeypatch):
 
 
 def test_native_ascend_dispatch_reads_modelslim_description(tmp_path):
-    from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+    from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
     from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
 
     description = {"quant_method": "ascend", "model.layers.0.self_attn.q_proj.weight": "W8A8_MXFP8"}
@@ -47,22 +47,62 @@ def test_native_ascend_dispatch_reads_modelslim_description(tmp_path):
         local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
     )
     rollout_config = SimpleNamespace(
-        name="vllm", quantization="ascend", checkpoint_engine=SimpleNamespace(backend="naive")
+        name="vllm",
+        quantization=SimpleNamespace(linear=None, moe=None, moe_activation=None, ignore=[], config_file=None),
+        engine_kwargs={"vllm": {"quantization": "ascend"}},
+        checkpoint_engine=SimpleNamespace(backend="naive"),
     )
 
     quantizer = dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
 
-    assert isinstance(quantizer, AscendMxfp8WeightQuantizer)
+    assert isinstance(quantizer, ModelSlimMxfp8WeightExporter)
     assert quantizer.quant_description == description
 
 
+def test_ascend_dispatch_rejects_structured_override_with_native_engine_quantization(tmp_path):
+    from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
+
+    model_config = SimpleNamespace(
+        local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
+    )
+    rollout_config = SimpleNamespace(
+        name="vllm",
+        quantization=SimpleNamespace(linear="MXFP8", moe="MXFP8", moe_activation=None, ignore=[], config_file=None),
+        engine_kwargs={"vllm": {"quantization": "ascend"}},
+        checkpoint_engine=SimpleNamespace(backend="naive"),
+    )
+
+    with pytest.raises(ValueError, match="conflicting quantization paths"):
+        dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
+
+
+def test_explicit_engine_quantization_skips_modelslim_auto_detection(tmp_path, monkeypatch):
+    from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
+
+    monkeypatch.setattr(
+        "verl.utils.qat.ascend_modelslim.detect_ascend_modelslim",
+        lambda path: pytest.fail("ModelSlim auto-detection should not override an explicit engine quantization"),
+    )
+    model_config = SimpleNamespace(
+        local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
+    )
+    rollout_config = SimpleNamespace(
+        name="vllm",
+        quantization=SimpleNamespace(linear=None, moe=None, moe_activation=None, ignore=[], config_file=None),
+        engine_kwargs={"vllm": {"quantization": "fp8"}},
+        checkpoint_engine=SimpleNamespace(backend="naive"),
+    )
+
+    assert dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config) is None
+
+
 def test_auto_detected_ascend_dispatch_reads_modelslim_description(tmp_path, monkeypatch):
-    from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+    from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
     from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
 
     description = {"quant_method": "ascend", "model.layers.0.self_attn.q_proj.weight": "W8A8_MXFP8"}
     (tmp_path / "quant_model_description.json").write_text(json.dumps(description))
-    monkeypatch.setattr("verl.utils.qat.ascend.detect_ascend_modelslim", lambda path: True)
+    monkeypatch.setattr("verl.utils.qat.ascend_modelslim.detect_ascend_modelslim", lambda path: True)
     model_config = SimpleNamespace(
         local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
     )
@@ -74,14 +114,14 @@ def test_auto_detected_ascend_dispatch_reads_modelslim_description(tmp_path, mon
 
     quantizer = dispatch_rollout_weight_quantizer(model_config=model_config, rollout_config=rollout_config)
 
-    assert isinstance(quantizer, AscendMxfp8WeightQuantizer)
+    assert isinstance(quantizer, ModelSlimMxfp8WeightExporter)
     assert quantizer.quant_description == description
 
 
 def test_ascend_auto_detection_keeps_unquantized_without_signature(tmp_path, monkeypatch):
     from verl.utils.qat.compressed_tensors import dispatch_rollout_weight_quantizer
 
-    monkeypatch.setattr("verl.utils.qat.ascend.detect_ascend_modelslim", lambda path: False)
+    monkeypatch.setattr("verl.utils.qat.ascend_modelslim.detect_ascend_modelslim", lambda path: False)
     model_config = SimpleNamespace(
         local_path=str(tmp_path), hf_config=SimpleNamespace(model_type="qwen3_moe", text_config=None)
     )
@@ -95,12 +135,12 @@ def test_ascend_auto_detection_keeps_unquantized_without_signature(tmp_path, mon
 
 
 def test_ascend_quantizer_emits_mxfp8_weights_and_scales(monkeypatch):
-    from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+    from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
 
     calls = _patch_torch_npu(monkeypatch)
     name = "model.layers.0.self_attn.q_proj.weight"
     gate = "model.layers.0.mlp.gate.weight"
-    quantizer = AscendMxfp8WeightQuantizer({name: "W8A8_MXFP8", gate: "FLOAT"})
+    quantizer = ModelSlimMxfp8WeightExporter({name: "W8A8_MXFP8", gate: "FLOAT"})
     weight = torch.randn(2, 64, dtype=torch.bfloat16)
     gate_weight = torch.randn(4, 64, dtype=torch.bfloat16)
 
@@ -115,14 +155,14 @@ def test_ascend_quantizer_emits_mxfp8_weights_and_scales(monkeypatch):
 
 
 def test_ascend_quantizer_expands_packed_experts(monkeypatch):
-    from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+    from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
 
     _patch_torch_npu(monkeypatch)
     prefix = "model.layers.0.mlp.experts.0"
     description = {
         f"{prefix}.{projection}.weight": "W8A8_MXFP8" for projection in ("gate_proj", "up_proj", "down_proj")
     }
-    quantizer = AscendMxfp8WeightQuantizer(description)
+    quantizer = ModelSlimMxfp8WeightExporter(description)
 
     output = dict(
         quantizer(
@@ -140,35 +180,21 @@ def test_ascend_quantizer_expands_packed_experts(monkeypatch):
 
 
 def test_ascend_quantizer_rejects_unsupported_weight_types():
-    from verl.utils.qat.ascend import AscendMxfp8WeightQuantizer
+    from verl.utils.qat.ascend_modelslim import ModelSlimMxfp8WeightExporter
 
     with pytest.raises(NotImplementedError, match="W8A8_DYNAMIC"):
-        AscendMxfp8WeightQuantizer({"model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC"})
+        ModelSlimMxfp8WeightExporter({"model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC"})
 
 
-def test_native_string_quantization_needs_no_hf_override():
+def test_native_ascend_engine_quantization_needs_no_hf_override():
     pytest.importorskip("vllm")
     from verl.workers.rollout.vllm_rollout.vllm_async_server import build_cli_args_from_config, vLLMHttpServer
 
-    server = SimpleNamespace(config=SimpleNamespace(quantization="ascend"))
+    server = SimpleNamespace(config=SimpleNamespace(quantization=SimpleNamespace(enabled=False)))
 
     assert vLLMHttpServer._apply_quantization(server) == {}
-    engine_kwargs = {}
-    vLLMHttpServer._set_native_quantization(server, engine_kwargs)
-    assert engine_kwargs == {"quantization": "ascend"}
+    engine_kwargs = {"quantization": "ascend"}
     assert build_cli_args_from_config(engine_kwargs) == ["--quantization", "ascend"]
-
-
-def test_structured_quantization_does_not_set_native_engine_arg():
-    pytest.importorskip("vllm")
-    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-
-    server = SimpleNamespace(config=SimpleNamespace(quantization=SimpleNamespace(enabled=True)))
-    engine_kwargs = {}
-
-    vLLMHttpServer._set_native_quantization(server, engine_kwargs)
-
-    assert engine_kwargs == {}
 
 
 def test_ascend_mx_config_is_quantized(monkeypatch):
