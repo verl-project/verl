@@ -1,7 +1,7 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 11/06/2026.
+Last updated: 11/09/2026.
 
 
 镜像获取与公开镜像地址
@@ -43,7 +43,7 @@ TransformerEngineNPU 使用 ``26.2.0_release_v2.17``；MindSpeed-Ops 使用 ``26
 ``_v0.9.1`` 构建入口及对应镜像标签保留原依赖，安装 verl ``release/v0.9.1`` 源码；现有已发布镜像及历史 release 版本保持原样。
 
 当前 A2/A3/950 vLLM latest Dockerfile 使用克隆仓库中的 ``requirements-npu.txt``，在安装 verl 后补装 ``triton-ascend==3.6.0.post2``。
-例如，可在仓库根目录运行构建：``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``。
+例如，可在仓库根目录运行构建：``docker build -f docker/ascend/Dockerfile.ascend_9.2.1_a2 .``。
 
 vLLM 后端当前 Dockerfile 目标组件版本
 ----------------------------------------------------------------
@@ -86,9 +86,12 @@ Dockerfile构建镜像脚本清单
 ============== ==================== ============== ==============================================================
 设备类型         CANN基础镜像版本     推理后端        参考文件
 ============== ==================== ============== ==============================================================
-A2              9.2.1                  vLLM            `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
-A3              9.2.1                  vLLM            `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
-950PR&950DT     9.2.1                  vLLM            `Dockerfile.ascend_9.1.0_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5>`_
+A2              9.2.1                  vLLM            `Dockerfile.ascend_9.2.1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a2>`_
+A3              9.2.1                  vLLM            `Dockerfile.ascend_9.2.1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a3>`_
+950PR&950DT     9.2.1                  vLLM            `Dockerfile.ascend_9.2.1_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a5>`_
+A2              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
+A3              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
+950PR&950DT     9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5>`_
 A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
 A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
 A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
@@ -141,7 +144,7 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
    # 从仓库根目录构建 latest vLLM 镜像
    cd {verl-root-path}
-   docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.2.1-a2 .
+   docker build -f docker/ascend/Dockerfile.ascend_9.2.1_a2 -t verl-ascend:9.2.1-a2 .
 
    # 发布版和 SGLang 镜像保留原有构建上下文
    cd {verl-root-path}/docker/ascend
@@ -155,7 +158,7 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 **说明：**
 
-* 以 vLLM 的镜像为例，``Dockerfile.ascend_9.1.0_a2`` 为 Dockerfile 文件名，``verl-ascend:9.2.1-a2`` 中，verl-ascend 为自定义的镜像名称，9.2.1-a2 为自定义的镜像标签
+* 以 vLLM 的镜像为例，``Dockerfile.ascend_9.2.1_a2`` 为 Dockerfile 文件名，``verl-ascend:9.2.1-a2`` 中，verl-ascend 为自定义的镜像名称，9.2.1-a2 为自定义的镜像标签
 * 构建 verl v0.9.1 镜像时，请使用带 ``_v0.9.1`` 后缀的 Dockerfile；A3 和 950PR&950DT 分别使用清单中对应的 ``a3`` 和 ``a5`` 文件。
 
 容器启动命令模板

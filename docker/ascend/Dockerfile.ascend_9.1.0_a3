@@ -1,5 +1,5 @@
 # Pull base image
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.2.1-a3-ubuntu22.04-py3.12
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-a3-ubuntu22.04-py3.12
 
 ARG SOC_VERSION="ascend910_9392"
 
@@ -20,20 +20,15 @@ RUN ARCH=$(uname -m) && \
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
     fi && \
     # Clone libs
-    git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git && \
-    git clone -b releases/v0.30.0 https://github.com/vllm-project/vllm-ascend.git && \
-    git clone --branch 26.2.0_core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
-    git clone --depth 1 --branch core_v0.18.2 https://github.com/NVIDIA/Megatron-LM.git && \
-    git clone --depth 1 --branch 26.2.0_core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
-    git clone --depth 1 --branch 26.2.0_release_v2.17 https://gitcode.com/ascend/TransformerEngineNPU.git && \
-    git clone --depth 1 --branch 26.2.0 https://gitcode.com/ascend/MindSpeed-Ops.git && \
-    git clone --depth 1 --branch 26.2.0_v0.5.0 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
+    git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git && \
+    git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone --branch core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
+    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git && \
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git && \
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git && \
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
     git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
-
-# Preserve Transformers' native Qwen3-ASR registration.
-COPY docker/ascend/patches/megatron_bridge_qwen3_asr.patch /tmp/megatron_bridge_qwen3_asr.patch
-RUN git -C Megatron-Bridge apply --unidiff-zero /tmp/megatron_bridge_qwen3_asr.patch && \
-    rm /tmp/megatron_bridge_qwen3_asr.patch
 
 # Install repositories with low update frequency
 RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
@@ -41,9 +36,9 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.2.1/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
     elif [ "$ARCH" = "x86_64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.2.1/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
@@ -59,12 +54,11 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     export COMPILE_CUSTOM_KERNELS=1 && pip install --no-build-isolation --no-deps -v -e . && cd .. && \
     # Install Megatron & MindSpeed
     pip install -e Megatron-LM && \
+    pip install -e MindSpeed && \
     # Install MegatronAdaptor
     pip install -e MegatronAdaptor && \
     # Install TransformerEngineNPU
     pip install -e TransformerEngineNPU --no-build-isolation && \
-    # Install MindSpeed after MA and TENPU
-    pip install -e MindSpeed && \
     # Install MindSpeed-Ops
     pip install -e MindSpeed-Ops --no-build-isolation --no-deps && \
     # Install MindSpeed-Bridge
@@ -72,22 +66,15 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     pip install -e MindSpeed-Bridge --no-deps && \
     # Install Megatron-Bridge
     pip install -e Megatron-Bridge --no-build-isolation --no-deps && \
-    # Restore the vLLM 0.30.0 runtime versions after installing training dependencies
-    pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0" && \
+    # Fix transformers
+    pip install transformers==5.10.4 && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
 
 # Prepare and install verl (update frequently)
 RUN git clone --recursive https://github.com/verl-project/verl.git && \
-    cd verl && \
-    pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
-    pip install -v -e . --no-deps && cd .. && \
-    # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin
-    pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn && \
-    # Install the FLA NPU backend required during vLLM-Ascend worker initialization
-    pip install --no-deps "flash-linear-attention-npu-a3==26.9.1" \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    cd verl && pip install -r requirements-npu.txt && pip install -v -e . --no-deps && cd .. && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
