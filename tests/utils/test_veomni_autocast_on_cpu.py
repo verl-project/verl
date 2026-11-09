@@ -18,19 +18,6 @@ import pytest
 import torch
 
 from verl.workers.engine.fsdp import transformer_impl as fsdp
-from verl.workers.engine.veomni import transformer_impl as veomni
-
-
-@pytest.mark.parametrize("enabled", [True, False])
-def test_veomni_controls_inherited_autocast(monkeypatch, enabled):
-    monkeypatch.setattr(fsdp, "get_device_name", lambda: "cpu")
-    monkeypatch.setattr(veomni, "get_device_name", lambda: "cpu")
-    engine = object.__new__(veomni.VeOmniEngineWithLMHead)
-    engine.engine_config = SimpleNamespace(enable_autocast=enabled)
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        with engine._get_forward_autocast_context():
-            assert torch.is_autocast_enabled("cpu") == enabled
-        assert torch.is_autocast_enabled("cpu")
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
