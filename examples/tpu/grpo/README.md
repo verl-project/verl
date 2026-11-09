@@ -8,6 +8,7 @@ By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1`
 |---|---|
 | [`run_qwen3_0_6b_torchtitan.sh`](run_qwen3_0_6b_torchtitan.sh) | 5-step smoke test (Qwen3-0.6B, 2 `v6e-1` slices / 2 chips by default) |
 | [`run_qwen3_4b_torchtitan.sh`](run_qwen3_4b_torchtitan.sh) | 100-step GRPO run (Qwen3-4B, 2 `v6e-4` slices / 8 chips) |
+| [`run_qwen3_5_torchtitan.sh`](run_qwen3_5_torchtitan.sh) | Qwen3.5 GRPO on TPU v7x (default `Qwen3.5-35B-A3B` MoE; also `Qwen3.5-0.8B`) |
 | [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | KubeRay `RayCluster`: 1 CPU head pod and 2 TPU `v6e-1` slices (configurable for `v6e-4` / `v6e-8`) |
 | [`Dockerfile`](Dockerfile) | Image of the Ray pods |
 
@@ -18,7 +19,8 @@ You need `gcloud`, `kubectl`, Docker with Buildx, the Ray CLI (`pip install "ray
 ```bash
 git clone https://github.com/verl-project/verl.git
 git clone https://github.com/verl-project/verl-hardware-plugin.git
-git -C verl-hardware-plugin checkout c76de674294e5ffdbacf8889a4f0ee6abece37d6
+# 11/05/2026 HEAD of verl-hardware-plugin
+git -C verl-hardware-plugin checkout 0bc8bbac944e753686f89718c0c5eac61e84b912
 cd verl
 ```
 
@@ -90,7 +92,7 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash example
 
 The 5-step smoke test takes about 5-6 minutes to start up and log the first step metric, then ~2 s per step once compiled. Follow the job with `ray job logs -f <JOB_ID>`.
 
-The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HOME=/data/<DIR> TOTAL_TRAINING_STEPS=10 bash examples/tpu/grpo/run_qwen3_0_6b_torchtitan.sh`, and pass extra arguments to `verl.trainer.main_ppo` as Hydra overrides.
+The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HOME=/data/<DIR> TOTAL_TRAINING_STEPS=10 bash examples/tpu/grpo/run_qwen3_0_6b_torchtitan.sh`, and pass extra arguments to `verl.trainer.main_ppo` as Hydra overrides. Fused QKV projection (`FUSE_QKV=True`) is enabled by default (`FUSE_QKV=False` disables it).
 
 ## 6. Run Qwen3-4B on 2 `v6e-4` slices (8 chips)
 
@@ -147,3 +149,36 @@ The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HO
    The 4B run takes about 10 minutes to start, then about 18-27 s per step (~22 s average over 100 steps).
 
 To scale further to **2 `v6e-8` slices (16 chips)**, create two multi-host node pools with `--machine-type ct6e-standard-4t --num-nodes 2 --tpu-topology 2x4`, set `numOfHosts: 2` and `cloud.google.com/gke-tpu-topology: 2x4` (with `memory: 400Gi`, `cpu: "48"`, `google.com/tpu: "4"`) in [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml), and run with `NNODES_TRAINER=2 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=2 N_CHIPS_ROLLOUT=4`.
+
+## 7. Qwen3.5 on TPU v7x
+
+[`run_qwen3_5_torchtitan.sh`](run_qwen3_5_torchtitan.sh) runs GRPO on GSM8K with Qwen3.5 (default `Qwen3.5-35B-A3B` MoE) on TPU v7x, with one trainer slice and one rollout slice (e.g. `2x2x1` each). `MODEL_PATH` must be a text-only Qwen3.5 checkpoint (`Qwen3_5[Moe]ForCausalLM`, i.e. the language model of the Hugging Face checkpoint without the vision encoder). Submit it as in step 5:
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env MODEL_NAME=Qwen3.5-35B-A3B bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```
+
+### Qwen3.5-397B-A17B (expert parallelism)
+
+Expert parallelism (`EXPERT_PARALLEL_SIZE > 1`) needs torchtitan from [google-pytorch/torchtitan#142](https://github.com/google-pytorch/torchtitan/pull/142), which enables Qwen3.5 with EP on TPU. Build the image at its head commit:
+
+```bash
+docker buildx build -t <IMAGE> --push \
+  --build-arg TORCHTITAN_COMMIT=4e16e67aed8c1e702e6f440b1ff81619bb6873d4 examples/tpu/grpo
+```
+
+Full-parameter 8K GRPO on 64 TPU v7x chips (a `2x4x4` trainer slice and four `2x2x2` rollout slices):
+
+```bash
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env MODEL_NAME=Qwen3.5-397B-A17B \
+  NNODES_TRAINER=8 EXPERT_PARALLEL_SIZE=8 PARAM_DTYPE=bfloat16 FP32_MASTER=True OPTIMIZER_HOST_OFFLOAD=True USE_KL_LOSS=False \
+  EP_DISPATCHER=static EP_TOKEN_CHUNKS=8 EP_PAIRED_GROUPED_MM=True AC_SAVE_SPLASH_AND_ROUTING=True \
+  SPARSECORE_OFFLOAD=True TRAINER_SCOPED_VMEM_LIMIT_KIB=65472 \
+  USE_DYNAMIC_BSZ=True MAX_TOKEN_LEN_PER_GPU=16384 STATIC_MICRO_BATCH_LEN=16384 STATIC_MAX_RESPONSE_LEN=7680 \
+  NUM_WARMUP_BATCHES=3 MAX_NUM_SEQS=512 MAX_NUM_BATCHED_TOKENS=8192 \
+  NNODES_ROLLOUT=8 ROLLOUT_TENSOR_PARALLEL_SIZE=16 ROLLOUT_EXPERT_PARALLEL_SIZE=16 ROLLOUT_LOAD_FORMAT=dummy \
+  TRAIN_BATCH_SIZE=64 ROLLOUT_N=16 MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=7680 \
+  bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```

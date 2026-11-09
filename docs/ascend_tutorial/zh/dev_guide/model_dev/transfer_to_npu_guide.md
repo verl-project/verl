@@ -271,7 +271,7 @@ models = [
 
 ### 5.4 多机拉起推理服务端
 
-参考[vllm_ascend GLM5指南](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md#multi-node-deployment)拉起双机A3推理服务，`host_port`与上一小节配置保持一致，`max_model_len`设置为训练时的`max_prompt_length`与`max_response`之和。
+参考[vllm_ascend GLM5指南](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md)拉起双机A3推理服务，`host_port`与上一小节配置保持一致，`max_model_len`设置为训练时的`max_prompt_length`与`max_response`之和。
 
 ### 5.5 启动vllm评测任务
 

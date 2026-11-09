@@ -223,10 +223,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         if self._enable_hybrid_replicas:
             self.checkpoint_manager.update_weights(self.global_steps)
 
+    def on_train_end(self):
+        self.standalone_checkpoint_manager.wait_for_weight_update()
+
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+        self.standalone_checkpoint_manager.wait_for_weight_update()
 
     def _get_sampleable_count(self, global_steps: int) -> int:
         return ray.get(self.streaming_dataloader.count_sampleable.remote(global_steps))

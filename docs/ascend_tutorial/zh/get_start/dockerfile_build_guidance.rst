@@ -1,13 +1,13 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 09/28/2026.
+Last updated: 11/03/2026.
 
 
 镜像获取与公开镜像地址
 --------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_ 构建。
 
 最新构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
 
@@ -33,55 +33,44 @@ Atlas 800T A3
 Ascend 950PR&950DT系列产品
 
 
-当前 A2/A3 Megatron 环境以 ``scripts/install_vllm_mcore_npu.sh`` 为基准：
-Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
+当前 A2/A3/950 vLLM 的 Megatron 构建环境以 ``scripts/install_vllm_mcore_npu.sh`` 为基准：
+Megatron-LM 使用 ``core_v0.18.0``，MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
 Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支（未固定 tag/commit），
-同时安装 TransformerEngineNPU 和 MindSpeed-Ops。SGLang CI 镜像需要重建后才能使用该组合。
+同时安装 TransformerEngineNPU 和 MindSpeed-Ops。
 
-A2/A3 vLLM 最新镜像内各组件版本信息清单
+下表列出本分支 latest Dockerfile 的目标版本；镜像需要重新构建并验证。
+``_v0.9.1`` 构建入口及对应镜像标签保留原依赖，安装 verl ``release/v0.9.1`` 源码；现有已发布镜像及历史 release 版本保持原样。
+
+当前 A2/A3/950 vLLM latest Dockerfile 使用克隆仓库中的 ``requirements-npu.txt``，在安装 verl 后补装 ``triton-ascend==3.6.0.post2``。
+例如，可在仓库根目录运行构建：``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``。
+
+vLLM 后端当前 Dockerfile 目标组件版本
 ----------------------------------------------------------------
 
-================= ============
-组件               版本
-================= ============
-基础镜像            Ubuntu 22.04
-Python             3.12
-CANN               9.1.0
-torch              2.10.0
-torch_npu          2.10.0.post4
-torchvision        0.25.0
-vLLM               0.23.0
-vLLM-ascend        0.23.0
-Megatron-LM        core_r0.18.0
-MindSpeed          core_r0.18.0
-Megatron-Bridge    0.5.0
-triton-ascend      3.2.2
-================= ============
+================== ==================== ======================================
+组件               A2/A3版本            Ascend 950PR&950DT系列产品
+================== ==================== ======================================
+基础镜像           Ubuntu 22.04         Ubuntu 22.04
+Python             3.12                 3.12
+CANN               9.1.0                9.1.0
+torch              2.10.0               2.10.0
+torch_npu          2.10.0.post7         2.10.0.post7
+torchvision        0.25.0               0.25.0
+torchaudio         2.10.0               2.10.0
+transformers       5.14.1               5.14.1
+xgrammar           >=0.2.1,<1.0.0       >=0.2.1,<1.0.0
+vLLM               0.30.0               0.30.0
+vLLM-ascend        0.30.0               0.30.0
+Megatron-LM        core_v0.18.0         core_v0.18.0
+MindSpeed          core_r0.18.0         core_r0.18.0
+Megatron-Bridge    0.5.0                0.5.0
+triton-ascend      3.6.0.post2          3.6.0.post2
+================== ==================== ======================================
 
 
 A2/A3 SGLang 镜像使用 CANN ``8.5.0``、Python ``3.11``、torch ``2.8.0``、
 torch_npu ``2.8.0.post2``、SGLang ``v0.5.10`` 和 sgl-kernel-npu ``2026.02.01``。
-Megatron 相关组件采用上面的统一依赖组合，transformers 使用 ``5.10.4``。
-
-
-Ascend 950PR&950DT系列产品 最新镜像内各组件版本信息清单
-----------------------------------------------------------------
-
-================= ============
-组件               版本
-================= ============
-基础镜像            Ubuntu 22.04
-Python             3.12
-CANN               9.1.0
-torch              2.10.0
-torch_npu          2.10.0.post4
-torchvision        0.25.0
-vLLM               0.23.0
-vLLM-ascend        0.23.0
-Megatron-LM        core_r0.12.0
-MindSpeed          0c6c0c(master)
-triton-ascend      3.2.2
-================= ============
+该 SGLang 镜像的训练组件沿用原 Dockerfile，未参与本次升级；transformers 使用 ``5.10.4``。
 
 
 
@@ -149,12 +138,12 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 .. code:: bash
 
-   # Navigate to the directory containing the Dockerfile 
-   cd {verl-root-path}/docker/ascend
+   # 从仓库根目录构建 latest vLLM 镜像
+   cd {verl-root-path}
+   docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
 
-   # Build the image
-   # vLLM
-   docker build -f Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
+   # 发布版和 SGLang 镜像保留原有构建上下文
+   cd {verl-root-path}/docker/ascend
    # vLLM (verl release/v0.9.1)
    docker build -f Dockerfile.ascend_9.1.0_a2_v0.9.1 -t verl-ascend:v0.9.1-9.1.0-a2 .
    # SGLang
