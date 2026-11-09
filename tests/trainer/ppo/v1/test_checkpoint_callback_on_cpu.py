@@ -38,6 +38,9 @@ class _RecordingCallback(CheckpointCallback):
     def on_save(self, trainer, global_step, checkpoint_dir, async_save=False, **kwargs):
         self.events.append(("on_save", global_step, checkpoint_dir, async_save))
 
+    def on_train_end(self, trainer, final_global_step, output_dir, success=True, **kwargs):
+        self.events.append(("on_train_end", final_global_step, output_dir, success))
+
 
 def _make_trainer(tmp_path, events, async_save=False):
     trainer = _StubTrainer.__new__(_StubTrainer)
@@ -111,3 +114,63 @@ def test_callback_exception_propagates(tmp_path):
 
     with pytest.raises(RuntimeError, match="callback failed"):
         trainer._save_checkpoint()
+
+
+def test_train_end_fires_on_train_end_callback(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+
+    trainer._notify_train_end_callback(success=True)
+
+    assert events == [("on_train_end", 2, str(tmp_path), True)]
+
+
+def test_train_end_callback_exception_propagates(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+    trainer.checkpoint_callback.on_train_end = MagicMock(side_effect=RuntimeError("train-end callback failed"))
+
+    with pytest.raises(RuntimeError, match="train-end callback failed"):
+        trainer._notify_train_end_callback(success=True)
+
+
+def test_finalize_train_end_success_orders_dump_before_notify(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+    trainer.on_train_end = lambda: events.append("on_train_end")
+    trainer._shutdown_dump_executor = lambda: events.append("shutdown_dump")
+    trainer._notify_train_end_callback = lambda success: events.append(("notify", success))
+    trainer._shutdown_train_dataloader = lambda: events.append("shutdown_dataloader")
+
+    trainer._finalize_train_end_success()
+
+    assert events == [
+        "on_train_end",
+        "shutdown_dump",
+        ("notify", True),
+        "shutdown_dataloader",
+    ]
+
+
+def test_finalize_train_end_still_shutdowns_dataloader_on_notify_failure(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+    trainer.on_train_end = lambda: events.append("on_train_end")
+    trainer._shutdown_dump_executor = lambda: events.append("shutdown_dump")
+
+    def _raise_notify(success):
+        events.append(("notify", success))
+        raise RuntimeError("notify failed")
+
+    trainer._notify_train_end_callback = _raise_notify
+    trainer._shutdown_train_dataloader = lambda: events.append("shutdown_dataloader")
+
+    with pytest.raises(RuntimeError, match="notify failed"):
+        trainer._finalize_train_end_success()
+
+    assert events == [
+        "on_train_end",
+        "shutdown_dump",
+        ("notify", True),
+        "shutdown_dataloader",
+    ]

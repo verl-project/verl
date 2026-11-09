@@ -15,11 +15,11 @@
 
 Users plug in a custom callback by setting ``trainer.checkpoint_callback_class``
 to the fully qualified class name of a :class:`CheckpointCallback` subclass.
-The trainer instantiates it on the driver process and calls :meth:`CheckpointCallback.on_save`
-after each checkpoint save, mirroring the ``on_save`` event of the HuggingFace
-``transformers`` ``TrainerCallback``. The hook runs only on the driver, after the
-worker-group RPCs; per-rank hooks inside the FSDP/Megatron checkpoint managers
-are out of scope.
+The trainer instantiates it on the driver process and calls
+:meth:`CheckpointCallback.on_save` after each checkpoint save, then
+:meth:`CheckpointCallback.on_train_end` once the training loop exits
+successfully. The hooks run only on the driver, after worker-group RPCs;
+per-rank hooks inside the FSDP/Megatron checkpoint managers are out of scope.
 
 Exceptions raised by the hook propagate and abort training: checkpoint callbacks
 typically perform durability-critical side effects (uploading shards, registering
@@ -33,9 +33,10 @@ from verl.utils.import_utils import load_class_from_fqn
 class CheckpointCallback:
     """No-op base class for trainer checkpoint callbacks.
 
-    Subclass and override :meth:`on_save`. The hook is invoked with keyword
-    arguments and must accept ``**kwargs`` so that additional context can be
-    passed in future versions without breaking user subclasses.
+    Subclass and override :meth:`on_save` and/or :meth:`on_train_end`. Hooks
+    are invoked with keyword arguments and must accept ``**kwargs`` so that
+    additional context can be passed in future versions without breaking user
+    subclasses.
     """
 
     def __init__(self, config=None):
@@ -59,6 +60,24 @@ class CheckpointCallback:
             global_step: The training step that was checkpointed.
             checkpoint_dir: The local ``global_step_{N}`` directory that was written.
             async_save: Whether the checkpoint was saved asynchronously.
+            **kwargs: Reserved for future context.
+        """
+
+    def on_train_end(
+        self,
+        trainer,
+        final_global_step: int,
+        output_dir: str,
+        success: bool = True,
+        **kwargs,
+    ) -> None:
+        """Event called once after a successful training-loop completion.
+
+        Args:
+            trainer: The trainer instance.
+            final_global_step: Last finished training step.
+            output_dir: Trainer output root directory.
+            success: Whether training completed successfully.
             **kwargs: Reserved for future context.
         """
 
