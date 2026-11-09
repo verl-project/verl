@@ -879,6 +879,25 @@ def test_chunk_tensordict():
                         assert torch.all(torch.eq(tensor.data["pixel_values"], expect["pixel_values"])).item()
 
 
+def test_chunk_tensordict_uses_views_for_2d_nested_tensors():
+    rows = [torch.arange(length) for length in (4, 7, 3, 6)]
+    input_ids = torch.nested.as_nested_tensor(rows, layout=torch.jagged)
+    td = tu.get_tensordict({"input_ids": input_ids, "labels": ["a", "b", "c", "d"]})
+
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    source_storage = input_ids.values().untyped_storage().data_ptr()
+    for index, chunk in enumerate(chunks):
+        assert chunk["input_ids"].values().untyped_storage().data_ptr() == source_storage
+        expected_rows = rows[index * 2 : (index + 1) * 2]
+        assert all(
+            torch.equal(actual, expected)
+            for actual, expected in zip(chunk["input_ids"].unbind(), expected_rows, strict=True)
+        )
+    assert tu.get(chunks[0], "labels") == ["a", "b"]
+    assert tu.get(chunks[1], "labels") == ["c", "d"]
+
+
 def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_equal_seq_len_per_chunk():
     position_ids = tu.nested_tensor_from_tensor_list(
         [
