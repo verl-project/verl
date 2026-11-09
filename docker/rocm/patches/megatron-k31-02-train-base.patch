@@ -1,0 +1,113 @@
+mLite Kimi-K3.1 checkpoint: MLITE_K31_TRAIN=base trains the non-expert BF16 parameters without LoRA (full-weight
+sync). Part of the validated patch chain; the LoRA recipe does not enable it. Upstream status: not yet proposed.
+
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py b/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
+index 41051e9f775539d7f66b4889c79d0896a13eb3f5..a483d8bb7fefec26540e58755d46981d68683dd7 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
+@@ -557,6 +557,14 @@ def export_hf_weights(
+     # The adapter is small and yielded tensor by tensor; the bucket size is moot.
+     kwargs.pop("buffer_max_size_bytes", None)
+     to_cpu = bool(kwargs.pop("cpu", False))
++    if os.environ.get("MLITE_K31_TRAIN", "lora") == "base":
++        # option P: the trainable base (BF16 / FP32 masters) for vLLM load_weights, not an adapter
++        kwargs.pop("export_dtype", None)
++        kwargs.pop("lora_expert_slice", None)
++        if kwargs:
++            raise TypeError(f"unsupported export options: {sorted(kwargs)}")
++        yield from export_hf_base_weights(chunks, model_cfg, ps, cpu=to_cpu)
++        return
+     expert_slice = kwargs.pop("lora_expert_slice", None)
+     export_dtype = kwargs.pop("export_dtype", None)
+     if export_dtype is not None and str(export_dtype).removeprefix("torch.") not in (
+@@ -587,6 +595,82 @@ def export_hf_weights(
+         yield peft, tensor.cpu() if to_cpu else tensor
+ 
+ 
++def _base_entries(model: nn.Module, spec: K31WeightSpec) -> Iterator[tuple[str, torch.Tensor]]:
++    """Trainable base tensors of one chunk as release-checkpoint names and layouts.
++
++    The inverse of :meth:`K31WeightSpec.plan` / ``materialize``: fused ``K31Linear`` weights are split
++    back into their HF projections, ``conv1d`` into ``q/k/v_conv1d`` ``[P, 1, W]``; everything else is
++    1:1.  Frozen parameters, LoRA factors and the MXFP4 expert buffers are skipped.
++    """
++
++    from megatron.lite.model.k31.vllm.model import K31Linear
++
++    linears = {n: m for n, m in model.named_modules() if isinstance(m, K31Linear)}
++    plan = spec.plan(model)
++    for native, param in model.named_parameters():
++        if not param.requires_grad or ".lora" in native or native.startswith("lora"):
++            continue
++        item = plan.get(native)
++        if item is None:
++            raise KeyError(f"no checkpoint name for trainable {native}")
++        tensor = param.detach()
++        full = getattr(tensor, "full_tensor", None)
++        if callable(full):
++            tensor = full()
++        module_path, _, leaf = native.rpartition(".")
++        if module_path in linears and leaf == "weight":
++            sizes = linears[module_path].slice_sizes
++            for name, part in zip(item.hf_names, tensor.split(sizes, dim=0), strict=True):
++                yield name, part
++            continue
++        if native.endswith("self_attn.conv1d.weight"):
++            for name, part in zip(item.hf_names, tensor.chunk(3, dim=0), strict=True):
++                yield name, part
++            continue
++        if len(item.hf_names) != 1 or item.kind.startswith("expert:"):
++            raise NotImplementedError(f"base export of {native} ({item.kind}) is not mapped")
++        yield item.hf_names[0], tensor
++
++
++def export_hf_base_weights(
++    chunks: nn.Module | Iterable[nn.Module],
++    model_cfg: K31Config,
++    ps: ParallelState,
++    *,
++    cpu: bool = False,
++) -> Iterator[tuple[str, torch.Tensor]]:
++    """Weight sync for ``MLITE_K31_TRAIN=base`` (option P): yield every *trainable* base tensor with its
++    release-checkpoint name (``language_model.model.layers.N...``), in its master dtype (BF16 linears /
++    norms, FP32 KDA ``A_log`` / ``dt_bias`` / ``conv1d``), for vLLM ``load_weights``.
++
++    PP>1: every rank yields the tensors of all stages (each stage broadcasts its own over the PP group,
++    stage by stage, so the order is the layer order).  TP/ETP must be 1; dense parameters are
++    replicated over EP/DP, so no other gather is needed.
++    """
++
++    if (ps.tp_size, ps.etp_size) != (1, 1):
++        raise NotImplementedError("K31 base export requires TP/ETP=1")
++    spec = K31WeightSpec(model_cfg, ps)
++    local = [entry for model in _models(chunks) for entry in _base_entries(model, spec)]
++    if ps.pp_size <= 1:
++        for name, tensor in local:
++            yield name, tensor.cpu() if cpu else tensor
++        return
++    device = torch.device("cuda", torch.cuda.current_device())
++    group = ps.pp_group
++    ranks = dist.get_process_group_ranks(group)
++    for stage in range(ps.pp_size):
++        meta = [[(n, tuple(t.shape), str(t.dtype)) for n, t in local] if ps.pp_rank == stage else None]
++        dist.broadcast_object_list(meta, src=ranks[stage], group=group)
++        for i, (name, shape, dtype) in enumerate(meta[0]):
++            if ps.pp_rank == stage:
++                buf = local[i][1].contiguous().to(device)
++            else:
++                buf = torch.empty(shape, dtype=getattr(torch, dtype.removeprefix("torch.")), device=device)
++            dist.broadcast(buf, src=ranks[stage], group=group)
++            yield name, buf.cpu() if cpu else buf
++
++
+ def _export_entry(
+     param: torch.Tensor, peft: str, kind: str, ps: ParallelState, plan: _ExpertExchange | None = None
+ ):
+@@ -756,6 +840,7 @@ __all__ = [
+     "PEFT_PREFIX",
+     "PLACEMENT_FN",
+     "SUPPORTS_LORA_EXPERT_SLICE",
++    "export_hf_base_weights",
+     "export_hf_weights",
+     "load_hf_weights",
+     "load_lora_adapter",

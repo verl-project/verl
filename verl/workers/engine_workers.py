@@ -109,6 +109,19 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
+def _release_trainer_grads(engine) -> None:
+    """Drop the gradients left over from the last optimizer step (the next update zeroes them anyway)."""
+    opt = getattr(getattr(engine, "handle", None), "_optimizer", None)
+    if opt is None:
+        return
+    for group in opt.param_groups:
+        for p in group["params"]:
+            if p.grad is not None:
+                p.grad = None
+            if getattr(p, "main_grad", None) is not None:
+                p.main_grad = None
+
+
 class TrainingWorker(Worker, DistProfilerExtension):
     """
     TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
@@ -830,7 +843,83 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         set_expandable_segments(False)
         get_torch_device().empty_cache()
+        # Full Kimi-K3.1 on 2 x 8 MI355X ran out of memory at the first sync with ~230 GiB of non-PyTorch memory
+        # held: the colocated vLLM engine was still awake although init calls sleep_replicas(). VERL_K31_SYNC_DEBUG=1
+        # logs what the sync sees; VERL_K31_RELEASE_IF_AWAKE_GIB=<N> puts the engine to sleep first when less than
+        # N GiB is free.
+        if os.environ.get("VERL_K31_SYNC_DEBUG", "0") == "1" or os.environ.get("VERL_K31_RELEASE_IF_AWAKE_GIB"):
+            _free, _total = torch.cuda.mem_get_info()
+            _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+            logger.warning(
+                f"[k31-sync] rank={_rank} step={global_steps} entry free={_free / 2**30:.1f}/{_total / 2**30:.1f} GiB "
+                f"torch_alloc={torch.cuda.memory_allocated() / 2**30:.1f} GiB "
+                f"param_offload={self.actor.engine.is_param_offload_enabled} base_sync_done={self.base_sync_done} "
+                f"peft_merge={self.peft_merge} "
+                f"export_before_wake={os.environ.get('VERL_LORA_EXPORT_BEFORE_WAKE', '0')} "
+                f"free_cache_engine={self.config.rollout.free_cache_engine}"
+            )
+            _thr = os.environ.get("VERL_K31_RELEASE_IF_AWAKE_GIB")
+            if _thr and _free / 2**30 < float(_thr):
+                await self.rollout.release()
+                aggressive_empty_cache(force_sync=True)
+                _free2, _ = torch.cuda.mem_get_info()
+                logger.warning(
+                    f"[k31-sync] rank={_rank} engine looked awake ({_free / 2**30:.1f} GiB free < {_thr}): "
+                    f"rollout.release() -> {_free2 / 2**30:.1f} GiB free"
+                )
         log_gpu_memory_usage("Before resume weights", logger=logger)
+
+        # An engine that can export per-rank expert slices of a LoRA adapter sends each
+        # colocated vLLM worker only the experts its EP rank keeps.
+        export_kwargs = {}
+        lora_expert_slice = getattr(self.rollout, "lora_expert_slice", None)
+        if callable(lora_expert_slice) and getattr(self.actor.engine, "supports_lora_expert_slice", False):
+            expert_slice = lora_expert_slice()
+            if expert_slice is not None:
+                export_kwargs["lora_expert_slice"] = expert_slice
+
+        # VERL_K31_LORA_RANK_SLICE=1: without rollout EP, vLLM shards every expert over TP; send each colocated
+        # worker only its TP shard of the expert LoRA factors instead of the whole adapter.
+        tp_slice = None
+        if os.environ.get("VERL_K31_LORA_RANK_SLICE", "0") == "1" and "lora_expert_slice" not in export_kwargs:
+            lora_expert_tp_slice = getattr(self.rollout, "lora_expert_tp_slice", None)
+            tp_slice = lora_expert_tp_slice() if callable(lora_expert_tp_slice) else None
+
+        def _rank_slice(params, peft_cfg):
+            if tp_slice is None or peft_cfg is None:
+                return params
+            from verl.workers.rollout.vllm_rollout.k31_lora_rank_slice import tp_slice_adapter
+
+            return tp_slice_adapter(params, *tp_slice)
+
+        # 0b. VERL_LORA_EXPORT_BEFORE_WAKE=1 with param offload and an adapter-only rollout sync: the engine
+        # onloads the whole model to export, which cannot share the GPU with the rollout's resumed base
+        # weights on a large model.  Export the adapter while the rollout still sleeps (materialized;
+        # adapter-sized), offload the model, then resume the rollout.
+        early_export = None
+        if os.environ.get("VERL_LORA_EXPORT_BEFORE_WAKE", "0") == "1":
+            if os.environ.get("VERL_FREE_GRADS_BEFORE_WAKE", "0") == "1":
+                _release_trainer_grads(self.actor.engine)
+                aggressive_empty_cache(force_sync=True)
+            if self.actor.engine.is_param_offload_enabled and not self.peft_merge and self.base_sync_done:
+                lora_cfg = self.config.model.get("lora", None) or {}
+                if not (self.config.model.get("lora_rank", 0) or lora_cfg.get("rank", 0)):
+                    raise RuntimeError("VERL_LORA_EXPORT_BEFORE_WAKE=1 needs a LoRA adapter (model.lora.rank > 0)")
+                per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                    layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
+                )
+                if peft_config is None:
+                    raise RuntimeError("VERL_LORA_EXPORT_BEFORE_WAKE=1 needs an adapter-only (peft) export")
+                per_tensor_param = _rank_slice(per_tensor_param, peft_config)
+                # clone: an exporter may reuse its staging buffer between yields
+                early_export = ([(name, t.clone()) for name, t in per_tensor_param], peft_config)
+                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+                aggressive_empty_cache(force_sync=True)
+                # the replica head resumes every rollout engine as soon as its own trainer rank gets there:
+                # wait until every trainer rank has released its GPU copy of the model
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+                log_gpu_memory_usage("After adapter export before resume", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
         # sleep_level=1 (adapter mode) in SGLang never released weights, so do not resume them.
@@ -846,9 +935,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         # 2. determine if we need a base weight sync (adapter path only)
-        per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
-        )
+        if early_export is not None:
+            per_tensor_param, peft_config = iter(early_export[0]), early_export[1]
+            early_export = None
+        else:
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
+            )
+            per_tensor_param = _rank_slice(per_tensor_param, peft_config)
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
@@ -867,6 +961,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
+        del per_tensor_param
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 

@@ -1,0 +1,1956 @@
+Kimi-K3.1 mLite (impl=vllm) on ROCm: kernel backend selection (MLITE_K31_BACKEND=rocm), ROCm GEMM / MXFP4 dequant /
+MoE alignment kernels and VJPs, and the batch-invariant paths that mirror the rollout under VLLM_BATCH_INVARIANT=1:
+dense BI GEMMs and LoRA epilogue, virtual TP (MLITE_K31_BI_VTP) reproducing a TP=N rollout's partial sums, BI KDA
+(k31kdabi plugin), BI MXFP4 MoE with expert LoRA (k31lora.bi_moe), and the rollout's pinned AttnRes tiling.
+Why BI needs it: the trainer forward must run the same kernels, tiles and reduction order as the BI rollout.
+Upstream status: not yet proposed.
+
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/kda.py b/experimental/lite/megatron/lite/model/k31/vllm/kda.py
+index da56538b952d1902abd1b511c05260af5abfec21..856b586cf5ecfd45bccc81d74ef62c65f5758f9b 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/kda.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/kda.py
+@@ -71,6 +71,7 @@ class K31KDAAttention(nn.Module):
+         )
+         self.f_b_proj = K31Linear(d, (p,), ("f_b_proj",), lora=lora)
+         self.o_proj = K31Linear(p, (h,), ("o_proj",), lora=lora)
++        self.o_proj.row_parallel = True
+         self.conv1d = _Weight(3 * p, 1, config.kda_short_conv_kernel_size, dtype=torch.float32)
+         self.A_log = nn.Parameter(torch.empty(config.kda_num_heads, dtype=torch.float32))
+         self.dt_bias = nn.Parameter(torch.empty(p, dtype=torch.float32))
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/model.py b/experimental/lite/megatron/lite/model/k31/vllm/model.py
+index 65cd49aea9ad1af9cbe5d0d04ef288433d985069..5e89f858710ee091128f46c8a3262da06e27ca4a 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/model.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/model.py
+@@ -41,16 +41,41 @@ from megatron.lite.model.k31.vllm.primitive import (
+     visible_lora_linear,
+ )
+ from megatron.lite.model.k31.vllm.runtime_metadata import K31Runtime
+-from megatron.lite.primitive.kernels.vllm_k31 import (
+-    AttnResAdapter,
+-    BILinearAdapter,
+-    LoRALeafAdapter,
+-    PunicaLoRADeltaAdapter,
+-    RMSNormAdapter,
+-    SiTUAndMulAdapter,
+-    TemperatureAdapter,
+-    TokenLogprobAdapter,
+-)
++from megatron.lite.primitive.kernels.k31_backend import adapters as _adapters
++
++
++# Adapter classes of the active kernel backend (``MLITE_K31_BACKEND``: vllm_cuda | rocm).
++def AttnResAdapter():
++    return _adapters().AttnResAdapter()
++
++
++def BILinearAdapter():
++    return _adapters().BILinearAdapter()
++
++
++def LoRALeafAdapter():
++    return _adapters().LoRALeafAdapter()
++
++
++def PunicaLoRADeltaAdapter():
++    return _adapters().PunicaLoRADeltaAdapter()
++
++
++def RMSNormAdapter():
++    return _adapters().RMSNormAdapter()
++
++
++def SiTUAndMulAdapter():
++    return _adapters().SiTUAndMulAdapter()
++
++
++def TemperatureAdapter():
++    return _adapters().TemperatureAdapter()
++
++
++def TokenLogprobAdapter():
++    return _adapters().TokenLogprobAdapter()
++
+ from megatron.lite.primitive.parallel import ParallelState, build_pipeline_chunk_layout
+ 
+ _ALIASES = {
+@@ -170,6 +195,7 @@ class K31Linear(nn.Module):
+         self.weight = nn.Parameter(
+             torch.empty(sum(self.slice_sizes), self.in_features, dtype=torch.bfloat16)
+         )
++        self.row_parallel = False  # vLLM RowParallelLinear (o_proj, down_proj): virtual TP reproduces its rank partials
+         self.lora: LoRAProjection | None = None
+         if lora is not None and lora.wants(self.slice_names):
+             self.lora = LoRAProjection(
+@@ -184,18 +210,37 @@ class K31Linear(nn.Module):
+ 
+     def forward(self, value: torch.Tensor, runtime: K31Runtime | None = None) -> torch.Tensor:
+         if self.lora is None:
+-            return visible_linear(BILinearAdapter(), value, self.weight)
++            op = BILinearAdapter()
++            op.row_parallel = self.row_parallel
++            return visible_linear(op, value, self.weight)
+         if runtime is None or runtime.lora_meta is None:
+             raise RuntimeError("LoRA-wrapped projection requires runtime.lora_meta")
++        leaf = LoRALeafAdapter()
++        leaf.row_parallel = self.row_parallel
+         return visible_lora_linear(
+             PunicaLoRADeltaAdapter(),
+-            LoRALeafAdapter(),
++            leaf,
+             value,
+             self.weight,
+             self.lora,
+             runtime.lora_meta,
+         )
+ 
++    def vtp_partials(self, value: torch.Tensor, runtime: K31Runtime | None, n: int) -> torch.Tensor:
++        """Forward VALUES only (no graph): the TP=n rollout ranks' un-reduced partials ``[n, T, out]`` of this row-parallel
++        projection (vLLM ``reduce_results=False``, e.g. the shared experts' down_proj before the latent-MoE tail)."""
++
++        from megatron.lite.primitive.kernels import rocm_k31
++        from megatron.lite.model.k31.vllm.primitive.linear import _stack_vllm
++
++        x2 = value.detach().reshape(-1, value.shape[-1]).contiguous()
++        with torch.no_grad():
++            if self.lora is None:
++                return rocm_k31.vtp_row_partials(x2, self.weight.detach(), n)
++            a_st, b_st = _stack_vllm(self.lora.a_params(), self.lora.b_params(), self.lora.scaling, self.lora.max_rank)
++            return rocm_k31.vtp_row_partials(x2, self.weight.detach(), n,
++                                             lora=(a_st, b_st, tuple(self.lora.slice_sizes), runtime.lora_meta))
++
+ 
+ class K31RMSNorm(nn.Module):
+     def __init__(self, hidden_size: int, eps: float, dtype: torch.dtype = torch.bfloat16):
+@@ -229,6 +274,7 @@ class K31DenseMLP(nn.Module):
+             lora=lora,
+         )
+         self.down_proj = K31Linear(intermediate_size, (hidden_size,), ("down_proj",), lora=lora)
++        self.down_proj.row_parallel = True
+ 
+     def forward(self, value: torch.Tensor, runtime: K31Runtime | None = None) -> torch.Tensor:
+         gate_up = self.gate_up_proj(value, runtime)
+@@ -322,7 +368,10 @@ def capture_forward_context():
+     installed theirs.
+     """
+ 
+-    module = importlib.import_module("vllm.forward_context")
++    try:
++        module = importlib.import_module("vllm.forward_context")
++    except ImportError:
++        return None
+     context = getattr(module, "_forward_context", None)
+     if context is None:
+         return None
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/moe.py b/experimental/lite/megatron/lite/model/k31/vllm/moe.py
+index 42ba5e300e41848ba131edcf2ba87cae9ef8e78f..01c4fd09936c579825443a8542eb801fa750c6be 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/moe.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/moe.py
+@@ -67,8 +67,35 @@ from megatron.lite.primitive.alignment.vllm_fi_w4a16_moe import (
+     VLLMFiW4A16LeafRowsFunction,
+     expert_backward_rows,
+ )
+-from megatron.lite.primitive.kernels import vllm_k31_moe as K
+-from megatron.lite.primitive.kernels.vllm_k31 import BIRouterAdapter, RMSNormAdapter
++from megatron.lite.primitive.kernels import k31_backend
++from megatron.lite.primitive.kernels import vllm_k31_moe as _K_CUDA
++
++
++def _moe_kernels():
++    """MoE helper module of the active backend (router factory, latent-up mm)."""
++
++    if k31_backend.is_rocm():
++        from megatron.lite.primitive.kernels import rocm_k31
++
++        return rocm_k31
++    return _K_CUDA
++
++
++def BIRouterAdapter():
++    return k31_backend.adapters().BIRouterAdapter()
++
++
++def RMSNormAdapter():
++    return k31_backend.adapters().RMSNormAdapter()
++
++
++def rocm_moe_act_quant() -> str:
++    """``MLITE_K31_ROCM_MOE_ACT_QUANT``: ``none`` (BF16 activations, W4A16 math) or ``mxfp4``
++    (fake-quant the expert GEMM inputs like the A4W4 AITER rollout kernels)."""
++
++    import os
++
++    return os.environ.get("MLITE_K31_ROCM_MOE_ACT_QUANT", "none")
+ from megatron.lite.primitive.parallel import ParallelState
+ from megatron.lite.primitive.recompute import active_recompute_tape
+ 
+@@ -118,6 +145,8 @@ def default_ep_transport(num_experts: int, ep_size: int) -> str:
+ 
+     if ep_size <= 1:
+         return "local"
++    if k31_backend.is_rocm():
++        return "nccl"
+     if num_experts // ep_size > DEEPEP_MAX_LOCAL_EXPERTS:
+         return "nccl"
+     nvl = torch.cuda.device_count() if torch.cuda.is_available() else 0
+@@ -192,7 +221,12 @@ class K31RoutedExperts(nn.Module):
+             self.lora_w1_B = nn.Parameter(torch.zeros(e, inter, r, dtype=bf16))
+             self.lora_w3_B = nn.Parameter(torch.zeros(e, inter, r, dtype=bf16))
+             self.lora_w2_A = nn.Parameter(torch.empty(e, r, inter, dtype=bf16))
+-        self._fi: K.FiW4A16Experts | None = None
++            # Same init as the dense LoRAProjection (kaiming A, zero B), so a run without a theta0
++            # adapter (``lora_adapter_path`` unset) never trains from uninitialized memory.
++            with torch.no_grad():
++                for a in (self.lora_w1_A, self.lora_w3_A, self.lora_w2_A):
++                    nn.init.kaiming_uniform_(a.view(-1, a.shape[-1]), a=5**0.5)
++        self._fi: _K_CUDA.FiW4A16Experts | None = None
+         self._fi_key: tuple | None = None
+ 
+     def _apply(self, fn, recurse=True):
+@@ -216,13 +250,41 @@ class K31RoutedExperts(nn.Module):
+             )
+         )
+ 
++    def rocm_experts(self):
++        """Checkpoint MXFP4 buffers as the ROCm expert path reads them (no layout rewrite)."""
++
++        from megatron.lite.primitive.alignment.rocm_mxfp4_moe import RocmMxfp4Experts
++
++        return RocmMxfp4Experts(
++            ckpt_w13=self.w13_weight_packed,
++            ckpt_w13_scale=self.w13_weight_scale,
++            ckpt_w2=self.w2_weight_packed,
++            ckpt_w2_scale=self.w2_weight_scale,
++            num_experts=self.num_experts,
++            local_offset=self.local_offset,
++            situ_beta=self.situ_beta,
++            situ_linear_beta=self.situ_linear_beta,
++        )
++
++    def _lora_tuple(self):
++        if not self.has_lora:
++            return None
++        return (
++            self.lora_w1_A[0],
++            self.lora_w3_A[0],
++            self.lora_w1_B,
++            self.lora_w3_B,
++            self.lora_w2_A,
++            self.lora_w2_B[0],
++        )
++
+     @property
+-    def fi(self) -> K.FiW4A16Experts:
++    def fi(self) -> _K_CUDA.FiW4A16Experts:
+         """The ``_k31_prepare_fi_w4a16`` rewrite of the loaded buffers (cached)."""
+ 
+         key = self._buffers_key()
+         if self._fi is None or self._fi_key != key:
+-            self._fi = K.FiW4A16Experts.from_checkpoint(
++            self._fi = _K_CUDA.FiW4A16Experts.from_checkpoint(
+                 self.w13_weight_packed,
+                 self.w13_weight_scale,
+                 self.w2_weight_packed,
+@@ -241,6 +303,10 @@ class K31RoutedExperts(nn.Module):
+     def stored(self, latent: Tensor, sent, plan) -> Tensor:
+         """The forward's routed latent with the autograd graph of experts + combine (recompute only)."""
+ 
++        if k31_backend.is_rocm():
++            # ROCm: the expert forward is cheap relative to its backward; rebuild the graph.
++            del latent
++            return _CanonicalCombine.apply(self.leaf_rows(sent, plan), plan)
+         return _StoredExpertsLatent.apply(
+             latent,
+             self.fi,
+@@ -263,6 +329,19 @@ class K31RoutedExperts(nn.Module):
+         Only the routed rows are written (``L`` = local routes), not a dense ``[n, top_k, H]`` slot
+         tensor of the received tokens (26 GB at EP8 with a 16k-token micro-batch)."""
+ 
++        if k31_backend.is_rocm():
++            from megatron.lite.primitive.alignment.rocm_mxfp4_moe import rocm_expert_leaf_rows
++
++            return rocm_expert_leaf_rows(
++                self.rocm_experts(),
++                plan.expert_rows,
++                sent.hidden,
++                sent.topk_ids,
++                sent.topk_weights,
++                scaling=self.lora_scaling,
++                lora=self._lora_tuple(),
++                act_quant=rocm_moe_act_quant(),
++            )
+         if not self.has_lora:
+             # RL always serves the adapter; the no-LoRA FI branch is a different
+             # rollout pipeline (fused finalize) and is deliberately not ported.
+@@ -332,7 +411,7 @@ class K31MoE(nn.Module):
+     def _selection(self):
+         if self._router is None:
+             cfg = self.config
+-            self._router = K.build_k31_router(
++            self._router = _moe_kernels().build_k31_router(
+                 top_k=cfg.num_experts_per_token,
+                 num_experts=cfg.num_experts,
+                 e_score_correction_bias=self.gate.e_score_correction_bias.detach(),
+@@ -431,9 +510,14 @@ class K31MoE(nn.Module):
+         normed = rms_norm(
+             RMSNormAdapter(), latent, self.routed_expert_norm.weight, self.config.rms_norm_eps
+         )
+-        routed = visible_linear(K.MoELatentUpAdapter(), normed, self.routed_expert_up_proj.weight)
++        routed = visible_linear(
++            _moe_kernels().MoELatentUpAdapter(), normed, self.routed_expert_up_proj.weight
++        )
+         shared = self.shared_experts(hidden_states, runtime)
+         out = routed + shared
++        n_vtp = _moe_kernels().vtp_size() if k31_backend.is_rocm() else 1
++        if n_vtp > 1:
++            out = self._vtp_tail(out, hidden_states, normed, runtime, n_vtp)
+         return out, {
+             "logits": logits,
+             "weights": weights,
+@@ -445,6 +529,33 @@ class K31MoE(nn.Module):
+             "shared": shared,
+         }
+ 
++    def _vtp_tail(self, reference: Tensor, hidden_states: Tensor, normed: Tensor, runtime, n: int) -> Tensor:
++        """TP=n BI rollout's latent-MoE tail (ROCmLatentMoERunner tier 2): each rank r folds ``bf16(BI_mm(normed,
++        W_up[r-shard].T))`` into its hidden shard of the shared experts' un-reduced partial (``hidden_shard.addmm_`` ->
++        vLLM ``_addmm_impl``: BF16 GEMM, then a BF16 add), then the final fixed-order all-reduce.  Value only; gradients
++        flow through ``reference`` (the TP1 graph of the same function)."""
++
++        from megatron.lite.model.k31.vllm.model import SiTUAndMulAdapter, _ForwardValue
++        from megatron.lite.model.k31.vllm.primitive import situ_and_mul
++
++        RK = _moe_kernels()
++        se = self.shared_experts
++        with torch.no_grad():
++            gate_up = se.gate_up_proj(hidden_states.detach(), runtime)
++            act = situ_and_mul(SiTUAndMulAdapter(), gate_up, beta=se.beta, linear_beta=se.linear_beta)
++            parts = se.down_proj.vtp_partials(act, runtime, n)  # [n, T, H]
++            w_up = self.routed_expert_up_proj.weight.detach()
++            h = w_up.shape[0]
++            if h % n:
++                raise ValueError(f"virtual TP={n} does not divide the hidden size {h}")
++            s = h // n
++            nrm = normed.detach().reshape(-1, normed.shape[-1])
++            for r in range(n):
++                hs = slice(r * s, (r + 1) * s)
++                parts[r, :, hs] = RK.rocm_linear(nrm, w_up[hs].contiguous()) + parts[r, :, hs]
++            value = RK.vtp_fixed_sum(parts)
++        return _ForwardValue.apply(reference, value.reshape(reference.shape).to(reference.dtype))
++
+     def forward(
+         self,
+         hidden_states: torch.Tensor,
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
+index ec918b3a3cf3064e4faa34946dd78da27e7bfeee..ef4ae63870c4ab117eebf66514d88b67eda6d492 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
+@@ -32,6 +32,7 @@ import torch
+ import torch.nn.functional as F
+ from torch import Tensor
+ 
++from megatron.lite.primitive.kernels import k31_backend
+ from megatron.lite.primitive.kernels.vllm_k31 import (
+     KDA_CONV_WIDTH,
+     KDA_HEAD_DIM,
+@@ -168,9 +169,23 @@ def pin_fla_autotune() -> dict[str, str]:
+                 tuner.configs = [tuner.configs[0]]
+                 tuner._k31_pinned = True
+             _PINNED[f"{name}.{attr}"] = str(tuner.configs[0])
++    if _kda_bi_fla_fix_wanted() and "k31kdabi_fla_fix" not in _PINNED:
++        # Batch-invariant KDA: the rollout's k31kdabi plugin swaps FLA's forward intra sub-chunk kernel for a
++        # T-independent-reference variant; the trainer must run the same kernel to stay bitwise equal to the rollout.
++        try:
++            from k31kdabi import apply_bi_fla_fix
++        except ImportError as exc:
++            raise RuntimeError("MLITE_K31_KDA_BI=1 needs the k31kdabi plugin on PYTHONPATH") from exc
++        _PINNED["k31kdabi_fla_fix"] = apply_bi_fla_fix()
+     return dict(_PINNED)
+ 
+ 
++def _kda_bi_fla_fix_wanted() -> bool:
++    import os
++
++    return os.environ.get("MLITE_K31_KDA_BI", "0") == "1"
++
++
+ def _token_positions(cu_seqlens: Tensor, total: int, device) -> Tensor:
+     cu = cu_seqlens.to(device=device, dtype=torch.long)
+     seq = torch.repeat_interleave(torch.arange(cu.numel() - 1, device=device), cu.diff())
+@@ -236,6 +251,73 @@ def fla_functional(cfg: KDAKernelConfig, cu_seqlens: Tensor) -> Callable[..., Te
+     return functional
+ 
+ 
++def _rocm_kda_autograd() -> bool:
++    """``MLITE_K31_ROCM_KDA_AUTOGRAD`` (default 1; grads measured bitwise equal to the recompute path): KDA forward + backward through FLA's own autograd (one forward instead of
++    visible forward + functional recompute). Only with ``MLITE_K31_ROCM_KDA=fla``."""
++
++    import os
++
++    return os.environ.get("MLITE_K31_ROCM_KDA_AUTOGRAD", "1") == "1" and _rocm_kda_mode() == "fla"
++
++
++def _rocm_kda_mode() -> str:
++    """``MLITE_K31_ROCM_KDA``: ``fla`` (default; the FLA ``chunk_kda`` graph of the backward, run without
++    autograd) or ``vllm`` (the ROCm image's forward-only ``chunk_kda_prefill`` for the core, backend from
++    ``MLITE_K31_ROCM_KDA_BACKEND``, default ``triton``; conv and gated norm stay FP32 torch)."""
++
++    import os
++
++    return os.environ.get("MLITE_K31_ROCM_KDA", "fla")
++
++
++def kda_visible_rocm(
++    cfg: KDAKernelConfig,
++    mixed_qkv: Tensor,
++    g1: Tensor,
++    beta: Tensor,
++    g2: Tensor,
++    conv_weight: Tensor,
++    A_log: Tensor,
++    dt_bias: Tensor,
++    norm_weight: Tensor,
++    cu_seqlens: Tensor,
++) -> Tensor:
++    """ROCm (BI=0) visible KDA forward, ``ctx = 0`` per sequence; same boundary as :func:`kda_visible`."""
++
++    _check(cfg, mixed_qkv, g1, beta, g2, conv_weight, A_log, dt_bias, norm_weight)
++    with torch.no_grad():
++        if _rocm_kda_mode() == "fla":
++            return fla_functional(cfg, cu_seqlens)(
++                mixed_qkv, g1, beta, g2, conv_weight, A_log, dt_bias, norm_weight
++            )
++        import os
++
++        from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
++
++        H, D, HD = cfg.num_heads, cfg.head_dim, cfg.projection_size
++        T = mixed_qkv.shape[0]
++        cu = cu_seqlens.to(device=mixed_qkv.device, dtype=torch.long)
++        qkv = causal_conv_silu(mixed_qkv, conv_weight, cu).to(mixed_qkv.dtype)
++        q, k, v = (t.reshape(1, T, H, D).contiguous() for t in qkv.split(HD, dim=-1))
++        o, _ = chunk_kda_prefill(
++            q=q,
++            k=k,
++            v=v.clone(),
++            raw_g=g1.reshape(1, T, H, D),
++            raw_beta=beta.reshape(1, T, H),
++            A_log=A_log,
++            g_bias=dt_bias,
++            lower_bound=cfg.gate_lower_bound,
++            use_qk_l2norm_in_kernel=True,
++            cu_seqlens=cu.to(torch.int32),
++            backend=os.environ.get("MLITE_K31_ROCM_KDA_BACKEND", "triton"),
++        )
++        out = gated_rms_norm(
++            o.reshape(T, H, D), g2.reshape(T, H, D), norm_weight.to(torch.bfloat16), cfg.norm_eps
++        )
++        return out.to(mixed_qkv.dtype).reshape(T, HD)
++
++
+ def kda_core(
+     cfg: KDAKernelConfig,
+     mixed_qkv: Tensor,
+@@ -256,8 +338,22 @@ def kda_core(
+ 
+     pin_fla_autotune()
+ 
+-    def visible(*inputs):
+-        return kda_visible(cfg, *inputs, cu_seqlens)
++    if k31_backend.is_rocm() and _rocm_kda_autograd():
++        # BI=0: the visible forward and the recompute graph are the same FLA function; run it once under autograd
++        # (FLA saves what its backward needs) instead of visible forward + recompute in backward.
++        return fla_functional(cfg, cu_seqlens)(
++            mixed_qkv, g1, beta, g2, conv_weight, A_log, dt_bias, norm_weight
++        )
++
++    if k31_backend.is_rocm():
++
++        def visible(*inputs):
++            return kda_visible_rocm(cfg, *inputs, cu_seqlens)
++
++    else:
++
++        def visible(*inputs):
++            return kda_visible(cfg, *inputs, cu_seqlens)
+ 
+     return visible_functional_vjp(
+         visible,
+@@ -274,5 +370,6 @@ __all__ = [
+     "gated_rms_norm",
+     "kda_core",
+     "kda_visible",
++    "kda_visible_rocm",
+     "pin_fla_autotune",
+ ]
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/linear.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/linear.py
+index 81f55725257f3bca4988bf1c416d8f4cc5859fdd..66568be4deb3ccb36cf2a409ddcc8bcb702ce4fa 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/linear.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/linear.py
+@@ -21,9 +21,25 @@ from ._contract import (
+ )
+ 
+ 
++def _single_term_dgrad() -> bool:
++    """BI=0 ROCm only: ``MLITE_K31_ROCM_DGRAD=bf16`` -> dX = bf16(dy) @ W in one BF16 GEMM (FP32 accumulate/out) instead of
++    the 2-term FP32-accurate split (which the BI contract needs and the later BI work keeps)."""
++
++    import os
++
++    from megatron.lite.primitive.kernels import k31_backend
++
++    return k31_backend.is_rocm() and os.environ.get("MLITE_K31_ROCM_DGRAD", "split") == "bf16"
++
++
+ def _mm_dx(dy32: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+     if weight.dtype != torch.bfloat16:
+         return torch.mm(dy32, weight.float())
++    if _single_term_dgrad():
++        dy16 = dy32.to(torch.bfloat16)
++        if dy16.is_cuda:
++            return torch.mm(dy16, weight.detach(), out_dtype=torch.float32)
++        return torch.mm(dy16.float(), weight.detach().float())
+     from megatron.lite.primitive.alignment.split_bf16_mm import mm_f32
+ 
+     return mm_f32(dy32, weight.detach())
+@@ -217,8 +233,15 @@ class _VLLMLoRALinearFunction(torch.autograd.Function):
+         x2d = value.reshape(-1, value.shape[-1])
+         if not x2d.is_contiguous():
+             x2d = x2d.contiguous()
+-        delta = delta_op(x2d, a_stacked, b_stacked, tuple(slice_sizes), meta)
+-        output = own_visible_tensor(leaf_op(x2d, master_weight, delta))
++        fused = getattr(leaf_op, "fused_lora", None)
++        if fused is not None and fused():
++            # ROCm BI: the rollout's punica add_lora_linear on the BI base output, in one leaf (no separate delta)
++            output = own_visible_tensor(
++                leaf_op.fused_forward(x2d, master_weight, a_stacked, b_stacked, tuple(slice_sizes), meta)
++            )
++        else:
++            delta = delta_op(x2d, a_stacked, b_stacked, tuple(slice_sizes), meta)
++            output = own_visible_tensor(leaf_op(x2d, master_weight, delta))
+         output = output.reshape(*value.shape[:-1], output.shape[-1])
+         ctx.save_for_backward(value, *factors)
+         ctx.master_weight = master_weight
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
+index 8882bda5f482c9d57e0845996cfeccd2355d9208..020475ae4afc37eefca40e85fae9130d5f62e7f4 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
+@@ -31,7 +31,15 @@ import torch
+ import torch.distributed as dist
+ from torch import Tensor
+ 
+-from megatron.lite.primitive.kernels.vllm_k31_moe import tree16_root
++from megatron.lite.primitive.kernels import k31_backend
++
++
++def tree16_root(leaves: Tensor) -> Tensor:
++    if k31_backend.is_rocm():
++        from megatron.lite.primitive.kernels.rocm_k31 import tree16_root as fn
++    else:
++        from megatron.lite.primitive.kernels.vllm_k31_moe import tree16_root as fn
++    return fn(leaves)
+ 
+ _TOKEN_SHIFT = 5  # slot k < 32
+ _RANK_SHIFT = 40
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/protocol.py b/experimental/lite/megatron/lite/model/k31/vllm/protocol.py
+index ecbbdf3e2fc302b1064f27941a5e1394ea057f5d..032d1fb040e7ecdaf5bdcbe273ad8be74b91489e 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/protocol.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/protocol.py
+@@ -12,6 +12,7 @@ import torch
+ import torch.nn as nn
+ 
+ from megatron.lite.model.k31.config import K31Config
++from megatron.lite.primitive.kernels import k31_backend
+ from megatron.lite.model.k31.vllm.checkpoint import (
+     EXPERT_CLASSIFIER,
+     PLACEMENT_FN,
+@@ -358,6 +359,38 @@ def build_model_config(source: str | Path | dict, **overrides) -> K31Config:
+     return config
+ 
+ 
++def _set_trainable(model: nn.Module) -> dict[str, int]:
++    """Which parameters train: ``MLITE_K31_TRAIN``.
++
++    * ``lora`` (default): adapter factors only (``freeze_non_lora_params``);
++    * ``base`` (full non-expert training without LoRA, BI=0 ROCm: the K3.1 ROCm vLLM model serves no LoRA): the BF16 / FP32 text
++      decoder parameters; frozen are the router's selection bias and whatever
++      ``MLITE_K31_TRAIN_FREEZE`` (regex on parameter names) matches, default
++      ``embed_tokens|lm_head|indexer``.  Routed experts are MXFP4 buffers and always frozen.
++    """
++
++    import os
++    import re
++
++    mode = os.environ.get("MLITE_K31_TRAIN", "lora")
++    if mode == "lora":
++        return freeze_non_lora_params(model)
++    if mode != "base":
++        raise ValueError(f"MLITE_K31_TRAIN must be lora|base, got {mode!r}")
++    exclude = os.environ.get("MLITE_K31_TRAIN_FREEZE", "embed_tokens|lm_head|indexer")
++    pattern = re.compile(exclude) if exclude else None
++    stats = {"trainable_tensors": 0, "trainable_numel": 0, "frozen_tensors": 0, "frozen_numel": 0}
++    for name, param in model.named_parameters():
++        frozen = name.endswith("e_score_correction_bias") or (
++            pattern is not None and pattern.search(name) is not None
++        )
++        param.requires_grad_(not frozen)
++        key = "frozen" if frozen else "trainable"
++        stats[f"{key}_tensors"] += 1
++        stats[f"{key}_numel"] += param.numel()
++    return stats
++
++
+ def lora_spec_from_impl(impl_cfg: ImplConfig):
+     from megatron.lite.model.k31.vllm.model import K31LoRASpec
+ 
+@@ -391,7 +424,8 @@ def _validate_contract(model_cfg: K31Config, impl_cfg: ImplConfig) -> None:
+         )
+     if parallel.ep <= 0 or model_cfg.num_experts % parallel.ep:
+         raise ValueError(f"EP={parallel.ep} must divide {model_cfg.num_experts} routed experts.")
+-    if not impl_cfg.use_deepep:
++    if not impl_cfg.use_deepep and not k31_backend.is_rocm():
++        # ROCm: no DeepEP; the MoE uses the torch all-to-all ("nccl" -> RCCL) transport.
+         raise NotImplementedError("K31 vLLM requires normal DeepEP training transport.")
+     if impl_cfg.mtp_enable:
+         raise NotImplementedError("K31 vLLM does not support MTP.")
+@@ -413,8 +447,15 @@ def _validate_contract(model_cfg: K31Config, impl_cfg: ImplConfig) -> None:
+         # gradient must be summed over every EP rank.  Use adamw/sgd, whose
+         # finalize step reduces per parameter class.
+         raise NotImplementedError("K31 vLLM with EP>1 does not support the fsdp2 optimizer")
+-    if not impl_cfg.lora.enabled:
+-        raise NotImplementedError("K31 vLLM trains LoRA only; a LoRA config is required.")
++    import os
++
++    train_base = os.environ.get("MLITE_K31_TRAIN", "lora") == "base"
++    if train_base and impl_cfg.lora.enabled:
++        raise ValueError("MLITE_K31_TRAIN=base trains the base weights; disable the LoRA config")
++    if not train_base and not impl_cfg.lora.enabled:
++        raise NotImplementedError(
++            "K31 vLLM trains LoRA unless MLITE_K31_TRAIN=base; a LoRA config is required."
++        )
+     if impl_cfg.lora.dropout:
+         raise NotImplementedError("LoRA dropout is not part of the rollout contract.")
+     if impl_cfg.max_lora_rank and impl_cfg.max_lora_rank < impl_cfg.lora.rank:
+@@ -620,7 +661,7 @@ def build_model(model_cfg: K31Config, *, impl_cfg: ImplConfig) -> ModelBundle:
+         selected_module_names=impl_cfg.selector.module_names,
+         lora=lora,
+     )
+-    freeze_non_lora_params(model)
++    _set_trainable(model)
+     recompute_spec = parse_recompute_spec(impl_cfg.recompute)
+     if recompute_spec:
+         from megatron.lite.model.k31.vllm.model import capture_forward_context
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py b/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
+index 33a3b4bf091dc179aa3e922c5db8e07578ac863f..09796422ce8aeb8755bed78dff36c4d8155658c3 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
+@@ -28,6 +28,7 @@ from typing import Any, Iterator
+ import torch
+ import torch.distributed as dist
+ 
++from megatron.lite.primitive.kernels import k31_backend
+ from megatron.lite.primitive.kernels.vllm_k31 import _k31_module, _symbol, k31_vllm_package
+ from megatron.lite.primitive.parallel import ParallelState
+ from megatron.lite.runtime.contracts.config import refuse_retired_env
+@@ -131,6 +132,24 @@ def initialize_k31_vllm_batch_invariance() -> None:
+     if _INITIALIZED:
+         return
+     _check_retired_env()
++    if k31_backend.is_rocm():
++        # ROCm trainer.  The sm_10x bi-gemm / CF-BI overlays do not exist here.  Under VLLM_BATCH_INVARIANT=1 the ROCm BI paths
++        # that match the BI rollout bitwise are switched on (defaults, overridable): KDA via the pinned FLA contract
++        # (MLITE_K31_KDA_BI, k31kdabi plugin) and routed experts via the k31lora BI MoE (MLITE_K31_MOE_BI, k31lora.bi_moe).  Dense /
++        # router / shared-expert GEMMs still run hipBLASLt (not row-invariant): they are the remaining non-BI trainer modules.
++        if os.environ.get("VLLM_BATCH_INVARIANT", "0") not in ("", "0"):
++            os.environ.setdefault("MLITE_K31_KDA_BI", "1")
++            os.environ.setdefault("MLITE_K31_MOE_BI", "1")
++            for flag, mod in (("MLITE_K31_KDA_BI", "k31kdabi"), ("MLITE_K31_MOE_BI", "k31lora.bi_moe")):
++                if os.environ[flag] == "1":
++                    try:
++                        importlib.import_module(mod)
++                    except ImportError as exc:
++                        raise RuntimeError(f"VLLM_BATCH_INVARIANT=1 on ROCm: {flag}=1 needs {mod} on PYTHONPATH") from exc
++            torch.backends.cuda.matmul.allow_tf32 = False
++        _check_no_cublas_env()
++        _INITIALIZED = True
++        return
+     batch_invariant = bool(importlib.import_module("vllm.envs").VLLM_BATCH_INVARIANT)
+     if batch_invariant:
+         _check_env()
+@@ -164,6 +183,10 @@ def initialize_k31_vllm_batch_invariance() -> None:
+     _INITIALIZED = True
+ 
+ 
++# Placeholder ``lora_meta`` of the ROCm backend (all tokens on the single adapter).
++ROCM_LORA_META = "rocm-torch-lora"
++
++
+ # ---------------------------------------------------------------------------
+ # per-microbatch runtime
+ # ---------------------------------------------------------------------------
+@@ -181,6 +204,13 @@ class K31Runtime:
+ def build_lora_kernel_meta(num_tokens: int, device: torch.device | str, *, max_loras: int = 1):
+     """The punica metadata of a rollout batch whose every token uses adapter slot 0."""
+ 
++    if k31_backend.is_rocm():
++        from megatron.lite.primitive.kernels.rocm_k31 import dense_bi
++
++        if not dense_bi():
++            # BI=0: rocm_k31.PunicaLoRADeltaAdapter computes the delta in torch; no punica metadata.
++            return ROCM_LORA_META
++        # BI: the fused LoRA leaf launches vLLM's punica kernels, as the rollout does
+     meta_cls = _symbol("vllm.lora.ops.triton_ops.lora_kernel_metadata", "LoRAKernelMeta")
+     meta = meta_cls.make(max_loras, num_tokens, device=device)
+     meta.prepare_tensors(torch.zeros(num_tokens, dtype=torch.int32, device=device))
+@@ -224,6 +254,10 @@ def k31_vllm_forward_context(
+     input_ids = getattr(batch, "input_ids", None)
+     if not isinstance(input_ids, torch.Tensor):
+         raise TypeError("K31 vLLM batches require tensor input_ids")
++    if k31_backend.is_rocm():
++        # The ROCm MoE path reads no vLLM forward context (DPMetadata).
++        yield
++        return
+     local = int(getattr(batch, "total_tokens", None) or input_ids.numel())
+     if local <= 0:
+         raise ValueError("K31 vLLM batches must contain at least one token")
+diff --git a/experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py b/experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a2aec487049caa9e84c37e51f81a0634d4ffa8d
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py
+@@ -0,0 +1,442 @@
++"""K31 routed experts on ROCm (BI=0): exact MXFP4 dequant + BF16 grouped GEMM, optional expert LoRA.
++
++Replaces the FlashInfer W4A16 / CUDA expert-LoRA path of ``vllm_fi_w4a16_moe`` for the BI=0 trainer
++on AMD.  No vLLM, FlashInfer or CUDA extension is needed: everything is PyTorch.
++
++Per routed slot ``(t, k)`` with local expert ``e`` (weights dequantized exactly from the checkpoint
++MXFP4 bytes, rows ``[gate; up]`` = ``[w1; w3]``)::
++
++    xq    = act_quant(x_t)                                 (identity, or MXFP4 fake-quant)
++    gu    = xq @ W13_e^T              (BF16 GEMM, FP32 accumulate)
++    gate += (x_t A1^T) B1_e^T * s ;  up += (x_t A3^T) B3_e^T * s      (expert LoRA, if any)
++    act   = SiTU(gate, up)           (FP32 math)            -> BF16
++    y     = act_quant(act) @ W2_e^T  (BF16 GEMM, FP32 accumulate)
++    leaf  = w_tk * (y + (act A2_e^T) B2^T * s)               FP32
++
++The leaves are returned as FP32 rows in ``rows_index`` order (``plan.expert_rows`` of
++``primitive.moe.plan_canonical_combine``), exactly the contract of
++``VLLMFiW4A16LeafRowsFunction``, so the canonical combine / EP transport are reused unchanged.
++
++Grouped GEMM: local experts with routed rows are processed in chunks; a chunk is a padded
++``[c, n_max, .]`` batch (``torch.bmm``), experts sorted by row count to bound the padding.  Only the
++experts of the chunk are dequantized (``dequantize_k31_mxfp4_bf16``: exact, BF16).
++
++Backward: chunk by chunk recompute of the same graph under autograd (BF16 GEMMs with FP32
++accumulate, FP32 SiTU), returning dX, d(route weight) and the LoRA grads; base weights are frozen.
++``act_quant`` is straight-through in the backward.
++"""
++
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass
++from typing import Any
++
++import torch
++from torch import Tensor
++
++from megatron.lite.primitive.alignment.vllm_fi_w4a16_moe import dequantize_k31_mxfp4_bf16
++
++# Rows (padded) per chunk and experts per chunk; bound the FP32 temporaries.
++CHUNK_ROWS = int(os.environ.get("MLITE_K31_ROCM_MOE_CHUNK_ROWS", "32768"))
++CHUNK_EXPERTS = int(os.environ.get("MLITE_K31_ROCM_MOE_CHUNK_EXPERTS", "64"))
++ACT_QUANTS = ("none", "mxfp4")
++
++
++@dataclass
++class RocmMxfp4Experts:
++    """EP-local checkpoint MXFP4 buffers (rows ``[gate; up]``) and the SiTU parameters."""
++
++    ckpt_w13: Tensor  # uint8 [E, 2I, H/2]
++    ckpt_w13_scale: Tensor  # uint8 [E, 2I, H/32]
++    ckpt_w2: Tensor  # uint8 [E, H, I/2]
++    ckpt_w2_scale: Tensor  # uint8 [E, H, I/32]
++    num_experts: int
++    local_offset: int
++    situ_beta: float
++    situ_linear_beta: float | None
++
++    @property
++    def num_local_experts(self) -> int:
++        return int(self.ckpt_w13.shape[0])
++
++    @property
++    def intermediate(self) -> int:
++        return int(self.ckpt_w13.shape[1]) // 2
++
++    @property
++    def hidden(self) -> int:
++        return int(self.ckpt_w2.shape[1])
++
++    def dequant(self, ex: Tensor) -> tuple[Tensor, Tensor]:
++        """BF16 ``W13 [c, 2I, H]`` and ``W2 [c, H, I]`` of the local experts ``ex`` (exact)."""
++
++        if self.ckpt_w13.is_cuda and os.environ.get("MLITE_K31_ROCM_DEQUANT", "triton") == "triton":
++            from megatron.lite.primitive.kernels.rocm_mxfp4_dequant import dequant_experts
++
++            return (
++                dequant_experts(self.ckpt_w13, self.ckpt_w13_scale, ex),
++                dequant_experts(self.ckpt_w2, self.ckpt_w2_scale, ex),
++            )
++        w13 =dequantize_k31_mxfp4_bf16(
++            self.ckpt_w13.index_select(0, ex), self.ckpt_w13_scale.index_select(0, ex)
++        )
++        w2 = dequantize_k31_mxfp4_bf16(
++            self.ckpt_w2.index_select(0, ex), self.ckpt_w2_scale.index_select(0, ex)
++        )
++        return w13, w2
++
++
++# --------------------------------------------------------------------------- activation quant
++def _mxfp4_fake_quant_rule() -> str:
++    # "ceil" (default): 2^ceil(log2(amax / 6)), AITER's HIP dynamic MXFP4 quant (kDefaultMxScaleRoundMode
++    # = RoundUp, mx_quant_utils.h) used by the FlyDSL a4w4 MoE stage 1 and its stage-1 epilogue;
++    # "floor": OCP / AITER Triton "even" mode floor(log2(amax)) - 2 (may saturate to 6).
++    return os.environ.get("MLITE_K31_ROCM_ACT_QUANT_SCALE", "ceil")
++
++
++_E2M1_MIDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
++_E2M1_LEVELS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
++
++
++def mxfp4_fake_quant(x: Tensor) -> Tensor:
++    """BF16 -> MXFP4 (group 32 along the last dim, E8M0 scale) -> BF16, round-half-to-even on E2M1.
++
++    The rollout's AITER A4W4 kernels quantize activations on the fly; this reproduces the value
++    grid (not necessarily every tie / scale rule, see ``MLITE_K31_ROCM_ACT_QUANT_SCALE``).
++    """
++
++    shape = x.shape
++    if shape[-1] % 32:
++        raise ValueError("MXFP4 activation quant needs the last dim divisible by 32")
++    xf = x.float().reshape(*shape[:-1], -1, 32)
++    amax = xf.abs().amax(-1, keepdim=True)
++    if _mxfp4_fake_quant_rule() == "ceil":
++        e = torch.ceil(torch.log2(amax / 6.0).clamp(min=-127.0))
++    else:
++        e = (torch.floor(torch.log2(amax)) - 2.0).clamp(min=-127.0)
++    e = torch.where(amax > 0, e, torch.full_like(e, -127.0))
++    scale = torch.exp2(e)
++    v = (xf / scale).abs().clamp(max=6.0)
++    levels = torch.tensor(_E2M1_LEVELS, device=x.device)
++    mids = torch.tensor(_E2M1_MIDS, device=x.device)
++    idx = torch.bucketize(v, mids, right=False)  # ties down
++    # round-half-to-even on ties: E2M1 codes with even mantissa are 0,1.0,2.0,4.0 (idx 0,2,4,6)
++    tie = (idx < 7) & (v == mids[idx.clamp(max=6)])
++    idx = torch.where(tie & (idx % 2 == 1), idx + 1, idx)
++    q = levels[idx] * torch.sign(xf) * scale
++    return q.reshape(shape).to(x.dtype)
++
++
++def _aq(x: Tensor, mode: str) -> Tensor:
++    if mode == "none":
++        return x
++    if mode == "mxfp4":
++        return mxfp4_fake_quant(x)
++    raise ValueError(f"act_quant must be one of {ACT_QUANTS}")
++
++
++def _aq_ste(x: Tensor, mode: str) -> Tensor:
++    """Fake-quant value, identity gradient."""
++
++    if mode == "none":
++        return x
++    if torch.is_grad_enabled() and x.requires_grad:
++        return _STEQuant.apply(x, mode)
++    return _aq(x, mode)
++
++
++def situ_fp32(gate: Tensor, up: Tensor, beta: float, linear_beta: float | None) -> Tensor:
++    act = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
++    if linear_beta is not None:
++        up = linear_beta * torch.tanh(up / linear_beta)
++    return act * up
++
++
++# --------------------------------------------------------------------------- chunk planning
++def _plan(topk_ids: Tensor, rows_index: Tensor, experts: RocmMxfp4Experts):
++    """Group the listed routed slots by local expert; returns chunk tables (host lists)."""
++
++    k = topk_ids.shape[1]
++    e_loc = experts.num_local_experts
++    flat_ids = topk_ids.reshape(-1).long().index_select(0, rows_index) - experts.local_offset
++    if flat_ids.numel() and (int(flat_ids.min()) < 0 or int(flat_ids.max()) >= e_loc):
++        raise RuntimeError("ROCm MoE: a listed route is not on this rank")
++    order = torch.argsort(flat_ids, stable=True)  # positions in rows_index, grouped by expert
++    counts = torch.bincount(flat_ids, minlength=e_loc)
++    starts = torch.cumsum(counts, 0) - counts
++    both = torch.cat((counts, starts)).tolist()
++    counts_l, starts_l = both[:e_loc], both[e_loc:]
++    items = [(e, starts_l[e], counts_l[e]) for e in range(e_loc) if counts_l[e]]
++    items.sort(key=lambda it: -it[2])
++    chunks, cur = [], []
++    for it in items:
++        n_first = -(-(cur[0][2] if cur else it[2]) // 8) * 8
++        if cur and (len(cur) == CHUNK_EXPERTS or (len(cur) + 1) * n_first > CHUNK_ROWS):
++            chunks.append(cur)
++            cur = []
++        cur.append(it)
++    if cur:
++        chunks.append(cur)
++    del k
++    return order, chunks
++
++
++def _chunk_tensors(chunk, order: Tensor, rows_index: Tensor, topk: int, dev):
++    c = len(chunk)
++    n = -(-chunk[0][2] // 8) * 8
++    ex = torch.tensor([it[0] for it in chunk], dtype=torch.long, device=dev)
++    cnt = torch.tensor([it[2] for it in chunk], dtype=torch.long, device=dev)
++    first = torch.tensor([it[1] for it in chunk], dtype=torch.long, device=dev)
++    col = torch.arange(n, device=dev)
++    real = col.unsqueeze(0) < cnt.unsqueeze(1)  # [c, n]
++    pos = first.unsqueeze(1) + torch.minimum(col.unsqueeze(0), cnt.unsqueeze(1) - 1)
++    out_pos = order.index_select(0, pos.reshape(-1))  # position in rows_index (pads repeat)
++    flat = rows_index.index_select(0, out_pos)  # flat route n * K + k
++    tok = flat // topk
++    return c, n, ex, real, out_pos, flat, tok
++
++
++def _chunk_leaves(
++    experts: RocmMxfp4Experts,
++    ex: Tensor,
++    xp: Tensor,  # [c, n, H] bf16
++    wp: Tensor,  # [c, n, 1] fp32 (0 on pads)
++    lora: tuple | None,
++    scaling: float,
++    act_quant: str,
++) -> Tensor:
++    """Differentiable leaves ``[c, n, H]`` fp32 of one chunk (grad flows to xp, wp, LoRA)."""
++
++    inter = experts.intermediate
++    w13, w2 = experts.dequant(ex)
++    gu = torch.bmm(_aq_ste(xp, act_quant), w13.transpose(1, 2)).float()  # [c, n, 2I]
++    if lora is not None:
++        a1, a3, b1, b3, a2, b2 = lora
++        xa1 = torch.matmul(xp.float(), a1.to(torch.bfloat16).float().t())  # [c, n, r]
++        xa3 = torch.matmul(xp.float(), a3.to(torch.bfloat16).float().t())
++        b1e = b1.index_select(0, ex).float() * scaling  # [c, I, r]
++        b3e = b3.index_select(0, ex).float() * scaling
++        gate = gu[..., :inter] + torch.bmm(xa1, b1e.transpose(1, 2))
++        up = gu[..., inter:] + torch.bmm(xa3, b3e.transpose(1, 2))
++    else:
++        gate, up = gu[..., :inter], gu[..., inter:]
++    act = situ_fp32(gate, up, experts.situ_beta, experts.situ_linear_beta).to(torch.bfloat16)
++    y = torch.bmm(_aq_ste(act, act_quant), w2.transpose(1, 2)).float()  # [c, n, H]
++    if lora is not None:
++        a2e = a2.index_select(0, ex).to(torch.bfloat16).float()  # [c, r, I]
++        d2 = torch.matmul(torch.bmm(act.float(), a2e.transpose(1, 2)), b2.float().t() * scaling)
++        y = y + d2
++    return wp * y
++
++
++def _moe_bi() -> bool:
++    """``MLITE_K31_MOE_BI=1``: forward leaves through k31lora's batch-invariant MoE kernels (``k31lora.bi_moe``: pinned Triton grouped
++    GEMMs with in-register exact MXFP4 dequant), the same code the BI rollout runs, so trainer == rollout bitwise. Backward unchanged."""
++
++    return os.environ.get("MLITE_K31_MOE_BI", "0") == "1"
++
++
++def bi_moe_slot_leaves(experts: "RocmMxfp4Experts", x: Tensor, topk_ids: Tensor, topk_weights: Tensor,
++                       scaling: float, lora: tuple | None) -> Tensor:
++    """FP32 leaves ``[T * K, H]`` in flat slot order, computed by ``k31lora.bi_moe.bi_moe_forward`` itself (the BI rollout
++    code; its ``leaf_reduce`` hook hands us the slot leaves right before the expert-ascending combine), so the trainer cannot
++    drift from the contract (canonical 8-chunk W2 contraction, pinned grouped GEMMs, exact in-register dequant).
++    Non-local slots (EP) are zero; the canonical combine only reads ``plan.expert_rows``. Expert LoRA uses bi_moe's dict layout
++    (A1/A3/B1/B3/A2/B2 + scaling)."""
++    import importlib
++
++    BM = importlib.import_module("k31lora.bi_moe")
++    lora_dict = None
++    if lora is not None:
++        # k31lora.bi_moe expert-LoRA contract: d13 = [d1 | d3] with separate shared A1 / A3, per-expert B1 / B3;
++        # d2 over the 8 canonical N-chunks with per-expert A2, shared B2 -- 1:1 with vLLM --enable-moe-shared-loras and mLite.
++        a1, a3, b1, b3, a2, b2 = (t.detach().to(torch.bfloat16) for t in lora)
++        lora_dict = {"A1": a1[None].contiguous(), "A3": a3[None].contiguous(), "B1": b1.contiguous(), "B3": b3.contiguous(),
++                     "A2": a2.contiguous(), "B2": b2[None].contiguous(), "scaling": float(scaling),
++                     "shared_A1": True, "shared_A3": True, "shared_B1": False, "shared_B3": False,
++                     "shared_A2": False, "shared_B2": True}
++    expert_map = None
++    if experts.num_local_experts != experts.num_experts:
++        expert_map = torch.full((experts.num_experts,), -1, dtype=torch.int64, device=x.device)
++        expert_map[experts.local_offset: experts.local_offset + experts.num_local_experts] = torch.arange(
++            experts.num_local_experts, device=x.device)
++    got = []
++
++    def capture(slots):
++        got.append(slots)
++        return slots
++
++    BM.bi_moe_forward(x.contiguous(), experts.ckpt_w13, experts.ckpt_w13_scale, experts.ckpt_w2, experts.ckpt_w2_scale,
++                      topk_weights.to(torch.float32), topk_ids, experts.situ_beta, experts.situ_linear_beta,
++                      lora=lora_dict, expert_map=expert_map, leaf_reduce=capture)
++    # bi_moe_forward calls leaf_reduce once per token block (K31_BI_MOE_TOK_CHUNK), in token order: concatenate
++    return got[0] if len(got) == 1 else torch.cat(got, 0)
++
++
++class _STEQuant(torch.autograd.Function):
++    @staticmethod
++    def forward(ctx, x, mode):
++        return _aq(x, mode)
++
++    @staticmethod
++    def backward(ctx, g):
++        return g, None
++
++
++class RocmExpertLeafRowsFunction(torch.autograd.Function):
++    """FP32 leaves of the listed routed slots (``rows_index``), forward no-grad, chunked recompute bwd."""
++
++    @staticmethod
++    def forward(ctx, experts, scaling, act_quant, rows_index, x, topk_ids, topk_weights, *lora):
++        has_lora = len(lora) > 0 and lora[0] is not None
++        dev = x.device
++        h = x.shape[1]
++        topk = topk_ids.shape[1]
++        if _moe_bi():
++            if act_quant != "none":
++                raise ValueError("MLITE_K31_MOE_BI needs BF16 expert activations (act_quant none)")
++            with torch.no_grad():
++                slots = bi_moe_slot_leaves(experts, x.detach(), topk_ids, topk_weights.detach(), scaling,
++                                           tuple(lora) if has_lora else None)
++            out = slots.index_select(0, rows_index)
++            ctx.experts = experts
++            ctx.scaling = scaling
++            ctx.act_quant = act_quant
++            ctx.has_lora = has_lora
++            ctx.save_for_backward(rows_index, x, topk_ids, topk_weights, *(lora if has_lora else ()))
++            ctx.mark_non_differentiable(topk_ids)
++            return out
++        out = torch.zeros((rows_index.numel(), h), dtype=torch.float32, device=dev)
++        order, chunks = _plan(topk_ids, rows_index, experts)
++        we_flat = topk_weights.detach().reshape(-1).float()
++        with torch.no_grad():
++            for chunk in chunks:
++                c, n, ex, real, out_pos, flat, tok = _chunk_tensors(chunk, order, rows_index, topk, dev)
++                xp = x.detach().index_select(0, tok).view(c, n, h)
++                wp = torch.where(real.reshape(-1), we_flat.index_select(0, flat), 0.0).view(c, n, 1)
++                leaves = _chunk_leaves(
++                    experts, ex, xp, wp, tuple(lora) if has_lora else None, scaling, act_quant
++                )
++                sel = real.reshape(-1)
++                out.index_copy_(0, out_pos[sel], leaves.reshape(-1, h)[sel])
++        ctx.experts = experts
++        ctx.scaling = scaling
++        ctx.act_quant = act_quant
++        ctx.has_lora = has_lora
++        ctx.save_for_backward(rows_index, x, topk_ids, topk_weights, *(lora if has_lora else ()))
++        ctx.mark_non_differentiable(topk_ids)
++        return out
++
++    @staticmethod
++    def backward(ctx, grad_rows):
++        rows_index, x, topk_ids, topk_weights, *lora = ctx.saved_tensors
++        experts: RocmMxfp4Experts = ctx.experts
++        dev = x.device
++        h = x.shape[1]
++        m, topk = topk_ids.shape
++        order, chunks = _plan(topk_ids, rows_index, experts)
++        need_x = ctx.needs_input_grad[4]
++        need_w = ctx.needs_input_grad[6]
++        dx = torch.zeros((m, h), dtype=torch.float32, device=dev)
++        dw = torch.zeros((m * topk,), dtype=torch.float32, device=dev)
++        lora_grads = [torch.zeros(t.shape, dtype=torch.float32, device=dev) for t in lora]
++        we_flat = topk_weights.detach().reshape(-1).float()
++        grad_rows = grad_rows.float()
++        for chunk in chunks:
++            c, n, ex, real, out_pos, flat, tok = _chunk_tensors(chunk, order, rows_index, topk, dev)
++            sel = real.reshape(-1)
++            g = torch.where(sel.unsqueeze(1), grad_rows.index_select(0, out_pos), 0.0).view(c, n, h)
++            with torch.enable_grad():
++                xp = x.detach().index_select(0, tok).view(c, n, h).requires_grad_(need_x)
++                wp = (
++                    torch.where(sel, we_flat.index_select(0, flat), 0.0)
++                    .view(c, n, 1)
++                    .requires_grad_(need_w)
++                )
++                lp = tuple(t.detach().requires_grad_(True) for t in lora) if ctx.has_lora else None
++                leaves = _chunk_leaves(experts, ex, xp, wp, lp, ctx.scaling, ctx.act_quant)
++                inputs = [t for t in (xp, wp) if t.requires_grad] + (list(lp) if lp else [])
++                grads = torch.autograd.grad(leaves, inputs, g, allow_unused=True)
++            it = iter(grads)
++            if need_x:
++                gx = next(it)
++                dx.index_add_(0, tok[sel], gx.reshape(-1, h)[sel].float())
++            if need_w:
++                gw = next(it)
++                dw.index_add_(0, flat[sel], gw.reshape(-1)[sel].float())
++            if lp:
++                for acc, gl in zip(lora_grads, it):
++                    if gl is not None:
++                        acc += gl.float()
++        out_lora = tuple(
++            gl.to(t.dtype) for gl, t in zip(lora_grads, lora)
++        ) if ctx.has_lora else ()
++        return (
++            None,
++            None,
++            None,
++            None,
++            dx.to(x.dtype) if need_x else None,
++            None,
++            dw.view(m, topk).to(topk_weights.dtype) if need_w else None,
++            *out_lora,
++        )
++
++
++def rocm_expert_leaf_rows(
++    experts: RocmMxfp4Experts,
++    rows_index: Tensor,
++    x: Tensor,
++    topk_ids: Tensor,
++    topk_weights: Tensor,
++    *,
++    scaling: float = 1.0,
++    lora: tuple[Tensor, ...] | None = None,
++    act_quant: str = "none",
++) -> Tensor:
++    """``lora`` = ``(w1_a [r,H], w3_a [r,H], w1_b [E,I,r], w3_b [E,I,r], w2_a [E,r,I], w2_b [H,r])``."""
++
++    if act_quant not in ACT_QUANTS:
++        raise ValueError(f"act_quant must be one of {ACT_QUANTS}")
++    return RocmExpertLeafRowsFunction.apply(
++        experts, float(scaling), act_quant, rows_index, x, topk_ids, topk_weights, *(lora or ())
++    )
++
++
++def expert_leaves_dense_reference(
++    experts: RocmMxfp4Experts,
++    x: Tensor,
++    topk_ids: Tensor,
++    topk_weights: Tensor,
++    *,
++    scaling: float = 1.0,
++    lora: tuple[Tensor, ...] | None = None,
++    act_quant: str = "none",
++) -> Tensor:
++    """Per-expert loop reference ``[M, K, H]`` (tests only)."""
++
++    m, topk = topk_ids.shape
++    out = torch.zeros((m, topk, experts.hidden), dtype=torch.float32, device=x.device)
++    local = topk_ids.long() - experts.local_offset
++    for e in torch.unique(local).tolist():
++        if e < 0 or e >= experts.num_local_experts:
++            continue
++        n_idx, k_idx = torch.nonzero(local == e, as_tuple=True)
++        ex = torch.tensor([e], device=x.device)
++        xp = x[n_idx].unsqueeze(0)
++        wp = topk_weights[n_idx, k_idx].float().view(1, -1, 1)
++        leaves = _chunk_leaves(experts, ex, xp, wp, lora, scaling, act_quant)
++        out[n_idx, k_idx] = leaves[0]
++    return out
++
++
++__all__ = [
++    "ACT_QUANTS",
++    "RocmExpertLeafRowsFunction",
++    "RocmMxfp4Experts",
++    "expert_leaves_dense_reference",
++    "mxfp4_fake_quant",
++    "rocm_expert_leaf_rows",
++    "situ_fp32",
++]
+diff --git a/experimental/lite/megatron/lite/primitive/kernels/k31_backend.py b/experimental/lite/megatron/lite/primitive/kernels/k31_backend.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff8bd15c6e8c187d29a47a09d6a1d96667001c37
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/kernels/k31_backend.py
+@@ -0,0 +1,78 @@
++"""Which kernel set the K31 vLLM-visible model runs on.
++
++* ``vllm_cuda`` (the original design): forward values from the NVIDIA K31 rollout image's kernels and BI
++  overlays through the strict adapters of :mod:`vllm_k31` / :mod:`vllm_k31_moe` (sm_10x only).
++* ``rocm``: BI=0 trainer on AMD.  Same adapter names and call signatures, implemented in
++  :mod:`rocm_k31` with PyTorch / Triton (FLA) / the ROCm vLLM image's ops; no batch invariance, no
++  bit-equality claim with the rollout (old log-probs are recomputed by the trainer, TIS corrects the rest).
++
++Select with ``MLITE_K31_BACKEND`` (``vllm_cuda`` | ``rocm``); default ``rocm`` on a HIP build of torch,
++else ``vllm_cuda``.  Layer modules must take adapters from :func:`adapters`, never import them directly
++from ``vllm_k31``, so DSA / KDA / MoE pieces of either backend plug in the same way.
++"""
++
++from __future__ import annotations
++
++import functools
++import os
++import types
++
++import torch
++
++BACKENDS = ("vllm_cuda", "rocm")
++
++
++@functools.lru_cache(maxsize=1)
++def backend() -> str:
++    value = os.environ.get("MLITE_K31_BACKEND")
++    if value is None:
++        value = "rocm" if getattr(torch.version, "hip", None) else "vllm_cuda"
++    if value not in BACKENDS:
++        raise ValueError(f"MLITE_K31_BACKEND must be one of {BACKENDS}, got {value!r}")
++    return value
++
++
++def is_rocm() -> bool:
++    return backend() == "rocm"
++
++
++@functools.lru_cache(maxsize=1)
++def adapters() -> types.SimpleNamespace:
++    """The adapter classes of the active backend (one namespace, same attribute names)."""
++
++    from megatron.lite.primitive.kernels import vllm_k31 as V
++
++    names = (
++        "AttnResAdapter",
++        "BILinearAdapter",
++        "BIRouterAdapter",
++        "LoRALeafAdapter",
++        "PunicaLoRADeltaAdapter",
++        "RMSNormAdapter",
++        "SiTUAndMulAdapter",
++        "TemperatureAdapter",
++        "TokenLogprobAdapter",
++        # DSA (ROCm side in primitive/dsa_rocm.py)
++        "DSAAbsorbBmmAdapter",
++        "DSAFP8KVUpconvertAdapter",
++        "DSAIndexerAdapter",
++        "DSAMLAKVInsertAdapter",
++        "DSASparseMLAAdapter",
++        # KDA
++        "KDACausalConvAdapter",
++        "KDACFBIPrefillAdapter",
++        "KDAGatedNormAdapter",
++    )
++    if not is_rocm():
++        return types.SimpleNamespace(**{n: getattr(V, n) for n in names}, backend="vllm_cuda")
++    from megatron.lite.primitive.kernels import rocm_k31 as Rk
++
++    ns = {}
++    for n in names:
++        # ROCm implementations override; anything not ported keeps the CUDA adapter, which fails
++        # closed (NotImplementedError / sm_10x checks) when it is actually called.
++        ns[n] = getattr(Rk, n, None) or getattr(V, n)
++    return types.SimpleNamespace(**ns, backend="rocm")
++
++
++__all__ = ["BACKENDS", "adapters", "backend", "is_rocm"]
+diff --git a/experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py b/experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..577611ab0009ba169e571569e5ba5b7fd861bcd7
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py
+@@ -0,0 +1,624 @@
++"""ROCm (AMD) BI=0 adapters for the K31 vLLM-visible model.
++
++Same class names and call signatures as :mod:`vllm_k31` (and the MoE helpers of
++:mod:`vllm_k31_moe`), so ``model.py`` / ``moe.py`` / ``kda.py`` switch implementation through
++:func:`megatron.lite.primitive.kernels.k31_backend.adapters` only.
++
++There is no batch invariance on this path: the rollout (the ROCm vLLM build with
++Kimi-K3.1 support, AITER kernels) and this forward agree to kernel rounding, not bitwise.  The verl recipe's
++``--bi 0`` arm accounts for it (old log-probs recomputed by the trainer, token TIS, R3 routing replay).
++
++Op choice (``MLITE_K31_ROCM_OPS``):
++
++* ``torch`` (default): PyTorch math in the precision the rollout uses at each boundary (BF16 GEMMs
++  with FP32 accumulate, FP32 norm / activation math, BF16 outputs);
++* ``vllm``: where the ROCm vLLM image registers the same op the rollout calls (``_C.situ_and_mul``,
++  ``_C.rms_norm``, the AMD ``attn_res`` kernel), call it; anything missing falls back to ``torch``.
++
++Adapters stay parameter-free and stateless, outputs go through ``_output_boundary`` like the CUDA
++adapters (the autograd owners in ``model/k31/vllm/primitive`` supply the backward).
++"""
++
++from __future__ import annotations
++
++import functools
++import importlib
++import os
++from typing import Any
++
++import torch
++import torch.nn.functional as F
++from torch import Tensor
++
++from megatron.lite.primitive.kernels.vllm_k31 import (
++    ATTN_RES_HIDDEN,
++    _Adapter,
++    _output_boundary,
++    _same_device,
++    _tensor,
++)
++
++
++def _ops_mode() -> str:
++    # under dense BI the rollout's own kernels are the contract (measured: torch attn_res / rms_norm differ by ~1e-5 rel)
++    mode = os.environ.get("MLITE_K31_ROCM_OPS", "vllm" if dense_bi() else "torch")
++    if mode not in ("torch", "vllm"):
++        raise ValueError(f"MLITE_K31_ROCM_OPS must be torch|vllm, got {mode!r}")
++    return mode
++
++
++@functools.lru_cache(maxsize=None)
++def _c_op(name: str):
++    """``torch.ops._C.<name>`` if the image's vLLM registered it (imports ``vllm._C``)."""
++
++    try:
++        importlib.import_module("vllm._C")
++    except ImportError:
++        return None
++    return getattr(torch.ops._C, name, None) if hasattr(torch.ops, "_C") else None
++
++
++# ---------------------------------------------------------------------------
++# dense linear / router / LoRA
++# ---------------------------------------------------------------------------
++def mm_f32out(a: Tensor, b: Tensor) -> Tensor:
++    """``a @ b`` with BF16 operands and an FP32 result (no intermediate BF16 rounding)."""
++
++    if a.is_cuda:
++        return torch.mm(a, b, out_dtype=torch.float32)
++    return torch.mm(a.float(), b.float())  # CPU (tests): same value up to accumulation order
++
++
++def _gemm_pad() -> int:
++    """``MLITE_K31_ROCM_GEMM_PAD``: pad the token rows of every BF16 linear to a multiple of this (0 = off).
++
++    Workaround for hipBLASLt ``HIPBLAS_STATUS_INTERNAL_ERROR`` on some odd-M shapes (torch then retries on the slower
++    hipBLAS path); GEMM rows are independent, so padding changes no value of
++    the real rows beyond the algorithm choice."""
++
++    return int(os.environ.get("MLITE_K31_ROCM_GEMM_PAD", "0"))
++
++
++def dense_bi() -> bool:
++    """Trainer forward == BI rollout for the dense GEMMs / LoRA / router / head (``VLLM_BATCH_INVARIANT=1``; opt out with
++    ``MLITE_K31_DENSE_BI=0``): call the same vLLM functions the rollout runs under BI on ROCm."""
++
++    return os.environ.get("VLLM_BATCH_INVARIANT", "0") not in ("", "0") and os.environ.get("MLITE_K31_DENSE_BI", "1") == "1"
++
++
++@functools.lru_cache(maxsize=None)
++def _bi_lib():
++    """vLLM's batch-invariant library with the rollout's tile/config state (``init_batch_invariance`` resolves the tuned
++    matmul configs and block sizes; the aten overrides themselves are NOT installed in the trainer process)."""
++
++    m = importlib.import_module("vllm.model_executor.determinism.batch_invariant")
++    for name in ("resolve_tuned_matmul_configs", "_resolve_block_sizes"):
++        fn = getattr(m, name, None)
++        if fn is not None:
++            fn()
++    return m
++
++
++@functools.lru_cache(maxsize=None)
++def _bi_lora_epilogue() -> str:
++    """Mirror the rollout's punica expand epilogue: the k31lora overlay (``k31lora.bi_lora.install``, K31_BI_LORA_F32ADD=1:
++    ``bf16(fp32(delta) + fp32(base))``) when the rollout runs it, else vLLM's default kernel."""
++
++    if os.environ.get("K31_BI_LORA_F32ADD", "0") != "1":
++        return "default"
++    try:
++        bi_lora = importlib.import_module("k31lora.bi_lora")
++    except ImportError as exc:
++        raise RuntimeError("K31_BI_LORA_F32ADD=1 needs the k31lora plugin on PYTHONPATH in the trainer") from exc
++    return bi_lora.install()
++
++
++def vtp_size() -> int:
++    """``MLITE_K31_BI_VTP=N`` (N > 1, dense BI only): the trainer reproduces a TP=N BI rollout's row-parallel layers --
++    per-rank K-sliced BI GEMMs (+ punica LoRA on the sliced A), reduced like ``all_reduce_batch_invariant`` (K31_BI_AR=1:
++    all-gather + fixed rank-order FP32 sum, one rounding).  Column-parallel / per-head / replicated layers are per-element
++    identical to TP1 and need nothing."""
++
++    n = int(os.environ.get("MLITE_K31_BI_VTP", "0") or 0)
++    return n if n > 1 and dense_bi() else 1
++
++
++def vtp_fixed_sum(partials: Tensor) -> Tensor:
++    """``all_reduce_batch_invariant`` on stacked per-rank partials ``[N, ...]`` (its ``_fixed_order_sum_kernel``)."""
++
++    lib = _bi_lib()
++    n = partials.shape[0]
++    gathered = partials.reshape(n, -1).contiguous()
++    numel = gathered.shape[1]
++    out = torch.empty(numel, dtype=partials.dtype, device=partials.device)
++    import triton
++
++    lib._fixed_order_sum_kernel[(triton.cdiv(numel, 1024),)](
++        gathered, out, numel, numel, WORLD_SIZE=n, BLOCK_SIZE=1024, LARGE=gathered.numel() > 2**31
++    )
++    return out.view(partials.shape[1:])
++
++
++def _vtp_slices(k: int, n: int):
++    if k % n:
++        raise ValueError(f"virtual TP={n} does not divide K={k}")
++    s = k // n
++    return [slice(r * s, (r + 1) * s) for r in range(n)]
++
++
++def vtp_row_partials(value: Tensor, weight: Tensor, n: int, lora=None) -> Tensor:
++    """Per-rank partial outputs ``[n, T, out]`` of a row-parallel linear (RowParallelLinear / RowParallelLinearWithLoRA
++    before its all-reduce): rank r = BI linear of the r-th K slice, plus (LoRA) the punica leaf with A sliced on its input."""
++
++    parts = []
++    for ks in _vtp_slices(value.shape[-1], n):
++        xr = value[:, ks].contiguous()
++        wr = weight[:, ks].contiguous()
++        if lora is None:
++            parts.append(rocm_linear(xr, wr))
++        else:
++            a_st, b_st, slices, meta = lora
++            a_r = tuple(a[..., ks].contiguous() for a in a_st)
++            parts.append(_punica_leaf(xr, wr, a_r, b_st, slices, meta))
++    return torch.stack(parts)
++
++
++def _punica_leaf(value, weight, lora_a_stacked, lora_b_stacked, output_slices, meta, specialize_active_lora=False):
++    """``PunicaWrapperGPU.add_lora_linear`` on the BI base output (rollout epilogue, see ``_bi_lora_epilogue``)."""
++
++    _bi_lora_epilogue()
++    from megatron.lite.primitive.kernels.vllm_k31 import _drop_punica_ptr_cache
++
++    lops = importlib.import_module("vllm.lora.ops.triton_ops")
++    y = rocm_linear(value, weight).contiguous()
++    tokens = value.shape[0]
++    rank = lora_b_stacked[0].size(-1)
++    buffer = torch.empty((len(output_slices), tokens, rank), dtype=torch.float32, device=value.device)
++    _drop_punica_ptr_cache(lora_a_stacked, lora_b_stacked)
++    try:
++        lops.lora_shrink(value, lora_a_stacked, buffer, *meta.meta_args(tokens, specialize_active_lora), 1.0)
++        lops.lora_expand(buffer, lora_b_stacked, y, *meta.meta_args(tokens, specialize_active_lora), offset_start=0,
++                         add_inputs=True)
++    finally:
++        _drop_punica_ptr_cache(lora_a_stacked, lora_b_stacked)
++    return y
++
++
++def rocm_linear(value: Tensor, weight: Tensor) -> Tensor:
++    """BF16 ``x @ W^T`` (FP32 accumulate, BF16 out): what ``UnquantizedLinearMethod`` computes.
++
++    Under BI: ``rocm_unquantized_gemm_impl`` -> ``linear_batch_invariant`` (persistent Triton matmul), as the rollout."""
++
++    if dense_bi():
++        return _bi_lib().linear_batch_invariant(value, weight, None)
++    pad = _gemm_pad()
++    if pad <= 1 or value.ndim != 2 or value.shape[0] % pad == 0:
++        return F.linear(value, weight)
++    t = value.shape[0]
++    tp = -(-t // pad) * pad
++    padded = torch.cat([value, value.new_zeros(tp - t, value.shape[1])])
++    return F.linear(padded, weight)[:t]
++
++
++class BILinearAdapter(_Adapter):
++    """Plain BF16 linear (BI: ``linear_batch_invariant``).  ``row_parallel`` (set by the caller) + virtual TP: the TP=N
++    rollout's row-parallel layer (per-rank partials, fixed-order all-reduce)."""
++
++    row_parallel = False
++
++    def forward(self, value: Tensor, weight: Tensor) -> Tensor:
++        _tensor(value, "x", dtype=torch.bfloat16, contiguous=False)
++        _tensor(weight, "weight", ndim=2, dtype=torch.bfloat16, contiguous=False)
++        if value.shape[-1] != weight.shape[1]:
++            raise ValueError("x and weight inner dimensions differ")
++        _same_device({"x": value, "weight": weight})
++        n = vtp_size() if self.row_parallel else 1
++        if n > 1:
++            x2 = value.reshape(-1, value.shape[-1])
++            out = vtp_fixed_sum(vtp_row_partials(x2, weight, n)).reshape(*value.shape[:-1], weight.shape[0])
++            return _output_boundary(out, value, weight)
++        return _output_boundary(rocm_linear(value, weight), value, weight)
++
++
++def _router_mode() -> str:
++    # "mm_f32out" (rollout prefill: GateLinear -> fp32_router_gemm_dispatch -> torch.mm(x, W^T,
++    # out_dtype=fp32), BF16 operands, FP32 accumulate and output); "fp32": FP32 operands.
++    return os.environ.get("MLITE_K31_ROCM_ROUTER", "mm_f32out")
++
++
++class BIRouterAdapter(_Adapter):
++    """Router logits, FP32 ``[T, E]``."""
++
++    def forward(self, value: Tensor, weight: Tensor) -> Tensor:
++        _tensor(value, "x", ndim=2, dtype=torch.bfloat16, contiguous=False)
++        _tensor(weight, "weight", ndim=2, dtype=torch.bfloat16)
++        _same_device({"x": value, "weight": weight})
++        if dense_bi():
++            # GateLinear(out_dtype=fp32) under BI: tiers 1-6 are off, tier 7 = ReplicatedLinear (BI linear, BF16) .to(fp32)
++            out = rocm_linear(value, weight).to(torch.float32)
++        elif _router_mode() == "fp32":
++            out = F.linear(value.float(), weight.float())
++        else:
++            out = mm_f32out(value, weight.t())
++        return _output_boundary(out, value, weight)
++
++
++class PunicaLoRADeltaAdapter(_Adapter):
++    """LoRA delta of one (packed) projection, FP32 ``[T, sum(out)]``.
++
++    Same values as vLLM's Triton punica shrink (FP32 accumulate into an FP32 buffer) followed by
++    expand (buffer cast to the weight dtype, FP32 accumulate), with ``scale = 1`` and the vLLM-folded
++    ``B``; ``meta`` is ignored (one adapter, every token on slot 0).
++    """
++
++    def forward(
++        self,
++        value: Tensor,
++        lora_a_stacked: tuple[Tensor, ...],
++        lora_b_stacked: tuple[Tensor, ...],
++        output_slices: tuple[int, ...],
++        meta: Any,
++        *,
++        specialize_active_lora: bool = False,
++    ) -> Tensor:
++        del meta, specialize_active_lora
++        _tensor(value, "x", ndim=2, dtype=torch.bfloat16)
++        if not (len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)):
++            raise ValueError("LoRA slice tuples must have equal length")
++        pieces = []
++        for i, (a, b) in enumerate(zip(lora_a_stacked, lora_b_stacked, strict=True)):
++            a2 = a.reshape(-1, a.shape[-2], a.shape[-1])[0]  # [r, in]
++            b2 = b.reshape(-1, b.shape[-2], b.shape[-1])[0]  # [out, r]
++            if a2.shape[-1] != value.shape[1] or b2.shape[0] != output_slices[i]:
++                raise ValueError(f"LoRA slice {i} shape mismatch")
++            shrink = mm_f32out(value, a2.t())
++            pieces.append(mm_f32out(shrink.to(b2.dtype), b2.t()))
++        delta = torch.cat(pieces, dim=-1) if len(pieces) > 1 else pieces[0]
++        return _output_boundary(delta, value, lora_a_stacked, lora_b_stacked)
++
++
++class LoRALeafAdapter(_Adapter):
++    """``bf16(fp32(bf16(x W^T)) + fp32(delta))``: punica expand with ``add_inputs`` into the base output.
++
++    Under BI the leaf is FUSED (``fused_lora()``): exactly ``PunicaWrapperGPU.add_lora_linear`` on the BI base output --
++    ``lora_shrink`` into an FP32 buffer, ``lora_expand(add_inputs=True)`` into ``y`` with the rollout's epilogue -- since the
++    epilogue rounds ``delta + base`` once and the delta alone is never materialized in the rollout."""
++
++    @staticmethod
++    def fused_lora() -> bool:
++        return dense_bi()
++
++    def fused_forward(self, value, weight, lora_a_stacked, lora_b_stacked, output_slices, meta,
++                      specialize_active_lora: bool = False):
++        _tensor(value, "x", ndim=2, dtype=torch.bfloat16)
++        _tensor(weight, "weight", ndim=2, dtype=torch.bfloat16, contiguous=False)
++        if weight.shape[0] != sum(output_slices):
++            raise ValueError("LoRA slices must cover the base output")
++        n = vtp_size() if getattr(self, "row_parallel", False) else 1
++        if n > 1:
++            y = vtp_fixed_sum(vtp_row_partials(value, weight, n,
++                                               lora=(lora_a_stacked, lora_b_stacked, output_slices, meta)))
++        else:
++            y = _punica_leaf(value, weight, lora_a_stacked, lora_b_stacked, output_slices, meta, specialize_active_lora)
++        return _output_boundary(y, value, weight, lora_a_stacked, lora_b_stacked)
++
++    def forward(self, value: Tensor, weight: Tensor, delta: Tensor) -> Tensor:
++        _tensor(value, "x", ndim=2, dtype=torch.bfloat16)
++        _tensor(weight, "weight", ndim=2, dtype=torch.bfloat16, contiguous=False)
++        if delta.shape != (value.shape[0], weight.shape[0]):
++            raise ValueError("delta must be [tokens, out_features]")
++        _same_device({"x": value, "weight": weight, "delta": delta})
++        base = rocm_linear(value, weight)
++        out = (base.float() + delta.float()).to(torch.bfloat16)
++        return _output_boundary(out, value, weight, delta)
++
++
++# ---------------------------------------------------------------------------
++# norms and activations
++# ---------------------------------------------------------------------------
++def rms_norm_reference(value: Tensor, weight: Tensor, eps: float) -> Tensor:
++    """FP32 normalize, FP32 weight multiply, one rounding (AITER / ``_C.rms_norm`` semantics)."""
++
++    x = value.float()
++    y = x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
++    return (y * weight.float()).to(value.dtype)
++
++
++class RMSNormAdapter(_Adapter):
++    def forward(self, value: Tensor, weight: Tensor, eps: float) -> Tensor:
++        _tensor(value, "x", dtype=torch.bfloat16, contiguous=False)
++        _tensor(weight, "weight", ndim=1)
++        if weight.shape[0] != value.shape[-1]:
++            raise ValueError("RMSNorm weight must match the hidden dimension")
++        if eps <= 0:
++            raise ValueError("eps must be positive")
++        _same_device({"x": value, "weight": weight})
++        op = _c_op("rms_norm") if _ops_mode() == "vllm" else None
++        if dense_bi():
++            # vLLM RMSNorm.forward_cuda under BI: rms_norm_batch_invariant (Triton), measured bitwise vs the BI rollout
++            out = _bi_lib().rms_norm_batch_invariant(value, weight, float(eps))
++        elif op is not None and weight.dtype == value.dtype:
++            x2 = value.reshape(-1, value.shape[-1]).contiguous()
++            out = torch.empty_like(x2)
++            op(out, x2, weight.contiguous(), float(eps))
++            out = out.view(value.shape)
++        else:
++            out = rms_norm_reference(value, weight, eps)
++        return _output_boundary(out, value, weight)
++
++
++def situ_and_mul_fp32(value: Tensor, beta: float, linear_beta: float | None) -> Tensor:
++    d = value.shape[-1] // 2
++    gate = value[..., :d].float()
++    up = value[..., d:].float()
++    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
++    if linear_beta is not None:
++        up = linear_beta * torch.tanh(up / linear_beta)
++    return (gate * up).to(value.dtype)
++
++
++class SiTUAndMulAdapter(_Adapter):
++    def forward(self, value: Tensor, beta: float, linear_beta: float | None) -> Tensor:
++        _tensor(value, "x", dtype=torch.bfloat16)
++        if value.shape[-1] % 2:
++            raise ValueError("SiTU input must hold gate and up halves")
++        op = _c_op("situ_and_mul") if _ops_mode() == "vllm" else None
++        if op is not None:
++            d = value.shape[-1] // 2
++            out = torch.empty(value.shape[:-1] + (d,), dtype=value.dtype, device=value.device)
++            op(out, value, float(beta), -1.0 if linear_beta is None else float(linear_beta))
++        else:
++            out = situ_and_mul_fp32(value, beta, linear_beta)
++        return _output_boundary(out, value)
++
++
++# ---------------------------------------------------------------------------
++# AttnRes
++# ---------------------------------------------------------------------------
++def attn_res_math(
++    prefix: Tensor,
++    delta: Tensor | None,
++    rows_blocks: list[Tensor],
++    norm_weight: Tensor,
++    qk_weight: Tensor,
++    output_norm_weight: Tensor | None,
++    eps: float,
++    output_norm_eps: float,
++) -> tuple[Tensor, Tensor]:
++    """``(output, updated_prefix)``; FP32 math of ``primitive.attn_res.attn_res_reference``."""
++
++    updated = prefix if delta is None else (prefix.float() + delta.float()).to(prefix.dtype)
++    if not rows_blocks:
++        mixed = updated.float()
++    else:
++        rows = torch.stack([*rows_blocks, updated], dim=-2).float()
++        qk = norm_weight.float() * qk_weight.float()
++        rstd = torch.rsqrt(rows.square().mean(dim=-1, keepdim=True) + eps)
++        logits = (rows * qk).sum(dim=-1, keepdim=True) * rstd
++        probs = torch.softmax(logits, dim=-2)
++        mixed = (probs * rows).sum(dim=-2)
++    if output_norm_weight is not None:
++        rstd_out = torch.rsqrt(mixed.square().mean(dim=-1, keepdim=True) + output_norm_eps)
++        mixed = mixed * rstd_out * output_norm_weight.float()
++    return mixed.to(prefix.dtype), updated
++
++
++class AttnResAdapter(_Adapter):
++    """The rollout ``attn_res`` wrapper semantics (mutates ``prefix`` and the bank in place)."""
++
++    def forward(
++        self,
++        prefix: Tensor,
++        delta: Tensor | None,
++        blocks: Tensor,
++        norm_weight: Tensor,
++        qk_weight: Tensor,
++        output_norm_weight: Tensor | None,
++        num_blocks: int,
++        block_write_idx: int,
++        eps: float,
++        output_norm_eps: float,
++    ) -> Tensor:
++        _tensor(prefix, "prefix", ndim=2, dtype=torch.bfloat16)
++        if delta is not None:
++            _tensor(delta, "delta", ndim=2, dtype=torch.bfloat16)
++            if delta.shape != prefix.shape:
++                raise ValueError("delta must match prefix")
++        _tensor(blocks, "blocks", ndim=3, dtype=torch.bfloat16)
++        tokens, hidden = prefix.shape
++        if hidden != ATTN_RES_HIDDEN and os.environ.get("MLITE_K31_ROCM_ANY_HIDDEN") != "1":
++            raise ValueError(f"K31 AttnRes expects hidden={ATTN_RES_HIDDEN}")
++        if blocks.shape[0] != tokens or blocks.shape[2] != hidden:
++            raise ValueError("blocks must be [tokens, slots, hidden]")
++        if not 0 <= num_blocks <= blocks.shape[1]:
++            raise ValueError(f"num_blocks={num_blocks} outside the bank")
++        out = None
++        if _ops_mode() == "vllm":
++            out = _vllm_attn_res(
++                prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight,
++                num_blocks, block_write_idx, eps, output_norm_eps,
++            )
++        if out is None:
++            out, updated = attn_res_math(
++                prefix,
++                delta,
++                [blocks[:, i] for i in range(num_blocks)],
++                norm_weight,
++                qk_weight,
++                output_norm_weight,
++                eps,
++                output_norm_eps,
++            )
++            if delta is not None:
++                prefix.copy_(updated)
++            if block_write_idx >= 0:
++                blocks[:, block_write_idx].copy_(prefix)
++        return _output_boundary(
++            out, prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight
++        )
++
++
++def _vllm_attn_res(*args) -> Tensor | None:
++    """The ROCm image's AMD ``attn_res`` (same wrapper signature as the NVIDIA one), if present."""
++
++    if dense_bi() and os.environ.get("K31_BI_ATTNRES", "1") == "1":
++        return _bi_attn_res()(*args)
++    for mod in ("vllm.models.kimi_k3.amd.ops.attn_res", "vllm.models.kimi_k3.common.ops.attn_res"):
++        try:
++            fn = getattr(importlib.import_module(mod), "attn_res")
++        except (ImportError, AttributeError):
++            continue
++        return fn(*args)
++    return None
++
++
++@functools.lru_cache(maxsize=None)
++def _bi_attn_res():
++    """BI rollout's AttnRes (``k31lora.bi_attnres``): the image's ``_attn_res_kernel`` with its batch-size-dependent
++    launch tiling pinned (the default picks BLOCK_L/num_warps from num_tokens once num_blocks >= 2).  Same pin as the rollout."""
++
++    bi = None
++    for name in ("k31lora.bi_attnres", "k31bi_attnres"):   # the k31lora copy first, a standalone k31bi_attnres second
++        try:
++            bi = importlib.import_module(name)
++            break
++        except ImportError:
++            continue
++    if bi is None:
++        raise RuntimeError("VLLM_BATCH_INVARIANT=1: the trainer needs k31lora.bi_attnres on PYTHONPATH, "
++                           "or K31_BI_ATTNRES=0 on both rollout and trainer")
++    return bi._pinned_attn_res(importlib.import_module("vllm.models.kimi_k3.amd.ops.attn_res"))
++
++
++# ---------------------------------------------------------------------------
++# head
++# ---------------------------------------------------------------------------
++class TokenLogprobAdapter(_Adapter):
++    """Selected-token log-softmax in FP32 (``[T, n]`` for ``token_ids [T, n]``)."""
++
++    def forward(self, logits: Tensor, token_ids: Tensor) -> Tensor:
++        _tensor(logits, "logits", ndim=2, dtype=(torch.bfloat16, torch.float32))
++        _tensor(token_ids, "token_ids", ndim=2, contiguous=False)
++        if dense_bi():
++            # rollout sampler: logits.log_softmax(dim=-1, dtype=fp32) -> aten::_log_softmax override (BI Triton kernel)
++            lp = _bi_lib()._log_softmax_batch_invariant(logits.float(), -1, False)
++        else:
++            lp = torch.log_softmax(logits.float(), dim=-1)
++        return _output_boundary(lp.gather(-1, token_ids.long()), logits)
++
++
++class TemperatureAdapter(_Adapter):
++    def forward(self, logits: Tensor, temperature: float) -> Tensor:
++        _tensor(logits, "logits", ndim=2, dtype=(torch.bfloat16, torch.float32))
++        return logits.detach().float() / float(temperature)
++
++
++# ---------------------------------------------------------------------------
++# MoE helpers (replace the vllm_k31_moe entries)
++# ---------------------------------------------------------------------------
++class TorchK31Router:
++    """``select_experts`` of the K31 router: sigmoid scores, bias for selection only, top-k,
++    renormalize, ``routed_scaling_factor``; FP32 weights, int32 ids (vLLM's return types)."""
++
++    def __init__(
++        self,
++        *,
++        top_k: int,
++        num_experts: int,
++        e_score_correction_bias: Tensor,
++        renormalize: bool = True,
++        num_expert_group: int = 1,
++        topk_group: int = 1,
++        scoring_func: str = "sigmoid",
++        routed_scaling_factor: float = 1.0,
++    ) -> None:
++        if scoring_func != "sigmoid" or num_expert_group != 1 or topk_group != 1:
++            raise NotImplementedError("K31 router: sigmoid, no expert groups")
++        self.top_k = top_k
++        self.num_experts = num_experts
++        self.bias = e_score_correction_bias
++        self.renormalize = renormalize
++        self.scale = routed_scaling_factor
++
++    def select_experts(self, hidden_states: Tensor, router_logits: Tensor) -> tuple[Tensor, Tensor]:
++        if dense_bi():
++            # the rollout's FusedTopKBiasRouter: vLLM fused_topk_bias, which dispatches (same env as the rollout:
++            # VLLM_ROCM_USE_AITER) to AITER biased_grouped_topk or the _C topk_sigmoid kernel
++            FT = importlib.import_module("vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router")
++            A = importlib.import_module("vllm._aiter_ops").rocm_aiter_ops
++            n_exp = router_logits.shape[-1]
++            if A.is_fused_moe_enabled():
++                # measured (against a BI rollout dump): the rollout's top-k ids/weights are AITER
++                # biased_grouped_topk's, bitwise (its router reaches the kernel without fused_topk_bias's eligibility gate)
++                g = FT._aiter_get_num_expert_group(n_exp)
++                w = torch.empty(router_logits.shape[0], self.top_k, dtype=torch.float32, device=router_logits.device)
++                i = torch.empty(router_logits.shape[0], self.top_k, dtype=torch.int32, device=router_logits.device)
++                A.biased_grouped_topk(router_logits.float().contiguous(), self.bias, w, i, num_expert_group=g, topk_group=g,
++                                      need_renorm=self.renormalize)
++                if self.scale != 1.0:
++                    w *= self.scale
++                return w, i
++            w, i = FT.fused_topk_bias(hidden_states, router_logits, "sigmoid", self.bias, self.top_k, self.renormalize,
++                                      routed_scaling_factor=self.scale)
++            return w.float(), i.to(torch.int32)
++        del hidden_states
++        scores = torch.sigmoid(router_logits.float())
++        choice = scores + self.bias.float().unsqueeze(0)
++        ids = torch.topk(choice, self.top_k, dim=-1, sorted=True).indices
++        weights = scores.gather(-1, ids)
++        if self.renormalize:
++            weights = weights / weights.sum(dim=-1, keepdim=True)
++        if self.scale != 1.0:
++            weights = weights * self.scale
++        return weights.float(), ids.to(torch.int32)
++
++
++def build_k31_router(**kwargs) -> TorchK31Router:
++    return TorchK31Router(**kwargs)
++
++
++def tree16_root(leaves: Tensor) -> Tensor:
++    """FP32 adjacent-pair tree over ``leaves[16, n]`` (the CUDA ``local_subtree`` order)."""
++
++    if leaves.dtype != torch.float32 or leaves.ndim != 2 or leaves.shape[0] != 16:
++        raise ValueError("tree16_root expects fp32 [16, n] leaves")
++    values = leaves
++    while values.shape[0] > 1:
++        values = values[0::2] + values[1::2]
++    return values[0]
++
++
++class MoELatentUpAdapter:
++    """``torch.mm(normed_latent, routed_expert_up_proj.weight.t())`` (BF16, no BI pins)."""
++
++    def __call__(self, latent: Tensor, weight: Tensor) -> Tensor:
++        if latent.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
++            raise TypeError("latent up-projection is BF16 x BF16")
++        if latent.ndim != 2 or weight.ndim != 2 or latent.shape[1] != weight.shape[1]:
++            raise ValueError("latent [T, L] and weight [H, L] expected")
++        if dense_bi():
++            # TP1 rollout under BI: routed_output_transform.up_proj (BI linear). NOTE TP>1 rollouts fold the shared-expert
++            # partial into hidden_shard.addmm_(latent, W_shard.T) (BI addmm epilogue): not mirrored here (TP1 only).
++            return rocm_linear(latent, weight)
++        return torch.mm(latent, weight.t())
++
++
++__all__ = [
++    "AttnResAdapter",
++    "BILinearAdapter",
++    "BIRouterAdapter",
++    "LoRALeafAdapter",
++    "MoELatentUpAdapter",
++    "PunicaLoRADeltaAdapter",
++    "RMSNormAdapter",
++    "SiTUAndMulAdapter",
++    "TemperatureAdapter",
++    "TokenLogprobAdapter",
++    "TorchK31Router",
++    "attn_res_math",
++    "build_k31_router",
++    "rms_norm_reference",
++    "rocm_linear",
++    "situ_and_mul_fp32",
++    "tree16_root",
++]
+diff --git a/experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py b/experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9a0414468ce3b93a1bdc021133a1033b022b584
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py
+@@ -0,0 +1,74 @@
++"""Fused MXFP4 -> BF16 dequant of selected experts (Triton; ROCm and CUDA).
++
++``dequant_experts(packed [E, N, K/2] u8, scale [E, N, K/32] u8, experts [c] i64) -> [c, N, K] bf16``
++
++Same values as ``alignment.vllm_fi_w4a16_moe.dequantize_k31_mxfp4_bf16(packed[experts], scale[experts])`` bit for bit
++(E2M1 levels times a power-of-two scale are exact in BF16; byte 0 -> 2^-127 like the reference). Differences from the
++torch path: one kernel per call, experts gathered by index inside the kernel (no ``index_select`` copies), E2M1 decoded
++arithmetically in registers (no LUT gather), scale applied in FP32 before the single BF16 store.
++"""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _e2m1(c):
++    s = (c >> 3) & 1
++    e = (c >> 1) & 3
++    m = (c & 1).to(tl.float32)
++    mag = tl.where(e == 0, m * 0.5, (1.0 + m * 0.5) * tl.exp2((e - 1).to(tl.float32)))
++    return tl.where(s == 1, -mag, mag)
++
++
++@triton.jit
++def _dequant_kernel(
++    packed, scale, experts, out,
++    N, KH,
++    s_pe, s_pn, s_se, s_sn,
++    BLOCK_N: tl.constexpr, BLOCK_KH: tl.constexpr,
++):
++    pid_e = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    pid_k = tl.program_id(2)
++    e = tl.load(experts + pid_e).to(tl.int64)
++    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    rk = pid_k * BLOCK_KH + tl.arange(0, BLOCK_KH)
++    mask = (rn[:, None] < N) & (rk[None, :] < KH)
++    p = tl.load(packed + e * s_pe + rn[:, None].to(tl.int64) * s_pn + rk[None, :], mask=mask, other=0).to(tl.int32)
++    sc = tl.load(scale + e * s_se + rn[:, None].to(tl.int64) * s_sn + rk[None, :] // 16, mask=mask, other=127)
++    f = tl.exp2(sc.to(tl.float32) - 127.0)
++    lo = (_e2m1(p & 15) * f).to(tl.bfloat16)
++    hi = (_e2m1(p >> 4) * f).to(tl.bfloat16)
++    base = out + pid_e.to(tl.int64) * N * KH * 2 + rn[:, None].to(tl.int64) * (KH * 2) + rk[None, :] * 2
++    tl.store(base, lo, mask=mask)
++    tl.store(base + 1, hi, mask=mask)
++
++
++def dequant_experts(packed: torch.Tensor, scale: torch.Tensor, experts: torch.Tensor) -> torch.Tensor:
++    if packed.dtype != torch.uint8 or scale.dtype != torch.uint8 or packed.ndim != 3:
++        raise TypeError("packed / scale must be uint8 [E, N, K/2] / [E, N, K/32]")
++    if packed.stride(-1) != 1 or scale.stride(-1) != 1:
++        raise ValueError("packed / scale need a contiguous last dim")
++    E, N, KH = packed.shape
++    if scale.shape != (E, N, KH * 2 // 32):
++        raise ValueError(f"scale shape {tuple(scale.shape)} does not match packed {tuple(packed.shape)}")
++    ex = experts.to(device=packed.device, dtype=torch.int64).contiguous()
++    c = ex.numel()
++    out = torch.empty((c, N, KH * 2), dtype=torch.bfloat16, device=packed.device)
++    if c == 0:
++        return out
++    BLOCK_N, BLOCK_KH = 32, 128
++    grid = (c, triton.cdiv(N, BLOCK_N), triton.cdiv(KH, BLOCK_KH))
++    _dequant_kernel[grid](
++        packed, scale, ex, out, N, KH,
++        packed.stride(0), packed.stride(1), scale.stride(0), scale.stride(1),
++        BLOCK_N=BLOCK_N, BLOCK_KH=BLOCK_KH,
++    )
++    return out
++
++
++__all__ = ["dequant_experts"]

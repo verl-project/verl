@@ -535,6 +535,27 @@ class RayPPOTrainer:
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+            # VERL_K31_DUMP_LOGPROBS=1 adds the per-token trainer (old) and rollout log-probs of every sample,
+            # masked to its response, and its prompt length to the rollout_data_dir dump, so a rollout/trainer
+            # mismatch can be located by position (prefill vs decode) and checked token by token.
+            if os.environ.get("VERL_K31_DUMP_LOGPROBS", "0") == "1":
+                keys = batch.batch.keys()
+                mask = batch.batch["response_mask"] if "response_mask" in keys else None
+                plen = (
+                    batch.batch["attention_mask"][:, : batch.batch["prompts"].shape[1]].sum(-1).cpu().tolist()
+                    if "attention_mask" in keys
+                    else None
+                )
+                for name in ("old_log_probs", "rollout_log_probs"):
+                    if name not in keys:
+                        continue
+                    lp = batch.batch[name].float().cpu()
+                    m = mask.cpu().bool() if mask is not None else torch.ones_like(lp, dtype=torch.bool)
+                    reward_extra_infos_to_dump[f"k31_{name}"] = [
+                        row[mk].tolist() for row, mk in zip(lp, m, strict=True)
+                    ]
+                if plen is not None:
+                    reward_extra_infos_to_dump["k31_prompt_len"] = plen
 
             self._dump_generations(
                 inputs=inputs,

@@ -1,0 +1,1808 @@
+vLLM general plugin k31kdabi for the ROCm Kimi-K3.1 model, consistent arm only: batch-invariant KDA (row engine
+and FULL decode graphs, K31_KDA_BI_FULL=1) under VLLM_BATCH_INVARIANT=1; register() does nothing otherwise. Creates
+kimi-k31/k31kdabi/ under /opt/k31-plugins. Upstream status: not yet proposed.
+
+diff --git a/kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/METADATA b/kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/METADATA
+new file mode 100644
+index 0000000000000000000000000000000000000000..b56d6336d7d0ea72991f0f948bb544092241906c
+--- /dev/null
++++ b/kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/METADATA
+@@ -0,0 +1,3 @@
++Metadata-Version: 2.1
++Name: k31kdabi
++Version: 0.1
+diff --git a/kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/entry_points.txt b/kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/entry_points.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..663d21e6387688cf520efad8d5e057007d714dd8
+--- /dev/null
++++ b/kimi-k31/k31kdabi/k31kdabi-0.1.dist-info/entry_points.txt
+@@ -0,0 +1,2 @@
++[vllm.general_plugins]
++k31kdabi = k31kdabi:register
+diff --git a/kimi-k31/k31kdabi/k31kdabi/__init__.py b/kimi-k31/k31kdabi/k31kdabi/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec8181db10ec2052a36abd091ed9c3ea7a466b6e
+--- /dev/null
++++ b/kimi-k31/k31kdabi/k31kdabi/__init__.py
+@@ -0,0 +1,872 @@
++"""k31kdabi: batch-invariant (BI) KDA for the ROCm Kimi-K3/K3.1 model (vLLM f5926fb, ROCm Kimi-K3.1 build).
++
++vLLM general plugin (entry point `vllm.general_plugins: k31kdabi = k31kdabi:register`); put `tracks/mlite/plugin` on PYTHONPATH.
++Active ONLY when `VLLM_BATCH_INVARIANT=1` (or the test switch `K31_KDA_BI=1`); otherwise `register()` does nothing and the default
++AMD KDA path is untouched.
++
++Contract (tracks/mlite/PHASE_D_KDA.md): the KDA core is FLA `chunk_kda` with every Triton autotuner pinned, chunks of 64 tokens
++aligned to the sequence start, the recurrent state materialized only at chunk boundaries, and a partial chunk recomputed from its
++boundary state. Measured on gfx950: FLA chunk_kda is batch-composition invariant and prefix invariant, and boundary state + tail
++recompute is bitwise equal to the full prefill. Every request (prefill, chunked prefill, decode, mixed) goes through:
++
++  conv   : the trainer's FP32 torch causal conv + SiLU (megatron primitive/kda.py `causal_conv_silu` expression) over
++           [3 history rows | new rows]; history = last 3 raw rows per state slot, in a buffer owned here
++  window : [cached tail rows (pos <= 63) | new rows]  (post-conv q|k|v, raw g, raw b), starting at the last boundary B
++  outputs: ONE chunk_kda call over the whole window with the boundary state (None for fresh sequences, exactly the trainer's
++           call; a request whose first chunk is still open also calls with initial_state=None), outputs of the new rows kept
++  state  : if the window crosses a boundary, a second chunk_kda call over the aligned prefix [B, B') gives the new boundary
++           state -> written to the request's recurrent-state slot (FLA [H, K, V] layout, owned here)
++  norm   : the trainer's FP32 torch gated RMSNorm (`gated_rms_norm` expression), weight BF16
++Spec decode and prefix caching are refused under BI.
++"""
++
++from __future__ import annotations
++
++import importlib
++import os
++import sys
++
++_CHUNK = 64
++_PINNED = False
++
++
++def bi_enabled() -> bool:
++    return os.environ.get("VLLM_BATCH_INVARIANT", "0") == "1" or os.environ.get("K31_KDA_BI", "0") == "1"
++
++
++def register():
++    if not bi_enabled():
++        return
++    from vllm.platforms import current_platform
++
++    if not current_platform.is_rocm():
++        return
++    mod = importlib.import_module("vllm.models.kimi_k3.amd.kda")
++    cls = mod.KimiK3DeltaAttention
++    if getattr(cls, "_k31kdabi_patched", False):
++        return
++    cls._k31kdabi_orig_forward = cls._forward
++    # Keep vLLM's breakable-cudagraph break on the KDA core op (the default _forward carries
++    # @eager_break_during_capture). Without it, vLLM PIECEWISE capture records _bi_forward's host-side work into the graph.
++    try:
++        from vllm.compilation.breakable_cudagraph import eager_break_during_capture
++        cls._forward = eager_break_during_capture(_bi_forward)
++    except ImportError:  # vLLM without breakable cudagraphs: BI runs must then be eager
++        cls._forward = _bi_forward
++    orig_init = cls.__init__
++
++    def __init__(self, *a, **k):
++        orig_init(self, *a, **k)
++        _init_bi_state(self)
++
++    cls.__init__ = __init__
++    cls._k31kdabi_patched = True
++    # vLLM refuses to start under VLLM_BATCH_INVARIANT unless the KDA attention backend declares BI support
++    # (v1/attention/selector.py, v1/worker/gpu/attn_utils.py -> KimiK3ROCmKDABackend.supports_batch_invariance()).
++    # With the forward above installed, the ROCm KDA layer is batch invariant, so declare it -- only here.
++    backend = cls.get_attn_backend(None) if callable(getattr(cls, "get_attn_backend", None)) else None
++    if backend is None:
++        backend = getattr(mod, "KimiK3ROCmKDABackend")
++    backend.supports_batch_invariance = classmethod(lambda c: True)
++
++
++# ----------------------------------------------------------------------------------------------- shared math
++def pin_fla_autotune():
++    """Same as megatron primitive/kda.py `pin_fla_autotune`: every Triton autotuner on the chunk_kda path -> configs[0]."""
++
++    global _PINNED
++    if _PINNED:
++        return
++    from triton.runtime.autotuner import Autotuner
++
++    importlib.import_module("fla.ops.kda")
++    importlib.import_module("fla.ops.kda.chunk_bwd")
++    pkgs = ("fla.ops.kda", "fla.ops.common", "fla.ops.gla", "fla.ops.utils", "fla.modules.l2norm")
++    for name, m in list(sys.modules.items()):
++        if m is None or not name.startswith(pkgs):
++            continue
++        for _attr, obj in list(vars(m).items()):
++            t = obj
++            for _ in range(8):
++                if t is None or isinstance(t, Autotuner):
++                    break
++                t = getattr(t, "fn", None)
++            if isinstance(t, Autotuner) and not getattr(t, "_k31_pinned", False):
++                t.configs = [t.configs[0]]
++                t._k31_pinned = True
++    apply_bi_fla_fix()
++    _PINNED = True
++
++
++# FLA 0.5.2 `fla/ops/kda/chunk_intra.py` (sha256 prefix) whose forward sub-chunk kernel takes the SAFE_GATE reference at
++# min(BC//2, T - i_ti - 1): the middle row of the 16-token sub-chunk, clamped to the last valid token. The clamp makes a row's
++# rounding depend on how many tokens follow it (measured: 1 of 63 window lengths differs). BI fix: reference = sub-chunk start
++# (T-independent, always valid; |g - g_start| <= 15 * 5/ln2 = 108 in log2 units, so exp2 stays in FP32 range, zm's bound).
++_FLA_INTRA_SHA = os.environ.get("K31_KDA_BI_FLA_SHA", "b59a1f2987d4577b")
++_FIXED = None
++
++
++def apply_bi_fla_fix():
++    """Swap FLA's forward intra sub-chunk kernel for the T-independent-reference variant (rollout AND trainer must call this)."""
++
++    global _FIXED
++    if _FIXED is not None:
++        return _FIXED
++    import hashlib
++    import importlib.util
++    import tempfile
++
++    src_mod = importlib.import_module("fla.ops.kda.chunk_intra")
++    path = src_mod.__file__
++    text = open(path).read()
++    sha = hashlib.sha256(text.encode()).hexdigest()
++    if not sha.startswith(_FLA_INTRA_SHA):
++        raise RuntimeError(f"K31 BI KDA: unexpected FLA chunk_intra.py (sha256 {sha[:16]}), re-derive the fix for this FLA version")
++    start = text.index("def chunk_kda_fwd_kernel_intra_sub_chunk(")
++    end = text.index("@dispatch('kda')", start)
++    body = text[start:end]
++    old_g = "b_gn = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)"
++    old_p = "p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * HV*K + tl.arange(0, BK)"
++    if body.count(old_g) != 1 or body.count(old_p) != 1:
++        raise RuntimeError("K31 BI KDA: FLA sub-chunk kernel text not as expected")
++    body = body.replace(old_g, "b_gn = gather(b_g, tl.full([1, BK], 0, dtype=tl.int16), axis=0)")
++    body = body.replace(old_p, "p_gn = g + i_ti * HV*K + tl.arange(0, BK)")
++    fixed = text[:start] + body + text[end:]
++    cache = os.path.join(os.environ.get("K31_KDA_BI_CACHE", tempfile.gettempdir()), f"k31kdabi_fla_intra_{sha[:12]}.py")
++    if not os.path.exists(cache) or open(cache).read() != fixed:
++        tmp = cache + f".{os.getpid()}"
++        with open(tmp, "w") as f:
++            f.write(fixed)
++        os.replace(tmp, cache)
++    spec = importlib.util.spec_from_file_location("k31kdabi_fla_intra_fixed", cache)
++    mod = importlib.util.module_from_spec(spec)
++    sys.modules["k31kdabi_fla_intra_fixed"] = mod
++    spec.loader.exec_module(mod)
++    kern = mod.chunk_kda_fwd_kernel_intra_sub_chunk
++    t = kern
++    from triton.runtime.autotuner import Autotuner
++
++    for _ in range(8):
++        if t is None or isinstance(t, Autotuner):
++            break
++        t = getattr(t, "fn", None)
++    if isinstance(t, Autotuner):
++        t.configs = [t.configs[0]]
++        t._k31_pinned = True
++    src_mod.chunk_kda_fwd_kernel_intra_sub_chunk = kern
++    _FIXED = cache
++    return cache
++
++
++def conv_silu_rows(ext, weight):
++    """Trainer's causal conv expression on [hist(3) | new] rows; returns SiLU(conv) FP32 for every row (first 3 discarded by caller).
++
++    ext [3 + L, C] bf16, weight [C, W] fp32. Same op order as megatron `causal_conv_silu`:
++    acc = x * w[:, W-1]; for s in 1..W-1: acc = acc + x[t-s] * w[:, W-1-s]."""
++    import torch
++    import torch.nn.functional as F
++
++    W = weight.shape[1]
++    xf = ext.float()
++    wf = weight.float()
++    acc = xf * wf[:, W - 1]
++    for shift in range(1, W):
++        shifted = F.pad(xf[: xf.shape[0] - shift], (0, 0, shift, 0))
++        acc = acc + shifted * wf[:, W - 1 - shift]
++    return F.silu(acc)
++
++
++def conv_silu_last(ext, weight):
++    """conv_silu_rows for the LAST row of each [R, W, C] window only (decode): the same per-element op sequence
++    (x[t] * w[W-1], then + x[t-s] * w[W-1-s] for s = 1..W-1, separate mul / add kernels, then SiLU) -> identical bits."""
++    import torch.nn.functional as F
++
++    W = weight.shape[1]
++    wf = weight.float()
++    acc = ext[:, W - 1].float() * wf[:, W - 1]
++    for shift in range(1, W):
++        acc = acc + ext[:, W - 1 - shift].float() * wf[:, W - 1 - shift]
++    return F.silu(acc)
++
++
++def gated_rms_norm(x, gate, weight, eps):
++    """Trainer's expression (megatron primitive/kda.py `gated_rms_norm`)."""
++    import torch
++
++    xf = x.float()
++    y = xf * torch.rsqrt(xf.square().sum(dim=-1, keepdim=True) / xf.shape[-1] + eps)
++    return y * weight.float() * torch.sigmoid(gate.float())
++
++
++def kda_chunk(q, k, v, g, beta_raw, A_log, dt_bias, lower, cu, init=None, final=False, cu_cpu=None):
++    """The contract call: exactly the trainer's FLA chunk_kda arguments (megatron primitive/kda.py `fla_functional`)."""
++    from fla.ops.kda import chunk_kda
++
++    return chunk_kda(
++        q=q, k=k, v=v, g=g, beta=beta_raw.float().sigmoid(), A_log=A_log, dt_bias=dt_bias,
++        initial_state=init, output_final_state=final, use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
++        safe_gate=True, lower_bound=lower, cu_seqlens=cu,
++        **({"cu_seqlens_cpu": cu_cpu} if cu_cpu is not None else {}),  # same indices, no device->host sync in FLA
++    )
++
++
++# ----------------------------------------------------------------------------------------------- BI step (pure)
++def _to_dev(lists, dev):
++    """Several Python int lists -> device int64 tensors with ONE pinned host->device copy."""
++    import torch
++
++    sizes = [len(x) for x in lists]
++    flat = torch.empty(sum(sizes), dtype=torch.int64, pin_memory=True)
++    o = 0
++    for x, n in zip(lists, sizes):
++        if n:
++            flat[o:o + n] = torch.as_tensor(x, dtype=torch.int64)
++        o += n
++    return list(flat.to(dev, non_blocking=True).split(sizes))
++
++
++def _seg_arange(starts, lens, total, dev):
++    """concat_i arange(starts[i], starts[i] + lens[i]) on the GPU; `total` = sum(lens) known on the host (no sync)."""
++    import torch
++
++    n = lens.numel()
++    offs = torch.cumsum(lens, 0) - lens
++    rep = torch.repeat_interleave(torch.arange(n, device=dev), lens, output_size=total)
++    return starts.index_select(0, rep) + torch.arange(total, device=dev) - offs.index_select(0, rep)
++
++
++def _n_slots():
++    """Per-layer BI buffers are sized by concurrent requests, not by vLLM's state-cache block count (which can be ~1e5).
++    Resolved at layer construction (the vLLM config context exists there, not in the forward); fails loudly otherwise."""
++    env = os.environ.get("K31_KDA_BI_SLOTS")
++    if env:
++        return int(env)
++    from vllm.config import get_current_vllm_config
++
++    try:
++        max_num_seqs = get_current_vllm_config().scheduler_config.max_num_seqs
++    except Exception as exc:  # noqa: BLE001
++        raise RuntimeError("K31 BI KDA: cannot read max_num_seqs from the vLLM config; set K31_KDA_BI_SLOTS") from exc
++    if not max_num_seqs:
++        raise RuntimeError("K31 BI KDA: vLLM max_num_seqs unset; set K31_KDA_BI_SLOTS")
++    return 2 * int(max_num_seqs) + 8
++
++
++def _init_bi_state(layer):
++    """At KimiK3DeltaAttention construction: size (and, on a real device, allocate) the per-slot BI buffers, so they are
++    part of the model's memory when vLLM profiles and budgets the KV cache (the profile run skips the BI forward)."""
++    import torch
++
++    layer._k31_bi_slots = _n_slots()
++    w = getattr(getattr(layer, "conv1d", None), "weight", None)
++    if w is None or w.device.type != "cuda":
++        return
++    P, D, H = layer.local_projection_size, layer.head_dim, layer.local_num_heads
++    layer._bi_state = BIKDAState(layer._k31_bi_slots, P, H, D, w.shape[-1], w.device)
++    # The row-engine caches (~1.7 MB per slot per layer at TP8) must exist before vLLM's memory
++    # profiling too; created lazily at the first real decode they landed outside the KV-cache budget (~15 GB/GPU at 69 layers)
++    lower = getattr(layer, "gate_lower_bound", None)
++    if os.environ.get("K31_KDA_BI_ROW", "1") == "1" and lower is not None:
++        layer._bi_state.ensure_rows(w.device, lower)
++
++
++
++# Compact-map consistency under FULL decode graphs; each switch only for A/B gating (default ON):
++#   K31_KDA_BI_CID_DEDUPE    full_post's cid_dev push deduped, last mapping wins (a duplicate index_copy_ kept the
++#                            EARLIER (o, dummy) write -> a live request's graph decodes ran on the dummy slot)
++#   K31_KDA_BI_EVICT_PROTECT _evict skips ids whose owner state index is in the current batch (no (o, None)/(o, c') churn)
++#   K31_KDA_BI_NULL_DUMMY    state index 0 (vLLM null block, padded rows) is always the parked dummy id: never a fresh id in
++#                            compact(), cid_dev[0] pinned, full_decode masks state-0 rows to the dummy
++#   K31_KDA_BI_T3            0 (default): off | 1: log | raise: RuntimeError when a real FULL row hit the dummy slot or a push
++#                            carried a duplicate index (T3 detector; counter is always maintained on device, read only here)
++_CID_DEDUPE = os.environ.get("K31_KDA_BI_CID_DEDUPE", "1") == "1"
++_EVICT_PROTECT = os.environ.get("K31_KDA_BI_EVICT_PROTECT", "1") == "1"
++_NULL_TO_DUMMY = os.environ.get("K31_KDA_BI_NULL_DUMMY", "1") == "1"
++_T3 = os.environ.get("K31_KDA_BI_T3", "0")
++
++
++def _t3_check(st):
++    """Eager-step read of the T3 detectors (one D2H, only when K31_KDA_BI_T3 != 0)."""
++    if _T3 == "0":
++        return
++    rows = getattr(st, "rows", None)
++    bad = int(rows.t3_bad_dev.item()) if rows is not None and hasattr(rows, "t3_bad_dev") else 0
++    seen = getattr(st, "_t3_seen", (0, 0))
++    if (bad, st.dup_pushes) != seen:
++        st._t3_seen = (bad, st.dup_pushes)
++        msg = f"K31 BI KDA T3: real FULL rows on the dummy slot={bad}, duplicate-index pushes={st.dup_pushes}"
++        if _T3 == "raise":
++            raise RuntimeError(msg)
++        import logging
++
++        logging.getLogger("k31kdabi").warning(msg)
++
++
++def _all_padding_batch():
++    """True iff vLLM marks every token of this forward as padding (cudagraph warmup/capture dummy batches set
++    forward_context.is_padding all True; real steps mark only the padded tail). Called only on the rare fail-closed
++    path, so its host sync never touches normal steps."""
++    try:
++        from vllm.forward_context import get_forward_context, is_forward_context_available
++        if not is_forward_context_available():
++            return False
++        ip = getattr(get_forward_context(), "is_padding", None)
++        import torch
++        return isinstance(ip, torch.Tensor) and ip.numel() > 0 and bool(ip.all())
++    except Exception:  # noqa: BLE001
++        return False
++
++class BIKDAState:
++    """Per-layer BI state owned by the overlay: per slot tail rows (<= 63), pos, null flag, conv history (3 raw rows).
++    The boundary recurrent state lives in the caller's `recurrent_state[slot]` (FLA [H, K, V] fp32 layout)."""
++
++    def __init__(self, n_slots, P, H, D, W, device):
++        import torch
++
++        self.P, self.H, self.D, self.W = P, H, D, W
++        self.tail = torch.zeros((n_slots, _CHUNK - 1, 4 * P + H), dtype=torch.bfloat16, device=device)
++        self.hist = torch.zeros((n_slots, W - 1, 3 * P), dtype=torch.bfloat16, device=device)
++        self.pos = [0] * n_slots
++        self.null = [True] * n_slots
++        self.real = [-1] * n_slots  # compact id -> vLLM state index (the caller's recurrent_state row)
++        self._cid = {}  # vLLM state index -> compact id
++        self._lru = []  # compact ids, least recently used first
++        self._cid_changes = []  # (vLLM state index, compact id | None) since the last device push (FULL mode)
++        self.dup_pushes = 0     # pushes that carried a duplicate state index (deduped; see full_post)
++        # With graph decode, the LAST compact id is reserved as the dummy slot for padded graph batches
++        # (compact() only hands out ids whose real == -1, so -2 is never assigned)
++        if os.environ.get("K31_KDA_BI_GRAPH", "1") == "1":
++            self.real[n_slots - 1] = -2
++
++    def compact(self, state_idx, has_init):
++        """Map vLLM state indices to compact ids of this object's per-slot buffers (n_slots ~ 2 x max_num_seqs, not the cache's
++        block count). A new request (has_init False) takes a free or least-recently-used id; a continuing request must still
++        own its id (else its open-chunk rows are lost: fail closed)."""
++        out = []
++        # Never evict an id whose owner state index is in THIS batch: if vLLM reused a dead
++        # owner's index for a request of the same batch, evicting it here and re-mapping it below queued (o, None) then
++        # (o, c') -> duplicate index in full_post's push. Victim choice only; slots are re-initialized at prefill (bit-neutral).
++        protect = {self._cid[s] for s in state_idx if s in self._cid} if _EVICT_PROTECT else set()
++        dm = self.dummy_id() if self.real[-1] == -2 else None
++        for s, hi in zip(state_idx, has_init):
++            if s == 0 and dm is not None and _NULL_TO_DUMMY:
++                # State index 0 = vLLM's null block (warmup/capture all-padding batches, padded
++                # FULL rows): ALWAYS the reserved dummy id, never a fresh id, never in _cid / _lru / the push (else
++                # cid_dev[0] became a real id c0 that padded FULL rows scribbled into, and c0 is the first victim after a wake)
++                out.append(dm)
++                continue
++            c = self._cid.get(s)
++            if c is None:
++                if hi and not _all_padding_batch():
++                    raise RuntimeError(f"K31 BI KDA: state {s} continues but its open-chunk rows were evicted; raise K31_KDA_BI_SLOTS")
++                # A dummy all-padding batch (vLLM cudagraph warmup/capture) may "continue" a state it never
++                # prefilled: give it a fresh id, treated as cold below (output is discarded; a real request always
++                # re-initializes its slot at prefill)
++                if -1 in self.real:
++                    c = self.real.index(-1)
++                else:
++                    c = self._evict(out, protect)
++                    old = self.real[c]
++                    del self._cid[old]
++                    self._cid_changes.append((old, None))
++                self.real[c] = s
++                self._cid[s] = c
++                self._cid_changes.append((s, c))
++            if c in self._lru:
++                self._lru.remove(c)
++            self._lru.append(c)
++            out.append(c)
++        return out
++
++    def _evict(self, taken, protect=()):
++        """Victim compact id for a new request. FULL mode: requests that decode only inside vLLM's CUDA graphs never touch the
++        host LRU, so pick the least recently used by the DEVICE last-use table (one D2H, only on eviction). `protect`: ids
++        whose owner index is in the current batch (skipped unless nothing else is left)."""
++        cand = [x for x in self._lru if x not in taken and x not in protect] or [x for x in self._lru if x not in taken]
++        rows = getattr(self, "rows", None)
++        if _full_mode() and rows is not None and hasattr(rows, "lastuse_dev"):
++            lu = rows.lastuse_dev.tolist()
++            return min(cand, key=lambda x: lu[x])
++        return cand[0]
++
++    # ------------------------------------------------------------------------------------- FULL decode-graph support
++    def ensure_rows(self, device, lower):
++        if hasattr(self, "rows"):
++            return self.rows
++        import torch
++
++        if os.environ.get("K31_KDA_BI_GRAPH", "1") == "1" or _full_mode():
++            from .graphdec import GraphDecoder, StaticRowDecoder
++
++            self.rows = StaticRowDecoder(self.tail.shape[0], self.H, self.D, device, lower, self.D ** -0.5, self._rs)
++            self.gdec = GraphDecoder(self, self.rows)
++            self.rows.ensure_grt()
++            self.rows.lastuse_dev = torch.zeros(self.tail.shape[0], dtype=torch.int64, device=device)
++            self.rows.tick_dev = torch.zeros(1, dtype=torch.int64, device=device)
++            self.rows.t3_bad_dev = torch.zeros(1, dtype=torch.int64, device=device)   # T3 lost-mapping counter
++        else:
++            from .rowdec import RowDecoder
++
++            self.rows = RowDecoder(self.tail.shape[0], self.H, self.D, device, lower, self.D ** -0.5, self._rs)
++        self._dev_dirty = set()
++        return self.rows
++
++    def dummy_id(self):
++        return len(self.real) - 1
++
++    def ensure_cid(self, recurrent_state):
++        """cid_dev[vLLM state index] -> compact id (int32), default = the reserved dummy id (null block 0, unassigned indices,
++        padded graph rows). Rebuilt if the state cache moves (vLLM allocates it after its memory profiling)."""
++        import torch
++
++        key = (recurrent_state.data_ptr(), recurrent_state.shape[0])
++        if getattr(self, "_cid_key", None) == key:
++            return self.cid_dev
++        self.cid_dev = torch.full((recurrent_state.shape[0],), self.dummy_id(), dtype=torch.int32, device=recurrent_state.device)
++        self._cid_key = key
++        self._cid_changes = [(s_, c) for s_, c in self._cid.items() if s_ != 0 or not _NULL_TO_DUMMY]   # cid_dev[0] pinned
++        return self.cid_dev
++
++    def full_pre(self, recurrent_state, slots):
++        """Eager step in FULL mode, before step(): the device is the truth for pos (graph replays advanced it); refresh the host
++        lists of the slots this step touches (one D2H)."""
++        rows = self.rows
++        vals = rows.pos_dev.index_select(0, _to_dev([slots], recurrent_state.device)[0]).tolist()
++        for s_, p_ in zip(slots, vals):
++            self.pos[s_] = int(p_)
++            rows.pos[s_] = int(p_)
++
++    def full_post(self, recurrent_state, slots, A_log, dt_bias):
++        """Eager step in FULL mode, after step(): warm every touched slot that holds state (so FULL decode never sees a cold slot),
++        then push host truth to the device: pos_dev, GRT rows, last-use, and the cid_dev deltas."""
++        import torch
++
++        rows = self.rows
++        cold = [s_ for s_ in dict.fromkeys(slots) if not rows.warm[s_]]
++        if cold:
++            for s_ in cold:
++                if self.null[s_]:
++                    recurrent_state[self._rs([s_])[0]].zero_()  # boundary state not materialized yet: zero == None for FLA
++                    self.null[s_] = False
++            rows.warm_up(recurrent_state, cold, [self.tail[s_, :self.pos[s_]] for s_ in cold], A_log, dt_bias)
++        uniq = list(dict.fromkeys(slots))
++        d, p = _to_dev([uniq, [rows.pos[s_] for s_ in uniq]], recurrent_state.device)
++        rows.pos_dev.index_copy_(0, d, p.to(torch.int32))
++        if rows.GRT is not None:
++            rows.GRT.index_copy_(0, d, rows.GR.index_select(0, d).transpose(1, 2).contiguous())
++        rows.tick_dev += 1
++        rows.lastuse_dev.index_copy_(0, d, rows.tick_dev.expand(d.numel()))
++        self._dev_dirty.difference_update(uniq)
++        if self._cid_changes:
++            cid = self.ensure_cid(recurrent_state)
++            ch = self._cid_changes
++            self._cid_changes = []
++            # One index_copy_ with a DUPLICATE state index is nondeterministic (it left
++            # cid_dev[o] = dummy for a live request -> its FULL-graph decodes ran on the dummy slot). Dedupe, last mapping
++            # wins (= the host map). State index 0 is vLLM's null block (padded graph rows): always the dummy id.
++            if len({a for a, _ in ch}) != len(ch):
++                self.dup_pushes += 1
++                if _CID_DEDUPE:
++                    ch = list({a: b for a, b in ch}.items())
++            if _NULL_TO_DUMMY:
++                ch = [(a, None if a == 0 else b) for a, b in ch]   # cid_dev[0] pinned to the dummy id
++            si, ci = _to_dev([[a for a, _ in ch], [self.dummy_id() if b is None else b for _, b in ch]], recurrent_state.device)
++            cid.index_copy_(0, si, ci.to(torch.int32))
++        _t3_check(self)
++
++    def full_decode(self, recurrent_state, state_idx, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps):
++        """Decode-only batch, device-side end to end (no host lists, no syncs, static shapes: capturable by vLLM FULL graphs).
++        Rows map to compact ids via cid_dev (padded rows: null block 0 -> dummy id, its pos parked at 0 so nothing completes)."""
++        import torch
++        from .graphdec import decode_step_static
++
++        rows = self.rows
++        cid = self.ensure_cid(recurrent_state)
++        dm = self.dummy_id()
++        SL = cid.index_select(0, state_idx).to(torch_int64())
++        if _NULL_TO_DUMMY:
++            # Padded rows (null block 0) ALWAYS run on the parked dummy slot, whatever cid_dev[0] holds
++            SL = torch.where(state_idx == 0, torch.full_like(SL, dm), SL)
++        RSL = state_idx.to(torch_int64())
++        rows.pos_dev.narrow(0, dm, 1).zero_()
++        out = decode_step_static(self, rows, recurrent_state, SL, RSL, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps)
++        # T3: a REAL row (state index != null block 0) resolved to the dummy slot = a lost mapping (H1/H2). Device-only,
++        # capturable, output-neutral; read at the next eager step by _t3_check.
++        rows.t3_bad_dev.add_(((SL == dm) & (state_idx != 0)).sum())
++        rows.tick_dev += 1
++        rows.lastuse_dev.index_copy_(0, SL, rows.tick_dev.expand(SL.numel()))
++        return out
++
++    def _rs(self, ids):
++        # ids never mapped through compact() (direct step() callers, tests) address the caller's state rows 1:1; the reserved
++        # dummy id (real == -2) addresses the null block row 0 (scratch), never a real request's row
++        return [self.real[c] if self.real[c] >= 0 else (0 if self.real[c] == -2 else c) for c in ids]
++
++    def step(self, recurrent_state, slots, has_init, qsl, raw, g1f, b1, g2, conv_w, A_log, dt_bias, lower, norm_w, eps):
++        """Dispatch: with K31_KDA_BI_ROW=1, decode requests (one token, existing state) go through the phase-2 row engine
++        (rowdec.RowDecoder, bitwise equal to the chunk contract); everything else through the phase-1 window path."""
++        import torch
++
++        n_req = len(qsl) - 1
++        if os.environ.get("K31_KDA_BI_ROW", "1") != "1":
++            return self._step_p1(recurrent_state, slots, has_init, qsl, raw, g1f, b1, g2, conv_w, A_log, dt_bias, lower,
++                                 norm_w, eps)
++        graph = os.environ.get("K31_KDA_BI_GRAPH", "1") == "1"
++        self.ensure_rows(raw.device, lower)
++        rd = [i for i in range(n_req) if has_init[i] and qsl[i + 1] - qsl[i] == 1]
++        if graph and rd and _warm_then_graph():
++            # Decode requests with cold slots (first decode after a prefill): warm them eagerly (the same warm_up the eager row
++            # path runs; it reads only tail/pos/state, not this token), then replay the graph for the decode requests instead of
++            # sending every request of the step down the eager row path
++            cold = [s_ for s_ in dict.fromkeys(slots[i] for i in rd) if not self.rows.warm[s_]]
++            if cold:
++                for s_ in cold:
++                    if self.null[s_]:
++                        recurrent_state[self._rs([s_])[0]].zero_()  # boundary state not materialized yet: zero == None for FLA
++                        self.null[s_] = False
++                self.rows.warm_up(recurrent_state, cold, [self.tail[s_, :self.pos[s_]] for s_ in cold], A_log, dt_bias)
++                self._dev_dirty.update(cold)
++        if graph and len(rd) == n_req and all(self.rows.warm[slots[i]] for i in rd):
++            return self._step_graph(recurrent_state, slots, qsl, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps)
++        if graph and rd and _warm_then_graph() and all(self.rows.warm[slots[i]] for i in rd):
++            # Mixed step: prefill / extend requests through phase 1, the decode requests through one graph replay (same bits:
++            # graph decode == eager row decode; the two sets touch disjoint slots)
++            p1 = [i for i in range(n_req) if i not in set(rd)]
++            out = torch.empty((raw.shape[0], self.H, self.D), dtype=torch.bfloat16, device=raw.device)
++            sel = torch.cat([torch.arange(qsl[i], qsl[i + 1], device=raw.device) for i in p1])
++            q2 = [0]
++            for i in p1:
++                q2.append(q2[-1] + qsl[i + 1] - qsl[i])
++            p1_slots = [slots[i] for i in p1]
++            self._dev_dirty.update(p1_slots)
++            for s_ in p1_slots:
++                self.rows.warm[s_] = False   # phase 1 handles this slot now: row caches are rebuilt on its next decode
++            o1 = self._step_p1(recurrent_state, p1_slots, [has_init[i] for i in p1], q2, raw.index_select(0, sel),
++                               g1f.index_select(0, sel), b1.index_select(0, sel), g2.index_select(0, sel), conv_w, A_log,
++                               dt_bias, lower, norm_w, eps)
++            out.index_copy_(0, sel, o1)
++            tok = torch.tensor([qsl[i] for i in rd], dtype=torch.int64).pin_memory().to(raw.device, non_blocking=True)
++            o2 = self._step_graph(recurrent_state, [slots[i] for i in rd], None, raw.index_select(0, tok), g1f.index_select(0, tok),
++                                  b1.index_select(0, tok), g2.index_select(0, tok), conv_w, A_log, dt_bias, norm_w, eps)
++            out.index_copy_(0, tok, o2)
++            return out
++        self._dev_dirty.update(slots)
++        for i in range(n_req):
++            if not has_init[i] or qsl[i + 1] - qsl[i] != 1:
++                self.rows.warm[slots[i]] = False  # phase 1 handles this slot now: row caches are rebuilt on its next decode
++        if not rd:
++            return self._step_p1(recurrent_state, slots, has_init, qsl, raw, g1f, b1, g2, conv_w, A_log, dt_bias, lower,
++                                 norm_w, eps)
++        p1 = [i for i in range(n_req) if i not in set(rd)]
++        out = torch.empty((raw.shape[0], self.H, self.D), dtype=torch.bfloat16, device=raw.device)
++        if p1:
++            sel = torch.cat([torch.arange(qsl[i], qsl[i + 1], device=raw.device) for i in p1])
++            q2 = [0]
++            for i in p1:
++                q2.append(q2[-1] + qsl[i + 1] - qsl[i])
++            o1 = self._step_p1(recurrent_state, [slots[i] for i in p1], [has_init[i] for i in p1], q2, raw.index_select(0, sel),
++                               g1f.index_select(0, sel), b1.index_select(0, sel), g2.index_select(0, sel), conv_w, A_log,
++                               dt_bias, lower, norm_w, eps)
++            out.index_copy_(0, sel, o1)
++        # ---- row-engine decode for rd
++        rs = [slots[i] for i in rd]
++        tok, st = _to_dev([[qsl[i] for i in rd], rs], raw.device)
++        Wm = self.W - 1
++        with torch.no_grad():
++            ext = torch.cat([self.hist.index_select(0, st), raw.index_select(0, tok)[:, None]], 1)  # [R, W, 3P]
++            qkv = conv_silu_last(ext, conv_w).to(raw.dtype)
++            self.hist.index_copy_(0, st, ext[:, 1:])
++            cold = [j for j, s_ in enumerate(rs) if not self.rows.warm[s_]]
++            if cold:
++                cs = [rs[j] for j in cold]
++                for s_ in cs:
++                    if self.null[s_]:
++                        recurrent_state[self._rs([s_])[0]].zero_()  # boundary state not materialized yet: zero == None for FLA (measured)
++                        self.null[s_] = False
++                self.rows.warm_up(recurrent_state, cs, [self.tail[s_, :self.pos[s_]] for s_ in cs], A_log, dt_bias)
++            g1r, b1r = g1f.index_select(0, tok), b1.index_select(0, tok)
++            core = self.rows.decode(recurrent_state, rs, qkv, g1r, b1r, A_log, dt_bias)
++            # keep the phase-1 view of these slots current (tail rows, pos), so phase 1 can resume any slot at any time; the boundary
++            # state at a chunk end was just written by the row path with the same FLA function phase 1 uses
++            new_rows = torch.cat([qkv, g1r, b1r], 1)
++            keep = [j for j, s_ in enumerate(rs) if self.pos[s_] < self.tail.shape[1]]
++            if keep:
++                kj, ks, kp = _to_dev([keep, [rs[j] for j in keep], [self.pos[rs[j]] for j in keep]], raw.device)
++                self.tail[ks, kp] = new_rows.index_select(0, kj).to(self.tail.dtype)
++            for s_ in rs:
++                self.pos[s_] = (self.pos[s_] + 1) % _CHUNK
++                if self.pos[s_] == 0:
++                    self.null[s_] = False
++            normed = gated_rms_norm(core, g2.index_select(0, tok), norm_w, eps).to(torch.bfloat16)
++            out.index_copy_(0, tok, normed)
++        return out
++
++    def _step_graph(self, recurrent_state, slots, qsl, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps):
++        """All-decode, all-warm batch: one CUDA-graph replay (graphdec.GraphDecoder). Slots touched eagerly since their last graph
++        step get their device mirrors (pos_dev, GRT rows) refreshed first; host lists are advanced here (one token each)."""
++        import torch
++
++        rows = self.rows
++        dirty = [s_ for s_ in slots if s_ in self._dev_dirty]
++        if dirty:
++            rows.ensure_grt()
++            d, p = _to_dev([dirty, [rows.pos[s_] for s_ in dirty]], raw.device)
++            rows.pos_dev.index_copy_(0, d, p.to(torch.int32))
++            if rows.GRT is not None:
++                rows.GRT.index_copy_(0, d, rows.GR.index_select(0, d).transpose(1, 2).contiguous())
++            self._dev_dirty.difference_update(dirty)
++        n = len(slots)
++        out = self.gdec.step(recurrent_state, list(slots), self._rs(slots), raw[:n], g1f[:n], b1[:n], g2[:n], conv_w, A_log,
++                             dt_bias, norm_w, eps)
++        for s_ in slots:
++            p_ = (self.pos[s_] + 1) % _CHUNK
++            self.pos[s_] = p_
++            rows.pos[s_] = p_
++            if p_ == 0:
++                self.null[s_] = False
++        return out
++
++    def _step_p1(self, recurrent_state, slots, has_init, qsl, raw, g1f, b1, g2, conv_w, A_log, dt_bias, lower, norm_w, eps):
++        """One batch. raw [T, 3P] (pre-conv q|k|v), g1f [T, P], b1 [T, H] raw b, g2 [T, H, D]; requests in token order
++        with boundaries `qsl`. Returns normed core [T, H, D] bf16 and updates the per-slot state."""
++        import torch
++
++        P, H, D, W = self.P, self.H, self.D, self.W
++        dev = raw.device
++        n_req = len(qsl) - 1
++        Wm = W - 1
++        RW = 4 * P + H
++        with torch.no_grad():
++            for i in range(n_req):
++                if not has_init[i]:
++                    slot = slots[i]
++                    self.pos[slot] = 0
++                    self.null[slot] = True
++            fresh = [i for i in range(n_req) if not has_init[i]]
++            if fresh:
++                self.hist.index_fill_(0, torch.tensor([slots[i] for i in fresh], device=dev), 0)
++            T = raw.shape[0]
++            C = _CHUNK - 1
++            Ls = [qsl[i + 1] - qsl[i] for i in range(n_req)]
++            ps = [self.pos[slots[i]] for i in range(n_req)]
++            win_len = [p + L for p, L in zip(ps, Ls)]
++            keep = Ls
++            # per-request small vectors -> device in one pinned copy; every row index is built on the GPU from them
++            slot_t, L_t, p_t = _to_dev([slots, Ls, ps], dev)
++            blk_t = L_t + Wm
++            blk_off = torch.cumsum(blk_t, 0) - blk_t
++            win_t = p_t + L_t
++            win_off = torch.cumsum(win_t, 0) - win_t
++            Wm_t = torch.full_like(L_t, Wm)
++            n_ext = n_req * Wm + T
++            hist_dst_t = _seg_arange(blk_off, Wm_t, n_req * Wm, dev)
++            new_dst_t = _seg_arange(blk_off + Wm, L_t, T, dev)
++            hist_last_t = _seg_arange(blk_off + L_t, Wm_t, n_req * Wm, dev)
++            ext = raw.new_empty((n_ext, 3 * P))
++            ext.index_copy_(0, hist_dst_t, self.hist.index_select(0, slot_t).reshape(n_req * Wm, 3 * P))
++            ext.index_copy_(0, new_dst_t, raw)
++            # conv over all blocks at once: shifts <= W-1 never leave a request's own block for the rows kept
++            qkv = conv_silu_rows(ext, conv_w).index_select(0, new_dst_t).to(raw.dtype)
++            self.hist.index_copy_(0, slot_t, ext.index_select(0, hist_last_t).reshape(n_req, Wm, 3 * P))
++            new_rows = torch.cat([qkv, g1f, b1], 1)  # [T, RW]
++            # windows: [tail_i[:pos_i] | new rows_i]
++            tail_flat = self.tail.view(-1, RW)
++            n_tail = sum(ps)
++            allwin = new_rows.new_empty((T + n_tail, RW))
++            if n_tail:
++                tsrc_t = _seg_arange(slot_t * C, p_t, n_tail, dev)
++                tdst_t = _seg_arange(win_off, p_t, n_tail, dev)
++                allwin.index_copy_(0, tdst_t, tail_flat.index_select(0, tsrc_t))
++            allwin.index_copy_(0, _seg_arange(win_off + p_t, L_t, T, dev), new_rows)
++            windows = list(allwin.split(win_len, 0))
++
++            def split(rows):
++                n = rows.shape[0]
++                q, k, v = (rows[:, j * P:(j + 1) * P].reshape(1, n, H, D) for j in range(3))
++                return q, k, v, rows[:, 3 * P:4 * P].reshape(1, n, H, D), rows[:, 4 * P:].reshape(1, n, H)
++
++            def init_for(idx):
++                # boundary state per request; a zero state for requests whose first chunk is still open
++                # (measured on gfx950: chunk_kda with an all-zero initial_state == initial_state=None, outputs and states, bitwise)
++                sl, nulls = _to_dev([self._rs([slots[i] for i in idx]), [j for j, i in enumerate(idx) if self.null[slots[i]]]], dev)
++                init = recurrent_state.index_select(0, sl)
++                if nulls.numel():
++                    init.index_fill_(0, nulls, 0)
++                return init
++
++            def run(idx, lengths, rows, final):
++                if not idx:
++                    return None, None
++                cu_cpu = torch.zeros(len(lengths) + 1, dtype=torch.long)
++                cu_cpu[1:] = torch.tensor(lengths, dtype=torch.long).cumsum(0)
++                cu = cu_cpu.pin_memory().to(dev, non_blocking=True)
++                q, k, v, g, b = split(rows)
++                return kda_chunk(q, k, v, g, b, A_log, dt_bias, lower, cu, init=init_for(idx), final=final, cu_cpu=cu_cpu)
++
++            new_states = {}
++            # (1) outputs: ONE call over every request's whole window
++            o_all, _ = run(list(range(n_req)), win_len, allwin, False)
++            outs = o_all[0].split(win_len, 0)
++            out_rows = [outs[i][-keep[i]:] for i in range(n_req)]
++            # (2) boundary states for windows that complete >= 1 chunk: one call over their aligned prefixes
++            cross = [i for i in range(n_req) if win_len[i] >= _CHUNK]
++            if cross:
++                alen = [(win_len[i] // _CHUNK) * _CHUNK for i in cross]
++                rows = torch.cat([windows[i][:a] for i, a in zip(cross, alen)], 0)
++                _, st = run(cross, alen, rows, True)
++                for j, i in enumerate(cross):
++                    new_states[i] = st[j]
++            st_slots, st_vals = [], []
++            d0, s0, nr = [], [], []
++            woff = 0
++            for i in range(n_req):
++                slot, n = slots[i], win_len[i]
++                a = (n // _CHUNK) * _CHUNK
++                if i in new_states:
++                    st_slots.append(slot)
++                    st_vals.append(new_states[i])
++                    self.null[slot] = False
++                rest = n - a
++                first = a if a > 0 else ps[i]  # rows [pos, n) are new; after a boundary the tail is window[a:], all new rows
++                d0.append(slot * C + (first - a))
++                s0.append(woff + first)
++                nr.append(n - first)
++                self.pos[slot] = rest
++                woff += n
++            if st_slots:
++                recurrent_state.index_copy_(0, torch.tensor(self._rs(st_slots), dtype=torch.long).to(dev, non_blocking=True),
++                                            torch.stack(st_vals))
++            n_new = sum(nr)
++            if n_new:
++                d0_t, s0_t, nr_t = _to_dev([d0, s0, nr], dev)
++                tail_flat.index_copy_(0, _seg_arange(d0_t, nr_t, n_new, dev),
++                                      allwin.index_select(0, _seg_arange(s0_t, nr_t, n_new, dev)))
++            o = torch.cat(out_rows, 0)
++            return gated_rms_norm(o, g2, norm_w, eps).to(torch.bfloat16)
++
++
++# ----------------------------------------------------------------------------------------------- vLLM adapter
++def _warm_then_graph() -> bool:
++    """K31_KDA_BI_WARM_GRAPH: cold decode slots warmed then replayed, mixed steps replay their decode subset (GraphDecoder).
++    Default ON for eager / PIECEWISE vLLM; default OFF under the FULL path (K31_KDA_BI_FULL=1): there vLLM's FULL graphs
++    already cover decode-only steps, and per-layer GraphDecoder captures in the eager mixed steps cost time (
++    8.1 -> 12.9 ms/step). An explicit env value wins in both modes. Bit-neutral either way."""
++    env = os.environ.get("K31_KDA_BI_WARM_GRAPH")
++    if env is not None:
++        return env == "1"
++    return not _full_mode()
++
++
++def _full_mode() -> bool:
++    """K31_KDA_BI_FULL=1: decode-only batches run fully device-side (BIKDAState.full_decode), capturable by vLLM's FULL /
++    FULL_DECODE_ONLY CUDA graphs; eager (prefill / mixed) steps keep host and device slot state in sync around them."""
++    return os.environ.get("K31_KDA_BI_FULL", "0") == "1"
++
++
++def torch_int64():
++    import torch
++
++    return torch.int64
++
++
++_META = {"key": None, "val": None}
++
++
++def _host_meta(m):
++    """Host copies of (query_start_loc, state indices, has_initial_state) of one step's KDA metadata. Every KDA layer of a step
++    shares the same tensors, so they are read (one D2H sync) once per step instead of once per layer. The cache holds strong
++    references to the keyed tensors, so their ids cannot be recycled while cached (no stale hits)."""
++    from vllm.forward_context import get_forward_context
++
++    t_q, t_s, t_h = m.non_spec_query_start_loc, m.non_spec_state_indices_tensor, m.has_initial_state
++    # per-step identity too (vLLM builds a new forward context + metadata every step), so an in-place-reused buffer can never hit
++    key = (get_forward_context(), m, t_q, t_s, t_h)
++    hit = _META["key"]
++    if hit is not None and all(a is b for a, b in zip(hit, key)):
++        q, s, h = _META["val"]
++        return q, list(s), list(h)
++    qsl = t_q.tolist()
++    n_req = len(qsl) - 1
++    slots = t_s[:n_req].tolist()
++    has_init = [True] * n_req if t_h is None else [bool(x) for x in t_h[:n_req].tolist()]
++    _META["key"], _META["val"] = key, (qsl, slots, has_init)
++    return qsl, list(slots), list(has_init)
++
++
++_DUMP = []
++
++
++def _dump_call(layer, recurrent_state, real_slots, slots, has_init, qsl, args):
++    """Debug (K31_KDA_BI_DUMP=path): exact engine inputs of one BI KDA call for offline replay through BIKDAState."""
++    import torch
++
++    def cp(t):
++        return t.detach().cpu().clone() if isinstance(t, torch.Tensor) else t
++
++    meta = {k: (tuple(t.shape), str(t.dtype), tuple(t.stride())) for k, t in
++            zip(("raw", "g1", "b1", "g2", "conv_w", "A_log", "dt_bias"), args[:7]) if isinstance(t, torch.Tensor)}
++    return {"real_slots": real_slots, "slots": list(slots), "has_init": list(has_init), "qsl": list(qsl),
++            "args": [cp(a) for a in args], "meta": meta,
++            "state_in": recurrent_state.index_select(0, torch.tensor(real_slots, device=recurrent_state.device)).cpu().clone(),
++            "row": os.environ.get("K31_KDA_BI_ROW", "1"), "state_shape": tuple(recurrent_state.shape),
++            "state_stride": tuple(recurrent_state.stride())}
++
++
++def _bi_forward(self, mixed_qkv, g1, g2, beta, core_attn_out):
++    import torch
++    from vllm.forward_context import get_forward_context
++
++    md = get_forward_context().attn_metadata
++    if md is None:
++        return
++    m = md.get(self.prefix) if isinstance(md, dict) else None
++    if m is None:
++        return
++    if m.spec_sequence_masks is not None or m.num_spec_decodes:
++        raise NotImplementedError("K31 BI KDA: speculative decoding is not supported under VLLM_BATCH_INVARIANT")
++    if getattr(m, "checkpoint", None) is not None:
++        raise NotImplementedError("K31 BI KDA: prefix-cache checkpoints are not supported under VLLM_BATCH_INVARIANT")
++    pin_fla_autotune()
++    P, D, H = self.local_projection_size, self.head_dim, self.local_num_heads
++    n_tok = m.num_actual_tokens
++    _conv_state, recurrent_state = self.kv_cache
++    if recurrent_state.dtype != torch.float32 or tuple(recurrent_state.shape[-3:]) != (H, D, D):
++        raise RuntimeError(f"K31 BI KDA needs an FP32 [H, {D}, {D}] state, got {recurrent_state.dtype} {tuple(recurrent_state.shape)}")
++    W = self.conv1d.weight.shape[-1]
++    st = getattr(self, "_bi_state", None)
++    if st is None:
++        n = getattr(self, "_k31_bi_slots", None) or _n_slots()
++        st = self._bi_state = BIKDAState(n, P, H, D, W, mixed_qkv.device)
++    full = _full_mode() and os.environ.get("K31_KDA_BI_ROW", "1") == "1"
++    if full:
++        st.ensure_rows(mixed_qkv.device, self.gate_lower_bound)
++        st.ensure_cid(recurrent_state)
++    if full and m.num_prefills == 0:
++        # FULL decode: static shapes (R = state-index rows = padded batch), no host reads of metadata
++        sidx = m.non_spec_state_indices_tensor
++        R = sidx.shape[0]
++        out = st.full_decode(recurrent_state, sidx, mixed_qkv[:R], g1[0, :R].reshape(R, P), beta[0, :R].reshape(R, H),
++                             g2[:R], self.conv1d.weight.view(self.conv1d.weight.size(0), W), self.A_log, self.dt_bias,
++                             self.o_norm.weight.to(torch.bfloat16), self.o_norm.eps)
++        core_attn_out[0, :R] = out.to(core_attn_out.dtype)
++        return
++    qsl, slots, has_init = _host_meta(m)
++    n_req = len(qsl) - 1
++    real_slots = list(slots)
++    slots = st.compact(slots, has_init)
++    args = (mixed_qkv[:n_tok], g1[0, :n_tok].reshape(n_tok, P), beta[0, :n_tok].reshape(n_tok, H), g2[:n_tok],
++            self.conv1d.weight.view(self.conv1d.weight.size(0), W), self.A_log, self.dt_bias, self.gate_lower_bound,
++            self.o_norm.weight.to(torch.bfloat16), self.o_norm.eps)
++    dump = os.environ.get("K31_KDA_BI_DUMP")
++    if dump and self.prefix.endswith(os.environ.get("K31_KDA_BI_DUMP_LAYER", "layers.0.self_attn")):
++        rec = _dump_call(self, recurrent_state, real_slots, slots, has_init, qsl, args)
++    if full:
++        st.full_pre(recurrent_state, slots)
++    out = st.step(recurrent_state, slots, has_init, qsl, *args)
++    if full:
++        st.full_post(recurrent_state, slots, self.A_log, self.dt_bias)
++    if dump and self.prefix.endswith(os.environ.get("K31_KDA_BI_DUMP_LAYER", "layers.0.self_attn")):
++        rec["out"] = out.detach().cpu().clone()
++        _DUMP.append(rec)
++        torch.save({"calls": _DUMP, "prefix": self.prefix}, dump)
++    core_attn_out[0, :n_tok] = out.to(core_attn_out.dtype)
+diff --git a/kimi-k31/k31kdabi/k31kdabi/graphdec.py b/kimi-k31/k31kdabi/k31kdabi/graphdec.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..40c25a3954946d97c6a99a2102b9adbbfbbf0a1a
+--- /dev/null
++++ b/kimi-k31/k31kdabi/k31kdabi/graphdec.py
+@@ -0,0 +1,431 @@
++"""CUDA-graph-capturable BI KDA decode on the row engine (K31_KDA_BI_GRAPH=1, needs K31_KDA_BI_ROW=1).
++
++Kernels, StaticRowDecoder and decode_step_static are verified bitwise against the eager row path and phase 1;
++GraphDecoder below integrates them. Every all-decode, all-warm batch of R requests replays a CUDA graph
++captured per (layer, R); everything else (prefill, first decode after prefill = warm-up, mixed batches) runs eagerly.
++"""
++from __future__ import annotations
++
++import os as _os
++
++import torch
++
++from . import conv_silu_rows, gated_rms_norm
++from . import rowkern as RK
++from .rowdec import BT, RowDecoder
++
++_CHUNK = 64
++_PROF_NO_COMPLETE = False
++_COMPLETE_FLA = _os.environ.get("K31_KDG_COMPLETE", "row") == "fla"
++_LEAN = True
++
++import triton
++import triton.language as tl
++from fla.ops.utils.op import exp2 as _exp2
++
++
++@triton.jit
++def b_complete(SLOT, RSLOT, POS, S0, SH, KC, G, VN, H0, H, K: tl.constexpr, V: tl.constexpr, BT: tl.constexpr):
++    """Next boundary state for (request r, head h) iff row t == BT-1 closed the chunk (else no-op), in place in H0 (vLLM's
++    recurrent_state, FLA [K, V] fp32 layout). Mirrors FLA chunk_gated_delta_rule_fwd_kernel_h_blockdim64 for ONE chunk with
++    USE_GK (KDA): h_k *= exp2(g_last_k); h += dot(kg_blk [64, BT], bf16(v_new) [BT, V]) per 64-row K block, with
++    kg = bf16(k * exp2(g_last - g)) as recompute_w_u_fwd_kda_kernel stores it and v_new = the row engine's VN rows."""
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    t = tl.load(POS + r)
++    if t != BT - 1:
++        return
++    s = tl.load(SLOT + r).to(tl.int64)
++    b = s * H + h
++    # H0 may be a strided view (vLLM paged state cache): slot stride S0, head stride SH; each [K, V] head block contiguous
++    rb = tl.load(RSLOT + r).to(tl.int64) * S0 + h * SH
++    kc = KC + b * BT * K
++    gg = G + b * BT * K
++    vn = VN + b * BT * V
++    h0 = H0 + rb
++    o_t = tl.arange(0, BT)
++    o_v = tl.arange(0, V)
++    b_v = tl.load(vn + o_t[:, None] * V + o_v[None, :])                       # [BT, V] bf16 (= bf16(fp32 v_new))
++    for i_k in tl.static_range(K // 64):
++        o_k = i_k * 64 + tl.arange(0, 64)
++        b_h = tl.load(h0 + o_k[:, None] * V + o_v[None, :]).to(tl.float32)    # [64, V]
++        b_gn = tl.load(gg + (BT - 1) * K + o_k).to(tl.float32)                # g at the chunk's last row
++        b_h *= _exp2(b_gn)[:, None]
++        b_k = tl.load(kc + o_k[:, None] + o_t[None, :] * K)                    # [64, BT] (k^T, bf16)
++        b_gk = tl.load(gg + o_k[:, None] + o_t[None, :] * K).to(tl.float32)   # [64, BT]
++        b_kg = (b_k * _exp2(b_gn[:, None] - b_gk)).to(b_k.dtype)
++        b_h += tl.dot(b_kg, b_v)
++        tl.store(h0 + o_k[:, None] * V + o_v[None, :], b_h.to(H0.dtype.element_ty))
++
++
++@triton.jit
++def b_scatter(SLOT, POS, QN, KN, VV, sv, GRAW, sg, BETA_IN, Q, KC, VC, GR, GRT, BETA, H, D: tl.constexpr, BT: tl.constexpr):
++    """Pure copies of request r's new row into slot caches at row t: Q/KC/VC/GR [S, H, BT, D], GRT [S, BT, H, D], BETA [S, H, BT].
++    QN/KN [R, H, D] contiguous; VV / GRAW rows of stride sv / sg (elements); BETA_IN [R, H] fp32 (already sigmoid)."""
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r).to(tl.int64)
++    o = tl.arange(0, D)
++    src = (r * H + h).to(tl.int64) * D + o
++    dst = ((s * H + h) * BT + t) * D + o
++    tl.store(Q + dst, tl.load(QN + src))
++    tl.store(KC + dst, tl.load(KN + src))
++    tl.store(VC + dst, tl.load(VV + r.to(tl.int64) * sv + h * D + o))
++    g = tl.load(GRAW + r.to(tl.int64) * sg + h * D + o)
++    tl.store(GR + dst, g)
++    tl.store(GRT + ((s * BT + t) * H + h) * D + o, g)
++    tl.store(BETA + (s * H + h) * BT + t, tl.load(BETA_IN + r * H + h))
++
++
++@triton.jit
++def b_scatter_g(SLOT, POS, GC, G, H, D: tl.constexpr, BT: tl.constexpr):
++    """G[s, h, t, :] = GC[r, t, h, :] (fp32 copy of the cumsum row t)."""
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r).to(tl.int64)
++    o = tl.arange(0, D)
++    tl.store(G + ((s * H + h) * BT + t) * D + o, tl.load(GC + ((r.to(tl.int64) * BT + t) * H + h) * D + o))
++
++
++@triton.jit
++def _conv_last_kernel(HIST, SLOT, RAW, sr, W, ACC, C, BLOCK: tl.constexpr):
++    """Lean v2: conv_silu_rows' expression for the new row (pre-SiLU, FP32) + the hist shift, one launch.
++    acc = x3*w3; acc = acc + x2*w2; acc = acc + x1*w1; acc = acc + x0*w0 (x0..x2 = the slot's hist rows, x3 = the new raw row),
++    every product and sum rounded separately (launch with enable_fp_fusion=False), then hist[s] = (x1, x2, x3)."""
++    r = tl.program_id(0)
++    s = tl.load(SLOT + r).to(tl.int64)
++    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    m = offs < C
++    h = HIST + s * 3 * C
++    x0 = tl.load(h + offs, mask=m, other=0.0)
++    x1 = tl.load(h + C + offs, mask=m, other=0.0)
++    x2 = tl.load(h + 2 * C + offs, mask=m, other=0.0)
++    x3 = tl.load(RAW + r.to(tl.int64) * sr + offs, mask=m, other=0.0)
++    w0 = tl.load(W + offs * 4 + 0, mask=m, other=0.0)
++    w1 = tl.load(W + offs * 4 + 1, mask=m, other=0.0)
++    w2 = tl.load(W + offs * 4 + 2, mask=m, other=0.0)
++    w3 = tl.load(W + offs * 4 + 3, mask=m, other=0.0)
++    acc = x3.to(tl.float32) * w3
++    acc = acc + x2.to(tl.float32) * w2
++    acc = acc + x1.to(tl.float32) * w1
++    acc = acc + x0.to(tl.float32) * w0
++    tl.store(ACC + r.to(tl.int64) * C + offs, acc, mask=m)
++    tl.store(h + offs, x1, mask=m)
++    tl.store(h + C + offs, x2, mask=m)
++    tl.store(h + 2 * C + offs, x3, mask=m)
++
++
++@triton.jit
++def _tail_kernel(TAIL, SLOT, POS, QKV, sq, G1, sg, B1, sb, P3, P4, NC, C63, BLOCK: tl.constexpr):
++    """K1 lean v2: tail[s, t, :] = (qkv | g1 | b1) of the new row when t < 63 (pure copy; t = the position before this row)."""
++    r = tl.program_id(0)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r).to(tl.int64)
++    if t >= C63:
++        return
++    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    m = offs < NC
++    rr = r.to(tl.int64)
++    a = tl.load(QKV + rr * sq + offs, mask=m & (offs < P3), other=0.0)
++    b = tl.load(G1 + rr * sg + (offs - P3), mask=m & (offs >= P3) & (offs < P4), other=0.0)
++    c = tl.load(B1 + rr * sb + (offs - P4), mask=m & (offs >= P4), other=0.0)
++    v = tl.where(offs < P3, a, tl.where(offs < P4, b, c))
++    tl.store(TAIL + (s * C63 + t) * NC + offs, v, mask=m)
++
++
++@triton.jit
++def b_scatter2(SLOT, POS, QN, KN, sqk, VV, sv, GRAW, sg, BETA_IN, Q, KC, VC, GR, BETA, H, D: tl.constexpr, BT: tl.constexpr):
++    """b_scatter without the GRT mirror and with strided q/k rows (QN/KN = views into one [R, 2H, D] l2norm output)."""
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r).to(tl.int64)
++    o = tl.arange(0, D)
++    rr = r.to(tl.int64)
++    dst = ((s * H + h) * BT + t) * D + o
++    tl.store(Q + dst, tl.load(QN + rr * sqk + h * D + o))
++    tl.store(KC + dst, tl.load(KN + rr * sqk + h * D + o))
++    tl.store(VC + dst, tl.load(VV + rr * sv + h * D + o))
++    tl.store(GR + dst, tl.load(GRAW + rr * sg + h * D + o))
++    tl.store(BETA + (s * H + h) * BT + t, tl.load(BETA_IN + r * H + h))
++
++
++_LEAN2 = _os.environ.get("K31_KDA_BI_LEAN2", "1") == "1"   # default ON (gated in-engine); =0: lean v1
++
++
++class StaticRowDecoder(RowDecoder):
++    """RowDecoder with device-side positions and a sync-free decode step (graph-capturable)."""
++
++    def __init__(self, *a, **k):
++        super().__init__(*a, **k)
++        self.pos_dev = torch.zeros(len(self.pos), dtype=torch.int32, device=self.Q.device)
++
++    # host <-> device position mirrors (eager only, outside graphs)
++    def pos_from_host(self):
++        self.pos_dev.copy_(torch.tensor(self.pos, dtype=torch.int32))
++
++    def pos_to_host(self):
++        self.pos = [int(x) for x in self.pos_dev.tolist()]
++
++    def ensure_grt(self):
++        """Eager: GRT [S, BT, H, D] = GR in FLA's [B, T, H, S] layout (rows > pos may be stale: an inclusive scan's row t never
++        reads later rows; verified bitwise by kdagraph_gate.py)."""
++        if _LEAN2:   # lean v2 never reads GRT (per-row b_gate reads GR): don't allocate the [S, BT, H, D] mirror
++            self.GRT = None
++            return
++        if getattr(self, "GRT", None) is None:
++            self.GRT = self.GR.transpose(1, 2).contiguous()
++
++    def rows_static(self, recurrent_state, SL, RSL, q, k, v, graw, braw, A_log, dt_bias):
++        """Device-only version of RowDecoder._rows for R = SL.numel() requests (one new row each). Returns core [R, H, D] BF16."""
++        from fla.modules.l2norm import l2norm_fwd
++        from fla.ops.kda.chunk_fwd import chunk_kda_fwd
++        from fla.ops.kda.gate import kda_gate_chunk_cumsum
++        from fla.ops.utils.constant import RCP_LN2
++
++        H, D = self.H, self.D
++        R = SL.shape[0]
++        dev = q.device
++        PO = self.pos_dev.index_select(0, SL)                   # int32 [R]
++        tt = PO.to(torch.int64)
++        grid = (R, H)
++        if _LEAN2:
++            # one l2norm over q|k (row-local, same pinned config), strided scatter, per-row gate cumsum (rowkern.b_gate)
++            from .rowdec import _gate_cfg
++
++            qk = l2norm_fwd(q_k_pair(q, k).reshape(1, R, 2 * H, D))
++            qk = qk[0] if isinstance(qk, tuple) else qk
++            qk = qk.reshape(R, 2 * H, D)
++            assert v.stride(1) == 1 and graw.stride(1) == 1
++            beta_in = braw.reshape(R, H).float().sigmoid()
++            b_scatter2[grid](SL, PO, qk, qk[:, H:], 2 * H * D, v, v.stride(0), graw, graw.stride(0), beta_in,
++                             self.Q, self.KC, self.VC, self.GR, self.BETA, H, D=D, BT=BT, num_warps=1)
++            BS, nw = _gate_cfg()
++            RK.b_gate[(R, H, triton.cdiv(D, BS))](SL, PO, self.GR, self.G, A_log, dt_bias, self.lower, RCP_LN2, H, S=D, BT=BT,
++                                                   BS=BS, num_warps=nw)
++        elif _LEAN:
++            qn = l2norm_fwd(q.contiguous().reshape(1, R, H, D))
++            qn = qn[0] if isinstance(qn, tuple) else qn
++            kn = l2norm_fwd(k.contiguous().reshape(1, R, H, D))
++            kn = kn[0] if isinstance(kn, tuple) else kn
++            assert v.stride(1) == 1 and graw.stride(1) == 1
++            beta_in = braw.reshape(R, H).float().sigmoid()
++            b_scatter[grid](SL, PO, qn.contiguous(), kn.contiguous(), v, v.stride(0), graw, graw.stride(0), beta_in,
++                            self.Q, self.KC, self.VC, self.GR, self.GRT, self.BETA, H, D=D, BT=BT, num_warps=1)
++            gc = kda_gate_chunk_cumsum(self.GRT.index_select(0, SL), A_log, chunk_size=BT, scale=RCP_LN2, dt_bias=dt_bias,
++                                       lower_bound=self.lower)   # [R, BT, H, D] fp32; rows > t stale (unused by row t)
++            b_scatter_g[grid](SL, PO, gc, self.G, H, D=D, BT=BT, num_warps=1)
++        else:
++            q, k, v, graw, braw = (x.contiguous() for x in (q, k, v, graw, braw))
++            qn = l2norm_fwd(q.reshape(1, R, H, D))
++            qn = qn[0] if isinstance(qn, tuple) else qn
++            kn = l2norm_fwd(k.reshape(1, R, H, D))
++            kn = kn[0] if isinstance(kn, tuple) else kn
++            hh = torch.arange(H, device=dev)
++            idx = (SL[:, None], hh[None, :], tt[:, None])
++            self.Q[idx] = qn.reshape(R, H, D)
++            self.KC[idx] = kn.reshape(R, H, D)
++            self.VC[idx] = v.reshape(R, H, D)
++            self.GR[idx] = graw.reshape(R, H, D)
++            self.BETA[idx] = braw.reshape(R, H).float().sigmoid()
++            # g_cum of row t of each open chunk: fixed-shape batch, rows > t zero (the varlen call's masked loads)
++            ar = torch.arange(BT, device=dev)
++            gin = self.GR.index_select(0, SL).transpose(1, 2)        # [R, BT, H, D]
++            gin = torch.where((ar[None, :] <= tt[:, None])[:, :, None, None], gin, torch.zeros((), dtype=gin.dtype, device=dev))
++            gc = kda_gate_chunk_cumsum(gin.contiguous(), A_log, chunk_size=BT, scale=RCP_LN2, dt_bias=dt_bias,
++                                       lower_bound=self.lower)       # [R, BT, H, D] fp32
++            self.G[idx] = gc[torch.arange(R, device=dev), tt]        # [R, H, D]
++        AQK = torch.zeros(R, H, BT, dtype=torch.bfloat16, device=dev)
++        AKK = torch.zeros(R, H, BT, dtype=torch.bfloat16, device=dev)
++        W = torch.empty(R, H, D, dtype=torch.bfloat16, device=dev)
++        U = torch.empty(R, H, D, dtype=torch.bfloat16, device=dev)
++        O = torch.empty(R, H, D, dtype=torch.bfloat16, device=dev)
++        SL32 = SL.to(torch.int32)
++        RSL32 = RSL.to(torch.int32)
++        RK.b_diag[grid](SL32, PO, self.Q, self.KC, self.G, self.BETA, AQK, self.AD, self.AP, self.scale, H, K=D, BT=BT, BC=16,
++                        num_warps=1)
++        RK.b_inter[grid](SL32, PO, self.Q, self.KC, self.G, self.BETA, AQK, self.AD, self.AF, AKK, self.scale, H, K=D, BT=BT,
++                         BC=16, num_warps=4)
++        RK.b_wu[grid](SL32, PO, self.KC, self.VC, self.G, self.BETA, AKK, W, U, H, K=D, V=D, BT=BT, num_warps=2)
++        if recurrent_state.stride(3) != 1 or recurrent_state.stride(2) != D:
++            raise RuntimeError(f"k31kdagraph: per-head state must be a contiguous [K, V] block, strides {recurrent_state.stride()}")
++        S0, SH = recurrent_state.stride(0), recurrent_state.stride(1)
++        RK.b_stage_a[grid](SL32, RSL32, PO, S0, SH, self.Q, self.G, U, W, AQK, recurrent_state, self.VN, O, self.scale, H, K=D, V=D,
++                           BT=BT, R=16, num_warps=4)
++        # chunk completion, always run; keep the new boundary state only where row t closed the chunk
++        if _PROF_NO_COMPLETE:   # timing only (wrong bits at chunk ends)
++            self.pos_dev.index_copy_(0, SL, ((PO + 1) % BT).to(torch.int32))
++            return O
++        if _COMPLETE_FLA:   # reference variant: FLA chunk_kda_fwd on all R cached chunks, kept where t == BT-1
++            tq = lambda X: X.index_select(0, SL).transpose(1, 2).contiguous()  # noqa: E731  [R, BT, H, D]
++            beta = self.BETA.index_select(0, SL).transpose(1, 2).contiguous()   # [R, BT, H]
++            h0 = recurrent_state.index_select(0, RSL)
++            out = chunk_kda_fwd(q=tq(self.Q), k=tq(self.KC), v=tq(self.VC), g=tq(self.GR), beta=beta, scale=self.scale,
++                                initial_state=h0, output_final_state=True, safe_gate=True, lower_bound=self.lower,
++                                use_gate_in_kernel=True, A_log=A_log, dt_bias=dt_bias)
++            done = (tt == BT - 1)[:, None, None, None]
++            recurrent_state.index_copy_(0, RSL, torch.where(done, out[1], h0))
++        else:               # masked row-engine completion: work only for (request, head) programs whose chunk just closed
++            b_complete[grid](SL32, RSL32, PO, S0, SH, self.KC, self.G, self.VN, recurrent_state, H, K=D, V=D, BT=BT, num_warps=4)
++        self.pos_dev.index_copy_(0, SL, ((PO + 1) % BT).to(torch.int32))
++        return O
++
++
++def decode_step_static(st, rows, recurrent_state, SL, RSL, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps):
++    """Graph-capturable equivalent of BIKDAState.step's row-engine branch for an all-decode, all-warm batch.
++    st: k31kdabi.BIKDAState (tail / hist / P / H / D / W); rows: StaticRowDecoder sharing st's slot ids.
++    raw [R, 3P] pre-conv q|k|v, g1f [R, P], b1 [R, H], g2 [R, H, D]. Returns normed core [R, H, D] BF16.
++    Phase-1 bookkeeping: tail row at pos (if pos < 63), pos -> (pos+1) % 64 (device: rows.pos_dev; st.pos host list is NOT
++    updated here; call sync_st_from_device() before handing a slot back to phase 1)."""
++    P, Wm = st.P, st.W - 1
++    if _LEAN2:
++        return _decode_step_lean2(st, rows, recurrent_state, SL, RSL, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps)
++    with torch.no_grad():
++        ext = torch.cat([st.hist.index_select(0, SL), raw[:, None]], 1)                        # [R, W, 3P]
++        if _LEAN:
++            # conv_silu_rows' expression for the LAST row of each block only (same elementwise kernels, same order)
++            xf, wf = ext.float(), conv_w.float()
++            acc = xf[:, Wm] * wf[:, Wm]
++            for shift in range(1, Wm + 1):
++                acc = acc + xf[:, Wm - shift] * wf[:, Wm - shift]
++            qkv = torch.nn.functional.silu(acc).to(raw.dtype)
++        else:
++            qkv = conv_silu_rows(ext.reshape(-1, ext.shape[-1]), conv_w).reshape(ext.shape)[:, Wm].to(raw.dtype)
++        st.hist.index_copy_(0, SL, ext[:, 1:].contiguous())
++        PO = rows.pos_dev.index_select(0, SL).to(torch.int64)                                   # pos before this row
++        core = rows.rows_static(recurrent_state, SL, RSL, qkv[:, :P], qkv[:, P:2 * P], qkv[:, 2 * P:], g1f, b1, A_log, dt_bias)
++        new_rows = torch.cat([qkv, g1f, b1], 1)                                                 # [R, 4P+H]
++        C = st.tail.shape[1]                                                                   # 63
++        pc = PO.clamp(max=C - 1)
++        old = st.tail[SL, pc]
++        st.tail[SL, pc] = torch.where((PO < C)[:, None], new_rows, old)                        # pos == 63: unchanged
++        return gated_rms_norm(core, g2, norm_w, eps).to(torch.bfloat16)
++
++
++
++
++def q_k_pair(q, k):
++    """q, k are adjacent column blocks of the post-conv qkv rows: return the contiguous [R, 2P] q|k block."""
++    if q.data_ptr() + q.shape[1] * q.element_size() == k.data_ptr() and q.stride() == k.stride():
++        return q.as_strided((q.shape[0], 2 * q.shape[1]), q.stride()).contiguous()
++    return torch.cat([q, k], 1)
++
++
++def _decode_step_lean2(st, rows, recurrent_state, SL, RSL, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps):
++    """decode_step_static with fused glue (lean v2): conv-last + hist shift in one kernel, tail update in one kernel; same
++    bits (pure copies + the trainer's conv op order with separately rounded mul / add)."""
++    P = st.P
++    R = SL.shape[0]
++    C = 3 * P
++    with torch.no_grad():
++        acc = torch.empty((R, C), dtype=torch.float32, device=raw.device)
++        cw = conv_w if (conv_w.dtype == torch.float32 and conv_w.is_contiguous()) else conv_w.float().contiguous()
++        assert raw.stride(1) == 1 and st.hist.is_contiguous()
++        _conv_last_kernel[(R, triton.cdiv(C, 1024))](st.hist, SL, raw, raw.stride(0), cw, acc, C, BLOCK=1024, num_warps=4,
++                                                     enable_fp_fusion=False)
++        qkv = torch.nn.functional.silu(acc).to(raw.dtype)
++        PO = rows.pos_dev.index_select(0, SL)                                                   # int32, pos before this row
++        core = rows.rows_static(recurrent_state, SL, RSL, qkv[:, :P], qkv[:, P:2 * P], qkv[:, 2 * P:], g1f, b1, A_log, dt_bias)
++        NC = st.tail.shape[2]
++        assert g1f.stride(1) == 1 and b1.stride(1) == 1 and st.tail.is_contiguous()
++        _tail_kernel[(R, triton.cdiv(NC, 1024))](st.tail, SL, PO, qkv, qkv.stride(0), g1f, g1f.stride(0), b1, b1.stride(0),
++                                                 C, 4 * P, NC, st.tail.shape[1], BLOCK=1024, num_warps=4)
++        return gated_rms_norm(core, g2, norm_w, eps).to(torch.bfloat16)
++
++
++_SHARED_POOL = _os.environ.get("K31_KDA_BI_GRAPH_SHARED_POOL", "1") == "1"   # default ON; =0: one private pool per graph
++# One mempool per device for every KDA decode graph (all layers, all buckets). Safe: graphs replay strictly one at a time on
++# one stream, each replay's output is cloned before the next replay, and every persistent tensor (slot caches,
++# recurrent_state, io inputs) is allocated outside capture. Private pools grow with layers x buckets (proxy TP1: OOM at R=128).
++_POOLS = {}
++
++_BUCKETS = sorted({int(x) for x in _os.environ.get("K31_KDA_BI_GRAPH_BUCKETS",
++                                                  "1,2,4,8,16,24,32,48,64,96,128,192,256").split(",") if x})
++
++
++class GraphDecoder:
++    """Per-layer graph cache for decode_step_static: one CUDA graph per batch-size BUCKET (K31_KDA_BI_GRAPH_BUCKETS),
++    so the number of graphs per layer stays bounded under serving. A batch of R requests runs in the smallest bucket Rb >= R;
++    rows R..Rb-1 are padding: they point at the reserved dummy compact slot (BIKDAState.real[-1] == -2), read request 0's state
++    row (read-only), get zero inputs, and the dummy slot's position is parked at 0 before every step, so its chunk completion
++    (b_complete writes only at t == 63) never fires. R > the largest bucket: decode_step_static eagerly (still sync-free)."""
++
++    def __init__(self, st, rows):
++        self.st, self.rows = st, rows
++        self.graphs = {}
++        self.warm_r = set()
++        self.n_replay = 0
++        self.dummy = len(st.real) - 1
++        assert st.real[self.dummy] == -2, "graph decode needs the reserved dummy slot (set K31_KDA_BI_GRAPH=1 before BIKDAState)"
++
++    def _bucket(self, R):
++        return next((b for b in _BUCKETS if b >= R), None)
++
++    def step(self, recurrent_state, slots, real_slots, raw, g1f, b1, g2, conv_w, A_log, dt_bias, norm_w, eps):
++        st, rows = self.st, self.rows
++        rows.ensure_grt()
++        R = len(slots)
++        dev = raw.device
++        Rb = self._bucket(R)
++        if Rb is None:
++            ids = torch.tensor(slots + real_slots, dtype=torch.int64).pin_memory().to(dev, non_blocking=True)
++            return decode_step_static(st, rows, recurrent_state, ids[:R], ids[R:], raw, g1f, b1, g2, conv_w, A_log, dt_bias,
++                                      norm_w, eps)
++        pad = Rb - R
++        ids = torch.tensor(slots + [self.dummy] * pad + real_slots + [real_slots[0]] * pad,
++                           dtype=torch.int64).pin_memory().to(dev, non_blocking=True)
++        SL, RSL = ids[:Rb], ids[Rb:]
++        rows.pos_dev[self.dummy] = 0                      # park the dummy slot: its completion can never fire
++        if Rb not in self.warm_r:
++            # first time at this bucket: run eagerly (compiles every kernel; a correct step), capture on the next occurrence
++            padz = lambda x: torch.cat([x, x.new_zeros((pad,) + tuple(x.shape[1:]))]) if pad else x  # noqa: E731
++            out = decode_step_static(st, rows, recurrent_state, SL, RSL, padz(raw), padz(g1f), padz(b1), padz(g2), conv_w,
++                                     A_log, dt_bias, norm_w, eps)
++            self.warm_r.add(Rb)
++            return out[:R]
++        # A graph bakes in recurrent_state's address: vLLM allocates the real KV cache AFTER its cudagraph memory
++        # profiling (whose dummy decode batches can warm slots and capture here), so re-key on the state tensor
++        # Also key on the persistent parameters the graph bakes (conv_w / A_log / dt_bias: vLLM passes the module's own
++        # tensors, updated in place by weight sync); norm_w is staged by copy every replay (callers may pass a per-call .to() temp)
++        key = (Rb, recurrent_state.data_ptr(), tuple(recurrent_state.stride()), conv_w.data_ptr(), A_log.data_ptr(),
++               dt_bias.data_ptr())
++        if getattr(self, "_state_key", None) != key[1:]:
++            self.graphs.clear()
++            self._state_key = key[1:]
++        g = self.graphs.get(Rb)
++        if g is None:
++            mk = lambda x: x.new_zeros((Rb,) + tuple(x.shape[1:]))  # noqa: E731  padding rows stay zero forever
++            io = {"SL": SL.clone(), "RSL": RSL.clone(), "raw": mk(raw), "g1f": mk(g1f), "b1": mk(b1), "g2": mk(g2),
++                  "norm_w": norm_w.clone()}
++            graph = torch.cuda.CUDAGraph()
++            torch.cuda.synchronize()
++            m0 = torch.cuda.memory_reserved()
++            pool = None
++            if _SHARED_POOL:
++                dev_i = torch.cuda.current_device()
++                pool = _POOLS.get(dev_i)
++                if pool is None:
++                    pool = _POOLS[dev_i] = torch.cuda.graph_pool_handle()
++            with torch.cuda.graph(graph, pool=pool):
++                io["out"] = decode_step_static(st, rows, recurrent_state, io["SL"], io["RSL"], io["raw"], io["g1f"], io["b1"],
++                                               io["g2"], conv_w, A_log, dt_bias, io["norm_w"], eps)
++            torch.cuda.synchronize()
++            self.cap_bytes = getattr(self, "cap_bytes", {})
++            self.cap_bytes[Rb] = torch.cuda.memory_reserved() - m0
++            g = self.graphs[Rb] = (graph, io)
++        graph, io = g
++        io["SL"].copy_(SL)
++        io["RSL"].copy_(RSL)
++        io["raw"][:R].copy_(raw)
++        io["g1f"][:R].copy_(g1f)
++        io["b1"][:R].copy_(b1)
++        io["g2"][:R].copy_(g2)
++        io["norm_w"].copy_(norm_w)
++        if pad:   # rows of a larger earlier batch may linger in R..Rb-1 of a reused bucket: zero them
++            for k in ("raw", "g1f", "b1", "g2"):
++                io[k][R:].zero_()
++        graph.replay()
++        self.n_replay += 1
++        return io["out"][:R].clone()
+diff --git a/kimi-k31/k31kdabi/k31kdabi/rowdec.py b/kimi-k31/k31kdabi/k31kdabi/rowdec.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..67d26eb3ad8e299f6cdec9a18ff325e882d310c5
+--- /dev/null
++++ b/kimi-k31/k31kdabi/k31kdabi/rowdec.py
+@@ -0,0 +1,159 @@
++"""K31 BI KDA decode through the row engine (phase 2): one new token per request, bitwise equal to the FLA chunk contract.
++
++Per (slot, head) caches of the open chunk (rows 0..pos-1): q^, k^ (l2-normed, BF16), v (BF16), raw gate (BF16), beta (sigmoid, FP32),
++diagonal-block inverse rows (FP32, pre/post identity), merged-inverse rows (FP32), v_new rows (BF16). g_cum row t comes from FLA's gate-cumsum kernel
++expression on the slot's raw-gate block with T = t + 1 (rowkern.b_gate, FLA's pinned BS / warps). The boundary state lives in vLLM's recurrent-state slot
++(FLA [H, K, V] FP32 layout, shared with the phase-1 path). When a row completes a 64-token chunk, the next boundary state is FLA's own
++chunk_kda_fwd on the cached chunk (q^, k^ already normalized, as the contract call does after its l2norm) with output_final_state.
++"""
++from __future__ import annotations
++
++import torch
++import triton
++
++from . import rowkern as RK
++
++
++def _to_dev(lists, dev):
++    from . import _to_dev as f
++
++    return f(lists, dev)
++
++
++def _gate_cfg():
++    """FLA's pinned (configs[0]) BS / num_warps of kda_gate_chunk_cumsum_vector_kernel: tl.cumsum's scan layout must match."""
++    from triton.runtime.autotuner import Autotuner
++    import fla.ops.kda.gate as G
++
++    t = G.kda_gate_chunk_cumsum_vector_kernel
++    for _ in range(8):
++        if isinstance(t, Autotuner):
++            break
++        t = getattr(t, "fn", None)
++    if not getattr(t, "_k31_pinned", False):
++        raise RuntimeError("K31 BI KDA row engine: FLA gate cumsum autotuner is not pinned (call pin_fla_autotune first)")
++    c = t.configs[0]
++    return c.kwargs["BS"], c.num_warps
++
++BT = 64
++BC = 16
++
++
++class RowDecoder:
++    def __init__(self, n_slots, H, D, device, lower, scale, rmap=lambda ids: list(ids)):
++        f32, bf16 = torch.float32, torch.bfloat16
++        self.H, self.D, self.lower, self.scale = H, D, float(lower), float(scale)
++        z = lambda *shape, dt: torch.zeros(*shape, dtype=dt, device=device)  # noqa: E731
++        self.Q = z(n_slots, H, BT, D, dt=bf16)
++        self.KC = z(n_slots, H, BT, D, dt=bf16)
++        self.VC = z(n_slots, H, BT, D, dt=bf16)
++        self.GR = z(n_slots, H, BT, D, dt=bf16)
++        self.G = z(n_slots, H, BT, D, dt=f32)
++        self.BETA = z(n_slots, H, BT, dt=f32)
++        self.AD = z(n_slots, H, BT, BC, dt=f32)
++        self.AP = z(n_slots, H, BT, BC, dt=f32)
++        self.AF = z(n_slots, H, BT, BT, dt=f32)
++        self.VN = z(n_slots, H, BT, D, dt=bf16)
++        self.pos = [0] * n_slots
++        self.warm = [False] * n_slots
++        self.rmap = rmap  # compact ids -> rows of the caller's recurrent_state
++
++    # ------------------------------------------------------------------------------------------------ one row
++    def _rows(self, recurrent_state, slots, q, k, v, graw, braw, A_log, dt_bias):
++        """Append ONE row (q, k, v, raw gate [R, H*D] / raw beta [R, H]) to each slot's open chunk; returns core [R, H, D] BF16."""
++        from fla.modules.l2norm import l2norm_fwd
++        from fla.ops.utils.constant import RCP_LN2
++
++        H, D = self.H, self.D
++        R = len(slots)
++        dev = q.device
++        ts = [self.pos[s] for s in slots]
++        sl, tt, rsl_ = _to_dev([slots, ts, self.rmap(slots)], dev)
++        q, k, v, graw, braw = (x.contiguous() for x in (q, k, v, graw, braw))
++        qn = l2norm_fwd(q.reshape(1, R, H, D))
++        qn = qn[0] if isinstance(qn, tuple) else qn
++        kn = l2norm_fwd(k.reshape(1, R, H, D))
++        kn = kn[0] if isinstance(kn, tuple) else kn
++        hh = torch.arange(H, device=dev)
++        idx = (sl[:, None], hh[None, :], tt[:, None])
++        self.Q[idx] = qn.reshape(R, H, D)
++        self.KC[idx] = kn.reshape(R, H, D)
++        self.VC[idx] = v.reshape(R, H, D)
++        self.GR[idx] = graw.reshape(R, H, D)
++        self.BETA[idx] = braw.reshape(R, H).float().sigmoid()
++        # g_cum row t of each open chunk: FLA's gate-cumsum kernel expression on the slot's 64-row block with T = t + 1 (GPU, no host loop)
++        SLp, POp = sl.to(torch.int32), tt.to(torch.int32)
++        BS, nw = _gate_cfg()
++        RK.b_gate[(R, H, triton.cdiv(D, BS))](SLp, POp, self.GR, self.G, A_log, dt_bias, self.lower, RCP_LN2, H, S=D, BT=BT, BS=BS,
++                                               num_warps=nw)
++        # scratch per request
++        AQK = torch.zeros(R, H, BT, dtype=torch.bfloat16, device=dev)
++        AKK = torch.zeros(R, H, BT, dtype=torch.bfloat16, device=dev)
++        W = torch.empty(R, H, D, dtype=torch.bfloat16, device=dev)
++        U = torch.empty(R, H, D, dtype=torch.bfloat16, device=dev)
++        O = torch.empty(R, H, D, dtype=torch.bfloat16, device=dev)
++        SL = sl.to(torch.int32)
++        RSL = rsl_.to(torch.int32)
++        PO = tt.to(torch.int32)
++        grid = (R, H)
++        RK.b_diag[grid](SL, PO, self.Q, self.KC, self.G, self.BETA, AQK, self.AD, self.AP, self.scale, H, K=D, BT=BT, BC=BC,
++                        num_warps=1)
++        RK.b_inter[grid](SL, PO, self.Q, self.KC, self.G, self.BETA, AQK, self.AD, self.AF, AKK, self.scale, H, K=D, BT=BT,
++                         BC=BC, num_warps=4)
++        RK.b_wu[grid](SL, PO, self.KC, self.VC, self.G, self.BETA, AKK, W, U, H, K=D, V=D, BT=BT, num_warps=2)
++        if recurrent_state.stride(3) != 1 or recurrent_state.stride(2) != D:
++            raise RuntimeError(f"K31 BI KDA row engine: per-head state must be a contiguous [K, V] block, strides {recurrent_state.stride()}")
++        RK.b_stage_a[grid](SL, RSL, PO, recurrent_state.stride(0), recurrent_state.stride(1), self.Q, self.G, U, W, AQK, recurrent_state, self.VN, O, self.scale, H, K=D, V=D, BT=BT,
++                           R=16, num_warps=4)
++        # chunk completion -> next boundary state (FLA's own chunk forward on the cached chunk), open a new chunk
++        done = [i for i, t in enumerate(ts) if t + 1 == BT]
++        if done:
++            self._complete(recurrent_state, [slots[i] for i in done], A_log, dt_bias)
++            self._clear([slots[i] for i in done])
++        for s, t in zip(slots, ts):
++            self.pos[s] = (t + 1) % BT
++        return O
++
++    def _complete(self, recurrent_state, slots, A_log, dt_bias):
++        from fla.ops.kda.chunk_fwd import chunk_kda_fwd
++
++        H, D = self.H, self.D
++        n = len(slots)
++        sl, rsl = _to_dev([slots, self.rmap(slots)], self.Q.device)
++        tq = lambda X: X.index_select(0, sl).transpose(1, 2).reshape(1, n * BT, H, D).contiguous()  # noqa: E731
++        beta = self.BETA.index_select(0, sl).transpose(1, 2).reshape(1, n * BT, H).contiguous()
++        cu = torch.arange(0, (n + 1) * BT, BT, device=self.Q.device, dtype=torch.long)
++        h0 = recurrent_state.index_select(0, rsl)
++        out = chunk_kda_fwd(q=tq(self.Q), k=tq(self.KC), v=tq(self.VC), g=tq(self.GR), beta=beta, scale=self.scale,
++                            initial_state=h0, output_final_state=True, cu_seqlens=cu, safe_gate=True, lower_bound=self.lower,
++                            use_gate_in_kernel=True, A_log=A_log, dt_bias=dt_bias)
++        recurrent_state.index_copy_(0, rsl, out[1])
++
++    def _clear(self, slots):
++        """Open a fresh chunk: zero the slot's row caches (rows above t must read as 0 in the row kernels, as in FLA's masked tiles)."""
++        (sl,) = _to_dev([slots], self.Q.device)
++        for X in (self.Q, self.KC, self.VC, self.GR, self.G, self.BETA, self.AD, self.AP, self.AF, self.VN):
++            X.index_fill_(0, sl, 0)
++
++    # ------------------------------------------------------------------------------------------------ public
++    def warm_up(self, recurrent_state, slots, tails, A_log, dt_bias):
++        """First decode of a slot after phase-1 prefill: replay its open-chunk rows (phase-1 tail rows: post-conv q|k|v, raw g, raw b)."""
++        P = self.H * self.D
++        for s in slots:
++            self.pos[s] = 0
++        if slots:
++            self._clear(slots)
++        maxp = max((t.shape[0] for t in tails), default=0)
++        for j in range(maxp):
++            sub = [(s, t[j]) for s, t in zip(slots, tails) if j < t.shape[0]]
++            if not sub:
++                continue
++            rows = torch.stack([r for _, r in sub])
++            self._rows(recurrent_state, [s for s, _ in sub], rows[:, :P], rows[:, P:2 * P], rows[:, 2 * P:3 * P],
++                       rows[:, 3 * P:4 * P], rows[:, 4 * P:], A_log, dt_bias)
++        for s in slots:
++            self.warm[s] = True
++
++    def decode(self, recurrent_state, slots, qkv, graw, braw, A_log, dt_bias):
++        P = self.H * self.D
++        return self._rows(recurrent_state, slots, qkv[:, :P], qkv[:, P:2 * P], qkv[:, 2 * P:], graw, braw, A_log, dt_bias)
+diff --git a/kimi-k31/k31kdabi/k31kdabi/rowkern.py b/kimi-k31/k31kdabi/k31kdabi/rowkern.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..537e8b930ea871c7cd0cf36e68fa8b52b9c3a1de
+--- /dev/null
++++ b/kimi-k31/k31kdabi/k31kdabi/rowkern.py
+@@ -0,0 +1,301 @@
++"""K31 BI KDA row engine kernels (phase 2): compute ONE new row of the open chunk, bitwise equal to FLA 0.5.2 chunk_kda.
++
++The four row kernels mirror FLA's chunk kernels (validated bitwise per row against FLA in tracks/mlite/val/row_engine.py):
++  row_diag_kernel    <- chunk_kda_fwd_kernel_intra_sub_chunk (SAFE_GATE, BI sub-chunk-start reference; launch with num_warps=1)
++  row_inter_kernel   <- chunk_kda_fwd_kernel_inter_solve_fused (off-diagonal blocks + merged inverse; FP32-IEEE solve dots)
++  row_wu_kernel      <- recompute_w_u_fwd_kda_kernel (launch with num_warps=2)
++  row_stage_a_kernel <- chunk_gated_delta_rule_fwd_h (v_new on the BF16 chunk state) + chunk_gla_fwd_kernel_o
++Each works on one (sequence, head)'s per-chunk buffers ([BT, .] row-major) and a row index t. The b_* wrappers run them on a
++(request, head) grid over per-slot caches [n_slots, H, BT, .] and per-request scratch [R, H, .].
++Basis: on gfx950 a tl.dot element is tile-shape invariant (tracks/mlite/val/row_tile_probe.py), so a row in a 16-row tile equals
++FLA's 64-row-tile result; rows above t are zero-masked (their coefficients for row t are exactly 0).
++"""
++import triton
++import triton.language as tl
++
++from fla.ops.utils.op import exp, exp2
++from fla.ops.kda.chunk_intra import SOLVE_TRIL_DOT_PRECISION as SOLVE_PREC
++
++
++@triton.jit
++def row_stage_a_kernel(q, g, u, w, A, h0, vnew, o, t, scale,
++                       K: tl.constexpr, V: tl.constexpr, BT: tl.constexpr, R: tl.constexpr):
++    """Single head. q/g/u/w/A/vnew: [BT, .] row-major for the open chunk; h0 [K, V] fp32. Writes vnew[t], o[t]."""
++    rr = tl.arange(0, R)
++    ok = tl.arange(0, K)
++    ov = tl.arange(0, V)
++    row0 = rr == 0
++    # chunk-start state as the h kernel stores it (k dtype = bf16), K split in 64-blocks like FLA
++    hb1 = tl.load(h0 + tl.arange(0, 64)[:, None] * V + ov[None, :]).to(tl.bfloat16)
++    hb2 = tl.load(h0 + (64 + tl.arange(0, 64))[:, None] * V + ov[None, :]).to(tl.bfloat16)
++    # ---- v_new_t = u_t - w_t @ hb  (h kernel: b_v = dot(w1, h1); b_v += dot(w2, h2); b_v = load(u) - b_v)
++    w1 = tl.load(w + t * K + tl.arange(0, 64)[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0)
++    w2 = tl.load(w + t * K + 64 + tl.arange(0, 64)[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0)
++    b_v = tl.dot(w1, hb1)
++    b_v += tl.dot(w2, hb2)
++    b_u = tl.load(u + t * V + ov[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0)
++    b_v = b_u - b_v
++    tl.store(vnew + t * V + ov[None, :] + rr[:, None] * 0, b_v.to(vnew.dtype.element_ty), mask=row0[:, None])
++    tl.debug_barrier()
++    # ---- o_t  (o kernel: b_o += dot(bf16(q*exp2(g)), h) per K block; b_o *= scale; b_o += dot(bf16(mask(A)), v_new))
++    b_o = tl.zeros([R, V], dtype=tl.float32)
++    for i_k in tl.static_range(2):
++        okk = i_k * 64 + tl.arange(0, 64)
++        b_q = tl.load(q + t * K + okk[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0)
++        b_g = tl.load(g + t * K + okk[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0).to(tl.float32)
++        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
++        if i_k == 0:
++            b_o += tl.dot(b_qg, hb1.to(b_qg.dtype))
++        else:
++            b_o += tl.dot(b_qg, hb2.to(b_qg.dtype))
++    b_o *= scale
++    oi = tl.arange(0, BT)
++    b_A = tl.load(A + t * BT + oi[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0)
++    b_A = tl.where((oi[None, :] <= t) & row0[:, None], b_A, 0.)
++    b_vn = tl.load(vnew + oi[:, None] * V + ov[None, :], mask=(oi[:, None] <= t), other=0.0)
++    b_A = b_A.to(b_vn.dtype)
++    b_o += tl.dot(b_A, b_vn)
++    tl.store(o + t * V + ov[None, :] + rr[:, None] * 0, b_o.to(o.dtype.element_ty), mask=row0[:, None])
++
++
++@triton.jit
++def row_diag_kernel(q, k, g, beta, Aqk, Ainv, Apre, t, scale,
++                    K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
++    """FLA chunk_kda_fwd_kernel_intra_sub_chunk (SAFE_GATE, BI reference = sub-chunk start) VERBATIM on row t's sub-chunk with
++    T = t + 1 (FLA is prefix-invariant here: measured, all chunk lengths give the same rows). Recomputes the sub-chunk's rows <= t
++    (<= 16) so the forward substitution runs on the same register tensors / reduction layouts as FLA: a version that assembled b_Ai
++    from cached rows changed tl.sum's reduction layout and the FP32 inverse by 1 ulp on some rows (tests/probe_rowdec.py).
++    Writes Aqk[t, sub-chunk cols] and Ainv[rows <= t, :BC] (fp32, incl. identity; raw Akk is staged in the same rows as FLA
++    stages it in Akkd). Apre is unused (kept for the launch signature)."""
++    i_ti = (t // BC) * BC
++    Tl = t - i_ti + 1                                # valid rows of this sub-chunk (FLA: min(BC, T - i_ti) with T = t + 1)
++    o_i = tl.arange(0, BC)
++    o_k = tl.arange(0, K)
++    o_c = i_ti + o_i
++    m_c = o_i < Tl
++    b_q = tl.load(q + o_c[:, None] * K + o_k[None, :], mask=m_c[:, None], other=0.0)
++    b_k = tl.load(k + o_c[:, None] * K + o_k[None, :], mask=m_c[:, None], other=0.0)
++    b_g = tl.load(g + o_c[:, None] * K + o_k[None, :], mask=m_c[:, None], other=0.0)
++    b_beta = tl.load(beta + o_c, mask=m_c, other=0.0)
++    b_gn = tl.load(g + i_ti * K + o_k)[None, :]
++    b_gm = (b_g - b_gn).to(tl.float32)
++    b_gq = tl.where(m_c[:, None], exp2(b_gm), 0.)
++    b_gk = tl.where(m_c[:, None], exp2(-b_gm), 0.)
++    b_kgt = tl.trans(b_k * b_gk)
++    b_Aqk = tl.dot(b_q * b_gq, b_kgt) * scale
++    b_Akk = tl.dot(b_k * b_gq, b_kgt) * b_beta[:, None]
++    m_Aqk = o_i[:, None] >= o_i[None, :]
++    m_Akk = o_i[:, None] > o_i[None, :]
++    m_I = o_i[:, None] == o_i[None, :]
++    b_Aqk = tl.where(m_Aqk, b_Aqk, 0.0)
++    b_Akk = tl.where(m_Akk, b_Akk, 0.0)
++    is_t = o_c == t
++    tl.store(Aqk + o_c[:, None] * BT + (i_ti + o_i)[None, :], b_Aqk.to(Aqk.dtype.element_ty), mask=is_t[:, None])
++    p_Akk = Ainv + o_c[:, None] * BC + o_i[None, :]
++    m_Akk_st = m_c[:, None] & (o_i[None, :] < BC)
++    tl.store(p_Akk, b_Akk.to(Ainv.dtype.element_ty), mask=m_Akk_st)
++    tl.debug_barrier()
++    b_Ai = -b_Akk
++    for i in range(2, Tl):
++        b_a = -tl.load(Ainv + (i_ti + i) * BC + o_i)
++        b_a = tl.where(o_i < i, b_a, 0.)
++        b_a += tl.sum(b_a[:, None] * b_Ai, 0)
++        b_Ai = tl.where((o_i == i)[:, None], b_a, b_Ai)
++    b_Ai += m_I
++    tl.debug_barrier()
++    tl.store(p_Akk, b_Ai.to(Ainv.dtype.element_ty), mask=m_Akk_st)
++
++
++@triton.jit
++def _ld(ptr, rows, cols, ld, mrow):
++    return tl.load(ptr + rows[:, None] * ld + cols[None, :], mask=mrow[:, None], other=0.0).to(tl.float32)
++
++
++@triton.jit
++def row_inter_kernel(q, k, g, beta, Aqk, Adiag, Afull, Akk_out, t, scale,
++                     K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
++    """Mirror of FLA chunk_kda_fwd_kernel_inter_solve_fused (USE_SAFE_GATE) for row t (sub-chunk c = t // BC >= 0).
++    Rows of sub-chunk c above t are masked to 0 (exact: their inverse coefficients for row t are 0). Earlier sub-chunks are complete.
++    Adiag [BT, BC] fp32: diagonal-block inverses (stage B1, incl. identity). Afull [BT, BT] fp32: merged-inverse cache (this kernel
++    writes row t). Writes Aqk[t, off-diagonal cols] (scaled, Aqk dtype) and Akk_out[t, :] (merged inverse row, Akk dtype)."""
++    c = t // BC
++    o_i = tl.arange(0, BC)
++    o_k = tl.arange(0, K)
++    r0 = o_i
++    r1 = BC + o_i
++    r2 = 2 * BC + o_i
++    r3 = 3 * BC + o_i
++    full = o_i >= 0
++    if c == 0:
++        b_row = tl.load(Adiag + t * BC + o_i)
++        tl.store(Afull + t * BT + o_i, b_row)
++        tl.store(Akk_out + t * BT + o_i, b_row.to(Akk_out.dtype.element_ty))
++    else:
++        rc = c * BC + o_i
++        m_c = rc <= t
++        b_qc = _ld(q, rc, o_k, K, m_c)
++        b_kc = _ld(k, rc, o_k, K, m_c)
++        b_gc = _ld(g, rc, o_k, K, m_c)
++        b_gn = tl.load(g + c * BC * K + o_k).to(tl.float32)
++        b_gqn = tl.where(m_c[:, None], exp2(b_gc - b_gn[None, :]), 0)
++        b_qg = b_qc * b_gqn
++        b_kg = b_kc * b_gqn
++        b_bc = tl.load(beta + rc, mask=m_c, other=0.0).to(tl.float32)
++        is_t = rc == t
++        # off-diagonal blocks vs sub-chunk 0 (always), 1 (c >= 2), 2 (c == 3)
++        b_k0 = _ld(k, r0, o_k, K, full)
++        b_g0 = _ld(g, r0, o_k, K, full)
++        b_Aq0 = tl.dot(b_qg, tl.trans(b_k0 * exp2(b_gn[None, :] - b_g0)))
++        b_Ak0 = tl.dot(b_kg, tl.trans(b_k0 * exp2(b_gn[None, :] - b_g0))) * b_bc[:, None]
++        tl.store(Aqk + rc[:, None] * BT + r0[None, :], (b_Aq0 * scale).to(Aqk.dtype.element_ty), mask=is_t[:, None])
++        b_Ai00 = _ld(Adiag, r0, o_i, BC, full)
++        b_Aicc = _ld(Adiag, rc, o_i, BC, m_c)
++        if c == 1:
++            b_Ai10 = -tl.dot(tl.dot(b_Aicc, b_Ak0, input_precision=SOLVE_PREC), b_Ai00, input_precision=SOLVE_PREC)
++            tl.store(Afull + rc[:, None] * BT + r0[None, :], b_Ai10, mask=is_t[:, None])
++            tl.store(Afull + rc[:, None] * BT + r1[None, :], b_Aicc, mask=is_t[:, None])
++            tl.store(Akk_out + rc[:, None] * BT + r0[None, :], b_Ai10.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++            tl.store(Akk_out + rc[:, None] * BT + r1[None, :], b_Aicc.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++        else:
++            b_k1 = _ld(k, r1, o_k, K, full)
++            b_g1 = _ld(g, r1, o_k, K, full)
++            b_Aq1 = tl.dot(b_qg, tl.trans(b_k1 * exp2(b_gn[None, :] - b_g1)))
++            b_Ak1 = tl.dot(b_kg, tl.trans(b_k1 * exp2(b_gn[None, :] - b_g1))) * b_bc[:, None]
++            tl.store(Aqk + rc[:, None] * BT + r1[None, :], (b_Aq1 * scale).to(Aqk.dtype.element_ty), mask=is_t[:, None])
++            b_Ai11 = _ld(Adiag, r1, o_i, BC, full)
++            b_Ai10 = _ld(Afull, r1, r0, BT, full)
++            if c == 2:
++                b_Ai21 = -tl.dot(tl.dot(b_Aicc, b_Ak1, input_precision=SOLVE_PREC), b_Ai11, input_precision=SOLVE_PREC)
++                b_Ai20 = -tl.dot(b_Aicc, tl.dot(b_Ak0, b_Ai00, input_precision=SOLVE_PREC) +
++                                 tl.dot(b_Ak1, b_Ai10, input_precision=SOLVE_PREC), input_precision=SOLVE_PREC)
++                tl.store(Afull + rc[:, None] * BT + r0[None, :], b_Ai20, mask=is_t[:, None])
++                tl.store(Afull + rc[:, None] * BT + r1[None, :], b_Ai21, mask=is_t[:, None])
++                tl.store(Afull + rc[:, None] * BT + r2[None, :], b_Aicc, mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r0[None, :], b_Ai20.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r1[None, :], b_Ai21.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r2[None, :], b_Aicc.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++            else:
++                b_k2 = _ld(k, r2, o_k, K, full)
++                b_g2 = _ld(g, r2, o_k, K, full)
++                b_Aq2 = tl.dot(b_qg, tl.trans(b_k2 * exp2(b_gn[None, :] - b_g2)))
++                b_Ak2 = tl.dot(b_kg, tl.trans(b_k2 * exp2(b_gn[None, :] - b_g2))) * b_bc[:, None]
++                tl.store(Aqk + rc[:, None] * BT + r2[None, :], (b_Aq2 * scale).to(Aqk.dtype.element_ty), mask=is_t[:, None])
++                b_Ai22 = _ld(Adiag, r2, o_i, BC, full)
++                b_Ai21 = _ld(Afull, r2, r1, BT, full)
++                b_Ai20 = _ld(Afull, r2, r0, BT, full)
++                b_Ai32 = -tl.dot(tl.dot(b_Aicc, b_Ak2, input_precision=SOLVE_PREC), b_Ai22, input_precision=SOLVE_PREC)
++                b_Ai31 = -tl.dot(b_Aicc, tl.dot(b_Ak1, b_Ai11, input_precision=SOLVE_PREC) +
++                                 tl.dot(b_Ak2, b_Ai21, input_precision=SOLVE_PREC), input_precision=SOLVE_PREC)
++                b_Ai30 = -tl.dot(b_Aicc, tl.dot(b_Ak0, b_Ai00, input_precision=SOLVE_PREC) +
++                                 tl.dot(b_Ak1, b_Ai10, input_precision=SOLVE_PREC) +
++                                 tl.dot(b_Ak2, b_Ai20, input_precision=SOLVE_PREC), input_precision=SOLVE_PREC)
++                tl.store(Afull + rc[:, None] * BT + r0[None, :], b_Ai30, mask=is_t[:, None])
++                tl.store(Afull + rc[:, None] * BT + r1[None, :], b_Ai31, mask=is_t[:, None])
++                tl.store(Afull + rc[:, None] * BT + r2[None, :], b_Ai32, mask=is_t[:, None])
++                tl.store(Afull + rc[:, None] * BT + r3[None, :], b_Aicc, mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r0[None, :], b_Ai30.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r1[None, :], b_Ai31.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r2[None, :], b_Ai32.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++                tl.store(Akk_out + rc[:, None] * BT + r3[None, :], b_Aicc.to(Akk_out.dtype.element_ty), mask=is_t[:, None])
++
++
++@triton.jit
++def row_wu_kernel(k, v, g, beta, A, w, u, t, K: tl.constexpr, V: tl.constexpr, BT: tl.constexpr):
++    """Mirror of FLA recompute_w_u_fwd_kda_kernel for row t: u_t = dot(A[t] (Akk dtype), bf16(v*beta)); w_t = dot(A[t], bf16(k*beta*exp2(g)))."""
++    rr = tl.arange(0, 16)
++    row0 = rr == 0
++    o_t = tl.arange(0, BT)
++    m_t = o_t <= t
++    b_b = tl.load(beta + o_t, mask=m_t, other=0.0)
++    b_A = tl.load(A + t * BT + o_t[None, :] + rr[:, None] * 0, mask=row0[:, None], other=0.0)
++    o_v = tl.arange(0, V)
++    b_v = tl.load(v + o_t[:, None] * V + o_v[None, :], mask=m_t[:, None], other=0.0)
++    b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
++    b_u = tl.dot(b_A, b_vb)
++    tl.store(u + t * V + o_v[None, :] + rr[:, None] * 0, b_u.to(u.dtype.element_ty), mask=row0[:, None])
++    o_k = tl.arange(0, K)
++    b_k = tl.load(k + o_t[:, None] * K + o_k[None, :], mask=m_t[:, None], other=0.0)
++    b_kb = b_k * b_b[:, None]
++    b_gk = tl.load(g + o_t[:, None] * K + o_k[None, :], mask=m_t[:, None], other=0.0).to(tl.float32)
++    b_kb *= exp2(b_gk)
++    b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
++    tl.store(w + t * K + o_k[None, :] + rr[:, None] * 0, b_w.to(w.dtype.element_ty), mask=row0[:, None])
++
++
++
++# ------------------------------------------------------------------------------------------- batched wrappers
++@triton.jit
++def b_diag(SLOT, POS, Q, KC, G, BETA, AQK, AD, AP, scale, H, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r)
++    b = s * H + h
++    rq = (r * H + h).to(tl.int64)
++    row_diag_kernel(Q + b * BT * K, KC + b * BT * K, G + b * BT * K, BETA + b * BT,
++                    AQK + rq * BT - t * BT, AD + b * BT * BC, AP + b * BT * BC, t, scale, K=K, BT=BT, BC=BC)
++
++
++@triton.jit
++def b_inter(SLOT, POS, Q, KC, G, BETA, AQK, AD, AF, AKK, scale, H, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r)
++    b = s * H + h
++    rq = (r * H + h).to(tl.int64)
++    row_inter_kernel(Q + b * BT * K, KC + b * BT * K, G + b * BT * K, BETA + b * BT,
++                     AQK + rq * BT - t * BT, AD + b * BT * BC, AF + b * BT * BT, AKK + rq * BT - t * BT, t, scale,
++                     K=K, BT=BT, BC=BC)
++
++
++@triton.jit
++def b_wu(SLOT, POS, KC, VC, G, BETA, AKK, W, U, H, K: tl.constexpr, V: tl.constexpr, BT: tl.constexpr):
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r)
++    b = s * H + h
++    rq = (r * H + h).to(tl.int64)
++    row_wu_kernel(KC + b * BT * K, VC + b * BT * V, G + b * BT * K, BETA + b * BT, AKK + rq * BT - t * BT,
++                  W + rq * K - t * K, U + rq * V - t * V, t, K=K, V=V, BT=BT)
++
++
++@triton.jit
++def b_stage_a(SLOT, RSLOT, POS, S0, SH, Q, G, U, W, AQK, H0, VN, O, scale, H, K: tl.constexpr, V: tl.constexpr, BT: tl.constexpr,
++              R: tl.constexpr):
++    r = tl.program_id(0)
++    h = tl.program_id(1)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r)
++    b = s * H + h
++    rq = (r * H + h).to(tl.int64)
++    # caller's recurrent_state may be a strided view (vLLM's paged state cache): slot stride S0, head stride SH (elements);
++    # within a head the [K, V] block is contiguous (checked by the caller)
++    rb = tl.load(RSLOT + r).to(tl.int64) * S0 + h * SH
++    row_stage_a_kernel(Q + b * BT * K, G + b * BT * K, U + rq * V - t * V, W + rq * K - t * K, AQK + rq * BT - t * BT,
++                       H0 + rb, VN + b * BT * V, O + rq * V - t * V, t, scale, K=K, V=V, BT=BT, R=R)
++
++
++@triton.jit
++def b_gate(SLOT, POS, GR, G, A_log, dt_bias, lower_bound, scale, H, S: tl.constexpr, BT: tl.constexpr, BS: tl.constexpr):
++    """FLA kda_gate_chunk_cumsum_vector_kernel (USE_LOWER_BOUND, HAS_BIAS, HAS_SCALE, forward) on one slot's open chunk with
++    T = t + 1; stores g_cum row t only. Launch with FLA's pinned config (BS, num_warps), grid (R, H, cdiv(S, BS))."""
++    r = tl.program_id(0)
++    i_h = tl.program_id(1)
++    i_s = tl.program_id(2)
++    s = tl.load(SLOT + r).to(tl.int64)
++    t = tl.load(POS + r)
++    T = t + 1
++    b = s * H + i_h
++    o_t = tl.arange(0, BT)
++    o_s = i_s * BS + tl.arange(0, BS)
++    m_s = (o_t[:, None] < T) & (o_s[None, :] < S)
++    b_s = tl.load(GR + b * BT * S + o_t[:, None] * S + o_s[None, :], mask=m_s, other=0.0).to(tl.float32)
++    b_bias = tl.load(dt_bias + i_h * S + o_s, mask=o_s < S, other=0.0).to(tl.float32)
++    b_s = b_s + b_bias[None, :]
++    b_A = tl.load(A_log + i_h).to(tl.float32)
++    b_gate = lower_bound * tl.sigmoid(exp(b_A) * b_s)
++    b_o = tl.cumsum(b_gate, axis=0)
++    b_o *= scale
++    tl.store(G + b * BT * S + o_t[:, None] * S + o_s[None, :], b_o.to(G.dtype.element_ty), mask=m_s & (o_t[:, None] == t))
