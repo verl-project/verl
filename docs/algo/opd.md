@@ -183,9 +183,35 @@ Number of GPUs per node in the teacher resource pool. Default: `8`.
 Number of nodes in the teacher resource pool. Default: `0` (effectively
 disables the pool — must be set to `≥ 1` when `enabled=True`).
 
-**Constraint:** the total teacher pool size (`n_gpus_per_node × nnodes`) must
-exactly equal the sum of `(num_replicas × per_replica_world_size)` across all
+**Constraint (resident):** the total teacher pool size (`n_gpus_per_node × nnodes`)
+must exactly equal the sum of `(num_replicas × per_replica_world_size)` across all
 configured teachers, or `DistillationConfig.__post_init__` raises.
+
+**Constraint (on_demand):** the pool size is the fleet, not the teacher count.
+It must be divisible by a shared `inference.tensor_model_parallel_size`, and
+`n_gpus_per_node` must be divisible by TP (the weight cache is node-local).
+`num_replicas` is ignored.
+
+### `distillation.teacher_serving` (str)
+
+How teacher inference is served. Default: `"resident"`.
+
+- **`resident`**: one vLLM engine per teacher. Teacher cards grow with
+  `Σ num_replicas × TP`. Existing MOPD recipes that omit this field stay on
+  this path.
+- **`on_demand`**: teachers share a replica fleet sized by the teacher pool.
+  Each checkpoint is snapshotted once into a node-local mmap cache. A replica
+  copies a teacher into live weights only when occupancy donates that card to
+  a new routing key (first-wave keys occupy the fleet; a replica is not stolen
+  while its teacher still has remaining samples this step).
+
+```yaml
+distillation.teacher_serving: on_demand
+distillation.teacher_cache_backend: disk   # or shm
+distillation.teacher_cache_dir: /path/to/node-local-cache
+```
+
+See `examples/on_policy_distillation_trainer/run_qwen3_8b_mopd_on_demand.sh`.
 
 ### `distillation.teacher_key` (str)
 
@@ -245,8 +271,11 @@ Each replica occupies
 `per_replica_world_size = inference.tensor_model_parallel_size * inference.data_parallel_size * inference.pipeline_model_parallel_size`
 GPUs, so the teacher's total footprint is `num_replicas × per_replica_world_size`.
 
-For a **single teacher**, you may leave this at `0`: `_resolve_teacher_models`
-auto-fills it as `pool_size // per_replica_world_size`.
+For a **single teacher** with `teacher_serving=resident`, you may leave this at
+`0`: `_resolve_teacher_models` auto-fills it as
+`pool_size // per_replica_world_size`.
+
+Ignored when `teacher_serving=on_demand`: fleet size is `pool_size // TP`.
 
 ### `distillation.teacher_models.<name>.inference.*`
 
@@ -548,6 +577,8 @@ When `use_task_rewards=false`, the PPO/GRPO task-reward loss is zeroed and the u
 ### Multi-teacher OPD
 
 Multiple teachers can be configured by adding one entry under `distillation.teacher_models` per teacher. Each teacher has a routing `key`, model path, replica count, and inference configuration.
+
+With the default `teacher_serving=resident`, each teacher owns its own engines and the GPU count grows with the teacher count. Set `teacher_serving=on_demand` to share a replica fleet: teacher cards stay sized by the pool, and occupancy donates a replica to the next unstarted routing key only after that replica's teacher finishes the step. See `run_qwen3_8b_mopd_on_demand.sh`.
 
 ```yaml
 distillation:
@@ -854,9 +885,11 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `examples/on_policy_distillation_trainer/run_qwen3_8b_megatron.sh` — text, vLLM rollout, Megatron student, single teacher
 - `examples/on_policy_distillation_trainer/run_qwen3_vl_8b_fsdp.sh` — VL student/teacher, vLLM rollout, FSDP student
 - `examples/on_policy_distillation_trainer/run_qwen3_8b_mopd_fsdp.sh` — multi-teacher (gsm8k text + geo3k VL), routed by `data_source`
+- `examples/on_policy_distillation_trainer/run_qwen3_8b_mopd_on_demand.sh` — same recipe with `teacher_serving=on_demand` (shared replica fleet)
 
 ### **Tests**
 
+- `tests/experimental/teacher_loop/test_teacher_shared_fleet_on_cpu.py` — on-demand mmap cache and occupancy donate
 - `tests/workers/test_distillation_topk_symmetry_on_cpu.py` — top-k loss symmetry and overlap metric checks
 - `tests/utils/test_special_megatron_kl_loss_tp.py` — Megatron KL loss and overlap metrics under tensor parallelism
 - `tests/special_e2e/run_v1_separate_async_opd.sh` — end-to-end multi-teacher OPD on the V1 separate_async trainer

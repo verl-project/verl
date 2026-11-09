@@ -867,6 +867,9 @@ distillation:
     clip_ratio_high: 0.2
   n_gpus_per_node: 8
   nnodes: 0
+  teacher_serving: resident
+  teacher_cache_backend: disk
+  teacher_cache_dir: null
   teacher_models:
     teacher_model:
       _target_: verl.workers.config.DistillationTeacherModelConfig
