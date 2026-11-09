@@ -435,7 +435,8 @@ class _AwaitableRemote:
         self._action = action
         self._log = log
 
-    def remote(self):
+    def remote(self, method=None):
+        del method
         log = self._log
         name = self._name
         action = self._action
@@ -451,22 +452,8 @@ class _AwaitableRemote:
 class _SleepServerStub:
     def __init__(self, name: str, log: list[tuple[str, str, str]]):
         self.wait_for_requests_to_drain = _AwaitableRemote(name, "drain", log)
+        self.collective_rpc = _AwaitableRemote(name, "disconnect", log)
         self.sleep = _AwaitableRemote(name, "sleep", log)
-
-
-def _sleep_bounds(log: list[tuple[str, str, str]], name: str) -> tuple[int, int]:
-    starts = [
-        i
-        for i, (phase, server, action) in enumerate(log)
-        if phase == "start" and server == name and action == "sleep"
-    ]
-    ends = [
-        i
-        for i, (phase, server, action) in enumerate(log)
-        if phase == "end" and server == name and action == "sleep"
-    ]
-    assert len(starts) == 1 and len(ends) == 1
-    return starts[0], ends[0]
 
 
 def test_npu_pd_sleeps_decode_and_prefill_servers_serially(patched_replica_cls):
@@ -484,12 +471,15 @@ def test_npu_pd_sleeps_decode_and_prefill_servers_serially(patched_replica_cls):
         asyncio.run(replica.sleep())
 
     assert log[0] == ("start", "prefill-0", "drain")
-    _, decode_0_end = _sleep_bounds(log, "decode-0")
-    decode_1_start, decode_1_end = _sleep_bounds(log, "decode-1")
-    prefill_0_start, prefill_0_end = _sleep_bounds(log, "prefill-0")
-    prefill_1_start, _ = _sleep_bounds(log, "prefill-1")
-    assert decode_0_end < decode_1_start < decode_1_end < prefill_0_start
-    assert prefill_0_end < prefill_1_start
+    assert log[1] == ("end", "prefill-0", "drain")
+    disconnect_ends = [i for i, (phase, _, action) in enumerate(log) if phase == "end" and action == "disconnect"]
+    sleep_starts = [i for i, (phase, _, action) in enumerate(log) if phase == "start" and action == "sleep"]
+    sleep_ends = [i for i, (phase, _, action) in enumerate(log) if phase == "end" and action == "sleep"]
+    assert len(disconnect_ends) == 4
+    assert len(sleep_starts) == 4
+    assert len(sleep_ends) == 4
+    assert max(disconnect_ends) < min(sleep_starts)
+    assert max(sleep_starts) < min(sleep_ends)
 
 
 def test_resume_generation_resumes_every_engine_before_opening_gates():

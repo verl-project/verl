@@ -254,15 +254,18 @@ class vLLMPDReplica(vLLMReplica):
         )
 
     async def sleep(self):
-        """Drain the prefill ingress, then sleep P/D servers."""
+        """Drain the prefill ingress, disconnect Mooncake peers, then sleep P/D."""
         if self._is_ascend_platform():
             if not self._prefill_servers:
                 raise RuntimeError("PD servers have not been launched")
             await self._prefill_servers[0].wait_for_requests_to_drain.remote()
-            for server in self._decode_servers:
-                await server.sleep.remote()
-            for server in self._prefill_servers:
-                await server.sleep.remote()
+            await asyncio.gather(
+                *[
+                    server.collective_rpc.remote(method="disconnect_kv_transfer_peers")
+                    for server in self.servers
+                ]
+            )
+            await asyncio.gather(*[server.sleep.remote() for server in self.servers])
             return
         await super().sleep()
 
