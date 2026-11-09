@@ -271,7 +271,7 @@ models = [
 
 ### 5.4 Launch the Multi-Node Inference Server
 
-Refer to the [vllm_ascend GLM5 Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md#multi-node-deployment) to launch the two-node A3 inference service. `host_port` should be consistent with the configuration in the previous section, and `max_model_len` should be set to the sum of `max_prompt_length` and `max_response` during training.
+Refer to the [vllm_ascend GLM5 Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/GLM5.md) to launch the two-node A3 inference service. `host_port` should be consistent with the configuration in the previous section, and `max_model_len` should be set to the sum of `max_prompt_length` and `max_response` during training.
 
 ### 5.5 Launch the vLLM Evaluation Task
 
