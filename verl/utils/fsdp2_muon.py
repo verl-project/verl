@@ -62,11 +62,13 @@ def validate_fsdp2_muon_config(config, engine_config, model_config=None):
 
 
 def _reject_moe(config):
+    """Reject expert counts above one, including nested text-model configs."""
     if config is None:
         return
     values = config.to_dict() if hasattr(config, "to_dict") else vars(config)
 
     def visit(mapping):
+        """Inspect nested config mappings for supported expert-count fields."""
         for key, value in mapping.items():
             if isinstance(value, dict):
                 visit(value)
@@ -106,7 +108,7 @@ def group_fsdp2_muon_parameters(model):
                 continue
             fqn = f"{module_name}.{name}" if module_name else name
             is_head = module_name == "output" or any(
-                part in {"lm_head", "head", "output_layer", "embed_out", "classifier", "score"}
+                part in {"lm_head", "head", "output_layer", "embed_out", "classifier", "score", "v_head"}
                 for part in module_name.split(".")
             )
             ordinary = (
@@ -137,6 +139,7 @@ def group_fsdp2_muon_parameters(model):
 
 
 def _parameter_mesh(groups):
+    """Validate FP32 storage and placement, returning the shared mesh or None."""
     params = [p for group in groups for p in group["params"]]
     if not params:
         raise ValueError("Muon needs trainable parameters.")
@@ -190,6 +193,7 @@ def _check_gradients(optimizer, args, kwargs):
 
 
 def _validate_checkpoint(optimizer, state_dict):
+    """Reject changed grouping, layout or update semantics before loading state."""
     current = optimizer.param_groups
     saved = state_dict["param_groups"]
     if len(saved) != len(current):
@@ -201,6 +205,7 @@ def _validate_checkpoint(optimizer, state_dict):
 
 
 def build_fsdp2_muon(model, config, engine_config, model_config=None):
+    """Build optional Dion Muon with semantic groups and gradient/state guards."""
     validate_fsdp2_muon_config(config, engine_config, model_config)
     groups = group_fsdp2_muon_parameters(model)
     if not any(g["algorithm"] == "muon" for g in groups):

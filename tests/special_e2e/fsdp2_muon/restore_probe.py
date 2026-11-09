@@ -64,6 +64,7 @@ def install_restore_probe():
 
     @functools.wraps(original)
     def checked_load(self, local_path, *args, **kwargs):
+        """Compare restored model, optimizer and scheduler state with the saved shard."""
         result = original(self, local_path, *args, **kwargs)
         if local_path is None:
             return result

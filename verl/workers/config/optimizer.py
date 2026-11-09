@@ -311,6 +311,9 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig, *, model=None, engi
     Args:
         parameters: Model parameters to optimize
         config: FSDPOptimizerConfig with optimizer settings
+        model: Owning module, required for Muon's semantic parameter grouping
+        engine_config: Backend and sharding settings used to validate Muon support
+        model_config: Optional model settings used to reject unsupported Muon combinations
 
     Returns:
         Optimizer instance

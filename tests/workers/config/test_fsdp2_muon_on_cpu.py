@@ -96,6 +96,28 @@ def test_semantic_grouping_complete_deterministic(tied):
     )
 
 
+@pytest.mark.parametrize("aliased", [False, True])
+def test_trl_value_head_uses_adamw(aliased):
+    """A TRL-shaped value head stays on AdamW, including a shared Linear alias."""
+    from verl.utils.fsdp2_muon import group_fsdp2_muon_parameters
+
+    model = TinyModel()
+    model.v_head = torch.nn.Module()
+    model.v_head.summary = torch.nn.Linear(4, 1)
+    if aliased:
+        model.alias = model.v_head.summary
+
+    groups = group_fsdp2_muon_parameters(model)
+    by_algorithm = {g["algorithm"]: {id(p) for p in g["params"]} for g in groups}
+    assert id(model.v_head.summary.weight) in by_algorithm["adamw"]
+    assert id(model.v_head.summary.bias) in by_algorithm["adamw"]
+    assert id(model.proj.weight) in by_algorithm["muon"]
+    params = [p for g in groups for p in g["params"]]
+    assert len(params) == len({id(p) for p in params})
+    assert {id(p) for p in params} == {id(p) for p in model.parameters() if p.requires_grad}
+    assert [g["param_names"] for g in groups] == [g["param_names"] for g in group_fsdp2_muon_parameters(model)]
+
+
 @pytest.mark.parametrize(
     "options",
     [

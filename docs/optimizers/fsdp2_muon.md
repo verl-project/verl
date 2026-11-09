@@ -81,7 +81,8 @@ check gradient-presence/layout consistency before matrix communication.
 ## Parameter classification and boundaries
 
 Only trainable ordinary `nn.Linear.weight` matrices use Muon. HF input/output
-embedding accessor identities, `nn.Embedding`, output heads, norms, biases,
+embedding accessor identities, `nn.Embedding`, output heads (including TRL
+`v_head.summary`), norms, biases,
 unknown tensors (even 2D), and hybrid `linear_attn`/GatedDeltaNet blocks use AdamW.
 Special ownership wins when a parameter is shared with a projection. Frozen
 parameters are omitted. Every remaining parameter belongs to exactly one group,

@@ -215,8 +215,9 @@ driver manifest contains ten zero exits and its assertion-completion marker.
 The submission branch incorporates upstream main
 `a911bca25d6adb26f5bef2dc57e7ba62e99b7ade`, seven commits after the GPU experiment
 base. None of those commits overlaps the 26 proposed implementation, test and
-documentation paths. The executed Muon implementation and GPU test source remain
-byte-identical. One upstream change masks empty responses in rollout metrics;
+documentation paths. At submission commit `14fd349501b45e91919fe09dd34bb3b2b7222b44`,
+the executed Muon implementation and GPU test source remained byte-identical.
+One upstream change masks empty responses in rollout metrics;
 its CPU regression was included in the post-integration check:
 
 ```bash
@@ -237,6 +238,18 @@ Complete pre-commit also passed all 14 hooks on the integrated source snapshot,
 with no hook changes. GPU and real GRPO evidence above belongs to the explicitly
 recorded experiment base, not a rerun after main integration. Submission evidence
 and source hashes are retained locally in `logs/fsdp2_muon_submission_20261109/`.
+
+### Review follow-up: TRL value-head grouping
+
+The output-head exclusions now include `v_head`, keeping TRL's
+`v_head.summary` on AdamW even when shared with an ordinary Linear alias.
+Two new CPU cases failed before this correction and passed afterward. Repeating
+the CPU command above produced **101 passed, 0 failed, 5 skipped; exit 0**.
+The initial sandbox run could not initialize loopback communication for three
+Gloo tests; the same command passed with local network access enabled.
+Function descriptions were also added to the optimizer and acceptance helpers.
+The numerical update and communication algorithms are unchanged. Review evidence
+is retained locally in `logs/fsdp2_muon_review_20261109/`.
 
 ## Reproduce the real training experiment
 

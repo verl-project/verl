@@ -35,6 +35,7 @@ class FSDP2Muon(Muon):
     """
 
     def _create_ortho_tasks(self, param_groups):
+        """Batch active matrices by global shape in deterministic group order."""
         for group in param_groups:
             shape_groups = {}
             for param in group["params"]:
@@ -44,6 +45,7 @@ class FSDP2Muon(Muon):
                 yield AsyncTask(self._gathered_update(params, group))
 
     def _gathered_update(self, params, group):
+        """Gather full NS inputs, orthogonalize them and update only local rows."""
         # Same compiled local momentum update as pinned Dion's native path.
         updates = muon_update_pre_orthogonalize(
             G=to_local([param.grad for param in params]),

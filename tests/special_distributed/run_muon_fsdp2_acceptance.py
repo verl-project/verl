@@ -30,6 +30,7 @@ REPOSITORY = DIRECTORY.parent.parent
 
 
 def dion_revision():
+    """Require the pinned Dion commit and reject modified local dependency sources."""
     distribution = importlib.metadata.distribution("dion")
     direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
     revision = direct_url.get("vcs_info", {}).get("commit_id")
@@ -45,6 +46,7 @@ def dion_revision():
 
 
 def run_worker(case, precision, output, timeout, dynamo_recompile_limit=None):
+    """Launch a bounded torchrun process and require its assertion-completion marker."""
     ranks = 1 if case == "smoke" else 2
     command = [
         sys.executable,
@@ -95,6 +97,7 @@ def run_worker(case, precision, output, timeout, dynamo_recompile_limit=None):
 
 
 def main():
+    """Validate the GPU environment, run ordered phases and save their result manifest."""
     if not __debug__:
         raise RuntimeError("Acceptance must run with assertions enabled; do not use python -O/PYTHONOPTIMIZE")
     parser = argparse.ArgumentParser(description=__doc__)

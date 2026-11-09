@@ -492,6 +492,7 @@ class FSDPEngine(BaseEngine):
         return module
 
     def _build_optimizer(self, module):
+        """Pass model metadata to optimizers that classify parameters by role."""
         from verl.workers.config.optimizer import build_optimizer
 
         optimizer = build_optimizer(
@@ -538,6 +539,7 @@ class FSDPEngine(BaseEngine):
         return lr_scheduler
 
     def _build_model_optimizer(self):
+        """Validate the backend, shard the loaded model and initialize training state."""
         from verl.utils.model import print_model_size
 
         if not self.engine_config.forward_only and self.optimizer_config.optimizer.lower() == "muon":

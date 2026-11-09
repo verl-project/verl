@@ -84,6 +84,7 @@ class AcceptanceModel(nn.Module):
     """Repeated, uneven and empty shards plus embeddings, head, biases and norms."""
 
     def __init__(self, stochastic=False):
+        """Create mixed-role parameters and optional dropout for RNG restore checks."""
         super().__init__()
         self.config = PretrainedConfig(vocab_size=64, hidden_size=32, tie_word_embeddings=False)
         self.embed_tokens = nn.Embedding(64, 32)
@@ -98,15 +99,19 @@ class AcceptanceModel(nn.Module):
         self.lm_head = nn.Linear(32, 64)
 
     def get_input_embeddings(self):
+        """Expose embedding ownership to the production parameter classifier."""
         return self.embed_tokens
 
     def get_output_embeddings(self):
+        """Expose the output head so its weights stay on AdamW."""
         return self.lm_head
 
     def can_generate(self):
+        """Keep generation metadata out of this synthetic checkpoint fixture."""
         return False
 
     def forward(self, tokens):
+        """Exercise ordinary, uneven-row and single-row projections in the loss."""
         x = self.embed_tokens(tokens)
         for block in self.blocks:
             x = block(x)
@@ -115,6 +120,7 @@ class AcceptanceModel(nn.Module):
 
 
 def full(value):
+    """Collect DTensors and recursively copy state to independent CPU tensors."""
     if isinstance(value, DTensor):
         value = value.full_tensor()
     if isinstance(value, torch.Tensor):
@@ -143,6 +149,7 @@ def assert_tree_close(actual, expected, *, atol=0.0, rtol=0.0, path="root"):
 
 
 def snapshot(model, optimizer, scheduler=None):
+    """Capture full weights, all optimizer state/groups and optional scheduler state."""
     names = {id(param): name for name, param in model.named_parameters()}
     # Preserve *all* state, not just a chosen list of expected momentum names.
     state = {names[id(param)]: full(value) for param, value in optimizer.state.items()}
@@ -165,6 +172,7 @@ def snapshot(model, optimizer, scheduler=None):
 
 
 def assert_storage(model, optimizer, step):
+    """Check finite CUDA FP32 shards, matching state layouts and step counters."""
     assert isinstance(optimizer, Muon), "Acceptance must exercise Dion Muon kernels and state"
     assert {group["algorithm"] for group in optimizer.param_groups} == {"muon", "adamw"}
     for name, param in model.named_parameters():
@@ -188,6 +196,7 @@ def assert_storage(model, optimizer, step):
 
 
 def create_pair(precision, *, stochastic=False, engine_builder=True):
+    """Create real FSDP2 and unsharded models with independently checked groups."""
     torch.manual_seed(9123)
     reference = AcceptanceModel(stochastic=stochastic).cuda()
     model = copy.deepcopy(reference)
@@ -275,6 +284,7 @@ def create_pair(precision, *, stochastic=False, engine_builder=True):
 
 
 def max_abs_tensor_error(actual, expected):
+    """Return the largest absolute tensor error across a nested state tree."""
     if isinstance(expected, torch.Tensor):
         return (actual - expected).abs().max().item() if expected.numel() else 0.0
     if isinstance(expected, dict):
@@ -301,6 +311,7 @@ def assert_nonzero_group_updates(optimizer, before, after):
 
 
 def compare(model, optimizer, reference, ref_optimizer, before, ref_before, budget, step):
+    """Report errors and check weights, state and nonzero updates against fixed tolerances."""
     actual, expected = snapshot(model, optimizer), snapshot(reference, ref_optimizer)
     # Group ordering is allowed to differ; group membership and every option are checked.
     actual["groups"].sort(key=lambda group: group["algorithm"])
@@ -344,6 +355,7 @@ def compare(model, optimizer, reference, ref_optimizer, before, ref_before, budg
 
 
 def optimizer_alignment(precision, steps, *, engine_builder=True):
+    """Compare sharded and unsharded updates using identical full synthetic gradients."""
     model, optimizer, reference, ref_optimizer, _ = create_pair(precision, engine_builder=engine_builder)
     for step in range(1, steps + 1):
         before = {name: full(param) for name, param in model.named_parameters()}
@@ -364,6 +376,7 @@ def optimizer_alignment(precision, steps, *, engine_builder=True):
 
 
 def batch(step, rank):
+    """Generate reproducible local batches for the shared global-batch reference."""
     generator = torch.Generator().manual_seed(501 + step * 37 + rank)
     return (
         torch.randint(64, (4, 8), generator=generator).cuda(),
@@ -372,6 +385,7 @@ def batch(step, rank):
 
 
 def loss_for(model, tokens, labels, precision=None):
+    """Compute cross entropy with explicit BF16 reference parameter casting when requested."""
     if precision == "bf16":
         # FSDP2 casts every parameter for compute, including norms/embeddings.
         # Autocast alone would leave those FP32 and would be a different reference.
@@ -383,6 +397,7 @@ def loss_for(model, tokens, labels, precision=None):
 
 
 def training_alignment(precision, steps):
+    """Compare FSDP2 backward, clipping and updates with the same global-batch reference."""
     model, optimizer, reference, ref_optimizer, config = create_pair(precision)
     for step in range(1, steps + 1):
         before = {name: full(param) for name, param in model.named_parameters()}
@@ -414,11 +429,13 @@ def training_alignment(precision, steps):
 
 
 def save_snapshot(path, model, optimizer, scheduler):
+    """Persist this rank's complete comparison state for the next fresh process."""
     value = snapshot(model, optimizer, scheduler)
     torch.save(value, path / f"rank_{dist.get_rank()}.pt")
 
 
 def checkpoint_phase(phase, precision, output):
+    """Exercise verl checkpoint save/load and compare resumed with continuous training."""
     from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
 
     model, optimizer, _, _, config = create_pair(precision, stochastic=True)
@@ -465,6 +482,7 @@ def checkpoint_phase(phase, precision, output):
 
 
 def main():
+    """Run one CUDA acceptance phase and emit a success marker only after assertions."""
     if not __debug__:
         raise RuntimeError("Acceptance must run with assertions enabled; do not use python -O/PYTHONOPTIMIZE")
     parser = argparse.ArgumentParser(description=__doc__)
