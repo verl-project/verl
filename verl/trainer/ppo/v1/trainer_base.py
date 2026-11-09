@@ -526,10 +526,16 @@ class PPOTrainer(ABC):
                 progress_bar.close()
                 break
 
-        self.on_train_end()
-        self._notify_train_end_callback(success=True)
-        self._shutdown_dump_executor()
-        self._shutdown_train_dataloader()
+        self._finalize_train_end_success()
+
+    def _finalize_train_end_success(self) -> None:
+        """Finalize trainer resources and emit successful train-end callback."""
+        try:
+            self.on_train_end()
+            self._shutdown_dump_executor()
+            self._notify_train_end_callback(success=True)
+        finally:
+            self._shutdown_train_dataloader()
 
     def _notify_train_end_callback(self, success: bool) -> None:
         """Invoke the run-end checkpoint callback once per trainer run."""

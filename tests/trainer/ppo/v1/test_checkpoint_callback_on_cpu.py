@@ -132,3 +132,45 @@ def test_train_end_callback_exception_propagates(tmp_path):
 
     with pytest.raises(RuntimeError, match="train-end callback failed"):
         trainer._notify_train_end_callback(success=True)
+
+
+def test_finalize_train_end_success_orders_dump_before_notify(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+    trainer.on_train_end = lambda: events.append("on_train_end")
+    trainer._shutdown_dump_executor = lambda: events.append("shutdown_dump")
+    trainer._notify_train_end_callback = lambda success: events.append(("notify", success))
+    trainer._shutdown_train_dataloader = lambda: events.append("shutdown_dataloader")
+
+    trainer._finalize_train_end_success()
+
+    assert events == [
+        "on_train_end",
+        "shutdown_dump",
+        ("notify", True),
+        "shutdown_dataloader",
+    ]
+
+
+def test_finalize_train_end_still_shutdowns_dataloader_on_notify_failure(tmp_path):
+    events = []
+    trainer = _make_trainer(tmp_path, events)
+    trainer.on_train_end = lambda: events.append("on_train_end")
+    trainer._shutdown_dump_executor = lambda: events.append("shutdown_dump")
+
+    def _raise_notify(success):
+        events.append(("notify", success))
+        raise RuntimeError("notify failed")
+
+    trainer._notify_train_end_callback = _raise_notify
+    trainer._shutdown_train_dataloader = lambda: events.append("shutdown_dataloader")
+
+    with pytest.raises(RuntimeError, match="notify failed"):
+        trainer._finalize_train_end_success()
+
+    assert events == [
+        "on_train_end",
+        "shutdown_dump",
+        ("notify", True),
+        "shutdown_dataloader",
+    ]
