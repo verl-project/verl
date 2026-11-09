@@ -898,6 +898,21 @@ def test_chunk_tensordict_uses_views_for_2d_nested_tensors():
     assert tu.get(chunks[1], "labels") == ["c", "d"]
 
 
+def test_chunk_tensordict_keeps_tensordict_0_8_fallback(monkeypatch):
+    rows = [torch.arange(length) for length in (4, 7, 3, 6)]
+    input_ids = torch.nested.as_nested_tensor(rows, layout=torch.jagged)
+    td = tu.get_tensordict({"input_ids": input_ids})
+    monkeypatch.setattr(tu, "_TENSORDICT_SUPPORTS_NESTED_CHUNK", False)
+
+    chunks = tu.chunk_tensordict(td, chunks=2)
+
+    assert all(
+        torch.equal(actual, expected)
+        for chunk, expected_rows in zip(chunks, (rows[:2], rows[2:]), strict=True)
+        for actual, expected in zip(chunk["input_ids"].unbind(), expected_rows, strict=True)
+    )
+
+
 def test_chunk_tensordict_preserves_3d_nested_tensor_layout_with_equal_seq_len_per_chunk():
     position_ids = tu.nested_tensor_from_tensor_list(
         [

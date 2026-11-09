@@ -22,6 +22,8 @@ from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
+_TENSORDICT_SUPPORTS_NESTED_CHUNK = parse_version(tensordict.__version__) >= parse_version("0.10")
+
 
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     """Assign a single non-tensor value to a TensorDict.
@@ -332,7 +334,7 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             evenly divisible by chunks.
 
     Note:
-        ``TensorDict.chunk`` handles 2D jagged tensors without rebuilding their
+        TensorDict 0.10+ handles 2D jagged tensors without rebuilding their
         rows. PyTorch ``unbind(dim=0)`` on 3D+ jagged NestedTensors has a bug where
         ``split_with_sizes`` is applied to the wrong dimension of the internal
         ``_values`` tensor.  For example, mRoPE ``position_ids`` with per-sample
@@ -358,7 +360,7 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
     )
     chunk_size = len(td) // chunks
     nested_keys = {key for key, val in td.items() if isinstance(val, torch.Tensor) and val.is_nested}
-    if nested_keys and all(td[key].dim() == 2 for key in nested_keys):
+    if nested_keys and _TENSORDICT_SUPPORTS_NESTED_CHUNK and all(td[key].dim() == 2 for key in nested_keys):
         return td.chunk(chunks=chunks)
 
     new_td = TensorDict(
