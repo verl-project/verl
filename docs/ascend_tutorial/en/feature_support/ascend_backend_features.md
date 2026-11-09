@@ -1,7 +1,7 @@
 # Ascend Backend Feature Guide
 ==================================================================================
 
-Last updated: 03/03/2026.
+Last updated: 11/08/2026.
 
 Ascend comprehensively supports the verl ecosystem. This document introduces the adaptation work and backend feature support for verl on NPU for developers' reference.
 
@@ -314,8 +314,6 @@ The VeOmni backend supports the Router Replay feature for MoE models, configured
 | Parameter | Description |
 | --- | --- |
 | `mode` | Router replay mode, supports disabled (disable), R2 (record and replay routing decisions), R3 (record and replay on the rollout side) |
-| `record_file` | File path for recording routing decisions, required in R2/R3 modes |
-| `replay_file` | File path for loading routing decisions for replay, required in replay mode |
 
 #### Usage Example
 
