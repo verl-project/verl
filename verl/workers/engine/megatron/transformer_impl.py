@@ -838,6 +838,11 @@ class MegatronEngine(BaseEngine):
         return torch.tensor(input_ids.numel(), device=input_ids.device)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        """Run the Megatron forward/backward schedule over the prepared micro-batches.
+
+        Validates the router-replay batch flag before scheduling so replay cannot
+        silently fall back to native routing.
+        """
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 

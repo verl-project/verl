@@ -489,11 +489,39 @@ def test_router_replay_debug_env(monkeypatch):
 
 
 def test_summarize_replay_mask():
+    """The summary separates valid, replayed, native and padding rows."""
     mask = torch.tensor([True, True, False, False])
 
     assert rr_utils.summarize_replay_mask(mask) == {
-        "total_rows": 4,
+        "valid_rows": 4,
         "replay_rows": 2,
         "native_rows": 2,
+        "padding_rows": 0,
     }
     assert rr_utils.summarize_replay_mask(None) == {}
+
+
+def test_summarize_replay_mask_counts_alignment_padding():
+    """THD alignment padding is reported separately from native rows."""
+    nested = torch.nested.as_nested_tensor(
+        [torch.tensor([True, True, False]), torch.tensor([True, True])], layout=torch.jagged
+    )
+
+    assert rr_utils.summarize_replay_mask(nested, packed_rows=10) == {
+        "valid_rows": 5,
+        "replay_rows": 4,
+        "native_rows": 1,
+        "padding_rows": 5,
+    }
+
+
+def test_summarize_replay_mask_counts_bshd_padding():
+    """BSHD sequence padding is excluded from native rows."""
+    mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils.summarize_replay_mask(mask, valid_rows=3) == {
+        "valid_rows": 3,
+        "replay_rows": 2,
+        "native_rows": 1,
+        "padding_rows": 1,
+    }

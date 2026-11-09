@@ -441,19 +441,31 @@ def is_router_replay_debug_enabled() -> bool:
     return os.getenv("VERL_ROUTER_REPLAY_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def summarize_replay_mask(replay_mask: torch.Tensor | None) -> dict[str, int]:
-    """Return replay/native row counts for a boolean replay mask.
+def summarize_replay_mask(
+    replay_mask: torch.Tensor | None,
+    valid_rows: int | None = None,
+    packed_rows: int | None = None,
+) -> dict[str, int]:
+    """Return replay/native/padding row counts for a boolean replay mask.
 
-    ``None`` means every row is replayed; callers get an empty summary.
+    ``valid_rows`` excludes sequence padding; ``packed_rows`` includes THD
+    alignment padding. ``None`` means every row is replayed.
     """
     if replay_mask is None:
         return {}
-    total_rows = int(replay_mask.numel())
-    replay_rows = int(replay_mask.sum().item())
+    if replay_mask.is_nested:
+        total_rows = int(replay_mask.offsets().diff().sum().item())
+        replay_rows = int(replay_mask.values().sum().item())
+    else:
+        total_rows = int(replay_mask.numel())
+        replay_rows = int(replay_mask.sum().item())
+    valid_rows = total_rows if valid_rows is None else int(valid_rows)
+    packed_rows = total_rows if packed_rows is None else int(packed_rows)
     return {
-        "total_rows": total_rows,
+        "valid_rows": valid_rows,
         "replay_rows": replay_rows,
-        "native_rows": total_rows - replay_rows,
+        "native_rows": valid_rows - replay_rows,
+        "padding_rows": max(0, packed_rows - valid_rows),
     }
 
 
@@ -549,7 +561,14 @@ def set_router_replay_data(
         index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
 
         if is_router_replay_debug_enabled():
-            coverage = summarize_replay_mask(replay_mask_rmpad_split)
+            if replay_mask is None:
+                coverage = {}
+            elif layers_topk_idx.is_nested:
+                packed_rows = int(replay_mask_rmpad.numel()) if replay_mask_rmpad is not None else None
+                coverage = summarize_replay_mask(replay_mask, packed_rows=packed_rows)
+            else:
+                valid_rows = int(attention_mask.sum().item()) if attention_mask is not None else None
+                coverage = summarize_replay_mask(replay_mask, valid_rows=valid_rows)
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
             logger.warning(
                 "router replay REPLAY: rank=%d, layers=%d, vp_rank=%s, coverage=%s",
