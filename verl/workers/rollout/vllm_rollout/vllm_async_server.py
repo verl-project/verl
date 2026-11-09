@@ -1415,6 +1415,14 @@ class vLLMHttpServer:
                 "rollout.engine_kwargs.vllm may not set args that verl derives from its config: "
                 + "; ".join(f"{key} (set {_VERL_MANAGED_VLLM_ARGS[key.replace('-', '_')]})" for key in managed)
             )
+        if is_torch_npu_available(check_device=False):
+            # Ascend RL defaults disable NZ weights for sleep/wake and weight updates.
+            additional_config = dict(engine_kwargs.get("additional_config") or {})
+            rl_config = dict(additional_config.get("rl_config") or {})
+            rl_config.setdefault("enabled", True)
+            additional_config["rl_config"] = rl_config
+            engine_kwargs["additional_config"] = additional_config
+
         if _VLLM_VERSION < version.parse("0.22.0"):
             # Work around multimodal processor cache desync across pause/resume.
             # See: https://github.com/vllm-project/vllm/pull/43001/

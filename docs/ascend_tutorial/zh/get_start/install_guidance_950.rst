@@ -4,20 +4,16 @@
 Last updated: 11/03/2026.
 
 
-目录
---------
-
-- `框架后端支持说明 <#框架后端支持说明>`_
-- `部署指南 <#部署指南>`_
-   - `Docker镜像获取、构建和使用 <#1-docker镜像获取构建和使用>`_
-   - `自定义安装 <#2-自定义安装>`_
+.. contents:: 目录
+   :local:
+   :depth: 2
 
 
 
 框架后端支持说明
 ----------------
 
-当前NPU在Ascend 950PR&950DT系列产品上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU在Ascend 950PR&950DT系列产品上支持以下常见训推后端的部署，您可以根据我们的 :doc:`昇腾镜像说明 <dockerfile_build_guidance>` 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -35,7 +31,7 @@ Last updated: 11/03/2026.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
-`昇腾镜像说明 <dockerfile_build_guidance.rst>`__\ 。
+:doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
 
 
 2. 自定义安装

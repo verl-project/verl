@@ -7,7 +7,7 @@ Last updated: 11/03/2026.
 镜像获取与公开镜像地址
 --------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_ 构建。
 
 最新构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
 
