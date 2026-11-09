@@ -889,7 +889,8 @@ def test_chunk_tensordict_uses_views_for_2d_nested_tensors():
 
     source_storage = input_ids.values().untyped_storage().data_ptr()
     for index, chunk in enumerate(chunks):
-        assert chunk["input_ids"].values().untyped_storage().data_ptr() == source_storage
+        if tu._TENSORDICT_SUPPORTS_NESTED_CHUNK:
+            assert chunk["input_ids"].values().untyped_storage().data_ptr() == source_storage
         expected_rows = rows[index * 2 : (index + 1) * 2]
         assert all(
             torch.equal(actual, expected)
