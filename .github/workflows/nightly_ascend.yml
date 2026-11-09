@@ -396,7 +396,7 @@ jobs:
   # Test grpo qwen3_5_2b fsdp_turbo vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu

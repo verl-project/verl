@@ -64,6 +64,8 @@ def init_config() -> DictConfig:
             ],
         )
 
+    config.trainer.n_gpus_per_node = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", config.trainer.n_gpus_per_node))
+    config.trainer.nnodes = int(os.getenv("VERL_TEST_NNODES", config.trainer.nnodes))
     model_path = os.path.expanduser("~/models/Qwen/Qwen3.5-2B")
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
@@ -71,7 +73,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.enforce_eager = True
     config.actor_rollout_ref.rollout.prompt_length = 10240
     config.actor_rollout_ref.rollout.response_length = 4096
-    config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.n = int(os.getenv("VERL_TEST_ROLLOUT_N", "4"))
     config.actor_rollout_ref.rollout.seed = 0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
@@ -165,7 +167,7 @@ def test_multimodal_tool_agent(init_config):
     with open(tool_config_path, "w") as f:
         json.dump(tool_config, f)
 
-    n = 2
+    n = int(os.getenv("VERL_TEST_ROLLOUT_N", "2"))
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
@@ -325,7 +327,7 @@ def test_multimodal_single_turn_agent(init_config):
     )
 
     # =========================== 1. Init rollout manager ===========================
-    n = 2
+    n = int(os.getenv("VERL_TEST_ROLLOUT_N", "2"))
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
