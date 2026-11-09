@@ -549,3 +549,41 @@ def test_summarize_replay_mask_counts_bshd_padding():
         "native_rows": 1,
         "padding_rows": 1,
     }
+
+
+def test_summarize_dense_replay_coverage_ignores_padding():
+    """Padded mask positions are not counted as replayed rows."""
+    replay_mask = torch.tensor([True, True, True, True])
+    attention_mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils._summarize_dense_replay_coverage(replay_mask, attention_mask, packed_rows=4) == {
+        "valid_rows": 2,
+        "replay_rows": 2,
+        "native_rows": 0,
+        "padding_rows": 2,
+    }
+
+
+def test_summarize_dense_replay_coverage_counts_only_valid_replays():
+    """Only replay rows at valid positions are counted."""
+    replay_mask = torch.tensor([True, False, True, True])
+    attention_mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils._summarize_dense_replay_coverage(replay_mask, attention_mask, packed_rows=4) == {
+        "valid_rows": 2,
+        "replay_rows": 1,
+        "native_rows": 1,
+        "padding_rows": 2,
+    }
+
+
+def test_summarize_dense_replay_coverage_without_attention_mask_keeps_old_counting():
+    """A missing attention_mask keeps the previous all-position behavior."""
+    replay_mask = torch.tensor([True, True, False, False])
+
+    assert rr_utils._summarize_dense_replay_coverage(replay_mask, None) == {
+        "valid_rows": 4,
+        "replay_rows": 2,
+        "native_rows": 2,
+        "padding_rows": 0,
+    }

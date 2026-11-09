@@ -469,6 +469,27 @@ def summarize_replay_mask(
     }
 
 
+def _summarize_dense_replay_coverage(
+    replay_mask: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    packed_rows: int | None = None,
+) -> dict[str, int]:
+    """Coverage for a dense replay mask, counting replay rows only at valid positions.
+
+    Padded positions can be True in a caller-provided dense mask; intersecting
+    with ``attention_mask`` keeps ``native_rows`` non-negative and matches the
+    packed THD path, which excludes padding. A missing ``attention_mask`` keeps
+    the previous all-position counting behaviour.
+    """
+    valid_mask = None
+    if attention_mask is not None:
+        valid_mask = attention_mask.to(device=replay_mask.device, dtype=torch.bool)
+    valid_rows = int(valid_mask.sum().item()) if valid_mask is not None else None
+    if valid_mask is not None:
+        replay_mask = replay_mask.to(torch.bool) & valid_mask
+    return summarize_replay_mask(replay_mask, valid_rows=valid_rows, packed_rows=packed_rows)
+
+
 def set_router_replay_data(
     layers_topk_idx,
     attention_mask,
@@ -576,8 +597,7 @@ def set_router_replay_data(
                 if layers_topk_idx.is_nested:
                     coverage = summarize_replay_mask(replay_mask, packed_rows=packed_rows)
                 else:
-                    valid_rows = int(attention_mask.sum().item()) if attention_mask is not None else None
-                    coverage = summarize_replay_mask(replay_mask, valid_rows=valid_rows, packed_rows=packed_rows)
+                    coverage = _summarize_dense_replay_coverage(replay_mask, attention_mask, packed_rows=packed_rows)
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
             logger.warning(
                 "router replay REPLAY: rank=%d, layers=%d, vp_rank=%s, coverage=%s",
