@@ -1,6 +1,6 @@
 # Training Configuration Parameters and Metrics
 
-Last updated: 11/02/2026.
+Last updated: 11/08/2026.
 
 For NPU-related features, visit: [NPU Advanced Features Guide](../../feature_support/npu_advance_features.md).
 
@@ -597,8 +597,6 @@ Same structure as the Actor Megatron engine configuration. The main differences:
 | Parameter | Default | Description |
 |--------|--------|------|
 | `actor.megatron.router_replay.mode` / `actor.veomni.router_replay.mode` | `disabled` | Engine-side routing replay mode; options include disabled, R2, R3 |
-| `router_replay.record_file` | `null` | Routing record file path |
-| `router_replay.replay_file` | `null` | Routing replay file path |
 
 #### 1.4.4 Checkpoint Configuration
 

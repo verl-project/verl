@@ -22,8 +22,6 @@ Router Replay is an advanced routing replay functionality within the Verl framew
 ```yaml
 router_replay:
   mode: "disabled"  # Available options: disabled, R2, R3
-  record_file: null  # Path for recording routing decisions
-  replay_file: null   # Path for replaying recorded decisions
 ```
 
 ## Quick Start Guide
