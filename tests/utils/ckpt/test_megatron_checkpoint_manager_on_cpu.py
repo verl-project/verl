@@ -506,8 +506,8 @@ class TestLoadCheckpointDispatch:
         mgr.model[0].load_state_dict.assert_called_once()
         mgr.optimizer.reload_model_params.assert_called_once_with()
 
-    def test_megatron_fsdp_model_only_reloads_optimizer_model_params(self):
-        """Model-only Megatron-FSDP resume refreshes the optimizer's main parameters."""
+    def test_megatron_fsdp_model_only_uses_wrapper_load_hooks(self):
+        """Megatron-FSDP relies on its wrapper load hooks instead of optimizer reload."""
         dist_path = os.path.join(self.ckpt_path, "model", "dist_ckpt")
         os.makedirs(dist_path, exist_ok=True)
         with open(os.path.join(dist_path, ".metadata"), "w") as f:
@@ -523,6 +523,7 @@ class TestLoadCheckpointDispatch:
         training.checkpointing = checkpointing
 
         mgr = _make_manager(load_contents=["model"], use_megatron_fsdp=True)
+        mgr.optimizer.reload_model_params.side_effect = NotImplementedError
         modules = {
             "megatron.bridge": bridge,
             "megatron.bridge.training": training,
@@ -532,7 +533,7 @@ class TestLoadCheckpointDispatch:
             mgr.load_checkpoint(self.ckpt_path)
 
         mgr.model[0].load_state_dict.assert_called_once()
-        mgr.optimizer.reload_model_params.assert_called_once_with()
+        mgr.optimizer.reload_model_params.assert_not_called()
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")

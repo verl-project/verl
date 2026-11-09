@@ -636,6 +636,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.bridge.load_hf_weights(self.model, hf_model_path)
 
     def _reload_optimizer_model_params_if_needed(self):
+        if self.use_megatron_fsdp:
+            # The FSDP wrapper loads main-weight DTensors and refreshes compute weights;
+            # DistributedOptimizer.reload_model_params() is unsupported in this mode.
+            return
         if self.optimizer is not None and not self.should_load_optimizer:
             self.optimizer.reload_model_params()
 
