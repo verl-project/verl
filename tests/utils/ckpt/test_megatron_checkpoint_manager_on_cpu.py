@@ -23,6 +23,7 @@ Uses real megatron.core with gloo backend on a single CPU process.
 import os
 import shutil
 import tempfile
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -109,6 +110,7 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    use_megatron_fsdp=False,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -150,6 +152,7 @@ def _make_manager(
         use_dist_checkpointing=use_dist_checkpointing,
         bridge=bridge,
         peft_cls=peft_cls,
+        use_megatron_fsdp=use_megatron_fsdp,
     )
 
 
@@ -475,6 +478,61 @@ class TestLoadCheckpointDispatch:
         assert "optimizer" in calls["optimizer"]
         assert "rng_state" in calls["extra"]
         assert "model" not in calls["optimizer"]
+        mgr.optimizer.reload_model_params.assert_not_called()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_hf_model_only_reloads_optimizer_model_params(self, mock_load_dc, _mock_meta):
+        """Model-only HF resume refreshes the optimizer's main parameters."""
+        mgr = _make_manager(load_contents=["model"])
+
+        with patch.object(mgr, "_load_model_as_hf_via_bridge") as mock_bridge_load:
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mock_bridge_load.assert_called_once()
+        mock_load_dc.assert_not_called()
+        mgr.optimizer.reload_model_params.assert_called_once_with()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_dist_ckpt_model_only_reloads_optimizer_model_params(self, mock_load_dc, _mock_meta):
+        """Model-only dist-checkpoint resume refreshes the optimizer's main parameters."""
+        _make_v2_layout(self.ckpt_path, "model")
+        mock_load_dc.return_value = {"model": {"layer.weight": torch.zeros(1)}}
+        mgr = _make_manager(load_contents=["model"], use_dist_checkpointing=True)
+
+        mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.model[0].load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_called_once_with()
+
+    def test_megatron_fsdp_model_only_reloads_optimizer_model_params(self):
+        """Model-only Megatron-FSDP resume refreshes the optimizer's main parameters."""
+        dist_path = os.path.join(self.ckpt_path, "model", "dist_ckpt")
+        os.makedirs(dist_path, exist_ok=True)
+        with open(os.path.join(dist_path, ".metadata"), "w") as f:
+            f.write("")
+
+        checkpointing = ModuleType("megatron.bridge.training.checkpointing")
+        checkpointing.load_fsdp_dtensor_checkpoint = MagicMock(
+            return_value=({"model": {"layer.weight": torch.zeros(1)}}, None, None, None)
+        )
+        bridge = ModuleType("megatron.bridge")
+        training = ModuleType("megatron.bridge.training")
+        bridge.training = training
+        training.checkpointing = checkpointing
+
+        mgr = _make_manager(load_contents=["model"], use_megatron_fsdp=True)
+        modules = {
+            "megatron.bridge": bridge,
+            "megatron.bridge.training": training,
+            "megatron.bridge.training.checkpointing": checkpointing,
+        }
+        with patch.dict("sys.modules", modules):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        mgr.model[0].load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_called_once_with()
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
@@ -506,6 +564,7 @@ class TestLoadCheckpointDispatch:
         assert "optimizer" in calls["optimizer"]
         assert "rng_state" in calls["extra"]
         mgr.model[0].load_state_dict.assert_called_once()
+        mgr.optimizer.reload_model_params.assert_not_called()
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
