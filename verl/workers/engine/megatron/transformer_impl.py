@@ -1022,61 +1022,61 @@ class MegatronEngine(BaseEngine):
                 micro_batch_size=1,  # the communication shape is obtained via p2p comm
                 forward_only=forward_only,
             )
+
+            if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+                # because save_loss_to_tracker uses avg_group=DP+CP group.
+                # Only collect metrics on the src rank afterward.
+                metrics = get_megatron_mtp_loss(n_micro_batch)
+                if self.is_mp_src_rank_with_outputs():
+                    if "metrics" not in losses_reduced[0]:
+                        losses_reduced[0]["metrics"] = {}
+                    losses_reduced[0]["metrics"].update(metrics)
+
+            if record_r2_routes:
+                if not self.mini_layer_topk_idx_list:
+                    raise RuntimeError("R2 RECORD completed without capturing any router routes.")
+                if self.tf_config.virtual_pipeline_model_parallel_size is not None:
+                    # config = self.actor_module[0].module.module.config
+                    vp_size = len(self.module)
+                    microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
+                    bs = n_micro_batch
+                    topk_idx_td = reorder_and_merge_vpp_layers(
+                        self.mini_layer_topk_idx_list, bs, vp_size, microbatch_group_size_per_vp_stage
+                    )
+                else:
+                    topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
+                self.mini_layer_topk_idx_list = []
+
+                layers_topk_idx = pp_gather(topk_idx_td, self.tf_config)
+                use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
+                if use_dynamic_bsz and indices is not None:
+                    layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
+                if dcp_group is not None and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                    # This rank only recorded routes for its scheduled samples, in
+                    # micro-batch order. Hand them per micro-batch to the leader
+                    # collection below, which restores the original sample order.
+                    _attach_dcp_recorded_routes(losses_reduced, layers_topk_idx)
+
+            output = {}
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                if dcp_group is not None:
+                    output = postprocess_dynamic_cp_batch(
+                        losses_reduced, len(data), dcp_group, include_model_output=self.is_mp_src_rank_with_outputs()
+                    )
+                else:
+                    output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+                if record_r2_routes and dcp_group is None:
+                    output["model_output"]["routed_experts"] = layers_topk_idx
+            if enable_routing_replay:
+                clear_model_router_replay_indices(self.module)
+                clear_model_router_replay_action(self.module)
+            return output
         except Exception:
             # Keep router replay state from leaking into the next step after an error.
             if enable_routing_replay:
                 self._clear_replay_state_after_error()
             raise
-
-        if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
-            # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
-            # because save_loss_to_tracker uses avg_group=DP+CP group.
-            # Only collect metrics on the src rank afterward.
-            metrics = get_megatron_mtp_loss(n_micro_batch)
-            if self.is_mp_src_rank_with_outputs():
-                if "metrics" not in losses_reduced[0]:
-                    losses_reduced[0]["metrics"] = {}
-                losses_reduced[0]["metrics"].update(metrics)
-
-        if record_r2_routes:
-            if not self.mini_layer_topk_idx_list:
-                raise RuntimeError("R2 RECORD completed without capturing any router routes.")
-            if self.tf_config.virtual_pipeline_model_parallel_size is not None:
-                # config = self.actor_module[0].module.module.config
-                vp_size = len(self.module)
-                microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
-                bs = n_micro_batch
-                topk_idx_td = reorder_and_merge_vpp_layers(
-                    self.mini_layer_topk_idx_list, bs, vp_size, microbatch_group_size_per_vp_stage
-                )
-            else:
-                topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
-            self.mini_layer_topk_idx_list = []
-
-            layers_topk_idx = pp_gather(topk_idx_td, self.tf_config)
-            use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
-            if use_dynamic_bsz and indices is not None:
-                layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
-            if dcp_group is not None and mpu.is_pipeline_last_stage(ignore_virtual=True):
-                # This rank only recorded routes for its scheduled samples, in
-                # micro-batch order. Hand them per micro-batch to the leader
-                # collection below, which restores the original sample order.
-                _attach_dcp_recorded_routes(losses_reduced, layers_topk_idx)
-
-        output = {}
-        if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            if dcp_group is not None:
-                output = postprocess_dynamic_cp_batch(
-                    losses_reduced, len(data), dcp_group, include_model_output=self.is_mp_src_rank_with_outputs()
-                )
-            else:
-                output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
-            if record_r2_routes and dcp_group is None:
-                output["model_output"]["routed_experts"] = layers_topk_idx
-        if enable_routing_replay:
-            clear_model_router_replay_indices(self.module)
-            clear_model_router_replay_action(self.module)
-        return output
 
     def _clear_replay_state_after_error(self) -> None:
         """Best-effort clear of router replay state after a failed schedule.

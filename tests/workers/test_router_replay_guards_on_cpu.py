@@ -27,6 +27,8 @@ instead of silent route corruption:
 from types import SimpleNamespace
 
 import pytest
+import torch
+from tensordict import TensorDict
 
 from verl.utils.megatron import router_replay_patch as replay_patch
 from verl.workers.engine.megatron import transformer_impl
@@ -107,4 +109,48 @@ def test_clear_replay_state_after_error_keeps_action_cleanup_on_index_failure(mo
     engine._clear_replay_state_after_error()
 
     assert engine.mini_layer_topk_idx_list == []
+    assert cleared == [True]
+
+
+def test_forward_backward_batch_clears_state_on_postprocess_error(monkeypatch):
+    """A postprocessing failure must still clear replay state before propagating."""
+    engine = object.__new__(transformer_impl.MegatronEngine)
+    engine.enable_routing_replay = True
+    engine.engine_config = SimpleNamespace(
+        context_parallel_size=1,
+        dynamic_context_parallel=False,
+        pad_bshd_to_minibatch_max=False,
+        use_remove_padding=True,
+        router_replay=SimpleNamespace(mode="R3"),
+        use_fused_kernels=False,
+    )
+    engine.model_config = SimpleNamespace(mtp=SimpleNamespace(enable=False))
+    engine.tf_config = None
+    engine.module = []
+    engine.get_data_parallel_group = lambda: None
+    engine.get_data_parallel_size = lambda: 1
+
+    data = TensorDict({"loss_mask": torch.ones(4)}, batch_size=[4])
+    transformer_impl.tu.assign_non_tensor_data(data, "enable_routing_replay", True)
+
+    monkeypatch.setattr(transformer_impl, "_check_dcp_unsupported_features", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transformer_impl, "get_device_id", lambda: "cpu")
+    monkeypatch.setattr(transformer_impl.torch.distributed, "all_reduce", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transformer_impl.mpu, "get_virtual_pipeline_model_parallel_world_size", lambda: None)
+    monkeypatch.setattr(transformer_impl, "prepare_micro_batches", lambda **kwargs: ([], None))
+    monkeypatch.setattr(transformer_impl, "make_batch_generator", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transformer_impl, "get_forward_backward_func", lambda: (lambda **kwargs: []))
+    monkeypatch.setattr(transformer_impl.mpu, "is_pipeline_last_stage", lambda ignore_virtual=True: True)
+
+    def boom(**kwargs):
+        raise RuntimeError("postprocess boom")
+
+    monkeypatch.setattr(transformer_impl, "postprocess_batch_func", boom)
+
+    cleared = []
+    monkeypatch.setattr(engine, "_clear_replay_state_after_error", lambda: cleared.append(True))
+
+    with pytest.raises(RuntimeError, match="postprocess boom"):
+        engine.forward_backward_batch(data, loss_function=None)
+
     assert cleared == [True]
