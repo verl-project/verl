@@ -46,6 +46,12 @@ on:
       # even when it touches no .py file.
       - "pyproject.toml"
       - "uv.lock"
+      - "requirements-fsdp2-muon.txt"
+      - "tests/special_distributed/run_muon_fsdp2_acceptance.sh"
+      - "tests/special_e2e/fsdp2_muon/**"
+      - "examples/grpo_trainer/run_dense_muon_fsdp2.sh"
+      - "verl/trainer/config/optim/fsdp.yaml"
+      - "verl/trainer/config/_generated_ppo_trainer.yaml"
   pull_request:
     branches:
       - main
@@ -70,6 +76,12 @@ on:
       # even when it touches no .py file.
       - "pyproject.toml"
       - "uv.lock"
+      - "requirements-fsdp2-muon.txt"
+      - "tests/special_distributed/run_muon_fsdp2_acceptance.sh"
+      - "tests/special_e2e/fsdp2_muon/**"
+      - "examples/grpo_trainer/run_dense_muon_fsdp2.sh"
+      - "verl/trainer/config/optim/fsdp.yaml"
+      - "verl/trainer/config/_generated_ppo_trainer.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -104,13 +116,13 @@ jobs:
     if: github.repository_owner == 'verl-project'
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 60 # Increase this timeout value as needed
+    timeout-minutes: 90
     env:
       HTTP_PROXY: "http://100.68.174.87:3128"
       HTTPS_PROXY: "http://100.68.174.87:3128"
       NO_PROXY: "localhost,127.0.0.1"
       HF_HUB_ENABLE_HF_TRANSFER: 1
-      # No install step: every command below runs through uv, which syncs .venv
+      # Every command below runs through uv, which syncs .venv
       # from the committed uv.lock (offline, from the image's baked cache).
       # Keep these extras identical across the job so uv never re-syncs torch.
       UV_RUN: "uv run --frozen --all-packages --extra sglang --extra megatron --extra ci"
@@ -134,6 +146,36 @@ jobs:
       - name: Check final pip list
         run: |
           $UV_RUN uv pip list
+      # Muon is optional and stays outside the shared dependency resolution.
+      # Preserve the locked torch/CUDA stack, and retain direct_url.json so the
+      # standalone driver can verify the exact pinned Dion commit.
+      - name: Install optional pinned Dion for FSDP2 Muon
+        run: |
+          $UV_RUN uv pip install --no-deps -r requirements-fsdp2-muon.txt
+      - name: Run standalone FSDP2 Muon acceptance on two GPUs
+        timeout-minutes: 30
+        env:
+          CUDA_VISIBLE_DEVICES: "0,1"
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          $UV_RUN python tests/special_distributed/run_muon_fsdp2_acceptance.py \
+            --case all \
+            --precision both \
+            --dynamo-recompile-limit 64 \
+            --timeout 900 \
+            --output artifacts/fsdp2-muon \
+            2>&1 | tee artifacts/fsdp2-muon-driver.log
+      - name: Upload FSDP2 Muon acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsdp2-muon-acceptance
+          path: |
+            artifacts/fsdp2-muon/
+            artifacts/fsdp2-muon-driver.log
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Run all GPU unit tests
         run: |
           $UV_RUN pytest -s -x --ignore-glob="*on_npu.py" --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_bucketed_weight_transfer*" tests/
