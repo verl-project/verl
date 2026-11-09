@@ -1420,21 +1420,6 @@ class vLLMHttpServer:
             # See: https://github.com/vllm-project/vllm/pull/43001/
             engine_kwargs.setdefault("mm_processor_cache_gb", 0)
 
-        if _VLLM_VERSION >= version.parse("0.30.0") and get_platform().device_name == "npu":
-            # RL weight updates and wake_up require NZ to be disabled. vLLM-Ascend
-            # now reads additional_config.weight_nz_mode instead of the legacy env var.
-            config_key = "additional-config" if "additional-config" in engine_kwargs else "additional_config"
-            additional_config = engine_kwargs.get(config_key)
-            if additional_config is None:
-                additional_config = {}
-            if isinstance(additional_config, str):
-                additional_config = json.loads(additional_config)
-            if not isinstance(additional_config, Mapping):
-                raise TypeError("rollout.engine_kwargs.vllm.additional_config must be a mapping or a JSON object")
-            additional_config = dict(additional_config)
-            additional_config.setdefault("weight_nz_mode", 0)
-            engine_kwargs[config_key] = additional_config
-
         checkpoint_config = getattr(self.config, "checkpoint_engine", None)
         if getattr(checkpoint_config, "backend", None) == "delta_sharded":
             from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
