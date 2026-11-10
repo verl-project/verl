@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 09/21/2026.
+Last updated: 11/04/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -268,7 +268,9 @@ Practical tuning order:
 
 ## Checkpoint and Validation Behavior
 
-When the installed TransferQueue supports checkpointing, V1 async checkpoints persist its state alongside model and dataloader state. Finished samples are restored directly. Pending and running prompts are cleared and reissued after resume so prompts already fetched from the dataloader are not lost.
+V1 async checkpoints persist TransferQueue state alongside model and dataloader state. Finished samples are restored directly. Pending and running prompts are cleared and reissued after resume so prompts already fetched from the dataloader are not lost.
+
+Saving this state uses TransferQueue's checkpoint API, so install the TransferQueue version that verl requires (see `requirements.txt`); with an older release the run fails at its first checkpoint. TransferQueue's controller and storage units write their part of the state from the nodes they run on, so multi-node runs need `trainer.default_local_dir` on a filesystem that all nodes share.
 
 Validation shares the same AgentLoop and rollout server pool with unfinished training trajectories. Those partial trajectories continue running alongside validation requests, so `timing_s/testing` includes the contention and rollout capacity they consume rather than measuring validation generation in isolation.
 
