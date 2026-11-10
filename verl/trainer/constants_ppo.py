@@ -20,6 +20,7 @@ from pathlib import Path
 import torch
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
+from verl.single_controller.ray.base import TRAINING_WORKER_OMP_NUM_THREADS_ENV
 from verl.utils.device import get_device_capability
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,18 @@ def _uses_megatron(config) -> bool:
 
     for key in ("actor_rollout_ref.actor.strategy", "critic.strategy"):
         if OmegaConf.select(config, key, default=None) == "megatron":
+            return True
+    return False
+
+
+def _uses_cpu_offload(config) -> bool:
+    """Return True if any trainable engine in the config runs with FSDP CPU offload."""
+    if config is None:
+        return False
+    from omegaconf import OmegaConf
+
+    for key in ("actor_rollout_ref.actor.veomni.enable_fsdp_offload", "critic.veomni.enable_fsdp_offload"):
+        if OmegaConf.select(config, key, default=False):
             return True
     return False
 
@@ -110,6 +123,12 @@ def _default_omp_num_threads(config) -> int:
     return max(_available_physical_cores() // n_gpus_per_node, 1)
 
 
+def _ray_init_env_var(config, key: str):
+    from omegaconf import OmegaConf
+
+    return OmegaConf.select(config, f"ray_kwargs.ray_init.runtime_env.env_vars.{key}")
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -149,8 +168,16 @@ def get_ppo_ray_runtime_env(config=None):
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
-    if os.environ.get("OMP_NUM_THREADS") is None and "OMP_NUM_THREADS" not in job_runtime_env.get("env_vars", {}):
-        runtime_env["env_vars"]["OMP_NUM_THREADS"] = str(_default_omp_num_threads(config))
+    # With CPU offload the training workers run gradient accumulation and the optimizer step on the
+    # host, so they get the large thread count. Nobody else does: set job-wide it also reaches rollout
+    # servers and agent loop workers, whose many small tensor ops then oversubscribe the node.
+    if (
+        _uses_cpu_offload(config)
+        and os.environ.get("OMP_NUM_THREADS") is None
+        and "OMP_NUM_THREADS" not in job_runtime_env.get("env_vars", {})
+        and _ray_init_env_var(config, "OMP_NUM_THREADS") is None
+    ):
+        runtime_env["env_vars"][TRAINING_WORKER_OMP_NUM_THREADS_ENV] = str(_default_omp_num_threads(config))
     # Set after the loop above on purpose: the point is to override an inherited value, so it must
     # survive the "already set in the launching shell" filter.
     if _uses_torch_profiler(config) and os.environ.get("VERL_KEEP_NVTX_INJECTION", "0") != "1":
