@@ -1,4 +1,5 @@
-# TPU platform tests on 1 Cloud TPU v6e chip (the TPU counterpart of gpu_unit_tests.yml and npu_unit_tests.yml).
+# TPU platform test and the verl unit tests that run on TPU, on 1 Cloud TPU v6e chip (the TPU counterpart of
+# gpu_unit_tests.yml and npu_unit_tests.yml; the test list is TPU_UNIT_TESTS in tests/special_tpu/run_tpu_e2e_ci.sh).
 #
 # How the TPU workflows run (details in tests/special_tpu/README.md): self-hosted runners in a GKE cluster with TPU v6e
 # node pools create a Kueue-queued RayCluster for each test with tests/special_tpu/run_tpu_e2e_ci.sh, run the test on
@@ -24,6 +25,11 @@ on:
       - "examples/tpu/grpo/README.md"
       - "tests/special_tpu/**"
       - "!tests/special_tpu/README.md"
+      # TPU_UNIT_TESTS
+      - "tests/single_controller/test_data_transfer.py"
+      - "tests/trainer/ppo/test_rollout_corr.py"
+      - "tests/trainer/ppo/test_rollout_corr_integration.py"
+      - "tests/utils/test_flops_counter.py"
       - ".github/workflows/tpu_unit_tests.yml"
   pull_request:
     branches:
@@ -36,6 +42,11 @@ on:
       - "examples/tpu/grpo/README.md"
       - "tests/special_tpu/**"
       - "!tests/special_tpu/README.md"
+      # TPU_UNIT_TESTS
+      - "tests/single_controller/test_data_transfer.py"
+      - "tests/trainer/ppo/test_rollout_corr.py"
+      - "tests/trainer/ppo/test_rollout_corr_integration.py"
+      - "tests/utils/test_flops_counter.py"
       - ".github/workflows/tpu_unit_tests.yml"
   workflow_dispatch:
     inputs:
@@ -97,7 +108,7 @@ jobs:
   tpu_unit_tests:
     needs: setup
     if: needs.setup.outputs.runner != ''
-    name: TPU platform tests on 1 x TPU v6e-1 (torch_tpu, verl-hardware-plugin)
+    name: TPU platform and verl unit tests on 1 x TPU v6e-1 (torch_tpu, verl-hardware-plugin)
     runs-on: ${{ needs.setup.outputs.runner }}
     timeout-minutes: 180 # Includes waiting for TPU quota (Kueue) and TPU hosts.
     steps:
@@ -108,7 +119,7 @@ jobs:
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
-      - name: Running TPU platform tests on 1 TPU v6e chip (tests/special_tpu/tpu_smoke_test.py)
+      - name: Running tests/special_tpu/tpu_smoke_test.py and the verl unit tests of TPU_UNIT_TESTS on 1 TPU v6e chip
         run: |
           bash tests/special_tpu/run_tpu_e2e_ci.sh tpu_platform
       - name: Clean up the RayCluster

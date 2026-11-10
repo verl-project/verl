@@ -2,8 +2,9 @@
 #
 # Runs the 8-step smoke test (SMOKE_TEST=1) of examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh (Qwen3-0.6B, GSM8K
 # multi-turn SFT, TorchTitan FSDP over 4 chips) in both of its launch modes: torchrun (verl.trainer.sft_trainer, the
-# default) and SFT_TRAINER_MODE=ray (verl.trainer.sft_trainer_ray). Train and validation losses must go down. See
-# tpu_unit_tests.yml and tests/special_tpu/README.md for how the TPU jobs run, and where.
+# default) and SFT_TRAINER_MODE=ray (verl.trainer.sft_trainer_ray). Train and validation losses must go down. Each mode
+# then resumes from the checkpoint of its last step for 2 more steps (trainer.resume_mode=auto), like the resume test
+# of e2e_sft_llm.yml. See tpu_unit_tests.yml and tests/special_tpu/README.md for how the TPU jobs run, and where.
 
 name: e2e_sft_llm_tpu
 
@@ -29,7 +30,6 @@ on:
       - "!verl/workers/rollout/**"
       # Entrypoints
       - "verl/trainer/config/**"
-      - "examples/data_preprocess/gsm8k_multiturn_sft.py"
       - "examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh"
       - "examples/tpu/grpo/Dockerfile"
       # Checks out the verl-hardware-plugin commit under test
@@ -58,7 +58,6 @@ on:
       - "!verl/workers/rollout/**"
       # Entrypoints
       - "verl/trainer/config/**"
-      - "examples/data_preprocess/gsm8k_multiturn_sft.py"
       - "examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh"
       - "examples/tpu/grpo/Dockerfile"
       # Checks out the verl-hardware-plugin commit under test
@@ -126,7 +125,7 @@ jobs:
   e2e_sft_llm_tpu:
     needs: setup
     if: needs.setup.outputs.runner != ''
-    name: GSM8K SFT Qwen3-0.6B on 1 x TPU v6e-4 (TorchTitan, torchrun and Ray)
+    name: GSM8K SFT Qwen3-0.6B on 1 x TPU v6e-4 (TorchTitan, torchrun and Ray, resume from checkpoint)
     runs-on: ${{ needs.setup.outputs.runner }}
     timeout-minutes: 240 # Includes waiting for TPU quota (Kueue) and TPU hosts.
     steps:
@@ -137,7 +136,7 @@ jobs:
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
-      - name: Running the GSM8K SFT smoke test on 4 TPU v6e chips (examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh)
+      - name: Running the GSM8K SFT smoke test and resume tests on 4 TPU v6e chips (examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh)
         run: |
           bash tests/special_tpu/run_tpu_e2e_ci.sh sft
       - name: Clean up the RayCluster

@@ -33,7 +33,6 @@ on:
       # Entrypoints
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/**"
-      - "examples/data_preprocess/gsm8k.py"
       - "examples/tpu/grpo/run_qwen3_torchtitan.sh"
       - "examples/tpu/grpo/Dockerfile"
       # Checks out the verl-hardware-plugin commit under test
@@ -64,7 +63,6 @@ on:
       # Entrypoints
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/**"
-      - "examples/data_preprocess/gsm8k.py"
       - "examples/tpu/grpo/run_qwen3_torchtitan.sh"
       - "examples/tpu/grpo/Dockerfile"
       # Checks out the verl-hardware-plugin commit under test

@@ -25,8 +25,8 @@
 #   4. tear down - delete the RayCluster on exit, whether the test passed, failed, timed out or was cancelled.
 #
 # Tests (one per workflow, see tests/special_tpu/README.md):
-#   tpu_platform  1 x v6e-1  tpu_unit_tests.yml             tests/special_tpu/tpu_smoke_test.py
-#   sft           1 x v6e-4  e2e_sft_llm_tpu.yml            examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
+#   tpu_platform  1 x v6e-1  tpu_unit_tests.yml             tests/special_tpu/tpu_smoke_test.py, TPU_UNIT_TESTS
+#   sft           1 x v6e-4  e2e_sft_llm_tpu.yml            examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh (+ resume)
 #   grpo          2 x v6e-1  e2e_v1_separate_async_tpu.yml  examples/tpu/grpo/run_qwen3_torchtitan.sh (0.6B)
 #   grpo_4b       2 x v6e-4  nightly_tpu.yml                examples/tpu/grpo/run_qwen3_torchtitan.sh (4B)
 #
@@ -701,23 +701,51 @@ run_in_tpu_worker() {
 # examples' READMEs do.
 # ---------------------------------------------------------------------------------------------------------------------
 
+# verl unit tests that run on a TPU chip (tpu_unit_tests.yml). A list, not gpu_unit_tests.yml's ignore globs: most of
+# tests/ relies on GPU behaviour that TPU does not have, because a TPU chip belongs to one process at a time. Several
+# WorkerGroups cannot share a resource pool, the driver cannot load device tensors returned by workers, and every rank
+# of a WorkerGroup has to initialize the TPU runtime (see tests/special_tpu/README.md).
+TPU_UNIT_TESTS=(
+    tests/single_controller/test_data_transfer.py
+    tests/trainer/ppo/test_rollout_corr.py
+    tests/trainer/ppo/test_rollout_corr_integration.py
+    tests/utils/test_flops_counter.py
+)
+
 test_tpu_platform() {
     # torch_tpu basics, the same MLP on TPU and CPU, and the verl TPU platform of verl-hardware-plugin on 1 chip.
     submit_and_verify_ray_job smoke 15 "" -- python3 tests/special_tpu/tpu_smoke_test.py
+    # TPU_UNIT_TESTS in the TPU container, like gpu_unit_tests.yml on a GPU host: one pytest process per file (the chip
+    # belongs to one process at a time), each test that uses Ray with its own local Ray instance.
+    run_in_tpu_worker unit 20 "--files ${#TPU_UNIT_TESTS[@]}" -- \
+        bash tests/special_tpu/run_tpu_unit_tests.sh "${TPU_UNIT_TESTS[@]}"
 }
 
 test_sft() {
-    # Qwen3-0.6B GSM8K multi-turn SFT, TorchTitan FSDP on one v6e-4 slice, in both launch modes of the script.
+    # Qwen3-0.6B GSM8K multi-turn SFT, TorchTitan FSDP on one v6e-4 slice, in both launch modes of the script. The SFT
+    # trainer saves a checkpoint (model, optimizer, dataloader) at its last step; each mode then resumes from it for two
+    # more steps (trainer.resume_mode=auto), like the resume test of e2e_sft_llm.yml.
+    local ckpt=/tmp/verl-tpu-ci-sft-checkpoints
+    local sft=(env RAY_DATA_HOME="${TPU_CI_DATA_HOME}" SMOKE_TEST=1 NNODES_TRAINER=1 N_CHIPS_TRAINER=4)
+    # The resumed runs must continue at step 9 with the trained weights: Qwen3-0.6B starts at a train/loss of ~1.4 and
+    # is at ~0.55 after 8 steps.
+    local resumed="--steps 10 --resumed-step 8 --max-first-loss 1.0"
     # 1. Ray single controller (verl.trainer.sft_trainer_ray), as a Ray job.
-    submit_and_verify_ray_job sft 30 "--steps 8" -- \
-        env RAY_DATA_HOME="${TPU_CI_DATA_HOME}" SMOKE_TEST=1 NNODES_TRAINER=1 N_CHIPS_TRAINER=4 SFT_TRAINER_MODE=ray \
-        bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
+    submit_and_verify_ray_job sft 30 "--steps 8 --saved-step 8" -- \
+        "${sft[@]}" SFT_TRAINER_MODE=ray bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh \
+        trainer.default_local_dir="${ckpt}/ray"
+    submit_and_verify_ray_job sft_resume 30 "${resumed}" -- \
+        "${sft[@]}" SFT_TRAINER_MODE=ray TOTAL_TRAINING_STEPS=10 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh \
+        trainer.resume_mode=auto trainer.default_local_dir="${ckpt}/ray"
     # 2. torchrun (verl.trainer.sft_trainer, the script's default) in the TPU container. Not as a Ray job: a Ray driver
     #    that reserves all chips of a host gets Ray's host-default TPU environment (without TPU_HOST_BOUNDS and
     #    TPU_CHIPS_PER_HOST_BOUNDS), which does not describe a 2x2 subslice.
-    run_in_tpu_worker sft 30 "--steps 8" -- \
-        env RAY_DATA_HOME="${TPU_CI_DATA_HOME}" SMOKE_TEST=1 NNODES_TRAINER=1 N_CHIPS_TRAINER=4 \
-        bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh
+    run_in_tpu_worker sft 30 "--steps 8 --saved-step 8" -- \
+        "${sft[@]}" bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh \
+        trainer.default_local_dir="${ckpt}/torchrun"
+    run_in_tpu_worker sft_resume 30 "${resumed}" -- \
+        "${sft[@]}" TOTAL_TRAINING_STEPS=10 bash examples/tpu/sft/run_qwen3_0_6b_torchtitan.sh \
+        trainer.resume_mode=auto trainer.default_local_dir="${ckpt}/torchrun"
 }
 
 test_grpo() {
