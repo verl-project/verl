@@ -19,7 +19,7 @@ import logging
 import os
 import uuid
 from dataclasses import replace as _dc_replace
-from typing import Optional
+from typing import Any, Optional
 
 import ray
 from ray.actor import ActorHandle
@@ -268,6 +268,47 @@ class vLLMPDReplica(vLLMReplica):
             await asyncio.gather(*[server.sleep.remote() for server in self.servers])
             return
         await super().sleep()
+
+    async def abort_all_requests(
+        self,
+        reject_request: bool = False,
+        reset_prefix_cache: bool = True,
+        abort_only: bool = False,
+    ) -> dict[str, Any]:
+        """Abort every prefill server before any decode server.
+
+        A finished prefill request keeps its KV blocks until decode sends DONE.
+        Pausing decode in the same gather closes its admission gate, so that
+        pull never starts and the prefill pause waits out the delayed-free
+        timeout. Prefill abort runs to completion first. Decode stays open
+        during that wait, finishes the pull, and sends DONE on the existing
+        path. Decode abort runs after the blocks have been released.
+        """
+        if not self._prefill_servers:
+            raise RuntimeError("PD servers have not been launched")
+
+        async def _abort_role(servers: list[ActorHandle]) -> list[dict[str, Any]]:
+            return list(
+                await asyncio.gather(
+                    *[
+                        server.abort_all_requests.remote(
+                            reject_request=reject_request,
+                            reset_prefix_cache=reset_prefix_cache,
+                            abort_only=abort_only,
+                        )
+                        for server in servers
+                    ]
+                )
+            )
+
+        prefill_results = await _abort_role(self._prefill_servers)
+        decode_results = await _abort_role(self._decode_servers)
+        results = prefill_results + decode_results
+        return {
+            "aborted_count": sum(result.get("aborted_count", 0) for result in results),
+            "request_ids": [request_id for result in results for request_id in result.get("request_ids", [])],
+            "server_results": results,
+        }
 
     @staticmethod
     def _is_ascend_platform() -> bool:

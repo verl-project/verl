@@ -482,6 +482,145 @@ def test_npu_pd_sleeps_decode_and_prefill_servers_serially(patched_replica_cls):
     assert max(sleep_starts) < min(sleep_ends)
 
 
+class _AbortCall:
+    def __init__(self, server: "_AbortServerStub"):
+        self._server = server
+
+    def remote(
+        self,
+        reject_request: bool = False,
+        reset_prefix_cache: bool = True,
+        abort_only: bool = False,
+    ):
+        return self._server.run_abort(
+            reject_request=reject_request,
+            reset_prefix_cache=reset_prefix_cache,
+            abort_only=abort_only,
+        )
+
+
+class _AbortServerStub:
+    def __init__(
+        self,
+        role: str,
+        name: str,
+        log: list[tuple],
+        *,
+        hold: asyncio.Event | None = None,
+        aborted_count: int = 1,
+        request_ids: list[str] | None = None,
+    ):
+        self.role = role
+        self.name = name
+        self.abort_all_requests = _AbortCall(self)
+        self._log = log
+        self._hold = hold
+        self._aborted_count = aborted_count
+        self._request_ids = list(request_ids or [name])
+
+    async def run_abort(self, reject_request: bool, reset_prefix_cache: bool, abort_only: bool):
+        self._log.append(
+            (
+                "start",
+                self.role,
+                self.name,
+                {
+                    "reject_request": reject_request,
+                    "reset_prefix_cache": reset_prefix_cache,
+                    "abort_only": abort_only,
+                },
+            )
+        )
+        if self._hold is not None:
+            await self._hold.wait()
+        self._log.append(("end", self.role, self.name))
+        return {"aborted_count": self._aborted_count, "request_ids": list(self._request_ids)}
+
+    def generate(self) -> None:
+        self._log.append(("generate", self.role, self.name))
+
+
+def _abort_replica(patched_replica_cls, prefill_servers, decode_servers):
+    replica = object.__new__(patched_replica_cls)
+    replica._prefill_servers = prefill_servers
+    replica._decode_servers = decode_servers
+    return replica
+
+
+def test_pd_abort_finishes_prefill_before_starting_decode(patched_replica_cls):
+    log: list[tuple] = []
+    prefill = _AbortServerStub("prefill", "prefill-0", log, aborted_count=2, request_ids=["p0", "p1"])
+    decode_0 = _AbortServerStub("decode", "decode-0", log, aborted_count=1, request_ids=["d0"])
+    decode_1 = _AbortServerStub("decode", "decode-1", log, aborted_count=3, request_ids=["d1"])
+    replica = _abort_replica(patched_replica_cls, [prefill], [decode_0, decode_1])
+
+    result = asyncio.run(
+        replica.abort_all_requests(reject_request=True, reset_prefix_cache=False, abort_only=False)
+    )
+
+    prefill_ends = [i for i, entry in enumerate(log) if entry[0] == "end" and entry[1] == "prefill"]
+    decode_starts = [i for i, entry in enumerate(log) if entry[0] == "start" and entry[1] == "decode"]
+    assert prefill_ends
+    assert decode_starts
+    assert max(prefill_ends) < min(decode_starts)
+    for entry in log:
+        if entry[0] != "start":
+            continue
+        assert entry[3] == {"reject_request": True, "reset_prefix_cache": False, "abort_only": False}
+    assert result["aborted_count"] == 6
+    assert result["request_ids"] == ["p0", "p1", "d0", "d1"]
+    assert result["server_results"] == [
+        {"aborted_count": 2, "request_ids": ["p0", "p1"]},
+        {"aborted_count": 1, "request_ids": ["d0"]},
+        {"aborted_count": 3, "request_ids": ["d1"]},
+    ]
+
+
+def test_pd_prefill_abort_can_observe_decode_admission(patched_replica_cls):
+    log: list[tuple] = []
+    hold = asyncio.Event()
+    prefill = _AbortServerStub("prefill", "prefill-0", log, hold=hold)
+    decode = _AbortServerStub("decode", "decode-0", log)
+    replica = _abort_replica(patched_replica_cls, [prefill], [decode])
+
+    async def admit_while_prefill_is_paused() -> None:
+        while not any(entry[0] == "start" and entry[1] == "prefill" for entry in log):
+            await asyncio.sleep(0)
+        decode.generate()
+        hold.set()
+
+    async def run() -> None:
+        admit = asyncio.create_task(admit_while_prefill_is_paused())
+        await replica.abort_all_requests()
+        await admit
+
+    asyncio.run(run())
+
+    generate_at = next(i for i, entry in enumerate(log) if entry[0] == "generate")
+    prefill_end = next(i for i, entry in enumerate(log) if entry[0] == "end" and entry[1] == "prefill")
+    decode_start = next(i for i, entry in enumerate(log) if entry[0] == "start" and entry[1] == "decode")
+    assert generate_at < prefill_end < decode_start
+
+
+def test_pd_abort_only_keeps_the_same_order(patched_replica_cls):
+    log: list[tuple] = []
+    prefill = _AbortServerStub("prefill", "prefill-0", log)
+    decode = _AbortServerStub("decode", "decode-0", log)
+    replica = _abort_replica(patched_replica_cls, [prefill], [decode])
+
+    asyncio.run(replica.abort_all_requests(abort_only=True))
+
+    phases = [(entry[0], entry[1]) for entry in log]
+    assert phases == [
+        ("start", "prefill"),
+        ("end", "prefill"),
+        ("start", "decode"),
+        ("end", "decode"),
+    ]
+    assert log[0][3]["abort_only"] is True
+    assert log[2][3]["abort_only"] is True
+
+
 def test_resume_generation_resumes_every_engine_before_opening_gates():
     pytest.importorskip("vllm")
     from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
