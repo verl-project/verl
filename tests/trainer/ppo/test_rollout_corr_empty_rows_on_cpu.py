@@ -54,6 +54,11 @@ CORRECTION_CONFIGS = [
 
 
 def _make_batch(seed: int, batch_size: int = 12, seq_len: int = 20) -> tuple[torch.Tensor, ...]:
+    """Create a seeded ``(old_log_prob, rollout_log_prob, response_mask)`` batch without empty rows.
+
+    Every row has 1 to ``seq_len`` valid tokens, and the rollout log-probs are the training
+    log-probs plus Gaussian noise.
+    """
     gen = torch.Generator().manual_seed(seed)
     lengths = torch.randint(1, seq_len + 1, (batch_size,), generator=gen)
     response_mask = (torch.arange(seq_len)[None, :] < lengths[:, None]).float()
@@ -75,6 +80,10 @@ def _add_empty_rows(seed: int, num_empty: int, *tensors: torch.Tensor) -> tuple[
 
 
 def _assert_metrics_close(actual: dict[str, float], expected: dict[str, float]) -> None:
+    """Assert that both dicts have the same keys and that their values agree within 1e-5, relative or absolute.
+
+    The tolerance covers floating-point rounding, since inserted rows change the order of the sums.
+    """
     assert actual.keys() == expected.keys()
     for key, value in expected.items():
         assert actual[key] == pytest.approx(value, rel=1e-5, abs=1e-5), key
@@ -83,6 +92,10 @@ def _assert_metrics_close(actual: dict[str, float], expected: dict[str, float]) 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
 @pytest.mark.parametrize("numel", [1, 2, 3, 7, 41, 49, 128])
 def test_seq_masked_helpers_equal_plain_reductions_when_all_rows_valid(numel, dtype):
+    """With every row selected, the masked helpers return exactly ``Tensor.mean`` / ``max`` / ``min`` / ``std``.
+
+    ``std`` is only compared for two or more rows; the callers of ``_seq_masked_std`` handle a single row.
+    """
     values = torch.randn(numel, generator=torch.Generator().manual_seed(numel)).to(dtype)
     all_valid = torch.ones(numel, dtype=torch.bool)
 
@@ -95,6 +108,7 @@ def test_seq_masked_helpers_equal_plain_reductions_when_all_rows_valid(numel, dt
 
 @pytest.mark.parametrize("seed", range(5))
 def test_seq_masked_helpers_ignore_unselected_rows(seed):
+    """With a random subset of rows selected, the masked helpers match the plain reductions of that subset."""
     gen = torch.Generator().manual_seed(seed)
     values = torch.randn(32, generator=gen, dtype=torch.float64)
     seq_mask = torch.rand(32, generator=gen) < 0.6
@@ -109,12 +123,14 @@ def test_seq_masked_helpers_ignore_unselected_rows(seed):
 
 
 def test_seq_masked_std_is_zero_for_a_single_selected_row():
+    """With one selected row, ``_seq_masked_std`` returns 0, as ``rollout_is_seq_std`` does for a one-row batch."""
     values = torch.tensor([0.3, 1.7, -2.0, 5.0])
     seq_mask = torch.tensor([False, True, False, False])
     assert _seq_masked_std(values, seq_mask).item() == 0.0
 
 
 def test_offpolicy_metrics_unchanged_without_empty_rows():
+    """Without empty rows, the per-sequence off-policy metrics equal the plain reductions over all rows exactly."""
     old_log_prob, rollout_log_prob, response_mask = _make_batch(seed=0)
     metrics = compute_offpolicy_metrics(old_log_prob, rollout_log_prob, response_mask)
 
@@ -140,6 +156,10 @@ def test_offpolicy_metrics_unchanged_without_empty_rows():
 
 @pytest.mark.parametrize("rollout_is", ["token", "sequence"])
 def test_is_metrics_unchanged_without_empty_rows(rollout_is):
+    """Without empty rows, the per-sequence IS metrics equal the plain reductions over all rows exactly.
+
+    In sequence mode this includes ``rollout_is_max`` / ``rollout_is_min`` and ``rollout_is_ratio_fraction_*``.
+    """
     old_log_prob, rollout_log_prob, response_mask = _make_batch(seed=1)
     threshold = 1.2
     log_ratio = old_log_prob - rollout_log_prob
@@ -183,6 +203,10 @@ def test_is_metrics_unchanged_without_empty_rows(rollout_is):
 
 
 def test_rs_seq_masked_fraction_unchanged_without_empty_rows():
+    """Without empty rows, ``rollout_rs_seq_masked_fraction`` equals the plain mean over all rows exactly.
+
+    The fraction is checked to lie strictly between 0 and 1, so the comparison is not trivial.
+    """
     old_log_prob, rollout_log_prob, response_mask = _make_batch(seed=2)
     _, modified_mask, metrics = compute_rollout_correction_and_rejection_mask(
         old_log_prob, rollout_log_prob, response_mask, rollout_rs="token_k1", rollout_rs_threshold="0.8_1.25"
@@ -195,6 +219,11 @@ def test_rs_seq_masked_fraction_unchanged_without_empty_rows():
 @pytest.mark.parametrize("config", CORRECTION_CONFIGS)
 @pytest.mark.parametrize("seed", range(3))
 def test_empty_rows_do_not_change_correction_metrics(config, seed):
+    """Empty rows inserted at random positions leave every rollout-correction metric unchanged.
+
+    Checked for each ``CORRECTION_CONFIGS`` case. The inserted rows also stay masked out, and their
+    IS weights, when computed, are zero.
+    """
     batch = _make_batch(seed)
     padded = _add_empty_rows(seed, 5, *batch)
 
@@ -211,6 +240,11 @@ def test_empty_rows_do_not_change_correction_metrics(config, seed):
 
 @pytest.mark.parametrize("seed", range(3))
 def test_empty_rows_do_not_change_training_offpolicy_metrics(seed):
+    """Empty rows leave the off-policy metrics that the actor computes during training unchanged.
+
+    ``compute_rollout_corr_metrics_from_logprobs`` takes them from ``compute_offpolicy_metrics``,
+    which excludes such rows since #7785.
+    """
     batch = _make_batch(seed)
     padded = _add_empty_rows(seed, 7, *batch)
     _assert_metrics_close(
