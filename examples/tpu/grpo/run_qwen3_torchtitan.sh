@@ -257,6 +257,8 @@ if (( DEFAULT_ROLLOUT_TP_PER_HOST )); then
 else
     DEFAULT_ROLLOUT_TP="${TOTAL_ROLLOUT_CHIPS}"
 fi
+# Rollout engine: vllm (default) or sglang (sglang-torchtpu must be installed in the worker image).
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${DEFAULT_ROLLOUT_TP}}"
 if (( ROLLOUT_TENSOR_PARALLEL_SIZE < 1 || TOTAL_ROLLOUT_CHIPS % ROLLOUT_TENSOR_PARALLEL_SIZE != 0 )); then
     echo "ERROR: ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_TENSOR_PARALLEL_SIZE} must be a positive divisor of the ${TOTAL_ROLLOUT_CHIPS} rollout chips." >&2
@@ -312,9 +314,16 @@ TPU_EAGER_MODE="${TPU_EAGER_MODE:-DEFER_AND_FUSE}"
 # reference weights add ~3.7-4.1 GB per trainer chip and leave too little HBM at the update_actor peak on v6e.
 USE_KL_LOSS="${USE_KL_LOSS:-${DEFAULT_USE_KL_LOSS}}"
 
+# vLLM-only engine overrides (seed, prefix caching off); SGLang takes the generic rollout.seed / enable_prefix_caching.
+EXTRA_OVERRIDES=()
+if [[ "${ROLLOUT_NAME}" == "vllm" ]]; then
+    EXTRA_OVERRIDES+=(
+        "++actor_rollout_ref.rollout.engine_kwargs.vllm.seed=${SEED}"
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True"
+    )
+fi
 # tpu-sync weight-sync check: off (plugin default) | norm (compare trainer / rollout weight norms after every sync) |
 # exact (on the step-0 sync, compare every received tensor bit for bit with the checkpoint vLLM loaded) | all.
-EXTRA_OVERRIDES=()
 if [[ -n "${VERIFY_PARITY:-}" ]]; then
     case "${VERIFY_PARITY}" in
         off | norm | exact | all) ;;
@@ -409,7 +418,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.use_simple_fsdp=True \
     +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     +actor_rollout_ref.ref.torchtitan.engine_kwargs.tpu.context_parallel_strategy="${CONTEXT_PARALLEL_STRATEGY}" \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TENSOR_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.data_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
@@ -420,9 +429,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.dtype=bfloat16 \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.seed="${SEED}" \
-    ++actor_rollout_ref.rollout.engine_kwargs.vllm.seed="${SEED}" \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${ROLLOUT_LOGPROB_MICRO_BATCH_SIZE}" \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
