@@ -209,9 +209,9 @@ class ServerAdapter(BaseRollout):
 
     def lora_expert_tp_slice(self) -> Optional[tuple[int, int]]:
         """``(tp_rank, tp_size)`` of the colocated vLLM worker when its MoE layers shard every
-        expert over TP (no expert parallelism), else None.  With ``VERL_K31_LORA_RANK_SLICE=1`` the adapter sync then
-        sends that worker only its TP shard of the expert LoRA factors (``k31_lora_rank_slice.tp_slice_adapter``); the
-        worker checks the shard against its own layers and refuses on any mismatch.
+        expert over TP (no expert parallelism), else None.  With ``VERL_LORA_EXPERT_SLICE=1`` an engine that supports
+        it then exports that worker only its TP shard of the expert LoRA factors; the rollout's LoRA loader checks the
+        shard against its own layers and refuses on any mismatch.
         """
         if self.config.expert_parallel_size > 1 or self._pd_role is not None:
             return None

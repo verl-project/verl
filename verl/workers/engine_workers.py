@@ -109,6 +109,26 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
+def _lora_expert_slice_kwargs(rollout, engine) -> dict:
+    """Export options that send each colocated rollout worker only its slice of the expert LoRA factors.
+
+    Off unless ``VERL_LORA_EXPERT_SLICE=1``. With rollout expert parallelism the engine exports only the experts of
+    the worker's EP rank (``lora_expert_slice``); without it, only the worker's TP shard of every expert factor
+    (``lora_expert_tp_slice``). Each needs an engine that declares it (``supports_lora_expert_slice`` /
+    ``supports_lora_expert_tp_slice``). The engine heads a sliced export with a tag that the rollout's LoRA loader
+    checks against its own layout; verl passes the tensors through unchanged.
+    """
+    if os.environ.get("VERL_LORA_EXPERT_SLICE", "0") != "1":
+        return {}
+    for key in ("lora_expert_slice", "lora_expert_tp_slice"):
+        placement = getattr(rollout, key, None)
+        if callable(placement) and getattr(engine, f"supports_{key}", False):
+            value = placement()
+            if value is not None:
+                return {key: value}
+    return {}
+
+
 def _release_trainer_grads(engine) -> None:
     """Drop the gradients left over from the last optimizer step (the next update zeroes them anyway)."""
     opt = getattr(getattr(engine, "handle", None), "_optimizer", None)
@@ -869,28 +889,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # An engine that can export per-rank expert slices of a LoRA adapter sends each
-        # colocated vLLM worker only the experts its EP rank keeps.
-        export_kwargs = {}
-        lora_expert_slice = getattr(self.rollout, "lora_expert_slice", None)
-        if callable(lora_expert_slice) and getattr(self.actor.engine, "supports_lora_expert_slice", False):
-            expert_slice = lora_expert_slice()
-            if expert_slice is not None:
-                export_kwargs["lora_expert_slice"] = expert_slice
-
-        # VERL_K31_LORA_RANK_SLICE=1: without rollout EP, vLLM shards every expert over TP; send each colocated
-        # worker only its TP shard of the expert LoRA factors instead of the whole adapter.
-        tp_slice = None
-        if os.environ.get("VERL_K31_LORA_RANK_SLICE", "0") == "1" and "lora_expert_slice" not in export_kwargs:
-            lora_expert_tp_slice = getattr(self.rollout, "lora_expert_tp_slice", None)
-            tp_slice = lora_expert_tp_slice() if callable(lora_expert_tp_slice) else None
-
-        def _rank_slice(params, peft_cfg):
-            if tp_slice is None or peft_cfg is None:
-                return params
-            from verl.workers.rollout.vllm_rollout.k31_lora_rank_slice import tp_slice_adapter
-
-            return tp_slice_adapter(params, *tp_slice)
+        # VERL_LORA_EXPERT_SLICE=1: send each colocated rollout worker only its slice of the expert LoRA factors.
+        export_kwargs = _lora_expert_slice_kwargs(self.rollout, self.actor.engine)
 
         # 0b. VERL_LORA_EXPORT_BEFORE_WAKE=1 with param offload and an adapter-only rollout sync: the engine
         # onloads the whole model to export, which cannot share the GPU with the rollout's resumed base
@@ -910,7 +910,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
                 if peft_config is None:
                     raise RuntimeError("VERL_LORA_EXPORT_BEFORE_WAKE=1 needs an adapter-only (peft) export")
-                per_tensor_param = _rank_slice(per_tensor_param, peft_config)
                 # clone: an exporter may reuse its staging buffer between yields
                 early_export = ([(name, t.clone()) for name, t in per_tensor_param], peft_config)
                 self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
@@ -942,7 +941,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
             )
-            per_tensor_param = _rank_slice(per_tensor_param, peft_config)
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:

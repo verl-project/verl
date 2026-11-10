@@ -22,7 +22,7 @@
 #   rollout one vLLM engine per node, TP8 + EP8 (MI355X: 288 GB per GPU; ~190 GiB of weights per GPU at TP8).
 #   sync    the rollout sleeps at level 2 and reloads its frozen base from MODEL_PATH on every wake
 #           (VERL_K31_WAKE_RELOAD=1); the adapter is exported while vLLM still sleeps (VERL_LORA_EXPORT_BEFORE_WAKE=1)
-#           and each rollout worker receives only the expert factors of its EP rank (VERL_K31_LORA_RANK_SLICE=1).
+#           and each rollout worker receives only the expert factors of its EP rank (VERL_LORA_EXPERT_SLICE=1).
 #
 # Image: docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy (the ROCm vLLM build with Kimi-K3.1 support + the DSA
 # batch-invariance patch, Megatron-LM mLite with its Kimi-K3.1 ROCm port, and the vLLM plugins in K31_PLUGIN_ROOT:
@@ -117,7 +117,7 @@ export VERL_FULL_DETERMINISM=0
 # Weight sync: level-2 sleep + reload of the frozen base on wake, adapter export before wake, per-rank expert slices.
 export VERL_VLLM_SLEEP_LEVEL=2 VERL_K31_WAKE_RELOAD=1
 export VERL_LORA_EXPORT_BEFORE_WAKE=1 VERL_FREE_GRADS_BEFORE_WAKE=1
-export VERL_K31_LORA_RANK_SLICE=1
+export VERL_LORA_EXPERT_SLICE=1
 export VERL_K31_SYNC_DEBUG="${VERL_K31_SYNC_DEBUG:-1}" VERL_K31_RELEASE_IF_AWAKE_GIB="${VERL_K31_RELEASE_IF_AWAKE_GIB:-120}"
 # Per-token trainer and rollout log-probs in the rollout_data_dir dump (set trainer.rollout_data_dir=<dir>).
 export VERL_K31_DUMP_LOGPROBS="${VERL_K31_DUMP_LOGPROBS:-1}"
@@ -130,7 +130,7 @@ ARM_ENV_NAMES=(PYTHONPATH PYTHONHASHSEED PYTHONUNBUFFERED CUDA_DEVICE_MAX_CONNEC
   VLLM_ALLOW_INSECURE_SERIALIZATION TORCH_NCCL_AVOID_RECORD_STREAMS VLLM_USE_BREAKABLE_CUDAGRAPH
   VLLM_ENGINE_READY_TIMEOUT_S HF_HUB_OFFLINE TVM_FFI_DISABLE_TORCH_C_DLPACK VLLM_ROCM_USE_AITER
   VLLM_ROCM_USE_AITER_MOE_SITUV2 MLITE_K31_BACKEND VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM VERL_VLLM_SLEEP_LEVEL
-  VERL_K31_WAKE_RELOAD VERL_LORA_EXPORT_BEFORE_WAKE VERL_FREE_GRADS_BEFORE_WAKE VERL_K31_LORA_RANK_SLICE
+  VERL_K31_WAKE_RELOAD VERL_LORA_EXPORT_BEFORE_WAKE VERL_FREE_GRADS_BEFORE_WAKE VERL_LORA_EXPERT_SLICE
   VERL_K31_SYNC_DEBUG VERL_K31_RELEASE_IF_AWAKE_GIB VERL_K31_DUMP_LOGPROBS VERL_TASK_RUNNER_ON_DRIVER_NODE
   VERL_FILE_LOGGER_PATH)
 # RDMA: select the ibverbs userspace that matches the host's AMD ionic NIC driver (docker/rocm/ionic-rdma-env.sh of

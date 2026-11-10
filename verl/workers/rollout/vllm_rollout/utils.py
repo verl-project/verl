@@ -393,12 +393,6 @@ class vLLMColocateWorkerExtension:
         if peft_config and base_sync_done:
             # The caller already copied these out of the receiver's reused IPC bucket buffer (#6454).
             weights = dict(weights)
-            # VERL_K31_LORA_RANK_SLICE=1: a per-rank expert-sliced adapter (EP block or TP shard tag) is checked
-            # against this worker's own MoE LoRA layout and its tag stripped.
-            from verl.workers.rollout.vllm_rollout import k31_lora_rank_slice as _k31rs
-
-            if _k31rs.enabled():
-                weights = _k31rs.localize_received(weights, self)
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
