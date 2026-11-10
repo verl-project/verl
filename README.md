@@ -48,6 +48,7 @@ verl is fast with:
 </p>
 
 ## News
+- [2026/11] Mainline PPO training now uses V1 exclusively; the V0 trainer has been removed. Fully async and one-step-off trainers have moved to [verl-recipe](https://github.com/verl-project/verl-recipe), pinned to verl v0.9.1.
 - [2026/08] [verl-vla](https://github.com/verl-project/verl-vla) `v0.1.0` is released: a unified VLA post-training framework for human-in-the-loop data collection, supervised fine-tuning, and reinforcement learning across simulators, real robots, and distributed cloud-edge resources, built on top of verl.
 - [2026/08] [VeRL-Tinker](https://github.com/verl-project/verl-recipe/tree/main/verl_tinker) is released: keep the Tinker Cookbook loop you know, and run SFT, RL, and distillation on verl-managed GPU workers you control; read the blog [here](https://verl-project.github.io/posts/2026-08-11-verl-tinker/).
 - [2026/08] [VeRL-Omni](https://github.com/verl-project/verl-omni) `v0.2.0` is released: faster diffusion RL, rebuilt Qwen3-Omni multimodal training (DPO & GSPO), plus LTX-2.3, Qwen-Image-Edit support and more.

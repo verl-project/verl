@@ -43,7 +43,7 @@ Checkpoint Callback
 
 Set ``trainer.checkpoint_callback_class`` to the fully qualified class name of a
 ``verl.trainer.ppo.checkpoint_callback.CheckpointCallback`` subclass to run custom
-code after each trainer checkpoint save (v1 trainer, ``trainer.use_v1=true``) —
+code after each trainer checkpoint save,
 for example uploading checkpoints to object storage, registering them in a model
 registry, or triggering evaluations.
 The interface mirrors the ``on_save`` event of the HuggingFace ``transformers``

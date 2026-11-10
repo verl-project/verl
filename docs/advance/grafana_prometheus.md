@@ -2,17 +2,15 @@
 
 **Author:** `https://github.com/meituan-search`
 
-Last updated: 12/05/2025.
+Last updated: 11/10/2026.
 
-Monitor the rollout computation process using Prometheus and Grafana when using verl to enhance system observability and facilitate further performance optimization.
+Monitor vLLM and SGLang rollout servers with Prometheus and Grafana in all V1 trainer modes: `sync`, `colocate_async`, and `separate_async`.
 
-We provide an additional training monitoring capability, leveraging Prometheus and Grafana to display rollout information during training and enhance system observability to facilitate further performance optimization.
-
-The system automatically configures Prometheus to scrape metrics from rollout servers, eliminating manual configuration steps.
+`LLMServerManager` registers rollout server addresses with Prometheus. In `separate_async` mode, the trainer registers the combined addresses of hybrid and standalone rollout servers.
 
 ## Overview
 
-The figures below show the performance of Qwen235B on the AIME2024 dataset with a response length of 20k, where the emergence of a long-tail problem is clearly observable.
+The historical monitoring examples below show the performance of Qwen235B on the AIME2024 dataset with a response length of 20k, where the emergence of a long-tail problem is clearly observable.
 
 ![fully_async_policy_structure](https://github.com/ArronHZG/verl-community/blob/main/docs/grafana_validate.png?raw=true)
 
@@ -29,7 +27,7 @@ The overall workflow consists of the following steps:
 1. **Multi-node Ray Cluster Setup**: Start Ray cluster across multiple nodes with Grafana and Prometheus information configured in environment variables on the master node
 2. **Start Grafana Service**: Launch Grafana on the master node for visualization of monitoring dashboards
 3. **Start Prometheus Service**: Launch Prometheus on the master node for metrics collection and storage
-4. **verl Async Rollout Mode**: verl uses async rollout mode to obtain rollout server ports and IP addresses
+4. **V1 Training**: `verl.trainer.main_ppo` starts the selected V1 trainer and its rollout servers
 5. **Automatic Prometheus Configuration**: verl automatically rewrites the Prometheus configuration to add monitoring for rollout servers and notifies Prometheus to reload the configuration
 6. **Metrics Collection**: After program execution, metrics can be viewed in Prometheus
 7. **Dashboard Visualization**: Upload and view monitoring metrics in Grafana dashboards
@@ -110,46 +108,35 @@ If use default path, this parameter can be omitted.
 
 - `actor_rollout_ref.rollout.prometheus.file="/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"`
 
-served_model_name uses `model_path.split("/")[-1]` for data statistics by default.
-Users can also customize other aliases:
+`served_model_name` defaults to `actor_rollout_ref.model.path`. Set a shorter alias for dashboard labels:
 
 - `actor_rollout_ref.rollout.prometheus.served_model_name="Qwen3-235B"`
 
-**Shell Script Example:**
+**V1 Launch Example:**
+
+Use this colocated async snippet in your training script and pass the usual model, dataset, and optimization overrides as script arguments. Training and rollout share the same GPU pool.
 
 ```bash
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
+TRAINER_MODE=${TRAINER_MODE:-colocate_async}
+ROLLOUT_NAME=${ROLLOUT_NAME:-vllm}  # vllm or sglang
 
-rollout_mode="async"
-rollout_name="vllm"  # Options: sglang or vllm
-if [ "$rollout_mode" = "async" ]; then
-    export VLLM_USE_V1=1
-    return_raw_chat="True"
-fi
-
-# Synchronous training
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
     -- python3 -m verl.trainer.main_ppo \
-    data.return_raw_chat=${return_raw_chat} \
-    actor_rollout_ref.rollout.name=${rollout_name} \
-    actor_rollout_ref.rollout.mode=${rollout_mode} \
+    trainer.v1.trainer_mode=colocate_async \
+    data.return_raw_chat=True \
+    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
+    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.disable_log_stats=False \
-    actor_rollout_ref.rollout.prometheus.enable=True
-    ...
-
-# Asynchronous training
-ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
-    --working-dir "${WORKING_DIR}" \
-    -- python3 verl.experimental.fully_async_policy.fully_async_main \
-    data.return_raw_chat=${return_raw_chat} \
-    actor_rollout_ref.rollout.name=${rollout_name} \
-    actor_rollout_ref.rollout.mode=${rollout_mode} \
-    actor_rollout_ref.rollout.disable_log_stats=False \
-    actor_rollout_ref.rollout.prometheus.enable=True
-    ...
+    actor_rollout_ref.rollout.prometheus.enable=True \
+    "$@"
 ```
+
+This example uses four GPUs on one node, shared by training and rollout. Adjust `trainer.nnodes` and `trainer.n_gpus_per_node` for your cluster.
+
+See [V1 async trainer](v1_async_trainer.md) for scheduling and weight synchronization settings.
 
 ### Step 6: View Metrics in Prometheus
 
@@ -162,7 +149,7 @@ confirm metrics are being reported correctly.
 
 If no metrics appear:
 
-1. Check logs for `AgentLoopManager` to find the server port
+1. Check rollout server startup logs for the server addresses; in `separate_async`, check both hybrid and standalone servers
 2. Visit `http://master_ip:server_port/metrics` to verify server metrics are available
 3. Confirm that `actor_rollout_ref.rollout.disable_log_stats=False` is set
 

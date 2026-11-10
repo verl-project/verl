@@ -194,8 +194,8 @@ Correctness evidence (details in the PR):
 
 ## Usage
 
-A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_sharded_2_6.sh`` —
-the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
+A runnable example is ``recipe/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_sharded_2_6.sh`` —
+the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``, pinned to verl v0.9.1.
 
 Current scope is disaggregated (``hybrid_engine=False``) BF16 rollout. The
 producer side supports FSDP1, FSDP2, and TorchTitan training engines; the

@@ -13,6 +13,7 @@ on:
       - "examples/data_preprocess/gsm8k.py"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/ppo/v1/**"
+      - "verl/trainer/ppo/trainer_utils.py"
       - "verl/trainer/config/**"
       - "verl/checkpoint_engine/**"
       - "verl/experimental/separation/**"

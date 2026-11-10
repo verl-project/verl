@@ -2,7 +2,9 @@
 
 **Authors**: Haichuan Hu, Yongxiang Huang, Jiawei Zhang, Nguyen Long
 
-Last updated: 06/16/2026.
+Last updated: 11/10/2026.
+
+For the legacy V0 end-to-end reproducibility example, see the [verl v0.9.1 guide](https://github.com/verl-project/verl/blob/v0.9.1/docs/advance/determinism.md).
 
 ## Overview
 
