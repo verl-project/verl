@@ -32,6 +32,15 @@
 name: nightly_ci_ascend
 
 on:
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl/utils/tensordict_utils.py"
+      - "tests/test_protocol_v2_on_cpu.py"
+      - "tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh"
+      - ".github/workflows/nightly_ascend.yml"
   schedule:
     - cron: "0 17 * * *"
     - cron: "0 18 * * *"
@@ -347,7 +356,9 @@ jobs:
   
     # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
+    if: >-
+      ${{ github.repository_owner == 'verl-project' &&
+          (github.event_name == 'pull_request' || github.event.schedule == '0 18 * * *') }}
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
