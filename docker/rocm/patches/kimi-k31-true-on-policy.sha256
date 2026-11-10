@@ -3,12 +3,15 @@
 # to /opt/Megatron-LM, kimi-k31/ to /opt/k31-plugins. docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy checks
 # them at build time (sha256sum -c).
 # The comment above each entry is the md5 of that file in the validated runs.
-# experimental/ entries: the restructured tree (mLite k1-k31-rocm-min a99944b, 5 patches megatron-k31-01..05),
-# validated by trainer gate 6 (g6v8_min_a99944b, g6v9_min_a99944b_audit; shipped file = validated file).
-# vllm/ and kimi-k31/ entries: unchanged from the previous manifest.
+# experimental/ entries: the restructured tree (mLite k1-k31-rocm-min 2e4541c, 5 patches megatron-k31-01..05),
+# trainer files validated by gate 6 at a99944b (g6v8_min_a99944b, g6v9_img_refresh_a99944b); 77f745a/2e4541c change only the adapter export (TP slice) and its test.
+# vllm/ entries: unchanged from the previous manifest. kimi-k31/ entries: unchanged except k31lora/__init__.py and the new
+# k31lora/lora_slice.py (the receive side of the per-rank expert LoRA slice, moved out of verl).
 
-# validated-run md5 78cd9a921341035ae32d5d3cacf9bf4a
-d5e51aa9fe8b6aaffcb45985219a86e686b4efbccd400ff7945c13311b9edfa1  experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+# validated-run md5 65badcc1a16001d6a3c63efa0209f010
+ece1f8901d45a4683b65599251f34ee6c86e40c5086b2cd010fe233b5e2927f0  experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+# validated-run md5 83e279b78ed7874cc099fd603660eb91
+c87189e99991f4488fa01517846406af77eb1f5e9c7f07656f0da42578f001be  experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
 # validated-run md5 0c8d54ba2f8d622945b27f8615a77436
 c031b02f68237d69739f74e30028c71adb2a6d1cdb703b9ad0d71fa8bf1cf3b1  experimental/lite/megatron/lite/model/k31/vllm/dsa.py
 # validated-run md5 bb292907a38bd5c5adef3364703c4d9d
@@ -27,8 +30,8 @@ cb324d7702157fd47d786113905c77afd2edb267b56aa2db0c8f4cd14a717ba3  experimental/l
 287273e344d819bbbe841a1f6d40df2af228122f84132e2709939bdd8c5d4f76  experimental/lite/megatron/lite/model/k31/vllm/primitive/linear.py
 # validated-run md5 24ea51446490740aeb560e9e13dff36f
 ae03ec5bd0a7ae372094b6b561aeb5648bae9824d8baf1d83235a473246c2455  experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
-# validated-run md5 6e5cb50f262123ffc0956eb5f20ebb52
-b0351ebf9d9d37fc0b48e10f8387748eb725f3bc7b561237e865f8d71ec3e445  experimental/lite/megatron/lite/model/k31/vllm/protocol.py
+# validated-run md5 cd0c5a60327c4260518c3fd3038a2bc4
+c29c45c3b4b7e98888963caad6a5a6ea445a590910002dd5e39afa7897f614cd  experimental/lite/megatron/lite/model/k31/vllm/protocol.py
 # validated-run md5 8c74af430f92107fc22bad94a168334c
 e7cd476cf44c3d1382da035a880d9e71349595e79ae1ab0554213b1ccc3c406d  experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
 # validated-run md5 4610a09f1b20ffc8a9702d6a4ba20f9e
@@ -49,6 +52,8 @@ b2861811fb477e2c59db59885e86251f5fe3a245e1948b76aa3d3e8a4478fd74  experimental/l
 9a6a2706c05c9c385399b9e410f147ea9e2001a1ef8cee69d3f24f576d8d613e  experimental/lite/megatron/lite/runtime/megatron_utils.py
 # validated-run md5 5015dd64eec1d95934dcfe0b2d475ec4
 ea26560eb293c62d88b9b90ec8f521f4b4255ecaf2ae8f0f1ae41c8937825441  experimental/lite/tests/unit/model/k31/vllm/_rocm_interp_cases.py
+# validated-run md5 51c2670dea7c7ea8b582772010a8cab7
+8c2dc27b8bfad6360ff8971494a241c8ac6d0f7572895ca3b78a6309647f6f9e  experimental/lite/tests/unit/model/k31/vllm/test_lora_expert_tp_slice.py
 # validated-run md5 d0399cccfdcf8a50cca1817b2966cf3f
 87e583a4a2685019e804712438ba95c3101f0fbb48759edc5c2855e4bb93c84c  experimental/lite/tests/unit/model/k31/vllm/test_rocm_backend_cpu.py
 # validated-run md5 242c7b38b291a7b79adcc0603c11f979
@@ -69,14 +74,16 @@ c78f6824cfe7fbac095c737abe7c210215f7b343d0d8dc495c0432e8eb410041  experimental/l
 92c5a48aa2e5aa85775583948fe918e7facb9f2568cf9fddb8d24f6b2e7171b1  kimi-k31/k31lora/k31lora-0.1.dist-info/METADATA
 # validated-run md5 4c2bcf82d259fd2c41076c82e506d017
 6cc4a51bf90915130052da17c921459848255f0f01b6de31681486b8263d4596  kimi-k31/k31lora/k31lora-0.1.dist-info/entry_points.txt
-# validated-run md5 5525d99266705324425e768c9a678b77 (shipped md5 dd6a51a6308a2e9aa82292e79cf886d1: comments/docstrings only)
-74fa180d86bc91c6761aaf96e8727e9cc9b57ccfabd9962f42d1091f9f8f6fbf  kimi-k31/k31lora/k31lora/__init__.py
+# validated-run md5 5525d99266705324425e768c9a678b77 (shipped md5 2f89733406a3b15fb7f528a9c1e6b1a4: comments/docstrings + the lora_slice.install() hook added after the validated runs)
+87adfee0831be438f6d28ca23a2401b2e442f0efaf0c34c088d086a314883df0  kimi-k31/k31lora/k31lora/__init__.py
 # validated-run md5 d0f8dab907e5d53c379d36eef183e84d (shipped md5 85d0e5390ed581d68244cc828460e893: comments/docstrings only)
 17e0cf92b6e38c09be97b691e60b5440f9663962ed9fd85c17a73e62e9d824a1  kimi-k31/k31lora/k31lora/bi_attnres.py
 # validated-run md5 f7c4cdb0835ac59fc1ac4cbd452191a3 (shipped md5 295dbcf8fe1e41d0895093d7345b4ed4: comments/docstrings only)
 2613d73b36bcb36f44c93742e8879d8f21053f999f6286a23599e8da24682ee1  kimi-k31/k31lora/k31lora/bi_lora.py
 # validated-run md5 cfb467747e39adb5db4b65906ad3d367 (shipped md5 ca2b8088e859f82761a34e0678128fcb: comments/docstrings only)
 e1cf96bc0dc7a53acdd7602926de4a39ae5a1a60f3306b0a039aa9a224eacbd5  kimi-k31/k31lora/k31lora/bi_moe.py
+# not in the validated runs (receive side of the per-rank expert LoRA slice, moved from verl; same checks)
+a42f8f95857213395d80d84628f8136b81ca6ed6541d86d72aef4abf28e820d6  kimi-k31/k31lora/k31lora/lora_slice.py
 # validated-run md5 93e4dbb389949fe8264c8aa8bdb34502
 4e08c6660afae3c09011cf2ec2f982ad6a5a2f4933b095c6c6ac4d6fa0d00823  kimi-k31/k31lora/k31lora/model.py
 # validated-run md5 a7282893bb7c78af78413f4ba02c7bca (shipped md5 9c4fc5461f49c44440f93fe2dd8bfecb: comments/docstrings only)

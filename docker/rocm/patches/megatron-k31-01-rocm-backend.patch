@@ -163,10 +163,10 @@ index 81f5572..c585f46 100644
          ctx.save_for_backward(value, *factors)
          ctx.master_weight = master_weight
 diff --git a/experimental/lite/megatron/lite/model/k31/vllm/protocol.py b/experimental/lite/megatron/lite/model/k31/vllm/protocol.py
-index ecbbdf3..2cbf47d 100644
+index ecbbdf3..51fd48d 100644
 --- a/experimental/lite/megatron/lite/model/k31/vllm/protocol.py
 +++ b/experimental/lite/megatron/lite/model/k31/vllm/protocol.py
-@@ -12,6 +12,7 @@ import torch
+@@ -12,10 +12,12 @@ import torch
  import torch.nn as nn
  
  from megatron.lite.model.k31.config import K31Config
@@ -174,7 +174,12 @@ index ecbbdf3..2cbf47d 100644
  from megatron.lite.model.k31.vllm.checkpoint import (
      EXPERT_CLASSIFIER,
      PLACEMENT_FN,
-@@ -391,7 +392,8 @@ def _validate_contract(model_cfg: K31Config, impl_cfg: ImplConfig) -> None:
+     SUPPORTS_LORA_EXPERT_SLICE,
++    SUPPORTS_LORA_EXPERT_TP_SLICE,
+     export_hf_weights,
+     load_hf_weights,
+     load_lora_adapter,
+@@ -391,7 +393,8 @@ def _validate_contract(model_cfg: K31Config, impl_cfg: ImplConfig) -> None:
          )
      if parallel.ep <= 0 or model_cfg.num_experts % parallel.ep:
          raise ValueError(f"EP={parallel.ep} must divide {model_cfg.num_experts} routed experts.")
@@ -184,6 +189,14 @@ index ecbbdf3..2cbf47d 100644
          raise NotImplementedError("K31 vLLM requires normal DeepEP training transport.")
      if impl_cfg.mtp_enable:
          raise NotImplementedError("K31 vLLM does not support MTP.")
+@@ -791,6 +794,7 @@ __all__ = [
+     "ImplConfig",
+     "PLACEMENT_FN",
+     "SUPPORTS_LORA_EXPERT_SLICE",
++    "SUPPORTS_LORA_EXPERT_TP_SLICE",
+     "SelectorConfig",
+     "build_attention_metadata",
+     "build_model",
 diff --git a/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py b/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
 index 33a3b4b..fb58583 100644
 --- a/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py

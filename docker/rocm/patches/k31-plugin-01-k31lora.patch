@@ -23,10 +23,10 @@ index 0000000000000000000000000000000000000000..c50041b7f7983139bd84e1f64752f2f5
 +k31lora = k31lora:register
 diff --git a/kimi-k31/k31lora/k31lora/__init__.py b/kimi-k31/k31lora/k31lora/__init__.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..4cfcbcc34a62beaffb59821e0b6910b2610b994d
+index 0000000000000000000000000000000000000000..29ac2dc77c54721e958eb10e78ae0fcc46059fce
 --- /dev/null
 +++ b/kimi-k31/k31lora/k31lora/__init__.py
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,129 @@
 +"""k31lora: vLLM general plugin that makes the ROCm Kimi-K3/K3.1 model LoRA-capable for DENSE modules
 +(vLLM f5926fb, the ROCm Kimi-K3.1 build, declares no SupportsLoRA for the amd/ path).
 +Loaded in every vLLM process via the `vllm.general_plugins` entry point; put this directory on PYTHONPATH.
@@ -54,6 +54,9 @@ index 0000000000000000000000000000000000000000..4cfcbcc34a62beaffb59821e0b6910b2
 +7. Opt-in, BI only (VLLM_BATCH_INVARIANT=1 and K31_BI_MOE=1, needs VLLM_ROCM_USE_AITER_MOE_SITUV2=0, TP1/EP1): BI MXFP4
 +   routed experts = exact dequant + pinned Triton grouped GEMM + expert-id-ascending FP32 tree (k31lora/bi_moe.py,
 +   importable by the trainer so trainer == rollout).
++8. Per-rank expert LoRA slices of the colocated weight sync (verl VERL_LORA_EXPERT_SLICE=1): a tensor adapter headed by
++   an EP block or TP shard tag is checked against this worker's MoE LoRA layout and its tag stripped before vLLM loads
++   it; TP shards are not sliced a second time. Untagged adapters are unchanged. See k31lora/lora_slice.py.
 +"""
 +import os
 +
@@ -79,6 +82,8 @@ index 0000000000000000000000000000000000000000..4cfcbcc34a62beaffb59821e0b6910b2
 +            cls._k31lora_patched = True
 +    _patch_replicated_shard()
 +    _patch_base_layer_alias()
++    from . import lora_slice
++    lora_slice.install()
 +    if os.environ.get("K31_PERSIST_SLEEP", "0") == "1":
 +        from . import persist_sleep
 +        persist_sleep.install()
@@ -1779,6 +1784,207 @@ index 0000000000000000000000000000000000000000..15b2c27a07475a5e7a9f524d000988cc
 +    except Exception:
 +        pass
 +    return "on"
+diff --git a/kimi-k31/k31lora/k31lora/lora_slice.py b/kimi-k31/k31lora/k31lora/lora_slice.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..54c1a947d3792d30d938772181fbe6821edce842
+--- /dev/null
++++ b/kimi-k31/k31lora/k31lora/lora_slice.py
+@@ -0,0 +1,195 @@
++"""Receive side of the per-rank expert LoRA slice of the colocated weight sync.
++
++The Megatron-LM mLite Kimi-K3.1 exporter can send each colocated vLLM worker only its slice of the expert LoRA
++factors (verl: VERL_LORA_EXPERT_SLICE=1). The payload is headed by a tag:
++
++* EP layouts (expert_parallel_size > 1, e.g. TP8+EP8): EP_TAG = [ep_rank, ep_size, num_experts]; the per-expert
++  factors are the worker's expert block [r*E/R, (r+1)*E/R).
++* TP layouts without EP: TP_TAG = [tp_rank, tp_size]; experts.w{1,3}.lora_B (dim 1) and experts.w2.lora_A (dim 2)
++  are narrowed to the worker's TP shard.
++
++install() wraps the worker LoRA managers' add_adapter: a tagged tensor adapter is checked against this worker's own
++MoE LoRA layout and its tag stripped before vLLM loads it. For TP shards it also makes FusedMoEWithLoRA keep a factor
++that already has the shard width: vLLM's set_lora would otherwise take [tp_rank*s:(tp_rank+1)*s] of an s-wide tensor,
++empty for every rank but 0 (silently zero expert LoRA). Every mismatch raises: a wrong block or shard would load other
++experts' (or other ranks') factors without error. An adapter without a tag is loaded unchanged.
++"""
++
++from __future__ import annotations
++
++import logging
++
++logger = logging.getLogger(__name__)
++
++# megatron.lite.model.k31.vllm.checkpoint.LORA_EXPERT_SLICE_TAG / LORA_EXPERT_TP_SLICE_TAG
++try:  # vLLM's own key on builds that have one
++    from vllm.lora.lora_model import LORA_EXPERT_SLICE_KEY as EP_TAG
++except Exception:  # noqa: BLE001
++    EP_TAG = "__k31_lora_expert_slice__"
++TP_TAG = "__k31_lora_expert_tp_slice__"
++
++# (name suffix, dim sharded over TP by vLLM's FusedMoEWithLoRA: _slice_w13_b / _slice_w2_a)
++_TP_SHARDED = (
++    (".experts.w1.lora_B.weight", 1),
++    (".experts.w3.lora_B.weight", 1),
++    (".experts.w2.lora_A.weight", 2),
++)
++
++
++def tp_sharded_dim(name):
++    for suffix, dim in _TP_SHARDED:
++        if name.endswith(suffix):
++            return dim
++    return None
++
++
++def _moe_lora_modules(adapter_manager):
++    return [m for m in getattr(adapter_manager, "modules", {}).values() if hasattr(m, "w13_lora_b_stacked")]
++
++
++def localize(weights, adapter_manager):
++    """Check and strip a slice tag (EP or TP) from an adapter's tensors; return them ready for vLLM's loader.
++
++    ``adapter_manager`` is the worker's LoRA model manager (``WorkerLoRAManager._adapter_manager``). An adapter without
++    a tag is returned unchanged (whole adapter: vLLM slices it itself).
++    """
++    has_ep, has_tp = EP_TAG in weights, TP_TAG in weights
++    if not (has_ep or has_tp):
++        return weights
++    if has_ep and has_tp:
++        raise RuntimeError("K31 adapter carries both an EP and a TP slice tag")
++    moes = _moe_lora_modules(adapter_manager)
++    if not moes:
++        raise RuntimeError("expert-sliced K31 adapter reached a vLLM worker without MoE LoRA layers")
++    if has_ep:
++        moe = moes[0]
++        placement = getattr(getattr(moe, "base_layer", None), "expert_placement_strategy", None)
++        mpc = getattr(getattr(moe, "moe_config", None), "moe_parallel_config", None)
++        return localize_ep(
++            weights,
++            getattr(adapter_manager, "moe_ep_load_spec", None),
++            placement,
++            bool(getattr(mpc, "enable_eplb", False)),
++        )
++    return localize_tp(weights, moes)
++
++
++def localize_ep(weights, ep_spec, placement=None, eplb=False):
++    """EP block ``[r, R, E]``: check it against this worker's expert placement and drop the tag."""
++    rank, size, num_experts = (int(v) for v in weights[EP_TAG].detach().to("cpu").reshape(-1).tolist())
++    if ep_spec is None:
++        raise RuntimeError(
++            f"expert-sliced K31 adapter (EP rank {rank}/{size}) reached a vLLM worker without "
++            "expert parallelism for its LoRA MoE layers"
++        )
++    if placement not in (None, "linear") or eplb:
++        raise RuntimeError(
++            "expert-sliced K31 adapter needs vLLM's linear expert placement without EPLB, got "
++            f"placement={placement!r} eplb={eplb}"
++        )
++    want = (
++        ep_spec.ep_rank,
++        ep_spec.global_num_experts // max(ep_spec.local_num_experts, 1),
++        ep_spec.global_num_experts,
++    )
++    if (rank, size, num_experts) != want or num_experts % size:
++        raise RuntimeError(
++            f"expert-sliced K31 adapter for EP rank {rank}/{size} ({num_experts} experts) reached a "
++            f"vLLM worker with EP rank {want[0]}/{want[1]} ({want[2]} experts): placement mismatch"
++        )
++    local = num_experts // size
++    out = {}
++    for name, t in weights.items():
++        if name == EP_TAG:
++            continue
++        if ".experts." in name and t.dim() == 3 and t.shape[0] not in (1, local):
++            raise RuntimeError(
++                f"expert-sliced K31 adapter tensor {name} has expert dim {t.shape[0]}, expected 1 "
++                f"(shared) or {local} (EP rank {rank}/{size})"
++            )
++        out[name] = t
++    return out
++
++
++def localize_tp(weights, moes):
++    """TP shard ``[tp_rank, tp_size]``: check against every MoE LoRA layer, install the pass-through, drop the tag."""
++    rank, size = (int(v) for v in weights[TP_TAG].detach().to("cpu").reshape(-1).tolist())
++    got = {(int(m.tp_rank), int(m.tp_size), int(m._tp_shard_size), bool(m.use_ep)) for m in moes}
++    if len(got) != 1:
++        raise RuntimeError(f"TP-sliced K31 adapter: MoE LoRA layers disagree on their TP shard: {sorted(got)}")
++    w_rank, w_size, shard, use_ep = got.pop()
++    if use_ep or (rank, size) != (w_rank, w_size) or size < 2:
++        raise RuntimeError(
++            f"TP-sliced K31 adapter for TP rank {rank}/{size} reached a vLLM worker whose MoE LoRA "
++            f"layers are TP rank {w_rank}/{w_size} (use_ep={use_ep}): trainer/rollout layout mismatch"
++        )
++    out = {}
++    n_sliced = 0
++    for name, t in weights.items():
++        if name == TP_TAG:
++            continue
++        dim = tp_sharded_dim(name)
++        if dim is not None:
++            if t.dim() != 3 or t.shape[dim] != shard:
++                raise RuntimeError(
++                    f"TP-sliced K31 adapter tensor {name} {tuple(t.shape)}: dim {dim} should be this "
++                    f"worker's expert shard {shard} (TP rank {rank}/{size})"
++                )
++            n_sliced += 1
++        out[name] = t
++    install_presliced_tp_passthrough()
++    logger.info("TP-sliced K31 adapter for TP rank %d/%d (%d expert factors at shard %d)", rank, size, n_sliced, shard)
++    return out
++
++
++def install_presliced_tp_passthrough():
++    """Make ``FusedMoEWithLoRA``'s TP slicing keep a factor that already has this rank's shard width.
++
++    vLLM shards ``w13_lora_b`` (dim 1) and ``w2_lora_a`` (dim 2) by ``_tp_shard_size``; a whole factor has
++    ``_tp_shard_size * tp_size`` there, a pre-sliced one ``_tp_shard_size``: with TP >= 2 the two never coincide, so
++    whole adapters (incl. vLLM's warm-up dummy) keep vLLM's own path.  Idempotent.
++    """
++    from vllm.lora.layers import fused_moe as fm
++
++    changed = False
++    for cls_name in ("FusedMoEWithLoRA", "FusedMoE3DWithLoRA"):
++        cls = getattr(fm, cls_name, None)
++        if cls is None:
++            continue
++        for meth, dim in (("_slice_w13_b", 1), ("_slice_w2_a", 2)):
++            orig = cls.__dict__.get(meth)
++            if orig is None or getattr(orig, "_k31_presliced", False):
++                continue
++
++            def wrapped(self, t, _orig=orig, _dim=dim):
++                if self.tp_size > 1 and t is not None and t.dim() == 3 and t.shape[_dim] == self._tp_shard_size:
++                    return t
++                return _orig(self, t)
++
++            wrapped._k31_presliced = True
++            setattr(cls, meth, wrapped)
++            changed = True
++    return changed
++
++
++def install():
++    """Localize tagged tensor adapters in the worker LoRA managers' add_adapter (before vLLM loads them). Idempotent."""
++    from vllm.lora import worker_manager as wm
++
++    changed = False
++    for cls_name in ("WorkerLoRAManager", "LRUCacheWorkerLoRAManager"):
++        cls = getattr(wm, cls_name, None)
++        orig = None if cls is None else cls.__dict__.get("add_adapter")
++        if orig is None or getattr(orig, "_k31_lora_slice", False):
++            continue
++
++        def add_adapter(self, request, _orig=orig):
++            tensors = getattr(request, "lora_tensors", None)
++            if isinstance(tensors, dict) and (EP_TAG in tensors or TP_TAG in tensors):
++                request.lora_tensors = localize(tensors, self._adapter_manager)
++            return _orig(self, request)
++
++        add_adapter._k31_lora_slice = True
++        setattr(cls, "add_adapter", add_adapter)
++        changed = True
++    return changed
 diff --git a/kimi-k31/k31lora/k31lora/model.py b/kimi-k31/k31lora/k31lora/model.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..6068dff24bbba33d42f2a927d79b47a389ae0556
