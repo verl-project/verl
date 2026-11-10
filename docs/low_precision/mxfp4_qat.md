@@ -72,9 +72,6 @@ PRECISION=bf16 TOTAL_TRAINING_STEPS=10 bash examples/mxfp4/run_qwen3_30b_a3b_meg
   to its 17,398 unique prompts
 - verl main `e41dd697` plus this PR; the versions verl locks: vLLM 0.32.0, Transformer Engine
   2.20.2, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2, ModelOpt 0.47.0, TileLang 0.1.15
-- wandb: [QAT](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/z52e8qr2),
-  [MXFP4](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/mzx5r4ys),
-  [BF16](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/xd7yxpnw)
 
 "X/Y" is training precision X, rollout precision Y; BF16+QAT trains in BF16 with MXFP4 QAT on the routed experts.
 
@@ -99,6 +96,12 @@ are slower than the rest; its steps 5–10 ran on an idle machine. The same six 
 | `old_log_prob` (s) | 117 | 116 | 135 |
 | `update_actor` (s) | 472 | 468 | 511 |
 | `rollout_corr/kl` | 0.0018 | 0.0153 | 0.0030 |
+
+![Qwen3-30B-A3B on DAPO-Math-17k, MXFP4 and QAT, per step](https://github.com/user-attachments/assets/e1ca6340-8646-4e11-abd5-d5413275d26b)
+*Per step on one 4×B300 machine; the shaded steps of the QAT arm shared the node. wandb:
+[QAT](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/z52e8qr2),
+[MXFP4](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/mzx5r4ys),
+[BF16](https://wandb.ai/train0z5a/verl_grpo_dapo_mxfp4/runs/xd7yxpnw)*
 
 Results and observations:
 
