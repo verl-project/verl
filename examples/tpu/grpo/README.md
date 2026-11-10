@@ -11,6 +11,7 @@ By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1`
 | [`run_qwen3_5_torchtitan.sh`](run_qwen3_5_torchtitan.sh) | Qwen3.5 GRPO on TPU v7x (default `Qwen3.5-35B-A3B` MoE; also `Qwen3.5-0.8B`) |
 | [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | KubeRay `RayCluster`: 1 CPU head pod and 2 TPU `v6e-1` slices (configurable for `v6e-4` / `v6e-8`) |
 | [`Dockerfile`](Dockerfile) | Image of the Ray pods |
+| [`run_qwen3_30b_a3b_torchtitan.sh`](run_qwen3_30b_a3b_torchtitan.sh) | Qwen3-30B-A3B (MoE) GRPO on TPU (default v7x `2x2x1` + `2x2x1`) |
 
 You need `gcloud`, `kubectl`, Docker with Buildx, the Ray CLI (`pip install "ray[default]>=2.56"`), the Hugging Face CLI (`pip install -U huggingface_hub`), and verl's Python dependencies to preprocess the data (see the [verl installation guide](https://verl.readthedocs.io/en/latest/start/install.html)).
 
@@ -181,4 +182,28 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
   NNODES_ROLLOUT=8 ROLLOUT_TENSOR_PARALLEL_SIZE=16 ROLLOUT_EXPERT_PARALLEL_SIZE=16 ROLLOUT_LOAD_FORMAT=dummy \
   TRAIN_BATCH_SIZE=64 ROLLOUT_N=16 MAX_PROMPT_LEN=512 MAX_RESPONSE_LEN=7680 \
   bash examples/tpu/grpo/run_qwen3_5_torchtitan.sh
+```
+
+## 8. Qwen3-30B-A3B (MoE)
+
+[`run_qwen3_30b_a3b_torchtitan.sh`](run_qwen3_30b_a3b_torchtitan.sh) runs GRPO on GSM8K with Qwen3-30B-A3B (128 experts, 8 active per token). It needs `verl-hardware-plugin` with Qwen3 MoE training (verl-hardware-plugin#88 and #112), e.g. `git -C ../verl-hardware-plugin checkout 3b5213ce624c930ea1c992bfa8c633c2e0372490`.
+
+| TPU | Trainer slice + rollout slice | Ray cluster ([`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml), `replicas: 2`) |
+|---|---|---|
+| v7x (default) | `2x2x1` + `2x2x1` | `numOfHosts: 1`, `google.com/tpu: "4"`, `gke-tpu-accelerator: tpu7x`, `gke-tpu-topology: 2x2x1` |
+| v5p | `2x2x4` + `2x2x4` | `numOfHosts: 4`, `google.com/tpu: "4"`, `gke-tpu-accelerator: tpu-v5p-slice`, `gke-tpu-topology: 2x2x4` |
+
+Upload the checkpoint as in step 3 (the recipe reads `/data/assets/hf/Qwen3-30B-A3B`, or set `MODEL_PATH`), create the Ray cluster for the TPU as in step 4, then submit as in step 5:
+
+```bash
+hf download Qwen/Qwen3-30B-A3B --local-dir /tmp/Qwen3-30B-A3B
+gcloud storage cp -r /tmp/Qwen3-30B-A3B gs://<BUCKET>/assets/hf/
+
+# TPU v7x
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
+
+# TPU v5p: also add "TPU_ACCELERATOR_TYPE": "v5p", "TORCH_TPU_TOPOLOGY": "2,2,4", "USE_MOE_SPARSE_CORE": "0" and
+# "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": "USE_MOE_SPARSE_CORE" to env_vars in RUNTIME_ENV
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+  env NNODES_TRAINER=4 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_30b_a3b_torchtitan.sh
 ```
