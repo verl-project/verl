@@ -1,6 +1,11 @@
 # Whether to enable TransferQueue
 enable: False
 
+# Whether the rollout.n trajectories of a prompt share its preprocessing and storage (V1 trainer):
+# media is decoded and run through the processor once per prompt, and the prompt fields and
+# multi_modal_inputs are stored once in TransferQueue (storage sharing requires SimpleStorage).
+share_prompts: True
+
 # Other settings use TransferQueue defaults; override them with ++transfer_queue.<key>=<value>.
 
 # Pluggable storage and transport backend for TransferQueue
