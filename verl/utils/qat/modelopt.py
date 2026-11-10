@@ -474,6 +474,15 @@ def _is_routed_expert(module_name: str) -> bool:
     return _ROUTED_EXPERT_RE.search(module_name) is not None
 
 
+# A plain linear owns one ``weight_quantizer``; modelopt's TE grouped linear owns a GroupedQuantizer (an
+# nn.ModuleList) whose per-expert quantizers are surfaced as ``weight_quantizer.{i}``.
+_WEIGHT_QUANTIZER_RE = re.compile(r"(^|\.)weight_quantizer(\.\d+)?$")
+
+
+def _is_expert_weight_quantizer(quantizer_name: str) -> bool:
+    return _is_routed_expert(quantizer_name) and _WEIGHT_QUANTIZER_RE.search(quantizer_name) is not None
+
+
 def _check_mxfp4_experts(modules):
     """Fail fast if the experts-only MXFP4 config did not land where it should.
 
@@ -489,7 +498,7 @@ def _check_mxfp4_experts(modules):
         for name, q in m.named_modules():
             if not isinstance(q, TensorQuantizer) or not getattr(q, "is_enabled", True):
                 continue
-            if name.endswith("weight_quantizer") and _is_routed_expert(name):
+            if _is_expert_weight_quantizer(name):
                 n_expert_w += 1
             else:
                 others.append(name)
@@ -497,6 +506,8 @@ def _check_mxfp4_experts(modules):
             for name, sub in m.named_modules():
                 w0, wq = getattr(sub, "weight0", None), getattr(sub, "weight_quantizer", None)
                 if w0 is not None and wq is not None and _is_routed_expert(name):
+                    if isinstance(wq, torch.nn.ModuleList):  # GroupedQuantizer: weight{i} <-> wq[i]
+                        wq = wq[0]
                     try:
                         with torch.no_grad():
                             fq = wq(w0)
