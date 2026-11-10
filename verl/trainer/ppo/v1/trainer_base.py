@@ -73,6 +73,14 @@ from verl.trainer.ppo.utils import (
 )
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
+from verl.trainer.runtime_extension import (
+    RuntimeCapability,
+    RuntimeExtension,
+    RuntimeExtensionRegistration,
+    RuntimeExtensionRegistry,
+    SafePoint,
+    SampleWaitState,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
@@ -120,6 +128,9 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        self.runtime_extensions = RuntimeExtensionRegistry(
+            capabilities=(RuntimeCapability.EVENTS, RuntimeCapability.SAFE_POINTS)
+        )
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -169,6 +180,7 @@ class PPOTrainer(ABC):
             replay_buffer_kwargs.update(
                 filter_groups_metric=filter_groups_metric,
                 sync_refill_failed_groups=sync_refill_failed_groups,
+                wait_observer=self._on_sample_wait,
             )
             if sampler_cls is ReplayBuffer:
                 filter_groups = self.config.algorithm.get("filter_groups", None)
@@ -223,6 +235,31 @@ class PPOTrainer(ABC):
         """
         self._setup()
         self.on_init_end()
+        if self.runtime_extensions:
+            self.runtime_extensions.publish("trainer.initialized")
+
+    def register_runtime_extension(self, extension: RuntimeExtension) -> RuntimeExtensionRegistration:
+        """Register a versioned runtime extension consumer for this trainer."""
+        return self.runtime_extensions.register(extension)
+
+    def _on_sample_wait(self, state: SampleWaitState) -> None:
+        """Notify extensions from the actual replay-buffer polling loop."""
+        if not self.runtime_extensions:
+            return
+        self.runtime_extensions.publish(
+            "trainer.samples.waiting",
+            trainer_mode=state.trainer_mode,
+            partition_id=state.partition_id,
+            global_step=state.global_step,
+            required=state.required,
+            available=state.available,
+            pending=state.pending,
+            running=state.running,
+            elapsed_seconds=state.elapsed_seconds,
+            poll_interval=state.poll_interval,
+            poll_count=state.poll_count,
+        )
+        self.runtime_extensions.reach(SafePoint.WAITING_FOR_SAMPLES)
 
     def _setup(self):
         self._init_tokenizer()
@@ -411,6 +448,26 @@ class PPOTrainer(ABC):
         return self.reward_loop_manager.reward_loop_worker_handles
 
     def fit(self, agent_loop_manager: AgentLoopManager):
+        """Run training while notifying registered runtime extensions."""
+        if not self.runtime_extensions:
+            return self._fit(agent_loop_manager)
+        self.runtime_extensions.reach(SafePoint.BEFORE_FIT)
+        self.runtime_extensions.publish("trainer.fit.started")
+        try:
+            return self._fit(agent_loop_manager)
+        except BaseException as error:
+            self.runtime_extensions.publish(
+                "trainer.fit.failed",
+                error_type=type(error).__name__,
+                message=str(error),
+            )
+            self.runtime_extensions.reach(SafePoint.TERMINAL_FAILURE)
+            raise
+        finally:
+            self.runtime_extensions.reach(SafePoint.AFTER_FIT)
+            self.runtime_extensions.publish("trainer.fit.finished")
+
+    def _fit(self, agent_loop_manager: AgentLoopManager):
         """Fit the trainer with the agent loop manager.
 
         Args:
@@ -469,6 +526,9 @@ class PPOTrainer(ABC):
             is_last_step = self.global_steps >= self.total_training_steps
             metrics = {}
             self.timing_raw = {}
+            if self.runtime_extensions:
+                self.runtime_extensions.reach(SafePoint.STEP_BOUNDARY)
+                self.runtime_extensions.publish("trainer.step.started", step=self.global_steps)
 
             # 1. perform rollout and actor/critic training
             with marked_timer("step", self.timing_raw):

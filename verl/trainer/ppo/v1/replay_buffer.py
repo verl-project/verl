@@ -15,12 +15,14 @@ import logging
 import os
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 
 import numpy as np
 import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
+from verl.trainer.runtime_extension import SampleWaitState
 from verl.utils.skip import SkipManager
 
 logger = logging.getLogger(__name__)
@@ -148,6 +150,7 @@ class ReplayBuffer:
         gen_batch_size: int | None = None,
         max_inflight_gen_batches: int = 1,
         sync_refill_failed_groups: bool = False,
+        wait_observer: Callable[[SampleWaitState], None] | None = None,
     ):
         self.trainer_mode = trainer_mode
         self.trainer_config = trainer_config
@@ -161,6 +164,7 @@ class ReplayBuffer:
         self.gen_batch_size = gen_batch_size
         self.max_inflight_gen_batches = max_inflight_gen_batches
         self.sync_refill_failed_groups = sync_refill_failed_groups
+        self.wait_observer = wait_observer
 
         if self.max_off_policy_threshold is not None:
             assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
@@ -418,6 +422,33 @@ class ReplayBuffer:
             return now
         return last_debug_time
 
+    def _notify_sample_wait(
+        self,
+        *,
+        global_steps: int,
+        partition_id: str,
+        required: int,
+        available: int,
+        started_at: float,
+        poll_count: int,
+    ) -> None:
+        if self.wait_observer is None:
+            return
+        self.wait_observer(
+            SampleWaitState(
+                trainer_mode=self.trainer_mode,
+                partition_id=partition_id,
+                global_step=global_steps,
+                required=required,
+                available=available,
+                pending=len(self.pending_keys[partition_id]),
+                running=len(self.running_keys[partition_id]),
+                elapsed_seconds=time.monotonic() - started_at,
+                poll_interval=self.poll_interval,
+                poll_count=poll_count,
+            )
+        )
+
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
         """Sample a batch using synchronous rollout semantics.
@@ -438,6 +469,8 @@ class ReplayBuffer:
             dict: Auxiliary metrics.
         """
         last_debug_time = time.time()
+        wait_started_at = time.monotonic()
+        poll_count = 0
         eviction_metrics: dict = {}
         dapo_enabled = partition_id != "val" and self.filter_groups_metric is not None
         refill_credit = 0
@@ -500,6 +533,15 @@ class ReplayBuffer:
                         eviction_metrics[key] = eviction_metrics.get(key, 0) + len(surplus_uids)
                 break
 
+            poll_count += 1
+            self._notify_sample_wait(
+                global_steps=global_steps,
+                partition_id=partition_id,
+                required=batch_size,
+                available=len(sampleable_keys),
+                started_at=wait_started_at,
+                poll_count=poll_count,
+            )
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 
         selected_uids = set(selected_prompt_uids)
@@ -567,6 +609,8 @@ class ReplayBufferAsync(ReplayBuffer):
         Returns the sampleable uids and the eviction metrics accrued while waiting.
         """
         last_debug_time = time.time()
+        wait_started_at = time.monotonic()
+        poll_count = 0
         eviction_metrics: dict = {}
 
         while True:
@@ -587,6 +631,15 @@ class ReplayBufferAsync(ReplayBuffer):
             if self._has_enough_samples(global_steps, partition_id, target_count, sampleable_keys):
                 return sampleable_keys, eviction_metrics
 
+            poll_count += 1
+            self._notify_sample_wait(
+                global_steps=global_steps,
+                partition_id=partition_id,
+                required=target_count,
+                available=len(sampleable_keys),
+                started_at=wait_started_at,
+                poll_count=poll_count,
+            )
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")

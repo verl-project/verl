@@ -11,3 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from verl.trainer.runtime_extension import (
+    RUNTIME_EXTENSION_API_VERSION,
+    RuntimeCapability,
+    RuntimeEvent,
+    RuntimeExtension,
+    RuntimeExtensionContext,
+    RuntimeExtensionRegistration,
+    RuntimeExtensionRestartRequired,
+    SafePoint,
+    SafePointDecision,
+    SampleWaitState,
+)
+
+__all__ = [
+    "RUNTIME_EXTENSION_API_VERSION",
+    "RuntimeCapability",
+    "RuntimeEvent",
+    "RuntimeExtension",
+    "RuntimeExtensionContext",
+    "RuntimeExtensionRegistration",
+    "RuntimeExtensionRestartRequired",
+    "SampleWaitState",
+    "SafePoint",
+    "SafePointDecision",
+]
