@@ -59,7 +59,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_AND_PIECEWISE" \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.path="${MODEL_PATH}" \

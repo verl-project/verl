@@ -152,9 +152,6 @@ compatible defaults automatically:
 
 Notes:
 
-- vLLM-Ascend 0.30.x rejects FRACTAL_NZ weights in RL scenarios (weight
-  sync after sleep/wake raises an error), so the scripts explicitly pass
-  ``additional_config.weight_nz_mode=0`` to the rollout engine.
 - The FSDP2 + SGLang script accepts the same ``NDEVICES_PER_NODE`` /
   ``ROLLOUT_TP`` / ``TRAIN_BATCH_SIZE`` overrides (its rollout sample count
   ``n`` is fixed at 2).

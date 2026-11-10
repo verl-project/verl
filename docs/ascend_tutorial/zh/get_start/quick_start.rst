@@ -147,9 +147,6 @@ Atlas A2/910B 卡）上，通过覆盖 ``NDEVICES_PER_NODE`` 即可直接运行�
 
 说明：
 
-- vLLM-Ascend 0.30.x 在 RL 场景（sleep/wake 后的权重同步）会拒绝
-  FRACTAL_NZ 权重并报错，脚本已显式向 rollout 引擎传
-  ``additional_config.weight_nz_mode=0``。
 - FSDP2 + SGLang 脚本同样支持 ``NDEVICES_PER_NODE`` / ``ROLLOUT_TP`` /
   ``TRAIN_BATCH_SIZE`` 覆盖（其采样数 n 固定为 2）。
 - Megatron 组合固定 ``TP=2、PP=2``，至少需要 4 个设备。
