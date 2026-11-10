@@ -75,6 +75,8 @@ def run_training(
     val_files=None,
     temperature=0.7,
     max_num_seqs=4,
+    policy_mnbt=None,
+    rm_mnbt=None,
     save_metrics=False,
 ):
     """Run one PPO training session via main_ppo using Hydra overrides.
@@ -177,6 +179,15 @@ def run_training(
         cmd.append(f"data.train_files={train_files}")
     if val_files:
         cmd.append(f"data.val_files={val_files}")
+    # Cap max_num_batched_tokens per engine. verl's default (8192) is passed to vLLM
+    # explicitly, which bypasses vLLM's own clamp; when 8192 > max_num_seqs *
+    # max_model_len (policy: 4*128=512, RM: 1*512=512) vLLM's FlashInfer autotune
+    # dummy run over-subscribes the batch and crashes with a CUDA illegal memory
+    # access at engine init (B300, vLLM 0.25.1 & 0.32.0, batch-invariant mode).
+    if policy_mnbt is not None:
+        cmd.append(f"actor_rollout_ref.rollout.max_num_batched_tokens={policy_mnbt}")
+    if rm_mnbt is not None:
+        cmd.append(f"reward.reward_model.rollout.max_num_batched_tokens={rm_mnbt}")
 
     print(f"\n{'=' * 60}")
     print(f"Starting {run_name} (metrics: {', '.join(loggers)})")
@@ -414,6 +425,7 @@ def plot_reward_curves(steps1, rewards1, rewards2, output_path):
 
 
 def main():
+    """Parse CLI args, validate the mnbt capacity caps, then run the gate and compare."""
     parser = argparse.ArgumentParser(
         description="E2E determinism gate: run PPO twice, verify reward curves bitwise aligned.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -445,10 +457,44 @@ def main():
         help="Actor ROLLOUT max_num_seqs (the RM's is forced to 1). Lower to 1 to serialize if the policy "
         "model is not batch-invariant.",
     )
+    parser.add_argument(
+        "--policy_mnbt",
+        type=int,
+        default=None,
+        help="Cap the policy rollout's max_num_batched_tokens (verl default 8192 is passed to vLLM "
+        "explicitly). Must satisfy max_num_seqs <= mnbt <= max_num_seqs * max_model_len: below "
+        "max_num_seqs vLLM raises a config error at init, above the capacity its autotune dummy "
+        "run over-subscribes and hits a CUDA illegal memory access on B300. Defaults to the full "
+        "capacity max_num_seqs * 128.",
+    )
+    parser.add_argument(
+        "--rm_mnbt",
+        type=int,
+        default=512,
+        help="Cap the RM rollout's max_num_batched_tokens (same constraint; the RM engine's capacity is "
+        "max_num_seqs(1) * max_model_len(512) = 512).",
+    )
     parser.add_argument("--project_name", default="determinism_e2e", help="Tracking project name.")
     parser.add_argument("--save_metrics", action="store_true", help="Also write {output_dir}/{run_name}.jsonl per run.")
     parser.add_argument("--plot", action="store_true", help="Also save a comparison PNG (needs matplotlib).")
     args = parser.parse_args()
+
+    # ── mnbt validation (crash guard, see run_training) ──
+    # The rollout max_model_len (128) and the RM's max_num_seqs (1) /
+    # max_model_len (512) are fixed in the Hydra command above.
+    if args.policy_mnbt is None:
+        # Full capacity: satisfies both vLLM constraints
+        # (max_num_seqs <= mnbt and mnbt <= max_num_seqs * max_model_len).
+        args.policy_mnbt = args.max_num_seqs * 128
+    if not args.max_num_seqs <= args.policy_mnbt <= args.max_num_seqs * 128:
+        parser.error(
+            f"--policy_mnbt ({args.policy_mnbt}) must be in "
+            f"[max_num_seqs, max_num_seqs * max_model_len] = [{args.max_num_seqs}, {args.max_num_seqs * 128}]; "
+            "below max_num_seqs vLLM raises a config error at init, above the capacity its "
+            "autotune dummy run over-subscribes and crashes"
+        )
+    if not 1 <= args.rm_mnbt <= 512:
+        parser.error(f"--rm_mnbt ({args.rm_mnbt}) must be in [1, 512] (max_num_seqs=1, max_model_len=512)")
 
     policy_model = os.path.expanduser(args.policy_model)
     rm_model = os.path.expanduser(args.rm_model)
@@ -465,6 +511,8 @@ def main():
         rm_tp=args.rm_tp,
         temperature=args.temperature,
         max_num_seqs=args.max_num_seqs,
+        policy_mnbt=args.policy_mnbt,
+        rm_mnbt=args.rm_mnbt,
         train_files=args.train_files,
         val_files=args.val_files,
         save_metrics=args.save_metrics,
