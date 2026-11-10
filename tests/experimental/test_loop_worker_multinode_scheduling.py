@@ -18,7 +18,9 @@ from types import SimpleNamespace
 import pytest
 import ray
 from ray.cluster_utils import Cluster
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from verl.experimental.agent_loop import agent_loop as agent_loop_module
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop.reward_loop import RewardLoopManager
 from verl.utils.ray_utils import LOOP_WORKER_NODE_RESOURCE_ENV, schedulable_loop_worker_node_ids
@@ -33,6 +35,12 @@ class _NodeProbe:
 
     def get_node_id(self):
         return self.node_id
+
+
+@ray.remote
+class _CpuHog:
+    def ready(self):
+        return True
 
 
 @pytest.fixture
@@ -103,3 +111,21 @@ def test_loop_workers_stay_on_configured_nodes(multinode_ray_cluster, monkeypatc
 
     with pytest.raises(RuntimeError, match="missing-loop-worker-resource"):
         schedulable_loop_worker_node_ids("missing-loop-worker-resource")
+
+
+def test_loop_workers_spill_off_a_full_preferred_node(multinode_ray_cluster, monkeypatch):
+    eligible = [node["NodeID"] for node in ray.nodes() if node["Resources"].get(_RESOURCE, 0) > 0]
+    full_node, free_node = eligible
+    pin_to_full = NodeAffinitySchedulingStrategy(full_node, soft=False)
+    hog = _CpuHog.options(num_cpus=2, scheduling_strategy=pin_to_full).remote()
+    ray.get(hog.ready.remote())
+
+    monkeypatch.setenv(LOOP_WORKER_NODE_RESOURCE_ENV, _RESOURCE)
+    # A stale availability view still ranks the full node first.
+    monkeypatch.setattr(agent_loop_module, "available_cpu_per_node", lambda: {full_node: 2.0, free_node: 0.0})
+    manager = AgentLoopManager(_agent_config(num_workers=2), llm_client=None)
+    manager.agent_loop_workers_class = _NodeProbe
+    asyncio.run(manager._init_agent_loop_workers())
+
+    node_ids = ray.get([actor.get_node_id.remote() for actor in manager.agent_loop_workers], timeout=60)
+    assert set(node_ids) == {free_node}
