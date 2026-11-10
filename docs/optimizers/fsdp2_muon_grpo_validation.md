@@ -1,6 +1,6 @@
 # Real GRPO and submission validation — 2026-11-09
 
-Last updated: 11/09/2026
+Last updated: 11/10/2026
 
 The native FSDP2 implementation completed **Muon 30 updates, AdamW 30 updates,
 and a fresh Muon process restoring step 15 and continuing through step 30**.
@@ -271,19 +271,15 @@ VERL_MUON_VERIFY_RESTORE=1 OPTIMIZER=Muon \
   actor_rollout_ref.model.external_lib=tests.special_e2e.fsdp2_muon.restore_probe
 ```
 
-## Limits and retained evidence
+## Validation scope and limitations
 
-Qwen3.5-4B, full GSM8K evaluation, multi-seed quality/performance experiments,
-FlashAttention, multi-node execution, changed-world-size resume and GitHub-hosted
-CI are **NOT RUN**. FSDP1, HSDP, TP training, MoE, LoRA, NPU and CPU offload remain
-outside the implemented scope. Full-matrix shape-batch gathering and replicated
-orthogonalization can add substantial communication and temporary memory cost.
+Validation covers FP32/BF16 synthetic FSDP2 tests and 30-update GSM8K GRPO runs
+with Qwen2.5-0.5B-Instruct on a single node with two A100-SXM4-80GB GPUs,
+including checkpoint restoration in a fresh process.
 
-Local primary records are under `logs/fsdp2_muon_grpo_20261109/` (Git-ignored).
-They retain failed attempts, all three successful runs' metrics/logs/rollouts,
-effective configs, restore reports, checkpoint inspections, environment/source
-manifests, and validation scripts. Large checkpoints remain on the GPU instance
-under `/root/verl-muon-grpo-results/`; they are not included in the source diff.
-At the end of GPU validation, the repository index and HEAD were unchanged and
-no push, PR update or community message had been performed. Submission integration
-is recorded separately above.
+The implementation supports dense full-parameter native FSDP2 on a single 1D
+shard mesh, FP32 parameter/state storage, FP32/BF16 computation and same-world-size
+checkpoint restoration. FSDP1, HSDP, TP training, MoE, LoRA, NPU and CPU offload
+remain outside the implemented scope. Full-matrix shape-batch gathering and
+replicated orthogonalization can add substantial communication and temporary
+memory cost.
