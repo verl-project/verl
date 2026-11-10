@@ -10,21 +10,34 @@
 # CUDA dependencies from the current uv.lock (Python 3.12):
 #   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
 #
-# Requirements on Ascend (scripts/install_vllm_mcore_npu.sh baseline):
-#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
-#   - Megatron-LM==core_r0.18.0
+# Requirements on Ascend (source install per the MindSpeed-Bridge install guide:
+# https://gitcode.com/Ascend/MindSpeed-Bridge/blob/master/docs/zh/install_guide.md):
+#   - 16 NPUs (2*64GB each, e.g. a single A3 node)
+#   - vllm==0.30.0, vllm-ascend@<g15ec56012>, transformers==5.21.0
+#   - flash-linear-attention-npu==v26.9.1 (version pinned to match vllm-ascend)
+#   - Megatron-LM==core_v0.18.0
 #   - Megatron-Bridge==v0.5.0
 #   - MindSpeed==core_r0.18.0
 #   - MegatronAdaptor==core_r0.18.0
 #   - TransformerEngineNPU==main
-#   -   pip install decorator pybind11 diffusers
 #   - MindSpeed-Ops==master
-#   - MindSpeed-Bridge: repository default branch (no pinned tag/commit)
-#   - flash-linear-attention-npu==v26.1.0
-#       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
-#   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
+#   - MindSpeed-Bridge==master
+#   - The NPU path uses MindSpeed-Bridge by default, with ascend GDN enabled:
 #       +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
 #       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+#     GDN models with use_ascend_gdn=True also need the AscendC op package `fla_npu`:
+#     https://gitcode.com/Ascend/MindSpeed-Bridge/blob/master/docs/zh/feature/ascend_gdn.md
+#
+# NPU path notes (default targets a single-node 16-NPU Atlas A3):
+#   - MTP speculative decoding (opt-in, MTP_ENABLE=True) requires
+#     vllm-ascend >= v0.27.1rc1 (the earliest tag containing commit 40348c31,
+#     on main since 2026-08-07, the first build with usable Qwen3.5-family
+#     MTP spec decode) and a checkpoint with MTP layers
+#     (mtp_num_hidden_layers > 0, e.g. Qwen3.5-35B-A3B-40L)
+#   - rl_config.enabled=True (set in the npu ROLLOUT below) is required for
+#     RL weight sync with vllm-ascend >= v0.27.1rc1: those builds default to
+#     the NZ weight layout (weight_nz_mode=1), which breaks the in-place
+#     ND-format weight updates Megatron pushes to vLLM each training step.
 #
 # Qwen3.5 architecture notes:
 #   This example uses BSHD compute format on CUDA:
@@ -38,9 +51,9 @@
 # Tested parallelism config (8 GPUs / 1 node):
 #   TP=2 PP=1 CP=1 EP=8 ETP=1 GEN_TP=8
 #
+export VLLM_USE_V1=1
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 set -xeuo pipefail
 
@@ -77,8 +90,9 @@ case "${DEVICE}" in
 esac
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
-# Set to True when using Mindspeed-Bridge to enable ascend GDN performance optimization
-USE_MINDSPEED_BRIDGE=${USE_MINDSPEED_BRIDGE:-False}
+# MTP speculative decoding (opt-in): requires vllm-ascend >= v0.27.1rc1
+# (see NPU path notes above) and a checkpoint with MTP layers.
+MTP_ENABLE=${MTP_ENABLE:-False}
 
 rollout_name="vllm"
 project_name='verl_grpo_qwen3_5_35b_geo3k'
@@ -150,17 +164,13 @@ ROLLOUT=(
     actor_rollout_ref.rollout.n=5
     actor_rollout_ref.rollout.dtype=bfloat16
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
-    actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.enable_prefix_caching=False
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
     actor_rollout_ref.rollout.enforce_eager=False
 )
 
 REF=(
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${PP}
     actor_rollout_ref.ref.megatron.context_parallel_size=${CP}
@@ -196,31 +206,61 @@ case "${DEVICE}" in
         ;;
     npu)
         export CPU_AFFINITY_CONF=1
+        export MULTI_STREAM_MEMORY_REUSE=1
+        export TASK_QUEUE_ENABLE=1
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+        export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        # 1x8-NPU (A5) variant: NDEVICES_PER_NODE=8 PP=1, rollout dp/tp=4/2,
+        # gpu_memory_utilization=0.55, MTP_ENABLE=True, plus vLLM sleep mode
+        # (rl_config.sleep_mode_extra_cleanup).
         ACTOR+=(
             actor_rollout_ref.actor.use_dynamic_bsz=True
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192
             actor_rollout_ref.actor.checkpoint.strict=False
             actor_rollout_ref.actor.megatron.use_remove_padding=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
         )
-        if [ "${USE_MINDSPEED_BRIDGE}" = "True" ]; then
-          ACTOR+=(
-              +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
-              +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
-          )
-        fi
         ROLLOUT+=(
-            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.65
-            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+            ++actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=True
+            # vllm-ascend >= v0.27.1rc1 defaults to the NZ weight layout
+            # (weight_nz_mode=1); RL weight sync from Megatron is in-place
+            # ND-format, so force weight_nz_mode=0 via rl_config.enabled=True.
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.rl_config.enabled=True
         )
         MODEL+=(
             actor_rollout_ref.model.use_remove_padding=True
         )
-        REF+=(
-            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
-        )
+        # MTP speculative decoding (opt-in); needs vllm-ascend >= v0.27.1rc1
+        # and a checkpoint with MTP layers.
+        if [ "${MTP_ENABLE}" = "True" ]; then
+            # MTP decode graph capture needs a larger MoE alltoall HCCL window buffer.
+            export HCCL_BUFFSIZE=${HCCL_BUFFSIZE:-512}
+            # MTP decode emits (1 + 3 speculative) * num_reqs tokens per step; capture
+            # sizes must cover that in multiples of 4, else decode falls back to eager.
+            ROLLOUT+=(
+                # Tuned rollout parallelism from the A3 MTP graph-mode validation;
+                # the no-MTP default keeps the original GEN_TP=8 rollout layout.
+                actor_rollout_ref.rollout.data_parallel_size=2
+                actor_rollout_ref.rollout.tensor_model_parallel_size=4
+                actor_rollout_ref.rollout.expert_parallel_size=8
+                actor_rollout_ref.rollout.max_num_seqs=160
+                +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,16,64,128,256,512,640]"
+                +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.max_cudagraph_capture_size=640
+            )
+            MODEL+=(
+                actor_rollout_ref.model.mtp.enable=True
+                actor_rollout_ref.model.mtp.enable_train=True
+                actor_rollout_ref.model.mtp.enable_rollout=True
+                actor_rollout_ref.model.mtp.detach_encoder=True
+                actor_rollout_ref.model.mtp.num_speculative_tokens=3
+            )
+        fi
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
