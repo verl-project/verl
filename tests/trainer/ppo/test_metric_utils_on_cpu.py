@@ -16,6 +16,8 @@ Tests for the metric utilities in verl.trainer.ppo.metric_utils.
 """
 
 import unittest
+from copy import deepcopy
+from math import sqrt
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -605,6 +607,117 @@ class TestProcessValidationMetrics(unittest.TestCase):
         self.assertAlmostEqual(result["acc_source"]["acc_success_only"]["mean@1"], 1.0)
         self.assertNotIn("acc", result["reward_source"])
         self.assertNotIn("acc_success_only", result["reward_source"])
+
+
+class TestBayesAtNValidation(unittest.TestCase):
+    """Check posterior moments and the complete raw-trial input contract."""
+
+    def _compute(self, outcomes, **overrides):
+        questions, trials = np.shape(outcomes)
+        kwargs = {
+            "data_sources": ["source"] * (questions * trials),
+            "sample_uids": [f"q{i}" for i in range(questions) for _ in range(trials)],
+            "infos_dict": {"acc": np.asarray(outcomes).ravel().tolist()},
+            "expected_acc_counts": {("source", f"q{i}"): trials for i in range(questions)},
+            "sample_trial_ids": list(range(trials)) * questions,
+            "bayes_at_n": True,
+        }
+        kwargs.update(overrides)
+        return process_validation_metrics(**kwargs)
+
+    def test_same_totals_have_different_posterior_uncertainty(self):
+        """Separate questions before combining their posterior variances."""
+        separated = self._compute([[0, 0], [1, 1]])["source"]["acc"]
+        mixed = self._compute([[0, 1], [0, 1]])["source"]["acc"]
+        self.assertEqual(separated["bayes@2/mean"], 0.5)
+        self.assertEqual(mixed["bayes@2/mean"], 0.5)
+        self.assertAlmostEqual(separated["bayes@2/std"], sqrt(3 / 160), places=14)
+        self.assertAlmostEqual(mixed["bayes@2/std"], sqrt(1 / 40), places=14)
+
+    def test_single_trial_and_extreme_cohorts(self):
+        """All-success and all-failure grades retain posterior uncertainty."""
+        for grade in [0, 1]:
+            with self.subTest(grade=grade):
+                metric = self._compute([[grade]])["source"]["acc"]
+                self.assertAlmostEqual(metric["bayes@1/mean"], (grade + 1) / 3)
+                self.assertAlmostEqual(metric["bayes@1/std"], sqrt(1 / 18))
+                metric = self._compute([[grade] * 8, [grade] * 8])["source"]["acc"]
+                self.assertAlmostEqual(metric["bayes@8/mean"], 0.9 if grade else 0.1)
+                self.assertGreater(metric["bayes@8/std"], 0)
+
+    def test_binary_boolean_grades_and_integer_trials(self):
+        """Numeric binary grades include NumPy booleans and integer trial IDs."""
+        metric = self._compute(
+            [[False, True]],
+            infos_dict={"acc": [np.bool_(False), np.bool_(True)]},
+            sample_trial_ids=[np.int64(0), np.int64(1)],
+            expected_acc_counts={("source", "q0"): np.int64(2)},
+        )["source"]["acc"]
+        self.assertEqual(metric["bayes@2/mean"], 0.5)
+        self.assertAlmostEqual(metric["bayes@2/std"], sqrt(1 / 20))
+
+    def test_default_and_other_metrics_are_unchanged(self):
+        """Opt-in adds only the two moments and does not mutate caller inputs."""
+        infos = {"acc": [0, 0, 1, 1], "reward": [-0.4, 1.2, 0.5, 2.0], "pred": ["a", "b", "c", "d"]}
+        original = deepcopy(infos)
+        plain = self._compute([[0, 0], [1, 1]], bayes_at_n=False, infos_dict=infos)
+        enabled = self._compute([[0, 0], [1, 1]], infos_dict=infos)
+        for name in ["bayes@2/mean", "bayes@2/std"]:
+            enabled["source"]["acc"].pop(name)
+        self.assertEqual(plain, enabled)
+        self.assertEqual(infos, original)
+
+    def test_sources_have_separate_posteriors(self):
+        """Source-local question IDs and trial counts must not be pooled."""
+        result = process_validation_metrics(
+            ["a", "a", "b"],
+            ["q", "q", "q"],
+            {"acc": [0, 1, 1]},
+            expected_acc_counts={("a", "q"): 2, ("b", "q"): 1},
+            bayes_at_n=True,
+            sample_trial_ids=[0, 1, 0],
+        )
+        self.assertEqual(result["a"]["acc"]["bayes@2/mean"], 0.5)
+        self.assertAlmostEqual(result["b"]["acc"]["bayes@1/mean"], 2 / 3)
+
+    def test_rejects_invalid_raw_cohorts_before_failure_padding(self):
+        """Missing or invalid grades must never become synthetic failures."""
+        cases = [
+            {"expected_acc_counts": None},
+            {"expected_acc_counts": {}},
+            {"expected_acc_counts": {("source", "q0"): 3}},
+            {"expected_acc_counts": {("source", "q0"): 2, ("source", "absent"): 2}},
+            {"expected_acc_counts": {("source", "q0"): 2, ("source", "q1"): 1}},
+            {"expected_acc_counts": {("source", "q0"): True}},
+            {"expected_acc_counts": {("source", "q0"): 2.0}},
+            {"expected_acc_counts": {("source", True): 2}},
+            {"sample_uids": [True, "q0"]},
+            {"sample_uids": ["q0"]},
+            {"sample_uids": ["q0", "other"]},
+            {"data_sources": [False, "source"]},
+            {"sample_trial_ids": None},
+            {"sample_trial_ids": [0]},
+            {"sample_trial_ids": [0, 0]},
+            {"sample_trial_ids": [0, 2]},
+            {"sample_trial_ids": [0, -1]},
+            {"sample_trial_ids": [False, 1]},
+            {"sample_trial_ids": [0.0, 1.0]},
+            {"infos_dict": {}},
+            {"infos_dict": {"acc": [0]}},
+            {"infos_dict": {"acc": [0, 1], "extra": []}},
+        ]
+        for value in [None, float("nan"), float("inf"), -1, 2, 10**1000, 0.5, "1", [1], {"acc": 1}, 1j]:
+            cases.append({"infos_dict": {"acc": [0, value]}})
+        for overrides in cases:
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                self._compute([[0, 1]], **overrides)
+
+    def test_rejects_an_entirely_absent_source(self):
+        """The planned cohort survives even when every trial is missing."""
+        with self.assertRaisesRegex(ValueError, "all 2 observed trials"):
+            process_validation_metrics(
+                [], [], {"acc": []}, expected_acc_counts={("absent", "q"): 2}, bayes_at_n=True, sample_trial_ids=[]
+            )
 
 
 if __name__ == "__main__":
