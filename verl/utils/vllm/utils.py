@@ -93,6 +93,9 @@ class VLLMHijack:
                     "dtype": self.lora_config.lora_dtype,
                     "weights_mapper": hf_to_vllm_mapper,
                 }
+                adapter_converter = getattr(model, "convert_lora_adapter", None)
+                if adapter_converter is not None:
+                    lora_request_kwargs["adapter_converter"] = adapter_converter
                 if hasattr(self, "embedding_padding_modules"):
                     lora_request_kwargs["embedding_modules"] = self.embedding_modules
                     lora_request_kwargs["embedding_padding_modules"] = self.embedding_padding_modules
@@ -112,6 +115,10 @@ class VLLMHijack:
                         lora_path,
                         expected_lora_modules,
                         **lora_request_kwargs,
+                    )
+                if lora.rank > self.lora_config.max_lora_rank:
+                    raise ValueError(
+                        f"Converted LoRA rank {lora.rank} exceeds max_lora_rank {self.lora_config.max_lora_rank}."
                     )
             except Exception:
                 raise
