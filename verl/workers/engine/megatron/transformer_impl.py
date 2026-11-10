@@ -503,8 +503,13 @@ class MegatronEngine(BaseEngine):
 
         from verl.models.mcore.model_forward_fused import patch_fused_forward
 
-        for model in self.module:
-            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
+        patched = [
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config) for model in self.module
+        ]
+        if not all(patched):
+            # Calling an unpatched model with the fused-forward kwargs fails deep inside its forward.
+            logger.warning_once("Fused kernels are not supported for this Megatron model; disabling.")
+            self.engine_config.use_fused_kernels = False
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
