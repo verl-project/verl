@@ -27,6 +27,9 @@ import torch
 
 @pytest.fixture
 def backend(monkeypatch):
+    from verl.checkpoint_engine.base import CheckpointEngineRegistry
+
+    monkeypatch.setattr(CheckpointEngineRegistry, "_registry", dict(CheckpointEngineRegistry._registry))
     current = threading.local()
     current.device = 0
     calls = []
