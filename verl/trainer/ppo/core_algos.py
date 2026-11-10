@@ -2010,8 +2010,12 @@ def compute_policy_loss_geo_mean(
         # Note: rollout_is_weights is always 2D regardless of aggregation mode
         # Rejected tokens contribute 0 to the log-sum (loss_mask), while the
         # denominator stays the original token count, as above.
+        # Replace rejected weights with 1 before the log: log(0) is undefined, and
+        # the 1e-10 epsilon rounds to 0 in float16, so a rejected token would give
+        # log(0) * 0 = NaN instead of 0. Kept weights are unchanged.
+        safe_weights = torch.where(rollout_is_weights > 0, rollout_is_weights, 1.0)
         seq_is_weights = torch.exp(
-            (torch.log(rollout_is_weights + 1e-10) * loss_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
+            (torch.log(safe_weights) * loss_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
         )
         pg_losses = pg_losses * seq_is_weights
         # A fully rejected sequence has no kept tokens, so it gets zero weight

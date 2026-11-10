@@ -464,6 +464,76 @@ def test_geo_mean_drops_icepop_rejected_tokens():
     assert float(log_prob.grad[1].abs().max()) == pytest.approx(0.0, abs=1e-6)
 
 
+def test_geo_mean_fp16_weights_do_not_nan():
+    """geo_mean must stay finite with float16 IS weights (CodeRabbit review on #8421).
+
+    In float16, the 1e-10 epsilon rounds to 0, so a rejected token produced
+    log(0) * 0 = NaN, which poisoned the sequence loss — including a fully
+    rejected sequence, where the zero-weight guard multiplies NaN by 0 and
+    still gets NaN. Rejected weights are replaced with 1 before the log, so
+    the loss and gradients match the float32 reference in any dtype.
+    """
+
+    def actor_config(loss_mode):
+        return ActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+            clip_ratio=0.2,
+            clip_ratio_low=0.2,
+            clip_ratio_high=0.2,
+            loss_agg_mode="token-mean",
+            policy_loss=PolicyLossConfig(loss_mode=loss_mode),
+        )
+
+    batch_size, seq_len, bad = 2, 16, 5
+    old_log_prob = torch.full((batch_size, seq_len), -1.0)
+    response_mask = torch.ones(batch_size, seq_len)
+    advantages = torch.ones(batch_size, seq_len)
+
+    weights32 = torch.ones(batch_size, seq_len)
+    weights32[1, bad] = 0.0
+    weights16 = weights32.to(torch.float16)
+
+    losses, grads = {}, {}
+    for dtype, weights in [("fp32", weights32), ("fp16", weights16)]:
+        log_prob = old_log_prob.clone().requires_grad_(True)  # on-policy
+        loss, _ = compute_policy_loss_geo_mean(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode="token-mean",
+            config=actor_config("geo_mean"),
+            rollout_is_weights=weights,
+        )
+        loss.backward()
+        losses[dtype], grads[dtype] = loss, log_prob.grad
+
+    assert torch.isfinite(losses["fp16"]), "fp16 weights must not NaN the loss"
+    assert losses["fp16"].item() == pytest.approx(losses["fp32"].item(), abs=1e-6)
+    assert torch.allclose(grads["fp16"], grads["fp32"], atol=1e-6)
+    assert grads["fp16"][1, bad].item() == pytest.approx(0.0, abs=1e-6)
+
+    # Fully rejected sequence in float16: zero loss contribution, zero gradient.
+    full_reject16 = torch.ones(batch_size, seq_len, dtype=torch.float16)
+    full_reject16[1, :] = 0.0
+    log_prob = old_log_prob.clone().requires_grad_(True)
+    loss, _ = compute_policy_loss_geo_mean(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode="token-mean",
+        config=actor_config("geo_mean"),
+        rollout_is_weights=full_reject16,
+    )
+    loss.backward()
+    assert torch.isfinite(loss), "fully rejected fp16 sequence must not NaN the loss"
+    assert loss.item() == pytest.approx(-0.5, abs=1e-6)
+    assert float(log_prob.grad[1].abs().max()) == pytest.approx(0.0, abs=1e-6)
+
+
 def test_gspo_ignores_icepop_rejected_tokens_in_sequence_ratio():
     """A token rejected by IcePop (weight 0) must not move the GSPO sequence ratio of its kept tokens."""
     config = ActorConfig(
