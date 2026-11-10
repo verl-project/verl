@@ -28,7 +28,7 @@ from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutCo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rebuild_group", [False])
+@pytest.mark.parametrize("rebuild_group", [False, True])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(4, 12)])
 # 128MB bucket is smaller than the largest weight of Qwen3-8B (embed_tokens, ~1.2GB in bf16),
 # so it exercises the chunked transfer path for weights larger than the bucket.
