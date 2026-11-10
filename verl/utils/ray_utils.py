@@ -19,10 +19,13 @@ import asyncio
 import concurrent.futures
 import functools
 import inspect
+import logging
 import os
 from typing import Any, Optional
 
 import ray
+
+logger = logging.getLogger(__name__)
 
 # Optional Ray custom resource that constrains where lightweight loop workers
 # (agent-loop / reward-loop actors) may be scheduled. In a shared or
@@ -92,7 +95,8 @@ def available_cpu_per_node() -> dict[str, float]:
         from ray._private.state import available_resources_per_node
 
         per_node = available_resources_per_node()
-    except Exception:
+    except Exception as e:
+        logger.debug("Per-node CPU availability unavailable, loop workers use round-robin placement: %s", e)
         return {}
     return {node_id: float(resources.get("CPU", 0.0)) for node_id, resources in (per_node or {}).items()}
 
@@ -108,9 +112,11 @@ def assign_loop_worker_nodes(
     Prefers the node with the most currently-available CPU so workers fan out
     across a heterogeneous group instead of stacking on ``node_ids[0]``. Each
     placement provisionally debits ``cpus_per_worker`` from the chosen node so
-    later workers favor the next-emptiest node. Falls back to the historical
-    round-robin order when ``available_cpu`` is empty (Ray reported no per-node
-    availability). ``node_ids`` order breaks ties deterministically.
+    later workers favor the next-emptiest node. Workers that reserve no CPU are
+    dealt round-robin over the nodes ordered by available CPU, since nothing
+    drains. Falls back to the historical round-robin order when ``available_cpu``
+    is empty (Ray reported no per-node availability). ``node_ids`` order breaks
+    ties deterministically.
     """
     if num_workers <= 0:
         return []
@@ -121,6 +127,9 @@ def assign_loop_worker_nodes(
 
     remaining = {node_id: float(available_cpu.get(node_id, 0.0)) for node_id in node_ids}
     rank = {node_id: i for i, node_id in enumerate(node_ids)}
+    if cpus_per_worker <= 0:
+        ordered = sorted(node_ids, key=lambda nid: (-remaining[nid], rank[nid]))
+        return [ordered[i % len(ordered)] for i in range(num_workers)]
     assignments = []
     for _ in range(num_workers):
         node_id = min(node_ids, key=lambda nid: (-remaining[nid], rank[nid]))

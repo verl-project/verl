@@ -257,6 +257,9 @@ agent:
   # Number of agent loop workers
   num_workers: 8
 
+  # CPU reserved per agent loop worker actor; 0 reserves none
+  num_cpus_per_worker: 0.0
+
   # default agent loop to use if `agent_name` not set in RL dataset
   default_agent_loop: single_turn_agent
 

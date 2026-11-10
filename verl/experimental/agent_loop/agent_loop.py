@@ -1252,8 +1252,10 @@ class AgentLoopManager:
             options = {
                 "name": f"agent_loop_worker_{i}" + f"_{uuid4().hex[:8]}",
                 "num_cpus": num_cpus_per_worker,
+                # Spill keeps a worker placeable when its preferred node is full;
+                # the node-group resource below still bounds where it may land.
                 "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=node_id, soft=True
+                    node_id=node_id, soft=True, _spill_on_unavailable=True
                 ),
             }
             if worker_resources is not None:

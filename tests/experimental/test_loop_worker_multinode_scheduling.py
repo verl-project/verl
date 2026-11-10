@@ -40,8 +40,8 @@ def multinode_ray_cluster():
     cluster = Cluster()
     try:
         cluster.add_node(num_cpus=1, include_dashboard=False)
-        cluster.add_node(num_cpus=1, resources={_RESOURCE: 1}, include_dashboard=False)
-        cluster.add_node(num_cpus=1, resources={_RESOURCE: 1}, include_dashboard=False)
+        cluster.add_node(num_cpus=2, resources={_RESOURCE: 1}, include_dashboard=False)
+        cluster.add_node(num_cpus=2, resources={_RESOURCE: 1}, include_dashboard=False)
         ray.init(address=cluster.address)
         yield
     finally:

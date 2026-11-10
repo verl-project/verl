@@ -96,9 +96,9 @@ class RewardConfig(BaseConfig):
 
     # reward manager args
     num_workers: int = 8
-    # CPU reserved per reward-loop worker actor. Lightweight actors, so a
-    # fractional default avoids over-reserving CPU and stalling placement.
-    num_cpus_per_worker: float = 0.25
+    # CPU reserved per reward-loop worker actor. 0 reserves none, like the
+    # previous behavior; set a fraction to make placement CPU-aware.
+    num_cpus_per_worker: float = 0.0
     reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
     # reward model args
