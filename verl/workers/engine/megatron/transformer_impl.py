@@ -511,10 +511,18 @@ class MegatronEngine(BaseEngine):
             )
         except ImportError:
             return
+        from verl.utils.megatron.dsv4_pipeline import dsv4_logical_layers_per_stage
+
         for key in ("pipeline_model_parallel_size", "virtual_pipeline_model_parallel_size", "mtp_num_layers"):
             if key in provider_overrides:
                 setattr(provider, key, provider_overrides[key])
-        set_deepseek_v4_pipeline_model_parallel_layout(provider)
+        num_stages = provider.pipeline_model_parallel_size * (provider.virtual_pipeline_model_parallel_size or 1)
+        main_pattern = provider.hybrid_layer_pattern.split("/")[0].replace("|", "")
+        # Bridge resolves the hash-layer count from either HF config format (num_hash_layers / mlp_layer_types).
+        counts = dsv4_logical_layers_per_stage(
+            len(main_pattern) // 2, num_stages, getattr(provider, "moe_num_hash_layers", 0) or 0
+        )
+        set_deepseek_v4_pipeline_model_parallel_layout(provider, logical_layers_per_stage=counts)
         provider_overrides["pipeline_model_parallel_layout"] = provider.pipeline_model_parallel_layout
         provider_overrides["hybrid_layer_pattern"] = provider.hybrid_layer_pattern
         logger.warning(
