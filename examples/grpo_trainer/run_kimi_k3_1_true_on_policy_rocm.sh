@@ -141,7 +141,10 @@ if command -v ionic-rdma-env.sh >/dev/null; then
 fi
 # Site-specific RCCL / socket settings (NCCL_IB_HCA, NCCL_IB_GID_INDEX, NCCL_TOPO_FILE, NCCL_SOCKET_IFNAME,
 # GLOO_SOCKET_IFNAME, ...) come from the environment and are forwarded as they are.
-for name in $(compgen -e | grep -E '^(NCCL_|GLOO_|RCCL_)' || true); do ARM_ENV_NAMES+=("${name}"); done
+# (ionic-rdma-env.sh above may already have added NCCL_DMABUF_ENABLE: each name is forwarded once.)
+for name in $(compgen -e | grep -E '^(NCCL_|GLOO_|RCCL_)' || true); do
+  [[ " ${ARM_ENV_NAMES[*]} " == *" ${name} "* ]] || ARM_ENV_NAMES+=("${name}")
+done
 
 VC=actor_rollout_ref.rollout.engine_kwargs.vllm
 IMPL=actor_rollout_ref.actor.engine.impl_cfg
