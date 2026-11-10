@@ -928,6 +928,8 @@ These metrics cover both:
 - **Diagnostic metrics**: KL divergence, perplexity differences (measuring off-policy gap)
 - **Correction statistics**: IS weights, rejection rates (measuring correction applied)
 
+Statistics taken across sequences (means, standard deviations, extrema and fractions of per-sequence values) only count sequences with at least one valid token in `response_mask`, the same rule the rejection sampling metrics use. Rows without valid tokens, such as padding rows that keep micro-batch shapes fixed, do not change them.
+
 #### **Core IS Weight Metrics**
 
 - **`rollout_is_mean`**: Mean importance sampling weight across all valid tokens

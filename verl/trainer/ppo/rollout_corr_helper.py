@@ -194,6 +194,50 @@ def _parse_rollout_rs_thresholds(
     return thresholds
 
 
+# Per-sequence reductions over the batch dimension that skip sequences without a valid token
+# (``seq_mask = response_mask.sum(dim=-1) > 0``), the rule compute_rs_metrics applies via
+# ``seq_valid_mask``. Shapes never depend on how many sequences are valid (no boolean indexing),
+# and when every sequence is valid each helper returns exactly the plain reduction.
+
+
+def _seq_masked_mean(values: torch.Tensor, seq_mask: torch.Tensor) -> torch.Tensor:
+    """Mean of per-sequence ``values`` over the sequences selected by ``seq_mask``.
+
+    Unselected entries are zeroed and the mean over all entries is rescaled by
+    ``numel / num_selected``. The scale is exactly 1 when every sequence is selected,
+    so the result is then bitwise identical to ``values.mean()``.
+    """
+    num_selected = seq_mask.sum().clamp_min(1).to(values.dtype)
+    scale = values.new_tensor(values.numel()) / num_selected
+    return torch.where(seq_mask, values, torch.zeros_like(values)).mean() * scale
+
+
+def _seq_masked_std(values: torch.Tensor, seq_mask: torch.Tensor) -> torch.Tensor:
+    """Unbiased standard deviation of per-sequence ``values`` over the sequences selected by ``seq_mask``.
+
+    Returns 0 when fewer than two sequences are selected. Unselected entries are set to the
+    selected mean, so they add nothing to the sum of squared deviations, and the
+    ``numel - 1`` degrees of freedom of ``Tensor.std`` are rescaled to ``num_selected - 1``.
+    The scale is exactly 1 when every sequence is selected, so the result is then bitwise
+    identical to ``values.std()``. Callers handle ``values.numel() <= 1``.
+    """
+    num_selected = seq_mask.sum()
+    filled = torch.where(seq_mask, values, _seq_masked_mean(values, seq_mask))
+    dof_ratio = values.new_tensor(values.numel() - 1) / (num_selected - 1).clamp_min(1).to(values.dtype)
+    std = filled.std() * torch.sqrt(dof_ratio)
+    return torch.where(num_selected > 1, std, torch.zeros_like(std))
+
+
+def _seq_masked_max(values: torch.Tensor, seq_mask: torch.Tensor) -> torch.Tensor:
+    """Maximum of per-sequence ``values`` over the sequences selected by ``seq_mask``."""
+    return values.masked_fill(~seq_mask, float("-inf")).max()
+
+
+def _seq_masked_min(values: torch.Tensor, seq_mask: torch.Tensor) -> torch.Tensor:
+    """Minimum of per-sequence ``values`` over the sequences selected by ``seq_mask``."""
+    return values.masked_fill(~seq_mask, float("inf")).min()
+
+
 def compute_rollout_rejection_mask(
     log_ratio: torch.Tensor,
     response_mask: torch.Tensor,
@@ -407,7 +451,7 @@ def compute_rollout_rejection_mask(
     metrics["rollout_rs_masked_fraction"] = verl_F.masked_mean(1 - final_mask, response_mask).item()
     final_keep_bool = (final_mask > 0.5) & response_mask_bool
     seq_has_masked: torch.Tensor = (~final_keep_bool & response_mask_bool).any(dim=-1)
-    metrics["rollout_rs_seq_masked_fraction"] = seq_has_masked.float().mean().item()
+    metrics["rollout_rs_seq_masked_fraction"] = _seq_masked_mean(seq_has_masked.float(), seq_valid_mask).item()
 
     modified_response_mask: torch.Tensor = (response_mask * final_mask).to(dtype=response_mask.dtype)
     return modified_response_mask, metrics
@@ -700,11 +744,15 @@ def compute_is_metrics(
     log_threshold_upper: torch.Tensor = torch.log(torch.tensor(rollout_is_threshold, device=device))
     log_threshold_lower: torch.Tensor = torch.log(torch.tensor(rollout_is_threshold_lower, device=device))
 
+    # Per-sequence statistics skip sequences without valid tokens, as in compute_rs_metrics.
+    seq_valid_mask: torch.Tensor = response_mask.sum(dim=-1) > 0
+
     # Compute metrics based on aggregation level
     if rollout_is == "sequence":
         # Sequence-level aggregation: use log-space for unclamped stats
-        log_max: torch.Tensor = log_ratio_for_metrics.max()
-        log_min: torch.Tensor = log_ratio_for_metrics.min()
+        seq_valid_for_log_ratio = seq_valid_mask.reshape(log_ratio_for_metrics.shape)
+        log_max: torch.Tensor = _seq_masked_max(log_ratio_for_metrics, seq_valid_for_log_ratio)
+        log_min: torch.Tensor = _seq_masked_min(log_ratio_for_metrics, seq_valid_for_log_ratio)
         metrics["rollout_is_max"] = torch.exp(torch.clamp(log_max, max=SAFETY_BOUND)).item()
         metrics["rollout_is_min"] = torch.exp(log_min).item()
 
@@ -714,8 +762,10 @@ def compute_is_metrics(
         # Fraction of weights exceeding thresholds (log-space for accuracy)
         exceeds_upper: torch.Tensor = log_ratio_for_metrics > log_threshold_upper
         below_lower: torch.Tensor = log_ratio_for_metrics < log_threshold_lower
-        metrics["rollout_is_ratio_fraction_high"] = exceeds_upper.float().mean().item()
-        metrics["rollout_is_ratio_fraction_low"] = below_lower.float().mean().item()
+        metrics["rollout_is_ratio_fraction_high"] = _seq_masked_mean(
+            exceeds_upper.float(), seq_valid_for_log_ratio
+        ).item()
+        metrics["rollout_is_ratio_fraction_low"] = _seq_masked_mean(below_lower.float(), seq_valid_for_log_ratio).item()
 
     else:  # token-level
         # Token-level aggregation: the applied weights drive loss, std, and ESS,
@@ -762,23 +812,27 @@ def compute_is_metrics(
     if rollout_is_weights.dim() > 1:
         seq_mean_weights: torch.Tensor = verl_F.masked_mean(rollout_is_weights, response_mask, axis=-1)
 
-        metrics["rollout_is_seq_mean"] = seq_mean_weights.mean().item()
-        metrics["rollout_is_seq_std"] = seq_mean_weights.std().item() if seq_mean_weights.numel() > 1 else 0.0
-        metrics["rollout_is_seq_max"] = seq_mean_weights.max().item()
-        metrics["rollout_is_seq_min"] = seq_mean_weights.min().item()
+        metrics["rollout_is_seq_mean"] = _seq_masked_mean(seq_mean_weights, seq_valid_mask).item()
+        metrics["rollout_is_seq_std"] = (
+            _seq_masked_std(seq_mean_weights, seq_valid_mask).item() if seq_mean_weights.numel() > 1 else 0.0
+        )
+        metrics["rollout_is_seq_max"] = _seq_masked_max(seq_mean_weights, seq_valid_mask).item()
+        metrics["rollout_is_seq_min"] = _seq_masked_min(seq_mean_weights, seq_valid_mask).item()
 
         # Sequence deviation from ideal weight (1.0)
         seq_deviation: torch.Tensor = (seq_mean_weights - 1.0).abs()
-        metrics["rollout_is_seq_max_deviation"] = seq_deviation.max().item()
+        metrics["rollout_is_seq_max_deviation"] = _seq_masked_max(seq_deviation, seq_valid_mask).item()
 
         # Fraction of sequences with extreme weights. Use the raw (pre-truncation)
         # per-sequence mean: every clamped weight is <= rollout_is_threshold, so a mean
         # of clamped weights can never exceed it and the high fraction would be dead.
         raw_seq_mean_weights: torch.Tensor = verl_F.masked_mean(raw_rollout_is_weights, response_mask, axis=-1)
-        metrics["rollout_is_seq_fraction_high"] = (raw_seq_mean_weights > rollout_is_threshold).float().mean().item()
-        metrics["rollout_is_seq_fraction_low"] = (
-            (raw_seq_mean_weights < rollout_is_threshold_lower).float().mean().item()
-        )
+        metrics["rollout_is_seq_fraction_high"] = _seq_masked_mean(
+            (raw_seq_mean_weights > rollout_is_threshold).float(), seq_valid_mask
+        ).item()
+        metrics["rollout_is_seq_fraction_low"] = _seq_masked_mean(
+            (raw_seq_mean_weights < rollout_is_threshold_lower).float(), seq_valid_mask
+        ).item()
 
     return metrics
 
