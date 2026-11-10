@@ -9,6 +9,9 @@ num_workers: 8
 # prime_math, prime_code, geo3k, search_r1_like_qa_em, search_r1_like_qa_subem.
 preset: null
 
+# CPU reserved per reward loop worker actor; 0 reserves none
+num_cpus_per_worker: 0.0
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.

@@ -71,13 +71,13 @@ def test_filter_no_match_raises():
 def test_round_robin_stays_within_group():
     node_ids = schedulable_loop_worker_node_ids(_GROUP)
     # num_workers > group size must keep wrapping inside the group, never leaking.
-    placed = [node_ids[i % len(node_ids)] for i in range(8)]
+    placed = assign_loop_worker_nodes(node_ids, 8)
     assert set(placed) == {"managed-a", "managed-b"}
 
 
 def test_single_node_group_does_not_degrade():
     node_ids = schedulable_loop_worker_node_ids(_GROUP)[:1]
-    placed = [node_ids[i % len(node_ids)] for i in range(4)]
+    placed = assign_loop_worker_nodes(node_ids, 4)
     assert placed == ["managed-a"] * 4
 
 
@@ -113,17 +113,17 @@ def test_assign_prefers_most_available_and_spreads_as_cpu_drains():
     assert placed == ["b", "a", "b", "a"]
 
 
-def test_assign_zero_cost_pins_to_single_emptiest():
+def test_assign_zero_cost_deals_round_robin_by_availability():
     node_ids = ["a", "b", "c"]
-    # With no per-worker cost nothing drains, so the single emptiest node wins all.
-    placed = assign_loop_worker_nodes(node_ids, 3, available_cpu={"a": 1.0, "b": 3.0, "c": 2.0}, cpus_per_worker=0.0)
-    assert placed == ["b", "b", "b"]
+    # With no per-worker cost nothing drains, so workers rotate over the nodes, emptiest first.
+    placed = assign_loop_worker_nodes(node_ids, 4, available_cpu={"a": 1.0, "b": 3.0, "c": 2.0}, cpus_per_worker=0.0)
+    assert placed == ["b", "c", "a", "b"]
 
 
 def test_assign_missing_node_treated_as_zero_cpu():
     node_ids = ["a", "b"]
     # "b" absent from the map -> 0 available, so "a" is always preferred.
-    placed = assign_loop_worker_nodes(node_ids, 2, available_cpu={"a": 4.0}, cpus_per_worker=0.0)
+    placed = assign_loop_worker_nodes(node_ids, 2, available_cpu={"a": 4.0}, cpus_per_worker=1.0)
     assert placed == ["a", "a"]
 
 
@@ -132,9 +132,14 @@ def test_assign_empty_nodes_raises():
         assign_loop_worker_nodes([], 3, available_cpu={"a": 1.0})
 
 
-def test_available_cpu_per_node_returns_empty_when_unreachable():
-    # Outside a live Ray driver the internal state view is unavailable; callers
-    # must then fall back to round-robin.
+def test_available_cpu_per_node_returns_empty_when_unreachable(monkeypatch):
+    import ray._private.state as ray_state
+
+    def _unreachable():
+        raise RuntimeError("Ray is not initialized")
+
+    monkeypatch.setattr(ray_state, "available_resources_per_node", _unreachable)
+    # Callers then fall back to round-robin.
     assert ray_utils.available_cpu_per_node() == {}
 
 
@@ -151,7 +156,7 @@ def _declared_default(config_cls, field_name):
     return next(f for f in dataclasses.fields(config_cls) if f.name == field_name).default
 
 
-def test_loop_worker_cpu_knob_defaults_are_fractional():
-    assert AgentLoopConfig().num_cpus_per_worker == 0.25
-    assert _declared_default(AgentLoopConfig, "num_cpus_per_worker") == 0.25
-    assert _declared_default(RewardConfig, "num_cpus_per_worker") == 0.25
+def test_loop_worker_cpu_knob_defaults_reserve_none():
+    assert AgentLoopConfig().num_cpus_per_worker == 0.0
+    assert _declared_default(AgentLoopConfig, "num_cpus_per_worker") == 0.0
+    assert _declared_default(RewardConfig, "num_cpus_per_worker") == 0.0
