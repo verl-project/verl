@@ -17,7 +17,11 @@ from unittest.mock import patch
 
 from omegaconf import OmegaConf
 
-from verl.trainer.constants_ppo import NVTX_INJECTION_ENV, get_ppo_ray_runtime_env
+from verl.single_controller.ray.base import TRAINING_WORKER_OMP_NUM_THREADS_ENV
+from verl.trainer.constants_ppo import (
+    NVTX_INJECTION_ENV,
+    get_ppo_ray_runtime_env,
+)
 
 _INHERITED = "/usr/local/cuda/lib64/libcupti.so"
 
@@ -51,20 +55,22 @@ def test_nvtx_injection_override_can_be_opted_out():
     assert NVTX_INJECTION_ENV not in env_vars
 
 
-def test_omp_num_threads_defaults_to_physical_cores_per_gpu():
+def test_omp_num_threads_default_goes_to_training_workers_only():
+    """Every Ray worker reads the job-wide env, so the default must not be OMP_NUM_THREADS itself."""
     config = OmegaConf.create({"trainer": {"n_gpus_per_node": 8}})
     with (
         patch.dict(os.environ, {}, clear=True),
-        patch("verl.trainer.constants_ppo._available_physical_cores", return_value=64),
+        patch("verl.trainer.constants_ppo.available_physical_cores", return_value=64),
     ):
         env_vars = get_ppo_ray_runtime_env(config)["env_vars"]
 
-    assert env_vars["OMP_NUM_THREADS"] == "8"
+    assert env_vars[TRAINING_WORKER_OMP_NUM_THREADS_ENV] == "8"
+    assert "OMP_NUM_THREADS" not in env_vars
 
 
 def test_inherited_omp_num_threads_is_not_overridden():
-    config = OmegaConf.create({"trainer": {"n_gpus_per_node": 8}})
     with patch.dict(os.environ, {"OMP_NUM_THREADS": "3"}, clear=True):
-        env_vars = get_ppo_ray_runtime_env(config)["env_vars"]
+        env_vars = get_ppo_ray_runtime_env(OmegaConf.create({"trainer": {"n_gpus_per_node": 8}}))["env_vars"]
 
     assert "OMP_NUM_THREADS" not in env_vars
+    assert TRAINING_WORKER_OMP_NUM_THREADS_ENV not in env_vars
