@@ -72,6 +72,10 @@ pad_to_length: false
 # within-budget micro-batch onto a single shape. Only read when pad_to_length=true.
 pad_to_length_bucket: 1024
 
+# Compute the prompt shared by adjacent samples (e.g. the rollout.n samples of one prompt) once.
+# Requires use_remove_padding and flash attention; see docs/perf/perf_tuning.rst.
+use_prefix_packing: false
+
 # Whether to use forward only in fsdp.
 forward_only: false
 

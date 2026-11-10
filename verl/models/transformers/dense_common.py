@@ -13,11 +13,14 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+if TYPE_CHECKING:
+    from verl.workers.utils.prefix_packing import PrefixPackingAttnMeta
 
 
 @dataclass
@@ -38,18 +41,21 @@ def forward_base_model(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     cache_position: Optional[torch.LongTensor] = None,
+    prefix_packing: Optional["PrefixPackingAttnMeta"] = None,
 ) -> CausalLMOutputWithPast:
     r"""
     Copy paste LLaMa's forward
     https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/transformers/model/llama.py
 
     This function should be generic enough for all pure text models.
+    ``prefix_packing`` (shared-prefix attention metadata) is forwarded to the attention layers only when set.
     ```"""
 
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
     output_hidden_states = (
         output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
     )
+    attn_kwargs = {} if prefix_packing is None else {"prefix_packing": prefix_packing}
 
     # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
     outputs = self.model(
@@ -63,6 +69,7 @@ def forward_base_model(
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
         cache_position=cache_position,
+        **attn_kwargs,
     )
 
     return outputs
@@ -99,6 +106,7 @@ def forward_with_torch_backend(
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         cache_position=cache_position,
+        prefix_packing=loss_kwargs.pop("prefix_packing", None),
     )
 
     hidden_states = outputs[0]
@@ -168,6 +176,7 @@ def forward_with_triton_backend(
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
         cache_position=cache_position,
+        prefix_packing=loss_kwargs.pop("prefix_packing", None),
     )
 
     hidden_states = outputs[0]

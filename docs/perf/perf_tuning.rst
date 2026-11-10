@@ -315,6 +315,38 @@ numerically identical to synchronizing every micro-batch.
     every micro-batch when memory headroom is limited. Forward-only passes are
     unaffected.
 
+Shared-prefix packing (FSDP)
+----------------------------
+
+The ``rollout.n`` samples of a prompt share that prompt, but with ``use_remove_padding=True`` the
+log-prob and update passes still compute it ``n`` times. With shared-prefix packing, adjacent samples
+with an identical prompt are packed as one trunk (the prompt minus its last token) and ``n`` branches
+(the last prompt token followed by each response). Each branch attends to the trunk and to itself
+through one varlen flash-attention call, so outputs and gradients match unpacked training up to
+floating-point rounding. Tokens per group drop from :math:`n(P+R)` to :math:`(P-1)+n(R+1)`.
+
+.. code-block:: bash
+
+    actor_rollout_ref.actor.fsdp_config.use_prefix_packing=True   # the reference model follows the actor
+    critic.fsdp.use_prefix_packing=True
+
+The gain grows with the prompt length. In GRPO on Qwen3-4B with ``rollout.n=8`` and a 2k-token prompt,
+a training step was 2.7x faster; with 80-token GSM8K prompts it was 1.2x faster. The trainer logs
+``actor/prefix_packing_token_ratio`` (tokens before / after packing).
+
+``actor_rollout_ref.actor.use_prefix_grouper`` has no effect on the FSDP engine; shared-prefix packing replaces it.
+
+It requires ``use_remove_padding=True``, ``attn_implementation`` ``flash_attention_2`` or
+``flash_attention_3``, and a text-only model. It is not supported with Ulysses sequence parallelism,
+top-k distillation, score centering, router replay, or models that take ``cu_seqlens`` directly
+(linear-attention hybrids such as Qwen3.5).
+
+.. note::
+    - Samples of a prompt are only shared within a micro-batch. ``trainer.balance_batch`` keeps them
+      on one rank when the flag is on; with fixed micro-batch sizes, use a multiple of ``rollout.n``.
+    - With dynamic batch size, ``max_token_len_per_gpu`` applies to the packed length.
+    - ``perf/mfu`` counts unpacked tokens, so it is overstated with packing.
+
 Migrating to FSDP2
 ----------------------
 
