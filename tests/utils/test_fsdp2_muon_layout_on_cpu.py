@@ -30,6 +30,7 @@ from verl.utils.fsdp2_muon import _parameter_mesh, build_fsdp2_muon, group_fsdp2
 
 
 def _config():
+    """Return fixed Muon and AdamW settings shared by layout and reference tests."""
     return SimpleNamespace(
         optimizer_impl="torch.optim",
         override_optimizer_config=None,
@@ -45,18 +46,25 @@ def _config():
 
 
 def _optimizer(model):
+    """Build the real optional Dion-backed optimizer or skip when Dion is absent."""
     pytest.importorskip("dion")
     return build_fsdp2_muon(model, _config(), SimpleNamespace(strategy="fsdp2"))
 
 
 def _algorithm_by_id(model):
+    """Map parameter identities to their production Muon or AdamW classification."""
     groups = group_fsdp2_muon_parameters(model)
     return {id(p): group["algorithm"] for group in groups for p in group["params"]}
 
 
 def test_shared_embedding_and_exotic_output_head_win_over_linear_aliases():
+    """Keep special shared weights on AdamW while covering each trainable parameter once."""
+
     class Model(torch.nn.Module):
+        """Expose embedding and output-head weights through ordinary Linear aliases."""
+
         def __init__(self):
+            """Create shared special weights, an ordinary projection and frozen parameters."""
             super().__init__()
             self.a_projection = torch.nn.Linear(4, 4, bias=False)
             self.token_table = torch.nn.Embedding(4, 4)
@@ -68,6 +76,7 @@ def test_shared_embedding_and_exotic_output_head_win_over_linear_aliases():
             self.frozen.requires_grad_(False)
 
         def get_output_embeddings(self):
+            """Identify the output head despite its nonstandard module name."""
             return self.z_vocab_projection
 
     model = Model()
@@ -83,14 +92,20 @@ def test_shared_embedding_and_exotic_output_head_win_over_linear_aliases():
 
 
 def test_custom_input_embedding_identity_is_excluded_from_muon():
+    """Honor input-embedding ownership even when the embedding is implemented as Linear."""
+
     class Model(torch.nn.Module):
+        """Use a one-hot Linear projection as an input embedding."""
+
         def __init__(self):
+            """Create distinct input-embedding and hidden-projection weights."""
             super().__init__()
             # A one-hot token projection is an embedding even with a Linear implementation.
             self.token_projection = torch.nn.Linear(8, 4, bias=False)
             self.hidden = torch.nn.Linear(4, 4, bias=False)
 
         def get_input_embeddings(self):
+            """Expose the token projection as the model's input embedding."""
             return self.token_projection
 
     model = Model()
@@ -101,6 +116,7 @@ def test_custom_input_embedding_identity_is_excluded_from_muon():
 
 @pytest.mark.parametrize("field", ["param_names", "algorithm", "verl_muon_layout", "verl_muon_definition"])
 def test_checkpoint_metadata_rejected_before_state_or_lr_changes(field):
+    """Reject incompatible checkpoint metadata without modifying momentum or cached LR."""
     model = torch.nn.Linear(4, 4)
     optimizer = _optimizer(model)
     saved = copy.deepcopy(optimizer.state_dict())
@@ -117,6 +133,7 @@ def test_checkpoint_metadata_rejected_before_state_or_lr_changes(field):
 
 
 def test_checkpoint_load_refreshes_existing_lr_cache():
+    """Restore serialized learning rates into the existing device LR tensors."""
     model = torch.nn.Linear(4, 4)
     optimizer = _optimizer(model)
     saved = copy.deepcopy(optimizer.state_dict())
@@ -131,12 +148,14 @@ def test_checkpoint_load_refreshes_existing_lr_cache():
 
 
 def _dtensor(local, mesh, placement=None, shape=(4, 4)):
+    """Wrap a local tensor with explicit global matrix metadata and test placement."""
     if placement is None:
         placement = Shard(0)
     return DTensor.from_local(local, mesh, [placement], run_check=False, shape=shape, stride=(shape[1], 1))
 
 
 def _distributed_layout_worker(rank, rendezvous):
+    """Exercise CPU DTensor layout guards, collective errors and state round trips."""
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=12))
     try:
@@ -206,6 +225,7 @@ def _distributed_layout_worker(rank, rendezvous):
 
 
 def test_true_dtensor_submesh_and_collective_guards_on_two_cpu_ranks(tmp_path):
+    """Check submesh guards on two Gloo ranks and bound hangs during collective failures."""
     pytest.importorskip("dion")
     if not dist.is_available() or not dist.is_gloo_available():
         pytest.skip("CPU gloo backend unavailable")
@@ -225,6 +245,7 @@ def test_true_dtensor_submesh_and_collective_guards_on_two_cpu_ranks(tmp_path):
 
 
 def _distributed_update_worker(rank, rendezvous):
+    """Compare five DTensor updates with full-matrix Dion, including missing gradients."""
     from dion import Muon
 
     torch.set_num_threads(1)
@@ -275,6 +296,7 @@ def _distributed_update_worker(rank, rendezvous):
 
 
 def test_gathered_dtensor_updates_match_full_matrices_with_uneven_and_empty_shards(tmp_path):
+    """Match full-matrix updates with uneven or empty local shards on two CPU ranks."""
     pytest.importorskip("dion")
     if not dist.is_available() or not dist.is_gloo_available():
         pytest.skip("CPU gloo backend unavailable")

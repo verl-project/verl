@@ -25,7 +25,10 @@ from verl.workers.config.optimizer import FSDPOptimizerConfig, build_optimizer
 
 
 class TinyModel(torch.nn.Module):
+    """Cover projection, embedding, head, shared and frozen parameter roles."""
+
     def __init__(self, tied=False):
+        """Build a dense fixture with optional tied embedding and output weights."""
         super().__init__()
         self.embed = torch.nn.Embedding(7, 4)
         self.proj = torch.nn.Linear(4, 4)
@@ -38,23 +41,28 @@ class TinyModel(torch.nn.Module):
         self.special_matrix = torch.nn.Parameter(torch.ones(2, 2))
 
     def get_output_embeddings(self):
+        """Identify output-head ownership for the production parameter classifier."""
         return self.lm_head
 
     def forward(self, x):
+        """Produce logits through both Muon-eligible and AdamW-only parameters."""
         return self.lm_head(self.norm(self.proj(self.embed(x))))
 
 
 def context(**kwargs):
+    """Create minimal FSDP2 engine settings with explicit test overrides."""
     return SimpleNamespace(strategy="fsdp2", **kwargs)
 
 
 def build(model, **kwargs):
+    """Construct Muon through verl's public optimizer factory."""
     return build_optimizer(
         model.parameters(), FSDPOptimizerConfig(optimizer="Muon", **kwargs), model=model, engine_config=context()
     )
 
 
 def test_default_and_hydra_overrides():
+    """Keep AdamW as the default while applying explicit Muon Hydra overrides."""
     assert FSDPOptimizerConfig().optimizer == "AdamW"
     with initialize_config_module(config_module="verl.trainer.config", version_base=None):
         cfg = compose(
@@ -72,6 +80,7 @@ def test_default_and_hydra_overrides():
 
 @pytest.mark.parametrize("tied", [False, True])
 def test_semantic_grouping_complete_deterministic(tied):
+    """Require complete, deterministic groups with special aliases taking precedence."""
     from verl.utils.fsdp2_muon import group_fsdp2_muon_parameters
 
     model = TinyModel(tied=tied)
@@ -129,6 +138,7 @@ def test_trl_value_head_uses_adamw(aliased):
     ],
 )
 def test_invalid_muon_options(options):
+    """Reject invalid Muon hyperparameters and unsupported generic optimizer overrides."""
     with pytest.raises(ValueError):
         build(TinyModel(), **options)
 
@@ -145,15 +155,18 @@ def test_invalid_muon_options(options):
     ],
 )
 def test_unsupported_engine(engine, message):
+    """Reject backends, offload settings and dtypes outside the supported FSDP2 scope."""
     model = TinyModel()
     with pytest.raises(ValueError, match=message):
         build_optimizer(model.parameters(), FSDPOptimizerConfig(optimizer="Muon"), model=model, engine_config=engine)
 
 
 def test_dependency_is_optional(monkeypatch):
+    """Keep AdamW usable without Dion and report the optional dependency only for Muon."""
     real_import = importlib.import_module
 
     def missing(name, *args, **kwargs):
+        """Simulate an absent Dion installation without changing other imports."""
         if name == "dion":
             raise ImportError("simulated absent optional dependency")
         return real_import(name, *args, **kwargs)
@@ -167,10 +180,14 @@ def test_dependency_is_optional(monkeypatch):
 
 
 def test_stub_constructor_receives_options(monkeypatch):
+    """Check constructor wiring with a stub, without claiming real Dion numerical coverage."""
     calls = {}
 
     class StubMuon(torch.optim.Optimizer):
+        """Capture constructor options without executing Dion update kernels."""
+
         def __init__(self, params, **kwargs):
+            """Record forwarded options and register standard optimizer parameter groups."""
             calls.update(kwargs)
             super().__init__(params, {})
 
@@ -188,6 +205,7 @@ def test_stub_constructor_receives_options(monkeypatch):
 
 
 def test_real_dependency_update_scheduler_restore():
+    """Verify real Dion updates and exact continuation after optimizer and scheduler restore."""
     dion = pytest.importorskip("dion", reason="real optional Dion dependency missing")
     model = TinyModel()
     opt = build(model, lr=0.01)
@@ -222,6 +240,7 @@ def test_real_dependency_update_scheduler_restore():
 
 
 def test_real_zero_and_missing_gradients():
+    """Skip absent gradients while retaining weight decay for explicit zero gradients."""
     pytest.importorskip("dion", reason="real optional Dion dependency missing")
     model = TinyModel()
     opt = build(model)
@@ -235,6 +254,7 @@ def test_real_zero_and_missing_gradients():
 
 
 def test_hybrid_attention_special_projections_use_adamw():
+    """Exclude the entire hybrid attention block while retaining ordinary Muon projections."""
     from verl.utils.fsdp2_muon import group_fsdp2_muon_parameters
 
     model = TinyModel()
@@ -247,6 +267,7 @@ def test_hybrid_attention_special_projections_use_adamw():
 
 
 def test_engine_entry_and_default_adamw_equivalence():
+    """Exercise the engine builder and preserve exact default AdamW update behavior."""
     from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
 
     model = TinyModel()
@@ -268,6 +289,7 @@ def test_engine_entry_and_default_adamw_equivalence():
 @pytest.mark.parametrize("nesterov", [False, True])
 @pytest.mark.parametrize("scale", [None, "spectral_norm", "rms_norm"])
 def test_real_unsharded_reference_formula(nesterov, scale):
+    """Match real unsharded Dion across Nesterov and learning-rate scaling variants."""
     dion = pytest.importorskip("dion", reason="real optional Dion dependency missing")
     model = TinyModel()
     reference = copy.deepcopy(model)
@@ -314,6 +336,7 @@ def test_real_unsharded_reference_formula(nesterov, scale):
     ],
 )
 def test_reject_lora_and_moe(model_config):
+    """Reject adapter and expert-model configurations before optimizer construction."""
     from verl.utils.fsdp2_muon import validate_fsdp2_muon_config
 
     with pytest.raises(ValueError, match="LoRA|MoE"):
@@ -322,11 +345,13 @@ def test_reject_lora_and_moe(model_config):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_reject_low_precision_stored_parameters(dtype):
+    """Require FP32 stored parameters independently of forward-computation precision."""
     with pytest.raises(ValueError, match="FP32"):
         build(TinyModel().to(dtype))
 
 
 def test_missing_module_metadata_and_partial_parameter_list_rejected():
+    """Require module metadata and the complete trainable parameter set for Muon."""
     model = TinyModel()
     config = FSDPOptimizerConfig(optimizer="Muon")
     with pytest.raises(ValueError, match="module metadata"):
@@ -336,6 +361,7 @@ def test_missing_module_metadata_and_partial_parameter_list_rejected():
 
 
 def test_real_closure_and_sparse_gradients_rejected_before_update():
+    """Reject closures and sparse gradients before advancing any optimizer group."""
     pytest.importorskip("dion", reason="real optional Dion dependency missing")
     model = TinyModel()
     opt = build(model)
@@ -348,6 +374,7 @@ def test_real_closure_and_sparse_gradients_rejected_before_update():
 
 
 def test_attention_output_is_not_confused_with_lm_head():
+    """Keep nested attention output projections eligible for Muon."""
     from verl.utils.fsdp2_muon import group_fsdp2_muon_parameters
 
     model = TinyModel()

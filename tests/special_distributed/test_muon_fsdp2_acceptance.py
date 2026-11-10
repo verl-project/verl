@@ -24,6 +24,7 @@ torch = pytest.importorskip("torch")
 
 @pytest.mark.parametrize("case,devices", [("smoke", 1), ("alignment", 2), ("checkpoint", 2)])
 def test_muon_fsdp2_acceptance(case, devices, tmp_path):
+    """Run standalone CUDA acceptance, reporting insufficient hardware as a pytest skip."""
     if not torch.cuda.is_available() or torch.cuda.device_count() < devices:
         pytest.skip(f"{devices} CUDA GPU(s) required; GPU acceptance NOT RUN")
     driver = Path(__file__).with_name("run_muon_fsdp2_acceptance.py")

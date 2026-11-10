@@ -70,13 +70,17 @@ TOLERANCES = {
 
 
 class Block(nn.Module):
+    """Exercise normalization and two Muon-eligible projections in a residual block."""
+
     def __init__(self):
+        """Create the normalization layer and expansion/contraction projections."""
         super().__init__()
         self.norm = nn.LayerNorm(32)
         self.up = nn.Linear(32, 64)
         self.down = nn.Linear(64, 32)
 
     def forward(self, x):
+        """Apply the normalized projection pair and add the residual input."""
         return x + self.down(torch.tanh(self.up(self.norm(x))))
 
 
