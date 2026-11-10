@@ -1,5 +1,5 @@
 diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
-index 03539b7..2f05065 100644
+index 03539b7..079fd48 100644
 --- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
 +++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
 @@ -525,6 +525,8 @@ class MegatronLiteEngine(BaseEngine):
@@ -11,7 +11,7 @@ index 03539b7..2f05065 100644
      @property
      def supports_lora_expert_slice(self) -> bool:
          """Whether the weight-sync export can hand each rollout rank only its own experts.
-@@ -534,10 +536,23 @@ class MegatronLiteEngine(BaseEngine):
+@@ -534,10 +536,22 @@ class MegatronLiteEngine(BaseEngine):
          proto = self.handle._extras.get("protocol") if self.handle is not None else None
          return bool(getattr(proto, "SUPPORTS_LORA_EXPERT_SLICE", False))
  
@@ -28,15 +28,14 @@ index 03539b7..2f05065 100644
          self._require_initialized()
          if self.is_param_offload_enabled:
 -            self.to("cuda", model=True, optimizer=False, grad=False)
-+            # Adapter-only export (K31 LoRA): the exporter reads only the trainable factors, so do not move the frozen base
-+            # (~110 GiB/rank at PP4xEP4) next to the rollout; onload just the DDP param buffers.
++            # Adapter-only export: onload just the trainable parameters, not the frozen base.
 +            loader = getattr(self.runtime, "load_trainable_to_gpu", None)
 +            if not (self._exports_adapter_only() and callable(loader) and loader(self.handle)):
 +                self.to("cuda", model=True, optimizer=False, grad=False)
          if not getattr(self, "_initial_sync_cache_cleared", False):
              aggressive_empty_cache(force_sync=True)
              self._initial_sync_cache_cleared = True
-@@ -550,6 +565,10 @@ class MegatronLiteEngine(BaseEngine):
+@@ -550,6 +564,10 @@ class MegatronLiteEngine(BaseEngine):
              if not self.supports_lora_expert_slice:
                  raise ValueError("lora_expert_slice given but this model cannot export expert slices")
              export_kwargs["lora_expert_slice"] = tuple(kwargs["lora_expert_slice"])
@@ -47,7 +46,7 @@ index 03539b7..2f05065 100644
          export_kwargs.update(
              buffer_max_size_bytes=2 * 1024**3,
              cpu=False,
-@@ -582,8 +601,27 @@ class MegatronLiteEngine(BaseEngine):
+@@ -582,8 +600,25 @@ class MegatronLiteEngine(BaseEngine):
                  "this model exports only its LoRA adapter; the rollout must load the base "
                  "checkpoint (rollout.load_format != dummy)"
              )
@@ -56,9 +55,7 @@ index 03539b7..2f05065 100644
 +            and self._rollout_weight_quantizer is not None
 +            and not self.engine_config.qat.get("enable", False)
 +        ):
-+            # Full-weight sync to a low-precision rollout. An adapter export stays BF16: the rollout
-+            # adds it on top of the quantized base it loaded itself (as verl's Megatron engine).
-+            # With mLite QAT on, qat_export above already produced the rollout format.
++            # Full-weight exports only (adapters stay BF16); with QAT on, qat_export already quantized.
 +            weights = self._rollout_weight_quantizer(weights)
          return weights, peft_config
  
@@ -76,18 +73,15 @@ index 03539b7..2f05065 100644
          if self.handle is None:
              world_size = dist.get_world_size() if dist.is_initialized() else 1
 diff --git a/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py b/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
-index 41051e9..caa2a2d 100644
+index 41051e9..af2d238 100644
 --- a/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
 +++ b/experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
-@@ -379,6 +379,44 @@ except ImportError:
+@@ -379,6 +379,38 @@ except ImportError:
  # The K31 adapter export can hand each rollout rank only its own experts (``lora_expert_slice``).
  SUPPORTS_LORA_EXPERT_SLICE = True
  
-+# Rollout TP without EP: vLLM's FusedMoEWithLoRA shards every expert's intermediate dim over TP
-+# (``_slice_w13_b`` dim 1, ``_slice_w2_a`` dim 2).  ``lora_expert_tp_slice=(tp_rank, tp_size)``
-+# narrows those per-expert factors to the rank's shard, headed by the int64 ``[tp_rank, tp_size]``
-+# tensor named below; the rollout's loader checks it against its own MoE LoRA layers, strips it
-+# and keeps vLLM from slicing the shard again.
++# ``lora_expert_tp_slice=(tp_rank, tp_size)``: per-expert factors narrowed to the TP rank's shard (as vLLM's
++# FusedMoEWithLoRA shards them), headed by an int64 ``[tp_rank, tp_size]`` tag tensor with this name.
 +LORA_EXPERT_TP_SLICE_TAG = "__k31_lora_expert_tp_slice__"
 +SUPPORTS_LORA_EXPERT_TP_SLICE = True
 +# (peft name suffix, dim vLLM shards over TP)
@@ -106,10 +100,7 @@ index 41051e9..caa2a2d 100644
 +
 +
 +def _tp_narrow(peft: str, tensor: torch.Tensor, tp_rank: int, tp_size: int) -> torch.Tensor:
-+    """``tensor`` narrowed to ``tp_rank``'s shard if vLLM shards it over TP, else unchanged.
-+
-+    The shard is a contiguous copy (the sender packs tensors into flat buckets).
-+    """
++    """``tensor`` narrowed (contiguous copy) to ``tp_rank``'s shard if vLLM shards it over TP, else unchanged."""
 +    dim = _tp_sharded_dim(peft)
 +    if dim is None:
 +        return tensor
@@ -124,7 +115,7 @@ index 41051e9..caa2a2d 100644
  
  @dataclass(frozen=True)
  class _ExpertExchange:
-@@ -546,6 +584,11 @@ def export_hf_weights(
+@@ -546,6 +578,11 @@ def export_hf_weights(
      (exchanged inside the actor EP group), headed by ``LORA_EXPERT_SLICE_TAG``; dense
      and shared outer factors are yielded whole either way.
  
@@ -136,7 +127,7 @@ index 41051e9..caa2a2d 100644
      With PP>1 every rank still yields the whole adapter (all stages, layer order): a
      stage broadcasts its dense/shared tensors over the PP group, and for per-expert
      factors either broadcasts the EP-gathered tensor or, sliced, exchanges inside its
-@@ -558,6 +601,13 @@ def export_hf_weights(
+@@ -558,6 +595,13 @@ def export_hf_weights(
      kwargs.pop("buffer_max_size_bytes", None)
      to_cpu = bool(kwargs.pop("cpu", False))
      expert_slice = kwargs.pop("lora_expert_slice", None)
@@ -150,7 +141,7 @@ index 41051e9..caa2a2d 100644
      export_dtype = kwargs.pop("export_dtype", None)
      if export_dtype is not None and str(export_dtype).removeprefix("torch.") not in (
          "bfloat16",
-@@ -578,12 +628,17 @@ def export_hf_weights(
+@@ -578,12 +622,17 @@ def export_hf_weights(
              [rollout_ep_rank, rollout_ep_size, model_cfg.num_experts], dtype=torch.int64
          )
          yield LORA_EXPERT_SLICE_TAG, tag if to_cpu else tag.cuda()
@@ -186,21 +177,17 @@ index 4ab571b..edcc59b 100644
  
      def train_mode(self, handle: ModelHandle):
 diff --git a/experimental/lite/megatron/lite/runtime/megatron_utils.py b/experimental/lite/megatron/lite/runtime/megatron_utils.py
-index 5eecca7..3c6d8c6 100644
+index 5eecca7..5ceb255 100644
 --- a/experimental/lite/megatron/lite/runtime/megatron_utils.py
 +++ b/experimental/lite/megatron/lite/runtime/megatron_utils.py
-@@ -260,6 +260,31 @@ def offload_model_to_cpu(
+@@ -260,6 +260,27 @@ def offload_model_to_cpu(
                  model_chunk.to("cpu")
  
  
 +def load_trainable_params_to_gpu(model_list: list) -> bool:
-+    """Restore ONLY the DDP param buffers (the trainable parameters, e.g. LoRA factors) to GPU: no grad buffers, and frozen
-+    parameters (offloaded one by one) stay on CPU.  For adapter-only weight export.  Returns False (nothing changed) unless
-+    every chunk is a Megatron DDP chunk, so the caller can fall back to ``load_model_to_gpu``.  Consistent with the full
-+    paths: ``load_model_to_gpu`` skips already-resident buffers, ``offload_model_to_cpu`` re-offloads them."""
-+    # DDP chunks: offload is the same with or without ``persist`` (param buffers + frozen params one by one).
-+    # Other non-FSDP2 chunks (plain / persistent host cache): move only the trainable parameters; the persistent offload
-+    # re-copies non-frozen tensors and returns CPU-resident frozen ones as they are, the full persistent load moves the rest.
++    """Onload only the trainable parameters (adapter-only weight export); frozen parameters and grads stay on CPU.
++
++    Returns False (nothing changed) for FSDP2 chunks; the caller then uses ``load_model_to_gpu``."""
 +    if any(not _is_megatron_ddp(c) and _has_fsdp2(c) for c in model_list):
 +        return False
 +    for model_chunk in model_list:
@@ -223,15 +210,11 @@ index 5eecca7..3c6d8c6 100644
      load_grad: bool = True,
 diff --git a/experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py b/experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py
 new file mode 100644
-index 0000000..9e0021c
+index 0000000..115400a
 --- /dev/null
 +++ b/experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py
-@@ -0,0 +1,100 @@
-+"""verl's trainer-side rollout weight quantizer (``set_rollout_weight_quantizer``) in the mLite engine.
-+
-+verl calls the hook for any model with a native ``quantization_config`` (K31: compressed-tensors MXFP4). As in
-+verl's Megatron engine, the quantizer applies to full-weight exports only; an adapter export (K31 LoRA) stays BF16.
-+"""
+@@ -0,0 +1,96 @@
++"""mLite engine ``set_rollout_weight_quantizer``: applied to full-weight exports only; adapter exports stay BF16."""
 +
 +import sys
 +from pathlib import Path
@@ -329,15 +312,14 @@ index 0000000..9e0021c
 +    assert calls == []
 diff --git a/experimental/lite/tests/unit/model/k31/vllm/test_lora_expert_tp_slice.py b/experimental/lite/tests/unit/model/k31/vllm/test_lora_expert_tp_slice.py
 new file mode 100644
-index 0000000..58715b1
+index 0000000..60e4e21
 --- /dev/null
 +++ b/experimental/lite/tests/unit/model/k31/vllm/test_lora_expert_tp_slice.py
-@@ -0,0 +1,115 @@
-+"""TP-sliced LoRA export (``lora_expert_tp_slice``): rollout TP without EP gets only its shard of the expert factors.
+@@ -0,0 +1,114 @@
++"""TP-sliced LoRA export (``lora_expert_tp_slice``): each rollout TP rank gets only its shard of the expert factors.
 +
-+The reference is the send-side slicing verl applied to the whole export before this moved into the exporter
-+(``tp_slice_adapter``, copied verbatim below): tag ``[tp_rank, tp_size]`` first, then the adapter in export order with
-+``experts.w{1,3}.lora_B`` (dim 1) and ``experts.w2.lora_A`` (dim 2) narrowed.
++Reference: tag ``[tp_rank, tp_size]``, then the whole export with ``w{1,3}.lora_B`` (dim 1) and ``w2.lora_A``
++(dim 2) narrowed.
 +"""
 +
 +from __future__ import annotations
@@ -382,7 +364,7 @@ index 0000000..58715b1
 +
 +
 +def _reference_tp_slice(weights, tp_rank, tp_size):
-+    """The former send-side ``tp_slice_adapter``, verbatim semantics."""
++    """Slice a whole export on the send side (reference)."""
 +    sharded = {".experts.w1.lora_B.weight": 1, ".experts.w3.lora_B.weight": 1, ".experts.w2.lora_A.weight": 2}
 +    out = [("__k31_lora_expert_tp_slice__", torch.tensor([tp_rank, tp_size], dtype=torch.int64))]
 +    for name, t in weights:

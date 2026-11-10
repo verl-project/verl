@@ -11,7 +11,7 @@ index da56538..856b586 100644
          self.A_log = nn.Parameter(torch.empty(config.kda_num_heads, dtype=torch.float32))
          self.dt_bias = nn.Parameter(torch.empty(p, dtype=torch.float32))
 diff --git a/experimental/lite/megatron/lite/model/k31/vllm/model.py b/experimental/lite/megatron/lite/model/k31/vllm/model.py
-index 65cd49a..5e14070 100644
+index 65cd49a..37ac4f8 100644
 --- a/experimental/lite/megatron/lite/model/k31/vllm/model.py
 +++ b/experimental/lite/megatron/lite/model/k31/vllm/model.py
 @@ -41,7 +41,7 @@ from megatron.lite.model.k31.vllm.primitive import (
@@ -31,7 +31,7 @@ index 65cd49a..5e14070 100644
          self.lora: LoRAProjection | None = None
          if lora is not None and lora.wants(self.slice_names):
              self.lora = LoRAProjection(
-@@ -184,18 +185,37 @@ class K31Linear(nn.Module):
+@@ -184,18 +185,36 @@ class K31Linear(nn.Module):
  
      def forward(self, value: torch.Tensor, runtime: K31Runtime | None = None) -> torch.Tensor:
          if self.lora is None:
@@ -54,8 +54,7 @@ index 65cd49a..5e14070 100644
          )
  
 +    def vtp_partials(self, value: torch.Tensor, runtime: K31Runtime | None, n: int) -> torch.Tensor:
-+        """Forward VALUES only (no graph): the TP=n rollout ranks' un-reduced partials ``[n, T, out]`` of this row-parallel
-+        projection (vLLM ``reduce_results=False``, e.g. the shared experts' down_proj before the latent-MoE tail)."""
++        """No-grad values: the TP=n rollout ranks' un-reduced partials ``[n, T, out]`` of this row-parallel layer."""
 +
 +        from megatron.lite.primitive.kernels import rocm_k31
 +        from megatron.lite.model.k31.vllm.primitive.linear import _stack_vllm
@@ -71,7 +70,7 @@ index 65cd49a..5e14070 100644
  
  class K31RMSNorm(nn.Module):
      def __init__(self, hidden_size: int, eps: float, dtype: torch.dtype = torch.bfloat16):
-@@ -229,6 +249,7 @@ class K31DenseMLP(nn.Module):
+@@ -229,6 +248,7 @@ class K31DenseMLP(nn.Module):
              lora=lora,
          )
          self.down_proj = K31Linear(intermediate_size, (hidden_size,), ("down_proj",), lora=lora)
@@ -79,7 +78,7 @@ index 65cd49a..5e14070 100644
  
      def forward(self, value: torch.Tensor, runtime: K31Runtime | None = None) -> torch.Tensor:
          gate_up = self.gate_up_proj(value, runtime)
-@@ -322,7 +343,10 @@ def capture_forward_context():
+@@ -322,7 +342,10 @@ def capture_forward_context():
      installed theirs.
      """
  
@@ -92,7 +91,7 @@ index 65cd49a..5e14070 100644
      if context is None:
          return None
 diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
-index ec918b3..1738d22 100644
+index ec918b3..c836517 100644
 --- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
 +++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/kda.py
 @@ -32,6 +32,7 @@ import torch
@@ -103,13 +102,12 @@ index ec918b3..1738d22 100644
  from megatron.lite.primitive.kernels.vllm_k31 import (
      KDA_CONV_WIDTH,
      KDA_HEAD_DIM,
-@@ -168,9 +169,22 @@ def pin_fla_autotune() -> dict[str, str]:
+@@ -168,9 +169,21 @@ def pin_fla_autotune() -> dict[str, str]:
                  tuner.configs = [tuner.configs[0]]
                  tuner._k31_pinned = True
              _PINNED[f"{name}.{attr}"] = str(tuner.configs[0])
 +    if _kda_bi_fla_fix_wanted() and "k31kdabi_fla_fix" not in _PINNED:
-+        # Batch-invariant KDA: the rollout's k31kdabi plugin swaps FLA's forward intra sub-chunk kernel for a
-+        # T-independent-reference variant; the trainer must run the same kernel to stay bitwise equal to the rollout.
++        # BI KDA: use the rollout's k31kdabi FLA intra-chunk forward kernel (bitwise equal to the rollout).
 +        try:
 +            from k31kdabi import apply_bi_fla_fix
 +        except ImportError as exc:
@@ -126,13 +124,12 @@ index ec918b3..1738d22 100644
  def _token_positions(cu_seqlens: Tensor, total: int, device) -> Tensor:
      cu = cu_seqlens.to(device=device, dtype=torch.long)
      seq = torch.repeat_interleave(torch.arange(cu.numel() - 1, device=device), cu.diff())
-@@ -256,6 +270,13 @@ def kda_core(
+@@ -256,6 +269,12 @@ def kda_core(
  
      pin_fla_autotune()
  
 +    if k31_backend.is_rocm():
-+        # ROCm: the visible forward and the recompute graph are the same FLA function; run it once under autograd
-+        # (FLA saves what its backward needs; grads bitwise equal to visible forward + recompute).
++        # ROCm: one FLA call under autograd (visible forward and recompute are the same function).
 +        return fla_functional(cfg, cu_seqlens)(
 +            mixed_qkv, g1, beta, g2, conv_weight, A_log, dt_bias, norm_weight
 +        )
@@ -198,7 +195,7 @@ index ecbbdf3..51fd48d 100644
      "build_attention_metadata",
      "build_model",
 diff --git a/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py b/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
-index 33a3b4b..fb58583 100644
+index 33a3b4b..e90959d 100644
 --- a/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
 +++ b/experimental/lite/megatron/lite/model/k31/vllm/runtime_metadata.py
 @@ -28,6 +28,7 @@ from typing import Any, Iterator
@@ -220,12 +217,11 @@ index 33a3b4b..fb58583 100644
      batch_invariant = bool(importlib.import_module("vllm.envs").VLLM_BATCH_INVARIANT)
      if batch_invariant:
          _check_env()
-@@ -164,6 +169,85 @@ def initialize_k31_vllm_batch_invariance() -> None:
+@@ -164,6 +169,82 @@ def initialize_k31_vllm_batch_invariance() -> None:
      _INITIALIZED = True
  
  
-+# Retired ROCm switches. Their behavior is now fixed by VLLM_BATCH_INVARIANT; a value is accepted only if it names the
-+# fixed behavior (old launchers keep working), anything else fails closed instead of being silently ignored.
++# Retired ROCm switches (behavior follows VLLM_BATCH_INVARIANT): only the fixed BI value is accepted, else fail closed.
 +_ROCM_RETIRED_BI = {
 +    "MLITE_K31_DENSE_BI": "1",
 +    "MLITE_K31_KDA_BI": "1",
@@ -283,8 +279,7 @@ index 33a3b4b..fb58583 100644
 +
 +
 +def _initialize_rocm() -> None:
-+    """ROCm trainer.  Under BI the forward calls the BI rollout's kernels explicitly (rocm_k31 adapters, k31lora
-+    bi_moe, k31kdabi FLA fix); vLLM's aten overrides are not installed here (see RESTRUCTURE_STATUS, BI init audit)."""
++    """ROCm trainer init. Under BI the forward calls the rollout's BI kernels explicitly (no aten overrides)."""
 +
 +    bi = k31_backend.bi()
 +    _check_rocm_env(bi)
@@ -295,8 +290,7 @@ index 33a3b4b..fb58583 100644
 +            except ImportError as exc:
 +                raise RuntimeError(f"VLLM_BATCH_INVARIANT=1 on ROCm needs {mod} on PYTHONPATH") from exc
 +        torch.backends.cuda.matmul.allow_tf32 = False
-+        # megatron-26: trainer-only non-persistent BI dense GEMM for M >= 1024 (same per-element K chain as vLLM
-+        # matmul_persistent); the rollout keeps matmul_persistent.
++        # Non-persistent BI dense GEMM for M >= 1024 (bitwise equal to vLLM's matmul_persistent).
 +        from megatron.lite.primitive.kernels import k31_bi_mm_np
 +
 +        k31_bi_mm_np.install(min_m=1024)
@@ -306,7 +300,7 @@ index 33a3b4b..fb58583 100644
  # ---------------------------------------------------------------------------
  # per-microbatch runtime
  # ---------------------------------------------------------------------------
-@@ -224,6 +308,10 @@ def k31_vllm_forward_context(
+@@ -224,6 +305,10 @@ def k31_vllm_forward_context(
      input_ids = getattr(batch, "input_ids", None)
      if not isinstance(input_ids, torch.Tensor):
          raise TypeError("K31 vLLM batches require tensor input_ids")
@@ -319,19 +313,14 @@ index 33a3b4b..fb58583 100644
          raise ValueError("K31 vLLM batches must contain at least one token")
 diff --git a/experimental/lite/megatron/lite/primitive/kernels/k31_backend.py b/experimental/lite/megatron/lite/primitive/kernels/k31_backend.py
 new file mode 100644
-index 0000000..5cba661
+index 0000000..d41c802
 --- /dev/null
 +++ b/experimental/lite/megatron/lite/primitive/kernels/k31_backend.py
-@@ -0,0 +1,86 @@
-+"""Which kernel set the K31 vLLM-visible model runs on.
+@@ -0,0 +1,81 @@
++"""K31 kernel backend: ``MLITE_K31_BACKEND`` = ``vllm_cuda`` (:mod:`vllm_k31`) | ``rocm`` (:mod:`rocm_k31`).
 +
-+* ``vllm_cuda``: the NVIDIA rollout image's kernels and BI overlays (:mod:`vllm_k31`, :mod:`vllm_k31_moe`).
-+* ``rocm``: :mod:`rocm_k31` (same adapter names and call signatures) on the ROCm vLLM image's kernels; under
-+  ``VLLM_BATCH_INVARIANT=1`` the forward runs the BI rollout's own kernels (bitwise equal to the rollout).
-+
-+``MLITE_K31_BACKEND`` = ``vllm_cuda`` | ``rocm``; default ``rocm`` on a HIP build of torch.  Layer modules import
-+adapters from this module (``from ...k31_backend import RMSNormAdapter``): the name resolves to the active backend's
-+class.  Names a backend does not implement resolve to the ``vllm_k31`` class, which fails closed when called.
++Default: ``rocm`` on a HIP build of torch.  Adapter names imported from this module resolve to the active backend's
++class; names a backend lacks fall back to the ``vllm_k31`` class.
 +"""
 +
 +from __future__ import annotations
@@ -411,23 +400,14 @@ index 0000000..5cba661
 +__all__ = ["ADAPTERS", "BACKENDS", "backend", "bi", "is_rocm", "moe_kernels"]
 diff --git a/experimental/lite/megatron/lite/primitive/kernels/k31_bi_mm_np.py b/experimental/lite/megatron/lite/primitive/kernels/k31_bi_mm_np.py
 new file mode 100644
-index 0000000..6f61c5a
+index 0000000..c0908f2
 --- /dev/null
 +++ b/experimental/lite/megatron/lite/primitive/kernels/k31_bi_mm_np.py
-@@ -0,0 +1,111 @@
-+"""A2 -> K1 (trainer only): non-persistent BI matmul for large M, bitwise == vLLM
-+vllm.model_executor.determinism.batch_invariant.matmul_persistent (kernel matmul_kernel_persistent, bf16 default cfg
-+128x128x64 GROUP_M 8, 8 warps, 3 stages; batch_invariant.py md5 af2a6006) for BF16 inputs.
+@@ -0,0 +1,100 @@
++"""Non-persistent BF16 matmul with the same per-element arithmetic as vLLM's BI ``matmul_persistent`` (bitwise equal).
 +
-+Why the bits are the same: every output element is one tl.dot accumulation chain over K in BLOCK_K=64 steps from k=0
-+(fp32 acc, bf16 MFMA, chained in K order), then + bias (fp32, if any), then one cast to the output dtype; the tile shape,
-+the grid order and the non-persistent launch do not enter the per-element arithmetic on gfx950 (A2 sweeps 11/06: all
-+tile/knob variants bitwise; gate_mm_np.py). Non-BF16 inputs (fp16/fp32 use other BLOCK_K / paths) fall back to the
-+original function, as do M < MIN_M.
-+
-+Use (trainer process only; rollout untouched):
-+    import k31_bi_mm_np; k31_bi_mm_np.install(min_m=1024)   # wraps batch_invariant.matmul_persistent
-+or call matmul_np(a, b, bias=None) directly (same signature/semantics as matmul_persistent)."""
++``install(min_m=...)`` routes large-M BF16 calls of ``batch_invariant.matmul_persistent`` to ``matmul_np``; other calls
++use the original.  Trainer process only."""
 +import torch
 +import triton
 +import triton.language as tl
@@ -487,8 +467,7 @@ index 0000000..6f61c5a
 +
 +
 +def matmul_np(a, b, bias=None):
-+    """Same contract as vLLM matmul_persistent: a [M,K], b [K,N] same dtype, bias None or 1-D [N]; returns new [M,N] in
-+    a.dtype. BF16 only (asserted); callers wanting the fallback use install()'s wrapper."""
++    """vLLM ``matmul_persistent`` contract: a [M, K], b [K, N] BF16, bias None or [N]; returns [M, N] in a.dtype."""
 +    assert a.shape[1] == b.shape[0] and a.dtype == b.dtype == torch.bfloat16
 +    assert bias is None or bias.dim() == 1
 +    M, K = a.shape
@@ -510,9 +489,8 @@ index 0000000..6f61c5a
 +
 +
 +def install(min_m=1024, min_k=256, min_n=256):
-+    """Wrap vllm.model_executor.determinism.batch_invariant.matmul_persistent (module attribute, looked up at call time
-+    by mm_batch_invariant) so BF16 calls with M >= min_m, K >= min_k, N >= min_n use matmul_np (thin LoRA GEMMs,
-+    K or N = 32, are faster on the persistent kernel; bits are identical either way). Idempotent. Returns the wrapper."""
++    """Wrap ``batch_invariant.matmul_persistent``: BF16 calls with M >= min_m, K >= min_k, N >= min_n use ``matmul_np``.
++    Idempotent; returns the wrapper."""
 +    from vllm.model_executor.determinism import batch_invariant as BI
 +    if "fn" in _ORIG:
 +        return BI.matmul_persistent
@@ -528,16 +506,12 @@ index 0000000..6f61c5a
 +    return matmul_persistent
 diff --git a/experimental/lite/megatron/lite/primitive/kernels/k31_segsum.py b/experimental/lite/megatron/lite/primitive/kernels/k31_segsum.py
 new file mode 100644
-index 0000000..7571c51
+index 0000000..f7a89a0
 --- /dev/null
 +++ b/experimental/lite/megatron/lite/primitive/kernels/k31_segsum.py
-@@ -0,0 +1,53 @@
-+"""Fixed-order segmented scatter-add (K1 det backward, folded from the k31kdabi dsabwd/moebwd hooks).
-+
-+``segsum_index_add_(dst, idx, vals, valid)``: ``dst[idx[i]] += vals[i]`` with, per destination row, the contributions
-+summed in ascending ``i`` (FP32) and added once, instead of ``index_add_``'s GPU atomics (run-to-run bits).  The ROCm BI
-+trainer uses it for the DSA sparse-MLA dkv scatter, the expert-leaf dx scatter and the EP dispatch token-grad sum.
-+"""
+@@ -0,0 +1,49 @@
++"""Deterministic scatter-add: ``segsum_index_add_`` sums each destination row's contributions in index order (FP32)
++and adds them once, instead of ``index_add_``'s atomics."""
 +import torch
 +import triton
 +import triton.language as tl
@@ -587,17 +561,13 @@ index 0000000..7571c51
 +__all__ = ["segsum_index_add_"]
 diff --git a/experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py b/experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py
 new file mode 100644
-index 0000000..19a2eb1
+index 0000000..76bcfc7
 --- /dev/null
 +++ b/experimental/lite/megatron/lite/primitive/kernels/rocm_k31.py
-@@ -0,0 +1,451 @@
-+"""ROCm (AMD) adapters for the K31 vLLM-visible model (``MLITE_K31_BACKEND=rocm``).
+@@ -0,0 +1,432 @@
++"""ROCm adapters for the K31 model (``MLITE_K31_BACKEND=rocm``), with :mod:`vllm_k31`'s names and signatures.
 +
-+Same class names and call signatures as :mod:`vllm_k31` (and the MoE helpers of :mod:`vllm_k31_moe`); layer modules
-+get them through :mod:`k31_backend`.  Under ``VLLM_BATCH_INVARIANT=1`` every adapter calls the function the BI ROCm
-+rollout runs (vLLM's batch-invariant library, punica with the rollout's epilogue, AITER top-k, the pinned AttnRes),
-+so trainer and rollout forward values are bitwise equal.  Outputs go through ``_output_boundary`` like the CUDA
-+adapters; the autograd owners in ``model/k31/vllm/primitive`` supply the backward.
++Under ``VLLM_BATCH_INVARIANT=1`` each adapter calls the BI ROCm rollout's kernel, so forward values are bitwise equal.
 +"""
 +
 +from __future__ import annotations
@@ -623,7 +593,7 @@ index 0000000..19a2eb1
 +
 +@functools.lru_cache(maxsize=None)
 +def _c_op(name: str):
-+    """``torch.ops._C.<name>`` of the image's vLLM (the rollout's op); fails closed when it is not registered."""
++    """``torch.ops._C.<name>`` from vLLM; raises if it is not registered."""
 +
 +    importlib.import_module("vllm._C")
 +    op = getattr(torch.ops._C, name, None) if hasattr(torch.ops, "_C") else None
@@ -640,19 +610,18 @@ index 0000000..19a2eb1
 +
 +    if a.is_cuda:
 +        return torch.mm(a, b, out_dtype=torch.float32)
-+    return torch.mm(a.float(), b.float())  # CPU (tests): same value up to accumulation order
++    return torch.mm(a.float(), b.float())  # CPU (tests)
 +
 +
 +def dense_bi() -> bool:
-+    """Trainer forward == BI rollout (``VLLM_BATCH_INVARIANT=1``): call the same vLLM functions the rollout runs."""
++    """``VLLM_BATCH_INVARIANT=1``: call the BI rollout's kernels."""
 +
 +    return k31_backend.bi()
 +
 +
 +@functools.lru_cache(maxsize=None)
 +def _bi_lib():
-+    """vLLM's batch-invariant library with the rollout's tile/config state (``init_batch_invariance`` resolves the tuned
-+    matmul configs and block sizes; the aten overrides themselves are NOT installed in the trainer process)."""
++    """vLLM's batch-invariant module with its tuned configs resolved (aten overrides not installed)."""
 +
 +    m = importlib.import_module("vllm.model_executor.determinism.batch_invariant")
 +    for name in ("resolve_tuned_matmul_configs", "_resolve_block_sizes"):
@@ -664,8 +633,7 @@ index 0000000..19a2eb1
 +
 +@functools.lru_cache(maxsize=None)
 +def _bi_lora_epilogue() -> str:
-+    """Mirror the rollout's punica expand epilogue: the k31lora overlay (``k31lora.bi_lora.install``, K31_BI_LORA_F32ADD=1:
-+    ``bf16(fp32(delta) + fp32(base))``) when the rollout runs it, else vLLM's default kernel."""
++    """The rollout's punica expand epilogue: ``k31lora.bi_lora`` when ``K31_BI_LORA_F32ADD=1``, else vLLM's default."""
 +
 +    if os.environ.get("K31_BI_LORA_F32ADD", "0") != "1":
 +        return "default"
@@ -677,17 +645,15 @@ index 0000000..19a2eb1
 +
 +
 +def vtp_size() -> int:
-+    """``MLITE_K31_BI_VTP=N`` (N > 1, dense BI only): the trainer reproduces a TP=N BI rollout's row-parallel layers --
-+    per-rank K-sliced BI GEMMs (+ punica LoRA on the sliced A), reduced in fixed rank order (FP32 sum, one rounding).
-+    Must equal the rollout's tensor-parallel size.  Column-parallel layers are taken as per-element identical to TP1:
-+    this holds while ``linear_batch_invariant``'s tile config does not depend on N (gated, see RESTRUCTURE_STATUS)."""
++    """Virtual TP size ``MLITE_K31_BI_VTP`` (BI only; must equal the rollout's TP): row-parallel layers are computed
++    as per-rank K-slices summed in fixed rank order."""
 +
 +    n = int(os.environ.get("MLITE_K31_BI_VTP", "0") or 0)
 +    return n if n > 1 and dense_bi() else 1
 +
 +
 +def vtp_fixed_sum(partials: Tensor) -> Tensor:
-+    """``all_reduce_batch_invariant`` on stacked per-rank partials ``[N, ...]`` (its ``_fixed_order_sum_kernel``)."""
++    """``all_reduce_batch_invariant``'s fixed-order sum over stacked partials ``[N, ...]``."""
 +
 +    lib = _bi_lib()
 +    n = partials.shape[0]
@@ -710,8 +676,7 @@ index 0000000..19a2eb1
 +
 +
 +def vtp_row_partials(value: Tensor, weight: Tensor, n: int, lora=None) -> Tensor:
-+    """Per-rank partial outputs ``[n, T, out]`` of a row-parallel linear (RowParallelLinear / RowParallelLinearWithLoRA
-+    before its all-reduce): rank r = BI linear of the r-th K slice, plus (LoRA) the punica leaf with A sliced on its input."""
++    """Per-rank partials ``[n, T, out]`` of a row-parallel linear (and LoRA) before its all-reduce."""
 +
 +    parts = []
 +    for ks in _vtp_slices(value.shape[-1], n):
@@ -727,7 +692,7 @@ index 0000000..19a2eb1
 +
 +
 +def _punica_leaf(value, weight, lora_a_stacked, lora_b_stacked, output_slices, meta, specialize_active_lora=False):
-+    """``PunicaWrapperGPU.add_lora_linear`` on the BI base output (rollout epilogue, see ``_bi_lora_epilogue``)."""
++    """``PunicaWrapperGPU.add_lora_linear`` on the base output."""
 +
 +    _bi_lora_epilogue()
 +    from megatron.lite.primitive.kernels.vllm_k31 import _drop_punica_ptr_cache
@@ -748,9 +713,7 @@ index 0000000..19a2eb1
 +
 +
 +def rocm_linear(value: Tensor, weight: Tensor) -> Tensor:
-+    """BF16 ``x @ W^T`` (FP32 accumulate, BF16 out): what ``UnquantizedLinearMethod`` computes.
-+
-+    Under BI: ``rocm_unquantized_gemm_impl`` -> ``linear_batch_invariant`` (persistent Triton matmul), as the rollout."""
++    """BF16 ``x @ W^T``; under BI vLLM's ``linear_batch_invariant``."""
 +
 +    if dense_bi():
 +        return _bi_lib().linear_batch_invariant(value, weight, None)
@@ -758,8 +721,7 @@ index 0000000..19a2eb1
 +
 +
 +class BILinearAdapter(_Adapter):
-+    """Plain BF16 linear (BI: ``linear_batch_invariant``).  ``row_parallel`` (set by the caller) + virtual TP: the TP=N
-+    rollout's row-parallel layer (per-rank partials, fixed-order all-reduce)."""
++    """BF16 linear; ``row_parallel`` layers follow the virtual TP (``vtp_size``)."""
 +
 +    row_parallel = False
 +
@@ -785,7 +747,7 @@ index 0000000..19a2eb1
 +        _tensor(weight, "weight", ndim=2, dtype=torch.bfloat16)
 +        _same_device({"x": value, "weight": weight})
 +        if dense_bi():
-+            # GateLinear(out_dtype=fp32) under BI: tiers 1-6 are off, tier 7 = ReplicatedLinear (BI linear, BF16) .to(fp32)
++            # BI: the rollout's router GEMM is the BI linear in BF16, then cast to FP32
 +            out = rocm_linear(value, weight).to(torch.float32)
 +        else:
 +            out = mm_f32out(value, weight.t())
@@ -793,9 +755,7 @@ index 0000000..19a2eb1
 +
 +
 +class LoRALeafAdapter(_Adapter):
-+    """The rollout's ``PunicaWrapperGPU.add_lora_linear`` on the base output, as ONE leaf: ``lora_shrink`` into an FP32
-+    buffer, ``lora_expand(add_inputs=True)`` into ``y`` with the rollout's epilogue (the delta alone is never
-+    materialized in the rollout).  BI: base output from vLLM's BI linear."""
++    """Base linear plus the rollout's punica ``add_lora_linear`` (FP32 shrink, expand with add_inputs) as one leaf."""
 +
 +    @staticmethod
 +    def fused_lora() -> bool:
@@ -829,7 +789,7 @@ index 0000000..19a2eb1
 +            raise ValueError("eps must be positive")
 +        _same_device({"x": value, "weight": weight})
 +        if dense_bi():
-+            # vLLM RMSNorm.forward_cuda under BI: rms_norm_batch_invariant (Triton), measured bitwise vs the BI rollout
++            # BI: vLLM's rms_norm_batch_invariant
 +            out = _bi_lib().rms_norm_batch_invariant(value, weight, float(eps))
 +        else:
 +            if weight.dtype != value.dtype:
@@ -894,7 +854,7 @@ index 0000000..19a2eb1
 +
 +
 +def _vllm_attn_res(*args) -> Tensor:
-+    """The ROCm image's AMD ``attn_res`` (same wrapper signature as the NVIDIA one; BI: the rollout's pinned tiling)."""
++    """vLLM's ROCm ``attn_res`` op (BI: the rollout's pinned tiling)."""
 +
 +    if dense_bi() and os.environ.get("K31_BI_ATTNRES", "1") == "1":
 +        return _bi_attn_res()(*args)
@@ -909,11 +869,10 @@ index 0000000..19a2eb1
 +
 +@functools.lru_cache(maxsize=None)
 +def _bi_attn_res():
-+    """BI rollout's AttnRes (``k31lora.bi_attnres``): the image's ``_attn_res_kernel`` with its batch-size-dependent
-+    launch tiling pinned (the default picks BLOCK_L/num_warps from num_tokens once num_blocks >= 2).  Same pin as the rollout."""
++    """``attn_res`` with the batch-size-independent launch tiling of ``k31lora.bi_attnres`` (as the BI rollout)."""
 +
 +    bi = None
-+    for name in ("k31lora.bi_attnres", "k31bi_attnres"):   # the k31lora copy first, a standalone k31bi_attnres second
++    for name in ("k31lora.bi_attnres", "k31bi_attnres"):
 +        try:
 +            bi = importlib.import_module(name)
 +            break
@@ -935,7 +894,7 @@ index 0000000..19a2eb1
 +        _tensor(logits, "logits", ndim=2, dtype=(torch.bfloat16, torch.float32))
 +        _tensor(token_ids, "token_ids", ndim=2, contiguous=False)
 +        if dense_bi():
-+            # rollout sampler: logits.log_softmax(dim=-1, dtype=fp32) -> aten::_log_softmax override (BI Triton kernel)
++            # BI: the rollout sampler's log_softmax kernel
 +            lp = _bi_lib()._log_softmax_batch_invariant(logits.float(), -1, False)
 +        else:
 +            lp = torch.log_softmax(logits.float(), dim=-1)
@@ -952,8 +911,7 @@ index 0000000..19a2eb1
 +# MoE helpers (replace the vllm_k31_moe entries)
 +# ---------------------------------------------------------------------------
 +class TorchK31Router:
-+    """``select_experts`` of the K31 router with the rollout's kernels: sigmoid scores, bias for selection only,
-+    top-k, renormalize, ``routed_scaling_factor``; FP32 weights, int32 ids (vLLM's return types)."""
++    """K31 ``select_experts`` with the rollout's kernels; returns FP32 weights and int32 ids."""
 +
 +    def __init__(
 +        self,
@@ -976,14 +934,12 @@ index 0000000..19a2eb1
 +        self.scale = routed_scaling_factor
 +
 +    def select_experts(self, hidden_states: Tensor, router_logits: Tensor) -> tuple[Tensor, Tensor]:
-+        # the rollout's FusedTopKBiasRouter: vLLM fused_topk_bias, which dispatches (same env as the rollout:
-+        # VLLM_ROCM_USE_AITER) to AITER biased_grouped_topk or the _C topk_sigmoid kernel
++        # as the rollout's FusedTopKBiasRouter (AITER or _C top-k, per VLLM_ROCM_USE_AITER)
 +        FT = importlib.import_module("vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router")
 +        A = importlib.import_module("vllm._aiter_ops").rocm_aiter_ops
 +        n_exp = router_logits.shape[-1]
 +        if A.is_fused_moe_enabled():
-+            # measured (against a BI rollout dump): the rollout's top-k ids/weights are AITER
-+            # biased_grouped_topk's, bitwise (its router reaches the kernel without fused_topk_bias's eligibility gate)
++            # AITER biased_grouped_topk, called directly as the rollout does
 +            g = FT._aiter_get_num_expert_group(n_exp)
 +            w = torch.empty(router_logits.shape[0], self.top_k, dtype=torch.float32, device=router_logits.device)
 +            i = torch.empty(router_logits.shape[0], self.top_k, dtype=torch.int32, device=router_logits.device)
@@ -1021,8 +977,7 @@ index 0000000..19a2eb1
 +        if latent.ndim != 2 or weight.ndim != 2 or latent.shape[1] != weight.shape[1]:
 +            raise ValueError("latent [T, L] and weight [H, L] expected")
 +        if dense_bi():
-+            # TP1 rollout under BI: routed_output_transform.up_proj (BI linear). NOTE TP>1 rollouts fold the shared-expert
-+            # partial into hidden_shard.addmm_(latent, W_shard.T) (BI addmm epilogue): not mirrored here (TP1 only).
++            # BI: the BI linear, as a TP1 rollout (TP>1 rollouts are not mirrored here)
 +            return rocm_linear(latent, weight)
 +        return torch.mm(latent, weight.t())
 +
