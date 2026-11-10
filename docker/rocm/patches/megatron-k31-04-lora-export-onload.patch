@@ -1,8 +1,5 @@
-mLite / verl_mlite: export the LoRA adapter without onloading the frozen base. On full Kimi-K3.1 with parameter
-offload, onloading the base to export the adapter does not fit next to the rollout. Upstream status: not yet proposed.
-
 diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
-index 03539b7a492aa76640c2062b61e8fe3974aeb046..d82422cae8f869a575c632d440ca5abbb89b7084 100644
+index 03539b7..1ca8363 100644
 --- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
 +++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
 @@ -537,7 +537,11 @@ class MegatronLiteEngine(BaseEngine):
@@ -18,7 +15,7 @@ index 03539b7a492aa76640c2062b61e8fe3974aeb046..d82422cae8f869a575c632d440ca5abb
          if not getattr(self, "_initial_sync_cache_cleared", False):
              aggressive_empty_cache(force_sync=True)
              self._initial_sync_cache_cleared = True
-@@ -584,6 +588,14 @@ class MegatronLiteEngine(BaseEngine):
+@@ -584,6 +588,12 @@ class MegatronLiteEngine(BaseEngine):
              )
          return weights, peft_config
  
@@ -26,15 +23,13 @@ index 03539b7a492aa76640c2062b61e8fe3974aeb046..d82422cae8f869a575c632d440ca5abb
 +        if os.environ.get("MLITE_EXPORT_FULL_ONLOAD", "0") == "1":
 +            return False
 +        proto = self.handle._extras.get("protocol")
-+        if not callable(getattr(proto, "export_peft_config", None)):
-+            return False
-+        return os.environ.get("MLITE_K31_TRAIN", "lora") != "base"
++        return callable(getattr(proto, "export_peft_config", None))
 +
      def get_data_parallel_size(self):
          if self.handle is None:
              world_size = dist.get_world_size() if dist.is_initialized() else 1
 diff --git a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
-index 4ab571ba8cd749cbdaf7f553ebf5aef53446f76f..edcc59b7a1b9d9e68e59e6d527e724c0e810dc9c 100644
+index 4ab571b..edcc59b 100644
 --- a/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
 +++ b/experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
 @@ -523,6 +523,12 @@ class MegatronLiteRuntime(RuntimeBase):
@@ -51,7 +46,7 @@ index 4ab571ba8cd749cbdaf7f553ebf5aef53446f76f..edcc59b7a1b9d9e68e59e6d527e724c0
  
      def train_mode(self, handle: ModelHandle):
 diff --git a/experimental/lite/megatron/lite/runtime/megatron_utils.py b/experimental/lite/megatron/lite/runtime/megatron_utils.py
-index 5eecca78fb816acdf2b6d060865f6804476215fe..3c6d8c65d017b97c67bd3aef66293048e1ed91e6 100644
+index 5eecca7..3c6d8c6 100644
 --- a/experimental/lite/megatron/lite/runtime/megatron_utils.py
 +++ b/experimental/lite/megatron/lite/runtime/megatron_utils.py
 @@ -260,6 +260,31 @@ def offload_model_to_cpu(

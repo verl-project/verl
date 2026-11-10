@@ -1,0 +1,588 @@
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/moe.py b/experimental/lite/megatron/lite/model/k31/vllm/moe.py
+index 42ba5e3..d787bf1 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/moe.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/moe.py
+@@ -67,8 +67,9 @@ from megatron.lite.primitive.alignment.vllm_fi_w4a16_moe import (
+     VLLMFiW4A16LeafRowsFunction,
+     expert_backward_rows,
+ )
++from megatron.lite.primitive.kernels import k31_backend
+ from megatron.lite.primitive.kernels import vllm_k31_moe as K
+-from megatron.lite.primitive.kernels.vllm_k31 import BIRouterAdapter, RMSNormAdapter
++from megatron.lite.primitive.kernels.k31_backend import BIRouterAdapter, RMSNormAdapter
+ from megatron.lite.primitive.parallel import ParallelState
+ from megatron.lite.primitive.recompute import active_recompute_tape
+ 
+@@ -118,6 +119,8 @@ def default_ep_transport(num_experts: int, ep_size: int) -> str:
+ 
+     if ep_size <= 1:
+         return "local"
++    if k31_backend.is_rocm():
++        return "nccl"  # no DeepEP on ROCm: torch all-to-all over RCCL
+     if num_experts // ep_size > DEEPEP_MAX_LOCAL_EXPERTS:
+         return "nccl"
+     nvl = torch.cuda.device_count() if torch.cuda.is_available() else 0
+@@ -192,6 +195,12 @@ class K31RoutedExperts(nn.Module):
+             self.lora_w1_B = nn.Parameter(torch.zeros(e, inter, r, dtype=bf16))
+             self.lora_w3_B = nn.Parameter(torch.zeros(e, inter, r, dtype=bf16))
+             self.lora_w2_A = nn.Parameter(torch.empty(e, r, inter, dtype=bf16))
++            if k31_backend.is_rocm():
++                # Same init as the dense LoRAProjection (kaiming A, zero B), so a ROCm run without a theta0 adapter
++                # never trains from uninitialized memory (the NVIDIA path keeps its own behavior).
++                with torch.no_grad():
++                    for a in (self.lora_w1_A, self.lora_w3_A, self.lora_w2_A):
++                        nn.init.kaiming_uniform_(a.view(-1, a.shape[-1]), a=5**0.5)
+         self._fi: K.FiW4A16Experts | None = None
+         self._fi_key: tuple | None = None
+ 
+@@ -216,6 +225,34 @@ class K31RoutedExperts(nn.Module):
+             )
+         )
+ 
++    def rocm_experts(self):
++        """Checkpoint MXFP4 buffers as the ROCm expert path reads them (no layout rewrite)."""
++
++        from megatron.lite.primitive.alignment.rocm_mxfp4_moe import RocmMxfp4Experts
++
++        return RocmMxfp4Experts(
++            ckpt_w13=self.w13_weight_packed,
++            ckpt_w13_scale=self.w13_weight_scale,
++            ckpt_w2=self.w2_weight_packed,
++            ckpt_w2_scale=self.w2_weight_scale,
++            num_experts=self.num_experts,
++            local_offset=self.local_offset,
++            situ_beta=self.situ_beta,
++            situ_linear_beta=self.situ_linear_beta,
++        )
++
++    def _lora_tuple(self):
++        if not self.has_lora:
++            return None
++        return (
++            self.lora_w1_A[0],
++            self.lora_w3_A[0],
++            self.lora_w1_B,
++            self.lora_w3_B,
++            self.lora_w2_A,
++            self.lora_w2_B[0],
++        )
++
+     @property
+     def fi(self) -> K.FiW4A16Experts:
+         """The ``_k31_prepare_fi_w4a16`` rewrite of the loaded buffers (cached)."""
+@@ -241,6 +278,10 @@ class K31RoutedExperts(nn.Module):
+     def stored(self, latent: Tensor, sent, plan) -> Tensor:
+         """The forward's routed latent with the autograd graph of experts + combine (recompute only)."""
+ 
++        if k31_backend.is_rocm():
++            # ROCm: the expert forward is cheap relative to its backward; rebuild the graph.
++            del latent
++            return _CanonicalCombine.apply(self.leaf_rows(sent, plan), plan)
+         return _StoredExpertsLatent.apply(
+             latent,
+             self.fi,
+@@ -263,6 +304,18 @@ class K31RoutedExperts(nn.Module):
+         Only the routed rows are written (``L`` = local routes), not a dense ``[n, top_k, H]`` slot
+         tensor of the received tokens (26 GB at EP8 with a 16k-token micro-batch)."""
+ 
++        if k31_backend.is_rocm():
++            from megatron.lite.primitive.alignment.rocm_mxfp4_moe import rocm_expert_leaf_rows
++
++            return rocm_expert_leaf_rows(
++                self.rocm_experts(),
++                plan.expert_rows,
++                sent.hidden,
++                sent.topk_ids,
++                sent.topk_weights,
++                scaling=self.lora_scaling,
++                lora=self._lora_tuple(),
++            )
+         if not self.has_lora:
+             # RL always serves the adapter; the no-LoRA FI branch is a different
+             # rollout pipeline (fused finalize) and is deliberately not ported.
+@@ -332,7 +385,7 @@ class K31MoE(nn.Module):
+     def _selection(self):
+         if self._router is None:
+             cfg = self.config
+-            self._router = K.build_k31_router(
++            self._router = k31_backend.moe_kernels().build_k31_router(
+                 top_k=cfg.num_experts_per_token,
+                 num_experts=cfg.num_experts,
+                 e_score_correction_bias=self.gate.e_score_correction_bias.detach(),
+@@ -431,9 +484,14 @@ class K31MoE(nn.Module):
+         normed = rms_norm(
+             RMSNormAdapter(), latent, self.routed_expert_norm.weight, self.config.rms_norm_eps
+         )
+-        routed = visible_linear(K.MoELatentUpAdapter(), normed, self.routed_expert_up_proj.weight)
++        routed = visible_linear(
++            k31_backend.moe_kernels().MoELatentUpAdapter(), normed, self.routed_expert_up_proj.weight
++        )
+         shared = self.shared_experts(hidden_states, runtime)
+         out = routed + shared
++        n_vtp = k31_backend.moe_kernels().vtp_size() if k31_backend.is_rocm() else 1
++        if n_vtp > 1:
++            out = self._vtp_tail(out, hidden_states, normed, runtime, n_vtp)
+         return out, {
+             "logits": logits,
+             "weights": weights,
+@@ -445,6 +503,33 @@ class K31MoE(nn.Module):
+             "shared": shared,
+         }
+ 
++    def _vtp_tail(self, reference: Tensor, hidden_states: Tensor, normed: Tensor, runtime, n: int) -> Tensor:
++        """TP=n BI rollout's latent-MoE tail (ROCmLatentMoERunner tier 2): each rank r folds ``bf16(BI_mm(normed,
++        W_up[r-shard].T))`` into its hidden shard of the shared experts' un-reduced partial (``hidden_shard.addmm_`` ->
++        vLLM ``_addmm_impl``: BF16 GEMM, then a BF16 add), then the final fixed-order all-reduce.  Value only; gradients
++        flow through ``reference`` (the TP1 graph of the same function)."""
++
++        from megatron.lite.model.k31.vllm.model import SiTUAndMulAdapter, _ForwardValue
++        from megatron.lite.model.k31.vllm.primitive import situ_and_mul
++
++        RK = k31_backend.moe_kernels()
++        se = self.shared_experts
++        with torch.no_grad():
++            gate_up = se.gate_up_proj(hidden_states.detach(), runtime)
++            act = situ_and_mul(SiTUAndMulAdapter(), gate_up, beta=se.beta, linear_beta=se.linear_beta)
++            parts = se.down_proj.vtp_partials(act, runtime, n)  # [n, T, H]
++            w_up = self.routed_expert_up_proj.weight.detach()
++            h = w_up.shape[0]
++            if h % n:
++                raise ValueError(f"virtual TP={n} does not divide the hidden size {h}")
++            s = h // n
++            nrm = normed.detach().reshape(-1, normed.shape[-1])
++            for r in range(n):
++                hs = slice(r * s, (r + 1) * s)
++                parts[r, :, hs] = RK.rocm_linear(nrm, w_up[hs].contiguous()) + parts[r, :, hs]
++            value = RK.vtp_fixed_sum(parts)
++        return _ForwardValue.apply(reference, value.reshape(reference.shape).to(reference.dtype))
++
+     def forward(
+         self,
+         hidden_states: torch.Tensor,
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
+index 8882bda..c16ad3b 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/moe.py
+@@ -31,7 +31,11 @@ import torch
+ import torch.distributed as dist
+ from torch import Tensor
+ 
+-from megatron.lite.primitive.kernels.vllm_k31_moe import tree16_root
++from megatron.lite.primitive.kernels import k31_backend
++
++
++def tree16_root(leaves: Tensor) -> Tensor:
++    return k31_backend.moe_kernels().tree16_root(leaves)
+ 
+ _TOKEN_SHIFT = 5  # slot k < 32
+ _RANK_SHIFT = 40
+@@ -121,6 +125,16 @@ class _NCCLTokenDispatch(torch.autograd.Function):
+         g_send = g_hidden if g_hidden.dtype == torch.bfloat16 else g_hidden.float()
+         back_h = _a2a(g_send, ctx.send_l, ctx.recv_l, ctx.group).float()
+         back_w = _a2a(g_weights.float(), ctx.send_l, ctx.recv_l, ctx.group)
++        if k31_backend.is_rocm():
++            # ROCm: per token, its EP-rank copies in rank order (tok_idx is sorted by (rank, token)), summed in
++            # fixed order (no index_add_ atomics, so dh / dw bits repeat run to run)
++            from megatron.lite.primitive.kernels.k31_segsum import segsum_index_add_
++
++            dh = torch.zeros((t, h), dtype=torch.float32, device=dev)
++            segsum_index_add_(dh, tok_idx, back_h)
++            dw = torch.zeros((t, k), dtype=torch.float32, device=dev)
++            segsum_index_add_(dw, tok_idx, back_w)
++            return dh.to(torch.bfloat16), dw, None, None, None
+         dh = torch.zeros((t, h), dtype=torch.float32, device=dev).index_add_(0, tok_idx, back_h)
+         dw = torch.zeros((t, k), dtype=torch.float32, device=dev).index_add_(0, tok_idx, back_w)
+         return dh.to(torch.bfloat16), dw, None, None, None
+diff --git a/experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py b/experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py
+new file mode 100644
+index 0000000..00dad22
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/alignment/rocm_mxfp4_moe.py
+@@ -0,0 +1,307 @@
++"""K31 routed experts on ROCm: MXFP4 checkpoint buffers, expert LoRA, FP32 leaves per routed slot.
++
++Forward: the leaves come from ``k31lora.bi_moe.bi_moe_forward`` itself (pinned Triton grouped GEMMs with in-register
++MXFP4 dequant; the BI rollout's MoE code), captured through its ``leaf_reduce`` hook, so the trainer cannot drift from the
++BI rollout.  The BI=0 arm runs the same kernels.
++
++Per routed slot ``(t, k)`` with local expert ``e`` (rows ``[gate; up]`` = ``[w1; w3]``)::
++
++    gu    = x_t @ W13_e^T            (BF16 GEMM)
++    gate += (x_t A1^T) B1_e^T * s ;  up += (x_t A3^T) B3_e^T * s      (expert LoRA)
++    act   = SiTU(gate, up)           (FP32 math) -> BF16
++    y     = act @ W2_e^T             (BF16 GEMM)
++    leaf  = w_tk * (y + (act A2_e^T) B2^T * s)                         FP32
++
++Leaves are FP32 rows in ``rows_index`` order (``plan.expert_rows``), the contract of ``VLLMFiW4A16LeafRowsFunction``,
++so the canonical combine and the EP transport are reused unchanged.
++
++Backward: chunk by chunk recompute of the graph above under autograd (experts sorted by row count, padded
++``[c, n_max, .]`` bmm batches on the exactly dequantized weights), returning dX, d(route weight) and the LoRA grads;
++base weights are frozen.  The GEMMs return BF16 (``torch.bmm``) before the FP32 upcast, as in the validated trainer
++(Phase B: FP32-accurate base backward).  The dX scatter is a fixed-order segmented sum (``k31_segsum``).
++"""
++
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass
++from typing import Any
++
++import torch
++from torch import Tensor
++
++from megatron.lite.primitive.alignment.vllm_fi_w4a16_moe import dequantize_k31_mxfp4_bf16
++
++# Rows (padded) per chunk and experts per chunk; bound the FP32 temporaries.
++CHUNK_ROWS = 32768
++CHUNK_EXPERTS = 64
++
++
++@dataclass
++class RocmMxfp4Experts:
++    """EP-local checkpoint MXFP4 buffers (rows ``[gate; up]``) and the SiTU parameters."""
++
++    ckpt_w13: Tensor  # uint8 [E, 2I, H/2]
++    ckpt_w13_scale: Tensor  # uint8 [E, 2I, H/32]
++    ckpt_w2: Tensor  # uint8 [E, H, I/2]
++    ckpt_w2_scale: Tensor  # uint8 [E, H, I/32]
++    num_experts: int
++    local_offset: int
++    situ_beta: float
++    situ_linear_beta: float | None
++
++    @property
++    def num_local_experts(self) -> int:
++        return int(self.ckpt_w13.shape[0])
++
++    @property
++    def intermediate(self) -> int:
++        return int(self.ckpt_w13.shape[1]) // 2
++
++    @property
++    def hidden(self) -> int:
++        return int(self.ckpt_w2.shape[1])
++
++    def dequant(self, ex: Tensor) -> tuple[Tensor, Tensor]:
++        """BF16 ``W13 [c, 2I, H]`` and ``W2 [c, H, I]`` of the local experts ``ex`` (exact)."""
++
++        if self.ckpt_w13.is_cuda:
++            from megatron.lite.primitive.kernels.rocm_mxfp4_dequant import dequant_experts
++
++            return (
++                dequant_experts(self.ckpt_w13, self.ckpt_w13_scale, ex),
++                dequant_experts(self.ckpt_w2, self.ckpt_w2_scale, ex),
++            )
++        w13 = dequantize_k31_mxfp4_bf16(
++            self.ckpt_w13.index_select(0, ex), self.ckpt_w13_scale.index_select(0, ex)
++        )
++        w2 = dequantize_k31_mxfp4_bf16(
++            self.ckpt_w2.index_select(0, ex), self.ckpt_w2_scale.index_select(0, ex)
++        )
++        return w13, w2
++
++
++def situ_fp32(gate: Tensor, up: Tensor, beta: float, linear_beta: float | None) -> Tensor:
++    act = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
++    if linear_beta is not None:
++        up = linear_beta * torch.tanh(up / linear_beta)
++    return act * up
++
++
++# --------------------------------------------------------------------------- chunk planning
++def _plan(topk_ids: Tensor, rows_index: Tensor, experts: RocmMxfp4Experts):
++    """Group the listed routed slots by local expert; returns chunk tables (host lists)."""
++
++    k = topk_ids.shape[1]
++    e_loc = experts.num_local_experts
++    flat_ids = topk_ids.reshape(-1).long().index_select(0, rows_index) - experts.local_offset
++    if flat_ids.numel() and (int(flat_ids.min()) < 0 or int(flat_ids.max()) >= e_loc):
++        raise RuntimeError("ROCm MoE: a listed route is not on this rank")
++    order = torch.argsort(flat_ids, stable=True)  # positions in rows_index, grouped by expert
++    counts = torch.bincount(flat_ids, minlength=e_loc)
++    starts = torch.cumsum(counts, 0) - counts
++    both = torch.cat((counts, starts)).tolist()
++    counts_l, starts_l = both[:e_loc], both[e_loc:]
++    items = [(e, starts_l[e], counts_l[e]) for e in range(e_loc) if counts_l[e]]
++    items.sort(key=lambda it: -it[2])
++    chunks, cur = [], []
++    for it in items:
++        n_first = -(-(cur[0][2] if cur else it[2]) // 8) * 8
++        if cur and (len(cur) == CHUNK_EXPERTS or (len(cur) + 1) * n_first > CHUNK_ROWS):
++            chunks.append(cur)
++            cur = []
++        cur.append(it)
++    if cur:
++        chunks.append(cur)
++    del k
++    return order, chunks
++
++
++def _chunk_tensors(chunk, order: Tensor, rows_index: Tensor, topk: int, dev):
++    c = len(chunk)
++    n = -(-chunk[0][2] // 8) * 8
++    ex = torch.tensor([it[0] for it in chunk], dtype=torch.long, device=dev)
++    cnt = torch.tensor([it[2] for it in chunk], dtype=torch.long, device=dev)
++    first = torch.tensor([it[1] for it in chunk], dtype=torch.long, device=dev)
++    col = torch.arange(n, device=dev)
++    real = col.unsqueeze(0) < cnt.unsqueeze(1)  # [c, n]
++    pos = first.unsqueeze(1) + torch.minimum(col.unsqueeze(0), cnt.unsqueeze(1) - 1)
++    out_pos = order.index_select(0, pos.reshape(-1))  # position in rows_index (pads repeat)
++    flat = rows_index.index_select(0, out_pos)  # flat route n * K + k
++    tok = flat // topk
++    return c, n, ex, real, out_pos, flat, tok
++
++
++def _chunk_leaves(
++    experts: RocmMxfp4Experts,
++    ex: Tensor,
++    xp: Tensor,  # [c, n, H] bf16
++    wp: Tensor,  # [c, n, 1] fp32 (0 on pads)
++    lora: tuple | None,
++    scaling: float,
++) -> Tensor:
++    """Differentiable leaves ``[c, n, H]`` fp32 of one chunk (grad flows to xp, wp, LoRA)."""
++
++    inter = experts.intermediate
++    w13, w2 = experts.dequant(ex)
++    gu = torch.bmm(xp, w13.transpose(1, 2)).float()  # [c, n, 2I]
++    if lora is not None:
++        a1, a3, b1, b3, a2, b2 = lora
++        xa1 = torch.matmul(xp.float(), a1.to(torch.bfloat16).float().t())  # [c, n, r]
++        xa3 = torch.matmul(xp.float(), a3.to(torch.bfloat16).float().t())
++        b1e = b1.index_select(0, ex).float() * scaling  # [c, I, r]
++        b3e = b3.index_select(0, ex).float() * scaling
++        gate = gu[..., :inter] + torch.bmm(xa1, b1e.transpose(1, 2))
++        up = gu[..., inter:] + torch.bmm(xa3, b3e.transpose(1, 2))
++    else:
++        gate, up = gu[..., :inter], gu[..., inter:]
++    act = situ_fp32(gate, up, experts.situ_beta, experts.situ_linear_beta).to(torch.bfloat16)
++    y = torch.bmm(act, w2.transpose(1, 2)).float()  # [c, n, H]
++    if lora is not None:
++        a2e = a2.index_select(0, ex).to(torch.bfloat16).float()  # [c, r, I]
++        d2 = torch.matmul(torch.bmm(act.float(), a2e.transpose(1, 2)), b2.float().t() * scaling)
++        y = y + d2
++    return wp * y
++
++
++def bi_moe_slot_leaves(experts: "RocmMxfp4Experts", x: Tensor, topk_ids: Tensor, topk_weights: Tensor,
++                       scaling: float, lora: tuple | None) -> Tensor:
++    """FP32 leaves ``[T * K, H]`` in flat slot order, computed by ``k31lora.bi_moe.bi_moe_forward`` itself (the BI rollout
++    code; its ``leaf_reduce`` hook hands us the slot leaves right before the expert-ascending combine), so the trainer cannot
++    drift from the contract (canonical 8-chunk W2 contraction, pinned grouped GEMMs, exact in-register dequant).
++    Non-local slots (EP) are zero; the canonical combine only reads ``plan.expert_rows``. Expert LoRA uses bi_moe's dict layout
++    (A1/A3/B1/B3/A2/B2 + scaling)."""
++    import importlib
++
++    BM = importlib.import_module("k31lora.bi_moe")
++    tc = os.environ.get("MLITE_K31_MOE_BI_TOK_CHUNK", "")
++    if tc:
++        # trainer-only token block for bi_moe (vLLM never reads this MLITE_ var; the rollout keeps K31_BI_MOE_TOK_CHUNK).
++        # Rows are independent and every BLOCK_M gives the same per-element dot chain -> same bits; ~14x fewer launches.
++        BM.TOK_CHUNK = int(tc)
++    lora_dict = None
++    if lora is not None:
++        # k31lora.bi_moe expert-LoRA contract: d13 = [d1 | d3] with separate shared A1 / A3, per-expert B1 / B3;
++        # d2 over the 8 canonical N-chunks with per-expert A2, shared B2 -- 1:1 with vLLM --enable-moe-shared-loras and mLite.
++        a1, a3, b1, b3, a2, b2 = (t.detach().to(torch.bfloat16) for t in lora)
++        lora_dict = {"A1": a1[None].contiguous(), "A3": a3[None].contiguous(), "B1": b1.contiguous(), "B3": b3.contiguous(),
++                     "A2": a2.contiguous(), "B2": b2[None].contiguous(), "scaling": float(scaling),
++                     "shared_A1": True, "shared_A3": True, "shared_B1": False, "shared_B3": False,
++                     "shared_A2": False, "shared_B2": True}
++    expert_map = None
++    if experts.num_local_experts != experts.num_experts:
++        expert_map = torch.full((experts.num_experts,), -1, dtype=torch.int64, device=x.device)
++        expert_map[experts.local_offset: experts.local_offset + experts.num_local_experts] = torch.arange(
++            experts.num_local_experts, device=x.device)
++    got = []
++
++    def capture(slots):
++        got.append(slots)
++        return slots
++
++    BM.bi_moe_forward(x.contiguous(), experts.ckpt_w13, experts.ckpt_w13_scale, experts.ckpt_w2, experts.ckpt_w2_scale,
++                      topk_weights.to(torch.float32), topk_ids, experts.situ_beta, experts.situ_linear_beta,
++                      lora=lora_dict, expert_map=expert_map, leaf_reduce=capture)
++    # bi_moe_forward calls leaf_reduce once per token block (K31_BI_MOE_TOK_CHUNK), in token order: concatenate
++    return got[0] if len(got) == 1 else torch.cat(got, 0)
++
++
++class RocmExpertLeafRowsFunction(torch.autograd.Function):
++    """FP32 leaves of the listed routed slots (``rows_index``), forward no-grad, chunked recompute bwd."""
++
++    @staticmethod
++    def forward(ctx, experts, scaling, rows_index, x, topk_ids, topk_weights, *lora):
++        has_lora = len(lora) > 0 and lora[0] is not None
++        with torch.no_grad():
++            slots = bi_moe_slot_leaves(experts, x.detach(), topk_ids, topk_weights.detach(), scaling,
++                                       tuple(lora) if has_lora else None)
++        out = slots.index_select(0, rows_index)
++        ctx.experts = experts
++        ctx.scaling = scaling
++        ctx.has_lora = has_lora
++        ctx.save_for_backward(rows_index, x, topk_ids, topk_weights, *(lora if has_lora else ()))
++        ctx.mark_non_differentiable(topk_ids)
++        return out
++
++    @staticmethod
++    def backward(ctx, grad_rows):
++        rows_index, x, topk_ids, topk_weights, *lora = ctx.saved_tensors
++        experts: RocmMxfp4Experts = ctx.experts
++        dev = x.device
++        h = x.shape[1]
++        m, topk = topk_ids.shape
++        order, chunks = _plan(topk_ids, rows_index, experts)
++        need_x = ctx.needs_input_grad[3]
++        need_w = ctx.needs_input_grad[5]
++        dx = torch.zeros((m, h), dtype=torch.float32, device=dev)
++        dw = torch.zeros((m * topk,), dtype=torch.float32, device=dev)
++        lora_grads = [torch.zeros(t.shape, dtype=torch.float32, device=dev) for t in lora]
++        we_flat = topk_weights.detach().reshape(-1).float()
++        grad_rows = grad_rows.float()
++        from megatron.lite.primitive.kernels.k31_segsum import segsum_index_add_
++
++        for chunk in chunks:
++            c, n, ex, real, out_pos, flat, tok = _chunk_tensors(chunk, order, rows_index, topk, dev)
++            sel = real.reshape(-1)
++            g = torch.where(sel.unsqueeze(1), grad_rows.index_select(0, out_pos), 0.0).view(c, n, h)
++            with torch.enable_grad():
++                xp = x.detach().index_select(0, tok).view(c, n, h).requires_grad_(need_x)
++                wp = (
++                    torch.where(sel, we_flat.index_select(0, flat), 0.0)
++                    .view(c, n, 1)
++                    .requires_grad_(need_w)
++                )
++                lp = tuple(t.detach().requires_grad_(True) for t in lora) if ctx.has_lora else None
++                leaves = _chunk_leaves(experts, ex, xp, wp, lp, ctx.scaling)
++                inputs = [t for t in (xp, wp) if t.requires_grad] + (list(lp) if lp else [])
++                grads = torch.autograd.grad(leaves, inputs, g, allow_unused=True)
++            it = iter(grads)
++            if need_x:
++                gx = next(it)
++                # tokens routed to 2+ experts of one chunk are duplicate indices: fixed-order sum, no atomics
++                segsum_index_add_(dx, tok, gx.reshape(-1, h).float(), sel)
++            if need_w:
++                gw = next(it)
++                dw.index_add_(0, flat[sel], gw.reshape(-1)[sel].float())
++            if lp:
++                for acc, gl in zip(lora_grads, it):
++                    if gl is not None:
++                        acc += gl.float()
++        out_lora = tuple(
++            gl.to(t.dtype) for gl, t in zip(lora_grads, lora)
++        ) if ctx.has_lora else ()
++        return (
++            None,
++            None,
++            None,
++            dx.to(x.dtype) if need_x else None,
++            None,
++            dw.view(m, topk).to(topk_weights.dtype) if need_w else None,
++            *out_lora,
++        )
++
++
++def rocm_expert_leaf_rows(
++    experts: RocmMxfp4Experts,
++    rows_index: Tensor,
++    x: Tensor,
++    topk_ids: Tensor,
++    topk_weights: Tensor,
++    *,
++    scaling: float = 1.0,
++    lora: tuple[Tensor, ...] | None = None,
++) -> Tensor:
++    """``lora`` = ``(w1_a [r,H], w3_a [r,H], w1_b [E,I,r], w3_b [E,I,r], w2_a [E,r,I], w2_b [H,r])``."""
++
++    return RocmExpertLeafRowsFunction.apply(
++        experts, float(scaling), rows_index, x, topk_ids, topk_weights, *(lora or ())
++    )
++
++
++__all__ = [
++    "RocmExpertLeafRowsFunction",
++    "RocmMxfp4Experts",
++    "bi_moe_slot_leaves",
++    "rocm_expert_leaf_rows",
++    "situ_fp32",
++]
+diff --git a/experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py b/experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py
+new file mode 100644
+index 0000000..c9a0414
+--- /dev/null
++++ b/experimental/lite/megatron/lite/primitive/kernels/rocm_mxfp4_dequant.py
+@@ -0,0 +1,74 @@
++"""Fused MXFP4 -> BF16 dequant of selected experts (Triton; ROCm and CUDA).
++
++``dequant_experts(packed [E, N, K/2] u8, scale [E, N, K/32] u8, experts [c] i64) -> [c, N, K] bf16``
++
++Same values as ``alignment.vllm_fi_w4a16_moe.dequantize_k31_mxfp4_bf16(packed[experts], scale[experts])`` bit for bit
++(E2M1 levels times a power-of-two scale are exact in BF16; byte 0 -> 2^-127 like the reference). Differences from the
++torch path: one kernel per call, experts gathered by index inside the kernel (no ``index_select`` copies), E2M1 decoded
++arithmetically in registers (no LUT gather), scale applied in FP32 before the single BF16 store.
++"""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _e2m1(c):
++    s = (c >> 3) & 1
++    e = (c >> 1) & 3
++    m = (c & 1).to(tl.float32)
++    mag = tl.where(e == 0, m * 0.5, (1.0 + m * 0.5) * tl.exp2((e - 1).to(tl.float32)))
++    return tl.where(s == 1, -mag, mag)
++
++
++@triton.jit
++def _dequant_kernel(
++    packed, scale, experts, out,
++    N, KH,
++    s_pe, s_pn, s_se, s_sn,
++    BLOCK_N: tl.constexpr, BLOCK_KH: tl.constexpr,
++):
++    pid_e = tl.program_id(0)
++    pid_n = tl.program_id(1)
++    pid_k = tl.program_id(2)
++    e = tl.load(experts + pid_e).to(tl.int64)
++    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    rk = pid_k * BLOCK_KH + tl.arange(0, BLOCK_KH)
++    mask = (rn[:, None] < N) & (rk[None, :] < KH)
++    p = tl.load(packed + e * s_pe + rn[:, None].to(tl.int64) * s_pn + rk[None, :], mask=mask, other=0).to(tl.int32)
++    sc = tl.load(scale + e * s_se + rn[:, None].to(tl.int64) * s_sn + rk[None, :] // 16, mask=mask, other=127)
++    f = tl.exp2(sc.to(tl.float32) - 127.0)
++    lo = (_e2m1(p & 15) * f).to(tl.bfloat16)
++    hi = (_e2m1(p >> 4) * f).to(tl.bfloat16)
++    base = out + pid_e.to(tl.int64) * N * KH * 2 + rn[:, None].to(tl.int64) * (KH * 2) + rk[None, :] * 2
++    tl.store(base, lo, mask=mask)
++    tl.store(base + 1, hi, mask=mask)
++
++
++def dequant_experts(packed: torch.Tensor, scale: torch.Tensor, experts: torch.Tensor) -> torch.Tensor:
++    if packed.dtype != torch.uint8 or scale.dtype != torch.uint8 or packed.ndim != 3:
++        raise TypeError("packed / scale must be uint8 [E, N, K/2] / [E, N, K/32]")
++    if packed.stride(-1) != 1 or scale.stride(-1) != 1:
++        raise ValueError("packed / scale need a contiguous last dim")
++    E, N, KH = packed.shape
++    if scale.shape != (E, N, KH * 2 // 32):
++        raise ValueError(f"scale shape {tuple(scale.shape)} does not match packed {tuple(packed.shape)}")
++    ex = experts.to(device=packed.device, dtype=torch.int64).contiguous()
++    c = ex.numel()
++    out = torch.empty((c, N, KH * 2), dtype=torch.bfloat16, device=packed.device)
++    if c == 0:
++        return out
++    BLOCK_N, BLOCK_KH = 32, 128
++    grid = (c, triton.cdiv(N, BLOCK_N), triton.cdiv(KH, BLOCK_KH))
++    _dequant_kernel[grid](
++        packed, scale, ex, out, N, KH,
++        packed.stride(0), packed.stride(1), scale.stride(0), scale.stride(1),
++        BLOCK_N=BLOCK_N, BLOCK_KH=BLOCK_KH,
++    )
++    return out
++
++
++__all__ = ["dequant_experts"]

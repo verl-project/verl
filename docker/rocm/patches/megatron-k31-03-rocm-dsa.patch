@@ -1,0 +1,510 @@
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/dsa.py b/experimental/lite/megatron/lite/model/k31/vllm/dsa.py
+index f5ceff2..eb8994a 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/dsa.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/dsa.py
+@@ -29,6 +29,7 @@ import torch.nn as nn
+ 
+ from megatron.lite.model.k31.config import K31Config
+ from megatron.lite.model.k31.vllm.model import K31Linear, K31LoRASpec
++from megatron.lite.model.k31.vllm.primitive import dsa_rocm
+ from megatron.lite.model.k31.vllm.primitive.attention import (
+     absorbed_weights,
+     attention_core,
+@@ -41,10 +42,11 @@ from megatron.lite.model.k31.vllm.runtime_metadata import (
+     K31Runtime,
+     initialize_k31_vllm_batch_invariance,
+ )
++from megatron.lite.primitive.kernels import k31_backend
++from megatron.lite.primitive.kernels.k31_backend import RMSNormAdapter
+ from megatron.lite.primitive.kernels.vllm_k31 import (
+     DSA_BLOCK_SIZE,
+     FP8_DS_MLA_TOKEN_BYTES,
+-    RMSNormAdapter,
+     _symbol,
+ )
+ from megatron.lite.primitive.parallel import ParallelState
+@@ -103,13 +105,18 @@ class K31DSAAttention(nn.Module):
+         )
+         self.g_proj = K31Linear(h, (heads * config.v_head_dim,), ("g_proj",), lora=lora)
+         self.o_proj = K31Linear(heads * config.v_head_dim, (h,), ("o_proj",), lora=lora)
++        # vLLM RowParallelLinear: under MLITE_K31_BI_VTP=N (TP=N BI rollout) the virtual TP reproduces its per-rank
++        # partials + fixed-order sum; inert otherwise.
++        self.o_proj.row_parallel = True
+         self.indexer = _Indexer(config)
+ 
+     def forward(
+         self, hidden_states: torch.Tensor, *, metadata: Any, runtime: K31Runtime
+     ) -> torch.Tensor:
+-        if not isinstance(metadata, K31DSARuntimeMetadata):
+-            raise TypeError("K31 DSA layers need K31DSARuntimeMetadata (build_dsa_metadata)")
++        if not isinstance(metadata, (K31DSARuntimeMetadata, dsa_rocm.K31DSARocmMetadata)):
++            raise TypeError(
++                "K31 DSA layers need K31DSARuntimeMetadata or K31DSARocmMetadata (build_dsa_metadata)"
++            )
+         cfg = self.config
+         if not cfg.mla_use_nope or not cfg.mla_use_output_gate:
+             raise NotImplementedError("K31 DSA forward is ported for NoPE + output gate only")
+@@ -165,6 +172,7 @@ class K31DSAAttention(nn.Module):
+             softmax_scale=(nope + rope) ** -0.5,
+             qk_nope_head_dim=nope,
+             padded_heads=_padded_heads(heads),
++            backward_op=adapters.backward,
+         )
+         gated = output_gate(attn, self.g_proj(hidden_states, runtime))
+         return self.o_proj(gated, runtime)
+@@ -366,7 +374,7 @@ def initialize_k31_dsa_runtime(device: torch.device | str) -> None:
+ 
+ def build_dsa_metadata(
+     runtime: K31Runtime, *, max_model_len: int, topk: int = 2048, layer_name: str = "k31.dsa"
+-) -> K31DSARuntimeMetadata:
++) -> K31DSARuntimeMetadata | dsa_rocm.K31DSARocmMetadata:
+     """DSA metadata for one packed microbatch.
+ 
+     One object may serve every DSA layer of the microbatch: each call rewrites
+@@ -375,6 +383,9 @@ def build_dsa_metadata(
+     """
+ 
+     device = runtime.cu_seqlens.device
++    if k31_backend.is_rocm():
++        # ROCm: one fp8_ds_mla cache row per packed token (dsa_rocm.K31DSARocmMetadata).
++        return dsa_rocm.build_dsa_rocm_metadata(list(runtime.seq_lens), device=device, topk=topk)
+     initialize_k31_dsa_runtime(device)
+     return K31DSAMetadataBuilder(device=device, max_model_len=max_model_len, topk=topk).build(
+         list(runtime.seq_lens), layer_name=layer_name
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/attention.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/attention.py
+index ac07977..57e6404 100644
+--- a/experimental/lite/megatron/lite/model/k31/vllm/primitive/attention.py
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/attention.py
+@@ -42,9 +42,16 @@ class DSAAdapters:
+     sparse: Any
+     upconvert: Any
+     bmm: Any
++    backward: Any = None  # sparse-attention VJP; None: default_sparse_backward (cuDNN)
+ 
+ 
+ def default_dsa_adapters() -> DSAAdapters:
++    from megatron.lite.primitive.kernels import k31_backend
++
++    if k31_backend.is_rocm():
++        from megatron.lite.model.k31.vllm.primitive import dsa_rocm
++
++        return dsa_rocm.dsa_adapters()
+     from megatron.lite.primitive.kernels.vllm_k31 import (
+         DSAAbsorbBmmAdapter,
+         DSAFP8KVUpconvertAdapter,
+diff --git a/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py b/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py
+new file mode 100644
+index 0000000..955fefa
+--- /dev/null
++++ b/experimental/lite/megatron/lite/model/k31/vllm/primitive/dsa_rocm.py
+@@ -0,0 +1,410 @@
++"""K31 DSA on ROCm: indexer top-k + absorbed sparse MLA forward / FP32 backward.
++
++The NVIDIA path (``primitive/attention.py`` + ``primitive/kernels/vllm_k31.py``) drives FlashMLA fp8 / DeepSelect /
++cuDNN entries that do not exist on ROCm; this module is the ROCm replacement, matched to the rollout of the ROCm vLLM
++build with Kimi-K3.1 support.
++
++* Forward: the BI rollout's own DSA kernels (vllm-k31-bi-01: ue8m0 FP8 q/k, ``_bi_fp8_mqa_logits``,
++  ``dsv4_det_topk_per_row``; fp8_ds_mla KV cache + AITER ``triton_sparse_mla_fwd`` with one KV split, in the head groups
++  of a TP=N rollout).  Under ``VLLM_BATCH_INVARIANT=1`` the indexer projections also use the BI GEMMs, so the values equal
++  the rollout's bit for bit; the BI=0 arm runs the same kernels with plain GEMMs.
++* Backward: FP32 sparse-MLA VJP on the KV read back from the cache (identity gradient through the fp8 rounding),
++  fixed-order dkv scatter.
++
++Wired through the base ``attention.attention_core`` as its adapters (``dsa_adapters``: indexer, kv_insert, sparse,
++upconvert, bmm, plus ``backward``) and :class:`K31DSARocmMetadata`, which carries the fields that function reads.
++The absorb / V-up bmm and the indexer linears use vLLM's batch-invariant kernels under BI (the trainer does not
++install vLLM's aten overrides).
++"""
++
++from __future__ import annotations
++
++import importlib
++from dataclasses import dataclass
++
++import torch
++import torch.nn.functional as F
++
++from megatron.lite.primitive.kernels.k31_segsum import segsum_index_add_
++
++LATENT_DIM = 512
++ROPE_DIM = 64
++HEAD_DIM = LATENT_DIM + ROPE_DIM
++
++# Bound for each chunk's fp32 temporaries (scores / gathered KV), in bytes.
++_DEFAULT_CHUNK_BYTES = 512 * 1024 * 1024
++
++
++def _bi() -> bool:
++    from megatron.lite.primitive.kernels import k31_backend
++
++    return k31_backend.bi()
++
++
++def _fp8_dtype() -> torch.dtype:
++    # gfx950 (MI355X) uses OCP e4m3fn, like the image (IS_FNUZ is False there).
++    return torch.float8_e4m3fn
++
++
++# ---------------------------------------------------------------------------
++# fp8_ds_mla KV cache rows (csrc concat_and_cache_ds_mla_kernel)
++# ---------------------------------------------------------------------------
++DS_MLA_TILE = 128
++DS_MLA_BLOCK = 64
++# [512 B e4m3 latent | 4 x fp32 tile scales | 64 x bf16 rope] per token row
++DS_MLA_ROW_BYTES = LATENT_DIM + 4 * (LATENT_DIM // DS_MLA_TILE) + 2 * ROPE_DIM
++
++
++def ds_mla_dequant(rows: torch.Tensor) -> torch.Tensor:
++    """(T, 656) uint8 fp8_ds_mla cache rows -> (T, 576) bf16: the value the sparse-MLA kernel reads.
++
++    The writer stores ``e4m3(x / s)`` per 128-wide tile with ``s = 2^ceil(log2(max(amax / 448, 1e-4)))`` (fp32, a power
++    of two); read back as ``bf16(fp32(e4m3) * s)``. The rope tail is stored as raw bf16.
++    """
++
++    t = rows.shape[0]
++    n_tiles = LATENT_DIM // DS_MLA_TILE
++    lat = rows[:, :LATENT_DIM].contiguous().view(_fp8_dtype()).float().view(t, n_tiles, DS_MLA_TILE)
++    scale = rows[:, LATENT_DIM : LATENT_DIM + 4 * n_tiles].contiguous().view(torch.float32)
++    rope = rows[:, LATENT_DIM + 4 * n_tiles :].contiguous().view(torch.bfloat16)
++    return torch.cat(((lat * scale[..., None]).view(t, LATENT_DIM).to(torch.bfloat16), rope), dim=-1)
++
++
++# ---------------------------------------------------------------------------
++# metadata
++# ---------------------------------------------------------------------------
++@dataclass
++class K31DSARocmMetadata:
++    """Packed batch of fresh requests (context 0), the trainer's only shape.
++
++    Fields read by the base ``attention_core``: the KV cache is one contiguous row per packed token
++    (``slot_mapping`` = 0..T-1), so a token's packed row is its request's first row (``block_table`` and
++    ``workspace_starts``, both per request) plus its request-local index. One object serves every DSA layer of the
++    microbatch (each layer rewrites the cache rows it reads)."""
++
++    token_counts: tuple[int, ...]
++    cu_seqlens: torch.Tensor  # (R + 1,) int64
++    req_id_per_token: torch.Tensor  # (T,) int64
++    positions: torch.Tensor  # (T,) int64, request-local
++    topk: int
++    block_table: torch.Tensor  # (R,) int64: first packed row of each request
++    workspace_starts: torch.Tensor  # (R,) int64: same
++    slot_mapping: torch.Tensor  # (T,) int64
++    mla_cache: torch.Tensor  # (ceil(T / 64), 64, 656) uint8 fp8_ds_mla
++    k_scale: torch.Tensor  # () fp32, 1
++    block_size: int = DS_MLA_BLOCK
++    cache_lens: None = None
++    dummy_block_table: None = None
++
++    @property
++    def indexer(self) -> K31DSARocmMetadata:
++        return self
++
++
++def build_dsa_rocm_metadata(
++    seq_lens: list[int] | tuple[int, ...], *, device: torch.device | str, topk: int = 2048
++) -> K31DSARocmMetadata:
++    counts = [int(c) for c in seq_lens]
++    if not counts or min(counts) <= 0:
++        raise ValueError("seq_lens must be positive")
++    dev = torch.device(device)
++    lens = torch.tensor(counts, dtype=torch.int64, device=dev)
++    cu = torch.zeros(len(counts) + 1, dtype=torch.int64, device=dev)
++    cu[1:] = lens.cumsum(0)
++    req = torch.repeat_interleave(torch.arange(len(counts), device=dev), lens)
++    total = int(cu[-1])
++    first = cu[:-1]
++    nblk = (total + DS_MLA_BLOCK - 1) // DS_MLA_BLOCK
++    return K31DSARocmMetadata(
++        token_counts=tuple(counts),
++        cu_seqlens=cu,
++        req_id_per_token=req,
++        positions=torch.arange(total, device=dev) - first.index_select(0, req),
++        topk=int(topk),
++        block_table=first,
++        workspace_starts=first,
++        slot_mapping=torch.arange(total, device=dev, dtype=torch.int64),
++        mla_cache=torch.zeros((nblk, DS_MLA_BLOCK, DS_MLA_ROW_BYTES), dtype=torch.uint8, device=dev),
++        k_scale=torch.ones((), dtype=torch.float32, device=dev),
++    )
++
++
++# ---------------------------------------------------------------------------
++# indexer: FP8 emulation + causal top-k (frozen, forward only)
++# ---------------------------------------------------------------------------
++def _index_k_norm(k_lin, weight, bias, eps):
++    """``amd/dsa.py`` KimiK3DSAIndexerKNorm: fp32 params cast to the activation dtype, then
++    ``F.layer_norm`` on the bf16 key (fp32 accumulation, bf16 affine)."""
++    d = k_lin.shape[-1]
++    return F.layer_norm(k_lin, (d,), weight.to(k_lin.dtype), bias.to(k_lin.dtype), eps)
++
++
++class DSAIndexerAdapter:
++    """Frozen indexer selection on ROCm, the rollout's op sequence: (T, topk) int32 request-local, -1 tail."""
++
++    def __call__(self, hidden_states, q_c, *, wq, wk, wv, k_norm_weight, k_norm_bias, k_norm_eps, num_heads, head_dim,
++                 topk, metadata: K31DSARocmMetadata) -> torch.Tensor:
++        with torch.no_grad():
++            h = hidden_states.detach()
++            index_q = _linear(q_c.detach(), wq.detach())  # wq_index (the rollout's BI GEMM)
++            k_lin = _linear(h, wk.detach())  # wk_index
++            v_lin = _linear(h, wv.detach())  # wv_index (raw; H^-1/2 folded in the weights kernel)
++            return rollout_bi_indexer_topk(
++                index_q, k_lin, v_lin, k_norm_weight, k_norm_bias, k_norm_eps, metadata,
++                num_heads=num_heads, head_dim=head_dim, topk=topk,
++            )
++
++
++def rollout_bi_indexer_topk(
++    index_q: torch.Tensor,
++    k_lin: torch.Tensor,
++    v_lin: torch.Tensor,
++    k_norm_weight: torch.Tensor,
++    k_norm_bias: torch.Tensor,
++    k_norm_eps: float,
++    metadata: K31DSARocmMetadata,
++    *,
++    num_heads: int,
++    head_dim: int,
++    topk: int,
++    block_size: int = 64,
++) -> torch.Tensor:
++    """The BI rollout's indexer (amd/dsa.py KimiK3DSAIndexer + Phase-D patch), op for op, per request.
++
++    ``index_q`` / ``k_lin`` / ``v_lin``: the wq_index / wk_index / wv_index outputs. Steps: bf16-affine k LayerNorm
++    (KimiK3DSAIndexerKNorm) -> per-token-group ue8m0 FP8 q (per_token_group_quant_fp8) + the image's
++    _index_weights_kernel fold -> FP8 k insert (indexer_k_quant_and_cache_triton, NORMAL layout) ->
++    _bi_fp8_mqa_logits over the request's keys -> dsv4_det_topk_per_row. A row's logits do not depend on the chunk
++    it is scored in (measured), so per-request calls equal the rollout's chunks. Returns (T, topk) int32
++    request-local indices, ascending, -1 tail.
++    """
++
++    triton = importlib.import_module("triton")
++    quant = importlib.import_module(
++        "vllm.model_executor.layers.quantization.utils.fp8_utils"
++    ).per_token_group_quant_fp8
++    rs = importlib.import_module("vllm.v1.attention.ops.rocm_aiter_mla_sparse")
++    weights_kernel = importlib.import_module("vllm.models.kimi_k3.amd.dsa")._index_weights_kernel
++    if not hasattr(rs, "dsv4_det_topk_per_row"):
++        raise NotImplementedError("rollout_bi indexer needs the Phase-D vLLM patch (vllm-k31-bi-dsa.v3)")
++    T = index_q.shape[0]
++    dev = index_q.device
++    index_k = _index_k_norm(k_lin, k_norm_weight, k_norm_bias, k_norm_eps)
++    q_fp8, q_scale = quant(index_q.reshape(-1, head_dim).contiguous(), head_dim,
++                           column_major_scales=False, use_ue8m0=True)
++    q_fp8 = q_fp8.view(T, num_heads, head_dim)
++    w = torch.empty((T, num_heads), dtype=torch.float32, device=dev)
++    if T:
++        weights_kernel[(T,)](v_lin, q_scale, w, v_lin.stride(0), num_heads**-0.5, head_dim**-0.5,
++                             NUM_HEADS=num_heads, BLOCK=triton.next_power_of_2(num_heads))
++    nblk = (T + block_size - 1) // block_size
++    cache = torch.zeros((nblk, block_size, head_dim + 4), dtype=torch.uint8, device=dev)
++    rs.indexer_k_quant_and_cache_triton(index_k, cache, torch.arange(T, device=dev, dtype=torch.int64),
++                                        head_dim, "ue8m0", cache_layout="NORMAL")
++    flat = cache.view(nblk, -1)
++    k_fp8 = flat[:, : block_size * head_dim].contiguous().view(_fp8_dtype()).view(-1, head_dim)[:T]
++    k_scale = flat[:, block_size * head_dim :].contiguous().view(torch.float32).view(-1)[:T]
++    out = torch.full((T, topk), -1, dtype=torch.int32, device=dev)
++    cu = metadata.cu_seqlens.tolist()
++    for r, n in enumerate(metadata.token_counts):
++        s0 = cu[r]
++        ks = torch.zeros(n, dtype=torch.int32, device=dev)
++        ke = torch.arange(1, n + 1, dtype=torch.int32, device=dev)
++        logits = rs._bi_fp8_mqa_logits(q_fp8[s0 : s0 + n], (k_fp8[s0 : s0 + n], k_scale[s0 : s0 + n]),
++                                       w[s0 : s0 + n], ks, ke)
++        rs.dsv4_det_topk_per_row(logits, ks, ke, out[s0 : s0 + n], n, topk)
++    return out
++
++
++def _vtp_groups(heads: int) -> int:
++    """Head groups of a TP=N BI rollout (MLITE_K31_BI_VTP; 1 = TP1)."""
++    from megatron.lite.primitive.kernels.rocm_k31 import vtp_size
++
++    n = vtp_size()
++    if n > 1 and heads % n:
++        raise ValueError(f"MLITE_K31_BI_VTP={n} does not divide {heads} attention heads")
++    return n
++
++
++def _sparse_mla_bwd_explicit(q, kv, idx, scale, d_v, grad_out, need_dq, need_dkv, chunk_bytes=_DEFAULT_CHUNK_BYTES):
++    """FP32 sparse-MLA VJP (megatron-28: no forward recompute; lse recomputed from the same s as the forward). The dkv
++    scatter is a fixed-order segmented sum (K1 det, ``k31_segsum``): bits repeat run to run. Returns (dq | None, dkv fp32 | None)."""
++    T, H, D = q.shape
++    rows = _chunk_rows(H, idx.shape[1], D, chunk_bytes)
++    idx = idx.long()
++    acc = _acc(q.dtype)
++    dq = torch.zeros_like(q) if need_dq else None
++    dkv = torch.zeros(kv.shape, dtype=acc, device=kv.device) if need_dkv else None
++    for lo in range(0, T, rows):
++        hi = min(T, lo + rows)
++        ix = idx[lo:hi]
++        valid = ix >= 0
++        kvg = kv.index_select(0, ix.clamp(min=0).reshape(-1)).view(*ix.shape, D).to(acc)
++        qf = q[lo:hi].to(acc)
++        s = torch.einsum("chd,ckd->chk", qf, kvg) * scale
++        l = torch.logsumexp(s.masked_fill(~valid[:, None, :], float("-inf")), dim=-1)  # noqa: E741
++        safe = torch.where(torch.isfinite(l), l, torch.zeros_like(l))
++        p = torch.exp(s - safe[..., None]).masked_fill(~valid[:, None, :], 0.0)
++        do = grad_out[lo:hi].to(acc)
++        dp = torch.einsum("chd,ckd->chk", do, kvg[..., :d_v])
++        delta = (p * dp).sum(dim=-1, keepdim=True)
++        ds = p * (dp - delta) * scale
++        if dq is not None:
++            dq[lo:hi] = torch.einsum("chk,ckd->chd", ds, kvg).to(dq.dtype)
++        if dkv is not None:
++            dkvg = torch.einsum("chk,chd->ckd", ds, qf)
++            dkvg[..., :d_v] += torch.einsum("chk,chd->ckd", p, do)
++            segsum_index_add_(dkv, ix.clamp(min=0), dkvg.reshape(-1, D), valid)
++    return dq, dkv
++
++
++def sparse_backward(q, kv, out, grad_out, lse, indices, scale):
++    """``attention_core`` ``backward_op``: the FP32 VJP on the workspace rows (the KV the forward read)."""
++
++    del lse  # recomputed from the same scores
++    return _sparse_mla_bwd_explicit(q, kv, indices, scale, out.shape[-1], grad_out, True, True)
++
++
++class DSAMLAKVInsertAdapter:
++    """The rollout's fp8_ds_mla cache insert (``concat_and_cache_mla``)."""
++
++    def __call__(self, kv_c, k_pe, mla_cache, slot_mapping, k_scale) -> None:
++        importlib.import_module("vllm._custom_ops").concat_and_cache_mla(
++            kv_c.contiguous(), k_pe.contiguous(), mla_cache, slot_mapping, kv_cache_dtype="fp8_ds_mla", scale=k_scale
++        )
++
++
++class DSASparseMLAAdapter:
++    """The BI rollout's sparse MLA: AITER Triton ``sparse_mla_fwd`` (kv_splits=1 under VLLM_BATCH_INVARIANT) over the
++    fp8_ds_mla cache, in the head groups of a TP=N rollout (``MLITE_K31_BI_VTP``)."""
++
++    @staticmethod
++    def convert_indices(req_id_per_token, block_table, logical, *, block_size):
++        """Request-local top-k (-1 tail) -> packed cache rows (-1 kept); ``block_table`` = each request's first row."""
++        del block_size
++        return torch.where(logical >= 0, logical + block_table.index_select(0, req_id_per_token)[:, None], -1)
++
++    def __call__(self, q, mla_cache, rows, *, softmax_scale, padded_heads, cache_lens, dummy_block_table):
++        del padded_heads, cache_lens, dummy_block_table  # FlashMLA-only arguments
++        aiter_ops = importlib.import_module("vllm._aiter_ops").rocm_aiter_ops
++        T, H, D = q.shape
++        if D != HEAD_DIM:
++            raise ValueError(f"K31 ROCm sparse MLA expects q (T, H, {HEAD_DIM}), got {tuple(q.shape)}")
++        valid = rows >= 0
++        indptr = torch.zeros(T + 1, dtype=torch.int32, device=q.device)
++        indptr[1:] = valid.sum(1).cumsum(0).to(torch.int32)
++        indices = rows[valid].to(torch.int32)  # row-major: each row's top-k in its (ascending) order
++        o = torch.empty((T, H, LATENT_DIM), dtype=q.dtype, device=q.device)
++        kv_buf = mla_cache.view(-1, DS_MLA_ROW_BYTES).unsqueeze(1)
++        # Virtual TP (MLITE_K31_BI_VTP=N): a TP=N rollout rank runs H/N heads per kernel call; run the same head
++        # groups so the result cannot depend on the kernel's head count.
++        groups = _vtp_groups(H)
++        hg = H // groups
++        for g in range(groups):
++            sl = slice(g * hg, (g + 1) * hg)
++            og = torch.empty((T, hg, LATENT_DIM), dtype=q.dtype, device=q.device) if groups > 1 else o
++            aiter_ops.triton_sparse_mla_fwd(q[:, sl].contiguous(), kv_buf, og, softmax_scale, indptr, indices,
++                                            kv_lora_rank=LATENT_DIM, qk_rope_head_dim=ROPE_DIM, has_invalid=False)
++            if groups > 1:
++                o[:, sl] = og
++        return o, None  # no lse: sparse_backward recomputes it
++
++
++class DSAFP8KVUpconvertAdapter:
++    """Workspace rows = the cache rows read back (``ds_mla_dequant``); the cache holds one row per packed token."""
++
++    def __call__(self, mla_cache, workspace, block_table, workspace_starts) -> None:
++        del block_table, workspace_starts
++        workspace.copy_(ds_mla_dequant(mla_cache.view(-1, DS_MLA_ROW_BYTES)[: workspace.shape[0]]))
++
++
++# ---------------------------------------------------------------------------
++# sparse MLA: chunked fp32 reference with explicit backward
++# ---------------------------------------------------------------------------
++def _chunk_rows(heads: int, topk: int, dim: int, chunk_bytes: int) -> int:
++    # gathered KV (topk x dim) + scores/probs/dS (3 x heads x topk), fp32 per row
++    per_row = 4 * (topk * dim + 3 * heads * topk + 2 * heads * dim)
++    return max(1, chunk_bytes // per_row)
++
++
++def _acc(dtype: torch.dtype) -> torch.dtype:
++    return torch.promote_types(dtype, torch.float32)
++
++
++# ---------------------------------------------------------------------------
++# absorbed MLA core (ROCm): absorb bmm, sparse MLA, V up-projection
++# ---------------------------------------------------------------------------
++def _bi_bmm_lib():
++    """vLLM's batch-invariant library for an explicit bmm / linear, or None (BI off).
++
++    The BI rollout process installs vLLM's aten overrides (``init_batch_invariance``: aten::bmm / bmm.out ->
++    ``bmm_batch_invariant``, one fixed Triton config), so its MLA absorb / V up-projection bmm is row-invariant. The ROCm
++    trainer does NOT install those overrides (``rocm_k31._bi_lib``), so a plain ``torch.bmm`` here runs
++    hipBLASLt, whose Tensile solution depends on the problem size M (e.g. MT256x128x64 at M = 4096 vs MT128x160x64 at
++    4097): the rows' bits then depend on the micro-batch's total tokens (seen on the full model). Under
++    VLLM_BATCH_INVARIANT=1 call the rollout's kernel explicitly."""
++    if not _bi():
++        return None
++    return importlib.import_module("megatron.lite.primitive.kernels.rocm_k31")._bi_lib()
++
++
++def _linear(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
++    """F.linear, or the rollout's ``linear_batch_invariant`` under VLLM_BATCH_INVARIANT=1 (the BI rollout's
++    ReplicatedLinear goes through it; a plain F.linear here would be hipBLASLt, M-dependent, see ``_bi_bmm_lib``)."""
++    lib = _bi_bmm_lib()
++    return F.linear(x, w) if lib is None else lib.linear_batch_invariant(x, w, None)
++
++
++def _bmm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> None:
++    lib = _bi_bmm_lib()
++    if lib is None:
++        torch.bmm(a, b, out=out)
++    else:
++        lib.bmm_batch_invariant(a, b, out=out)
++
++
++class DSAAbsorbBmmAdapter:
++    """The MLA absorb / V up-projection bmm with vLLM's layouts (the BF16 path of ``MLAAttention``); the rollout's
++    batch-invariant bmm kernel under VLLM_BATCH_INVARIANT=1 (see ``_bi_bmm_lib``)."""
++
++    def absorb(self, q_nope: torch.Tensor, w_uk_t: torch.Tensor) -> torch.Tensor:
++        b, n, _p = q_nope.shape
++        out = q_nope.new_empty((b, n, w_uk_t.shape[-1]))
++        _bmm(q_nope.transpose(0, 1), w_uk_t, out=out.transpose(0, 1))
++        return out
++
++    def v_up(self, attn: torch.Tensor, w_uv: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
++        n, lr, v = w_uv.shape
++        x = attn.reshape(-1, n, lr).transpose(0, 1)
++        _bmm(x, w_uv, out=out.view(-1, n, v).transpose(0, 1))
++        return out
++
++
++def dsa_adapters():
++    """The ROCm ``attention.DSAAdapters`` (``default_dsa_adapters`` on the ROCm backend)."""
++
++    from megatron.lite.model.k31.vllm.primitive.attention import DSAAdapters
++
++    return DSAAdapters(
++        indexer=DSAIndexerAdapter(),
++        kv_insert=DSAMLAKVInsertAdapter(),
++        sparse=DSASparseMLAAdapter(),
++        upconvert=DSAFP8KVUpconvertAdapter(),
++        bmm=DSAAbsorbBmmAdapter(),
++        backward=sparse_backward,
++    )
++
++
++__all__ = [
++    "DSAAbsorbBmmAdapter",
++    "DSAFP8KVUpconvertAdapter",
++    "DSAIndexerAdapter",
++    "DSAMLAKVInsertAdapter",
++    "DSASparseMLAAdapter",
++    "K31DSARocmMetadata",
++    "build_dsa_rocm_metadata",
++    "ds_mla_dequant",
++    "dsa_adapters",
++    "rollout_bi_indexer_topk",
++    "sparse_backward",
++]

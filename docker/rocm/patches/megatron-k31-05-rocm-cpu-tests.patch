@@ -1,0 +1,650 @@
+diff --git a/experimental/lite/tests/unit/model/k31/vllm/_rocm_interp_cases.py b/experimental/lite/tests/unit/model/k31/vllm/_rocm_interp_cases.py
+new file mode 100644
+index 0000000..b680742
+--- /dev/null
++++ b/experimental/lite/tests/unit/model/k31/vllm/_rocm_interp_cases.py
+@@ -0,0 +1,205 @@
++"""CPU cases for the ROCm K31 Triton kernels, run by test_rocm_backend_cpu.py in a subprocess under TRITON_INTERPRET=1.
++
++    TRITON_INTERPRET=1 python _rocm_interp_cases.py <case>     -> prints "OK <case>" or raises
++
++The interpreter must be on before ``triton.jit`` decorates the kernels, so these cases cannot share the pytest process
++with tests that import the kernels normally.  (The interpreter's BF16 ``tl.dot`` is wrong in this Triton build, so
++``matmul_np``'s bits are left to the GPU gates; its dispatch is tested in-process.)
++"""
++from __future__ import annotations
++
++import sys
++
++import torch
++
++
++def _ref_segsum(dst, idx, vals, valid=None):
++    """dst[idx[i]] += vals[i]: per destination row, contributions summed in ascending i (fp32), then added once."""
++    out = dst.clone()
++    idx = idx.reshape(-1)
++    ok = torch.ones_like(idx, dtype=torch.bool) if valid is None else valid.reshape(-1)
++    for row in torch.unique(idx[ok]).tolist():
++        acc = torch.zeros(dst.shape[1], dtype=torch.float32)
++        for i in range(idx.numel()):
++            if ok[i] and int(idx[i]) == row:
++                acc = acc + vals[i]
++        out[row] = out[row] + acc
++    return out
++
++
++def case_segsum_bitwise() -> None:
++    from megatron.lite.primitive.kernels.k31_segsum import segsum_index_add_
++
++    g = torch.Generator().manual_seed(0)
++    for rows, n, d in ((7, 30, 200), (1, 9, 3), (64, 257, 129)):
++        dst = torch.randn(rows, d, generator=g)
++        vals = torch.randn(n, d, generator=g)
++        idx = torch.randint(0, rows, (n,), generator=g)
++        valid = torch.rand(n, generator=g) > 0.3
++        for v in (None, valid):
++            got = dst.clone()
++            segsum_index_add_(got, idx, vals, v)
++            assert torch.equal(got, _ref_segsum(dst, idx, vals, v)), (rows, n, d, v is None)
++            again = dst.clone()
++            segsum_index_add_(again, idx, vals, v)
++            assert torch.equal(got, again)
++
++
++def case_segsum_edges() -> None:
++    from megatron.lite.primitive.kernels.k31_segsum import segsum_index_add_
++
++    dst = torch.randn(4, 8)
++    got = dst.clone()
++    segsum_index_add_(got, torch.tensor([1, 2]), torch.randn(2, 8), torch.tensor([False, False]))  # all masked
++    assert torch.equal(got, dst)
++    segsum_index_add_(got, torch.zeros(0, dtype=torch.long), torch.zeros(0, 8))  # empty
++    assert torch.equal(got, dst)
++    idx2d = torch.tensor([[0, 3], [3, 0]])
++    vals = torch.randn(4, 8)
++    segsum_index_add_(got, idx2d, vals)  # 2-D idx is flattened row-major
++    assert torch.equal(got, _ref_segsum(dst, idx2d.reshape(-1), vals))
++    for bad in ((dst.double(), vals.double()), (dst, vals.half()), (dst[0], vals)):
++        try:
++            segsum_index_add_(bad[0], torch.tensor([0]), bad[1])
++        except AssertionError:
++            continue
++        raise AssertionError("segsum accepted non-fp32 / non-2-D operands")
++
++
++def _sparse_mla_ref(q, kv, idx, scale, d_v):
++    """Dense reference forward of the absorbed sparse MLA (fp64): o[t,h] = softmax_k(q.kv[idx]) @ kv[idx, :d_v]."""
++    valid = idx >= 0
++    kvg = kv[idx.clamp(min=0)]  # [T, K, D]
++    s = torch.einsum("thd,tkd->thk", q, kvg) * scale
++    s = s.masked_fill(~valid[:, None, :], float("-inf"))
++    p = torch.softmax(s, dim=-1).nan_to_num(0.0)
++    return torch.einsum("thk,tkd->thd", p, kvg[..., :d_v])
++
++
++def case_dsa_bwd() -> None:
++    from megatron.lite.model.k31.vllm.primitive.dsa_rocm import _sparse_mla_bwd_explicit
++
++    g = torch.Generator().manual_seed(1)
++    T, H, D, d_v, K = 37, 4, 24, 16, 6
++    scale = D ** -0.5
++    q = torch.randn(T, H, D, generator=g)
++    kv = torch.randn(T, D, generator=g)
++    # causal top-k with -1 padding (row t sees keys <= t; early rows have fewer than K valid, row 0 has one)
++    idx = torch.full((T, K), -1, dtype=torch.long)
++    for t in range(T):
++        cand = torch.randperm(t + 1, generator=g)[:K]
++        idx[t, : cand.numel()] = cand
++    grad = torch.randn(T, H, d_v, generator=g)
++
++    q64 = q.double().requires_grad_()
++    kv64 = kv.double().requires_grad_()
++    _sparse_mla_ref(q64, kv64, idx, scale, d_v).backward(grad.double())
++
++    runs = []
++    for chunk in (1 << 30, 4096):  # one chunk, and many small chunks
++        dq, dkv = _sparse_mla_bwd_explicit(q, kv, idx, scale, d_v, grad, True, True, chunk_bytes=chunk)
++        assert dq.dtype == torch.float32 and dkv.dtype == torch.float32
++        torch.testing.assert_close(dq.double(), q64.grad, rtol=1e-4, atol=1e-5)
++        torch.testing.assert_close(dkv.double(), kv64.grad, rtol=1e-4, atol=1e-5)
++        dq2, dkv2 = _sparse_mla_bwd_explicit(q, kv, idx, scale, d_v, grad, True, True, chunk_bytes=chunk)
++        assert torch.equal(dq, dq2) and torch.equal(dkv, dkv2), "explicit DSA backward is not run-to-run bitwise"
++        runs.append((dq, dkv))
++    # (no bitwise claim across chunk sizes: the chunk size is a fixed function of the shape, and einsum's own
++    # blocking may depend on the batch it is given)
++    dq_only, none_kv = _sparse_mla_bwd_explicit(q, kv, idx, scale, d_v, grad, True, False)
++    none_q, dkv_only = _sparse_mla_bwd_explicit(q, kv, idx, scale, d_v, grad, False, True)
++    assert none_kv is None and none_q is None
++    assert torch.equal(dq_only, runs[0][0]) and torch.equal(dkv_only, runs[0][1])
++
++
++def ds_mla_write_rows(kv_c, k_pe):
++    """Torch emulation of csrc concat_and_cache_ds_mla_kernel: (T, 656) uint8 rows (512 e4m3 | 4 fp32 scales | 64 bf16)."""
++    t = kv_c.shape[0]
++    x = kv_c.float().view(t, 4, 128)
++    amax = x.abs().amax(-1, keepdim=True)
++    scale = torch.exp2(torch.ceil(torch.log2(torch.clamp(amax / 448.0, min=1e-4))))
++    q = (x / scale).to(torch.float8_e4m3fn).view(t, 512).view(torch.uint8)
++    return torch.cat((q, scale.view(t, 4).contiguous().view(torch.uint8), k_pe.contiguous().view(torch.uint8)), dim=1)
++
++
++def ds_mla_round_ref(kv_c, k_pe):
++    """The rows' read-back value from the writer formula directly (independent of dsa_rocm.ds_mla_dequant)."""
++    t = kv_c.shape[0]
++    x = kv_c.float().view(t, 4, 128)
++    scale = torch.exp2(torch.ceil(torch.log2(torch.clamp(x.abs().amax(-1, keepdim=True) / 448.0, min=1e-4))))
++    lat = ((x / scale).to(torch.float8_e4m3fn).float() * scale).view(t, 512).to(torch.bfloat16)
++    return torch.cat((lat, k_pe), -1)
++
++
++def case_dsa_core() -> None:
++    """Base attention_core + the ROCm adapters/backward (kernels replaced by torch stand-ins on CPU: the cache writer
++    emulation and a dense sparse-MLA forward over the dequantized cache) vs fp64 dense autograd with an STE rounding."""
++    from megatron.lite.model.k31.vllm.primitive import attention as A
++    from megatron.lite.model.k31.vllm.primitive import dsa_rocm as D
++
++    g = torch.Generator().manual_seed(5)
++    lens = [9, 21, 6]
++    T, H, nope, rope, V, K = sum(lens), 4, 16, D.ROPE_DIM, D.LATENT_DIM, 8
++    md = D.build_dsa_rocm_metadata(lens, device="cpu", topk=K)
++    logical = torch.full((T, K), -1, dtype=torch.int32)
++    for t in range(T):
++        pos = int(md.positions[t])
++        cand = torch.randperm(pos + 1, generator=g)[:K].sort().values
++        logical[t, : cand.numel()] = cand.to(torch.int32)
++
++    class Insert:
++        def __call__(self, kv_c, k_pe, mla_cache, slot_mapping, k_scale):
++            mla_cache.view(-1, D.DS_MLA_ROW_BYTES)[slot_mapping] = ds_mla_write_rows(kv_c, k_pe)
++
++    class Sparse(D.DSASparseMLAAdapter):
++        def __call__(self, q, mla_cache, rows, *, softmax_scale, padded_heads, cache_lens, dummy_block_table):
++            kv = D.ds_mla_dequant(mla_cache.view(-1, D.DS_MLA_ROW_BYTES)[: q.shape[0]]).float()
++            valid = rows >= 0
++            s = torch.einsum("thd,tkd->thk", q.float(), kv[rows.clamp(min=0)]) * softmax_scale
++            p = torch.softmax(s.masked_fill(~valid[:, None, :], float("-inf")), -1)
++            return torch.einsum("thk,tkd->thd", p, kv[rows.clamp(min=0)][..., :V]).to(q.dtype), None
++
++    ad = D.dsa_adapters()
++    ad.kv_insert, ad.sparse = Insert(), Sparse()
++    scale = (nope + rope) ** -0.5
++    q = (torch.randn(T, H, nope + rope, generator=g)).to(torch.bfloat16).requires_grad_()
++    kv_c = torch.randn(T, V, generator=g).to(torch.bfloat16).requires_grad_()
++    k_pe = torch.randn(T, rope, generator=g).to(torch.bfloat16).requires_grad_()
++    w_uk_t = (torch.randn(H, nope, V, generator=g) * 0.1).to(torch.bfloat16).requires_grad_()
++    w_uv = (torch.randn(H, V, 16, generator=g) * 0.1).to(torch.bfloat16).requires_grad_()
++    grad = torch.randn(T, H * 16, generator=g)
++
++    out = A.attention_core(ad, q, kv_c, k_pe, logical, md, w_uk_t=w_uk_t, w_uv=w_uv, softmax_scale=scale,
++                           qk_nope_head_dim=nope, padded_heads=64, backward_op=ad.backward)
++    out.float().backward(grad)
++    got = [t.grad.double() for t in (q, kv_c, k_pe, w_uk_t, w_uv)]
++
++    # reference: fp64, KV = the rounded cache value with identity gradient
++    leaves = [t.detach().double().requires_grad_() for t in (q, kv_c, k_pe, w_uk_t, w_uv)]
++    rq, rkv, rpe, ruk, ruv = leaves
++    rounded = ds_mla_round_ref(kv_c.detach(), k_pe.detach()).double()
++    rows = torch.cat((rkv, rpe), -1)
++    rows = rows + (rounded - rows).detach()
++    packed = torch.where(logical >= 0, logical.long() + md.workspace_starts[md.req_id_per_token][:, None], -1)
++    valid = packed >= 0
++    def bf16(x):  # the real path's bf16 intermediates (absorb output, attention output), identity gradient
++        return x + (x.to(torch.bfloat16).double() - x).detach()
++
++    qc = torch.cat((bf16(torch.einsum("thp,hpl->thl", rq[..., :nope], ruk)), rq[..., nope:]), -1)
++    kvg = rows[packed.clamp(min=0)]
++    s = torch.einsum("thd,tkd->thk", qc, kvg) * scale
++    p = torch.softmax(s.masked_fill(~valid[:, None, :], float("-inf")), -1)
++    o = bf16(torch.einsum("thk,tkd->thd", p, kvg[..., :V]))
++    torch.einsum("thl,hlv->thv", o, ruv).reshape(T, -1).backward(grad.double())
++    for name, a, b in zip(("dq", "dkv_c", "dk_pe", "dw_uk", "dw_uv"), got, (t.grad for t in leaves)):
++        torch.testing.assert_close(a, b, rtol=3e-2, atol=3e-2, msg=name)  # bf16 grads / bf16 forward intermediates
++        assert float((a - b).norm() / b.norm()) < 1e-2, name
++    # the forward the backward differentiated is the cache read back: dequant == the writer emulation round trip
++    assert torch.equal(D.ds_mla_dequant(md.mla_cache.view(-1, D.DS_MLA_ROW_BYTES)[:T]), rounded.to(torch.bfloat16))
++
++
++CASES = {name[5:]: fn for name, fn in globals().items() if name.startswith("case_")}
++
++if __name__ == "__main__":
++    CASES[sys.argv[1]]()
++    print("OK", sys.argv[1])
+diff --git a/experimental/lite/tests/unit/model/k31/vllm/test_rocm_backend_cpu.py b/experimental/lite/tests/unit/model/k31/vllm/test_rocm_backend_cpu.py
+new file mode 100644
+index 0000000..0013401
+--- /dev/null
++++ b/experimental/lite/tests/unit/model/k31/vllm/test_rocm_backend_cpu.py
+@@ -0,0 +1,372 @@
++"""CPU tests of the ROCm K31 backend (k1-k31-rocm-min): backend seam, retired-switch fail-closed, contract, the
++trainer-only matmul_np dispatch, VTP helpers, and (in a TRITON_INTERPRET=1 subprocess) the fixed-order segmented sum
++and the explicit DSA backward.  The bitwise trainer == rollout claims themselves are GPU gates (gate 6, VTP)."""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++import types
++from pathlib import Path
++
++import pytest
++import torch
++from _tiny import tiny_config
++from megatron.lite.model.k31.vllm import protocol
++from megatron.lite.model.k31.vllm import runtime_metadata as rm
++from megatron.lite.primitive.kernels import k31_backend, rocm_k31, vllm_k31
++from test_vllm_skeleton import _impl
++
++
++@pytest.fixture
++def backend(monkeypatch):
++    """Select a backend for one test (``k31_backend.backend`` is cached per process)."""
++
++    def select(name: str | None) -> None:
++        if name is None:
++            monkeypatch.delenv("MLITE_K31_BACKEND", raising=False)
++        else:
++            monkeypatch.setenv("MLITE_K31_BACKEND", name)
++        k31_backend.backend.cache_clear()
++
++    yield select
++    k31_backend.backend.cache_clear()
++
++
++# --------------------------------------------------------------------------- backend seam
++def test_default_backend_follows_torch_build(backend, monkeypatch) -> None:
++    backend(None)
++    monkeypatch.setattr(torch.version, "hip", "7.0", raising=False)
++    k31_backend.backend.cache_clear()
++    assert k31_backend.backend() == "rocm" and k31_backend.is_rocm()
++    monkeypatch.setattr(torch.version, "hip", None, raising=False)
++    k31_backend.backend.cache_clear()
++    assert k31_backend.backend() == "vllm_cuda" and not k31_backend.is_rocm()
++
++
++def test_unknown_backend_fails_closed(backend) -> None:
++    backend("cuda")
++    with pytest.raises(ValueError, match="MLITE_K31_BACKEND"):
++        k31_backend.backend()
++
++
++ROCM_ADAPTERS = {"BILinearAdapter", "BIRouterAdapter", "LoRALeafAdapter", "RMSNormAdapter", "SiTUAndMulAdapter",
++                 "AttnResAdapter", "TokenLogprobAdapter", "TemperatureAdapter"}
++
++
++def test_adapters_resolve_to_active_backend(backend) -> None:
++    backend("rocm")
++    for name in k31_backend.ADAPTERS:
++        want = getattr(rocm_k31, name) if name in ROCM_ADAPTERS else getattr(vllm_k31, name)
++        assert getattr(k31_backend, name) is want, name
++    assert k31_backend.moe_kernels() is rocm_k31
++    backend("vllm_cuda")
++    for name in k31_backend.ADAPTERS:
++        assert getattr(k31_backend, name) is getattr(vllm_k31, name), name
++    with pytest.raises(AttributeError):
++        k31_backend.NotAnAdapter  # noqa: B018
++
++
++def test_rocm_adapter_set_is_what_rocm_k31_defines() -> None:
++    defined = {n for n in k31_backend.ADAPTERS if n in vars(rocm_k31) and isinstance(vars(rocm_k31)[n], type)}
++    assert defined == ROCM_ADAPTERS
++
++
++@pytest.mark.parametrize("value,want", [("", False), ("0", False), ("1", True), ("2", True)])
++def test_bi_follows_vllm_batch_invariant(monkeypatch, value, want) -> None:
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", value)
++    assert k31_backend.bi() is want
++
++
++# --------------------------------------------------------------------------- contract
++def test_no_deepep_is_rocm_only(backend) -> None:
++    backend("rocm")
++    protocol._validate_contract(tiny_config(), _impl(use_deepep=False))
++    backend("vllm_cuda")
++    with pytest.raises(NotImplementedError, match="DeepEP"):
++        protocol._validate_contract(tiny_config(), _impl(use_deepep=False))
++
++
++# --------------------------------------------------------------------------- retired switches
++@pytest.fixture
++def clean_env(monkeypatch):
++    for k in (*rm._ROCM_RETIRED, *rm._ROCM_RETIRED_BI, "MLITE_K31_BI_VTP", "ROLLOUT_TP"):
++        monkeypatch.delenv(k, raising=False)
++    return monkeypatch
++
++
++def test_clean_env_passes(clean_env) -> None:
++    rm._check_rocm_env(True)
++    rm._check_rocm_env(False)
++
++
++def test_retired_lists_are_disjoint() -> None:
++    assert not set(rm._ROCM_RETIRED) & set(rm._ROCM_RETIRED_BI)
++    assert len(rm._ROCM_RETIRED) == len(set(rm._ROCM_RETIRED))
++
++
++@pytest.mark.parametrize("name", rm._ROCM_RETIRED)
++@pytest.mark.parametrize("bi", [True, False])
++def test_retired_switch_fails_closed(clean_env, name, bi) -> None:
++    clean_env.setenv(name, "1")
++    with pytest.raises(RuntimeError, match=name):
++        rm._check_rocm_env(bi)
++
++
++@pytest.mark.parametrize("name,fixed", sorted(rm._ROCM_RETIRED_BI.items()))
++def test_retired_bi_switch_accepts_only_its_fixed_value_under_bi(clean_env, name, fixed) -> None:
++    clean_env.setenv(name, fixed)
++    rm._check_rocm_env(True)  # old launchers that name the fixed behavior keep working
++    with pytest.raises(RuntimeError, match=name):
++        rm._check_rocm_env(False)  # ... but not with BI off, where that behavior is not what runs
++    clean_env.setenv(name, fixed + "x")
++    with pytest.raises(RuntimeError, match=name):
++        rm._check_rocm_env(True)
++
++
++def test_all_bad_switches_are_reported_together(clean_env) -> None:
++    clean_env.setenv("MLITE_K31_TRAIN", "1")
++    clean_env.setenv("MLITE_K31_DSA_BI_BWD", "atomic")
++    with pytest.raises(RuntimeError) as err:
++        rm._check_rocm_env(True)
++    assert "MLITE_K31_TRAIN" in str(err.value) and "MLITE_K31_DSA_BI_BWD" in str(err.value)
++
++
++@pytest.mark.parametrize(
++    "vtp,tp,bi,error",
++    [
++        ("", "8", True, None),
++        ("1", "8", True, None),
++        ("8", "8", True, None),
++        ("8", "", True, None),
++        ("8", "4", True, "differs from ROLLOUT_TP"),
++        ("eight", "", True, "rollout's TP size"),
++        ("eight", "", False, None),  # VTP is read only under BI
++    ],
++)
++def test_vtp_must_mirror_rollout_tp(clean_env, vtp, tp, bi, error) -> None:
++    clean_env.setenv("MLITE_K31_BI_VTP", vtp)
++    clean_env.setenv("ROLLOUT_TP", tp)
++    if error is None:
++        rm._check_rocm_env(bi)
++    else:
++        with pytest.raises(RuntimeError, match=error):
++            rm._check_rocm_env(bi)
++
++
++# --------------------------------------------------------------------------- matmul_np dispatch (trainer only)
++@pytest.fixture
++def fake_bi(monkeypatch):
++    """Stub vllm.model_executor.determinism.batch_invariant and record which GEMM each call takes."""
++
++    from megatron.lite.primitive.kernels import k31_bi_mm_np as NP
++
++    calls = []
++    mod = types.ModuleType("vllm.model_executor.determinism.batch_invariant")
++    mod.matmul_persistent = lambda a, b, bias=None: calls.append("persistent") or "persistent"
++    for name in ("vllm", "vllm.model_executor", "vllm.model_executor.determinism"):
++        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
++    monkeypatch.setitem(sys.modules, mod.__name__, mod)
++    sys.modules["vllm.model_executor.determinism"].batch_invariant = mod
++    monkeypatch.setattr(NP, "_ORIG", {})
++    monkeypatch.setattr(NP, "matmul_np", lambda a, b, bias=None: calls.append("np") or "np")
++    return NP, mod, calls
++
++
++def test_matmul_np_thresholds(fake_bi) -> None:
++    NP, mod, calls = fake_bi
++    wrapper = NP.install(min_m=1024)
++    assert mod.matmul_persistent is wrapper
++    bf, f32 = torch.bfloat16, torch.float32
++
++    def mm(m, k, n, dt=bf):
++        return mod.matmul_persistent(torch.empty(m, k, dtype=dt), torch.empty(k, n, dtype=dt))
++
++    cases = [((1024, 256, 256), "np"), ((1023, 256, 256), "persistent"), ((4096, 255, 4096), "persistent"),
++             ((4096, 4096, 255), "persistent"), ((4096, 32, 4096), "persistent"), ((16384, 7168, 8448), "np")]
++    for shape, want in cases:
++        assert mm(*shape) == want, shape
++    assert mm(4096, 4096, 4096, f32) == "persistent"  # non-BF16 keeps the original path
++    assert NP.install(min_m=1) is wrapper  # idempotent: no double wrap, first thresholds stay
++    assert mm(1023, 256, 256) == "persistent"
++    assert calls == [w for _, w in cases] + ["persistent", "persistent"]  # each call reached exactly one GEMM
++
++
++# --------------------------------------------------------------------------- VTP / reduction helpers
++@pytest.mark.parametrize("vtp,bi,want", [("8", "1", 8), ("8", "0", 1), ("1", "1", 1), ("", "1", 1), ("0", "1", 1)])
++def test_vtp_size_needs_bi(monkeypatch, vtp, bi, want) -> None:
++    monkeypatch.setenv("MLITE_K31_BI_VTP", vtp)
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", bi)
++    assert rocm_k31.vtp_size() == want
++
++
++def test_vtp_slices_partition_k() -> None:
++    sl = rocm_k31._vtp_slices(7168, 8)
++    assert [s.start for s in sl] == list(range(0, 7168, 896)) and sl[-1].stop == 7168
++    with pytest.raises(ValueError, match="does not divide"):
++        rocm_k31._vtp_slices(100, 8)
++
++
++def test_tree16_root_is_the_pairwise_tree() -> None:
++    g = torch.Generator().manual_seed(3)
++    leaves = torch.randn(16, 33, generator=g)
++    level = list(leaves)
++    while len(level) > 1:
++        level = [level[i] + level[i + 1] for i in range(0, len(level), 2)]
++    assert torch.equal(rocm_k31.tree16_root(leaves), level[0])
++    for bad in (leaves.double(), leaves[:8], leaves[0]):
++        with pytest.raises(ValueError):
++            rocm_k31.tree16_root(bad)
++
++
++def test_mm_f32out_cpu() -> None:
++    a = torch.randn(5, 7).bfloat16()
++    b = torch.randn(7, 3).bfloat16()
++    out = rocm_k31.mm_f32out(a, b)
++    assert out.dtype == torch.float32
++    torch.testing.assert_close(out, a.float() @ b.float())
++
++
++# --------------------------------------------------------------------------- Triton kernels (interpreter, subprocess)
++@pytest.mark.parametrize("case", ["segsum_bitwise", "segsum_edges", "dsa_bwd", "dsa_core"])
++def test_interpreted_kernel_case(case) -> None:
++    pytest.importorskip("triton")
++    here = Path(__file__).parent
++    lite_root = Path(protocol.__file__).parents[5]  # experimental/lite
++    env = {**os.environ, "TRITON_INTERPRET": "1",
++           "PYTHONPATH": os.pathsep.join([str(lite_root), os.environ.get("PYTHONPATH", "")])}
++    res = subprocess.run([sys.executable, str(here / "_rocm_interp_cases.py"), case], env=env, capture_output=True,
++                         text=True, timeout=900, check=False)
++    assert res.returncode == 0 and f"OK {case}" in res.stdout, res.stdout[-2000:] + res.stderr[-4000:]
++
++
++# --------------------------------------------------------------------------- ROCm BI init
++@pytest.fixture
++def rocm_init(backend, clean_env, monkeypatch):
++    """ROCm init with no BI cuBLAS env at startup or now; returns the list of k31_bi_mm_np.install calls."""
++
++    from megatron.lite.primitive.kernels import k31_bi_mm_np as NP
++
++    backend("rocm")
++    monkeypatch.setattr(rm, "_INITIALIZED", False)
++    monkeypatch.setattr(rm, "_STARTUP_CUBLAS_ENV", dict.fromkeys(rm._CUBLAS_ENV))
++    for name in (*rm._CUBLAS_ENV, *rm.RETIRED_ENV):
++        monkeypatch.delenv(name, raising=False)
++    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)
++    installs = []
++    monkeypatch.setattr(NP, "install", lambda **kw: installs.append(kw))
++    return installs
++
++
++def _stub_plugins(monkeypatch, present=("k31kdabi", "k31lora", "k31lora.bi_moe")):
++    for name in ("k31kdabi", "k31lora", "k31lora.bi_moe"):
++        if name in present:
++            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
++        else:
++            monkeypatch.setitem(sys.modules, name, None)  # import raises ImportError
++
++
++def test_rocm_init_bi1_installs_trainer_gemm(rocm_init, monkeypatch) -> None:
++    _stub_plugins(monkeypatch)
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
++    rm.initialize_k31_vllm_batch_invariance()
++    assert rm._INITIALIZED is True
++    assert rocm_init == [{"min_m": 1024}]
++    assert torch.backends.cuda.matmul.allow_tf32 is False
++
++
++@pytest.mark.parametrize("missing", ["k31kdabi", "k31lora.bi_moe"])
++def test_rocm_init_bi1_needs_rollout_plugins(rocm_init, monkeypatch, missing) -> None:
++    _stub_plugins(monkeypatch, present=[m for m in ("k31kdabi", "k31lora", "k31lora.bi_moe") if m != missing])
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
++    with pytest.raises(RuntimeError, match=missing.replace(".", r"\.")):
++        rm.initialize_k31_vllm_batch_invariance()
++    assert rm._INITIALIZED is False and rocm_init == []
++
++
++def test_rocm_init_bi0_runs_without_plugins(rocm_init, monkeypatch) -> None:
++    _stub_plugins(monkeypatch, present=())
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
++    rm.initialize_k31_vllm_batch_invariance()
++    assert rm._INITIALIZED is True and rocm_init == []
++    assert torch.backends.cuda.matmul.allow_tf32 is True  # BI off: left alone
++
++
++def test_rocm_init_bi0_refuses_bi_cublas_env(rocm_init, monkeypatch) -> None:
++    name = next(iter(rm._CUBLAS_ENV))
++    monkeypatch.setenv(name, rm._CUBLAS_ENV[name] or "1")
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
++    with pytest.raises(RuntimeError, match="BI cuBLAS environment"):
++        rm.initialize_k31_vllm_batch_invariance()
++    assert rm._INITIALIZED is False
++
++
++def test_rocm_init_refuses_retired_switch_first(rocm_init, monkeypatch) -> None:
++    _stub_plugins(monkeypatch)
++    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
++    monkeypatch.setenv("MLITE_K31_ROCM_DGRAD", "1")
++    with pytest.raises(RuntimeError, match="MLITE_K31_ROCM_DGRAD"):
++        rm.initialize_k31_vllm_batch_invariance()
++    assert rm._INITIALIZED is False and rocm_init == []
++
++
++# --------------------------------------------------------------------------- DSA through the base attention_core
++def test_rocm_dsa_metadata_fields() -> None:
++    from megatron.lite.model.k31.vllm.primitive import dsa_rocm as D
++
++    md = D.build_dsa_rocm_metadata([5, 70, 1], device="cpu", topk=16)
++    assert torch.equal(md.block_table, torch.tensor([0, 5, 75])) and md.workspace_starts is md.block_table
++    assert torch.equal(md.slot_mapping, torch.arange(76))
++    assert md.mla_cache.shape == (2, 64, D.DS_MLA_ROW_BYTES) and D.DS_MLA_ROW_BYTES == 656
++    assert md.indexer is md and md.cache_lens is None and md.dummy_block_table is None
++    assert torch.equal(md.positions, torch.cat((torch.arange(5), torch.arange(70), torch.arange(1))))
++    with pytest.raises(ValueError):
++        D.build_dsa_rocm_metadata([3, 0], device="cpu")
++
++
++def test_rocm_dsa_indices_equal_packed_rows() -> None:
++    """attention_core's two index maps (sparse convert_indices, backward workspace_topk) both equal the packed rows
++    the ROCm path used before (request start + request-local index, -1 kept)."""
++    from megatron.lite.model.k31.vllm.primitive import dsa_rocm as D
++
++    g = torch.Generator().manual_seed(2)
++    md = D.build_dsa_rocm_metadata([7, 12, 4], device="cpu", topk=6)
++    T = 23
++    logical = torch.full((T, 6), -1, dtype=torch.int32)
++    for t in range(T):
++        n = int(md.positions[t]) + 1
++        logical[t, : min(n, 6)] = torch.randperm(n, generator=g)[:6].to(torch.int32)
++    starts = md.cu_seqlens[:-1].index_select(0, md.req_id_per_token)
++    packed = torch.where(logical >= 0, logical.long() + starts[:, None], -1)
++    conv = D.DSASparseMLAAdapter.convert_indices(md.req_id_per_token, md.block_table, logical, block_size=64)
++    ws = torch.where(logical >= 0, logical + md.workspace_starts.index_select(0, md.req_id_per_token.long())[:, None],
++                     logical)  # attention_core's workspace_topk expression
++    assert torch.equal(conv, packed) and torch.equal(ws, packed)
++
++
++def test_ds_mla_dequant_layout() -> None:
++    from _rocm_interp_cases import ds_mla_write_rows
++    from megatron.lite.model.k31.vllm.primitive import dsa_rocm as D
++
++    g = torch.Generator().manual_seed(4)
++    kv = (torch.randn(9, 512, generator=g) * torch.tensor([1e-6, 1.0, 30.0, 0.0]).repeat_interleave(128)).bfloat16()
++    pe = torch.randn(9, 64, generator=g).bfloat16()
++    out = D.ds_mla_dequant(ds_mla_write_rows(kv, pe))
++    assert out.dtype == torch.bfloat16 and out.shape == (9, 576)
++    assert torch.equal(out[:, 512:], pe)  # rope tail raw
++    assert torch.equal(out[:, 384:512], torch.zeros(9, 128, dtype=torch.bfloat16))  # zero tile stays zero
++    torch.testing.assert_close(out[:, 128:384].float(), kv[:, 128:384].float(), rtol=0.07, atol=0)  # e4m3 rounding
++
++
++def test_default_dsa_adapters_follow_backend(backend) -> None:
++    from megatron.lite.model.k31.vllm.primitive import attention as A
++    from megatron.lite.model.k31.vllm.primitive import dsa_rocm as D
++
++    backend("rocm")
++    ad = A.default_dsa_adapters()
++    assert ad.backward is D.sparse_backward and isinstance(ad.sparse, D.DSASparseMLAAdapter)
++    assert isinstance(ad.upconvert, D.DSAFP8KVUpconvertAdapter) and isinstance(ad.bmm, D.DSAAbsorbBmmAdapter)
++    backend("vllm_cuda")
++    ad = A.default_dsa_adapters()
++    assert ad.backward is None and type(ad.sparse).__module__.endswith("vllm_k31")
+diff --git a/experimental/lite/tests/unit/model/k31/vllm/test_vllm_skeleton.py b/experimental/lite/tests/unit/model/k31/vllm/test_vllm_skeleton.py
+index 39586a3..c50d503 100644
+--- a/experimental/lite/tests/unit/model/k31/vllm/test_vllm_skeleton.py
++++ b/experimental/lite/tests/unit/model/k31/vllm/test_vllm_skeleton.py
+@@ -6,7 +6,7 @@ from types import SimpleNamespace
+ 
+ import pytest
+ import torch
+-
++from _tiny import TINY_TARGETS, tiny_config, tiny_lora
+ from megatron.lite.model import registry
+ from megatron.lite.model.k31.config import K31Config
+ from megatron.lite.model.k31.vllm import checkpoint as ckpt
+@@ -22,8 +22,6 @@ from megatron.lite.primitive.modules.lora import LoraConfig
+ from megatron.lite.primitive.parallel import ParallelState
+ from megatron.lite.runtime.contracts import ParallelConfig
+ 
+-from _tiny import TINY_TARGETS, tiny_config, tiny_lora
+-
+ 
+ # --------------------------------------------------------------------------- registry
+ def test_registry_exposes_only_the_vllm_impl() -> None:
+@@ -114,9 +112,18 @@ def test_contract_accepts_the_deployment_shape() -> None:
+         "fsdp2-ep",
+     ],
+ )
+-def test_contract_fails_closed(overrides, error) -> None:
+-    with pytest.raises(error):
+-        protocol._validate_contract(tiny_config(), _impl(**overrides))
++def test_contract_fails_closed(overrides, error, monkeypatch) -> None:
++    # The CUDA contract (the ROCm backend allows use_deepep=False: see test_rocm_backend_cpu.py).
++    from megatron.lite.primitive.kernels import k31_backend
++
++    monkeypatch.setenv("MLITE_K31_BACKEND", "vllm_cuda")
++    k31_backend.backend.cache_clear()
++    try:
++        with pytest.raises(error):
++            protocol._validate_contract(tiny_config(), _impl(**overrides))
++    finally:
++        monkeypatch.delenv("MLITE_K31_BACKEND")
++        k31_backend.backend.cache_clear()
+ 
+ 
+ class TestSelectRouterLayers:
+@@ -604,6 +611,16 @@ class TestRetiredEnv:
+ 
+ 
+ class TestBatchInvarianceInit:
++    @pytest.fixture(autouse=True)
++    def _cuda_backend(self, monkeypatch):
++        """The CUDA init path (ROCm init: test_rocm_backend_cpu.py)."""
++        from megatron.lite.primitive.kernels import k31_backend
++
++        monkeypatch.setenv("MLITE_K31_BACKEND", "vllm_cuda")
++        k31_backend.backend.cache_clear()
++        yield
++        k31_backend.backend.cache_clear()
++
+     def test_cublas_check_reads_startup_values_not_vllm_rewrite(self, monkeypatch) -> None:
+         from megatron.lite.model.k31.vllm import runtime_metadata as rm
+ 
