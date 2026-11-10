@@ -693,6 +693,7 @@ def streaming_fit_trainer(
         "_stop_profiling",
         "_compute_metrics",
         "_shutdown_dump_executor",
+        "_shutdown_train_dataloader",
         "on_validate_begin",
         "on_validate_end",
     ):
