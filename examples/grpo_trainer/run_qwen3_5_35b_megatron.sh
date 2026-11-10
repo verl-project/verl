@@ -73,6 +73,9 @@ case "${DEVICE}" in
         n_devices_per_node=${NDEVICES_PER_NODE:-8}
         ;;
     npu)
+        # Defaults target a single 16-NPU Atlas A3 node. On a 1x8-NPU (A5)
+        # node set NDEVICES_PER_NODE=8 PP=1; see the A5 notes in the npu
+        # branch below for the remaining validated differences.
         TP=${TP:-2}
         PP=${PP:-2}
         CP=${CP:-1}
@@ -212,9 +215,12 @@ case "${DEVICE}" in
         export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        # 1x8-NPU (A5) variant: NDEVICES_PER_NODE=8 PP=1, rollout dp/tp=4/2,
-        # gpu_memory_utilization=0.55, MTP_ENABLE=True, plus vLLM sleep mode
-        # (rl_config.sleep_mode_extra_cleanup).
+        # Remaining validated differences of the 1x8-NPU (A5) variant
+        # (NDEVICES_PER_NODE=8 and PP=1 are set in the quick-config section):
+        #   - MTP_ENABLE=True with rollout dp/tp/ep = 4/2/8 (A3 MTP uses
+        #     2/4/8; edit the three parallelism lines in the MTP block below)
+        #   - gpu_memory_utilization=0.55 (A3 default: 0.6)
+        #   - vLLM sleep mode: additional_config.rl_config.sleep_mode_extra_cleanup=True
         ACTOR+=(
             actor_rollout_ref.actor.use_dynamic_bsz=True
             actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192
@@ -235,6 +241,11 @@ case "${DEVICE}" in
         )
         MODEL+=(
             actor_rollout_ref.model.use_remove_padding=True
+        )
+        REF+=(
+            # Keep ref weights resident; offloading them costs ~14s per step
+            # on the validated single-node recipes.
+            actor_rollout_ref.ref.megatron.param_offload=False
         )
         # MTP speculative decoding (opt-in); needs vllm-ascend >= v0.27.1rc1
         # and a checkpoint with MTP layers.
