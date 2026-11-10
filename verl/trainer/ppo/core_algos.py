@@ -1581,7 +1581,12 @@ def compute_policy_loss_gspo(
     # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
     # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
     seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
-    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    # Same rule as geo_mean: an IcePop rejected token (weight 0) adds 0 to the sequence log ratio while the
+    # length stays the same, so it can't push the kept tokens of its sequence into the clip region.
+    ratio_mask = response_mask
+    if rollout_is_weights is not None:
+        ratio_mask = response_mask * (rollout_is_weights > 0).to(response_mask.dtype)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * ratio_mask, dim=-1) / seq_lengths
 
     # Combined ratio at token level:
     # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]

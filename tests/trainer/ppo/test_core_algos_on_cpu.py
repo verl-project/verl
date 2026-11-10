@@ -25,6 +25,7 @@ from verl.trainer.ppo.core_algos import (
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
     compute_policy_loss_geo_mean,
+    compute_policy_loss_gspo,
     compute_policy_loss_vanilla,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
@@ -461,6 +462,42 @@ def test_geo_mean_drops_icepop_rejected_tokens():
     loss.backward()
     assert loss.item() == pytest.approx(-0.5, abs=1e-6), "fully rejected sequence must contribute 0 to the batch mean"
     assert float(log_prob.grad[1].abs().max()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_gspo_ignores_icepop_rejected_tokens_in_sequence_ratio():
+    """A token rejected by IcePop (weight 0) must not move the GSPO sequence ratio of its kept tokens."""
+    config = ActorConfig(
+        strategy="fsdp",
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        clip_ratio=0.2,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.2,
+        loss_agg_mode="seq-mean-token-mean",
+        policy_loss=PolicyLossConfig(loss_mode="gspo"),
+    )
+    batch_size, seq_len, bad = 2, 4, 2
+    old_log_prob = torch.full((batch_size, seq_len), -1.0)
+    log_prob = old_log_prob.clone()
+    log_prob[1, bad] = 0.0  # the rejected token drifted, exp(1 / 4) ~ 1.28 would clip the whole sequence
+    log_prob.requires_grad_(True)
+    weights = torch.ones(batch_size, seq_len)
+    weights[1, bad] = 0.0
+
+    loss, _ = compute_policy_loss_gspo(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=torch.ones(batch_size, seq_len),
+        response_mask=torch.ones(batch_size, seq_len),
+        loss_agg_mode="seq-mean-token-mean",
+        config=config,
+        rollout_is_weights=weights,
+    )
+    loss.backward()
+    g = log_prob.grad
+    assert g[1, bad].item() == pytest.approx(0.0, abs=1e-6)
+    assert g[0, 0].item() != 0.0
+    assert g[1, 0].item() == pytest.approx(g[0, 0].item(), rel=1e-5)
 
 
 if __name__ == "__main__":
