@@ -1,43 +1,22 @@
 #!/usr/bin/env bash
-# GRPO/DAPO | Kimi-K3.1 (MXFP4 routed experts) LoRA | true on-policy | vLLM rollout + Megatron mLite | AMD ROCm (MI355X)
+# GRPO/DAPO | Kimi-K3.1 (MXFP4 routed experts) LoRA | vLLM rollout + Megatron mLite | AMD ROCm (MI355X)
 #
-# One recipe; VLLM_BATCH_INVARIANT alone selects the arm:
-#   VLLM_BATCH_INVARIANT=1 (default)  consistent arm: batch-invariant vLLM rollout, Megatron mLite actor with the
-#                                     vLLM-aligned Kimi-K3.1 implementation (actor_rollout_ref.actor.engine.impl=vllm,
-#                                     model_name=k31): rollout log-probs == trainer log-probs bitwise
-#                                     (training/rollout_probs_diff_max = 0.0).
-#   VLLM_BATCH_INVARIANT=0            baseline: default vLLM kernels, the same actor without its batch-invariant paths;
-#                                     the rollout/trainer mismatch is corrected with token-level truncated IS.
-# Algorithm, data, lengths, batch, LoRA, optimizer and parallel layout are shared by both arms.
-# Same structure as examples/grpo_trainer/run_deepseek_v4_flash_true_on_policy_rocm.sh (#8505).
+# VLLM_BATCH_INVARIANT selects the arm (everything else is shared):
+#   1 (default)  batch-invariant vLLM rollout + mLite actor with the vLLM-aligned Kimi-K3.1 implementation
+#                (impl=vllm): rollout and trainer log-probs are bitwise equal (rollout_probs_diff_max = 0).
+#   0            default vLLM kernels; the mismatch is corrected with token-level truncated IS.
 #
-# The defaults are the configuration of the validated 2 x 8 MI355X runs (seed 42, 16 prompts x 8 samples, prompt 3072 /
-# response 4096 tokens): rollout_probs_diff_max 0.0 on every step.
+# Trains a LoRA adapter (r=32, alpha=64; attention, dense / shared-expert MLP, routed experts) on the frozen MXFP4
+# base. Layout (2 nodes x 8 GPUs): actor PP4 x EP4; one TP8 + EP8 rollout engine per node.
 #
-# What trains: a LoRA adapter (r=32, alpha=64) on attention, dense / shared-expert MLP and the routed experts; the
-# MXFP4 base stays frozen. LORA_ADAPTER_PATH is the initial adapter (a peft directory with these targets).
+# Image: docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy. Containers need --device /dev/kfd --device /dev/dri
+# --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576. Export the arm's environment
+# (DRY_RUN=1 prints it) before `ray start` on every node.
 #
-# Layout (2 nodes x 8 GPUs):
-#   actor   mLite impl=vllm, PP4 x EP4, TP1, full recompute, parameters offloaded while the rollout generates.
-#   rollout one vLLM engine per node, TP8 + EP8 (MI355X: 288 GB per GPU; ~190 GiB of weights per GPU at TP8).
-#   sync    the rollout sleeps at level 2 and reloads its frozen base from MODEL_PATH on every wake
-#           (rollout.reload_base_on_wake); the adapter is exported while vLLM still sleeps
-#           (rollout.export_adapter_before_wake) and each rollout worker receives only the expert factors of its EP
-#           rank (rollout.lora_expert_slice).
-#
-# Image: docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy (the ROCm vLLM build with Kimi-K3.1 support + the DSA
-# batch-invariance patch, Megatron-LM mLite with its Kimi-K3.1 ROCm port, and the vLLM plugins in K31_PLUGIN_ROOT:
-# k31lora and k31kdabi for the consistent arm, k31lora and k31xlora for the baseline arm).
-#
-# Containers: --device /dev/kfd --device /dev/dri --device /dev/infiniband --ulimit memlock=-1:-1
-#             --ulimit nofile=1048576:1048576. Export this arm's environment before `ray start` on every node as well:
-#             some of it is read at import time in Ray-spawned processes.
-#
-# Required env: MODEL_PATH (Kimi-K3.1 HF directory, node-local on every node), LORA_ADAPTER_PATH, TRAIN_FILES,
-# VAL_FILES; VERL_ROOT, MEGATRON_ROOT and K31_PLUGIN_ROOT (set by the image); RAY_ADDRESS of an existing Ray cluster
-# for NNODES > 1. K31_PLUGIN_PATH overrides the arm's plugin directories.
-# Modes: DRY_RUN=1 prints the arm environment and the full command; COMPOSE_ONLY=1 prints the resolved Hydra config.
-# Extra arguments are passed to verl.trainer.main_ppo as Hydra overrides (last wins).
+# Required: MODEL_PATH (node-local on every node), LORA_ADAPTER_PATH (initial peft adapter), TRAIN_FILES, VAL_FILES;
+# RAY_ADDRESS for NNODES > 1. VERL_ROOT, MEGATRON_ROOT, K31_PLUGIN_ROOT come from the image; K31_PLUGIN_PATH
+# overrides the arm's plugins. DRY_RUN=1 prints the environment and command, COMPOSE_ONLY=1 the resolved config.
+# Extra arguments are Hydra overrides (last wins).
 set -euo pipefail
 
 die() {
@@ -121,15 +100,12 @@ ARM_ENV_NAMES=(PYTHONPATH PYTHONHASHSEED PYTHONUNBUFFERED CUDA_DEVICE_MAX_CONNEC
   VLLM_ALLOW_INSECURE_SERIALIZATION TORCH_NCCL_AVOID_RECORD_STREAMS VLLM_USE_BREAKABLE_CUDAGRAPH
   VLLM_ENGINE_READY_TIMEOUT_S HF_HUB_OFFLINE TVM_FFI_DISABLE_TORCH_C_DLPACK VLLM_ROCM_USE_AITER
   VLLM_ROCM_USE_AITER_MOE_SITUV2 MLITE_K31_BACKEND VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM VERL_FILE_LOGGER_PATH)
-# RDMA: select the ibverbs userspace that matches the host's AMD ionic NIC driver (docker/rocm/ionic-rdma-env.sh of
-# #8505; with the wrong one RCCL silently falls back to TCP sockets) and pass the choice on to the Ray workers.
+# RDMA: the ibverbs userspace matching the host's AMD ionic NIC driver (as #8505), forwarded to the Ray workers.
 if command -v ionic-rdma-env.sh >/dev/null; then
   eval "$(ionic-rdma-env.sh)"
   if [[ "${LD_LIBRARY_PATH:-}" == */opt/rdma-core/lib* ]]; then ARM_ENV_NAMES+=(LD_LIBRARY_PATH NCCL_DMABUF_ENABLE); fi
 fi
-# Site-specific RCCL / socket settings (NCCL_IB_HCA, NCCL_IB_GID_INDEX, NCCL_TOPO_FILE, NCCL_SOCKET_IFNAME,
-# GLOO_SOCKET_IFNAME, ...) come from the environment and are forwarded as they are.
-# (ionic-rdma-env.sh above may already have added NCCL_DMABUF_ENABLE: each name is forwarded once.)
+# Site-specific NCCL_* / GLOO_* / RCCL_* settings are forwarded once each.
 for name in $(compgen -e | grep -E '^(NCCL_|GLOO_|RCCL_)' || true); do
   [[ " ${ARM_ENV_NAMES[*]} " == *" ${name} "* ]] || ARM_ENV_NAMES+=("${name}")
 done
@@ -145,7 +121,7 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
   export MLITE_K31_BI_VTP="${ROLLOUT_TP}" MLITE_K31_KDA_BI=1 MLITE_K31_MOE_BI=1
   # Rollout plugins: batch-invariant MXFP4 MoE with expert LoRA, LoRA added in FP32, KDA FULL decode graphs.
   export K31_BI_MOE=1 K31_BI_LORA_F32ADD=1 K31LORA_EXPERTS=1 K31_BI_TMP="${K31_BI_TMP:-/tmp}" K31_KDA_BI_FULL=1
-  # Bit-neutral speed switches of the batch-invariant MoE (same output bits; on in the faster validated run).
+  # Speed switches of the batch-invariant MoE (same output bits).
   export K31_BI_MOE_BM_LARGE="${K31_BI_MOE_BM_LARGE:-128}" K31_BI_MOE_FUSED_COMBINE_EP="${K31_BI_MOE_FUSED_COMBINE_EP:-1}"
   export K31_BI_MOE_FUSED_GLUE="${K31_BI_MOE_FUSED_GLUE:-1}" K31_BI_MOE_SCALED="${K31_BI_MOE_SCALED:-1}"
   ARM_ENV_NAMES+=(MLITE_K31_BI_VTP MLITE_K31_KDA_BI MLITE_K31_MOE_BI K31_BI_MOE K31_BI_LORA_F32ADD K31LORA_EXPERTS

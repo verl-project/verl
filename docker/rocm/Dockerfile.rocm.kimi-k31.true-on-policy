@@ -1,21 +1,10 @@
 # syntax=docker/dockerfile:1.7
-# Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh
+# Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh.
+# Adds to a ROCm vLLM build with Kimi-K3.1 support (vLLM f5926fb, AITER): the vLLM DSA batch-invariance patch,
+# Megatron-LM with mLite's Kimi-K3.1 implementation and its ROCm patches, the vLLM plugins in /opt/k31-plugins
+# (not on PYTHONPATH; the recipe selects them per arm), rdma-core for AMD ionic NICs (as #8505) and verl.
+# Every patched and plugin file is checked against patches/kimi-k31-true-on-policy.sha256. See docker/rocm/README.md.
 #
-# Base: the ROCm vLLM build with Kimi-K3.1 support (vLLM 0.0.0+f5926fb, AITER), plus
-#   - a vLLM DSA batch-invariance patch (patches/vllm-k31-bi-*.patch);
-#   - Megatron-LM: megatron.core from NVIDIA/Megatron-LM with mLite (experimental/lite) and its Kimi-K3.1
-#     implementation from the public zero-mismatch-rl branch, plus patches/megatron-k31-*.patch, which run mLite's
-#     vLLM-aligned Kimi-K3.1 implementation (impl=vllm) on ROCm with batch-invariant paths;
-#   - vLLM general plugins in /opt/k31-plugins/kimi-k31 (patches/k31-plugin-*.patch): k31lora (LoRA for the ROCm Kimi-K3.1 model,
-#     batch-invariant dense GEMMs / LoRA epilogue / MXFP4 MoE with expert LoRA / AttnRes), k31kdabi (batch-invariant
-#     KDA, FULL decode graphs) and k31xlora (W4A16 expert LoRA for the batch-variant arm). The recipe puts the arm's
-#     plugins on PYTHONPATH; nothing is on it by default;
-#   - upstream rdma-core in /opt/rdma-core for hosts with AMD ionic 26.x NIC drivers (as #8505, ionic-rdma-env.sh).
-# With VLLM_BATCH_INVARIANT=1 the rollout log-probs and the trainer log-probs of the same tokens are bitwise equal.
-# Every patched file and every plugin file is checked against patches/kimi-k31-true-on-policy.sha256 at build time.
-#
-# Build from the repository root, with BASE_IMAGE = a ROCm vLLM build with Kimi-K3.1 support (vLLM f5926fb with AITER;
-# pin it by digest, <image>@sha256:<digest>):
 #   DOCKER_BUILDKIT=1 docker build -f docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy \
 #     --build-arg BASE_IMAGE=<image>@sha256:<digest> -t verl-rocm:kimi-k31-true-on-policy .
 
