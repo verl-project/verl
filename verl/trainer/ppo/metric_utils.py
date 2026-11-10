@@ -426,7 +426,106 @@ class RolloutMoELoadBalanceMetricsAccumulator:
         return metrics
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
+def build_metric_batch_fields(use_critic: bool, calculate_sum_pi_squared: bool) -> list[str]:
+    """Fields the metrics step must project out of the batch before computing metrics.
+
+    ``compute_data_metrics`` and ``compute_variance_proxy_metrics`` only see the
+    projected batch, so every field they read has to be requested here:
+
+    - ``use_critic`` adds ``values`` for the critic metrics;
+    - ``calculate_sum_pi_squared`` adds the actor-side variance-proxy inputs
+      (``old_log_probs`` + ``sum_pi_squared``). The actor only writes
+      ``sum_pi_squared`` when that option is enabled, hence the flag.
+
+    Args:
+        use_critic: Whether the trainer owns a critic.
+        calculate_sum_pi_squared: Whether the actor emits ``sum_pi_squared``.
+
+    Returns:
+        The ordered list of field names to fetch.
+    """
+    fields = [
+        "prompts",
+        "responses",
+        "response_mask",
+        "advantages",
+        "returns",
+        "rm_scores",
+        "token_level_rewards",
+        "num_turns",
+    ]
+    if use_critic:
+        fields.append("values")
+    if calculate_sum_pi_squared:
+        fields.extend(["old_log_probs", "sum_pi_squared"])
+    return fields
+
+
+def metric_length_caps(config: Any) -> dict[str, int]:
+    """Configured prompt/response caps for the truncation-rate metrics.
+
+    ``compute_data_metrics`` cannot infer these from a padded V1 batch: V1 pads
+    jagged samples to the longest sample instead of the configured length. The
+    values mirror what the V0 agent loop pads to, i.e.
+    ``actor_rollout_ref.rollout.{prompt,response}_length``.
+
+    Args:
+        config: The trainer config.
+
+    Returns:
+        ``{"max_prompt_length": int, "max_response_length": int}``; keys whose
+        configured value is not a positive integer are omitted so the metric
+        falls back to its historical width-based behaviour.
+    """
+    rollout_config = config.actor_rollout_ref.rollout
+    caps: dict[str, int] = {}
+    for config_key, meta_key in (
+        ("prompt_length", "max_prompt_length"),
+        ("response_length", "max_response_length"),
+    ):
+        value = rollout_config.get(config_key, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            caps[meta_key] = value
+    return caps
+
+
+def _resolve_length_cap(
+    explicit: int | None,
+    meta_info: dict[str, Any] | None,
+    key: str,
+    fallback: int,
+) -> int:
+    """Resolve the configured length cap used by the truncation-rate metrics.
+
+    Precedence: explicit argument > ``meta_info[key]`` > padded tensor width.
+    Non-positive / non-integer values are ignored so that callers and test
+    doubles that do not carry the cap keep the historical width-based
+    behaviour instead of failing inside ``torch.eq``.
+
+    Args:
+        explicit: Cap passed directly by the caller, if any.
+        meta_info: Optional ``DataProto.meta_info`` mapping of the batch.
+        key: Meta-info key holding the cap (``max_prompt_length`` / ``max_response_length``).
+        fallback: Padded tensor width used when no configured cap is available.
+
+    Returns:
+        The length cap as a positive integer.
+    """
+    if isinstance(explicit, int) and not isinstance(explicit, bool) and explicit > 0:
+        return explicit
+    if isinstance(meta_info, dict):
+        value = meta_info.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return int(fallback)
+
+
+def compute_data_metrics(
+    batch: DataProto,
+    use_critic: bool = True,
+    max_prompt_length: int | None = None,
+    max_response_length: int | None = None,
+) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -437,6 +536,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     Args:
         batch: A DataProto object containing batch data with token-level scores, rewards, advantages, etc.
         use_critic: Whether to include critic-specific metrics. Defaults to True.
+        max_prompt_length: Configured prompt length cap used by the truncation-rate metrics.
+            When omitted, it is read from ``batch.meta_info["max_prompt_length"]`` and finally
+            falls back to the prompt tensor width.
+        max_response_length: Configured response length cap used by the truncation-rate metrics.
+            When omitted, it is read from ``batch.meta_info["max_response_length"]`` and finally
+            falls back to the response tensor width.
+
+    The tensor widths only equal the configured caps when the producer pads every sample to
+    that cap (the V0 agent loop does). V1 keeps jagged sequences and pads to the longest
+    sample in the batch, so callers must pass the configured caps (or put them in
+    ``batch.meta_info``) for ``*/clip_ratio`` to report the actual truncation rate.
 
     Returns:
         A dictionary of metrics including:
@@ -456,8 +566,21 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
 
-    max_prompt_length = batch.batch["prompts"].shape[-1]
-    max_response_length = batch.batch["responses"].shape[-1]
+    # Truncation-rate metrics must compare against the configured length caps, not against
+    # the padded batch width. The width is only a valid stand-in when the batch producer pads
+    # to the configured length (V0); V1 pads jagged samples to the batch maximum.
+    max_prompt_length = _resolve_length_cap(
+        explicit=max_prompt_length,
+        meta_info=getattr(batch, "meta_info", None),
+        key="max_prompt_length",
+        fallback=batch.batch["prompts"].shape[-1],
+    )
+    max_response_length = _resolve_length_cap(
+        explicit=max_response_length,
+        meta_info=getattr(batch, "meta_info", None),
+        key="max_response_length",
+        fallback=batch.batch["responses"].shape[-1],
+    )
 
     response_mask = batch.batch["response_mask"].bool()
 

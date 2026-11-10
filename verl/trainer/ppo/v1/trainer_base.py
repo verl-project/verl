@@ -52,12 +52,14 @@ from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
+    build_metric_batch_fields,
     compute_data_metrics,
     compute_moe_lb_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
     get_metric_data_with_optional_routed_experts,
+    metric_length_caps,
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
@@ -1885,18 +1887,10 @@ class PPOTrainer(ABC):
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
         non_padding_mask = np.array([not tag.get("is_padding", False) for tag in batch.tags], dtype=bool)
-        fields = [
-            "prompts",
-            "responses",
-            "response_mask",
-            "advantages",
-            "returns",
-            "rm_scores",
-            "token_level_rewards",
-            "num_turns",
-        ]
-        if self.use_critic:
-            fields.append("values")
+        # The actor only emits sum_pi_squared when the variance proxy is enabled, and
+        # compute_variance_proxy_metrics needs both fields; request them together.
+        calculate_sum_pi_squared = bool(self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False))
+        fields = build_metric_batch_fields(self.use_critic, calculate_sum_pi_squared)
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
@@ -1940,7 +1934,11 @@ class PPOTrainer(ABC):
             data["token_level_rewards"] = data["rm_scores"]
         data["prompt_length"] = prompt_length.float()
         data["response_length"] = response_length.float()
-        batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
+        # V1 pads jagged samples to the longest sample in the batch, so the tensor
+        # widths are not the configured truncation caps; carry the real caps so the
+        # clip_ratio metrics match V0 for the same run.
+        metric_meta_info = {"global_token_num": global_token_num, **metric_length_caps(self.config)}
+        batch = DataProto(batch=data, meta_info=metric_meta_info)
         metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
         # Expose per-row turn counts under the V0 schema (agent_loop writes
         # ``__num_turns__`` into the non-tensor batch) so compute_data_metrics
