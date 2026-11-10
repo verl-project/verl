@@ -89,9 +89,9 @@ def available_cpu_per_node() -> dict[str, float]:
     empty result as "unknown" and fall back to round-robin placement.
     """
     try:
-        from ray._private.state import state as ray_state
+        from ray._private.state import available_resources_per_node
 
-        per_node = ray_state._available_resources_per_node()
+        per_node = available_resources_per_node()
     except Exception:
         return {}
     return {node_id: float(resources.get("CPU", 0.0)) for node_id, resources in (per_node or {}).items()}

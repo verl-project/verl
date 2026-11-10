@@ -138,6 +138,15 @@ def test_available_cpu_per_node_returns_empty_when_unreachable():
     assert ray_utils.available_cpu_per_node() == {}
 
 
+def test_available_cpu_per_node_reads_ray_per_node_view(monkeypatch):
+    import ray._private.state as ray_state
+
+    monkeypatch.setattr(
+        ray_state, "available_resources_per_node", lambda: {"a": {"CPU": 2.5, "GPU": 1.0}, "b": {"memory": 1.0}}
+    )
+    assert ray_utils.available_cpu_per_node() == {"a": 2.5, "b": 0.0}
+
+
 def _declared_default(config_cls, field_name):
     return next(f for f in dataclasses.fields(config_cls) if f.name == field_name).default
 
