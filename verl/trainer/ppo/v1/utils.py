@@ -19,14 +19,14 @@ import torch
 
 from verl.protocol import DataProto
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.ray_trainer import compute_advantage
+from verl.trainer.ppo.trainer_utils import compute_advantage
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 
 
 class MetricsAggregator:
     """
     Combine per-iteration training metrics collected within a single ``parameter_sync_step`` cycle.
-    Adapted from ``verl.experimental.fully_async_policy.detach_utils.MetricsAggregator`.
+    Adapted from ``recipe.fully_async_policy.detach_utils.MetricsAggregator`.
     """
 
     def __init__(self):

@@ -50,7 +50,7 @@ tracking metrics to diagnose and correct off-policy issues.
   (KL/PPL/χ²) — no direct external calls needed.
 
 ### Integration Notes
-- Used in `ray_trainer.py` via `compute_rollout_correction_and_add_to_batch()` (batch training pipeline).
+- Used in `trainer_base.py` via `compute_rollout_correction_and_add_to_batch()` (batch training pipeline).
 - Used in `dp_actor.py` for distributed worker computations (distributed training scenarios).
 - All functions support batch inputs and valid token masking (via `response_mask`).
 

@@ -228,9 +228,6 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
-  # Whether to use V1 trainer
-  use_v1: true
-
   # V1 trainer mode configs
   v1:
 
@@ -460,21 +457,6 @@ skip:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.skip.SkipManagerConfig
 
-  # configs for RolloutSkip 
-  rollout:
-
-    # Whether to enable RolloutSkip
-    enable: False
-
-    # Directory to save rollout data
-    dump_dir: "~/.verl/rollout_dump"
-
-    # Steps to skip rollout
-    steps: []
-
-  # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
-    action: cache
-
   # configs for RolloutTqSkip (V1 TransferQueue-based trainer)
   rollout_tq:
 
@@ -488,21 +470,6 @@ skip:
     steps: []
 
     # Action to take when rollout is skipped (cache | repeat)
-    action: cache
-
-  # configs for AsyncRolloutSkip (fully async policy)
-  async_rollout:
-
-    # Whether to enable AsyncRolloutSkip
-    enable: False
-
-    # Directory to save rollout data
-    dump_dir: "~/.verl/rollout_dump"
-
-    # Steps to skip rollout (rollouter global_steps from sample_id)
-    steps: []
-
-    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
     action: cache
 
 # configs related to ray

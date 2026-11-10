@@ -33,8 +33,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Verify that imported functions/classes have docstrings.")
     p.add_argument(
         "--target-file",
-        default="verl/trainer/ppo/ray_trainer.py",
-        help="Path to the Python source file to analyse (e.g. verl/trainer/ppo/ray_trainer.py)",
+        default="verl/trainer/ppo/v1/trainer_base.py",
+        help="Path to the Python source file to analyse (e.g. verl/trainer/ppo/v1/trainer_base.py)",
     )
     p.add_argument(
         "--allow-list",

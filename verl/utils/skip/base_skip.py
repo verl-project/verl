@@ -24,8 +24,6 @@ class SkipAction(Enum):
     REPEAT = "repeat"  # repeat the result
     # Replace with the latest cached results
     # while relying on one cached result at least
-    RANDOM = "random"  # random the result
-    EMPTY = "empty"  # do thing, and return empty
 
 
 class BaseSkip:
@@ -40,7 +38,6 @@ class BaseSkip:
     """
 
     support_actions = []
-    support_online_step = False
 
     def __init__(self, local_config, global_config):
         self.action = SkipAction(local_config.action)
@@ -57,14 +54,8 @@ class BaseSkip:
     def meet_precondition(self, step: int, func: Callable, *args, **kwargs) -> bool:
         raise NotImplementedError("meet_precondition is not implemented")
 
-    def warp_function(self, step: int, func: Callable, *args, **kwargs):
-        raise NotImplementedError("warp_function is not implemented")
-
     def prepare_data(self, step: int, result, *args, **kwargs):
         raise NotImplementedError("prepare_data is not implemented")
-
-    def extract_step(self, *args, **kwargs):
-        raise NotImplementedError("extract_step is not implemented")
 
 
 SKIP_REGISTRY: dict[str, type[BaseSkip]] = {}
