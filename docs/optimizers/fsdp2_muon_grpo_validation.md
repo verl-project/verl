@@ -168,7 +168,6 @@ suite because the new step invokes it directly. GitHub Actions execution is
 | Standalone GPU suite, final source/environment | 0 | 10/10 worker phases passed, 0 failed, 0 skipped. |
 | Muon30 / AdamW30 / Muon resume15–30 | 0 each | All expected updates recorded; finite metrics and nonzero gradients. |
 | GRPO batch/restore assertions and checkpoint inspections | 0 | Both ranks pass; final scheduler epoch 30. |
-| GitHub Actions workflow | — | **NOT RUN**; workflow is wired, not remotely executed. |
 
 The five CPU skips are two pre-existing real-Megatron cases (dependency absent)
 and three CUDA wrappers on the local Mac. No new real-Dion CPU case skipped.
