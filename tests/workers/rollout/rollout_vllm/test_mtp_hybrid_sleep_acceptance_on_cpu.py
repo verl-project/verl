@@ -213,6 +213,7 @@ def test_separate_draft_model_hybrid_sleep_selects_level_1(monkeypatch, speculat
         {"vllm": {"speculative_config": {"num_speculative_tokens": 3}}},
         {"vllm": {"speculative_config": {"method": "ngram", "num_speculative_tokens": 3}}},
         {"vllm": {"speculative_config": {"model": "[ngram]", "num_speculative_tokens": 3}}},
+        {"vllm": {"speculative_config": {"method": "ngram_gpu", "num_speculative_tokens": 3}}},
         {"vllm": {"speculative_config": {"method": "suffix", "num_speculative_tokens": 3}}},
         {"vllm": {"speculative_config": '{"method": "ngram", "num_speculative_tokens": 3}'}},
         {"vllm": {"speculative_config": "ngram"}},

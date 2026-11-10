@@ -1415,7 +1415,7 @@ class vLLMHttpServer:
                 "rollout.engine_kwargs.vllm may not set args that verl derives from its config: "
                 + "; ".join(f"{key} (set {_VERL_MANAGED_VLLM_ARGS[key.replace('-', '_')]})" for key in managed)
             )
-        if is_torch_npu_available(check_device=False):
+        if _VLLM_VERSION >= version.parse("0.27.1") and is_torch_npu_available(check_device=False):
             # Ascend RL defaults disable NZ weights for sleep/wake and weight updates.
             additional_config = dict(engine_kwargs.get("additional_config") or {})
             rl_config = dict(additional_config.get("rl_config") or {})
@@ -1551,7 +1551,7 @@ class vLLMHttpServer:
                 or getattr(spec_config, "draft_model_config", None)
             )
             method = getattr(spec_config, "method", None)
-        weightless_methods = {"ngram", "[ngram]", "suffix", "prompt_lookup"}
+        weightless_methods = {"ngram", "[ngram]", "ngram_gpu", "suffix", "prompt_lookup"}
         if isinstance(method, str) and method.strip().lower() in weightless_methods:
             return False
         if isinstance(model, str) and model.strip().lower() in weightless_methods:
@@ -1568,7 +1568,7 @@ class vLLMHttpServer:
         MTP drafter-only weights and separately configured draft-model weights are not
         restored by actor weight sync after level 2 sleep discards them.
         lora only update adapter weights, so set sleep level to 1.
-        vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1576,12 +1576,9 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if (
-            mtp_rollout_enabled
-            or self._has_separate_draft_model()
-            or self.lora_as_adapter
-            or is_torch_npu_available(check_device=False)
-        ):
+        if mtp_rollout_enabled or self._has_separate_draft_model() or self.lora_as_adapter:
+            return 1
+        if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
         return 2
 
