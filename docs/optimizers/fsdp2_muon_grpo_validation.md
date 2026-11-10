@@ -64,7 +64,6 @@ comparison does **not** calibrate Muon and AdamW update magnitudes.
 | Steps with nonzero actor gradient norm | 11 | 19 | 2 |
 | Mean training reward | 0.015625 | 0.043750 | 0.004167 |
 | Last 10 updates' mean training reward | 0.009375 | 0.084375 | 0.006250 |
-| Final strict-format validation score, 64 examples | 0/64 | 10/64 | 0/64 |
 | Mean actor-update time, seconds | 7.4809 | 6.9195 | 7.7614 |
 | Mean logged step time, seconds | 18.9313 | 18.1296 | 19.9619 |
 | Maximum actor-reported allocated memory, GiB | 6.0380 | 5.2951 | 6.0402 |
