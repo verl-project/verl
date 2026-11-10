@@ -175,6 +175,9 @@ ACTOR=(
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=${OPTIMIZER_OFFLOAD_FRACTION}
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+    # Megatron-Core >= 0.20 / dev: the hybrid CPU-offload optimizer reuses (and asserts) the precision-aware path;
+    # main grads and Adam moments stay fp32 by default, so numerics match the old path.
+    actor_rollout_ref.actor.optim.use_precision_aware_optimizer=True
     actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU}
     actor_rollout_ref.actor.use_dynamic_bsz=True
