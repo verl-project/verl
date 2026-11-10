@@ -1,6 +1,7 @@
 set -ex
 
 USE_MEGATRON=${USE_MEGATRON:-1}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "1. install basic packages"
 pip uninstall -y triton triton-ascend
@@ -28,13 +29,17 @@ if [ $USE_MEGATRON -eq 1 ]; then
     echo "3. install Megatron & MindSpeed"
     # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron 相关依赖
     git clone https://gitcode.com/Ascend/MindSpeed.git
-    cd MindSpeed && git checkout core_r0.18.0 && cd ..
-    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git
-    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
-    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    cd MindSpeed && git checkout 26.2.0_core_r0.18.0 && cd ..
+    git clone --depth 1 --branch core_v0.18.2 https://github.com/NVIDIA/Megatron-LM.git
+    git clone --depth 1 --branch 26.2.0_core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
+    git clone --depth 1 --branch 26.2.0_release_v2.17 https://gitcode.com/ascend/TransformerEngineNPU.git
+    git clone --depth 1 --branch 26.2.0 https://gitcode.com/ascend/MindSpeed-Ops.git
+    git clone --depth 1 --branch 26.2.0_v0.5.0 https://gitcode.com/ascend/MindSpeed-Bridge.git
     git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+
+    # Preserve Transformers' native Qwen3-ASR registration.
+    git -C Megatron-Bridge apply --unidiff-zero \
+        "${SCRIPT_DIR}/../docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
 
     # 安装 Megatron 及 Ascend 适配组件
     pip install -e Megatron-LM

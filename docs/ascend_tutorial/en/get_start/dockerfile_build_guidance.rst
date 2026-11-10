@@ -1,13 +1,13 @@
 Ascend Image Guide
 ===================================
 
-Last updated: 11/03/2026.
+Last updated: 11/09/2026.
 
 
 Image Acquisition and Public Image Addresses
 --------------------------------------------
 
-Ascend hosts daily-built A2/A3/950 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built from the `Dockerfile <../../../../docker/ascend>`_.
+Ascend hosts daily-built A2/A3/950 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built from the `Dockerfile <https://github.com/verl-project/verl/tree/main/docker/ascend>`_.
 
 Latest build image name format: latest-{inference backend}-{applicable product info}-{operating system}-{other fields}
 
@@ -34,15 +34,16 @@ Ascend 950PR&950DT products
 
 
 The current A2/A3/950 vLLM Megatron build environment is based on ``scripts/install_vllm_mcore_npu.sh``:
-Megatron-LM uses ``core_v0.18.0``; MindSpeed and MegatronAdaptor use ``core_r0.18.0``,
-Megatron-Bridge uses ``v0.5.0``; MindSpeed-Bridge uses the repository default branch (no pinned tag/commit),
-and TransformerEngineNPU and MindSpeed-Ops are also installed.
+Megatron-LM uses ``core_v0.18.2``; MindSpeed uses ``26.2.0_core_r0.18.0``;
+MegatronAdaptor uses ``26.2.0_core_r0.18.0``,
+Megatron-Bridge uses ``v0.5.0``; MindSpeed-Bridge uses ``26.2.0_v0.5.0``;
+TransformerEngineNPU uses ``26.2.0_release_v2.17``; MindSpeed-Ops uses ``26.2.0``.
 
 The tables below list this branch's latest Dockerfile targets. Images must be rebuilt and validated.
 The ``_v0.9.1`` builds and their image tags retain the original dependencies and install verl from ``release/v0.9.1``. Existing published images and historical releases retain their original versions.
 
 The current A2/A3/950 vLLM latest Dockerfiles use ``requirements-npu.txt`` from the cloned repository, then install ``triton-ascend==3.6.0.post2`` after installing verl.
-For example, build from the repository root with ``docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 .``.
+For example, build from the repository root with ``docker build -f docker/ascend/Dockerfile.ascend_9.2.1_a2 .``.
 
 A2/A3 vLLM Current Dockerfile Target Component Versions
 -------------------------------------------------------------------
@@ -52,7 +53,7 @@ Component         Version
 ================= ===================
 Base image        Ubuntu 22.04
 Python            3.12
-CANN              9.1.0
+CANN              9.2.1
 torch             2.10.0
 torch_npu         2.10.0.post7
 torchvision       0.25.0
@@ -61,8 +62,8 @@ transformers      5.14.1
 xgrammar          >=0.2.1,<1.0.0
 vLLM              0.30.0
 vLLM-ascend       0.30.0
-Megatron-LM       core_v0.18.0
-MindSpeed         core_r0.18.0
+Megatron-LM       core_v0.18.2
+MindSpeed         26.2.0_core_r0.18.0
 Megatron-Bridge   0.5.0
 triton-ascend     3.6.0.post2
 ================= ===================
@@ -81,7 +82,7 @@ Component         Version
 ================= ===================
 Base image        Ubuntu 22.04
 Python            3.12
-CANN              9.1.0
+CANN              9.2.1
 torch             2.10.0
 torch_npu         2.10.0.post7
 torchvision       0.25.0
@@ -90,8 +91,8 @@ transformers      5.14.1
 xgrammar          >=0.2.1,<1.0.0
 vLLM              0.30.0
 vLLM-ascend       0.30.0
-Megatron-LM       core_v0.18.0
-MindSpeed         core_r0.18.0
+Megatron-LM       core_v0.18.2
+MindSpeed         26.2.0_core_r0.18.0
 Megatron-Bridge   0.5.0
 triton-ascend     3.6.0.post2
 ================= ===================
@@ -109,6 +110,9 @@ Dockerfile Image Build Script Inventory
 ============== ======================== ================== ==============================================================
 Device Type    CANN Base Image Version  Inference Backend  Reference File
 ============== ======================== ================== ==============================================================
+A2             9.2.1                    vLLM               `Dockerfile.ascend_9.2.1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a2>`_
+A3             9.2.1                    vLLM               `Dockerfile.ascend_9.2.1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a3>`_
+950PR&950DT    9.2.1                    vLLM               `Dockerfile.ascend_9.2.1_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.2.1_a5>`_
 A2             9.1.0                    vLLM               `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
 A3             9.1.0                    vLLM               `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
 950PR&950DT    9.1.0                    vLLM               `Dockerfile.ascend_9.1.0_a5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5>`_
@@ -164,7 +168,7 @@ Image Build Command Examples
 
    # Build the latest vLLM image from the repository root
    cd {verl-root-path}
-   docker build -f docker/ascend/Dockerfile.ascend_9.1.0_a2 -t verl-ascend:9.1.0-a2 .
+   docker build -f docker/ascend/Dockerfile.ascend_9.2.1_a2 -t verl-ascend:9.2.1-a2 .
 
    # Release and SGLang images retain their original build context
    cd {verl-root-path}/docker/ascend
@@ -178,7 +182,7 @@ Image Build Command Examples
 
 **Notes:**
 
-* Taking the vLLM image as an example, ``Dockerfile.ascend_9.1.0_a2`` is the Dockerfile filename; in ``verl-ascend:9.1.0-a2``, ``verl-ascend`` is the custom image name and ``9.1.0-a2`` is the custom image tag.
+* Taking the vLLM image as an example, ``Dockerfile.ascend_9.2.1_a2`` is the Dockerfile filename; in ``verl-ascend:9.2.1-a2``, ``verl-ascend`` is the custom image name and ``9.2.1-a2`` is the custom image tag.
 * When building the verl v0.9.1 image, use the Dockerfile with the ``_v0.9.1`` suffix; A3 and 950PR&950DT use the corresponding ``a3`` and ``a5`` files in the inventory, respectively.
 
 Container Startup Command Template

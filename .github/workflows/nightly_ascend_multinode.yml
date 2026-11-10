@@ -10,7 +10,7 @@ permissions:
 
 env:
   SUBMITTER_URL: http://rayjob-submitter.ci-system.svc.cluster.local
-  IMAGE: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+  IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
   WORKER_REPLICAS: "2"
   ASCEND_RECIPE_BASELINE_URL: "https://raw.githubusercontent.com/verl-project/verl-ascend-recipe/main/baseline"
 
@@ -21,7 +21,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-0
     timeout-minutes: 360
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -375,6 +375,7 @@ jobs:
         run: |
           set -euo pipefail
           LOG_DIR=/root/.cache/temp
+          mkdir -p "$LOG_DIR"
           /root/.cache/verl_ci/submit_and_wait_rayjob.sh \
             multinode-e2e \
             /root/.cache/verl_ci/run_multinode_testing.sh \
