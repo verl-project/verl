@@ -16,16 +16,17 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import AsyncGenerator, Generator
+from typing import AsyncGenerator, Callable, Generator
 from unittest.mock import patch
 
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
 import ray
-import ray.util.collective as collective
 import torch
 import zmq
+from ray.util.collective.collective_group.nccl_collective_group import NCCLGroup
+from ray.util.collective.types import BroadcastOptions
 
 from verl.checkpoint_engine.base import (
     CheckpointEngine,
@@ -61,6 +62,26 @@ class WorkerMetadata:
     master: MasterMetadata | None = None
 
 
+class _CheckpointNCCLGroup(NCCLGroup):
+    def __init__(self, world_size: int, rank: int, group_name: str, device: int):
+        super().__init__(world_size, rank, group_name)
+        self.device = device
+
+    def _generate_group_key(self, comm_key):
+        # Every participant owns one GPU; local ordinals may differ across ranks.
+        if comm_key != str(self.device):
+            raise ValueError(f"Checkpoint group expects GPU {self.device}, got communicator {comm_key!r}")
+        return f"single-device@{self.group_name}"
+
+    def barrier(self):
+        with cp.cuda.Device(self.device):
+            tensor = cp.ones(1, dtype=cp.float32)
+        self.allreduce([tensor])
+
+
+_CHECKPOINT_GROUPS: dict[str, _CheckpointNCCLGroup] = {}
+
+
 class BroadcastOperation:
     """Async broadcast operation with NCCL in separate thread.
 
@@ -71,6 +92,7 @@ class BroadcastOperation:
         metadata (dict[str, TensorMeta]): The metadata of the tensor.
         socket (zmq.Socket): The zeromq socket to communicate with master.
         topic (str): The topic to subscribe.
+        broadcast (Callable): Device-bound broadcast on the owning engine group.
     """
 
     def __init__(
@@ -81,6 +103,7 @@ class BroadcastOperation:
         metadata: dict[str, TensorMeta],
         socket: zmq.Socket,
         topic: str,
+        broadcast: Callable,
     ) -> None:
         self.rank = rank
         self.group_name = group_name
@@ -88,6 +111,7 @@ class BroadcastOperation:
         self.metadata = metadata
         self.socket = socket
         self.topic = topic
+        self.broadcast = broadcast
 
         loop = asyncio.get_running_loop()
         self._task = loop.run_in_executor(None, self._run)
@@ -103,7 +127,7 @@ class BroadcastOperation:
             self.bucket = self.bucket[: self.metadata["length"]]
 
         # broadcast tensor via NCCL
-        collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
+        self.broadcast(self.bucket)
 
     async def wait_for_complete(self) -> dict[str, TensorMeta]:
         """Wait for the broadcast operation to complete.
@@ -127,6 +151,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         rebuild_group (bool): Whether to rebuild the NCCL process group in each update. Defaults to False.
         is_master (bool): Whether the current process is the master process. Defaults to False.
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers. Defaults to torch.bfloat16.
+        device (int): Local CUDA ordinal. Defaults to the worker device at construction.
         multi_sender (bool): Whether to also admit the source's NVLink-local actor workers into the
             broadcast group as relays, widening the fan-out at the root. Defaults to False, which
             keeps the group at one sender (actor rank 0) plus the rollout workers.
@@ -140,12 +165,17 @@ class NCCLCheckpointEngine(CheckpointEngine):
         is_master: bool = False,
         rollout_dtype: torch.dtype = torch.bfloat16,
         multi_sender: bool = True,
+        device: int | None = None,
     ) -> None:
         self.bucket_size = bucket_size
         self.group_name = group_name
         self.rebuild_group = rebuild_group
         self.rollout_dtype = rollout_dtype
         self.multi_sender = multi_sender
+        self.device = torch.cuda.current_device() if device is None else device
+        self._group = None
+        self.rank = None
+        self.world_size = None
 
         # start zeromq server for broadcasting bucket tensor metadata
         self.is_master = is_master
@@ -163,14 +193,15 @@ class NCCLCheckpointEngine(CheckpointEngine):
         return ray.get_runtime_context().get_node_id()
 
     def prepare(self) -> WorkerMetadata:
-        # For master process, use cupy instead of torch to avoid memory register error
-        # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
-        if self.is_master:
-            self.send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
-            self.recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
-        else:
-            self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
-            self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+        device = self.device
+        # CuPy avoids expandable-segment registration for the source buffers.
+        with torch.cuda.device(device), cp.cuda.Device(device):
+            if self.is_master:
+                self.send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
+                self.recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
+            else:
+                self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device=f"cuda:{device}")
+                self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device=f"cuda:{device}")
 
         master = (
             MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port, multi_sender=self.multi_sender)
@@ -182,15 +213,28 @@ class NCCLCheckpointEngine(CheckpointEngine):
     def finalize(self):
         """Destroy the NCCL process group if rebuild_group is True."""
         if self.rebuild_group:
-            if self.rank >= 0:
-                collective.destroy_collective_group(self.group_name)
+            self._destroy_group()
             self.rank = None
             self.world_size = None
 
         self.send_buf = None
         self.recv_buf = None
 
-        torch.cuda.empty_cache()
+        with torch.cuda.device(self.device):
+            torch.cuda.empty_cache()
+
+    def _destroy_group(self):
+        if self._group is not None:
+            with torch.cuda.device(self.device), cp.cuda.Device(self.device):
+                self._group.destroy_group()
+            del _CHECKPOINT_GROUPS[self.group_name]
+            self._group = None
+
+    def _broadcast(self, tensor):
+        with torch.cuda.device(self.device), cp.cuda.Device(self.device):
+            options = BroadcastOptions()
+            options.root_rank = 0
+            self._group.broadcast([tensor], options)
 
     @staticmethod
     def _single_sender_ranks(actor_wg_world_size: int) -> list[int]:
@@ -294,20 +338,26 @@ class NCCLCheckpointEngine(CheckpointEngine):
             self.world_size = world_size
             return
 
-        if self.rebuild_group or not collective.is_group_initialized(self.group_name):
-            collective.init_collective_group(world_size, rank, "nccl", self.group_name)
+        existing = _CHECKPOINT_GROUPS.get(self.group_name)
+        if existing is not None and existing is not self._group:
+            raise RuntimeError(f"Checkpoint group {self.group_name!r} is owned by another engine; use a distinct name")
+        if self._group is not None:
+            if self.rebuild_group:
+                self._destroy_group()
+            else:
+                assert self.rank == rank, f"rank {rank} is not equal to self.rank {self.rank}"
+                assert self.world_size == world_size, f"world_size {world_size} is not equal to {self.world_size}"
+        if self._group is None:
+            self._group = _CheckpointNCCLGroup(world_size, rank, self.group_name, self.device)
+            _CHECKPOINT_GROUPS[self.group_name] = self._group
             self.rank = rank
             self.world_size = world_size
-        else:
-            assert self.rank == rank, f"rank {rank} is not equal to self.rank {self.rank}"
-            assert self.world_size == world_size, (
-                f"world_size {world_size} is not equal to self.world_size {self.world_size}"
-            )
 
         # Only consumers read the bucket metadata stream; relays never touch the payload.
         if self.rank >= num_senders:
             self._connect_zmq_client(master_metadata)
-        collective.barrier(self.group_name)
+        with torch.cuda.device(self.device), cp.cuda.Device(self.device):
+            self._group.barrier()
 
         logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
 
@@ -350,7 +400,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         async for tensor_meta, chunk in split_weight_chunks(weights, self.bucket_size):
             # fill the tensor bucket
             if offset + tensor_meta.chunk_size > self.bucket_size:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
 
                 # wait previous broadcast op finish
                 if pipelined and broadcast_op is not None:
@@ -363,6 +413,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
                     metadata={"bucket_meta": bucket_meta, "is_last": False, "length": offset},
                     socket=self.socket,
                     topic=self.topic,
+                    broadcast=self._broadcast,
                 )
 
                 # swap send_buf and recv_buf
@@ -375,7 +426,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
             tensor_meta.offset = offset
             bucket_meta[tensor_meta.name] = tensor_meta
-            send_buf[offset : offset + tensor_meta.chunk_size] = cp.asarray(chunk)
+            with cp.cuda.Device(self.device):
+                send_buf[offset : offset + tensor_meta.chunk_size] = cp.asarray(chunk)
             offset += tensor_meta.chunk_size
 
             # keep the relays in step: no-op once the bucket's broadcast has already been drained
@@ -383,7 +435,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 await broadcast_op.wait_for_complete()
 
         # broadcast last bucket
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(self.device)
         if pipelined and broadcast_op is not None:
             await broadcast_op.wait_for_complete()
 
@@ -394,13 +446,14 @@ class NCCLCheckpointEngine(CheckpointEngine):
             metadata={"bucket_meta": bucket_meta, "is_last": True, "length": offset},
             socket=self.socket,
             topic=self.topic,
+            broadcast=self._broadcast,
         )
         await broadcast_op.wait_for_complete()
 
         # the wait_for_complete() function just waits for the NCCL kernel to be enqueued,
         # not for the kernel to finish, hence we need to synchronize to make sure the
         # buffer does not get freed before the kernel finishes.
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(self.device)
 
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
@@ -420,16 +473,16 @@ class NCCLCheckpointEngine(CheckpointEngine):
         # a single buffer suffices: nothing reads the bucket, so successive broadcasts can share it
         async for tensor_meta, _ in split_weight_chunks(weights, self.bucket_size, meta_only=True):
             if offset + tensor_meta.chunk_size > self.bucket_size:
-                collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
+                self._broadcast(self.recv_buf[:offset])
                 offset = 0
 
             offset += tensor_meta.chunk_size
 
         # relay last bucket
-        collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
+        self._broadcast(self.recv_buf[:offset])
 
         # wait for the enqueued NCCL kernels, so finalize() cannot free the buffer under them
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(self.device)
 
         logger.info(f"Rank {self.rank} relay weights done, time cost: {time.time() - start_time:.2f}s")
 
@@ -465,6 +518,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             metadata=None,
             socket=self.socket,
             topic=self.topic,
+            broadcast=self._broadcast,
         )
         metadata = await broadcast_op.wait_for_complete()
         total_bytes += metadata["length"]
@@ -473,7 +527,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         # wait for the NCCL broadcast kernel to finish before we yield the tensors
         # otherwise if the buffer is clone using a non-blocking copy, it may
         # lead to data corruption
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(self.device)
 
         # swap send_buf and recv_buf
         send_buf, recv_buf = recv_buf, send_buf
@@ -486,6 +540,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 metadata=None,
                 socket=self.socket,
                 topic=self.topic,
+                broadcast=self._broadcast,
             )
 
             # 2. yield tensor from send_buf
@@ -499,7 +554,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             total_params += len(metadata["bucket_meta"])
 
             # 4. swap send_buf and recv_buf
-            torch.cuda.synchronize()  # sync non-blocking copy
+            torch.cuda.synchronize(self.device)  # sync non-blocking copy
             send_buf, recv_buf = recv_buf, send_buf
 
         # yield tensor from send_buf
