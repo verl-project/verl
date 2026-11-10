@@ -54,8 +54,13 @@ def _verl_core_requirement(package: str) -> Requirement:
 
 
 def _pinned_versions(dockerfile_text: str, package: str) -> list[str]:
-    """Return every ``<package>==<version>`` pin in a Dockerfile, in order of appearance."""
-    return re.findall(rf"(?<![\w.-]){re.escape(package)}==([^\s\"'\\]+)", dockerfile_text, flags=re.IGNORECASE)
+    """Return every ``<package>==<version>`` pin outside comments in a Dockerfile, in order of appearance.
+
+    A ``#`` at the start of a line or after a blank starts a comment that runs to the end of the line, also on a line
+    inside a multi-line ``RUN``. A pin in a comment is not installed, so it must not satisfy the check.
+    """
+    active = re.sub(r"(?m)(?:^|[ \t])#.*", "", dockerfile_text)
+    return re.findall(rf"(?<![\w.-]){re.escape(package)}==([^\s\"'\\]+)", active, flags=re.IGNORECASE)
 
 
 def _unsatisfied(pins: list[str], requirement: Requirement) -> list[str]:
@@ -94,3 +99,16 @@ def test_stale_or_unresolved_transfer_queue_pin_is_reported():
     # A pin through a build argument cannot be checked here, so it is reported rather than skipped.
     assert _unsatisfied(["${TRANSFER_QUEUE_VERSION}"], requirement) == ["${TRANSFER_QUEUE_VERSION}"]
     assert _unsatisfied(["0.1.11", "0.1.12"], requirement) == []
+
+
+def test_commented_out_transfer_queue_pin_is_not_counted():
+    # TransferQueue installed unpinned, its pin only in comments: a comment line, one inside the RUN, a trailing one.
+    commented = (
+        "# RUN pip install TransferQueue==0.1.11\n"
+        "RUN pip install tensorboard \\\n"
+        "    # TransferQueue==0.1.11 \\\n"
+        "    TransferQueue  # TransferQueue==0.1.11\n"
+    )
+
+    assert _pinned_versions(commented, PACKAGE) == []
+    assert _pinned_versions(commented + "RUN pip install TransferQueue==0.1.12\n", PACKAGE) == ["0.1.12"]
