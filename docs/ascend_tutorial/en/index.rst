@@ -1,7 +1,7 @@
 Ascend (NPU) Tutorial
 =====================
 
-Last updated: 06/05/2026.
+Last updated: 11/03/2026.
 
 .. toctree::
    :maxdepth: 1
@@ -19,6 +19,7 @@ Last updated: 06/05/2026.
 
    feature_support/ascend_backend_features
    feature_support/npu_advance_features
+   feature_support/native_weight_updates
 
 .. toctree::
    :maxdepth: 1
