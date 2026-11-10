@@ -2,14 +2,13 @@
 
 GRPO on GSM8K with Qwen3 on Cloud TPU: a TorchTitan trainer on one slice, a vLLM rollout on the other, and `tpu-sync` weight sync between them. TPU support comes from [`verl-hardware-plugin`](https://github.com/verl-project/verl-hardware-plugin).
 
-By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1` slices: 1 trainer chip and 1 rollout chip) for the Qwen3-0.6B smoke test. See [Section 6](#6-run-qwen3-4b-on-2-v6e-4-slices-8-chips) for scaling up to Qwen3-4B on 2 `v6e-4` slices (8 chips) or 2 `v6e-8` slices (16 chips).
+By default, this guide walks through the minimal **2-chip setup** (2 TPU `v6e-1` slices: 1 trainer chip and 1 rollout chip) for the Qwen3-0.6B smoke test. See [Section 6](#6-scale-dense-qwen3-17b-4b-8b-14b-32b) for scaling [`run_qwen3_torchtitan.sh`](run_qwen3_torchtitan.sh) across all dense Qwen3 sizes (`0.6B`, `1.7B`, `4B`, `8B`, `14B`, `32B`) on `v6e-4`, `v6e-8`, `v6e-16` and `v6e-32` slices.
 
 | File | |
 |---|---|
-| [`run_qwen3_0_6b_torchtitan.sh`](run_qwen3_0_6b_torchtitan.sh) | 5-step smoke test (Qwen3-0.6B, 2 `v6e-1` slices / 2 chips by default) |
-| [`run_qwen3_4b_torchtitan.sh`](run_qwen3_4b_torchtitan.sh) | 100-step GRPO run (Qwen3-4B, 2 `v6e-4` slices / 8 chips) |
+| [`run_qwen3_torchtitan.sh`](run_qwen3_torchtitan.sh) | Dense Qwen3 GRPO (`MODEL_SIZE=0.6B \| 1.7B \| 4B \| 8B \| 14B \| 32B`; defaults to the 5-step `0.6B` smoke test on 2 `v6e-1` slices) |
 | [`run_qwen3_5_torchtitan.sh`](run_qwen3_5_torchtitan.sh) | Qwen3.5 GRPO on TPU v7x (default `Qwen3.5-35B-A3B` MoE; also `Qwen3.5-0.8B`) |
-| [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | KubeRay `RayCluster`: 1 CPU head pod and 2 TPU `v6e-1` slices (configurable for `v6e-4` / `v6e-8`) |
+| [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | KubeRay `RayCluster`: 1 CPU head pod and 2 TPU `v6e-1` slices (configurable for `v6e-4` / `v6e-8` / `v6e-16` / `v6e-32`) |
 | [`Dockerfile`](Dockerfile) | Image of the Ray pods |
 | [`run_qwen3_30b_a3b_torchtitan.sh`](run_qwen3_30b_a3b_torchtitan.sh) | Qwen3-30B-A3B (MoE) GRPO on TPU (default v7x `2x2x1` + `2x2x1`) |
 
@@ -79,7 +78,7 @@ kubectl port-forward svc/ray-tpu-v6e-cluster-head-svc 23333:8265 &
 
 ## 5. Run the Qwen3-0.6B smoke test (2 chips)
 
-Ray ships `verl` and `verl-hardware-plugin` (from `../verl-hardware-plugin`) to the cluster with every job:
+Ray ships `verl` and `verl-hardware-plugin` (from `../verl-hardware-plugin`) to the cluster with every job. [`run_qwen3_torchtitan.sh`](run_qwen3_torchtitan.sh) defaults to `MODEL_SIZE=0.6B`:
 
 ```bash
 export RAY_ADDRESS=http://localhost:23333
@@ -88,68 +87,85 @@ RUNTIME_ENV='{"py_modules": ["../verl-hardware-plugin/verl_hardware_plugin"], "e
     "VERL_USE_EXTERNAL_MODULES": "verl_hardware_plugin",
     "RAY_OVERRIDE_JOB_RUNTIME_ENV": "1"}}'
 
-ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_0_6b_torchtitan.sh
+ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_torchtitan.sh
 ```
 
 The 5-step smoke test takes about 5-6 minutes to start up and log the first step metric, then ~2 s per step once compiled. Follow the job with `ray job logs -f <JOB_ID>`.
 
-The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HOME=/data/<DIR> TOTAL_TRAINING_STEPS=10 bash examples/tpu/grpo/run_qwen3_0_6b_torchtitan.sh`, and pass extra arguments to `verl.trainer.main_ppo` as Hydra overrides. Fused QKV projection (`FUSE_QKV=True`) is enabled by default (`FUSE_QKV=False` disables it).
+The script selects its dense Qwen3 preset with `MODEL_SIZE=0.6B | 1.7B | 4B | 8B | 14B | 32B` (default `0.6B`), takes settings from environment variables (e.g. `ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- env RAY_DATA_HOME=/data/<DIR> TOTAL_TRAINING_STEPS=10 bash examples/tpu/grpo/run_qwen3_torchtitan.sh`), and passes extra arguments to `verl.trainer.main_ppo` as Hydra overrides. Fused QKV projection (`FUSE_QKV=True`) is enabled by default (`FUSE_QKV=False` disables it).
 
-## 6. Run Qwen3-4B on 2 `v6e-4` slices (8 chips)
+## 6. Scale dense Qwen3 (1.7B, 4B, 8B, 14B, 32B)
 
-`run_qwen3_4b_torchtitan.sh` runs a 100-step GRPO job on 2 `v6e-4` slices (4 trainer chips + 4 rollout chips).
+[`run_qwen3_torchtitan.sh`](run_qwen3_torchtitan.sh) supports all six dense Qwen3 sizes via `MODEL_SIZE`. Each preset runs a TorchTitan SimpleFSDP trainer across one TPU slice and vLLM rollout across the other. To fit within the 32 GiB of HBM per `v6e` chip, the `8B`, `14B`, and `32B` presets train on 1 sequence per micro-batch and turn the KL-to-reference loss off (`USE_KL_LOSS=False`; the reference model would keep a second fp32 copy of the weights on every trainer chip).
 
-1. **Upload the 4B model** to your GCS bucket:
+| `MODEL_SIZE` | Slices | GKE node pool(s) | [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml) | Trainer | Rollout | `USE_KL_LOSS` | Default steps |
+|---|---|---|---|---|---|---|---|
+| `0.6B` (default) | 2 `v6e-1` (2 chips) | 1 pool: `ct6e-standard-1t --num-nodes 2` | `numOfHosts: 1`, `1x1`, `128Gi`, `cpu: "32"`, `tpu: "1"` | FSDP1 | 1 x TP1 | `True` | 5 |
+| `1.7B` | 2 `v6e-4` (8 chips) | 1 pool: `ct6e-standard-4t --num-nodes 2` | `numOfHosts: 1`, `2x2`, `400Gi`, `cpu: "48"`, `tpu: "4"` | FSDP4 | 1 x TP4 | `True` | 100 |
+| `4B` | 2 `v6e-4` (8 chips) | 1 pool: `ct6e-standard-4t --num-nodes 2` | `numOfHosts: 1`, `2x2`, `400Gi`, `cpu: "48"`, `tpu: "4"` | FSDP4 | 1 x TP4 | `True` | 100 |
+| `8B` | 2 `v6e-8` (16 chips) | 2 pools (1/slice): `ct6e-standard-4t --num-nodes 2 --tpu-topology 2x4` | `numOfHosts: 2`, `2x4`, `400Gi`, `cpu: "48"`, `tpu: "4"` | FSDP8 | 1 x TP8 | `False` | 100 |
+| `14B` | 2 `v6e-16` (32 chips) | 2 pools (1/slice): `ct6e-standard-4t --num-nodes 4 --tpu-topology 4x4` | `numOfHosts: 4`, `4x4`, `400Gi`, `cpu: "48"`, `tpu: "4"` | FSDP16 | 4 x TP4 | `False` | 100 |
+| `32B` | 2 `v6e-32` (64 chips) | 2 pools (1/slice): `ct6e-standard-4t --num-nodes 8 --tpu-topology 4x8` | `numOfHosts: 8`, `4x8`, `600Gi`, `cpu: "160"`, `tpu: "4"` | FSDP32 | 1 x TP32 | `False` | 20 |
+
+`Qwen3-14B` has 40 attention heads (not divisible by 16), so its rollout defaults to one single-host `TP=4` vLLM replica per rollout host (`4 x TP4` on `v6e-16`).
+
+1. **Upload the checkpoint** for your chosen `<SIZE>` (`1.7B`, `4B`, `8B`, `14B`, or `32B`) to your GCS bucket:
    ```bash
-   hf download Qwen/Qwen3-4B --local-dir /tmp/Qwen3-4B
-   gcloud storage cp -r /tmp/Qwen3-4B gs://<BUCKET>/assets/hf/
+   SIZE=4B  # 1.7B | 4B | 8B | 14B | 32B
+   hf download "Qwen/Qwen3-${SIZE}" --local-dir "/tmp/Qwen3-${SIZE}"
+   gcloud storage cp -r "/tmp/Qwen3-${SIZE}" gs://<BUCKET>/assets/hf/
    ```
+   Loading the 62 GB `Qwen3-32B` checkpoint through Cloud Storage FUSE is slow; to speed up start-up, stage it to the same pod-visible local path on every host (for example `/tmp/Qwen3-32B`, mounted from each host's `/tmp` in [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml), or another mounted `hostPath`) and point `MODEL_PATH` at it.
 
-2. **Create a `v6e-4` node pool** with 2 `ct6e-standard-4t` nodes (4 chips per node):
-   ```bash
-   gcloud container node-pools create <V6E4_NODE_POOL> --cluster <CLUSTER> --region <REGION> --node-locations <ZONE> \
-     --machine-type ct6e-standard-4t --num-nodes 2 --spot --disk-type hyperdisk-balanced \
-     --workload-metadata GKE_METADATA --scopes cloud-platform
-   ```
+2. **Create the TPU node pool(s)** matching the table above:
+   - For single-host `v6e-4` (`1.7B` or `4B`), create one 2-node pool:
+     ```bash
+     gcloud container node-pools create <V6E4_NODE_POOL> --cluster <CLUSTER> --region <REGION> --node-locations <ZONE> \
+       --machine-type ct6e-standard-4t --num-nodes 2 --spot --disk-type hyperdisk-balanced \
+       --workload-metadata GKE_METADATA --scopes cloud-platform
+     ```
+   - For multi-host `v6e-8` (`8B`), `v6e-16` (`14B`), or `v6e-32` (`32B`), create **two** node pools (one per TPU slice) with the `--num-nodes` and `--tpu-topology` from the table:
+     ```bash
+     for SLICE in 0 1; do
+       gcloud container node-pools create "<NODE_POOL>-${SLICE}" --cluster <CLUSTER> --region <REGION> --node-locations <ZONE> \
+         --machine-type ct6e-standard-4t --num-nodes <NODES_PER_SLICE> --tpu-topology <TOPOLOGY> \
+         --spot --disk-type hyperdisk-balanced --workload-metadata GKE_METADATA --scopes cloud-platform
+     done
+     ```
 
-3. **Update [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml)** under `workerGroupSpecs[0].template.spec` to request 4 TPU chips (`2x2` topology) per worker pod:
-   ```yaml
-   containers:
-     - name: ray-worker
-       ...
-       resources:
-         limits:
-           memory: 400Gi
-           google.com/tpu: "4"
-         requests:
-           cpu: "48"
-           memory: 400Gi
-           google.com/tpu: "4"
-   ...
-   nodeSelector:
-     cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
-     cloud.google.com/gke-tpu-topology: 2x2
-   ```
-   Then recreate the Ray cluster and port-forward its dashboard:
+3. **Update [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml)** under `workerGroupSpecs[0]` with the `numOfHosts`, `resources`, and `cloud.google.com/gke-tpu-topology` values from the table (also listed in the YAML comments), then recreate the Ray cluster and port-forward its dashboard:
    ```bash
    kubectl delete -f examples/tpu/grpo/ray-tpu-v6e-2slice.yaml
    kubectl apply -f examples/tpu/grpo/ray-tpu-v6e-2slice.yaml
-   kubectl get pods -l ray.io/cluster=ray-tpu-v6e-cluster  # wait for 3 pods at 2/2 Running
+   kubectl get pods -l ray.io/cluster=ray-tpu-v6e-cluster  # wait for all pods at 2/2 Running
    kubectl port-forward svc/ray-tpu-v6e-cluster-head-svc 23333:8265 &
    ```
 
-4. **Submit the 4B job** (or run the 0.6B smoke test across all 8 chips):
+4. **Submit the job** for the preset matching your cluster (`MODEL_SIZE=1.7B | 4B | 8B | 14B | 32B`; for example, `4B` on 2 `v6e-4` slices):
    ```bash
-   # 100-step Qwen3-4B run on 2 v6e-4 slices (defaults to N_CHIPS_TRAINER=4 N_CHIPS_ROLLOUT=4):
-   ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh
-
-   # Optional: 5-step Qwen3-0.6B smoke test on 2 v6e-4 slices:
    ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
-     N_CHIPS_TRAINER=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_0_6b_torchtitan.sh
+     env MODEL_SIZE=4B bash examples/tpu/grpo/run_qwen3_torchtitan.sh
    ```
-   The 4B run takes about 10 minutes to start, then about 18-27 s per step (~22 s average over 100 steps).
+   The `4B` run takes about 10 minutes to start, then about 18-27 s per step (~22 s average over 100 steps).
 
-To scale further to **2 `v6e-8` slices (16 chips)**, create two multi-host node pools with `--machine-type ct6e-standard-4t --num-nodes 2 --tpu-topology 2x4`, set `numOfHosts: 2` and `cloud.google.com/gke-tpu-topology: 2x4` (with `memory: 400Gi`, `cpu: "48"`, `google.com/tpu: "4"`) in [`ray-tpu-v6e-2slice.yaml`](ray-tpu-v6e-2slice.yaml), and run with `NNODES_TRAINER=2 N_CHIPS_TRAINER=4 NNODES_ROLLOUT=2 N_CHIPS_ROLLOUT=4`.
+   Alternatively, to run the 5-step `0.6B` smoke test across a larger cluster (for example, 2 `v6e-4` slices), override the trainer and rollout topology:
+   ```bash
+   ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- \
+     env MODEL_SIZE=0.6B N_CHIPS_TRAINER=4 N_CHIPS_ROLLOUT=4 bash examples/tpu/grpo/run_qwen3_torchtitan.sh
+   ```
+
+   `run_qwen3_torchtitan.sh` defaults to `TPU_EAGER_MODE=DEFER_AND_FUSE`. On an earlier image, `update_actor` hung at 32 trainer ranks with it; if a 32-rank (`32B`) run hangs in `update_actor`, set `TPU_EAGER_MODE=DEFER_NEVER`.
+
+   Set `VERIFY_PARITY` to enable `tpu-sync` weight-sync verification (`engine_kwargs.tpu-sync.verify_parity`):
+
+   | `VERIFY_PARITY` | Check |
+   |---|---|
+   | `off` (default) | None |
+   | `norm` | After every sync, compare the weight norms of the trainer and the rollout |
+   | `exact` | On the step-0 sync, compare every received tensor bit for bit with the checkpoint vLLM loaded |
+   | `all` | `norm` and `exact` |
+
+   For example, `ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- env MODEL_SIZE=8B VERIFY_PARITY=norm TOTAL_TRAINING_STEPS=10 bash examples/tpu/grpo/run_qwen3_torchtitan.sh`.
 
 ## 7. Qwen3.5 on TPU v7x
 
