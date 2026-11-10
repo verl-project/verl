@@ -208,11 +208,8 @@ class ServerAdapter(BaseRollout):
         return self.rollout_rank, ep_size
 
     def lora_expert_tp_slice(self) -> Optional[tuple[int, int]]:
-        """``(tp_rank, tp_size)`` of the colocated vLLM worker when its MoE layers shard every
-        expert over TP (no expert parallelism), else None.  With ``VERL_LORA_EXPERT_SLICE=1`` an engine that supports
-        it then exports that worker only its TP shard of the expert LoRA factors; the rollout's LoRA loader checks the
-        shard against its own layers and refuses on any mismatch.
-        """
+        """``(tp_rank, tp_size)`` of the colocated vLLM worker when its MoE layers shard every expert over TP
+        (no expert parallelism), else None."""
         if self.config.expert_parallel_size > 1 or self._pd_role is not None:
             return None
         if self.config.pipeline_model_parallel_size != 1:
@@ -259,7 +256,7 @@ class ServerAdapter(BaseRollout):
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
-            kwargs={**kwargs, "use_shm": self.use_shm},
+            kwargs={**kwargs, "use_shm": self.use_shm, "reload_base": self.config.reload_base_on_wake},
         )
 
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes

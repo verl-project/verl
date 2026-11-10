@@ -161,6 +161,9 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
+  # Add per-token trainer and rollout log-probs (response tokens) and prompt lengths to the rollout dump
+  rollout_data_dump_logprobs: False
+
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
@@ -524,6 +527,9 @@ ray_kwargs:
       # before starting Ray so the worker cwd has no resolvable uv/venv (uv is not required at that path).
       # Inherited by the TaskRunner and every worker actor. null -> Ray's default.
       py_executable: null
+
+  # Pin the TaskRunner to the driver's node (trainer checkpoint files on node-local disks)
+  task_runner_on_driver_node: False
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null

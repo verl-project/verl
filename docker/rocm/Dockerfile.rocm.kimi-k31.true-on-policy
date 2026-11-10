@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_true_on_policy_rocm.sh
+# Kimi-K3.1 true-on-policy LoRA RL on AMD MI355X (gfx950): examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh
 #
 # Base: the ROCm vLLM build with Kimi-K3.1 support (vLLM 0.0.0+f5926fb, AITER), plus
 #   - a vLLM DSA batch-invariance patch (patches/vllm-k31-bi-*.patch);

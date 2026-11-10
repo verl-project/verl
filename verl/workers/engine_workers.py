@@ -109,16 +109,12 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
-def _lora_expert_slice_kwargs(rollout, engine) -> dict:
-    """Export options that send each colocated rollout worker only its slice of the expert LoRA factors.
+def _lora_expert_slice_kwargs(rollout, engine, enabled: bool) -> dict:
+    """Export kwargs for the colocated worker's expert LoRA slice: its EP block, else its TP shard.
 
-    Off unless ``VERL_LORA_EXPERT_SLICE=1``. With rollout expert parallelism the engine exports only the experts of
-    the worker's EP rank (``lora_expert_slice``); without it, only the worker's TP shard of every expert factor
-    (``lora_expert_tp_slice``). Each needs an engine that declares it (``supports_lora_expert_slice`` /
-    ``supports_lora_expert_tp_slice``). The engine heads a sliced export with a tag that the rollout's LoRA loader
-    checks against its own layout; verl passes the tensors through unchanged.
+    Empty when disabled or when the engine (``supports_<key>``) or rollout layout does not support it.
     """
-    if os.environ.get("VERL_LORA_EXPERT_SLICE", "0") != "1":
+    if not enabled:
         return {}
     for key in ("lora_expert_slice", "lora_expert_tp_slice"):
         placement = getattr(rollout, key, None)
@@ -863,53 +859,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         set_expandable_segments(False)
         get_torch_device().empty_cache()
-        # Full Kimi-K3.1 on 2 x 8 MI355X ran out of memory at the first sync with ~230 GiB of non-PyTorch memory
-        # held: the colocated vLLM engine was still awake although init calls sleep_replicas(). VERL_K31_SYNC_DEBUG=1
-        # logs what the sync sees; VERL_K31_RELEASE_IF_AWAKE_GIB=<N> puts the engine to sleep first when less than
-        # N GiB is free.
-        if os.environ.get("VERL_K31_SYNC_DEBUG", "0") == "1" or os.environ.get("VERL_K31_RELEASE_IF_AWAKE_GIB"):
-            _free, _total = torch.cuda.mem_get_info()
-            _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-            logger.warning(
-                f"[k31-sync] rank={_rank} step={global_steps} entry free={_free / 2**30:.1f}/{_total / 2**30:.1f} GiB "
-                f"torch_alloc={torch.cuda.memory_allocated() / 2**30:.1f} GiB "
-                f"param_offload={self.actor.engine.is_param_offload_enabled} base_sync_done={self.base_sync_done} "
-                f"peft_merge={self.peft_merge} "
-                f"export_before_wake={os.environ.get('VERL_LORA_EXPORT_BEFORE_WAKE', '0')} "
-                f"free_cache_engine={self.config.rollout.free_cache_engine}"
-            )
-            _thr = os.environ.get("VERL_K31_RELEASE_IF_AWAKE_GIB")
-            if _thr and _free / 2**30 < float(_thr):
-                await self.rollout.release()
-                aggressive_empty_cache(force_sync=True)
-                _free2, _ = torch.cuda.mem_get_info()
-                logger.warning(
-                    f"[k31-sync] rank={_rank} engine looked awake ({_free / 2**30:.1f} GiB free < {_thr}): "
-                    f"rollout.release() -> {_free2 / 2**30:.1f} GiB free"
-                )
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # VERL_LORA_EXPERT_SLICE=1: send each colocated rollout worker only its slice of the expert LoRA factors.
-        export_kwargs = _lora_expert_slice_kwargs(self.rollout, self.actor.engine)
+        export_kwargs = _lora_expert_slice_kwargs(
+            self.rollout, self.actor.engine, self.config.rollout.get("lora_expert_slice", False)
+        )
 
-        # 0b. VERL_LORA_EXPORT_BEFORE_WAKE=1 with param offload and an adapter-only rollout sync: the engine
-        # onloads the whole model to export, which cannot share the GPU with the rollout's resumed base
-        # weights on a large model.  Export the adapter while the rollout still sleeps (materialized;
-        # adapter-sized), offload the model, then resume the rollout.
+        # 0b. rollout.export_adapter_before_wake: export the adapter while the rollout still sleeps.
         early_export = None
-        if os.environ.get("VERL_LORA_EXPORT_BEFORE_WAKE", "0") == "1":
-            if os.environ.get("VERL_FREE_GRADS_BEFORE_WAKE", "0") == "1":
-                _release_trainer_grads(self.actor.engine)
-                aggressive_empty_cache(force_sync=True)
+        if self.config.rollout.get("export_adapter_before_wake", False):
+            _release_trainer_grads(self.actor.engine)
+            aggressive_empty_cache(force_sync=True)
             if self.actor.engine.is_param_offload_enabled and not self.peft_merge and self.base_sync_done:
                 lora_cfg = self.config.model.get("lora", None) or {}
                 if not (self.config.model.get("lora_rank", 0) or lora_cfg.get("rank", 0)):
-                    raise RuntimeError("VERL_LORA_EXPORT_BEFORE_WAKE=1 needs a LoRA adapter (model.lora.rank > 0)")
+                    raise RuntimeError("rollout.export_adapter_before_wake needs a LoRA adapter (model.lora.rank > 0)")
                 per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
                     layered_summon=self.layered_summon, base_sync_done=True, **export_kwargs
                 )
                 if peft_config is None:
-                    raise RuntimeError("VERL_LORA_EXPORT_BEFORE_WAKE=1 needs an adapter-only (peft) export")
+                    raise RuntimeError("rollout.export_adapter_before_wake needs an adapter-only (peft) export")
                 # clone: an exporter may reuse its staging buffer between yields
                 early_export = ([(name, t.clone()) for name, t in per_tensor_param], peft_config)
                 self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)

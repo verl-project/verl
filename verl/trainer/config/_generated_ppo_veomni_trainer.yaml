@@ -299,6 +299,10 @@ actor_rollout_ref:
     scheduling_policy: fcfs
     load_format: dummy
     layered_summon: false
+    sleep_level: null
+    reload_base_on_wake: false
+    export_adapter_before_wake: false
+    lora_expert_slice: false
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
@@ -940,6 +944,7 @@ trainer:
   - wandb
   log_val_generations: 0
   rollout_data_dir: null
+  rollout_data_dump_logprobs: false
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
@@ -1045,4 +1050,5 @@ ray_kwargs:
     num_cpus: null
     runtime_env:
       py_executable: null
+  task_runner_on_driver_node: false
   timeline_json_file: null

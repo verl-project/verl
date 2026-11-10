@@ -21,8 +21,9 @@
 #   actor   mLite impl=vllm, PP4 x EP4, TP1, full recompute, parameters offloaded while the rollout generates.
 #   rollout one vLLM engine per node, TP8 + EP8 (MI355X: 288 GB per GPU; ~190 GiB of weights per GPU at TP8).
 #   sync    the rollout sleeps at level 2 and reloads its frozen base from MODEL_PATH on every wake
-#           (VERL_K31_WAKE_RELOAD=1); the adapter is exported while vLLM still sleeps (VERL_LORA_EXPORT_BEFORE_WAKE=1)
-#           and each rollout worker receives only the expert factors of its EP rank (VERL_LORA_EXPERT_SLICE=1).
+#           (rollout.reload_base_on_wake); the adapter is exported while vLLM still sleeps
+#           (rollout.export_adapter_before_wake) and each rollout worker receives only the expert factors of its EP
+#           rank (rollout.lora_expert_slice).
 #
 # Image: docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy (the ROCm vLLM build with Kimi-K3.1 support + the DSA
 # batch-invariance patch, Megatron-LM mLite with its Kimi-K3.1 ROCm port, and the vLLM plugins in K31_PLUGIN_ROOT:
@@ -114,25 +115,12 @@ export MLITE_K31_BACKEND=rocm
 # rollout.full_determinism=True would make verl's vLLM server set VLLM_BATCH_INVARIANT=1; both arms leave it off and
 # set VLLM_BATCH_INVARIANT themselves.
 export VERL_FULL_DETERMINISM=0
-# Weight sync: level-2 sleep + reload of the frozen base on wake, adapter export before wake, per-rank expert slices.
-export VERL_VLLM_SLEEP_LEVEL=2 VERL_K31_WAKE_RELOAD=1
-export VERL_LORA_EXPORT_BEFORE_WAKE=1 VERL_FREE_GRADS_BEFORE_WAKE=1
-export VERL_LORA_EXPERT_SLICE=1
-export VERL_K31_SYNC_DEBUG="${VERL_K31_SYNC_DEBUG:-1}" VERL_K31_RELEASE_IF_AWAKE_GIB="${VERL_K31_RELEASE_IF_AWAKE_GIB:-120}"
-# Per-token trainer and rollout log-probs in the rollout_data_dir dump (set trainer.rollout_data_dir=<dir>).
-export VERL_K31_DUMP_LOGPROBS="${VERL_K31_DUMP_LOGPROBS:-1}"
-# Keep the TaskRunner (dataloader state, checkpoint tracker) on this node, so a resume from a node-local CKPT_DIR
-# finds them.
-export VERL_TASK_RUNNER_ON_DRIVER_NODE=1
 export PYTHONPATH="${K31_PLUGIN_PATH}:${VERL_ROOT}:${MEGATRON_ROOT}:${MEGATRON_ROOT}/experimental/lite/examples/verl"
 
 ARM_ENV_NAMES=(PYTHONPATH PYTHONHASHSEED PYTHONUNBUFFERED CUDA_DEVICE_MAX_CONNECTIONS VLLM_NO_USAGE_STATS
   VLLM_ALLOW_INSECURE_SERIALIZATION TORCH_NCCL_AVOID_RECORD_STREAMS VLLM_USE_BREAKABLE_CUDAGRAPH
   VLLM_ENGINE_READY_TIMEOUT_S HF_HUB_OFFLINE TVM_FFI_DISABLE_TORCH_C_DLPACK VLLM_ROCM_USE_AITER
-  VLLM_ROCM_USE_AITER_MOE_SITUV2 MLITE_K31_BACKEND VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM VERL_VLLM_SLEEP_LEVEL
-  VERL_K31_WAKE_RELOAD VERL_LORA_EXPORT_BEFORE_WAKE VERL_FREE_GRADS_BEFORE_WAKE VERL_LORA_EXPERT_SLICE
-  VERL_K31_SYNC_DEBUG VERL_K31_RELEASE_IF_AWAKE_GIB VERL_K31_DUMP_LOGPROBS VERL_TASK_RUNNER_ON_DRIVER_NODE
-  VERL_FILE_LOGGER_PATH)
+  VLLM_ROCM_USE_AITER_MOE_SITUV2 MLITE_K31_BACKEND VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM VERL_FILE_LOGGER_PATH)
 # RDMA: select the ibverbs userspace that matches the host's AMD ionic NIC driver (docker/rocm/ionic-rdma-env.sh of
 # #8505; with the wrong one RCCL silently falls back to TCP sockets) and pass the choice on to the Ray workers.
 if command -v ionic-rdma-env.sh >/dev/null; then
@@ -314,6 +302,11 @@ HYDRA_ARGS=(
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.enable_chunked_prefill=True
   actor_rollout_ref.rollout.enforce_eager=False
+  # Weight sync: level-2 sleep + base reload on wake, adapter export before wake, per-rank expert LoRA slices.
+  actor_rollout_ref.rollout.sleep_level=2
+  actor_rollout_ref.rollout.reload_base_on_wake=True
+  actor_rollout_ref.rollout.export_adapter_before_wake=True
+  actor_rollout_ref.rollout.lora_expert_slice=True
   "+${VC}.language_model_only=True"
   "+${VC}.enable_moe_shared_loras=True"
   "+${VC}.lora_target_modules=${LORA_TARGETS}"
@@ -326,6 +319,10 @@ HYDRA_ARGS=(
   +reward.reward_kwargs.overlong_buffer_cfg.enable=False
   +reward.reward_kwargs.max_resp_len="${MAX_RESPONSE_LENGTH}"
   trainer.logger="${TRAINER_LOGGERS}"
+  # With trainer.rollout_data_dir=<dir>: add per-token trainer and rollout log-probs to the dump.
+  trainer.rollout_data_dump_logprobs=True
+  # Keep the TaskRunner (dataloader state, checkpoint tracker) on this node for a resume from a node-local CKPT_DIR.
+  ray_kwargs.task_runner_on_driver_node=True
   trainer.project_name="${PROJECT_NAME}"
   trainer.experiment_name="${RUN_NAME}"
   trainer.n_gpus_per_node="${NGPUS_PER_NODE}"

@@ -79,12 +79,9 @@ def run_ppo(config, task_runner_class) -> None:
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
-    # The TaskRunner writes the trainer-level checkpoint files (data.pt with the dataloader state,
-    # latest_checkpointed_iteration.txt) into trainer.default_local_dir.  When that directory is on
-    # node-local disks, a resumed run only finds them if the TaskRunner lands on the same node again;
-    # VERL_TASK_RUNNER_ON_DRIVER_NODE=1 pins it to the node running this driver.
+    # ray_kwargs.task_runner_on_driver_node: keep trainer checkpoint files on the driver's node-local disk.
     runner_options = {}
-    if os.environ.get("VERL_TASK_RUNNER_ON_DRIVER_NODE", "0") == "1":
+    if config.ray_kwargs.get("task_runner_on_driver_node", False):
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
         runner_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(

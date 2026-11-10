@@ -92,7 +92,7 @@ DOCKER_BUILDKIT=1 docker build \
 ## Kimi-K3.1 true on-policy (MI355X)
 
 [`Dockerfile.rocm.kimi-k31.true-on-policy`](Dockerfile.rocm.kimi-k31.true-on-policy) builds the image for
-[`examples/grpo_trainer/run_kimi_k3_1_true_on_policy_rocm.sh`](../../examples/grpo_trainer/run_kimi_k3_1_true_on_policy_rocm.sh):
+[`examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh`](../../examples/grpo_trainer/run_kimi_k3_1_megatron_lite.sh):
 LoRA GRPO on Kimi-K3.1 (MXFP4 routed experts) where the vLLM rollout log-probs and the trainer log-probs of the same
 tokens are bitwise equal (`rollout_probs_diff_max` = 0).
 

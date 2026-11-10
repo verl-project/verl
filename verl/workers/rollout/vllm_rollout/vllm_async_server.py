@@ -1528,12 +1528,8 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        # VERL_VLLM_SLEEP_LEVEL forces the level. Kimi-K3.1 with a LoRA adapter on the full model sleeps at level 2
-        # (level 1 backs ~2.6 TB of weights up in pinned host memory per node) and reloads the frozen base on wake
-        # (VERL_K31_WAKE_RELOAD=1); a sync of only part of the weights needs level 1 instead.
-        forced = os.environ.get("VERL_VLLM_SLEEP_LEVEL")
-        if forced:
-            assert forced in ("1", "2"), f"VERL_VLLM_SLEEP_LEVEL must be 1 or 2, got {forced!r}"
+        forced = getattr(self.config, "sleep_level", None)
+        if forced is not None:
             return int(forced)
         if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
             return 1

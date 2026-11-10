@@ -260,7 +260,9 @@ class vLLMColocateWorkerExtension:
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False, reload_base: bool = False
+    ):
         """Update the weights of the rollout model."""
         if self.device is None:
             # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
@@ -271,17 +273,13 @@ class vLLMColocateWorkerExtension:
         quant_reload_states = None
         staged_moe_layers = []
 
-        if os.environ.get("VERL_K31_WAKE_RELOAD", "0") == "1":
-            # Kimi-K3.1 full model: the rollout slept at level 2 (weights discarded; level 1 pins ~2.6 TB of host
-            # RAM per node and is not released after wake). Rebuild all weights in place from the checkpoint
-            # (including the frozen MXFP4 experts) with vLLM's layerwise reload, which re-runs each layer's
-            # post-load processing exactly once. Runs on every worker (all DP shards), after wake_up(["weights"]);
-            # the LoRA adapter is then applied on top as usual.
+        if reload_base:
+            # Rebuild the base weights discarded by a level-2 sleep from the checkpoint (vLLM layerwise reload).
             import time as _time
 
             _t = _time.time()
-            self.reload_weights()  # vllm Worker.reload_weights -> model_runner.reload_weights(), disk, ckpt format
-            logger.info(f"K3.1 wake reload of base weights from disk took {_time.time() - _t:.1f}s")
+            self.reload_weights()
+            logger.info(f"base weight reload from the checkpoint took {_time.time() - _t:.1f}s")
 
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
