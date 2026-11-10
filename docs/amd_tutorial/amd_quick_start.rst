@@ -100,6 +100,8 @@ Feature Support Matrix
 Example Workflow
 ----------------
 
+The fully async recipes below require verl <= v0.9.1.
+
 .. list-table:: 
    :header-rows: 1
 
@@ -118,11 +120,11 @@ Example Workflow
    * - Fully Async
      - vLLM
      - FSDP2
-     -  `bash verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_
+     -  `bash recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_
    * - Fully Async
      - vLLM
      - Megatron
-     -  `bash verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_
+     -  `bash recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_
    * - Colocate
      - SGLang
      - FSDP
@@ -134,11 +136,11 @@ Example Workflow
    * - Fully Async
      - SGLang
      - FSDP2
-     -  `bash verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_ (vllm->sglang)
+     -  `bash recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_ (vllm->sglang)
    * - Fully Async
      - SGLang
      - Megatron
-     -  `bash verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_ (vllm->sglang)
+     -  `bash recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_ (vllm->sglang)
    
    
 

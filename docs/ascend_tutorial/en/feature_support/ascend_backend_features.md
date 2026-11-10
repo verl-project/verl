@@ -387,7 +387,6 @@ A typical configuration on NPU for the v1 trainer separate async scenario is as 
 
 ```bash
 # Configure the v1 trainer separate async mode
-trainer.use_v1=True
 trainer.v1.trainer_mode=separate_async
 
 # Option 1: nccl backend (automatically recognized as HCCL on NPU)

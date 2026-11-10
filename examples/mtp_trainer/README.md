@@ -8,7 +8,6 @@ MTP uses an auxiliary token-prediction head (speculative / draft head) during tr
 |---------------------------------------------------------------------------|--------|----------|-----------------------------------|----------|
 | `run_mimo_7b_mtp_megatron.sh`                                             | SGLang | Megatron | Sync hybrid-engine                | NVIDIA   |
 | `run_mimo_7b_mtp_rl_vllm_sgl_megatron.sh`                                 | SGLang / vLLM | Megatron | Sync hybrid-engine, slime-aligned RL/EAGLE setup | NVIDIA |
-| `run_mimo_7b_mtp_fully_async_megatron_multinode.sh`                       | SGLang | Megatron | Fully-async split-placement (DAPO)| NVIDIA   |
 
 IMPORTANT: after downloading MiMo-7B-RL, set `max_position_embeddings: 32768` in its `config.json`.
 
@@ -22,12 +21,12 @@ IMPORTANT: after downloading MiMo-7B-RL, set `max_position_embeddings: 32768` in
 ## Multi-node fully-async layout
 
 The `*_multinode.sh` variant uses the fully-async one-step-off trainer
-(`verl.experimental.fully_async_policy.fully_async_main`). Scale it via:
+(`recipe.fully_async_policy.fully_async_main`), pinned to verl v0.9.1. Scale it via:
 
 ```bash
 TRAIN_NNODES=4 TRAIN_NGPUS_PER_NODE=8 \
 ROLLOUT_NNODES=4 ROLLOUT_NGPUS_PER_NODE=8 \
-bash examples/mtp_trainer/run_mimo_7b_mtp_fully_async_megatron_multinode.sh
+bash recipe/fully_async_policy/shell/run_mimo_7b_mtp_fully_async_megatron_multinode.sh
 ```
 
 Defaults to a single-node 4+4 split (trainer + rollout) for a smoke-test,

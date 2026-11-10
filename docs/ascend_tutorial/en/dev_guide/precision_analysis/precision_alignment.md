@@ -91,18 +91,23 @@ In single-card no-communication scenarios:
 Run the GPU script once with the following configuration enabled:
 
 ```bash
-trainer.rollout_data_dir='/path/dump/data_json'
+skip.rollout_tq.enable=True \
+skip.rollout_tq.dump_dir=/path/to/rollout_dump \
+'skip.rollout_tq.steps=[1,2,3]' \
+skip.rollout_tq.action=cache
 ```
 
-This saves the inference result of each step as a jsonl file.
+This saves the TransferQueue trajectory cache for steps 1–3. Copy the cache directory to the NPU environment at the same path, keeping the experiment name, project name, and batch settings unchanged. JSONL rollout logs cannot be used as this cache.
 
 **Step 2: Reproduce and verify on the NPU environment**
 
 Enable the following parameters on the NPU, reuse the sequence generated in the previous step, and run end-to-end:
 
 ```bash
-skip.rollout.enable=True \
-skip.rollout.dump_dir=/path/to/rollout_dump \
+skip.rollout_tq.enable=True \
+skip.rollout_tq.dump_dir=/path/to/rollout_dump \
+'skip.rollout_tq.steps=[1,2,3]' \
+skip.rollout_tq.action=cache
 ```
 
 **Step 3: Compare metrics**
@@ -122,7 +127,10 @@ When garbled inference output occurs, if the engine initialization uses **load_f
 ### 6.2  Inference Result Alignment
 
 ```bash
-trainer.rollout_data_dir='/path/dump/data_json'
+skip.rollout_tq.enable=True \
+skip.rollout_tq.dump_dir=/path/to/rollout_dump \
+'skip.rollout_tq.steps=[1,2,3]' \
+skip.rollout_tq.action=cache
 ```
 
 Save the inference result of each step as a jsonl file. You can directly open the jsonl file to quickly confirm whether the whole-network inference result is garbled, which is used to scope inference precision issues.

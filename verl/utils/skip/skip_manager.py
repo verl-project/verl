@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import inspect
 from typing import Callable
 
 from verl.utils.config import omega_conf_to_dataclass
@@ -25,7 +24,7 @@ class SkipManager:
     """SkipManager is a manager for skip.
 
     Class attributes default here so code paths (e.g. tests or modules that only import
-    ``@SkipManager.annotate``) work **before** ``SkipManager.init(config)`` runs — decorators
+    ``@SkipManager.annotate_tq``) work **before** ``SkipManager.init(config)`` runs — decorators
     then no-op until the trainer initializes skip state.
     """
 
@@ -50,79 +49,6 @@ class SkipManager:
     @classmethod
     def set_step(cls, step: int):
         cls.step = step
-
-    @staticmethod
-    def _get_prompts_batch(args, kwargs):
-        """Resolve ``DataProto`` from decorated ``generate_sequences(self, prompts, ...)`` calls."""
-        prompts = kwargs.get("prompts")
-        if prompts is not None:
-            return prompts
-        if len(args) > 1:
-            return args[1]
-        if len(args) == 1 and hasattr(args[0], "meta_info"):
-            return args[0]
-        return None
-
-    @classmethod
-    def _should_bypass_for_validation(cls, args, kwargs) -> bool:
-        prompts = cls._get_prompts_batch(args, kwargs)
-        if prompts is None and len(args) > 1:
-            return cls._should_bypass_for_validation_tensordict(args, kwargs)
-        if prompts is None:
-            return False
-        if hasattr(prompts, "non_tensor_data"):
-            return cls._should_bypass_for_validation_tensordict(args, kwargs)
-        meta_info = getattr(prompts, "meta_info", None) or {}
-        return bool(meta_info.get("validate", False))
-
-    @classmethod
-    def annotate(cls, role: str, **kwargs_outer) -> Callable:
-        def decorator(func: Callable) -> Callable:
-            if inspect.iscoroutinefunction(func):
-
-                @functools.wraps(func)
-                async def async_wrapper(*args, **kwargs_inner):
-                    if cls._should_bypass_for_validation(args, kwargs_inner):
-                        return await func(*args, **kwargs_inner)
-                    skip_instance = cls.skip_instances.get(role)
-                    if skip_instance is None or not skip_instance.is_enabled():
-                        return await func(*args, **kwargs_inner)
-                    if skip_instance.support_online_step:
-                        step = skip_instance.extract_step(*args, **kwargs_inner)
-                    else:
-                        step = cls.step
-                    if step not in skip_instance.steps:
-                        return await func(*args, **kwargs_inner)
-                    if skip_instance.meet_precondition(step, func, *args, **kwargs_inner):
-                        return skip_instance.warp_function(step, func, *args, **kwargs_inner)
-                    result = await func(*args, **kwargs_inner)
-                    skip_instance.prepare_data(step, result, *args, **kwargs_inner)
-                    return result
-
-                return async_wrapper
-
-            @functools.wraps(func)
-            def sync_wrapper(*args, **kwargs_inner):
-                if cls._should_bypass_for_validation(args, kwargs_inner):
-                    return func(*args, **kwargs_inner)
-                skip_instance = cls.skip_instances.get(role)
-                if skip_instance is None or not skip_instance.is_enabled():
-                    return func(*args, **kwargs_inner)
-                if skip_instance.support_online_step:
-                    step = skip_instance.extract_step(*args, **kwargs_inner)
-                else:
-                    step = cls.step
-                if step not in skip_instance.steps:
-                    return func(*args, **kwargs_inner)
-                if skip_instance.meet_precondition(step, func, *args, **kwargs_inner):
-                    return skip_instance.warp_function(step, func, *args, **kwargs_inner)
-                result = func(*args, **kwargs_inner)
-                skip_instance.prepare_data(step, result, *args, **kwargs_inner)
-                return result
-
-            return sync_wrapper
-
-        return decorator
 
     @classmethod
     def annotate_tq(cls, role: str, phase: str):
@@ -175,16 +101,3 @@ class SkipManager:
             return wrapper
 
         return decorator
-
-    @staticmethod
-    def _should_bypass_for_validation_tensordict(args, kwargs) -> bool:
-        """Check ``validate`` flag in TensorDict's non_tensor_data for V1 path."""
-        prompts = kwargs.get("prompts", None)
-        if prompts is None and len(args) > 1:
-            prompts = args[1]
-        if prompts is None:
-            return False
-        try:
-            return bool(getattr(prompts, "non_tensor_data", {}).get("validate", False))
-        except Exception:
-            return False

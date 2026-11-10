@@ -23,7 +23,7 @@ FSDP Backend Usage Guide
 
    This section applies to **FSDP/FSDP2 backend only**. For Megatron backend, see the :ref:`megatron-lora` section below.
 
-1. Lora is available in the `verl.trainer.ppo.ray_trainer.RayPPOTrainer`. Examples are provided via the `verl.trainer.main_ppo` entry point.
+1. Lora is available in the `verl.trainer.ppo.v1.trainer_base.PPOTrainer`. Examples are provided via the `verl.trainer.main_ppo` entry point.
 
 2. LoRA is supported via huggingface peft with fsdp/fsdp2 and both vllm and sglang rollout backends.
 

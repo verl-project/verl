@@ -196,7 +196,7 @@ actor_rollout_ref:
 
 - `verl/trainer/ppo/rollout_corr_helper.py` - Contains `compute_rollout_correction_and_rejection_mask()` and `compute_offpolicy_metrics()`
 - `verl/trainer/ppo/core_algos.py` - Rollout Correction integration with PPO and REINFORCE modes (`compute_policy_loss_bypass_mode()`, `compute_policy_loss_reinforce()`)
-- `verl/trainer/ppo/ray_trainer.py` - Bypass mode implementation (skips `old_log_prob` computation)
+- `verl/trainer/ppo/v1/trainer_base.py` - Bypass mode implementation (skips `old_log_prob` computation)
 - `verl/workers/utils/losses.py` - `ppo_loss` loss function wired to actor `TrainingWorker` via `verl.workers.engine_workers.ActorRolloutRefWorker.init_model`
 - `verl/trainer/ppo/core_algos.py` - `@register_policy_loss("bypass_mode")` policy loss that invokes `compute_rollout_correction_and_rejection_mask` and emits off-policy metrics
 
@@ -672,7 +672,7 @@ algorithm:
   ```
 
 - Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
-- v1 trainer (`trainer.use_v1: true`) with an FSDP actor only; single-turn agent loop only
+- FSDP actor only; single-turn agent loop only
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes

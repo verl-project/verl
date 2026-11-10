@@ -192,7 +192,6 @@ trainer.v1.trainer_mode=separate_async
 Add the following overrides to an existing V1 PPO launch:
 
 ```bash
-trainer.use_v1=True \
 trainer.v1.trainer_mode=colocate_async \
 trainer.v1.colocate_async.num_warmup_batches=1
 ```
@@ -204,7 +203,6 @@ The warmup batch starts generation before the first training step, reducing the 
 The following example uses two trainer nodes and two standalone rollout nodes:
 
 ```bash
-trainer.use_v1=True \
 trainer.v1.trainer_mode=separate_async \
 trainer.nnodes=2 \
 trainer.n_gpus_per_node=8 \

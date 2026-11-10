@@ -91,17 +91,22 @@ seed_all(mode=True)
 先跑一次GPU脚本，开启如下配置：
 
 ```bash
-trainer.rollout_data_dir='/path/dump/data_json'
+skip.rollout_tq.enable=True \
+skip.rollout_tq.dump_dir=/path/to/rollout_dump \
+'skip.rollout_tq.steps=[1,2,3]' \
+skip.rollout_tq.action=cache
 ```
-可以保存每步推理结果为jsonl文件。
+这会保存第 1–3 步的 TransferQueue 轨迹缓存。将缓存目录复制到 NPU 环境的相同路径，并保持实验名、项目名和 batch 配置一致。JSONL rollout 日志不能用作该缓存。
 
 **第二步：在 NPU 环境复现验证**
 
 NPU上开启如下参数，复用上一步生成的序列，端到端运行：
 
 ```bash
-skip.rollout.enable=True \
-skip.rollout.dump_dir=/path/to/rollout_dump \
+skip.rollout_tq.enable=True \
+skip.rollout_tq.dump_dir=/path/to/rollout_dump \
+'skip.rollout_tq.steps=[1,2,3]' \
+skip.rollout_tq.action=cache
 ```
 
 **第三步：对比指标**
@@ -121,7 +126,10 @@ skip.rollout.dump_dir=/path/to/rollout_dump \
 ### 6.2  推理结果对齐
 
 ```bash
-trainer.rollout_data_dir='/path/dump/data_json'
+skip.rollout_tq.enable=True \
+skip.rollout_tq.dump_dir=/path/to/rollout_dump \
+'skip.rollout_tq.steps=[1,2,3]' \
+skip.rollout_tq.action=cache
 ```
 
 保存每步推理结果为jsonl文件，可以直接打开jsonl文件快速确认整网推理结果是否乱码，用于推理精度问题定界。
