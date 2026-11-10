@@ -87,7 +87,7 @@ ACTOR_VPP=${ACTOR_VPP:-null}
 ACTOR_EP=${ACTOR_EP:-16}
 ACTOR_ETP=${ACTOR_ETP:-1}
 ACTOR_CP=${ACTOR_CP:-1}
-PIPELINE_MODEL_PARALLEL_LAYOUT=${PIPELINE_MODEL_PARALLEL_LAYOUT:-"Et*6|t*6|t*6|t*5|t*5|t*5|t*5|t*5L"}
+PIPELINE_MODEL_PARALLEL_LAYOUT=${PIPELINE_MODEL_PARALLEL_LAYOUT-"Et*6|t*6|t*6|t*5|t*5|t*5|t*5|t*5L"}
 
 REF_TP=${REF_TP:-${ACTOR_TP}}
 REF_PP=${REF_PP:-${ACTOR_PP}}
@@ -103,6 +103,9 @@ ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.40}
 ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-${PPO_MAX_TOKEN_LEN_PER_GPU}}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${PPO_MAX_TOKEN_LEN_PER_GPU}}
 ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
+# vLLM MoE kernel for the MXFP4 routed experts. Empty keeps verl's default (DeepGEMM, Blackwell-only for MXFP4);
+# on Hopper (H100/H200) use "marlin".
+ROLLOUT_MOE_BACKEND=${ROLLOUT_MOE_BACKEND:-}
 ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-512}
 ROUTER_REPLAY_MODE=${ROUTER_REPLAY_MODE:-R3}
 # Fused DSA attention kernels (dev Megatron-Core maps True -> dsa_kernel_backend=cudnn, which needs flash_mla from
@@ -203,8 +206,12 @@ ACTOR=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.fp8="hybrid"
     +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe="blockwise"
     +actor_rollout_ref.actor.optim.override_optimizer_config.fp8_recipe="blockwise"
-    "++actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'"
 )
+# An explicit PP layout only makes sense with PP > 1; leave PIPELINE_MODEL_PARALLEL_LAYOUT empty to let the model
+# provider decide (Megatron-Bridge >= 0.7 builds DSv4 as attention+MoE hybrid sublayers and clears it at PP=1).
+if [ -n "${PIPELINE_MODEL_PARALLEL_LAYOUT}" ]; then
+    ACTOR+=("++actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'")
+fi
 
 # Context parallelism needs three extra transformer-config settings for DeepSeek-V4 on top of
 # `context_parallel_size`. Each of them is enforced by Megatron-Core, so without them the run
@@ -234,9 +241,6 @@ if [ "${QAT_ENABLE}" = "True" ]; then
     QAT_ARGS=(
         ++actor_rollout_ref.actor.megatron.qat.enable=True
         ++actor_rollout_ref.actor.megatron.qat.mode=${QAT_MODE}
-        # rollout.qat is an oc.select alias of actor.megatron.qat in the generated config. The vLLM
-        # worker must not build quantizers: it consumes the MXFP4 weights the bridge exports.
-        ++actor_rollout_ref.rollout.qat.enable=False
     )
 fi
 
@@ -266,6 +270,9 @@ ROLLOUT=(
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB}
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=${ROLLOUT_KV_CACHE_DTYPE}
 )
+if [ -n "${ROLLOUT_MOE_BACKEND}" ]; then
+    ROLLOUT+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=${ROLLOUT_MOE_BACKEND})
+fi
 
 REWARD=(
     reward.reward_manager.name=dapo
