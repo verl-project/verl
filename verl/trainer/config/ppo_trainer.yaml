@@ -228,6 +228,9 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
+  # Deprecated compatibility option; main_ppo always uses V1.
+  use_v1: true
+
   # V1 trainer mode configs
   v1:
 
