@@ -1,8 +1,17 @@
 diff --git a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
-index 03539b7..7b20f61 100644
+index 03539b7..2f05065 100644
 --- a/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
 +++ b/experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
-@@ -534,10 +534,23 @@ class MegatronLiteEngine(BaseEngine):
+@@ -525,6 +525,8 @@ class MegatronLiteEngine(BaseEngine):
+             forward_only=forward_only,
+         )
+ 
++    _rollout_weight_quantizer = None
++
+     @property
+     def supports_lora_expert_slice(self) -> bool:
+         """Whether the weight-sync export can hand each rollout rank only its own experts.
+@@ -534,10 +536,23 @@ class MegatronLiteEngine(BaseEngine):
          proto = self.handle._extras.get("protocol") if self.handle is not None else None
          return bool(getattr(proto, "SUPPORTS_LORA_EXPERT_SLICE", False))
  
@@ -27,7 +36,7 @@ index 03539b7..7b20f61 100644
          if not getattr(self, "_initial_sync_cache_cleared", False):
              aggressive_empty_cache(force_sync=True)
              self._initial_sync_cache_cleared = True
-@@ -550,6 +563,10 @@ class MegatronLiteEngine(BaseEngine):
+@@ -550,6 +565,10 @@ class MegatronLiteEngine(BaseEngine):
              if not self.supports_lora_expert_slice:
                  raise ValueError("lora_expert_slice given but this model cannot export expert slices")
              export_kwargs["lora_expert_slice"] = tuple(kwargs["lora_expert_slice"])
@@ -38,10 +47,25 @@ index 03539b7..7b20f61 100644
          export_kwargs.update(
              buffer_max_size_bytes=2 * 1024**3,
              cpu=False,
-@@ -584,6 +601,12 @@ class MegatronLiteEngine(BaseEngine):
+@@ -582,8 +601,27 @@ class MegatronLiteEngine(BaseEngine):
+                 "this model exports only its LoRA adapter; the rollout must load the base "
+                 "checkpoint (rollout.load_format != dummy)"
              )
++        if (
++            peft_config is None
++            and self._rollout_weight_quantizer is not None
++            and not self.engine_config.qat.get("enable", False)
++        ):
++            # Full-weight sync to a low-precision rollout. An adapter export stays BF16: the rollout
++            # adds it on top of the quantized base it loaded itself (as verl's Megatron engine).
++            # With mLite QAT on, qat_export above already produced the rollout format.
++            weights = self._rollout_weight_quantizer(weights)
          return weights, peft_config
  
++    def set_rollout_weight_quantizer(self, quantizer) -> None:
++        """verl's trainer-side rollout weight quantizer, applied to full-weight exports only."""
++        self._rollout_weight_quantizer = quantizer
++
 +    def _exports_adapter_only(self) -> bool:
 +        if os.environ.get("MLITE_EXPORT_FULL_ONLOAD", "0") == "1":
 +            return False
@@ -197,6 +221,112 @@ index 5eecca7..3c6d8c6 100644
  def load_model_to_gpu(
      model_list: list,
      load_grad: bool = True,
+diff --git a/experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py b/experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py
+new file mode 100644
+index 0000000..9e0021c
+--- /dev/null
++++ b/experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py
+@@ -0,0 +1,100 @@
++"""verl's trainer-side rollout weight quantizer (``set_rollout_weight_quantizer``) in the mLite engine.
++
++verl calls the hook for any model with a native ``quantization_config`` (K31: compressed-tensors MXFP4). As in
++verl's Megatron engine, the quantizer applies to full-weight exports only; an adapter export (K31 LoRA) stays BF16.
++"""
++
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++VERL_EXAMPLE_ROOT = Path(__file__).resolve().parents[3] / "examples" / "verl"
++if str(VERL_EXAMPLE_ROOT) not in sys.path:
++    sys.path.insert(0, str(VERL_EXAMPLE_ROOT))
++
++pytestmark = pytest.mark.optional
++
++WEIGHTS = [
++    ("model.layers.0.mlp.down_proj.weight", torch.ones(2, 2, dtype=torch.bfloat16))
++]
++
++
++@pytest.fixture(autouse=True)
++def _require_verl() -> None:
++    pytest.importorskip(
++        "verl", reason="VERL is required for this optional example test."
++    )
++
++
++def _engine(monkeypatch, *, peft_config, qat=None):
++    from verl_mlite.engine import mlite_engine
++    from verl_mlite.engine.config import MegatronLiteEngineConfig
++
++    engine = mlite_engine.MegatronLiteEngine(
++        model_config=SimpleNamespace(
++            local_path="/tmp/k31", hf_config={"model_type": "kimi_k31"}, mtp=None
++        ),
++        engine_config=MegatronLiteEngineConfig(
++            custom_backend_module=None, impl_cfg={}, qat=qat or {}
++        ),
++        optimizer_config=SimpleNamespace(),
++        checkpoint_config={},
++    )
++    monkeypatch.setattr(
++        type(engine), "is_param_offload_enabled", property(lambda self: False)
++    )
++    monkeypatch.setattr(engine, "_require_initialized", lambda: None)
++    monkeypatch.setattr(engine, "_resolve_model_name", lambda: "kimi_k31")
++    monkeypatch.setattr(
++        mlite_engine.qat_export, "export_qat_weights", lambda w, cfg: [("qat", w)]
++    )
++    proto = (
++        SimpleNamespace(export_peft_config=lambda chunks: peft_config)
++        if peft_config is not None
++        else None
++    )
++    engine._initial_sync_cache_cleared = True
++    engine.handle = SimpleNamespace(_extras={"protocol": proto}, _model=None)
++    engine.runtime = SimpleNamespace(export_weights=lambda handle, **kw: list(WEIGHTS))
++    return engine
++
++
++def _quantizer(calls):
++    def quantize(weights):
++        calls.append(weights)
++        return [("quantized", weights)]
++
++    return quantize
++
++
++def test_default_has_no_quantizer(monkeypatch):
++    engine = _engine(monkeypatch, peft_config=None)
++    assert engine.get_per_tensor_param() == (WEIGHTS, None)
++
++
++def test_adapter_export_is_not_quantized(monkeypatch):
++    peft = {"r": 4}
++    engine = _engine(monkeypatch, peft_config=peft)
++    calls = []
++    engine.set_rollout_weight_quantizer(_quantizer(calls))
++    assert engine.get_per_tensor_param() == (WEIGHTS, peft)
++    assert calls == []
++
++
++def test_full_export_is_quantized(monkeypatch):
++    engine = _engine(monkeypatch, peft_config=None)
++    calls = []
++    engine.set_rollout_weight_quantizer(_quantizer(calls))
++    assert engine.get_per_tensor_param() == ([("quantized", WEIGHTS)], None)
++    assert calls == [WEIGHTS]
++
++
++def test_mlite_qat_export_is_not_quantized_twice(monkeypatch):
++    engine = _engine(monkeypatch, peft_config=None, qat={"enable": True})
++    calls = []
++    engine.set_rollout_weight_quantizer(_quantizer(calls))
++    assert engine.get_per_tensor_param() == ([("qat", WEIGHTS)], None)
++    assert calls == []
 diff --git a/experimental/lite/tests/unit/model/k31/vllm/test_lora_expert_tp_slice.py b/experimental/lite/tests/unit/model/k31/vllm/test_lora_expert_tp_slice.py
 new file mode 100644
 index 0000000..58715b1

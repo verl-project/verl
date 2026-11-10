@@ -3,13 +3,13 @@
 # to /opt/Megatron-LM, kimi-k31/ to /opt/k31-plugins. docker/rocm/Dockerfile.rocm.kimi-k31.true-on-policy checks
 # them at build time (sha256sum -c).
 # The comment above each entry is the md5 of that file in the validated runs.
-# experimental/ entries: the restructured tree (mLite k1-k31-rocm-min 2e4541c, 5 patches megatron-k31-01..05),
-# trainer files validated by gate 6 at a99944b (g6v8_min_a99944b, g6v9_img_refresh_a99944b); 77f745a/2e4541c change only the adapter export (TP slice) and its test.
+# experimental/ entries: the restructured tree (mLite k1-k31-rocm-min 5a61c10, 5 patches megatron-k31-01..05),
+# trainer files validated by gate 6 at a99944b (g6v8_min_a99944b, g6v9_img_refresh_a99944b); 77f745a/2e4541c change only the adapter export (TP slice) and its test. 5a61c10 adds the engine's set_rollout_weight_quantizer (verl #8287; full-weight exports only) and its test.
 # vllm/ entries: unchanged from the previous manifest. kimi-k31/ entries: unchanged except k31lora/__init__.py and the new
 # k31lora/lora_slice.py (the receive side of the per-rank expert LoRA slice, moved out of verl).
 
-# validated-run md5 65badcc1a16001d6a3c63efa0209f010
-ece1f8901d45a4683b65599251f34ee6c86e40c5086b2cd010fe233b5e2927f0  experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
+# validated-run md5 625a705b25fa5f07d9376cfbfed15605
+0fbef4377645668dc9a578c6f45fd276ef7b12d636f4bef40d188855c742760d  experimental/lite/examples/verl/verl_mlite/engine/mlite_engine.py
 # validated-run md5 83e279b78ed7874cc099fd603660eb91
 c87189e99991f4488fa01517846406af77eb1f5e9c7f07656f0da42578f001be  experimental/lite/megatron/lite/model/k31/vllm/checkpoint.py
 # validated-run md5 0c8d54ba2f8d622945b27f8615a77436
@@ -50,6 +50,8 @@ b2861811fb477e2c59db59885e86251f5fe3a245e1948b76aa3d3e8a4478fd74  experimental/l
 4635707611dd262dd86f4f1f1b794f9efe5ba590fea9227cb26e3d3828d3aa85  experimental/lite/megatron/lite/runtime/backends/mlite/runtime.py
 # validated-run md5 6f6766355af6dfd0efe38cb41aef811c
 9a6a2706c05c9c385399b9e410f147ea9e2001a1ef8cee69d3f24f576d8d613e  experimental/lite/megatron/lite/runtime/megatron_utils.py
+# validated-run md5 ec0493234060bacf842458a8f0385801
+77813e3dca943addadd240c176fb7684757cb655eb9161809da7235766905835  experimental/lite/tests/unit/examples/test_verl_mlite_engine_rollout_quantizer.py
 # validated-run md5 5015dd64eec1d95934dcfe0b2d475ec4
 ea26560eb293c62d88b9b90ec8f521f4b4255ecaf2ae8f0f1ae41c8937825441  experimental/lite/tests/unit/model/k31/vllm/_rocm_interp_cases.py
 # validated-run md5 51c2670dea7c7ea8b582772010a8cab7
