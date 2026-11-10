@@ -46,6 +46,7 @@ def _make_trainer(tmp_path, events, async_save=False):
     trainer.use_critic = False
     trainer.config = OmegaConf.create(
         {
+            "data": {"custom_dataloader": None},
             "trainer": {
                 "default_local_dir": str(tmp_path),
                 "default_hdfs_dir": None,
