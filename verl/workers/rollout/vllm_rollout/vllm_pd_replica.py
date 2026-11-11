@@ -260,10 +260,7 @@ class vLLMPDReplica(vLLMReplica):
                 raise RuntimeError("PD servers have not been launched")
             await self._prefill_servers[0].wait_for_requests_to_drain.remote()
             await asyncio.gather(
-                *[
-                    server.collective_rpc.remote(method="disconnect_kv_transfer_peers")
-                    for server in self.servers
-                ]
+                *[server.collective_rpc.remote(method="disconnect_kv_transfer_peers") for server in self.servers]
             )
             await asyncio.gather(*[server.sleep.remote() for server in self.servers])
             return

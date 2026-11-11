@@ -27,11 +27,11 @@ from verl.workers.config.cache_pool import KVCachePoolConfig, KVCachePoolMasterC
 from verl.workers.rollout.vllm_rollout.kv_cache_pool import (
     MooncakeMasterActor,
     MooncakeMasterProcess,
-    build_pd_kv_transfer_config,
     build_mooncake_json,
     build_mooncake_master_cmd,
-    build_pd_store_connector_config,
     build_non_pd_kv_transfer_config,
+    build_pd_kv_transfer_config,
+    build_pd_store_connector_config,
     materialize_mooncake_config,
     mooncake_json_path,
     p2p_connector_name,
@@ -69,9 +69,7 @@ def test_resolve_store_tp_lcm_of_p_and_d():
 
 
 def test_resolve_store_tp_user_override():
-    extra = resolve_store_tp(
-        prefill_tp=4, decode_tp=2, prefill_tps=[4], user_store_tp_size=8, enable_store_tp_lcm=None
-    )
+    extra = resolve_store_tp(prefill_tp=4, decode_tp=2, prefill_tps=[4], user_store_tp_size=8, enable_store_tp_lcm=None)
     assert extra == {"store_tp_size": 8}
 
 
@@ -117,16 +115,12 @@ def test_resolve_store_tp_explicit_lcm_uses_user_prefill_tp_sizes():
 
 def test_resolve_store_tp_rejects_store_tp_and_lcm():
     with pytest.raises(ValueError, match="mutually exclusive"):
-        resolve_store_tp(
-            prefill_tp=4, decode_tp=2, prefill_tps=[4], user_store_tp_size=8, enable_store_tp_lcm=True
-        )
+        resolve_store_tp(prefill_tp=4, decode_tp=2, prefill_tps=[4], user_store_tp_size=8, enable_store_tp_lcm=True)
 
 
 def test_resolve_store_tp_explicit_lcm_requires_prefill_tp_sizes():
     with pytest.raises(ValueError, match="prefill_tp_sizes"):
-        resolve_store_tp(
-            prefill_tp=4, decode_tp=2, prefill_tps=[], user_store_tp_size=None, enable_store_tp_lcm=True
-        )
+        resolve_store_tp(prefill_tp=4, decode_tp=2, prefill_tps=[], user_store_tp_size=None, enable_store_tp_lcm=True)
 
 
 def test_resolve_store_tp_lcm_validates_decode_against_prefill_lcm():
@@ -562,16 +556,12 @@ def test_extra_config_cannot_override_lookup_rpc_port():
 
 def test_store_tp_rejects_not_divisible():
     with pytest.raises(ValueError, match="store_tp_size"):
-        resolve_store_tp(
-            prefill_tp=4, decode_tp=2, prefill_tps=[4], user_store_tp_size=3, enable_store_tp_lcm=None
-        )
+        resolve_store_tp(prefill_tp=4, decode_tp=2, prefill_tps=[4], user_store_tp_size=3, enable_store_tp_lcm=None)
 
 
 def test_store_tp_rejects_decode_tp():
     with pytest.raises(ValueError, match="store_tp_size"):
-        resolve_store_tp(
-            prefill_tp=4, decode_tp=3, prefill_tps=[4], user_store_tp_size=4, enable_store_tp_lcm=None
-        )
+        resolve_store_tp(prefill_tp=4, decode_tp=3, prefill_tps=[4], user_store_tp_size=4, enable_store_tp_lcm=None)
 
 
 def _make_actor(**attrs):
@@ -700,9 +690,10 @@ def test_dead_child_fails_even_if_probe_would_succeed():
 def test_process_start_does_not_probe():
     proc = MooncakeMasterProcess()
     fake = _fake_popen()
-    with patch("subprocess.Popen", return_value=fake) as popen, patch(
-        "verl.workers.rollout.vllm_rollout.kv_cache_pool.probe_tcp"
-    ) as probe:
+    with (
+        patch("subprocess.Popen", return_value=fake) as popen,
+        patch("verl.workers.rollout.vllm_rollout.kv_cache_pool.probe_tcp") as probe,
+    ):
         proc.start(["mooncake_master", "--port", "1"])
     popen.assert_called_once()
     probe.assert_not_called()

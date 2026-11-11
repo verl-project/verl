@@ -483,7 +483,7 @@ def test_npu_pd_sleeps_decode_and_prefill_servers_serially(patched_replica_cls):
 
 
 class _AbortCall:
-    def __init__(self, server: "_AbortServerStub"):
+    def __init__(self, server: _AbortServerStub):
         self._server = server
 
     def remote(
@@ -554,9 +554,7 @@ def test_pd_abort_finishes_prefill_before_starting_decode(patched_replica_cls):
     decode_1 = _AbortServerStub("decode", "decode-1", log, aborted_count=3, request_ids=["d1"])
     replica = _abort_replica(patched_replica_cls, [prefill], [decode_0, decode_1])
 
-    result = asyncio.run(
-        replica.abort_all_requests(reject_request=True, reset_prefix_cache=False, abort_only=False)
-    )
+    result = asyncio.run(replica.abort_all_requests(reject_request=True, reset_prefix_cache=False, abort_only=False))
 
     prefill_ends = [i for i, entry in enumerate(log) if entry[0] == "end" and entry[1] == "prefill"]
     decode_starts = [i for i, entry in enumerate(log) if entry[0] == "start" and entry[1] == "decode"]
@@ -1178,8 +1176,6 @@ def _launch_servers_replica(*, transfer_backend, cache_pool):
 
 
 def test_launch_servers_gpu_pool_rejects_nixl():
-    from unittest.mock import MagicMock
-
     replica = _launch_servers_replica(
         transfer_backend="nixl",
         cache_pool={"enabled": True},

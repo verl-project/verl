@@ -139,10 +139,6 @@ class KVCachePoolConfig(BaseConfig):
                 f"not in {_ALLOWED_KV_LOAD_FAILURE_POLICIES}"
             )
         if self.master.port is not None and (
-            not isinstance(self.master.port, int)
-            or isinstance(self.master.port, bool)
-            or self.master.port < 0
+            not isinstance(self.master.port, int) or isinstance(self.master.port, bool) or self.master.port < 0
         ):
-            raise ValueError(
-                f"cache_pool.master.port={self.master.port!r} must be None, 0 (auto), or a positive int"
-            )
+            raise ValueError(f"cache_pool.master.port={self.master.port!r} must be None, 0 (auto), or a positive int")

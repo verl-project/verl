@@ -345,9 +345,7 @@ def build_non_pd_kv_transfer_config(
     else:
         store_tp = connector.store_tp_size if connector.store_tp_size is not None else tp
         if store_tp < tp or store_tp % tp != 0:
-            raise ValueError(
-                f"store_tp_size={store_tp} must be >= and divisible by tensor_model_parallel_size={tp}"
-            )
+            raise ValueError(f"store_tp_size={store_tp} must be >= and divisible by tensor_model_parallel_size={tp}")
         extra["store_tp_size"] = store_tp
         if connector.lookup_async:
             extra["lookup_async"] = True
@@ -617,9 +615,7 @@ class MooncakeMasterActor:
             port = master.port
             if pick_port:
                 port, reserve_sock = get_free_port(ip, with_alive_sock=True)
-            cmd = build_mooncake_master_cmd(
-                master=master, port=port, rpc_address=ip, enable_offload=enable_offload
-            )
+            cmd = build_mooncake_master_cmd(master=master, port=port, rpc_address=ip, enable_offload=enable_offload)
             try:
                 self._proc.start(cmd, log_output=master.log_master_output, reserve_sock=reserve_sock)
             except FileNotFoundError as e:
@@ -706,10 +702,14 @@ def setup_kv_cache_pool(rollout_cfg) -> None:
     except ValueError:
         enable_offload = bool((pool.get("store") or {}).get("ssd_offload_path"))
         driver_node = ray.get_runtime_context().get_node_id()
-        actor = ray.remote(MooncakeMasterActor).options(
-            name=name,
-            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=driver_node, soft=False),
-        ).remote()
+        actor = (
+            ray.remote(MooncakeMasterActor)
+            .options(
+                name=name,
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=driver_node, soft=False),
+            )
+            .remote()
+        )
         try:
             master_cfg = OmegaConf.to_container(pool.master, resolve=True)
             address = ray.get(actor.start.remote(master_cfg, enable_offload))
