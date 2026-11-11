@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import sys
 from typing import Generator
 
 import ray
@@ -102,6 +103,12 @@ class MockServerAdapter(BaseRollout):
         difference = (expected_cpu.float() - received_cpu.float()).abs()
         device_api = getattr(torch, received.device.type, None)
         current_device = device_api.current_device() if hasattr(device_api, "current_device") else None
+        check_time_npu_stream = None
+        check_time_cached_pyhccl_stream = None
+        if received.device.type == "npu" and device_api.is_initialized():
+            check_time_npu_stream = device_api.current_stream().npu_stream
+            provider = sys.modules.get("vllm_ascend.utils")
+            check_time_cached_pyhccl_stream = getattr(getattr(provider, "_CURRENT_STREAM", None), "npu_stream", None)
         details = {
             "expected_shape": tuple(expected.shape),
             "received_shape": tuple(received.shape),
@@ -110,6 +117,8 @@ class MockServerAdapter(BaseRollout):
             "expected_device": str(expected.device),
             "received_device": str(received.device),
             "current_device": current_device,
+            "check_time_torch_npu_stream": check_time_npu_stream,
+            "check_time_cached_pyhccl_stream": check_time_cached_pyhccl_stream,
             "rank": torch.distributed.get_rank() if torch.distributed.is_initialized() else None,
             "engine": type(checkpoint_engine).__name__,
             "engine_rank": getattr(checkpoint_engine, "rank", None),
