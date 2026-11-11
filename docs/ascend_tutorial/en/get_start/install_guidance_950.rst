@@ -13,7 +13,7 @@ Last updated: 11/11/2026.
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU for Ascend 950PR&950DT products. You can directly obtain published images from our :doc:`Ascend Image Guide <dockerfile_build_guidance>` or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU for Ascend 950PR&950DT products. You can directly obtain published images from our `Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_ or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -33,7 +33,7 @@ Deployment Guide
 We recommend using the prebuilt images available from
 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ to reduce environment setup and dependency installation work.
 If you need a custom environment, you can build an image from the Dockerfile. For details on obtaining, building, and using images, refer to the
-:doc:`Ascend Image Guide <dockerfile_build_guidance>`.
+`Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_.
 
 
 2. Custom Installation
