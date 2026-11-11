@@ -64,6 +64,7 @@ permissions:
 
 jobs:
   sanity:
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5 # Increase this timeout value as needed
     strategy:

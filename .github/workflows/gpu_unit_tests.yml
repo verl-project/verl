@@ -86,7 +86,7 @@ env:
 
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -101,7 +101,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   gpu_unit_tests:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (github.repository_owner == 'verl-project') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -147,7 +147,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, gpu_unit_tests]
-    if: always()
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

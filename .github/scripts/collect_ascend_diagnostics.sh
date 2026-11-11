@@ -10,7 +10,24 @@ mkdir -p "$root"
 capture() {
     local file="$1"
     shift
-    timeout 15s "$@" > "$file" 2>&1 || true
+    local status=0
+    timeout 15s "$@" > "$file" 2>&1 || status=$?
+    printf '[VERL_ASCEND_CAPTURE] exit_code=%s command=%s\n' "$status" "$*" >> "$file"
+}
+
+emit_file() {
+    local file="$1"
+    echo "[VERL_ASCEND_SNAPSHOT] file=$file lines=$(wc -l < "$file")"
+    sed 's/^/[VERL_ASCEND_SNAPSHOT] /' "$file"
+}
+
+emit_snapshot() {
+    local target="$1"
+    echo "[VERL_ASCEND_SNAPSHOT] BEGIN $target"
+    for name in time npu-smi processes tcp-sockets udp-sockets meminfo sysvipc-shm; do
+        emit_file "$target/$name.txt"
+    done
+    echo "[VERL_ASCEND_SNAPSHOT] END $target"
 }
 
 snapshot() {
@@ -28,7 +45,10 @@ snapshot() {
 if [ "$mode" = monitor ]; then
     trap 'exit 0' TERM INT
     while true; do
-        snapshot "samples/$(date -u +%Y%m%dT%H%M%S)"
+        sample="samples/$(date -u +%Y%m%dT%H%M%S)"
+        snapshot "$sample"
+        # Preserve live device/process evidence even if a timeout prevents the final step.
+        emit_snapshot "$root/$sample"
         sleep 15 &
         wait "$!" || true
     done
@@ -43,19 +63,19 @@ if [ "$mode" = before ]; then
     capture "$root/revision.txt" git rev-parse HEAD
     cat /usr/local/Ascend/driver/version.info > "$root/driver-version.txt" 2>&1 || true
     cat /usr/local/Ascend/ascend-toolkit/latest/*-linux/ascend_toolkit_install.info > "$root/cann-version.txt" 2>&1 || true
+    python verl/utils/hccl_diagnostics.py ci.baseline || true
     python verl/utils/hccl_diagnostics.py ci.before > "$root/identity.txt" 2>&1 || true
     cat "$root/identity.txt"
+    for name in uname network-addresses network-routes storage revision driver-version cann-version; do
+        emit_file "$root/$name.txt"
+    done
+    emit_snapshot "$root/before"
 fi
 
 if [ "$mode" = after ]; then
-    # Archive inside the job container; upload-artifact only needs the shared workspace.
-    if [ -d /tmp/ray/session_latest/logs ]; then
-        tar -czf "$root/ray-logs.tar.gz" -C /tmp/ray/session_latest logs || true
-    fi
-    if [ -d "$HOME/ascend/log" ]; then
-        tar -czf "$root/ascend-default-logs.tar.gz" -C "$HOME/ascend" log || true
-    fi
-    if [ -f output.txt ]; then
-        cp output.txt "$root/training-output.txt" || true
-    fi
+    # Console output is sufficient for users who cannot access the runner or artifacts.
+    emit_snapshot "$root/after"
+    capture "$root/kernel-errors.txt" dmesg --ctime --level=err,warn
+    emit_file "$root/kernel-errors.txt"
+    python verl/utils/hccl_diagnostics.py ci.report || true
 fi

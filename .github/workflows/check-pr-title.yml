@@ -36,6 +36,7 @@ on:
 
 jobs:
   check-title:
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

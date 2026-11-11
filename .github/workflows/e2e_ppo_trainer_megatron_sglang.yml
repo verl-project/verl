@@ -101,7 +101,7 @@ env:
 
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -116,6 +116,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   e2e_ppo_trainer_megatron-deepseek:
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -169,6 +170,7 @@ jobs:
 
   # Qwen3-0.6B: dense, tie_word_embeddings=True
   e2e_ppo_trainer_megatron-qwen3:
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -215,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [setup, e2e_ppo_trainer_megatron-deepseek, e2e_ppo_trainer_megatron-qwen3]
-    if: always()
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

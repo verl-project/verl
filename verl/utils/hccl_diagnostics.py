@@ -13,6 +13,7 @@
 # limitations under the License.
 """Opt-in, per-rank HCCL initialization diagnostics without additional collectives."""
 
+import gzip
 import hashlib
 import json
 import os
@@ -156,5 +157,69 @@ def hccl_diagnostic_stage(stage, **details):
         print_hccl_diagnostics(stage, status="success", elapsed_s=time.monotonic() - started, **details)
 
 
+def _ci_log_files():
+    roots = [
+        Path(os.environ["ASCEND_PROCESS_LOG_PATH"]),
+        Path.home() / "ascend/log",
+        Path("/var/log/npu/slog"),
+        Path("/tmp/ray/session_latest/logs"),
+    ]
+    for root in roots:
+        print(f"[VERL_ASCEND_LOG] source={root} exists={root.exists()}", flush=True)
+        try:
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    yield path
+        except Exception as error:
+            print(f"[VERL_ASCEND_LOG] cannot list {root}: {error!r}", flush=True)
+
+
+def print_ci_diagnostic_report(baseline=False):
+    """Print all newly written diagnostic log text, without line or tail limits."""
+    offsets_path = Path(os.environ["ASCEND_PROCESS_LOG_PATH"]).parent / "log-offsets.json"
+    offsets = {}
+    if not baseline and offsets_path.exists():
+        offsets = json.loads(offsets_path.read_text())
+    for path in _ci_log_files():
+        try:
+            stat = path.stat()
+            identity = [stat.st_dev, stat.st_ino]
+            if baseline:
+                offsets[str(path)] = {"identity": identity, "size": stat.st_size}
+                continue
+            previous = offsets.get(str(path), {})
+            start = previous.get("size", 0) if previous.get("identity") == identity else 0
+            if start > stat.st_size:
+                start = 0  # Log rotation/truncation: print the replacement contents.
+            if start == stat.st_size:
+                continue
+            print(f"[VERL_ASCEND_LOG] BEGIN file={path} offset={start} end={stat.st_size}", flush=True)
+            # Prefix every line so log contents cannot be interpreted as Actions commands.
+            if path.suffix == ".gz":
+                with gzip.open(path, "rt", errors="replace") as stream:
+                    for line in stream:
+                        print("[VERL_ASCEND_LOG] " + line.rstrip("\r\n"), flush=True)
+                print(f"[VERL_ASCEND_LOG] END file={path}", flush=True)
+                continue
+            with path.open("rb") as stream:
+                stream.seek(start)
+                while stream.tell() < stat.st_size:
+                    line = stream.readline(stat.st_size - stream.tell())
+                    if not line:
+                        print("[VERL_ASCEND_LOG] file truncated while reading", flush=True)
+                        break
+                    print("[VERL_ASCEND_LOG] " + line.decode(errors="replace").rstrip("\r\n"), flush=True)
+            print(f"[VERL_ASCEND_LOG] END file={path}", flush=True)
+        except Exception as error:
+            print(f"[VERL_ASCEND_LOG] cannot read {path}: {error!r}", flush=True)
+    if baseline:
+        offsets_path.parent.mkdir(parents=True, exist_ok=True)
+        offsets_path.write_text(json.dumps(offsets))
+    print(f"[VERL_ASCEND_LOG] {'baseline' if baseline else 'report'} complete", flush=True)
+
+
 if __name__ == "__main__":
-    print_hccl_diagnostics(sys.argv[1] if len(sys.argv) > 1 else "ci.snapshot")
+    if len(sys.argv) > 1 and sys.argv[1] in {"ci.baseline", "ci.report"}:
+        print_ci_diagnostic_report(baseline=sys.argv[1] == "ci.baseline")
+    else:
+        print_hccl_diagnostics(sys.argv[1] if len(sys.argv) > 1 else "ci.snapshot")
