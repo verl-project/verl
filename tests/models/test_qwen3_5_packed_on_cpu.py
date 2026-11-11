@@ -14,6 +14,7 @@
 """CPU regression tests for packed Qwen3.5 linear attention without FLA kernels."""
 
 import functools
+import inspect
 import sys
 import types
 
@@ -110,6 +111,55 @@ def test_call_accepts_kwarg_unwraps_hub_kernel_wrapper(monkeypatch):
 
     assert not _call_accepts_kwarg(wrapped_fallback, "cu_seqlens")
     assert not _call_accepts_kwarg(wrapped_fallback, "cp_context")
+
+
+def _as_kernels_function_module(func):
+    """Mimic kernels' use_kernel_forward_from_hub conversion of a function into a module."""
+    from torch import nn
+
+    class KernelFunction(nn.Module):
+        def forward(self, *args, **kwargs):
+            return func(*args, **kwargs)
+
+    func_sig = inspect.signature(func)
+    parameters = [inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    parameters.extend(func_sig.parameters.values())
+    KernelFunction.forward.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        parameters=parameters, return_annotation=func_sig.return_annotation
+    )
+    return KernelFunction()
+
+
+def test_call_accepts_kwarg_inspects_module_forward():
+    """Callable modules are inspected through their forward implementation, not their `__call__`."""
+
+    class ExplicitKernel(torch.nn.Module):
+        def forward(self, query, key, value, cp_context=None):
+            return query, None
+
+    assert _call_accepts_kwarg(ExplicitKernel(), "cp_context")
+    assert not _call_accepts_kwarg(ExplicitKernel(), "cu_seqlens")
+
+
+def test_call_accepts_kwarg_unwraps_function_backed_module(monkeypatch):
+    """Modules created by kernels for a hub-kernel wrapper still resolve the implementation."""
+    fake_pkg = types.ModuleType("_test_fake_fla_module")
+
+    def fake_fla_rule(q, k, v, g=None, beta=None, cu_seqlens=None, cu_seqlens_cpu=None, cp_context=None):
+        return q, None
+
+    fake_pkg.chunk_gated_delta_rule = fake_fla_rule
+    monkeypatch.setitem(sys.modules, "_test_fake_fla_module", fake_pkg)
+
+    @use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "_test_fake_fla_module")
+    def wrapped_with_kernel(query, key, value, **kwargs):
+        return query, None
+
+    module = _as_kernels_function_module(wrapped_with_kernel)
+
+    assert _call_accepts_kwarg(module, "cu_seqlens")
+    assert _call_accepts_kwarg(module, "cp_context")
+    assert not _call_accepts_kwarg(module, "seq_idx")
 
 
 def test_packed_chunk_gated_delta_rule_splits_without_fla():

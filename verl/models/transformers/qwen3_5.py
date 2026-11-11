@@ -39,27 +39,62 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def _resolve_kernel_target(fn):
+    """Return the callable whose signature describes the arguments a loaded kernel accepts.
+
+    transformers' hub kernel wrappers use ``@functools.wraps(torch_function)``, which
+    exposes the fallback's ``**kwargs`` signature even when an optimized kernel is loaded.
+    When the ``kernels`` package is installed, the wrapper is additionally converted into an
+    instantiated ``nn.Module`` that only forwards ``*args``/``**kwargs``, so both module and
+    function wrappers are unwrapped until the original implementation is reached.
+    """
     seen = set()
     current = fn
+    target = fn
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        # kernels' use_kernel_forward_from_hub turns a decorated function into a module instance.
+        if isinstance(current, torch.nn.Module):
+            current = getattr(current, "forward", None)
+            target = current if current is not None else target
+            continue
+        func = getattr(current, "__func__", None)
+        if func is not None:
+            current = func
+            target = func
+            continue
         closure = getattr(current, "__closure__", None)
         code = getattr(current, "__code__", None)
-        # transformers' use_kernel_func_from_hub_with_fallback uses @functools.wraps(torch_function),
-        # which exposes the fallback's `**kwargs` signature even when an optimized kernel is loaded.
-        if closure and code and "implementation" in code.co_freevars and "torch_function" in code.co_freevars:
+        if closure and code:
             freevars = dict(zip(code.co_freevars, closure, strict=True))
-            try:
-                impl = freevars["implementation"].cell_contents
-            except ValueError:
-                impl = None
-            if callable(impl):
-                return impl
-        current = getattr(current, "__wrapped__", getattr(current, "__func__", None))
-    return fn
+            implementation = freevars.get("implementation")
+            if implementation is not None:
+                try:
+                    impl = implementation.cell_contents
+                except ValueError:
+                    impl = None
+                if callable(impl):
+                    return impl
+            # kernels' _create_func_module wraps the hub kernel wrapper in a function that
+            # closes over it; follow that closure to keep resolving the implementation.
+            inner = freevars.get("func")
+            if inner is not None:
+                try:
+                    inner_callable = inner.cell_contents
+                except ValueError:
+                    inner_callable = None
+                if callable(inner_callable):
+                    current = inner_callable
+                    continue
+        current = getattr(current, "__wrapped__", None)
+    return target
 
 
 def _call_accepts_kwarg(fn, name: str) -> bool:
+    """Whether the resolved kernel implementation declares ``name`` explicitly.
+
+    ``**kwargs``-only wrappers are rejected so packed arguments are forwarded only to
+    kernels that actually accept them.
+    """
     target = _resolve_kernel_target(fn)
     return name in signature(target).parameters
 
