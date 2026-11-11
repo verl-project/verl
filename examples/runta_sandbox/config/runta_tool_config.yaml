@@ -1,0 +1,49 @@
+# Tool config for `actor_rollout_ref.rollout.multi_turn.tool_config_path`.
+# Credentials are not configured here: the Runta SDK reads RUNTA_TOKEN or
+# ~/.config/runta/config.toml (and RUNTA_ENDPOINT for a non-default endpoint).
+tools:
+  - class_name: "examples.runta_sandbox.runta_tool.RuntaSandboxTool"
+    config:
+      type: native
+
+      # python or bash
+      language: python
+
+      # Seconds allowed per execution; the process is killed afterwards.
+      default_timeout: 30
+
+      # Bytes kept per output stream (stdout / stderr).
+      max_output_bytes: 65536
+
+      # Runtime names are <name_prefix>-<8 hex chars>, which makes leftovers easy to find.
+      name_prefix: verl-sandbox
+
+      # Size of each runtime. One runtime is alive per in-flight trajectory that called the tool.
+      vcpus: 1
+      memory_mib: 1024
+
+      # Create runtimes from a Runta checkpoint, e.g. one with task dependencies preinstalled.
+      # null starts from the base runtime.
+      checkpoint_id: null
+
+      # Seconds to wait for a new runtime to become ready.
+      create_timeout: 240
+
+      # Server-side backstop for runtimes the trainer could not delete (e.g. it was killed):
+      # shut down after this many seconds, then delete this many seconds after shutdown.
+      auto_shutdown_after_secs: 3600
+      auto_delete_after_secs: 300
+
+    # Optional. Without `tool_schema` the tool exposes `code_interpreter(code: str)`.
+    # tool_schema:
+    #   type: function
+    #   function:
+    #     name: code_interpreter
+    #     description: Execute python code in a sandbox and return its stdout and stderr.
+    #     parameters:
+    #       type: object
+    #       properties:
+    #         code:
+    #           type: string
+    #           description: The code to execute.
+    #       required: ["code"]
