@@ -16,6 +16,7 @@
 
 import inspect
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Optional
 
@@ -85,9 +86,14 @@ def _gather_fused_hidden_states(hidden_states: Tensor, sequence_parallel: bool, 
     if not sequence_parallel:
         return hidden_states
 
-    # Liger TP-FLSCE already reduces dHidden across vocabulary shards. Its
-    # sequence-parallel gather must only split that gradient in backward.
-    tensor_parallel_output_grad = impl_backend.lower() != "liger"
+    from verl.trainer.ppo.score_centering import current_score_centering_fused_request
+
+    sc_request = current_score_centering_fused_request()
+    sc_active = sc_request is not None and sc_request.topk_ids is not None
+    # Liger TP-FLSCE and chunked score centering already reduce dHidden across
+    # vocabulary shards, so their sequence-parallel gather must only split that
+    # gradient in backward instead of reducing it a second time.
+    tensor_parallel_output_grad = impl_backend.lower() != "liger" and not sc_active
     return gather_from_sequence_parallel_region(
         hidden_states,
         tensor_parallel_output_grad=tensor_parallel_output_grad,
@@ -284,6 +290,9 @@ def fused_forward_model_engine(vision_model: bool = False):
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
         position_ids: Tensor | None = None,
+        score_centering: bool = False,
+        logits_processor_func=None,
+        batch=None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -343,23 +352,38 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels=labels_rmpad,
             **model_kwargs,
         )
-        if _use_output_processor_hook(model):
-            impl_backend = get_fused_impl_backend(model)
-            output_orig: CausalLMOutputForPPO = model(
-                **forward_kwargs,
-                output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(
+        from verl.trainer.ppo.score_centering import score_centering_fused_context
+
+        sc_ctx = score_centering_fused_context() if score_centering else nullcontext(None)
+        with sc_ctx as sc_request:
+            if score_centering and post_process:
+                if batch is None or logits_processor_func is None:
+                    raise ValueError("Megatron fused score centering requires batch and logits_processor_func")
+                topk_ids_rmpad, _, _ = preprocess_thd_engine(
+                    batch["rollout_topk_ids"],
+                    pre_process=True,
+                    need_roll=False,
+                    **thd_kwargs,
+                )
+                sc_request.topk_ids = topk_ids_rmpad.squeeze(0).contiguous()
+
+            if _use_output_processor_hook(model):
+                impl_backend = get_fused_impl_backend(model)
+                output_orig: CausalLMOutputForPPO = model(
+                    **forward_kwargs,
+                    output_processor=fused_output_processor,
+                    output_processor_context=FusedOutputProcessorContext(
+                        temperature=temperature,
+                        impl_backend=impl_backend,
+                    ),
+                )
+            else:
+                impl_backend = get_fused_impl_backend(model)
+                output_orig: CausalLMOutputForPPO = model(
                     temperature=temperature,
                     impl_backend=impl_backend,
-                ),
-            )
-        else:
-            impl_backend = get_fused_impl_backend(model)
-            output_orig: CausalLMOutputForPPO = model(
-                temperature=temperature,
-                impl_backend=impl_backend,
-                **forward_kwargs,
-            )
+                    **forward_kwargs,
+                )
 
         if not post_process:
             return output_orig
@@ -393,6 +417,35 @@ def fused_forward_model_engine(vision_model: bool = False):
                 local_cp_size=local_cp_size,
             )
             output["entropy"] = entropy
+
+        if score_centering:
+            if sc_request is None or sc_request.head_log_probs is None:
+                raise RuntimeError(
+                    "Megatron fused score centering did not produce head_log_probs: verify that the model ran "
+                    "linear_cross_entropy on the post_process stage."
+                )
+            sc_outputs = logits_processor_func(
+                student_logits=None,
+                train_head_log_probs=sc_request.head_log_probs,
+                data=batch,
+                data_format="thd",
+                quant_align_size=quant_align_size,
+                min_local_rows=min_local_rows,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
+            for k, v in sc_outputs.items():
+                if v.dim() == 1:
+                    v = v.unsqueeze(0)
+                output[k] = postprocess_thd_engine(
+                    v,
+                    packed_seq_params,
+                    input_ids,
+                    input_ids.shape[0],
+                    post_process=post_process,
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                )
 
         return output
 

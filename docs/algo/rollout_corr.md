@@ -299,7 +299,7 @@ Subtract the expected score under the sampler from every token's score
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
-- FSDP (`fsdp`/`fsdp2`), VeOmni (`veomni`), or Megatron (`megatron`) actor; incompatible with distillation; single-turn agent loop only. Supports `use_fused_kernels: true` with `use_remove_padding: true` on FSDP and VeOmni (`use_fused_kernels: false` on Megatron)
+- FSDP (`fsdp`/`fsdp2`), VeOmni (`veomni`), or Megatron (`megatron`) actor; incompatible with distillation; single-turn agent loop only. Supports `use_fused_kernels: true` with `use_remove_padding: true` across FSDP, VeOmni, and Megatron
 
 Score centering automatically tries to align with the actual sampling support. When the
 rollout provider verifies that the recorded head covers it, the trainer is normalized over
@@ -671,7 +671,7 @@ algorithm:
           score_centering: true
   ```
 
-- On FSDP (`fsdp`/`fsdp2`) and VeOmni (`veomni`, with a non-eager `cross_entropy_loss_implementation` such as `chunk_loss`), `actor_rollout_ref.model.use_fused_kernels: true` (with `use_remove_padding: true`) evaluates both the sampled token and the `k` head log-probs in streamed chunks without materializing `[T, vocab]` logits; set `use_fused_kernels: false` on Megatron
+- Across FSDP (`fsdp`/`fsdp2`), Megatron (`megatron`), and VeOmni (`veomni`, with a non-eager `cross_entropy_loss_implementation` such as `chunk_loss`), `actor_rollout_ref.model.use_fused_kernels: true` (with `use_remove_padding: true`) evaluates both the sampled token and the `k` head log-probs in streamed chunks without materializing `[T, vocab]` logits
 - v1 trainer (`trainer.use_v1: true`) with an FSDP, Megatron, or VeOmni actor (`use_remove_padding: true` on VeOmni); single-turn agent loop only. Under Megatron tensor parallelism the head log-probs are normalized over the vocab-parallel shards
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position

@@ -1284,10 +1284,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
             )
         if score_centering and use_fused_kernels:
-            raise NotImplementedError(
-                "score_centering=True is not supported with use_fused_kernels=True: "
-                "fused kernels do not materialize the logits tensor score centering needs."
-            )
+            if not self.engine_config.use_remove_padding:
+                raise NotImplementedError(
+                    "score_centering=True with use_fused_kernels=True on Megatron requires use_remove_padding=True."
+                )
+            if distillation_use_topk or distillation_only:
+                raise ValueError("score centering cannot be combined with distillation")
         pad_mode = tu.get_non_tensor_data(batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         temperature = batch["temperature"]
         model_inputs = self.prepare_model_inputs(batch)
@@ -1365,6 +1367,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
                 position_ids=batch.get("position_ids", None),
+                score_centering=score_centering,
+                logits_processor_func=logits_processor_func,
+                batch=batch,
             )
         else:
             if not isinstance(temperature, torch.Tensor):

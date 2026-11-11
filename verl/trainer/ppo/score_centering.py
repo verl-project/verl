@@ -626,6 +626,7 @@ def score_centering_logits_processor(
     config: ActorConfig,
     data_format: str = "thd",
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
     train_head_log_probs: Optional[torch.Tensor] = None,
@@ -664,7 +665,12 @@ def score_centering_logits_processor(
 
         from verl.models.mcore.util import preprocess_thd_engine
 
-        thd_kwargs = dict(quant_align_size=quant_align_size, local_cp_size=local_cp_size, cp_layout=cp_layout)
+        thd_kwargs = dict(
+            quant_align_size=quant_align_size,
+            min_local_rows=min_local_rows,
+            local_cp_size=local_cp_size,
+            cp_layout=cp_layout,
+        )
         topk_ids, *_ = preprocess_thd_engine(data["rollout_topk_ids"], pre_process=True, **thd_kwargs)
         topk_log_probs, *_ = preprocess_thd_engine(data["rollout_topk_log_probs"], pre_process=True, **thd_kwargs)
         if receipt is not None:
@@ -718,6 +724,7 @@ def score_centering_ppo_loss(
     student_logits: torch.Tensor = None,
     data_format: str = "thd",
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
     train_head_log_probs: Optional[torch.Tensor] = None,
@@ -748,6 +755,7 @@ def score_centering_ppo_loss(
             config,
             data_format,
             quant_align_size=quant_align_size,
+            min_local_rows=min_local_rows,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
             train_head_log_probs=train_head_log_probs,
