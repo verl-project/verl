@@ -84,7 +84,10 @@ def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=
         logits (Tensor): Model outputs of shape (..., vocab_size).
         labels (LongTensor): True class indices of shape matching logits[..., :-1].
         inplace_backward (bool): If True and Flash-Attn is available, perform backward in-place.
-        batch_invariant (bool): If True, use the vLLM sampler formula (see ``logprobs_from_logits_sampler``).
+        batch_invariant (bool): If True, compute the log-probabilities the way the vLLM sampler reports them:
+            fp32 logits divided by the fp32 per-row ``temperature`` (unscaled when ``None`` or below 1e-5),
+            fp32 log_softmax over the full vocabulary, then gather. Returns float32 regardless of the logits
+            dtype, and ``inplace_backward`` is unused.
         temperature (Tensor, optional): Per-row temperature for the ``batch_invariant`` path, which takes
             unscaled logits. The other paths expect logits that are already scaled.
 
@@ -92,7 +95,18 @@ def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=
         Tensor: Log-probabilities of the target labels, shape logits.shape[:-1].
     """
     if batch_invariant:
-        return logprobs_from_logits_sampler(logits, labels, temperature=temperature)
+        # log_softmax is row-wise, so chunks of rows give the same values as one call while bounding the fp32
+        # copy to one chunk; each chunk is checkpointed so backward recomputes it instead of keeping it alive
+        chunk_size = 2048
+        temperatures = [None] * len(logits.split(chunk_size)) if temperature is None else temperature.split(chunk_size)
+        return torch.cat(
+            [
+                checkpoint(_sampler_chunk_logprobs, chunk_logits, chunk_labels, chunk_temperature, use_reentrant=False)
+                for chunk_logits, chunk_labels, chunk_temperature in zip(
+                    logits.split(chunk_size), labels.split(chunk_size), temperatures, strict=True
+                )
+            ]
+        )
     # The flash-attn Triton cross-entropy kernel's reduction may be non-deterministic
     # and is NOT controlled by FLASH_ATTENTION_DETERMINISTIC (that only governs the
     # attention kernels) nor by torch.use_deterministic_algorithms (Triton custom ops
@@ -211,31 +225,6 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> 
             logprobs_labels.append(row_logprobs_labels)
         logprobs_labels = torch.stack(logprobs_labels)
     return logprobs_labels
-
-
-def logprobs_from_logits_sampler(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    chunk_size: int = 2048,
-    temperature: Optional[torch.Tensor] = None,
-):
-    """Log-probabilities computed the way the vLLM sampler reports them: fp32 logits divided by the fp32
-    per-row ``temperature`` (unscaled when ``None`` or below 1e-5), fp32 log_softmax over the full vocabulary, then
-    gather. Returns float32 regardless of the logits dtype.
-
-    log_softmax is row-wise, so processing chunks of rows gives the same values as one call on the
-    whole tensor while bounding the fp32 copy to one chunk. Each chunk is checkpointed, so backward
-    recomputes its fp32 log_softmax instead of keeping one full-vocabulary copy per chunk alive.
-    """
-    temperatures = [None] * len(logits.split(chunk_size)) if temperature is None else temperature.split(chunk_size)
-    logprobs_labels = []
-    for chunk_logits, chunk_labels, chunk_temperature in zip(
-        logits.split(chunk_size), labels.split(chunk_size), temperatures, strict=True
-    ):
-        logprobs_labels.append(
-            checkpoint(_sampler_chunk_logprobs, chunk_logits, chunk_labels, chunk_temperature, use_reentrant=False)
-        )
-    return torch.cat(logprobs_labels)
 
 
 def _sampler_chunk_logprobs(
