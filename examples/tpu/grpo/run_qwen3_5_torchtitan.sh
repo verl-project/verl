@@ -29,7 +29,63 @@ TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL="${TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL:-1}"
 # PROMOTE_F32: TPU 7x otherwise evaluates bf16 sigmoid/SiLU/GELU chains natively in bf16 (v6e promotes them
 # to f32), which inflates the trainer / rollout logits mismatch. Internal XLA flag, pinned with the image's libtpu;
 # the same as the Qwen3 recipes (verl-project/verl#8301).
-export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_enable_bitcast_reduce_fusion_graduation=false --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_bf16_emission_mode=PROMOTE_F32"
+LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_enable_bitcast_reduce_fusion_graduation=false --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_bf16_emission_mode=PROMOTE_F32"
+if [[ -n "${SCOPED_VMEM_LIMIT_KIB:-}" ]]; then
+    LIBTPU_INIT_ARGS+=" --xla_tpu_scoped_vmem_limit_kib=${SCOPED_VMEM_LIMIT_KIB}"
+fi
+if [[ -n "${TPU_DVFS_P_STATE:-}" ]]; then
+    LIBTPU_INIT_ARGS+=" --xla_tpu_dvfs_p_state=${TPU_DVFS_P_STATE}"
+fi
+if [[ -n "${EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
+    LIBTPU_INIT_ARGS+=" ${EXTRA_LIBTPU_INIT_ARGS}"
+fi
+export LIBTPU_INIT_ARGS
+
+# Trainer-only libtpu flags (applied via PlatformTPU.get_worker_env_vars on RayWorkerGroup trainer/ref actors only,
+# leaving vLLM rollout workers untouched so scoped-VMEM / SparseCore trainer flags never slow vLLM compilation):
+# - TRAINER_SCOPED_VMEM_LIMIT_KIB (e.g. 65472 on TPU v7x for Pallas Ring-of-Experts and double-buffered LCE kernels)
+# - SPARSECORE_OFFLOAD=True: TorchTitan Qwen3.5 fast-EP SparseCore collective offload + TensorCore gather/copy flags
+# - TRAINER_EXTRA_LIBTPU_INIT_ARGS: any additional trainer-only XLA/libtpu flags.
+VERL_TPU_TRAINER_LIBTPU_INIT_ARGS=""
+VERL_TPU_TRAINER_XLA_FLAGS=""
+if [[ -n "${TRAINER_SCOPED_VMEM_LIMIT_KIB:-}" ]]; then
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" --xla_tpu_scoped_vmem_limit_kib=${TRAINER_SCOPED_VMEM_LIMIT_KIB}"
+fi
+if [[ "${SPARSECORE_OFFLOAD:-False}" == "True" ]]; then
+    # torchtitan#142 SparseCore collective offload + latency-hiding scheduler flags (MaxText MoE recipe).
+    SPARSECORE_FLAGS=(
+        --xla_tpu_enable_latency_hiding_layer_scheduler=true
+        --xla_enable_async_all_gather=true
+        --xla_tpu_prefer_async_allgather_to_allreduce=true
+        --xla_tpu_enable_sparse_core_collective_aggregator=true
+        --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true
+        --xla_tpu_enable_sparse_core_collective_offload_all_gather=true
+        --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true
+        --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true
+        --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true
+        --xla_tpu_enable_sparse_core_reduce_scatter_v2=true
+        --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false
+        --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true
+        --xla_tpu_enable_offloading_gather_to_sparsecore=false
+        --xla_tpu_enable_offloading_copy_to_sparsecore=false
+    )
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" ${SPARSECORE_FLAGS[*]}"
+    VERL_TPU_TRAINER_XLA_FLAGS+=" --xla_enable_hlo_sharding_v3=false"
+fi
+if [[ -n "${TRAINER_EXTRA_LIBTPU_INIT_ARGS:-}" ]]; then
+    VERL_TPU_TRAINER_LIBTPU_INIT_ARGS+=" ${TRAINER_EXTRA_LIBTPU_INIT_ARGS}"
+fi
+if [[ -n "${TRAINER_EXTRA_XLA_FLAGS:-}" ]]; then
+    VERL_TPU_TRAINER_XLA_FLAGS+=" ${TRAINER_EXTRA_XLA_FLAGS}"
+fi
+VERL_TPU_TRAINER_LIBTPU_INIT_ARGS="${VERL_TPU_TRAINER_LIBTPU_INIT_ARGS# }"
+if [[ -n "${VERL_TPU_TRAINER_LIBTPU_INIT_ARGS}" ]]; then
+    export VERL_TPU_TRAINER_LIBTPU_INIT_ARGS
+fi
+VERL_TPU_TRAINER_XLA_FLAGS="${VERL_TPU_TRAINER_XLA_FLAGS# }"
+if [[ -n "${VERL_TPU_TRAINER_XLA_FLAGS}" ]]; then
+    export VERL_TPU_TRAINER_XLA_FLAGS
+fi
 
 project_name="${PROJECT_NAME:-verl_tpu_grpo}"
 MODEL_NAME="${MODEL_NAME:-Qwen3.5-35B-A3B}"
@@ -62,9 +118,26 @@ if (( TENSOR_PARALLEL_SIZE < 1 || CONTEXT_PARALLEL_SIZE < 1 || TOTAL_TRAINER_CHI
     exit 1
 fi
 DATA_PARALLEL_SHARD_SIZE="${DATA_PARALLEL_SHARD_SIZE:-$((TOTAL_TRAINER_CHIPS / TENSOR_PARALLEL_SIZE / CONTEXT_PARALLEL_SIZE))}"
-# The tpu-sync checkpoint engine supports a single rollout replica, so the rollout TP spans all rollout chips.
+# Default: a single rollout replica spanning all rollout chips; set ROLLOUT_TENSOR_PARALLEL_SIZE to divide
+# TOTAL_ROLLOUT_CHIPS across multiple rollout replicas (each pinned to its own TPU slice / tpu-group-<n>).
 ROLLOUT_TENSOR_PARALLEL_SIZE="${ROLLOUT_TENSOR_PARALLEL_SIZE:-${TOTAL_ROLLOUT_CHIPS}}"
 FUSE_QKV="${FUSE_QKV:-True}"
+
+# Memory settings for very large MoE models (e.g. Qwen3.5-397B-A17B on 24 chips): USE_KL_LOSS=False drops the
+# reference model; EXPERT_PARALLEL_SIZE shards the trainer's routed experts; PARAM_DTYPE=bfloat16 keeps bf16
+# parameters and gradients, and FP32_MASTER=True adds fp32 master weights and fp32 AdamW states to it;
+# OPTIMIZER_HOST_OFFLOAD=True keeps the optimizer states (and masters) in host memory; ROLLOUT_EXPERT_PARALLEL_SIZE
+# (= ROLLOUT_TENSOR_PARALLEL_SIZE) runs vLLM expert parallelism, which tpu-sync then fills without a staging copy; and
+# ROLLOUT_LOAD_FORMAT=dummy skips the rollout's checkpoint load (the first weight sync writes every weight).
+USE_KL_LOSS="${USE_KL_LOSS:-True}"
+EXPERT_PARALLEL_SIZE="${EXPERT_PARALLEL_SIZE:-1}"
+EP_CAPACITY_FACTOR="${EP_CAPACITY_FACTOR:-4.0}"
+PARAM_DTYPE="${PARAM_DTYPE:-float32}"
+OPTIMIZER_HOST_OFFLOAD="${OPTIMIZER_HOST_OFFLOAD:-False}"
+FP32_MASTER="${FP32_MASTER:-False}"
+ROLLOUT_EXPERT_PARALLEL_SIZE="${ROLLOUT_EXPERT_PARALLEL_SIZE:-1}"
+ROLLOUT_LOAD_FORMAT="${ROLLOUT_LOAD_FORMAT:-safetensors}"
+ROLLOUT_EXPERT_PARALLEL=$( (( ROLLOUT_EXPERT_PARALLEL_SIZE > 1 )) && echo True || echo False )
 
 # Training & validation settings
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
@@ -95,6 +168,36 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 PAD_TO_LENGTH_BUCKET="${PAD_TO_LENGTH_BUCKET:-512}"
+DATA_MAX_LENGTH="${DATA_MAX_LENGTH:-$(( MAX_MODEL_LEN > 8192 ? MAX_MODEL_LEN : 8192 ))}"
+MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-$(( MAX_MODEL_LEN * MICRO_BATCH_SIZE > 8192 ? MAX_MODEL_LEN * MICRO_BATCH_SIZE : 8192 ))}"
+# USE_DYNAMIC_BSZ=True packs each micro-batch up to MAX_TOKEN_LEN_PER_GPU tokens (instead of MICRO_BATCH_SIZE
+# sequences) for the actor update and the rollout / reference log-probs; verl requires the three to agree.
+USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+# MoE expert-parallel knobs of verl-hardware-plugin (engine_kwargs.tpu.*), passed only when set:
+# EP_DISPATCHER (auto / ragged / static; static keeps torchtitan's TpuQwen35TokenDispatcher, whose fast dropless
+# build runs Ring-of-Experts when EXPERT_PARALLEL_SIZE <= num_experts_per_tok), EP_TOKEN_CHUNKS (chunked
+# dispatch -> experts -> combine pipelining) and EP_PAIRED_GROUPED_MM (paired W1+W3 Pallas grouped matmul under EP).
+EXTRA_TPU_OVERRIDES=()
+if [[ -n "${EP_DISPATCHER:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_dispatcher=${EP_DISPATCHER}")
+fi
+if [[ -n "${EP_TOKEN_CHUNKS:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_token_chunks=${EP_TOKEN_CHUNKS}")
+fi
+if [[ -n "${EP_PAIRED_GROUPED_MM:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_paired_grouped_mm=${EP_PAIRED_GROUPED_MM}")
+fi
+if [[ -n "${AC_SAVE_SPLASH_AND_ROUTING:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ac_save_splash_and_routing=${AC_SAVE_SPLASH_AND_ROUTING}")
+fi
+# STATIC_MICRO_BATCH_LEN / STATIC_MAX_RESPONSE_LEN: pad every packed micro-batch (and its response bucket) to at
+# least this many tokens, e.g. MAX_TOKEN_LEN_PER_GPU / MAX_RESPONSE_LEN, so the trainer compiles one shape.
+if [[ -n "${STATIC_MICRO_BATCH_LEN:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_micro_batch_len=${STATIC_MICRO_BATCH_LEN}")
+fi
+if [[ -n "${STATIC_MAX_RESPONSE_LEN:-}" ]]; then
+    EXTRA_TPU_OVERRIDES+=("+actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.static_max_response_len=${STATIC_MAX_RESPONSE_LEN}")
+fi
 
 python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
@@ -119,8 +222,8 @@ python3 -m verl.trainer.main_ppo \
     data.val_max_samples="${VAL_MAX_SAMPLES}" \
     data.max_prompt_length="${MAX_PROMPT_LEN}" \
     data.max_response_length="${MAX_RESPONSE_LEN}" \
-    +data.max_length=8192 \
-    +data.max_token_len_per_gpu=8192 \
+    +data.max_length="${DATA_MAX_LENGTH}" \
+    +data.max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
     data.filter_overlong_prompts=True \
     data.truncation=error \
     +data.pad_mode=no_padding \
@@ -138,12 +241,19 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.use_simple_fsdp=True \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fuse_qkv="${FUSE_QKV}" \
     +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.optim_impl="${OPTIM_IMPL}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.param_dtype="${PARAM_DTYPE}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.optimizer_host_offload="${OPTIMIZER_HOST_OFFLOAD}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.fp32_master="${FP32_MASTER}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.ep_capacity_factor="${EP_CAPACITY_FACTOR}" \
+    +actor_rollout_ref.actor.torchtitan.engine_kwargs.tpu.rollout_expert_parallel="${ROLLOUT_EXPERT_PARALLEL}" \
+    actor_rollout_ref.actor.torchtitan.expert_parallel_size="${EXPERT_PARALLEL_SIZE}" \
     actor_rollout_ref.actor.optim.lr="${LEARNING_RATE}" \
     actor_rollout_ref.actor.optim.lr_warmup_steps="${LR_WARMUP_STEPS}" \
     actor_rollout_ref.actor.optim.decay_type=cosine \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.actor.use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
     actor_rollout_ref.actor.data_loader_seed="${SEED}" \
     actor_rollout_ref.actor.policy_loss.loss_mode=bypass_mode \
     '+actor_rollout_ref.actor.policy_loss.rollout_correction=${algorithm.rollout_correction}' \
@@ -151,7 +261,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
     actor_rollout_ref.actor.clip_ratio_high=0.2 \
     actor_rollout_ref.actor.clip_ratio_c=3.0 \
-    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.use_kl_loss="${USE_KL_LOSS}" \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -171,7 +281,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.torchtitan.pad_to_length=True \
     actor_rollout_ref.actor.torchtitan.pad_to_length_bucket="${PAD_TO_LENGTH_BUCKET}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
     actor_rollout_ref.ref.torchtitan.seed="${SEED}" \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=True \
     actor_rollout_ref.ref.torchtitan.max_seq_len="${MAX_MODEL_LEN}" \
@@ -180,11 +291,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TENSOR_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.data_parallel_size=1 \
+    actor_rollout_ref.rollout.expert_parallel_size="${ROLLOUT_EXPERT_PARALLEL_SIZE}" \
     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.rollout.load_format="${ROLLOUT_LOAD_FORMAT}" \
     actor_rollout_ref.rollout.dtype=bfloat16 \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.seed="${SEED}" \
@@ -193,7 +305,8 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.no_enable_prefix_caching=True \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
     actor_rollout_ref.rollout.checkpoint_engine.backend=tpu-sync \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.prompt_length="${MAX_PROMPT_LEN}" \
@@ -224,4 +337,4 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.nnodes="${NNODES_ROLLOUT}" \
     actor_rollout_ref.rollout.n_gpus_per_node="${N_CHIPS_ROLLOUT}" \
     +rollout.nnodes="${NNODES_ROLLOUT}" \
-    +rollout.n_gpus_per_node="${N_CHIPS_ROLLOUT}" "$@"
+    +rollout.n_gpus_per_node="${N_CHIPS_ROLLOUT}" ${EXTRA_TPU_OVERRIDES[@]+"${EXTRA_TPU_OVERRIDES[@]}"} "$@"

@@ -1415,6 +1415,14 @@ class vLLMHttpServer:
                 "rollout.engine_kwargs.vllm may not set args that verl derives from its config: "
                 + "; ".join(f"{key} (set {_VERL_MANAGED_VLLM_ARGS[key.replace('-', '_')]})" for key in managed)
             )
+        if _VLLM_VERSION >= version.parse("0.27.1") and is_torch_npu_available(check_device=False):
+            # Ascend RL defaults disable NZ weights for sleep/wake and weight updates.
+            additional_config = dict(engine_kwargs.get("additional_config") or {})
+            rl_config = dict(additional_config.get("rl_config") or {})
+            rl_config.setdefault("enabled", True)
+            additional_config["rl_config"] = rl_config
+            engine_kwargs["additional_config"] = additional_config
+
         if _VLLM_VERSION < version.parse("0.22.0"):
             # Work around multimodal processor cache desync across pause/resume.
             # See: https://github.com/vllm-project/vllm/pull/43001/
@@ -1517,7 +1525,7 @@ class vLLMHttpServer:
         MTP drafter-only weights are initialized by vLLM and are not guaranteed
         to be restored by actor weight sync after level 2 sleep discards them.
         lora only update adapter weights, so set sleep level to 1.
-        vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
         mtp_config = getattr(self.config, "mtp", None)
         mtp_rollout_enabled = (
@@ -1525,7 +1533,9 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+        if mtp_rollout_enabled or self.lora_as_adapter:
+            return 1
+        if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
         return 2
 

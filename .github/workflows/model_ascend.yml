@@ -64,7 +64,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -121,7 +121,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -164,4 +164,4 @@ jobs:
           PYTEST_DEBUG_TEMPROOT: /root/.cache/temp
         run: |
           ray stop --force
-          pytest tests/models/test_engine.py
+          pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none
