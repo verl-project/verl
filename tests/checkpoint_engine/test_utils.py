@@ -94,8 +94,11 @@ class MockServerAdapter(BaseRollout):
         expected_cpu = expected.detach().cpu()
         received_cpu = received.detach().cpu()
         mismatch = ~torch.isclose(expected_cpu, received_cpu)
+        mismatch_count = mismatch.sum().item()
         first_flat = mismatch.flatten().to(torch.int8).argmax()
-        first_index = tuple(int(index) for index in torch.unravel_index(first_flat, mismatch.shape))
+        first_index = (
+            tuple(int(index) for index in torch.unravel_index(first_flat, mismatch.shape)) if mismatch_count else None
+        )
         difference = (expected_cpu.float() - received_cpu.float()).abs()
         device_api = getattr(torch, received.device.type, None)
         current_device = device_api.current_device() if hasattr(device_api, "current_device") else None
@@ -111,9 +114,10 @@ class MockServerAdapter(BaseRollout):
             "engine": type(checkpoint_engine).__name__,
             "engine_rank": getattr(checkpoint_engine, "rank", None),
             "engine_device": getattr(checkpoint_engine, "device", None),
+            "cpu_mismatch_count": mismatch_count,
             "first_mismatch_index": first_index,
-            "expected_value": expected_cpu[first_index].item(),
-            "received_value": received_cpu[first_index].item(),
+            "expected_value": expected_cpu[first_index].item() if first_index is not None else None,
+            "received_value": received_cpu[first_index].item() if first_index is not None else None,
             "max_abs_error": difference.max().item(),
             "expected_nonfinite": (~torch.isfinite(expected_cpu)).sum().item(),
             "received_nonfinite": (~torch.isfinite(received_cpu)).sum().item(),
