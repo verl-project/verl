@@ -45,13 +45,13 @@ Atlas 800T A3
 
 ..
 
-   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 :doc:`安装指南（Ascend 950PR&950DT系列产品） <install_guidance_950>`。
+   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 `安装指南（Ascend 950PR&950DT系列产品） <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance_950.html>`_。
 
 
 框架后端支持说明
 ----------------
 
-当前NPU上支持以下常见训推后端的部署，您可以根据我们的 :doc:`昇腾镜像说明 <dockerfile_build_guidance>` 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_ 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -71,7 +71,7 @@ Atlas 800T A3
 
 推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
 如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
-:doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
+`昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_\ 。
 
 
 2. 自定义安装-vLLM + FSDP/Megatron

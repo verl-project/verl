@@ -45,7 +45,7 @@ Configuration tips:
 Environment Preparation
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Before running the scripts in this document, ensure that the verl Ascend environment has been installed. For installation details, see the :doc:`Ascend Installation Guide <./install_guidance>`.
+Before running the scripts in this document, ensure that the verl Ascend environment has been installed. For installation details, see the `Ascend Installation Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance.html>`_.
 
 Weight Preparation
 ~~~~~~~~~~~~~~~~~~~~
@@ -111,9 +111,9 @@ How to Run
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-For detailed parameter descriptions within the scripts, see :doc:`Training Configuration Parameters and Metrics <../dev_guide/model_dev/parameter_and_metrics>`.
+For detailed parameter descriptions within the scripts, see `Training Configuration Parameters and Metrics <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/model_dev/parameter_and_metrics.html>`_.
 
-For multi-node task launch, see the :doc:`Multi-Machine Task Startup Practice Guide <../model_support/examples/multi-machine_task_startup_practice>`.
+For multi-node task launch, see the `Multi-Machine Task Startup Practice Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/model_support/examples/multi-machine_task_startup_practice.html>`_.
 
 Appendix
 -------------------------------------------
