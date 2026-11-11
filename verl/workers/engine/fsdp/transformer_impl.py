@@ -1277,7 +1277,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
             )
-        if score_centering and use_fused_kernels:
+        if score_centering and use_fused_kernels and not getattr(self, "_supports_fused_score_centering", False):
             raise NotImplementedError(
                 "score_centering=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor score centering needs."

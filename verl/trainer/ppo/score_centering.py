@@ -335,25 +335,29 @@ def score_centering_auto_correction(
 
 
 def score_centering_logits_processor(
-    student_logits: torch.Tensor,
+    student_logits: Optional[torch.Tensor],
     data: TensorDict,
     config: ActorConfig,
     data_format: str = "thd",
     quant_align_size: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    train_head_log_probs: Optional[torch.Tensor] = None,
 ) -> dict[str, torch.Tensor]:
-    """Per-token centering term from the trainer logits, in the engine's logits-processor slot.
+    """Per-token centering term from the trainer logits or precomputed chunked head log-probs.
 
     Args:
         student_logits: Trainer logits, already temperature-scaled, shape (1, nnz/sp, V); under the
-            megatron strategy the local vocab-parallel shard, shape (1, nnz/cp, V/tp).
+            megatron strategy the local vocab-parallel shard, shape (1, nnz/cp, V/tp). May be None
+            when ``train_head_log_probs`` is supplied directly by a fused/chunked engine.
         data: Micro input batch, holding the nested ``rollout_topk_ids``/``rollout_topk_log_probs``
             sampler heads of shape [B, j, k] and the optional ``rollout_support_complete`` receipts.
         config: Actor configuration, used for ``strategy`` and ``policy_loss.rollout_correction``.
         data_format: "thd" or "bshd". Only "thd" is supported.
         quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs,
             so the sampler heads are packed into the same rows as ``student_logits``.
+        train_head_log_probs: Optional precomputed trainer head log-probs of shape (nnz/sp, k) or
+            (1, nnz/sp, k), used by VeOmni's chunked LM-head path to avoid materializing ``student_logits``.
 
     Returns:
         Dict with, each of shape (1, nnz/sp):
@@ -396,9 +400,14 @@ def score_centering_logits_processor(
     weight_fn = score_centering_weight_fn(
         rollout_correction.get("rollout_is", None), rollout_correction.get("rollout_is_threshold", 2.0)
     )
-    train_head_log_probs = topk_log_probs_from_logits(
-        student_logits.squeeze(0), topk_ids.squeeze(0), process_group=process_group
-    )
+    if train_head_log_probs is None:
+        if student_logits is None:
+            raise ValueError("score_centering_logits_processor requires student_logits or train_head_log_probs")
+        train_head_log_probs = topk_log_probs_from_logits(
+            student_logits.squeeze(0), topk_ids.squeeze(0), process_group=process_group
+        )
+    elif train_head_log_probs.ndim == 3:
+        train_head_log_probs = train_head_log_probs.squeeze(0)
     complete = support_complete.squeeze(0)
     correction, log_support_mass, sampler_head_mass, train_head_mass = score_centering_auto_correction(
         train_head_log_probs, topk_log_probs.squeeze(0), weight_fn, complete
@@ -425,10 +434,11 @@ def score_centering_ppo_loss(
     quant_align_size: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    train_head_log_probs: Optional[torch.Tensor] = None,
 ):
     """Actor loss function used both for the logits processor and the final policy loss.
-    - student_logits is not None, compute the centering term in the logits processor.
-    - student_logits is None, compute the final policy loss.
+    - student_logits or train_head_log_probs is not None: compute the centering term in the logits processor.
+    - both are None: compute the final policy loss.
 
     Args:
         config: Actor configuration.
@@ -439,12 +449,13 @@ def score_centering_ppo_loss(
         data_format: "thd" or "bshd". Only "thd" is supported.
         quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs, see
             ``score_centering_logits_processor``.
+        train_head_log_probs: Precomputed trainer head log-probs of shape (nnz/sp, k) from a chunked engine.
 
     Returns:
-        student_logits is not None: dict from ``score_centering_logits_processor``.
-        student_logits is None: the (loss, metrics) tuple from ``ppo_loss``.
+        student_logits or train_head_log_probs is not None: dict from ``score_centering_logits_processor``.
+        otherwise: the (loss, metrics) tuple from ``ppo_loss``.
     """
-    if student_logits is not None:
+    if student_logits is not None or train_head_log_probs is not None:
         return score_centering_logits_processor(
             student_logits,
             data,
@@ -453,6 +464,7 @@ def score_centering_ppo_loss(
             quant_align_size=quant_align_size,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
+            train_head_log_probs=train_head_log_probs,
         )
     rollout_correction = config.policy_loss.get("rollout_correction", None) or {}
     if rollout_correction.get("score_centering", False) and "sc_correction" not in model_output:

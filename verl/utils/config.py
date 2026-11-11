@@ -107,8 +107,22 @@ def _validate_score_centering_config(config: DictConfig) -> None:
             )
     if not config.trainer.get("use_v1", True):
         raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
-    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "megatron"):
-        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
+    strategy = config.actor_rollout_ref.actor.get("strategy")
+    if strategy not in ("fsdp", "fsdp2", "megatron", "veomni"):
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2, megatron, or veomni.")
+    if strategy == "veomni":
+        model_cfg = config.actor_rollout_ref.get("model") or {}
+        if model_cfg.get("use_remove_padding", True) is False:
+            raise ValueError("score centering on veomni requires actor_rollout_ref.model.use_remove_padding=True.")
+        veomni_cfg = config.actor_rollout_ref.actor.get("veomni") or {}
+        if (
+            model_cfg.get("use_fused_kernels", False)
+            and veomni_cfg.get("cross_entropy_loss_implementation", "chunk_loss") == "eager"
+        ):
+            raise ValueError(
+                "score centering with use_fused_kernels=True on veomni requires a non-eager "
+                "actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation."
+            )
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):

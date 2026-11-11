@@ -2,7 +2,7 @@
 
 **Author:** [Yingru Li](https://richardli.xyz/)
 
-Last updated: 10/11/2026.
+Last updated: 11/11/2026.
 
 ---
 
@@ -671,8 +671,8 @@ algorithm:
           score_centering: true
   ```
 
-- Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
-- v1 trainer (`trainer.use_v1: true`) with an FSDP or Megatron actor; single-turn agent loop only. Under Megatron tensor parallelism the head log-probs are normalized over the vocab-parallel shards
+- Set `actor_rollout_ref.actor.use_fused_kernels: false` on FSDP and Megatron; on the VeOmni actor (`strategy: veomni`), `actor_rollout_ref.model.use_fused_kernels: true` is supported with a non-eager `cross_entropy_loss_implementation` (e.g. `chunk_loss`), evaluating both the sampled token and the `k` head log-probs in streamed chunks without materializing `[T, vocab]` logits
+- v1 trainer (`trainer.use_v1: true`) with an FSDP, Megatron, or VeOmni actor (`use_remove_padding: true` on VeOmni); single-turn agent loop only. Under Megatron tensor parallelism the head log-probs are normalized over the vocab-parallel shards
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
