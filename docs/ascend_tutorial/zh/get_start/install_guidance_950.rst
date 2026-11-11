@@ -1,7 +1,7 @@
 昇腾安装指南(Ascend 950PR&950DT系列产品)
 =================
 
-Last updated: 11/06/2026.
+Last updated: 11/11/2026.
 
 
 .. contents:: 目录
@@ -30,7 +30,8 @@ Last updated: 11/06/2026.
 1. Docker镜像获取、构建和使用
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
+推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
+如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
 :doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
 
 
@@ -135,6 +136,15 @@ vLLM推理后端支持
 Megatron 训练后端支持
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
+.. note::
+
+   Megatron-Bridge ``v0.5.0`` 配合本文的 Transformers ``5.14.1`` 环境时，需要应用
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
+   当 Transformers 已提供原生 Qwen3-ASR 配置时，补丁会跳过内置的 AutoConfig、
+   AutoModel 和 AutoProcessor 注册，避免导入时出现 ``qwen3_asr`` 重复注册错误。
+   下方的 verl 依赖安装命令会在克隆 verl 后应用该补丁；
+   请将 Megatron-Bridge 与 verl 源码目录放在同一父目录下。
+
 .. code:: bash
     
     # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron 相关依赖
@@ -166,6 +176,9 @@ verl 依赖安装
 .. code:: bash
 
     git clone https://github.com/verl-project/verl.git
+    # 向 Megatron-Bridge 源码应用兼容性补丁
+    git -C Megatron-Bridge apply --unidiff-zero \
+        "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn

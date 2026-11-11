@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 11/06/2026.
+Last updated: 11/11/2026.
 
 .. contents:: 目录
    :local:
@@ -69,7 +69,8 @@ Atlas 800T A3
 1. Docker镜像获取、构建和使用
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
+推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
+如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
 :doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
 
 
@@ -143,6 +144,15 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 我们提供了基于conda一键部署 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`__ ， 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
+
+.. note::
+
+   启用 Megatron 后端时，安装脚本会自动向 Megatron-Bridge ``v0.5.0`` 应用
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
+   在本文使用的 Transformers ``5.14.1`` 环境中，补丁会保留已有的原生 Qwen3-ASR 注册，
+   并在该配置已注册时跳过内置的 AutoConfig、AutoModel 和 AutoProcessor 注册，
+   避免导入 Megatron-Bridge 时出现 ``qwen3_asr`` 重复注册错误。
+   运行安装脚本时，请保留克隆的 verl 仓库中的该补丁文件。
 
 .. code:: bash
 
