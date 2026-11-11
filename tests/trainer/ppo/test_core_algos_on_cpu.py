@@ -465,7 +465,7 @@ def test_geo_mean_drops_icepop_rejected_tokens():
 
 
 def test_geo_mean_fp16_weights_do_not_nan():
-    """geo_mean must stay finite with float16 IS weights (CodeRabbit review on #8421).
+    """geo_mean must stay finite with float16 IS weights.
 
     In float16, the 1e-10 epsilon rounds to 0, so a rejected token produced
     log(0) * 0 = NaN, which poisoned the sequence loss — including a fully
