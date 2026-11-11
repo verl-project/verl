@@ -82,6 +82,7 @@ def _run_logits_processor(eng, *, distillation_use_topk, distillation_only, logi
             calculate_entropy=False,
             distillation_use_topk=distillation_use_topk,
             distillation_only=distillation_only,
+            score_centering=False,
             logits_processor_func=logits_processor_func or _make_logits_processor(_DISTILLATION_KEYS),
             batch=batch,
             data_format="thd",

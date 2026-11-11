@@ -151,7 +151,7 @@ def test_sync_failure_refill_overrides_dataloader_generation_batch_size():
         patch("verl.trainer.ppo.v1.trainer_base.create_rl_dataset", side_effect=[[{}, {}], [{}]]),
         patch("verl.trainer.ppo.v1.trainer_base.create_rl_sampler", return_value=None),
         patch("verl.trainer.ppo.v1.trainer_base.StatefulDataLoader") as dataloader,
-        patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning,
+        patch("verl.utils.dataset.dataloader.logger.warning") as warning,
     ):
         trainer._init_dataloader()
 

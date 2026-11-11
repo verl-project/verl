@@ -20,6 +20,7 @@ from pathlib import Path
 import torch
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
+from verl.single_controller.ray.base import TRAINING_WORKER_OMP_NUM_THREADS_ENV
 from verl.utils.device import get_device_capability
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ NVTX_INJECTION_ENV = "NVTX_INJECTION64_PATH"
 _NVTX_INJECTION_DISABLED = "/nonexistent/verl-disabled-nvtx-injection.so"
 
 
-def _available_physical_cores() -> int:
+def available_physical_cores() -> int:
     """Return the number of physical CPU cores available to this process."""
     try:
         available_cpus = os.sched_getaffinity(0)
@@ -107,7 +108,7 @@ def _default_omp_num_threads(config) -> int:
 
     n_gpus_per_node = OmegaConf.select(config, "trainer.n_gpus_per_node", default=1) if config is not None else 1
     n_gpus_per_node = max(int(n_gpus_per_node or 1), 1)
-    return max(_available_physical_cores() // n_gpus_per_node, 1)
+    return max(available_physical_cores() // n_gpus_per_node, 1)
 
 
 PPO_RAY_RUNTIME_ENV = {
@@ -149,8 +150,11 @@ def get_ppo_ray_runtime_env(config=None):
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    # With CPU offload the training workers run gradient accumulation and the optimizer step on the
+    # host, so they get the large thread count. Nobody else does: set job-wide it also reaches rollout
+    # servers and agent loop workers, whose many small tensor ops then oversubscribe the node.
     if os.environ.get("OMP_NUM_THREADS") is None and "OMP_NUM_THREADS" not in job_runtime_env.get("env_vars", {}):
-        runtime_env["env_vars"]["OMP_NUM_THREADS"] = str(_default_omp_num_threads(config))
+        runtime_env["env_vars"][TRAINING_WORKER_OMP_NUM_THREADS_ENV] = str(_default_omp_num_threads(config))
     # Set after the loop above on purpose: the point is to override an inherited value, so it must
     # survive the "already set in the launching shell" filter.
     if _uses_torch_profiler(config) and os.environ.get("VERL_KEEP_NVTX_INJECTION", "0") != "1":
