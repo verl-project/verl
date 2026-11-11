@@ -1,7 +1,7 @@
 Ascend Installation Guide (Ascend 950PR&950DT products)
 ===============================================================
 
-Last updated: 11/06/2026.
+Last updated: 11/11/2026.
 
 
 .. contents:: Table of Contents
@@ -30,7 +30,9 @@ Deployment Guide
 1. Docker Image Acquisition, Build, and Usage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can obtain the relevant images from `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, or build them yourself from the Dockerfile. For details, refer to the
+We recommend using the prebuilt images available from
+`quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ to reduce environment setup and dependency installation work.
+If you need a custom environment, you can build an image from the Dockerfile. For details on obtaining, building, and using images, refer to the
 :doc:`Ascend Image Guide <dockerfile_build_guidance>`.
 
 
@@ -137,6 +139,18 @@ vLLM Inference Backend Support
 Megatron Training Backend Support
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+.. note::
+
+   Megatron-Bridge ``v0.5.0`` with the Transformers ``5.14.1`` environment used
+   here requires
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_.
+   When Transformers already provides a native Qwen3-ASR configuration, the
+   patch skips the vendored AutoConfig, AutoModel, and AutoProcessor
+   registrations to avoid duplicate ``qwen3_asr`` registration errors during
+   import. The verl dependency installation commands below apply the patch
+   after cloning verl; keep the Megatron-Bridge checkout in the same parent
+   directory as the verl checkout.
+
 .. code:: bash
 
     # Megatron
@@ -184,6 +198,9 @@ verl Dependency Installation
 .. code:: bash
 
     git clone https://github.com/verl-project/verl.git
+    # Apply the compatibility patch to the Megatron-Bridge checkout
+    git -C Megatron-Bridge apply --unidiff-zero \
+        "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
