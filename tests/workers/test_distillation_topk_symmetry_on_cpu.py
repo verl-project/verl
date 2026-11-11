@@ -74,6 +74,7 @@ def _make_engine_stub():
 
     class _EngineCfg:
         entropy_checkpointing = False
+        batch_invariant = False
 
     eng.engine_config = _EngineCfg()
     return eng

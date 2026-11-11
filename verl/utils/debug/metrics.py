@@ -122,7 +122,7 @@ def calculate_debug_metrics(data: DataProto) -> dict:
     rollout_logprobs_diff = calculate_log_prob_diff(
         actor_old_log_probs.float(), rollout_old_log_probs.float(), response_mask_bool
     )
-    logprobs_mismatch = torch.masked_select(actor_old_log_probs != rollout_old_log_probs, response_mask_bool)
+    logprobs_mismatch = rollout_logprobs_diff != 0
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),

@@ -19,7 +19,10 @@ from omegaconf import OmegaConf
 
 from verl.single_controller.ray.base import TRAINING_WORKER_OMP_NUM_THREADS_ENV
 from verl.trainer.constants_ppo import (
+    BATCH_INVARIANT_ENV,
     NVTX_INJECTION_ENV,
+    batch_invariant_requested,
+    export_batch_invariant_env,
     get_ppo_ray_runtime_env,
 )
 
@@ -74,3 +77,35 @@ def test_inherited_omp_num_threads_is_not_overridden():
 
     assert "OMP_NUM_THREADS" not in env_vars
     assert TRAINING_WORKER_OMP_NUM_THREADS_ENV not in env_vars
+
+
+def test_batch_invariant_env_is_forwarded_to_workers():
+    with patch.dict(os.environ, {}, clear=True):
+        export_batch_invariant_env()
+        env_vars = get_ppo_ray_runtime_env(_config(None))["env_vars"]
+
+    for key, value in BATCH_INVARIANT_ENV.items():
+        assert env_vars[key] == value
+    assert env_vars["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    for key in ("NCCL_ALGO", "NCCL_PROTO", "NCCL_NTHREADS", "NCCL_MIN_NCHANNELS", "NCCL_P2P_NET_DISABLE"):
+        assert key not in env_vars
+
+
+def _trainer_config(actor=None, ref=None, critic=None):
+    return OmegaConf.create(
+        {
+            "actor_rollout_ref": {"actor": {"fsdp_config": actor}, "ref": {"fsdp_config": ref}},
+            "critic": {"fsdp": critic},
+        }
+    )
+
+
+def test_batch_invariant_requested_by_any_fsdp_engine():
+    off = {"batch_invariant": False}
+    on = {"batch_invariant": True}
+
+    assert batch_invariant_requested(_trainer_config(off, off, off)) is False
+    assert batch_invariant_requested(_trainer_config(on, off, off)) is True
+    assert batch_invariant_requested(_trainer_config(off, on, off)) is True
+    assert batch_invariant_requested(_trainer_config(off, off, on)) is True
+    assert batch_invariant_requested(_trainer_config(None, None, {})) is False
