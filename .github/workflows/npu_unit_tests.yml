@@ -135,6 +135,7 @@ jobs:
               "--ignore-glob=*_hf_rollout*",
               "--ignore-glob=tests/models/",
               "--ignore-glob=tests/utils/qat",
+              "--ignore-glob=tests/utils/kernel",
               "--ignore-glob=tests/utils/real_nvfp4",
               "--ignore-glob=tests/special*",
               "--ignore-glob=tests/experimental",

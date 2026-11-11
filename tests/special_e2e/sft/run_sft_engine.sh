@@ -42,6 +42,9 @@ PAD_MODE=${PAD_MODE:-no_padding}
 
 USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-True}
 
+USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-False}
+FUSED_KERNEL_BACKEND=${FUSED_KERNEL_BACKEND:-torch}
+
 PAD_TO_LENGTH=${PAD_TO_LENGTH:-False}
 
 FSDP_ENGINE_CONFIG="\
@@ -136,11 +139,11 @@ AUTOMODEL_ENGINE_CONFIG="\
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
     echo "Using fsdp engine"
-    exp_name=gsm8k-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+    exp_name=gsm8k-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-fused-${USE_FUSED_KERNELS}-${FUSED_KERNEL_BACKEND}-mode-${mode}
 elif [ "$backend" = "veomni" ]; then
     ENGINE_CONFIG="$VEOMNI_ENGINE_CONFIG"
     echo "Using veomni engine"
-    exp_name=gsm8k-${backend}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+    exp_name=gsm8k-${backend}-sp${SP_SIZE}-fsdp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-fused-${USE_FUSED_KERNELS}-${FUSED_KERNEL_BACKEND}-mode-${mode}
 elif [ "$backend" = "torchtitan" ]; then
     ENGINE_CONFIG="$TORCHTITAN_ENGINE_CONFIG"
     echo "Using torchtitan engine"
@@ -152,7 +155,7 @@ elif [ "$backend" = "automodel" ]; then
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"
-    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-fused-${USE_FUSED_KERNELS}-${FUSED_KERNEL_BACKEND}-mode-${mode}
 fi
 
 mkdir -p "${ckpts_home}"
@@ -170,6 +173,8 @@ $COMMAND \
     data.max_token_len_per_gpu=2048 \
     data.messages_key=messages \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
+    model.use_fused_kernels=${USE_FUSED_KERNELS} \
+    model.fused_kernel_options.impl_backend=${FUSED_KERNEL_BACKEND} \
     data.ignore_input_ids_mismatch=True \
     ${ENGINE_CONFIG} \
     trainer.test_freq=after_each_epoch \
