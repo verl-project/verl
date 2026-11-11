@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for Score Centering on the VeOmni actor (chunked LM head, SC/SC+TIS/SC+MIS, Ulysses SP)."""
+"""CPU unit tests for shared chunked Score Centering across FSDP/FSDP2 and VeOmni engines."""
 
+import socket
 import sys
 from functools import partial
 from types import SimpleNamespace
@@ -27,17 +28,21 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
-from verl.trainer.ppo.score_centering import pad_rollout_topk, score_centering_ppo_loss
+from verl.trainer.ppo.score_centering import (
+    pad_rollout_topk,
+    score_centering_fused_context,
+    score_centering_ppo_loss,
+    topk_and_sampled_log_probs_from_hidden,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import _validate_score_centering_config
 from verl.utils.dataset.dataset_utils import DatasetPadMode
+from verl.utils.experimental.torch_functional import FusedLinearForPPO
+from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.ulysses import set_ulysses_sequence_parallel_group
-from verl.utils.veomni.score_centering import (
-    chunked_selected_linear_log_probs,
-    make_veomni_score_centering_adapter,
-    veomni_score_centering_context,
-)
-from verl.workers.config import ActorConfig, PolicyLossConfig, VeOmniEngineConfig
+from verl.utils.veomni.score_centering import make_veomni_score_centering_adapter
+from verl.workers.config import ActorConfig, FSDPEngineConfig, PolicyLossConfig, VeOmniEngineConfig
+from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 
 def _import_veomni_impl():
@@ -59,7 +64,7 @@ def _import_veomni_impl():
     return transformer_impl
 
 
-def _actor_config(rollout_is, rollout_is_threshold=2.0):
+def _actor_config(rollout_is, rollout_is_threshold=2.0, strategy="veomni"):
     rc = {
         "bypass_mode": True,
         "loss_type": "reinforce",
@@ -68,7 +73,7 @@ def _actor_config(rollout_is, rollout_is_threshold=2.0):
         "score_centering": True,
     }
     return ActorConfig(
-        strategy="veomni",
+        strategy=strategy,
         rollout_n=1,
         ppo_mini_batch_size=2,
         ppo_micro_batch_size_per_gpu=2,
@@ -77,8 +82,9 @@ def _actor_config(rollout_is, rollout_is_threshold=2.0):
     )
 
 
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "veomni"])
 @pytest.mark.parametrize("use_fused_kernels", [True, False])
-def test_validate_score_centering_config_accepts_veomni(use_fused_kernels):
+def test_validate_score_centering_config_accepts_fsdp_and_veomni(strategy, use_fused_kernels):
     rc = {"bypass_mode": True, "loss_type": "reinforce", "rollout_is": "token", "rollout_is_threshold": 2.0}
     cfg = OmegaConf.create(
         {
@@ -86,7 +92,7 @@ def test_validate_score_centering_config_accepts_veomni(use_fused_kernels):
             "actor_rollout_ref": {
                 "model": {"use_remove_padding": True, "use_fused_kernels": use_fused_kernels},
                 "actor": {
-                    "strategy": "veomni",
+                    "strategy": strategy,
                     "veomni": {"cross_entropy_loss_implementation": "chunk_loss"},
                     "policy_loss": {"loss_mode": "bypass_mode", "rollout_correction": {**rc, "score_centering": True}},
                 },
@@ -99,9 +105,32 @@ def test_validate_score_centering_config_accepts_veomni(use_fused_kernels):
     _validate_score_centering_config(cfg)
 
 
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "veomni"])
+def test_validate_score_centering_config_rejects_fused_without_remove_padding(strategy):
+    rc = {"bypass_mode": True, "loss_type": "reinforce", "rollout_is": "token", "rollout_is_threshold": 2.0}
+    cfg = OmegaConf.create(
+        {
+            "algorithm": {"rollout_correction": {**rc, "score_centering": True}},
+            "actor_rollout_ref": {
+                "model": {"use_remove_padding": False, "use_fused_kernels": True},
+                "actor": {
+                    "strategy": strategy,
+                    "veomni": {"cross_entropy_loss_implementation": "chunk_loss"},
+                    "policy_loss": {"loss_mode": "bypass_mode", "rollout_correction": {**rc, "score_centering": True}},
+                },
+                "rollout": {"name": "vllm", "topk_log_probs": 128, "temperature": 1.0},
+            },
+            "distillation": {"enabled": False},
+            "trainer": {"use_v1": True},
+        }
+    )
+    with pytest.raises(ValueError, match="use_remove_padding=True"):
+        _validate_score_centering_config(cfg)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("temperature", [1.0, 0.8])
-def test_chunked_selected_linear_log_probs_matches_dense_forward_and_backward(dtype, temperature):
+def test_topk_and_sampled_log_probs_from_hidden_matches_dense_forward_and_backward(dtype, temperature):
     torch.manual_seed(7)
     num_tokens, hidden_dim, vocab_size, k = 9, 16, 29, 5
     hidden = torch.randn(1, num_tokens, hidden_dim, dtype=dtype, requires_grad=True)
@@ -111,7 +140,7 @@ def test_chunked_selected_linear_log_probs_matches_dense_forward_and_backward(dt
     labels[0, -1] = -100
     topk_ids = torch.stack([torch.randperm(vocab_size)[:k] for _ in range(num_tokens)])
 
-    lp, ent, head_lp = chunked_selected_linear_log_probs(
+    lp, ent, head_lp = topk_and_sampled_log_probs_from_hidden(
         hidden, weight, labels, topk_ids, temperature=temperature, chunk_size=3, ignore_index=-100
     )
 
@@ -140,6 +169,84 @@ def test_chunked_selected_linear_log_probs_matches_dense_forward_and_backward(dt
     rtol = 2e-2 if dtype == torch.bfloat16 else 1e-5
     torch.testing.assert_close(hidden.grad.float(), hidden_ref.grad.float(), atol=atol, rtol=rtol)
     torch.testing.assert_close(weight.grad.float(), weight_ref.grad.float(), atol=atol, rtol=rtol)
+
+
+def _tp2_vocab_worker(rank: int, world_size: int, port: int, payload: dict, queue):
+    dist.init_process_group(backend="gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world_size)
+    try:
+        full_weight = payload["weight"]
+        local_vocab = full_weight.shape[0] // world_size
+        weight_shard = full_weight[rank * local_vocab : (rank + 1) * local_vocab].clone().requires_grad_(True)
+        hidden = payload["hidden"].clone().requires_grad_(True)
+
+        lp, ent, head_lp = topk_and_sampled_log_probs_from_hidden(
+            hidden,
+            weight_shard,
+            payload["labels"],
+            payload["topk_ids"],
+            temperature=payload["temperature"],
+            chunk_size=3,
+            ignore_index=-100,
+            process_group=dist.group.WORLD,
+        )
+        ((lp * payload["w_lp"]).sum() + (ent * payload["w_ent"]).sum() + (head_lp * payload["w_head"]).sum()).backward()
+        queue.put(
+            (
+                rank,
+                lp.detach().tolist(),
+                ent.detach().tolist(),
+                head_lp.detach().tolist(),
+                hidden.grad.detach().tolist(),
+                weight_shard.grad.detach().tolist(),
+            )
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def test_topk_and_sampled_log_probs_from_hidden_vocab_parallel_tp2_matches_full_vocab():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    torch.manual_seed(17)
+    num_tokens, hidden_dim, vocab_size, k = 9, 12, 24, 5
+    hidden = torch.randn(1, num_tokens, hidden_dim, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(vocab_size, hidden_dim, dtype=torch.float32, requires_grad=True)
+    labels = torch.randint(0, vocab_size, (1, num_tokens))
+    labels[0, 2] = -100
+    labels[0, -1] = -100
+    topk_ids = torch.stack([torch.randperm(vocab_size)[:k] for _ in range(num_tokens)])
+    w_lp = torch.randn(1, num_tokens)
+    w_ent = torch.randn(1, num_tokens)
+    w_head = torch.randn(num_tokens, k)
+
+    lp_ref, ent_ref, head_ref = topk_and_sampled_log_probs_from_hidden(
+        hidden, weight, labels, topk_ids, temperature=0.8, chunk_size=3, ignore_index=-100
+    )
+    ((lp_ref * w_lp).sum() + (ent_ref * w_ent).sum() + (head_ref * w_head).sum()).backward()
+
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    payload = {
+        "hidden": hidden.detach(),
+        "weight": weight.detach(),
+        "labels": labels,
+        "topk_ids": topk_ids,
+        "temperature": 0.8,
+        "w_lp": w_lp,
+        "w_ent": w_ent,
+        "w_head": w_head,
+    }
+    mp.spawn(_tp2_vocab_worker, args=(2, port, payload, queue), nprocs=2, join=True)
+    items = sorted((queue.get(timeout=5) for _ in range(2)), key=lambda item: item[0])
+    for _, lp, ent, head_lp, dhidden, _ in items:
+        torch.testing.assert_close(torch.tensor(lp), lp_ref.detach(), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(torch.tensor(ent), ent_ref.detach(), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(torch.tensor(head_lp), head_ref.detach(), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(torch.tensor(dhidden), hidden.grad, atol=1e-5, rtol=1e-5)
+    dweight_full = torch.cat([torch.tensor(item[5]) for item in items], dim=0)
+    torch.testing.assert_close(dweight_full, weight.grad, atol=1e-5, rtol=1e-5)
 
 
 def _build_ragged_micro_batch(vocab_size=19, k=4, support_complete=False):
@@ -210,6 +317,107 @@ def _build_ragged_micro_batch(vocab_size=19, k=4, support_complete=False):
         global_batch_size=2,
     )
     return batch
+
+
+class _TinyFSDPCausalLM(torch.nn.Module):
+    """Minimal causal LM exercising FSDP's two fused LM-head entrypoints and eager logits."""
+
+    def __init__(self, vocab_size: int, hidden_dim: int, backend: str):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="qwen3")
+        self.embed = torch.nn.Embedding(vocab_size, hidden_dim)
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size, bias=False)
+        self.backend = backend
+        self.fused_linear = FusedLinearForPPO(chunk_size=3, impl_backend="liger" if backend == "liger" else "torch")
+
+    def forward(self, input_ids, shift_labels=None, return_dict=False, temperature=1.0, **kwargs):
+        hidden = self.embed(input_ids)
+        if shift_labels is not None:
+            if self.backend in ("torch", "liger"):
+                log_probs, entropy = self.fused_linear(
+                    hidden_states=hidden,
+                    vocab_weights=self.lm_head.weight,
+                    input_ids=shift_labels,
+                    temperature=temperature,
+                )
+            elif self.backend == "triton":
+                log_probs, entropy = linear_cross_entropy(
+                    hidden,
+                    self.lm_head.weight,
+                    shift_labels,
+                    temperature=temperature,
+                    reduction="none",
+                    impl_backend="triton",
+                )
+            else:
+                raise ValueError(f"Unknown backend: {self.backend}")
+            return SimpleNamespace(log_probs=log_probs, entropy=entropy, logits=None)
+        return SimpleNamespace(logits=self.lm_head(hidden))
+
+
+@pytest.mark.parametrize("fused_backend", ["torch", "liger", "triton"])
+@pytest.mark.parametrize(
+    "rollout_is, threshold",
+    [
+        (None, 2.0),  # SC
+        ("token", 2.0),  # SC + TIS
+        ("token", "0.5_5.0"),  # SC + MIS
+    ],
+)
+@pytest.mark.parametrize("support_complete", [False, True])
+def test_fsdp_fused_score_centering_matches_eager_across_backends(
+    fused_backend, rollout_is, threshold, support_complete
+):
+    vocab_size, hidden_dim = 19, 12
+    torch.manual_seed(29)
+    model_fused = _TinyFSDPCausalLM(vocab_size, hidden_dim, backend=fused_backend)
+    model_eager = _TinyFSDPCausalLM(vocab_size, hidden_dim, backend=fused_backend)
+    model_eager.load_state_dict(model_fused.state_dict())
+
+    actor_cfg = _actor_config(rollout_is, threshold, strategy="fsdp2")
+    loss_fn = partial(score_centering_ppo_loss, config=actor_cfg)
+
+    def _run(model, use_fused):
+        engine = object.__new__(FSDPEngineWithLMHead)
+        engine.module = model
+        engine.engine_config = FSDPEngineConfig(batch_invariant=False)
+        engine.use_ulysses_sp = False
+        engine.ulysses_sequence_parallel_size = 1
+        engine.pad_to_length = False
+        engine.pad_to_length_bucket = 0
+        engine._autocast_dtype = torch.float32
+        engine.compute_entropy_from_logits = verl_F.entropy_from_logits
+        engine.get_data_parallel_group = lambda: None
+
+        batch = _build_ragged_micro_batch(vocab_size=vocab_size, k=4, support_complete=support_complete)
+        tu.assign_non_tensor(batch, use_fused_kernels=use_fused)
+        with (
+            patch("verl.workers.engine.fsdp.transformer_impl.get_device_name", return_value="cpu"),
+            patch("verl.workers.engine.fsdp.transformer_impl.get_device_id", return_value="cpu"),
+        ):
+            loss, metrics = engine.forward_step(batch, loss_function=loss_fn, forward_only=False)
+        loss.backward()
+        return loss.detach(), metrics
+
+    with patch.dict("os.environ", {"VERL_DISABLE_FLASH_ATTN_CE": "1"}):
+        loss_fused, metrics_fused = _run(model_fused, use_fused=True)
+        loss_eager, metrics_eager = _run(model_eager, use_fused=False)
+
+    torch.testing.assert_close(loss_fused, loss_eager, atol=1e-5, rtol=1e-5)
+    for key in (
+        "actor/sc_correction",
+        "actor/sc_sampler_head_mass",
+        "actor/sc_train_head_mass",
+        "actor/sc_support_aligned",
+        "actor/sc_sampler_tail_mass",
+    ):
+        if key not in metrics_fused and key not in metrics_eager:
+            continue
+        v_fused = metrics_fused[key].value if hasattr(metrics_fused[key], "value") else metrics_fused[key]
+        v_eager = metrics_eager[key].value if hasattr(metrics_eager[key], "value") else metrics_eager[key]
+        torch.testing.assert_close(torch.as_tensor(v_fused), torch.as_tensor(v_eager), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(model_fused.embed.weight.grad, model_eager.embed.weight.grad, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(model_fused.lm_head.weight.grad, model_eager.lm_head.weight.grad, atol=1e-5, rtol=1e-5)
 
 
 class _TinyVeOmniCausalLM(torch.nn.Module):
@@ -367,8 +575,6 @@ def _sp2_worker(rank: int, world_size: int, port: int, state_dict: dict, batch_d
 
 def test_veomni_fused_score_centering_ulysses_sp2_matches_sp1():
     veomni_impl = _import_veomni_impl()
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -416,9 +622,9 @@ def test_veomni_fused_score_centering_ulysses_sp2_matches_sp1():
     torch.testing.assert_close(torch.tensor(grad_sp2), ref_model.lm_head.weight.grad, atol=1e-5, rtol=1e-5)
 
 
-def test_veomni_score_centering_context_cleans_up_on_error():
+def test_score_centering_fused_context_cleans_up_on_error():
     with pytest.raises(RuntimeError, match="boom"):
-        with veomni_score_centering_context() as req:
+        with score_centering_fused_context() as req:
             req.topk_ids = torch.zeros((2, 4), dtype=torch.long)
             raise RuntimeError("boom")
     adapted = make_veomni_score_centering_adapter(lambda *a, **kw: ("orig_lp", "orig_ent"))

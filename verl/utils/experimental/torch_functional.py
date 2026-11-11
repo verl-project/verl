@@ -234,6 +234,26 @@ class FusedLinearForPPO(torch.nn.Module):
         temperature: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         input_ids = input_ids.to(torch.int64)
+        from verl.trainer.ppo.score_centering import (
+            current_score_centering_fused_request,
+            topk_and_sampled_log_probs_from_hidden,
+        )
+
+        sc_request = current_score_centering_fused_request()
+        if sc_request is not None and sc_request.topk_ids is not None:
+            if sc_request.head_log_probs is not None:
+                raise RuntimeError("score centering expected a single fused LM-head call per engine forward")
+            log_probs, entropy, head_log_probs = topk_and_sampled_log_probs_from_hidden(
+                hidden_states,
+                vocab_weights,
+                input_ids,
+                sc_request.topk_ids,
+                temperature=temperature,
+                chunk_size=sc_request.chunk_size,
+            )
+            sc_request.head_log_probs = head_log_probs.contiguous()
+            return log_probs, entropy
+
         if self.impl_backend == "torch" or _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None:
             return FusedLinearForPPOFunction.apply(
                 hidden_states,

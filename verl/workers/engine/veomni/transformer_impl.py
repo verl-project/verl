@@ -879,14 +879,6 @@ def _prepare_veomni_flash_attention_kwargs(position_ids: torch.Tensor) -> dict[s
 
 @EngineRegistry.register(model_type="language_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
-    _supports_fused_score_centering = True
-
-    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
-        from verl.utils.veomni.score_centering import veomni_score_centering_context
-
-        with veomni_score_centering_context():
-            return super().forward_step(micro_batch, loss_function, forward_only)
-
     def prepare_model_inputs(self, micro_batch: TensorDict):
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
         self._apply_veomni_input_transforms(model_inputs, micro_batch)
@@ -934,30 +926,13 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                 model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
 
             if score_centering:
-                from verl.utils.veomni.score_centering import (
-                    current_veomni_score_centering_request,
-                    install_veomni_score_centering_adapter,
-                    pack_veomni_topk_ids,
-                )
+                from verl.utils.veomni.score_centering import install_veomni_score_centering_adapter
 
-                if distillation_use_topk:
-                    raise ValueError("score centering cannot be combined with top-k distillation")
                 if self.engine_config.cross_entropy_loss_implementation == "eager":
                     raise ValueError(
                         "score centering with use_fused_kernels=True on VeOmni requires a non-eager "
                         "cross_entropy_loss_implementation (e.g. 'chunk_loss') to avoid materializing dense logits."
                     )
-                request = current_veomni_score_centering_request()
-                if request is None:
-                    raise RuntimeError(
-                        "VeOmni fused score centering must run inside VeOmniEngineWithLMHead.forward_step"
-                    )
-                request.topk_ids = pack_veomni_topk_ids(
-                    micro_batch["rollout_topk_ids"],
-                    micro_batch["input_ids"],
-                    output_args["pad_size"],
-                    use_ulysses_sp=self.use_ulysses_sp,
-                )
                 install_veomni_score_centering_adapter()
 
         # Arm router replay for this micro-batch. In REPLAY mode this also
@@ -1013,31 +988,6 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
         per-token output.
         """
         model_output = super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func)
-
-        use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
-        score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
-        if score_centering and use_fused_kernels:
-            from verl.utils.veomni.score_centering import current_veomni_score_centering_request
-
-            request = current_veomni_score_centering_request()
-            if request is None or request.head_log_probs is None:
-                raise RuntimeError(
-                    "VeOmni fused score centering did not produce head_log_probs: verify that the model ran "
-                    "VeOmni's chunk_logprobs path with return_log_probs=True."
-                )
-            head_log_probs = request.head_log_probs
-            if getattr(output, "log_probs", None) is not None and output.log_probs.requires_grad:
-                # Anchor onto the module's returned log_probs tensor so FSDP2's root post-forward hook
-                # always sees the backward even if a caller differentiates sc_correction alone.
-                head_log_probs = head_log_probs + 0.0 * output.log_probs.squeeze(0).unsqueeze(-1)
-            sc_outputs = logits_processor_func(
-                student_logits=None, train_head_log_probs=head_log_probs, data=micro_batch
-            )
-            cu_seqlens = micro_batch["input_ids"].offsets()
-            for k, v in sc_outputs.items():
-                v = v.squeeze(0)
-                v = self._gather_and_unpad_packed(v, output_args["pad_size"])
-                model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
         rr = self._router_replay
         if rr is not None and rr.action is RouterReplayAction.RECORD:

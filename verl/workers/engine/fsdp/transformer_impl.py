@@ -1254,6 +1254,30 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # shard boundary rather than the global sequence (issue #6068). This
                 # mirrors what the veomni engine already does for fused kernels.
                 extra_args["shift_labels"] = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+            if score_centering:
+                if not use_remove_padding:
+                    raise NotImplementedError(
+                        "score_centering=True with use_fused_kernels=True requires use_remove_padding=True."
+                    )
+                if distillation_use_topk:
+                    raise ValueError("score centering cannot be combined with top-k distillation")
+                from verl.trainer.ppo.score_centering import (
+                    current_score_centering_fused_request,
+                    pack_ulysses_topk_ids,
+                )
+
+                sc_request = current_score_centering_fused_request()
+                if sc_request is None:
+                    raise RuntimeError(
+                        "Fused score centering must run inside FSDPEngineWithLMHead.forward_step "
+                        "(or score_centering_fused_context())."
+                    )
+                sc_request.topk_ids = pack_ulysses_topk_ids(
+                    micro_batch["rollout_topk_ids"],
+                    micro_batch["input_ids"],
+                    output_args["pad_size"],
+                    use_ulysses_sp=self.use_ulysses_sp,
+                )
 
         model_inputs.update(multi_modal_inputs)
         model_inputs.update(extra_args)
@@ -1277,10 +1301,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
             )
-        if score_centering and use_fused_kernels and not getattr(self, "_supports_fused_score_centering", False):
+        if score_centering and use_fused_kernels and not use_remove_padding:
             raise NotImplementedError(
-                "score_centering=True is not supported with use_fused_kernels=True: "
-                "fused kernels do not materialize the full logits tensor score centering needs."
+                "score_centering=True with use_fused_kernels=True requires use_remove_padding=True."
             )
 
         model_output = {}
@@ -1316,6 +1339,29 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             v = getattr(aux_outputs, field_name).squeeze(0)
                             v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                             model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+
+                if score_centering:
+                    from verl.trainer.ppo.score_centering import current_score_centering_fused_request
+
+                    sc_request = current_score_centering_fused_request()
+                    if sc_request is None or sc_request.head_log_probs is None:
+                        raise RuntimeError(
+                            "Fused score centering did not produce head_log_probs: verify that the model ran "
+                            "a supported fused LM-head kernel with shift_labels."
+                        )
+                    head_log_probs = sc_request.head_log_probs
+                    if log_probs is not None and log_probs.requires_grad:
+                        # Anchor onto the module's returned log_probs tensor so FSDP2's root post-forward hook
+                        # always sees the backward even if a caller differentiates sc_correction alone.
+                        head_log_probs = head_log_probs + 0.0 * log_probs.unsqueeze(-1)
+                    sc_outputs = logits_processor_func(
+                        student_logits=None, train_head_log_probs=head_log_probs, data=micro_batch
+                    )
+                    cu_seqlens = input_ids.offsets()
+                    for k, v in sc_outputs.items():
+                        v = v.squeeze(0)
+                        v = self._gather_and_unpad_packed(v, output_args["pad_size"])
+                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
@@ -1505,48 +1551,54 @@ class FSDPEngineWithLMHead(FSDPEngine):
         return model_output
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
+        from verl.trainer.ppo.score_centering import score_centering_fused_context
+
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
-        model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
+        with score_centering_fused_context():
+            model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
-        # autocast is a no-op at best and a footgun at worst, so skip it entirely.
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
-        # and _build_fsdp_module, so self._autocast_dtype may not be set.
-        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
-        autocast_ctx: ContextManager = (
-            nullcontext()
-            if autocast_dtype == torch.float32
-            else torch.autocast(device_type=device_name, dtype=autocast_dtype)
-        )
-        with autocast_ctx:
-            raw_output = self.module(
-                **model_inputs,
-                use_cache=False,
-            )  # prevent model thinks we are generating
-
-            model_output = self.prepare_model_outputs(
-                output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
+            # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
+            # autocast is a no-op at best and a footgun at worst, so skip it entirely.
+            # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
+            # and _build_fsdp_module, so self._autocast_dtype may not be set.
+            autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
+            autocast_ctx: ContextManager = (
+                nullcontext()
+                if autocast_dtype == torch.float32
+                else torch.autocast(device_type=device_name, dtype=autocast_dtype)
             )
+            with autocast_ctx:
+                raw_output = self.module(
+                    **model_inputs,
+                    use_cache=False,
+                )  # prevent model thinks we are generating
 
-            if loss_function is not None:
-                loss, metrics = loss_function(
-                    model_output=model_output, data=micro_batch, dp_group=self.get_data_parallel_group()
+                model_output = self.prepare_model_outputs(
+                    output=raw_output,
+                    output_args=output_args,
+                    micro_batch=micro_batch,
+                    logits_processor_func=loss_function,
                 )
-            else:
-                assert forward_only, "forward_only must be True when loss_function is None"
-                loss = torch.tensor(1.0, device=device_name)
-                metrics = {}
 
-            # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
-            output = {
-                "model_output": detach_tree(model_output),
-                "loss": loss.detach().item(),
-                "metrics": metrics,
-            }
+                if loss_function is not None:
+                    loss, metrics = loss_function(
+                        model_output=model_output, data=micro_batch, dp_group=self.get_data_parallel_group()
+                    )
+                else:
+                    assert forward_only, "forward_only must be True when loss_function is None"
+                    loss = torch.tensor(1.0, device=device_name)
+                    metrics = {}
 
-            return loss, output
+                # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
+                output = {
+                    "model_output": detach_tree(model_output),
+                    "loss": loss.detach().item(),
+                    "metrics": metrics,
+                }
+
+                return loss, output
 
 
 @EngineRegistry.register(model_type="value_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])

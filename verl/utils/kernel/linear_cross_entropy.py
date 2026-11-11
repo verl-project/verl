@@ -242,6 +242,28 @@ def linear_cross_entropy(
         temperature = 1.0
     if reduction is None:
         reduction = "none"
+    from verl.trainer.ppo.score_centering import (
+        current_score_centering_fused_request,
+        topk_and_sampled_log_probs_from_hidden,
+    )
+
+    sc_request = current_score_centering_fused_request()
+    if sc_request is not None and sc_request.topk_ids is not None:
+        if str(reduction).lower() != "none":
+            raise NotImplementedError("score centering with linear_cross_entropy supports reduction='none' only")
+        if sc_request.head_log_probs is not None:
+            raise RuntimeError("score centering expected a single fused LM-head call per engine forward")
+        log_probs, entropy, head_log_probs = topk_and_sampled_log_probs_from_hidden(
+            hidden,
+            weight,
+            labels,
+            sc_request.topk_ids,
+            temperature=float(temperature),
+            chunk_size=sc_request.chunk_size,
+            process_group=dist_process_group,
+        )
+        sc_request.head_log_probs = head_log_probs.contiguous()
+        return log_probs, entropy
     if impl_backend == "triton":
         if hidden.device.type == "npu":
             from verl.utils.kernel.npu.cann_linear_ce import CannLinearCrossEntropy, should_use_cann_linear_ce

@@ -110,8 +110,13 @@ def _validate_score_centering_config(config: DictConfig) -> None:
     strategy = config.actor_rollout_ref.actor.get("strategy")
     if strategy not in ("fsdp", "fsdp2", "megatron", "veomni"):
         raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2, megatron, or veomni.")
+    model_cfg = config.actor_rollout_ref.get("model") or {}
+    if model_cfg.get("use_fused_kernels", False) and model_cfg.get("use_remove_padding", True) is False:
+        raise ValueError(
+            "score centering with actor_rollout_ref.model.use_fused_kernels=True requires "
+            "actor_rollout_ref.model.use_remove_padding=True."
+        )
     if strategy == "veomni":
-        model_cfg = config.actor_rollout_ref.get("model") or {}
         if model_cfg.get("use_remove_padding", True) is False:
             raise ValueError("score centering on veomni requires actor_rollout_ref.model.use_remove_padding=True.")
         veomni_cfg = config.actor_rollout_ref.actor.get("veomni") or {}

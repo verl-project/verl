@@ -22,6 +22,9 @@ predefined approximation; an incomplete head is never treated as the whole suppo
 
 import math
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -33,6 +36,7 @@ from verl.workers.config import ActorConfig
 from verl.workers.utils.losses import ppo_loss
 
 TOPK_LOG_PROB_CHUNK_SIZE = 4096
+FUSED_TOPK_LOG_PROB_CHUNK_SIZE = 1024
 
 
 def dummy_rollout_topk(
@@ -180,6 +184,288 @@ def topk_log_probs_from_logits(
         dtype float32, with gradient to ``logits``, identical on every rank of the group.
     """
     return _TopKLogProbsFromLogits.apply(logits, token_ids.long(), chunk_size, process_group)
+
+
+class _TopKAndSampledLogProbsFromHidden(torch.autograd.Function):
+    """Chunked LM-head projection + full-vocabulary log-softmax gather for sampled and top-k tokens.
+
+    Streams ``hidden_states @ weight.t()`` in ``(chunk_size, V_local)`` blocks and recomputes the
+    chunked projection in backward so ``use_fused_kernels=True`` never materializes ``(T, V)``
+    logits. Supports vocab-parallel ``process_group`` (Megatron TP) via chunked row all-reduces.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        labels: torch.Tensor,
+        topk_ids: torch.Tensor,
+        temperature: float,
+        chunk_size: int,
+        ignore_index: int,
+        process_group: Optional[torch.distributed.ProcessGroup],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ctx.set_materialize_grads(False)
+
+        compute_dtype = hidden_states.dtype
+        if torch.is_autocast_enabled(hidden_states.device.type):
+            compute_dtype = torch.get_autocast_dtype(hidden_states.device.type)
+        acc_dtype = torch.float64 if compute_dtype == torch.float64 else torch.float32
+
+        orig_label_shape = labels.shape
+        orig_hidden_shape = hidden_states.shape
+        k = topk_ids.shape[-1]
+        h_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+        l_1d = labels.reshape(-1)
+        ids_2d = topk_ids.reshape(-1, k)
+        num_tokens = l_1d.shape[0]
+        vocab_size = weight.shape[0]
+        vocab_start = _vocab_start(vocab_size, process_group)
+
+        log_probs = torch.empty(num_tokens, device=h_2d.device, dtype=acc_dtype)
+        entropy = torch.empty(num_tokens, device=h_2d.device, dtype=acc_dtype)
+        head_log_probs = torch.empty((num_tokens, k), device=h_2d.device, dtype=acc_dtype)
+        maxima = torch.empty((num_tokens, 1), device=h_2d.device, dtype=acc_dtype)
+        denominators = torch.empty((num_tokens, 1), device=h_2d.device, dtype=acc_dtype)
+
+        with torch.autocast(h_2d.device.type, enabled=False):
+            w = weight.to(compute_dtype)
+            for start in range(0, num_tokens, chunk_size):
+                end = min(start + chunk_size, num_tokens)
+                h_chunk = h_2d[start:end].to(compute_dtype)
+                l_chunk = l_1d[start:end]
+                ids_chunk = ids_2d[start:end]
+
+                logits = (h_chunk @ w.t()).to(acc_dtype)
+                if temperature != 1.0:
+                    logits.div_(temperature)
+
+                maximum = logits.max(dim=-1, keepdim=True).values
+                _all_reduce(maximum, torch.distributed.ReduceOp.MAX, process_group)
+
+                shifted = logits - maximum
+                exp_shifted = shifted.exp()
+                denominator = exp_shifted.sum(dim=-1, keepdim=True)
+                _all_reduce(denominator, torch.distributed.ReduceOp.SUM, process_group)
+                log_denom = denominator.log()
+                logp_local = shifted - log_denom
+
+                mask = l_chunk != ignore_index
+                safe_labels = l_chunk.clamp(min=0).unsqueeze(-1)
+                local_label_ids, local_label_mask = _local_ids(safe_labels, vocab_start, vocab_size)
+                sampled_lp = logp_local.gather(-1, local_label_ids).masked_fill_(~local_label_mask, 0.0).squeeze(-1)
+                _all_reduce(sampled_lp, torch.distributed.ReduceOp.SUM, process_group)
+                log_probs[start:end] = torch.where(mask, sampled_lp, torch.zeros_like(sampled_lp))
+
+                local_head_ids, local_head_mask = _local_ids(ids_chunk, vocab_start, vocab_size)
+                head_lp = logp_local.gather(-1, local_head_ids).masked_fill_(~local_head_mask, 0.0)
+                _all_reduce(head_lp, torch.distributed.ReduceOp.SUM, process_group)
+                head_log_probs[start:end] = head_lp
+
+                probs_local = exp_shifted / denominator
+                chunk_entropy = -(probs_local * logp_local).sum(dim=-1)
+                _all_reduce(chunk_entropy, torch.distributed.ReduceOp.SUM, process_group)
+                entropy[start:end] = torch.where(mask, chunk_entropy, torch.zeros_like(chunk_entropy))
+
+                maxima[start:end] = maximum
+                denominators[start:end] = denominator
+
+        ctx.save_for_backward(h_2d, weight, l_1d, ids_2d, maxima, denominators, entropy)
+        ctx.temperature = temperature
+        ctx.chunk_size = chunk_size
+        ctx.ignore_index = ignore_index
+        ctx.compute_dtype = compute_dtype
+        ctx.acc_dtype = acc_dtype
+        ctx.orig_hidden_shape = orig_hidden_shape
+        ctx.vocab_start = vocab_start
+        ctx.process_group = process_group
+
+        return log_probs.view(orig_label_shape), entropy.view(orig_label_shape), head_log_probs
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(
+        ctx,
+        dlog_probs: Optional[torch.Tensor],
+        dentropy: Optional[torch.Tensor],
+        dhead_log_probs: Optional[torch.Tensor],
+    ):
+        if dlog_probs is None and dentropy is None and dhead_log_probs is None:
+            return None, None, None, None, None, None, None, None
+
+        h_2d, weight, l_1d, ids_2d, maxima, denominators, saved_entropy = ctx.saved_tensors
+        num_tokens, k = ids_2d.shape
+        vocab_size = weight.shape[0]
+        compute_dtype = ctx.compute_dtype
+        acc_dtype = ctx.acc_dtype
+        process_group = ctx.process_group
+
+        dlp_1d = dlog_probs.reshape(-1).to(acc_dtype) if dlog_probs is not None else None
+        dent_1d = dentropy.reshape(-1).to(acc_dtype) if dentropy is not None else None
+        dhead_2d = dhead_log_probs.reshape(-1, k).to(acc_dtype) if dhead_log_probs is not None else None
+
+        dhidden = torch.empty_like(h_2d) if ctx.needs_input_grad[0] else None
+        dweight = torch.zeros_like(weight, dtype=acc_dtype) if ctx.needs_input_grad[1] else None
+
+        with torch.autocast(h_2d.device.type, enabled=False):
+            w = weight.to(compute_dtype)
+            for start in range(0, num_tokens, ctx.chunk_size):
+                end = min(start + ctx.chunk_size, num_tokens)
+                h_chunk = h_2d[start:end].to(compute_dtype)
+                l_chunk = l_1d[start:end]
+                ids_chunk = ids_2d[start:end]
+
+                logits = (h_chunk @ w.t()).to(acc_dtype)
+                if ctx.temperature != 1.0:
+                    logits.div_(ctx.temperature)
+                shifted = logits - maxima[start:end]
+                denom = denominators[start:end]
+                probs = shifted.exp().div_(denom)
+                dlogits = torch.zeros_like(probs)
+                mask = (l_chunk != ctx.ignore_index).to(acc_dtype)
+
+                if dlp_1d is not None:
+                    safe_labels = l_chunk.clamp(min=0).unsqueeze(-1)
+                    local_label_ids, local_label_mask = _local_ids(safe_labels, ctx.vocab_start, vocab_size)
+                    dlp_masked = (dlp_1d[start:end] * mask).unsqueeze(-1)
+                    dlogits.sub_(probs * dlp_masked)
+                    dlogits.scatter_add_(-1, local_label_ids, dlp_masked.masked_fill(~local_label_mask, 0.0))
+
+                if dent_1d is not None:
+                    logp_local = shifted - denom.log()
+                    dent_masked = (dent_1d[start:end] * mask).unsqueeze(-1)
+                    ent_chunk = saved_entropy[start:end].unsqueeze(-1)
+                    dlogits.sub_(dent_masked * probs * (logp_local + ent_chunk))
+
+                if dhead_2d is not None:
+                    dhead = dhead_2d[start:end]
+                    local_head_ids, local_head_mask = _local_ids(ids_chunk, ctx.vocab_start, vocab_size)
+                    dlogits.sub_(probs * dhead.sum(dim=-1, keepdim=True))
+                    dlogits.scatter_add_(-1, local_head_ids, dhead.masked_fill(~local_head_mask, 0.0))
+
+                if ctx.temperature != 1.0:
+                    dlogits.div_(ctx.temperature)
+
+                dlogits_cast = dlogits.to(compute_dtype)
+                if dhidden is not None:
+                    dh_chunk = dlogits_cast @ w
+                    _all_reduce(dh_chunk, torch.distributed.ReduceOp.SUM, process_group)
+                    dhidden[start:end] = dh_chunk.to(h_2d.dtype)
+                if dweight is not None:
+                    dweight.add_((dlogits_cast.t() @ h_chunk).to(acc_dtype))
+
+        return (
+            dhidden.view(ctx.orig_hidden_shape) if dhidden is not None else None,
+            dweight.to(weight.dtype) if dweight is not None else None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+def topk_and_sampled_log_probs_from_hidden(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    temperature: float = 1.0,
+    chunk_size: int = FUSED_TOPK_LOG_PROB_CHUNK_SIZE,
+    ignore_index: int = -100,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute ``(log_probs, entropy, head_log_probs)`` from ``hidden_states`` and ``weight`` in chunks.
+
+    Used by fused LM-head paths (FSDP/FSDP2, VeOmni, and Megatron) when score centering is active so
+    neither ``student_logits`` nor a full ``(T, V)`` softmax buffer is materialized.
+
+    Args:
+        hidden_states: Final hidden states of shape ``(..., hidden_size)``.
+        weight: LM-head weight of shape ``(vocab_size, hidden_size)`` (local shard under ``process_group``).
+        labels: Shifted target token IDs matching ``hidden_states.shape[:-1]``.
+        topk_ids: Global sampler top-k token IDs of shape ``(num_tokens, k)``.
+        temperature: Positive sampling temperature divisor. Default: 1.0.
+        chunk_size: Number of token rows projected per chunk. Default: 1024.
+        ignore_index: Label index masked to zero in ``log_probs`` and ``entropy``. Default: -100.
+        process_group: Optional vocab-parallel process group over which ``weight`` is sharded.
+
+    Returns:
+        Tuple ``(log_probs, entropy, head_log_probs)`` in fp32 (or fp64 when inputs are fp64),
+        where ``log_probs`` and ``entropy`` match ``labels.shape`` and ``head_log_probs`` has
+        shape ``(num_tokens, k)``.
+    """
+    if chunk_size <= 0 or not isinstance(chunk_size, int):
+        raise ValueError("chunk_size must be a positive integer")
+    if not isinstance(temperature, int | float) or not (0.0 < temperature < float("inf")):
+        raise ValueError("temperature must be a finite positive scalar")
+    if labels.numel() != topk_ids.shape[0]:
+        raise ValueError(
+            f"score centering topk_ids length ({topk_ids.shape[0]}) does not match labels ({labels.numel()})"
+        )
+    return _TopKAndSampledLogProbsFromHidden.apply(
+        hidden_states,
+        weight,
+        labels.long(),
+        topk_ids.long(),
+        float(temperature),
+        int(chunk_size),
+        int(ignore_index),
+        process_group,
+    )
+
+
+def pack_ulysses_topk_ids(
+    rollout_topk_ids: torch.Tensor,
+    input_ids: torch.Tensor,
+    pad_size: int,
+    *,
+    use_ulysses_sp: bool = False,
+) -> torch.Tensor:
+    """Pack nested ``rollout_topk_ids`` into the local ``(nnz/sp, k)`` layout seen by FSDP/VeOmni LM heads."""
+    if not rollout_topk_ids.is_nested or not torch.equal(rollout_topk_ids.offsets(), input_ids.offsets()):
+        raise ValueError("rollout_topk_ids must share the nested jagged offsets of input_ids")
+    ids = rollout_topk_ids.values().long()
+    if ids.ndim != 2 or ids.shape[-1] == 0:
+        raise ValueError("Packed rollout_topk_ids must have shape [tokens, k] with k > 0")
+    if use_ulysses_sp:
+        return slice_input_tensor(ids.unsqueeze(0), dim=1, padding=True).squeeze(0).contiguous()
+    if pad_size > 0:
+        ids = torch.cat([ids, ids.new_zeros((pad_size, ids.shape[-1]))], dim=0)
+    return ids.contiguous()
+
+
+@dataclass
+class ScoreCenteringFusedRequest:
+    """Per-forward state passing packed top-k head IDs into fused LM-head kernels and collecting head log-probs."""
+
+    topk_ids: Optional[torch.Tensor] = None
+    head_log_probs: Optional[torch.Tensor] = None
+    chunk_size: int = FUSED_TOPK_LOG_PROB_CHUNK_SIZE
+
+
+_active_fused_request: ContextVar[Optional[ScoreCenteringFusedRequest]] = ContextVar(
+    "verl_score_centering_fused_request", default=None
+)
+
+
+@contextmanager
+def score_centering_fused_context():
+    """Scope a fresh ``ScoreCenteringFusedRequest`` to one engine forward step."""
+    request = ScoreCenteringFusedRequest()
+    token = _active_fused_request.set(request)
+    try:
+        yield request
+    finally:
+        _active_fused_request.reset(token)
+
+
+def current_score_centering_fused_request() -> Optional[ScoreCenteringFusedRequest]:
+    """Return the active ``ScoreCenteringFusedRequest`` if inside ``score_centering_fused_context``."""
+    return _active_fused_request.get()
 
 
 def score_centering_weight_fn(
@@ -357,7 +643,7 @@ def score_centering_logits_processor(
         quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs,
             so the sampler heads are packed into the same rows as ``student_logits``.
         train_head_log_probs: Optional precomputed trainer head log-probs of shape (nnz/sp, k) or
-            (1, nnz/sp, k), used by VeOmni's chunked LM-head path to avoid materializing ``student_logits``.
+            (1, nnz/sp, k), used by fused/chunked LM-head paths to avoid materializing ``student_logits``.
 
     Returns:
         Dict with, each of shape (1, nnz/sp):
