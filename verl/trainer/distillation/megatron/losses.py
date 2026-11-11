@@ -322,14 +322,16 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
 
 
 def compute_forward_kl_topk(
-    student_logits: torch.Tensor,
+    student_logits: torch.Tensor | None,
     teacher_topk_log_probs: torch.Tensor,
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
     *,
+    student_topk_log_probs: torch.Tensor | None = None,
     include_tail: bool = False,
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
@@ -363,7 +365,12 @@ def compute_forward_kl_topk(
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
     if data_format == "thd":
         # packed exactly like the student's inputs in the model forward
-        thd_kwargs = dict(quant_align_size=quant_align_size, local_cp_size=local_cp_size, cp_layout=cp_layout)
+        thd_kwargs = dict(
+            quant_align_size=quant_align_size,
+            min_local_rows=min_local_rows,
+            local_cp_size=local_cp_size,
+            cp_layout=cp_layout,
+        )
         teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(
             teacher_topk_log_probs, pre_process=True, **thd_kwargs
         )
@@ -377,28 +384,67 @@ def compute_forward_kl_topk(
         teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(
             teacher_topk_ids, pre_process=True, use_fp8_padding=use_fp8_padding
         )
-    assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+    student_values = student_logits if student_logits is not None else student_topk_log_probs
+    if student_values is None:
+        raise ValueError("Either student_logits or student_topk_log_probs must be provided")
+    assert (
+        teacher_topk_log_probs_cp_split.shape[:2]
+        == teacher_topk_ids_cp_split.shape[:2]
+        == student_values.shape[:2]
+    )
 
     # 2. compute token-wise KL divergence across tp groups
     distillation_loss_config: DistillationLossConfig = config.distillation_loss
-    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage, tail_loss = (
-        _VocabParallelKLDivergence.apply(
-            student_logits,
-            teacher_topk_log_probs_cp_split,
-            teacher_topk_ids_cp_split,
-            distillation_loss_config.log_prob_min_clamp,
-            include_tail,
-            distillation_loss_config.tail_mass_eps,
+    if student_topk_log_probs is None:
+        distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage, tail_loss = (
+            _VocabParallelKLDivergence.apply(
+                student_logits,
+                teacher_topk_log_probs_cp_split,
+                teacher_topk_ids_cp_split,
+                distillation_loss_config.log_prob_min_clamp,
+                include_tail,
+                distillation_loss_config.tail_mass_eps,
+            )
         )
-    )
+    else:
+        if student_logits is not None:
+            raise ValueError("Provide either student_logits or student_topk_log_probs, not both")
+        if student_topk_log_probs.shape != teacher_topk_log_probs_cp_split.shape:
+            raise ValueError("student_topk_log_probs must match the aligned teacher top-k shape")
+        student_logps = student_topk_log_probs.float()
+        teacher_logps = teacher_topk_log_probs_cp_split.float()
+        student_mass = student_logps.exp().sum(dim=-1)
+        teacher_mass = teacher_logps.exp().sum(dim=-1)
+        tail_loss = None
+        if include_tail:
+            if distillation_loss_config.log_prob_min_clamp is not None:
+                raise ValueError(
+                    "Tail-aware top-k KL requires log_prob_min_clamp=None because per-entry clamping "
+                    "breaks the coarse-grained probability distribution."
+                )
+            topk_loss = (teacher_logps.exp() * (teacher_logps - student_logps)).sum(dim=-1)
+            tail_loss = compute_tail_bucket_kl(
+                student_topk_mass=student_mass,
+                teacher_topk_mass=teacher_mass,
+                tail_mass_eps=distillation_loss_config.tail_mass_eps,
+            )
+            distillation_losses = topk_loss + tail_loss
+        else:
+            if distillation_loss_config.log_prob_min_clamp is not None:
+                student_logps = student_logps.clamp_min(distillation_loss_config.log_prob_min_clamp)
+                teacher_logps = teacher_logps.clamp_min(distillation_loss_config.log_prob_min_clamp)
+            distillation_losses = (teacher_logps.exp() * (teacher_logps - student_logps)).sum(dim=-1)
+        overlap_count = None
+        overlap_token_advantage = None
 
     outputs = {
         "distillation_losses": distillation_losses,
         "student_mass": student_mass,
         "teacher_mass": teacher_mass,
-        "overlap_count": overlap_count,
-        "overlap_token_advantage": overlap_token_advantage,
     }
+    if overlap_count is not None:
+        outputs["overlap_count"] = overlap_count
+        outputs["overlap_token_advantage"] = overlap_token_advantage
     if include_tail:
         outputs["tail_loss"] = tail_loss
     return outputs

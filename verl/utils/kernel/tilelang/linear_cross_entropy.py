@@ -24,10 +24,10 @@ def linear_cross_entropy_fwd_mainloop(
     K: int,
     topk: int,
     dtype=T.bfloat16,
-    BLOCK_M=32,
-    BLOCK_N=128,
-    BLOCK_K=32,
-    VOCAB_PER_CTA=1024,
+    BLOCK_M=64,
+    BLOCK_N=256,
+    BLOCK_K=64,
+    VOCAB_PER_CTA=512,
     num_threads=128,
     num_stages=2,
 ):
@@ -445,20 +445,32 @@ class LinearCrossEntropy(torch.autograd.Function):
         """Forward pass.
 
         Args:
-            hidden: hidden states of shape (b*s, h).
+            hidden: hidden states of shape (..., h).
             weight: lm head weights of shape (vocab_size/tp_size, h).
-            labels: target tokens of shape (b*s, topk).
+            labels: target tokens of shape (...) or (..., topk).
             temperature: temperature for logits scaling.
             dist_process_group: ColumnParallelLinear process group, megatron only.
 
         Returns:
-            logprobs: logprobs tensor of shape (b*s, topk)
-            entropy: entropy tensor of shape (b*s)
+            logprobs: logprobs tensor matching labels.
+            entropy: entropy tensor matching hidden.shape[:-1].
         """
-        if hidden.ndim != 2 or weight.ndim != 2 or labels.ndim != 2:
-            raise ValueError("hidden, weight, and labels must have shapes [M, K], [N, K], and [M, topk]")
-        if hidden.shape[0] != labels.shape[0]:
-            raise ValueError("hidden and labels must have the same number of rows")
+        if hidden.ndim < 2 or weight.ndim != 2:
+            raise ValueError("hidden and weight must have shapes [..., K] and [N, K]")
+
+        original_hidden_shape = hidden.shape
+        hidden = hidden.reshape(-1, hidden.shape[-1])
+        if labels.ndim == len(original_hidden_shape) - 1 and labels.numel() == hidden.shape[0]:
+            single_label = True
+            output_shape = labels.shape
+            labels = labels.reshape(-1, 1)
+        elif labels.ndim == len(original_hidden_shape) and labels[..., 0].numel() == hidden.shape[0]:
+            single_label = False
+            output_shape = labels.shape[:-1]
+            labels = labels.reshape(-1, labels.shape[-1])
+        else:
+            raise ValueError("labels must contain one or more labels for every hidden row")
+
         if hidden.shape[1] != weight.shape[1]:
             raise ValueError("hidden and weight must have the same hidden size")
         if hidden.dtype != weight.dtype:
@@ -482,7 +494,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         local_vocab_size = weight.shape[0]
         vocab_start = tp_rank * local_vocab_size
         topk = labels.shape[1]
-        vocab_per_cta = 1024
+        vocab_per_cta = 512
         num_splits = (local_vocab_size + vocab_per_cta - 1) // vocab_per_cta
 
         partial_shape = (num_tokens, num_splits)
@@ -558,18 +570,24 @@ class LinearCrossEntropy(torch.autograd.Function):
         ctx.save_for_backward(hidden, weight, labels, lse, mean_logits)
         ctx.temperature = temperature
         ctx.dist_process_group = dist_process_group
-        return logprobs, entropy
+        ctx.original_hidden_shape = original_hidden_shape
+        ctx.output_shape = output_shape
+        ctx.single_label = single_label
+        logprobs = logprobs.reshape(*output_shape, topk)
+        if single_label:
+            logprobs = logprobs.squeeze(-1)
+        return logprobs, entropy.reshape(*output_shape)
 
     @staticmethod
     def backward(ctx, grad_logprobs: torch.Tensor, grad_entropy: torch.Tensor):
         """Backward pass.
 
         Args:
-            grad_logprobs: gradient of the logprobs tensor of shape (b*s, topk)
-            grad_entropy: gradient of the entropy tensor of shape (b*s), None if entropy loss is not used.
+            grad_logprobs: gradient matching the forward logprobs, or None.
+            grad_entropy: gradient matching hidden.shape[:-1], or None if entropy loss is not used.
 
         Returns:
-            grad_hidden: gradient of the hidden states tensor of shape (b*s, h)
+            grad_hidden: gradient matching the forward hidden shape.
             grad_weight: gradient of the lm head weights tensor of shape (vocab_size/tp_size, h)
         """
         hidden, weight, labels, lse, mean_logits = ctx.saved_tensors
@@ -585,15 +603,16 @@ class LinearCrossEntropy(torch.autograd.Function):
         has_logprobs_grad = grad_logprobs is not None
         has_entropy_grad = grad_entropy is not None
         if has_logprobs_grad:
-            if grad_logprobs.shape != (num_tokens, topk):
-                raise ValueError("grad_logprobs must have shape [M, topk]")
-            grad_logprobs = grad_logprobs.float().contiguous()
+            expected_shape = ctx.output_shape if ctx.single_label else (*ctx.output_shape, topk)
+            if grad_logprobs.shape != expected_shape:
+                raise ValueError(f"grad_logprobs must have shape {expected_shape}")
+            grad_logprobs = grad_logprobs.reshape(num_tokens, topk).float().contiguous()
         else:
             grad_logprobs = torch.empty((num_tokens, topk), dtype=torch.float32, device=hidden.device)
         if has_entropy_grad:
-            if grad_entropy.shape != (num_tokens,):
-                raise ValueError("grad_entropy must have shape [M]")
-            grad_entropy = grad_entropy.float().contiguous()
+            if grad_entropy.shape != ctx.output_shape:
+                raise ValueError(f"grad_entropy must have shape {ctx.output_shape}")
+            grad_entropy = grad_entropy.reshape(num_tokens).float().contiguous()
         else:
             # The no-entropy specialization does not read this argument.
             grad_entropy = lse
@@ -648,7 +667,7 @@ class LinearCrossEntropy(torch.autograd.Function):
                 out=grad_weight[vocab_offset : vocab_offset + valid_vocab],
             )
 
-        grad_hidden = grad_hidden_accum.to(hidden.dtype)
+        grad_hidden = grad_hidden_accum.to(hidden.dtype).reshape(ctx.original_hidden_shape)
         return grad_hidden, grad_weight, None, None, None
 
 

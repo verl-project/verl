@@ -22,6 +22,7 @@ import torch.nn.functional as F
 pytest.importorskip("tilelang")
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
+from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy as dispatched_linear_cross_entropy
 from verl.utils.kernel.tilelang.linear_cross_entropy import linear_cross_entropy
 from verl.utils.torch_functional import entropy_from_logits, logprobs_from_logits_v2
 
@@ -52,11 +53,19 @@ def test_linear_cross_entropy_forward_matches_pytorch():
     labels = torch.randint(vocab_size, (num_tokens, topk), device="cuda")
     labels[0, :] = labels[0, 0]
 
-    actual_logprobs, actual_entropy = linear_cross_entropy(
+    actual_logprobs, actual_entropy = dispatched_linear_cross_entropy(
         hidden,
         linear.weight,
         labels,
         temperature,
+        impl_backend="tilelang",
+    )
+    single_logprobs, single_entropy = dispatched_linear_cross_entropy(
+        hidden,
+        linear.weight,
+        labels[:, 0],
+        temperature,
+        impl_backend="tilelang",
     )
 
     logits = linear(hidden) / temperature
@@ -68,6 +77,9 @@ def test_linear_cross_entropy_forward_matches_pytorch():
 
     assert actual_logprobs.dtype == torch.float32
     assert actual_entropy.dtype == torch.float32
+    assert single_logprobs.shape == labels[:, 0].shape
+    torch.testing.assert_close(single_logprobs, actual_logprobs[:, 0])
+    torch.testing.assert_close(single_entropy, actual_entropy)
     torch.testing.assert_close(
         actual_logprobs[0],
         actual_logprobs[0, 0].expand(topk),
@@ -127,17 +139,25 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
     grad_logprobs = torch.randn(num_tokens, topk, device="cuda")
     grad_entropy = torch.randn(num_tokens, device="cuda")
 
+    hidden_actual = hidden.detach().reshape(1, num_tokens, hidden_size).requires_grad_()
+    weight_actual = weight.detach().clone().requires_grad_()
     actual_logprobs, actual_entropy = linear_cross_entropy(
-        hidden,
-        weight,
-        labels,
+        hidden_actual,
+        weight_actual,
+        labels.unsqueeze(0),
         temperature,
     )
+    assert actual_logprobs.shape == (1, num_tokens, topk)
+    assert actual_entropy.shape == (1, num_tokens)
     actual_outputs = (actual_logprobs, actual_entropy) if use_entropy_grad else (actual_logprobs,)
-    actual_output_grads = (grad_logprobs, grad_entropy) if use_entropy_grad else (grad_logprobs,)
+    actual_output_grads = (
+        (grad_logprobs.unsqueeze(0), grad_entropy.unsqueeze(0))
+        if use_entropy_grad
+        else (grad_logprobs.unsqueeze(0),)
+    )
     actual_grad_hidden, actual_grad_weight = torch.autograd.grad(
         actual_outputs,
-        (hidden, weight),
+        (hidden_actual, weight_actual),
         actual_output_grads,
     )
 
@@ -153,10 +173,15 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
     expected_grad_hidden, expected_grad_weight = torch.autograd.grad(
         expected_outputs,
         (hidden_ref, weight_ref),
-        actual_output_grads,
+        (grad_logprobs, grad_entropy) if use_entropy_grad else (grad_logprobs,),
     )
 
-    torch.testing.assert_close(actual_grad_hidden, expected_grad_hidden, atol=3e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        actual_grad_hidden.reshape_as(expected_grad_hidden),
+        expected_grad_hidden,
+        atol=3e-2,
+        rtol=1e-2,
+    )
     torch.testing.assert_close(actual_grad_weight, expected_grad_weight, atol=1e-2, rtol=1e-2)
 
 

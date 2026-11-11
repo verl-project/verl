@@ -633,6 +633,33 @@ def test_logits_processor_returns_per_token_scalars():
     assert (out["sc_sampler_head_mass"] <= 1.0 + 1e-6).all()
 
 
+def test_logits_processor_accepts_precomputed_topk_log_probs_with_gradient():
+    torch.manual_seed(21)
+    lengths, k, vocab = [3, 5], 4, 17
+    data = _nested_batch(lengths, k, vocab)
+    # Repeated query ids are valid and their gradient contributions must be preserved.
+    data["rollout_topk_ids"].values()[0, 1] = data["rollout_topk_ids"].values()[0, 0]
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
+
+    eager_logits = torch.randn(1, sum(lengths), vocab, requires_grad=True)
+    eager = score_centering_logits_processor(student_logits=eager_logits, data=data, config=config)
+    fused_logits = eager_logits.detach().clone().requires_grad_(True)
+    ids = data["rollout_topk_ids"].values()
+    precomputed = topk_log_probs_from_logits(fused_logits.squeeze(0), ids).unsqueeze(0)
+    fused = score_centering_logits_processor(
+        student_logits=None,
+        student_topk_log_probs=precomputed,
+        data=data,
+        config=config,
+    )
+
+    for key in eager:
+        torch.testing.assert_close(fused[key], eager[key])
+    eager["sc_correction"].sum().backward()
+    fused["sc_correction"].sum().backward()
+    torch.testing.assert_close(fused_logits.grad, eager_logits.grad)
+
+
 @pytest.mark.parametrize(
     "preset, rollout_correction",
     [

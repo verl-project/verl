@@ -126,9 +126,11 @@ def compute_topk_loss(
     config: ActorConfig,
     distillation_config: DistillationConfig,
     data: TensorDict,
-    student_logits: torch.Tensor,
+    student_logits: Optional[torch.Tensor],
     data_format: str,
+    student_topk_log_probs: Optional[torch.Tensor] = None,
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
 ) -> torch.Tensor:
@@ -164,22 +166,35 @@ def compute_topk_loss(
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
     backend_kwargs = {}
     if config.strategy == "megatron":
-        backend_kwargs = {"quant_align_size": quant_align_size, "cp_layout": cp_layout, "local_cp_size": local_cp_size}
+        backend_kwargs = {
+            "quant_align_size": quant_align_size,
+            "cp_layout": cp_layout,
+            "local_cp_size": local_cp_size,
+        }
+        if min_local_rows is not None:
+            backend_kwargs["min_local_rows"] = min_local_rows
 
     if loss_mode not in loss_functions:
         raise NotImplementedError(f"Unsupported top-k distillation loss mode: {loss_mode}")
     distillation_loss_fn = loss_functions[loss_mode]
 
+    student_kwargs = {}
+    if student_topk_log_probs is not None:
+        student_kwargs["student_topk_log_probs"] = student_topk_log_probs
     outputs = distillation_loss_fn(
         student_logits=student_logits,
         teacher_topk_log_probs=data["teacher_logprobs"],
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
+        **student_kwargs,
         **backend_kwargs,
     )
 
-    expected_shape = student_logits.shape[:2]
+    student_values = student_logits if student_logits is not None else student_topk_log_probs
+    if student_values is None:
+        raise ValueError("Either student_logits or student_topk_log_probs must be provided")
+    expected_shape = student_values.shape[:2]
     for k, v in outputs.items():
         assert v.shape == expected_shape, f"Expected shape {expected_shape}, but got {v.shape} for {k=}."
 
@@ -193,8 +208,10 @@ def distillation_ppo_loss(
     data: TensorDict = None,
     dp_group=None,
     student_logits: torch.Tensor = None,
+    student_topk_log_probs: torch.Tensor = None,
     data_format: str = "thd",
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
 ):
@@ -230,14 +247,16 @@ def distillation_ppo_loss(
     """
 
     # Called as logits processor
-    if student_logits is not None:
+    if student_logits is not None or student_topk_log_probs is not None:
         return compute_topk_loss(
             config,
             distillation_config,
             data,
             student_logits,
             data_format,
+            student_topk_log_probs=student_topk_log_probs,
             quant_align_size=quant_align_size,
+            min_local_rows=min_local_rows,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
@@ -371,8 +390,8 @@ def compute_forward_kl_topk(
         # A fused top-k engine may return only the truncated loss and probability
         # masses, so this fallback adds the missing tail term without changing the
         # teacher payload or materializing full logits. Its student_mass must be
-        # differentiable; metric-only masses (e.g. VeOmni's chunk_topk_distill)
-        # cannot carry the tail gradient and are rejected by the guard below.
+        # differentiable; metric-only masses cannot carry the tail gradient and
+        # are rejected by the guard below.
         if torch.is_grad_enabled() and distillation_losses.requires_grad and not student_mass.requires_grad:
             raise RuntimeError(
                 "forward_kl_topk_tail requires differentiable student_mass from the fused engine; "

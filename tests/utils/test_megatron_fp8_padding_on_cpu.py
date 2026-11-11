@@ -266,10 +266,11 @@ def test_compute_topk_loss_passes_the_student_packing_to_the_megatron_loss_only(
         torch.zeros(1, 8, 4),
         "thd",
         quant_align_size=32,
+        min_local_rows=64,
         cp_layout="contiguous",
         local_cp_size=2,
     )
-    packing = {"quant_align_size": 32, "cp_layout": "contiguous", "local_cp_size": 2}
+    packing = {"quant_align_size": 32, "min_local_rows": 64, "cp_layout": "contiguous", "local_cp_size": 2}
     assert received == [packing if strategy == "megatron" else {}]
 
 

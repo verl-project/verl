@@ -60,6 +60,16 @@ def test_triton_backend_preserves_existing_autograd_dispatch(monkeypatch):
     assert calls == [(hidden, weight, labels, 0.8, "none", group)]
 
 
+@pytest.mark.parametrize("backend", ["triton", "liger"])
+def test_single_label_backends_reject_multi_label_queries(backend):
+    hidden = torch.randn(3, 5)
+    weight = torch.randn(7, 5)
+    labels = torch.tensor([[1, 4, 4], [2, 5, 6], [3, 0, 0]])
+
+    with pytest.raises(ValueError, match="only supports one label per token"):
+        lce.linear_cross_entropy(hidden, weight, labels, impl_backend=backend)
+
+
 def test_liger_delegates_full_tensor_to_public_frontend(monkeypatch):
     calls = []
 

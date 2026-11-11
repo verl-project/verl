@@ -67,6 +67,7 @@ from verl.utils.ulysses import (
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_group,
     set_ulysses_sequence_parallel_group,
+    slice_input_tensor,
     ulysses_pad,
     ulysses_pad_and_slice_inputs,
 )
@@ -101,6 +102,13 @@ def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bo
     if is_unit_temperature:
         return logits
     return logits / temperature.clamp(min=1e-8).to(logits.dtype)
+
+
+def _slice_topk_labels_for_ulysses(topk_labels: torch.Tensor, pad_size: int) -> torch.Tensor:
+    """Apply the token stream's Ulysses suffix padding and sequence slice."""
+    if pad_size:
+        topk_labels = torch.nn.functional.pad(topk_labels, (0, 0, 0, pad_size), value=0)
+    return slice_input_tensor(topk_labels, dim=1, padding=False)
 
 
 class FSDPEngine(BaseEngine):
@@ -1079,6 +1087,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        use_fused_topk = use_fused_kernels and (distillation_use_topk or score_centering)
+        topk_labels = None
+        if use_fused_topk:
+            topk_key = "teacher_ids" if distillation_use_topk else "rollout_topk_ids"
+            topk_labels = micro_batch[topk_key]
+            if not topk_labels.is_nested:
+                raise ValueError(f"{topk_key} must be a jagged nested tensor")
         temperature = micro_batch["temperature"]
         temperature_item = temperature
         temperature_is_one = _is_scalar_unit_temperature(temperature)
@@ -1122,6 +1137,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             # for compute the log_prob
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+            topk_labels_rmpad = topk_labels.values().unsqueeze(0) if topk_labels is not None else None
 
             # Optional bucket-aligned packed length. This has to happen after the roll (which must
             # see the true global sequence) and before the SP split, so the pad stays a suffix of
@@ -1163,6 +1179,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 temperature_rmpad, _, _ = ulysses_pad_and_slice_inputs(
                     temperature_rmpad, position_ids_rmpad=None, sp_size=self.ulysses_sequence_parallel_size, pad_value=1
                 )
+                if topk_labels_rmpad is not None:
+                    topk_labels_rmpad = _slice_topk_labels_for_ulysses(topk_labels_rmpad, pad_size)
 
                 sp_pad_size = pad_size
 
@@ -1230,6 +1248,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     "attention_mask": attention_mask,
                     "position_ids": position_ids,
                 }
+                if topk_labels is not None:
+                    model_inputs["topk_labels"] = torch.nested.to_padded_tensor(
+                        topk_labels,
+                        padding=0,
+                        output_size=(batch_size, max_seq_len, topk_labels.size(-1)),
+                    )
 
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
@@ -1246,6 +1270,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # shard boundary rather than the global sequence (issue #6068). This
                 # mirrors what the veomni engine already does for fused kernels.
                 extra_args["shift_labels"] = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
+                if topk_labels_rmpad is not None:
+                    extra_args["topk_labels"] = topk_labels_rmpad
 
         model_inputs.update(multi_modal_inputs)
         model_inputs.update(extra_args)
@@ -1263,18 +1289,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(data=micro_batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(data=micro_batch, key="score_centering", default=False)
+        use_fused_topk = use_fused_kernels and (distillation_use_topk or score_centering)
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
                 "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True: "
                 "fused kernels do not materialize the full logits tensor needed for Σπ²."
             )
-        if score_centering and use_fused_kernels:
-            raise NotImplementedError(
-                "score_centering=True is not supported with use_fused_kernels=True: "
-                "fused kernels do not materialize the full logits tensor score centering needs."
-            )
-
         model_output = {}
 
         # Some internal callers construct output_args directly instead of going
@@ -1295,18 +1316,22 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                 entropy_rmpad = output.entropy.squeeze(0) if calculate_entropy else None  # (total_nnz,)
 
-                # When the fused kernel also computed top-K distillation
-                # (veomni's chunk_topk_distill path), extract the per-token
-                # distillation outputs and store them as nested tensors —
-                # same model_output keys as the eager logit-processor path.
-                if distillation_use_topk:
-                    aux_outputs = getattr(output, "fused_linear_aux", None)
-                    if aux_outputs is not None and aux_outputs.distillation_losses is not None:
-                        cu_seqlens = input_ids.offsets()
-                        for field_name in ("distillation_losses", "student_mass", "teacher_mass"):
-                            v = getattr(aux_outputs, field_name).squeeze(0)
-                            v = self._gather_and_unpad_packed(v, output_args["pad_size"])
-                            model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
+                if use_fused_topk:
+                    topk_log_probs = getattr(output, "topk_log_probs", None)
+                    if topk_log_probs is None:
+                        raise RuntimeError("Fused forward did not return the requested topk_log_probs")
+                    outputs = logits_processor_func(
+                        student_topk_log_probs=topk_log_probs,
+                        data=micro_batch,
+                    )
+                    cu_seqlens = input_ids.offsets()
+                    for k, v in outputs.items():
+                        v = v.squeeze(0)
+                        assert v.shape == (topk_log_probs.shape[1],), (
+                            f"topk_log_probs len: {topk_log_probs.shape[1]}, {k} shape: {v.shape}"
+                        )
+                        v = self._gather_and_unpad_packed(v, output_args["pad_size"])
+                        model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
@@ -1398,6 +1423,22 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     if calculate_entropy:
                         entropy = output.entropy[mask]
                         entropy = torch.nested.nested_tensor_from_jagged(entropy, cu_seqlens)
+
+                    if use_fused_topk:
+                        topk_output = getattr(output, "topk_log_probs", None)
+                        if topk_output is None:
+                            raise RuntimeError("Fused forward did not return the requested topk_log_probs")
+                        topk_log_probs = topk_output[mask].unsqueeze(0)
+                        outputs = logits_processor_func(
+                            student_topk_log_probs=topk_log_probs,
+                            data=micro_batch,
+                        )
+                        for k, v in outputs.items():
+                            v = v.squeeze(0)
+                            assert v.shape == (topk_log_probs.shape[1],), (
+                                f"topk_log_probs len: {topk_log_probs.shape[1]}, {k} shape: {v.shape}"
+                            )
+                            model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 

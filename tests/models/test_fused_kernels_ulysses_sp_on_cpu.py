@@ -40,6 +40,7 @@ exercises the full path on 2 GPUs.
 """
 
 import contextlib
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -47,6 +48,7 @@ import pytest
 import torch
 
 from verl.models.transformers import dense_common, glm4v, qwen2_vl, qwen3_5, qwen3_vl
+from verl.models.transformers.monkey_patch import patch_veomni_forward_with_backends
 
 # ---------------------------------------------------------------------------
 # 1. Root-cause demonstration: slice-then-local-roll != global-roll-then-slice.
@@ -160,13 +162,10 @@ def _patch_fused_kernels():
     """
     captured: dict[str, Any] = {}
 
-    def _fake_log_probs_and_entropy(input_ids: torch.Tensor):
-        if input_ids.dim() == 1:
-            shape = input_ids.shape
-        else:
-            shape = input_ids.shape  # already (B, T)
-        log_probs = torch.zeros(shape, dtype=torch.float32)
-        entropy = torch.zeros(shape, dtype=torch.float32)
+    def _fake_log_probs_and_entropy(input_ids: torch.Tensor, multi_label: bool = False):
+        log_probs = torch.zeros(input_ids.shape, dtype=torch.float32)
+        entropy_shape = input_ids.shape[:-1] if multi_label else input_ids.shape
+        entropy = torch.zeros(entropy_shape, dtype=torch.float32)
         return log_probs, entropy
 
     def fake_fused_linear_forward(self, hidden_states, vocab_weights, input_ids, temperature=1.0):
@@ -174,9 +173,10 @@ def _patch_fused_kernels():
         captured["impl_backend"] = self.impl_backend
         return _fake_log_probs_and_entropy(input_ids)
 
-    def fake_linear_ce(hidden_states, vocab_weights, input_ids, temperature, reduction):
+    def fake_linear_ce(hidden_states, vocab_weights, input_ids, temperature, reduction, *_args, **kwargs):
         captured["input_ids"] = input_ids.detach().clone()
-        return _fake_log_probs_and_entropy(input_ids)
+        captured["impl_backend"] = kwargs.get("impl_backend")
+        return _fake_log_probs_and_entropy(input_ids, multi_label=kwargs.get("impl_backend") == "tilelang")
 
     def fake_qwen2_vl_forward(self, input_ids, **_kwargs):
         # Bypass `process_position_ids` and the real VLM body; we only care
@@ -227,6 +227,8 @@ TORCH_ADAPTERS = [
     qwen2_vl.forward_with_torch_backend,
     glm4v.forward_with_torch_backend,
 ]
+
+TRITON_ADAPTERS = [forward_fn for forward_fn in ALL_ADAPTERS if forward_fn not in TORCH_ADAPTERS]
 
 
 def _adapter_id(forward_fn) -> str:
@@ -294,3 +296,94 @@ def test_adapter_falls_back_to_local_roll_when_shift_labels_absent(forward_fn):
     assert torch.equal(captured["input_ids"], expected), (
         f"{_adapter_id(forward_fn)}: expected fallback to torch.roll(input_ids), got {captured['input_ids'].tolist()}"
     )
+
+
+@pytest.mark.parametrize("forward_fn", TRITON_ADAPTERS, ids=_adapter_id)
+def test_tilelang_adapter_combines_and_splits_auxiliary_labels(forward_fn):
+    model = _make_fake_lm()
+    model._verl_fused_kernels_backend = "tilelang"
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
+    topk_labels = torch.tensor([[[3, 3], [5, 6], [7, 8], [9, 9]]], dtype=torch.long)
+
+    with _patch_fused_kernels() as captured:
+        output = forward_fn(
+            model,
+            input_ids=input_ids,
+            shift_labels=shift_labels,
+            topk_labels=topk_labels,
+            temperature=1.0,
+            return_dict=True,
+        )
+
+    expected_labels = torch.cat((shift_labels.unsqueeze(-1), topk_labels), dim=-1)
+    assert captured["impl_backend"] == "tilelang"
+    assert torch.equal(captured["input_ids"], expected_labels)
+    assert output.log_probs.shape == shift_labels.shape
+    assert output.topk_log_probs.shape == topk_labels.shape
+    assert output.entropy.shape == shift_labels.shape
+
+
+@pytest.mark.parametrize("forward_fn", TORCH_ADAPTERS, ids=_adapter_id)
+def test_liger_adapter_forwards_auxiliary_labels_to_unified_kernel(forward_fn):
+    model = _make_fake_lm()
+    model._verl_fused_kernels_backend = "liger"
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
+    topk_labels = torch.tensor([[[3, 3], [5, 6], [7, 8], [9, 9]]], dtype=torch.long)
+
+    with _patch_fused_kernels() as captured:
+        output = forward_fn(
+            model,
+            input_ids=input_ids,
+            shift_labels=shift_labels,
+            topk_labels=topk_labels,
+            temperature=1.0,
+            return_dict=True,
+        )
+
+    expected_labels = torch.cat((shift_labels.unsqueeze(-1), topk_labels), dim=-1)
+    assert captured["impl_backend"] == "liger"
+    assert torch.equal(captured["input_ids"], expected_labels)
+    assert output.log_probs.shape == shift_labels.shape
+    assert output.topk_log_probs.shape == topk_labels.shape
+
+
+def test_veomni_adapter_promotes_unified_topk_log_probs():
+    model = _make_fake_lm()
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+    shift_labels = torch.tensor([[20, 30, 40, 50]], dtype=torch.long)
+    topk_labels = torch.tensor([[[3, 3], [5, 6], [7, 8], [9, 9]]], dtype=torch.long)
+
+    def unused_loss_function(**_kwargs):
+        raise AssertionError("VeOmni's original fused-linear loss path must not run")
+
+    def veomni_forward(input_ids, **kwargs):
+        hidden_states = model.model(input_ids)[0]
+        _, _, auxiliary_output = model.loss_function(
+            logits=None,
+            labels=kwargs.pop("labels", None),
+            hidden_states=hidden_states,
+            weights=model.lm_head.weight,
+            **kwargs,
+        )
+        return SimpleNamespace(fused_linear_aux=auxiliary_output)
+
+    model.loss_function = unused_loss_function
+    model.forward = veomni_forward
+    patch_veomni_forward_with_backends(model, use_fused_kernels=True, fused_kernels_backend="tilelang")
+
+    with _patch_fused_kernels() as captured:
+        output = model(
+            input_ids,
+            labels=input_ids,
+            shift_labels=shift_labels,
+            topk_labels=topk_labels,
+            temperature=1.0,
+            return_log_probs=True,
+        )
+
+    expected_labels = torch.cat((shift_labels.unsqueeze(-1), topk_labels), dim=-1)
+    assert captured["impl_backend"] == "tilelang"
+    assert torch.equal(captured["input_ids"], expected_labels)
+    assert output.topk_log_probs.shape == topk_labels.shape
