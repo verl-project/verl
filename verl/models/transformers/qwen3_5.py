@@ -38,9 +38,30 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _resolve_kernel_target(fn):
+    seen = set()
+    current = fn
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        closure = getattr(current, "__closure__", None)
+        code = getattr(current, "__code__", None)
+        # transformers' use_kernel_func_from_hub_with_fallback uses @functools.wraps(torch_function),
+        # which exposes the fallback's `**kwargs` signature even when an optimized kernel is loaded.
+        if closure and code and "implementation" in code.co_freevars and "torch_function" in code.co_freevars:
+            freevars = dict(zip(code.co_freevars, closure, strict=True))
+            try:
+                impl = freevars["implementation"].cell_contents
+            except ValueError:
+                impl = None
+            if callable(impl):
+                return impl
+        current = getattr(current, "__wrapped__", getattr(current, "__func__", None))
+    return fn
+
+
 def _call_accepts_kwarg(fn, name: str) -> bool:
-    params = signature(fn).parameters
-    return name in params or any(param.kind == param.VAR_KEYWORD for param in params.values())
+    target = _resolve_kernel_target(fn)
+    return name in signature(target).parameters
 
 
 def _prepare_packed_seq_idx(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: Optional[torch.LongTensor]):
@@ -264,7 +285,9 @@ def qwen3_5_gated_delta_net_forward(
         if cache_params is not None:
             conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
             cache_params.conv_states[self.layer_idx] = conv_state
-        if causal_conv1d_fn is not None:
+        if causal_conv1d_fn is not None and (
+            model_cu_seqlens is None or _call_accepts_kwarg(causal_conv1d_fn, "seq_idx")
+        ):
             conv_prefix_len = 0
             conv_input = mixed_qkv
             if cp_context is not None:
