@@ -151,9 +151,7 @@ def test_linear_cross_entropy_backward_matches_pytorch(use_entropy_grad: bool):
     assert actual_entropy.shape == (1, num_tokens)
     actual_outputs = (actual_logprobs, actual_entropy) if use_entropy_grad else (actual_logprobs,)
     actual_output_grads = (
-        (grad_logprobs.unsqueeze(0), grad_entropy.unsqueeze(0))
-        if use_entropy_grad
-        else (grad_logprobs.unsqueeze(0),)
+        (grad_logprobs.unsqueeze(0), grad_entropy.unsqueeze(0)) if use_entropy_grad else (grad_logprobs.unsqueeze(0),)
     )
     actual_grad_hidden, actual_grad_weight = torch.autograd.grad(
         actual_outputs,

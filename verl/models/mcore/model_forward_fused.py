@@ -274,8 +274,8 @@ def patch_fused_forward(
         return
     if model_config is not None:
         configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
-        impl_backend = "liger" if model_config.use_liger else (
-            "tilelang" if configured_backend == "tilelang" else "triton"
+        impl_backend = (
+            "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
         )
     if impl_backend == "liger" and engine_config is not None and model.config.params_dtype == torch.bfloat16:
         _configure_liger_runtime(model, engine_config)
@@ -428,9 +428,7 @@ def fused_forward_model_engine(vision_model: bool = False):
                 raise RuntimeError("TileLang fused forward did not return topk_log_probs")
             if auxiliary_logits_processor is None:
                 raise RuntimeError("An auxiliary logits processor is required with fused top-k labels")
-            local_output.update(
-                auxiliary_logits_processor(student_topk_log_probs=output_orig.topk_log_probs)
-            )
+            local_output.update(auxiliary_logits_processor(student_topk_log_probs=output_orig.topk_log_probs))
 
         return {
             key: postprocess_thd_engine(

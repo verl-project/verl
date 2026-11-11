@@ -387,11 +387,7 @@ def compute_forward_kl_topk(
     student_values = student_logits if student_logits is not None else student_topk_log_probs
     if student_values is None:
         raise ValueError("Either student_logits or student_topk_log_probs must be provided")
-    assert (
-        teacher_topk_log_probs_cp_split.shape[:2]
-        == teacher_topk_ids_cp_split.shape[:2]
-        == student_values.shape[:2]
-    )
+    assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_values.shape[:2]
 
     # 2. compute token-wise KL divergence across tp groups
     distillation_loss_config: DistillationLossConfig = config.distillation_loss
