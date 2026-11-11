@@ -219,6 +219,8 @@ trainer.v1.separate_async.num_warmup_batches=1
 
 `num_warmup_batches` also accepts fractional values (see [colocate async](#colocate-async)).
 
+By default the next step's prompt batch is submitted in `prepare_step()`, after the current step's `old_log_prob` and `update_actor` finish. With `hybrid_rollout.enable_switch=False`, set `trainer.v1.separate_async.refill_after_sample=True` to submit it right after the current step's last mini-batch is sampled instead. Rollout then overlaps with trainer compute, which removes the alternating slow/fast step pattern when the rollout pool is otherwise idle during training. The number of in-flight batches does not change. The option is ignored when `enable_switch=True`.
+
 Hybrid replicas use `actor_rollout_ref.rollout.gpu_memory_utilization`. To give dedicated standalone rollout GPUs a different memory budget, set the existing `standalone_gpu_memory_utilization` override:
 
 ```bash

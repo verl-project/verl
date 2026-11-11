@@ -261,6 +261,12 @@ trainer:
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
 
+      # Submit the next step's prompt batch right after the last mini-batch of the current
+      # step is sampled, instead of at the start of the next step. Rollout then overlaps with
+      # this step's old_log_prob / update_actor. The number of in-flight batches is unchanged.
+      # Ignored when hybrid_rollout.enable_switch=True.
+      refill_after_sample: false
+
       # Lend idle hybrid trainer GPUs to rollout
       hybrid_rollout:
 
