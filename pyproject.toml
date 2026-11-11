@@ -176,7 +176,7 @@ megatron = [
     "megatron-energon==7.4.1",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
     # megatron needs it explicitly. 0.47.0 supports Transformer Engine 2.20 grouped linear.
-    "nvidia-modelopt==0.47.0",
+    "nvidia-modelopt==0.48.0",
     # transformers NOT pinned here (see fsdp note): settled via override-deps below.
 ]
 
