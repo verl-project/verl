@@ -16,7 +16,7 @@ import concurrent.futures
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Generator
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator
 
 import ray
 import torch
@@ -30,6 +30,9 @@ from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
 from verl.workers.rollout.utils import ensure_async_iterator
+
+if TYPE_CHECKING:
+    from verl.workers.engine.base import BaseEngine
 
 
 @dataclass
@@ -51,7 +54,7 @@ class TensorMeta:
 class CheckpointEngineRegistry:
     """Checkpoint engine registry."""
 
-    _registry: dict[str, type["CheckpointEngine"]] = {}
+    _registry: dict[str, type["CheckpointEngine | DirectRolloutCheckpointEngine"]] = {}
 
     # Engine modules whose import failed, keyed by module name. Each engine pulls
     # its own transport dependency (cupy for nccl/nixl, nixl, torch_npu for hccl,
@@ -66,7 +69,7 @@ class CheckpointEngineRegistry:
             backend: The backend of the checkpoint engine.
         """
 
-        def wrapper(cls: type["CheckpointEngine"]):
+        def wrapper(cls: type["CheckpointEngine | DirectRolloutCheckpointEngine"]):
             CheckpointEngineRegistry._registry[backend] = cls
             return cls
 
@@ -83,7 +86,7 @@ class CheckpointEngineRegistry:
         cls._import_errors[module] = error
 
     @classmethod
-    def get(cls, backend: str) -> type["CheckpointEngine"]:
+    def get(cls, backend: str) -> type["CheckpointEngine | DirectRolloutCheckpointEngine"]:
         """Get the checkpoint engine class.
 
         Args:
@@ -101,7 +104,7 @@ class CheckpointEngineRegistry:
         return cls._registry[backend]
 
     @classmethod
-    def new(cls, backend: str, *args, **kwargs) -> "CheckpointEngine":
+    def new(cls, backend: str, *args, **kwargs) -> "CheckpointEngine | DirectRolloutCheckpointEngine":
         """Create a new checkpoint engine instance.
 
         Args:
@@ -113,6 +116,36 @@ class CheckpointEngineRegistry:
             A new checkpoint engine instance.
         """
         return cls.get(backend)(*args, **kwargs)
+
+
+class DirectRolloutCheckpointEngine(ABC):
+    """Trainer-side transport whose peers install weights inside the rollout engine."""
+
+    support_publish_weights = False
+
+    @staticmethod
+    @abstractmethod
+    def get_rollout_endpoints(replicas: list[RolloutReplica]) -> tuple[int, list[tuple[Any, int]]]:
+        """Return the group size and control endpoints with their receiver rank offsets."""
+
+    @abstractmethod
+    def prepare(self) -> tuple[str, int] | None:
+        """Return the trainer rendezvous address on rank zero."""
+
+    @abstractmethod
+    def configure(
+        self, master_address: str, master_port: int, world_size: int, endpoints: list[tuple[Any, int]], generation: int
+    ) -> None:
+        """Install the current transfer membership on this trainer."""
+
+    @abstractmethod
+    async def send_weights(self, model_engine: "BaseEngine", global_steps: int | None = None):
+        """Export on every trainer and wait for all receivers to install the version."""
+
+    @staticmethod
+    @abstractmethod
+    async def finish_rollout_update(replicas: list[RolloutReplica], global_steps: int | None):
+        """Apply replica-level cache invalidation and version bookkeeping after installation."""
 
 
 class CheckpointEngine(ABC):
@@ -342,9 +375,10 @@ class CheckpointEngineWorker(Worker):
         # If custom_backend_module is set, import it so plugins can register
         # in CheckpointEngineRegistry before the backend is instantiated.
         import_external_libs(self.rollout_config.checkpoint_engine.custom_backend_module or None)
-        self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
-            backend, bucket_size=bucket_size, **engine_kwargs
-        )
+        engine_cls = CheckpointEngineRegistry.get(backend)
+        self.checkpoint_engine = None
+        if not issubclass(engine_cls, DirectRolloutCheckpointEngine):
+            self.checkpoint_engine = engine_cls(bucket_size=bucket_size, **engine_kwargs)
         self.extra_rollout_args = args
         self.extra_rollout_kwargs = kwargs
         if self.server_adapter is None:
@@ -360,6 +394,8 @@ class CheckpointEngineWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
+        if self.checkpoint_engine is None:
+            raise RuntimeError("This transport installs weights directly in rollout model workers")
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
         await self.server_adapter.update_weights(
             weights,
@@ -397,7 +433,8 @@ class WeightUpdateTicket:
 
     async def wait_committed(self):
         """Wait until rollout workers have installed this weight version."""
-        return await asyncio.wrap_future(self.rollout_committed)
+        # A cancelled waiter does not cancel a weight install already running on workers.
+        return await asyncio.shield(asyncio.wrap_future(self.rollout_committed))
 
 
 class CheckpointEngineManager:
@@ -407,7 +444,8 @@ class CheckpointEngineManager:
     - CE: checkpoint engine, NCCL, NIXL, etc
 
     In actor, model engine and checkpoint engine are in same process.
-    In rollout, checkpoint engine and rollout worker are in separate process, update weights via cuda ipc.
+    On rollout, relayed transports receive in a separate process and update weights via IPC.
+    A direct transport broadcasts to the rollout model workers and has no intermediate receiver.
 
     ```
     ┌────────┬────────┬─────┬────────┐         ┌───────────────────┬───────────────────┐
@@ -460,6 +498,10 @@ class CheckpointEngineManager:
         self.replicas = replicas
 
         self._update_ticket = None
+        # Direct submissions and their commits share the manager's background loop.
+        self._direct_submit_lock = asyncio.Lock()
+        self._direct_topology: tuple[int, list[tuple[Any, int]]] | None = None
+        self._direct_generation = 0
         self._background_loop = asyncio.new_event_loop()
         self._background_loop_ready = threading.Event()
         self._background_loop_thread = threading.Thread(
@@ -609,6 +651,10 @@ class CheckpointEngineManager:
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
+        if issubclass(self.backend_cls, DirectRolloutCheckpointEngine):
+            ticket = await self.submit_update(global_steps)
+            return await ticket.wait_committed()
+
         # Wait previous update to be committed
         if self._update_ticket is not None:
             await self._update_ticket.wait_committed()
@@ -621,6 +667,12 @@ class CheckpointEngineManager:
             return await self._update_ticket.wait_committed()
 
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
+        if issubclass(self.backend_cls, DirectRolloutCheckpointEngine):
+            submission = asyncio.run_coroutine_threadsafe(
+                self._submit_direct_update(list(self.replicas), global_steps, rollout_quiesced), self._background_loop
+            )
+            return await asyncio.shield(asyncio.wrap_future(submission))
+
         # 1. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:
@@ -654,6 +706,57 @@ class CheckpointEngineManager:
             trainer_published=trainer_published,
             rollout_committed=rollout_committed,
         )
+
+    async def _submit_direct_update(
+        self, replicas: list[RolloutReplica], global_steps: int | None, rollout_quiesced: bool
+    ) -> WeightUpdateTicket:
+        async with self._direct_submit_lock:
+            if self._update_ticket is not None:
+                await self._update_ticket.wait_committed()
+            topology = self.backend_cls.get_rollout_endpoints(replicas)
+            if topology != self._direct_topology:
+                self._direct_topology = None
+                self._direct_generation += 1
+                num_trainers = self.actor_wg.world_size
+                metadata = await asyncio.gather(*self.actor_wg.execute_checkpoint_engine(["prepare"] * num_trainers))
+                address, port = metadata[0]
+                world_size, endpoints = topology
+                await asyncio.gather(
+                    *self.actor_wg.execute_checkpoint_engine(
+                        method=["configure"] * num_trainers,
+                        master_address=[address] * num_trainers,
+                        master_port=[port] * num_trainers,
+                        world_size=[world_size] * num_trainers,
+                        endpoints=[endpoints] * num_trainers,
+                        generation=[self._direct_generation] * num_trainers,
+                    )
+                )
+                self._direct_topology = topology
+            if not rollout_quiesced:
+                await asyncio.gather(*(replica.abort_all_requests() for replica in replicas))
+            await asyncio.gather(*(replica.release_kv_cache() for replica in replicas))
+            try:
+                trainer_published = self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
+            except Exception as error:
+                # Ray can fail to submit to one actor after dispatching to others.
+                failed = concurrent.futures.Future()
+                failed.set_exception(error)
+                self._update_ticket = WeightUpdateTicket(global_steps, [], failed)
+                raise
+            committed = asyncio.run_coroutine_threadsafe(
+                self._commit_direct_update(replicas, trainer_published, global_steps), self._background_loop
+            )
+            self._update_ticket = WeightUpdateTicket(global_steps, trainer_published, committed)
+            return self._update_ticket
+
+    async def _commit_direct_update(
+        self, replicas: list[RolloutReplica], trainer_published: list[ray.ObjectRef], global_steps: int | None
+    ):
+        results = await asyncio.gather(*trainer_published)
+        await self.backend_cls.finish_rollout_update(replicas, global_steps)
+        await asyncio.gather(*(replica.resume_kv_cache() for replica in replicas))
+        await asyncio.gather(*(replica.resume_generation() for replica in replicas))
+        return self._merge_sync_metrics(results)
 
     async def _commit_update(
         self,

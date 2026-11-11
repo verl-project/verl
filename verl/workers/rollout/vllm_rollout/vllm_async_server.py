@@ -276,6 +276,10 @@ class vLLMHttpServer:
             kwargs=kwargs,
         )
 
+    async def finish_native_weight_update(self, weight_version: str | None = None):
+        """Complete native reload and let the vLLM frontend publish its optional version."""
+        await self.engine.finish_weight_update(weight_version)
+
     async def set_pd_peer(
         self,
         decode_peers: list,
@@ -518,6 +522,14 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+        if getattr(getattr(self.config, "checkpoint_engine", None), "backend", None) == "vllm_native_hccl":
+            parallel = vllm_config.parallel_config
+            # In internal-LB mode, the node-zero AsyncLLM fans collective RPCs out
+            # to all local and remote DP engines. Headless nodes have no frontend.
+            if parallel.local_engines_only or parallel.world_size_across_dp != self.replica_world_size:
+                raise ValueError("Native HCCL requires the vLLM frontend to manage the full rollout replica")
+            if vllm_config.model_config.quantization:
+                raise ValueError("Native HCCL requires unquantized rollout weights")
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
@@ -1429,6 +1441,12 @@ class vLLMHttpServer:
             engine_kwargs.setdefault("mm_processor_cache_gb", 0)
 
         checkpoint_config = getattr(self.config, "checkpoint_engine", None)
+        if getattr(checkpoint_config, "backend", None) == "vllm_native_hccl":
+            from verl.workers.rollout.vllm_rollout.native_weight_sync import configure_native_hccl
+
+            if not is_torch_npu_available(check_device=False):
+                raise ValueError("Native HCCL rollout requires vLLM-Ascend and torch_npu")
+            configure_native_hccl(self, engine_kwargs)
         if getattr(checkpoint_config, "backend", None) == "delta_sharded":
             from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
                 VERL_DELTA_WEIGHT_TRANSFER_BACKEND,

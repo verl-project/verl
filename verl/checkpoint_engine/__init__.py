@@ -18,6 +18,7 @@ from .base import (
     CheckpointEngineRegistry,
     CheckpointEngineWorker,
     ColocatedCheckpointEngine,
+    DirectRolloutCheckpointEngine,
     TensorMeta,
 )
 
@@ -26,6 +27,7 @@ __all__ = [
     "CheckpointEngineRegistry",
     "TensorMeta",
     "ColocatedCheckpointEngine",
+    "DirectRolloutCheckpointEngine",
     "CheckpointEngineManager",
     "CheckpointEngineWorker",
 ]
@@ -35,6 +37,14 @@ __all__ = [
 # the "nccl" backend name on Ascend). Failures are recorded so that asking for a
 # backend whose module did not import reports the missing dependency instead of
 # just "not registered".
+try:
+    from .ascend_native_checkpoint_engine import AscendNativeCheckpointEngine
+
+    __all__ += ["AscendNativeCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("ascend_native_checkpoint_engine", e)
+    AscendNativeCheckpointEngine = None
+
 try:
     from .nccl_checkpoint_engine import NCCLCheckpointEngine
 
