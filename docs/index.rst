@@ -49,6 +49,7 @@ verl is fast with:
 
    preparation/prepare_data
    preparation/reward_function
+   data/dapo_math_boxed.md
 
 .. toctree::
    :maxdepth: 2
