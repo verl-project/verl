@@ -174,6 +174,59 @@ def _ci_log_files():
             print(f"[VERL_ASCEND_LOG] cannot list {root}: {error!r}", flush=True)
 
 
+def print_ci_network_diagnostics(kind):
+    """Read Linux network tables and socket owners when iproute2 is absent."""
+    paths = {
+        "tcp": ("/proc/net/tcp", "/proc/net/tcp6"),
+        "udp": ("/proc/net/udp", "/proc/net/udp6"),
+        "interfaces": ("/proc/net/dev", "/proc/net/if_inet6", "/proc/net/fib_trie"),
+        "routes": ("/proc/net/route", "/proc/net/ipv6_route"),
+    }
+    inodes = set()
+    for name in paths[kind]:
+        contents = _read(name)
+        print(f"[VERL_ASCEND_NETWORK] source={name}; addresses/ports use the kernel's hex format", flush=True)
+        for line in contents.splitlines():
+            print(f"[VERL_ASCEND_NETWORK] {line}", flush=True)
+            fields = line.split()
+            if kind in {"tcp", "udp"} and len(fields) > 9 and fields[9].isdigit():
+                inodes.add(fields[9])
+    if kind not in {"tcp", "udp"}:
+        return
+    owned = set()
+    denied = 0
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            for fd in (process / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except FileNotFoundError:
+                    continue  # Processes can close descriptors during a snapshot.
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    inode = target[8:-1]
+                    owner = {"inode": inode, "pid": int(process.name), "fd": fd.name, "comm": _read(process / "comm")}
+                    print("[VERL_ASCEND_NETWORK] owner=" + json.dumps(owner), flush=True)
+                    owned.add(inode)
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            denied += 1
+    print(
+        "[VERL_ASCEND_NETWORK] "
+        + json.dumps(
+            {
+                "scope": "current network namespace; owners visible in current PID namespace only",
+                "socket_inodes": len(inodes),
+                "inodes_without_visible_owner": sorted(inodes - owned),
+                "processes_with_denied_fd_access": denied,
+            }
+        ),
+        flush=True,
+    )
+
+
 def print_ci_diagnostic_report(baseline=False):
     """Print all newly written diagnostic log text, without line or tail limits."""
     offsets_path = Path(os.environ["ASCEND_PROCESS_LOG_PATH"]).parent / "log-offsets.json"
@@ -219,7 +272,9 @@ def print_ci_diagnostic_report(baseline=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in {"ci.baseline", "ci.report"}:
+    if len(sys.argv) > 1 and sys.argv[1] == "ci.network":
+        print_ci_network_diagnostics(sys.argv[2])
+    elif len(sys.argv) > 1 and sys.argv[1] in {"ci.baseline", "ci.report"}:
         print_ci_diagnostic_report(baseline=sys.argv[1] == "ci.baseline")
     else:
         print_hccl_diagnostics(sys.argv[1] if len(sys.argv) > 1 else "ci.snapshot")

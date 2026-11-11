@@ -36,8 +36,13 @@ snapshot() {
     date -u +%Y-%m-%dT%H:%M:%S.%NZ > "$target/time.txt"
     capture "$target/npu-smi.txt" npu-smi info
     capture "$target/processes.txt" ps -eo pid,ppid,stat,nlwp,etime,comm
-    capture "$target/tcp-sockets.txt" ss -tanp
-    capture "$target/udp-sockets.txt" ss -uanp
+    if command -v ss >/dev/null 2>&1; then
+        capture "$target/tcp-sockets.txt" ss -tanp
+        capture "$target/udp-sockets.txt" ss -uanp
+    else
+        capture "$target/tcp-sockets.txt" python verl/utils/hccl_diagnostics.py ci.network tcp
+        capture "$target/udp-sockets.txt" python verl/utils/hccl_diagnostics.py ci.network udp
+    fi
     cat /proc/meminfo > "$target/meminfo.txt"
     cat /proc/sysvipc/shm > "$target/sysvipc-shm.txt" 2>&1 || true
 }
@@ -57,8 +62,13 @@ fi
 snapshot "$mode"
 if [ "$mode" = before ]; then
     capture "$root/uname.txt" uname -a
-    capture "$root/network-addresses.txt" ip -brief address
-    capture "$root/network-routes.txt" ip route
+    if command -v ip >/dev/null 2>&1; then
+        capture "$root/network-addresses.txt" ip -brief address
+        capture "$root/network-routes.txt" ip route
+    else
+        capture "$root/network-addresses.txt" python verl/utils/hccl_diagnostics.py ci.network interfaces
+        capture "$root/network-routes.txt" python verl/utils/hccl_diagnostics.py ci.network routes
+    fi
     capture "$root/storage.txt" df -h /dev/shm /tmp "${GITHUB_WORKSPACE:-$PWD}"
     capture "$root/revision.txt" git rev-parse HEAD
     cat /usr/local/Ascend/driver/version.info > "$root/driver-version.txt" 2>&1 || true
