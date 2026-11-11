@@ -98,7 +98,7 @@ jobs:
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       # built from https://github.com/mingjielu/Training-dockerfile/blob/main/ubuntu/rocm7.14_verl_0810_py312/Dockerfile
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1111"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -191,7 +191,7 @@ jobs:
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1111"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -267,7 +267,7 @@ jobs:
     if: ${{ always() && github.repository_owner == 'verl-project' }}
     runs-on: [rocm-mi300]
     container:
-      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
+      image: "verlai/verl:rocm7.14_torch2.12_release_1111"
     steps:
       - name: Clean up leftover checkpoints
         run: |
