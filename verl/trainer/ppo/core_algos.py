@@ -1311,8 +1311,10 @@ def compute_policy_loss_vanilla(
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
         config: `(verl.trainer.config.ActorConfig)`:
             config for the actor.
-        rollout_log_probs: `(torch.Tensor)`:
-            log probabilities of actions under the rollout policy, shape (batch_size, response_length).
+        rollout_is_weights (torch.Tensor, optional):
+            Pre-computed importance-sampling weights that correct the policy-gradient
+            loss for the rollout/training policy mismatch, shape (batch_size, response_length).
+            If None, no correction is applied. Defaults to None.
     """
 
     assert config is not None
@@ -1404,8 +1406,10 @@ def compute_policy_loss_dppo_tv(
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
         config: `(verl.trainer.config.ActorConfig)`:
             config for the actor.
-        rollout_log_probs: `(torch.Tensor)`:
-            log probabilities of actions under the rollout policy, shape (batch_size, response_length).
+        rollout_is_weights (torch.Tensor, optional):
+            Pre-computed importance-sampling weights that correct the policy-gradient
+            loss for the rollout/training policy mismatch, shape (batch_size, response_length).
+            If None, no correction is applied. Defaults to None.
     """
 
     assert config is not None
@@ -1485,8 +1489,10 @@ def compute_policy_loss_dppo_kl(
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
         config: `(verl.trainer.config.ActorConfig)`:
             config for the actor.
-        rollout_log_probs: `(torch.Tensor)`:
-            log probabilities of actions under the rollout policy, shape (batch_size, response_length).
+        rollout_is_weights (torch.Tensor, optional):
+            Pre-computed importance-sampling weights that correct the policy-gradient
+            loss for the rollout/training policy mismatch, shape (batch_size, response_length).
+            If None, no correction is applied. Defaults to None.
     """
 
     assert config is not None

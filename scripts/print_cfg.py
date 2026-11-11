@@ -22,7 +22,7 @@ def main(config):
     """Main entry point for PPO training with Hydra configuration management.
 
     Args:
-        config_dict: Hydra configuration dictionary containing training parameters.
+        config: Hydra configuration for PPO training.
     """
     print(config)
     from verl.utils.config import omega_conf_to_dataclass
