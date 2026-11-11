@@ -19,9 +19,10 @@ trainers: after ``tq.load_checkpoint`` restores the queue, prompts that were
 still generating (``pending``/``running``) must be re-submitted from the prompt
 data persisted at submit time, while finished trajectories are left untouched.
 
-Because half-generated tokens are not durable, a re-issued prompt restarts
-generation from scratch. Existing session trajectories under an in-flight prompt
-are removed, and the prompt is re-stamped with the resumed training step.
+Because half-generated tokens are persisted per session only for single-turn async
+sessions, a re-issued prompt resumes saved prefixes while retaining any already
+persisted sibling session trajectories, and re-stamps the prompt with the resumed
+training step.
 
 The method is bound to a lightweight stub ``self`` exposing
 ``agent_loop_manager``, ``trainer_mode``, and ``global_steps``, avoiding the need
@@ -232,11 +233,16 @@ def test_reissue_resubmits_only_inflight_prompts(tq_init, partition_id):
         assert _prompt_status(partition_id, running) == "pending"
         assert _prompt_status(partition_id, finished) == "finished"
 
-        # A restarted group keeps only its prompt fields. Terminal groups are not modified.
+        # Finished sibling trajectories under in-flight groups are retained so their completed
+        # rollouts and reward evaluations are not duplicated; terminal groups are untouched.
         remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
-        assert pending_trajectory not in remaining
-        assert running_trajectory not in remaining
+        assert pending_trajectory in remaining
+        assert running_trajectory in remaining
         assert finished_trajectory in remaining
+        batch = stub.agent_loop_manager.batches[0]
+        completed_map = dict(zip(batch["uid"], tu.get(batch, "completed_sessions"), strict=True))
+        assert completed_map[pending] == [0]
+        assert completed_map[running] == [0]
     finally:
         _clear_partition(partition_id)
 
@@ -417,7 +423,7 @@ def test_partial_state_roundtrip_with_mixed_prompt_columns(tq_init, partition_id
 
     from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ
     from verl.workers.rollout import llm_server
-    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
+    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, _partial_rollout_session
     from verl.workers.rollout.replica import TokenOutput
 
     running, pending = _uid(), _uid()
@@ -445,42 +451,43 @@ def test_partial_state_roundtrip_with_mixed_prompt_columns(tq_init, partition_id
             extra_fields={"global_steps": 4},
         )
 
-    monkeypatch.setattr(llm_server.LLMServerClient, "generate", backend)
-    worker_cls = AgentLoopWorkerTQ.__ray_actor_class__
-    worker = worker_cls.__new__(worker_cls)
-    worker.partial_rollout_states = {running: {}}
-
     class Interrupted(Exception):
         pass
 
-    def capture(state):
-        worker.partial_rollout_states[running]["0"] = state
-        if state["output"].token_ids:
-            raise Interrupted
+    async def interrupt_sleep(_delay):
+        raise Interrupted
+
+    monkeypatch.setattr(llm_server.LLMServerClient, "generate", backend)
+    worker_cls = AgentLoopWorkerTQ.__ray_actor_class__
+    worker = worker_cls.__new__(worker_cls)
+    # Simulate sibling session 1 already committed to TQ: _agent_loop_postprocess drops its
+    # live prefix so save_partial_rollout_states does not duplicate it in the prompt row.
+    worker.partial_rollout_states = {
+        running: {"1": TokenOutput(token_ids=[99], stop_reason="completed")},
+        pending: {"0": TokenOutput(token_ids=[])},
+    }
+    _add_trajectory(partition_id, running, session_id=1, global_steps=3)
+    worker.partial_rollout_states[running].pop("1", None)
 
     async def interrupt():
-        client = FullyAsyncLLMServerClient(config=config)
-        with pytest.raises(Interrupted):
-            await client.generate(
-                "first",
-                prompt_ids=[1],
-                sampling_params={"temperature": 1.0},
-                partial_rollout_checkpoint_callback=capture,
-            )
+        monkeypatch.setattr(llm_server.asyncio, "sleep", interrupt_sleep)
+        token = _partial_rollout_session.set((worker.partial_rollout_states[running], "0", None))
+        try:
+            with pytest.raises(Interrupted):
+                await FullyAsyncLLMServerClient(config=config).generate(
+                    "first",
+                    prompt_ids=[1],
+                    sampling_params={"temperature": 1.0},
+                )
+        finally:
+            _partial_rollout_session.reset(token)
 
     asyncio.run(interrupt())
-    # The worker writes to the training partition in production; isolate this test's partition.
-    real_put = tq.async_kv_put
-
-    async def isolated_put(*, partition_id: str, **kwargs):
-        return await real_put(partition_id=test_partition, **kwargs)
-
-    test_partition = partition_id
-    monkeypatch.setattr(tq, "async_kv_put", isolated_put)
-    asyncio.run(worker.save_partial_rollout_states())
-    # Verify repeated saves overwrite the column instead of retaining the first snapshot.
-    worker.partial_rollout_states[running]["0"]["output"].num_preempted = 7
-    asyncio.run(worker.save_partial_rollout_states())
+    asyncio.run(worker.save_partial_rollout_states(partition_id=partition_id))
+    # Verify repeated saves overwrite the column instead of retaining the first snapshot,
+    # while empty 0-token sessions leave `pending` untagged.
+    worker.partial_rollout_states[running]["0"].num_preempted = 7
+    asyncio.run(worker.save_partial_rollout_states(partition_id=partition_id))
     checkpoint = str(tmp_path / "partial-queue")
     tq.save_checkpoint(checkpoint)
     _clear_partition(partition_id)
@@ -490,18 +497,26 @@ def test_partial_state_roundtrip_with_mixed_prompt_columns(tq_init, partition_id
         assert stub._reissue_inflight_prompts(partition_id) == 2
         batch = stub.agent_loop_manager.batches[0]
         index = list(batch["uid"]).index(running)
-        state = tu.unwrap_non_tensor_data(batch["partial_rollout_states"][index])["0"]
+        row_states = tu.unwrap_non_tensor_data(batch["partial_rollout_states"][index])
+        assert set(row_states.keys()) == {"0"}
+        state = row_states["0"]
+        assert tu.unwrap_non_tensor_data(batch["completed_sessions"][index]) == [1]
+        assert f"{running}_1_0" in tq.kv_list(partition_id=partition_id).get(partition_id, {})
         pending_index = list(batch["uid"]).index(pending)
         assert not tu.unwrap_non_tensor_data(batch["partial_rollout_states"][pending_index])
-        assert state["output"]["num_preempted"] == 7
+        assert tu.unwrap_non_tensor_data(batch["completed_sessions"][pending_index]) == []
+        assert state["num_preempted"] == 7
 
         async def resume():
-            return await FullyAsyncLLMServerClient(config=config).generate(
-                "second",
-                prompt_ids=[1],
-                sampling_params={"temperature": 1.0},
-                partial_rollout_state=state,
-            )
+            token = _partial_rollout_session.set(({}, "0", state))
+            try:
+                return await FullyAsyncLLMServerClient(config=config).generate(
+                    "second",
+                    prompt_ids=[1],
+                    sampling_params={"temperature": 1.0},
+                )
+            finally:
+                _partial_rollout_session.reset(token)
 
         output = asyncio.run(resume())
         assert calls[1][0] == [1, 10, 11]
@@ -510,6 +525,7 @@ def test_partial_state_roundtrip_with_mixed_prompt_columns(tq_init, partition_id
         assert output.log_probs == [-0.1, -0.2, -0.3, -0.4, -0.5]
         np.testing.assert_array_equal(output.routed_experts[:, 0], [1, 2, 3, 4, 5, 6])
         assert output.extra_fields["min_global_steps"] == 3
+        assert output.extra_fields["max_global_steps"] == 4
         assert output.extra_fields["num_cached_tokens"] == 1
     finally:
         _clear_partition(partition_id)

@@ -18,9 +18,9 @@ Utility classes for manage and request LLM servers:
 """
 
 import asyncio
-import copy
 import logging
 import os
+from contextvars import ContextVar
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -39,6 +39,13 @@ from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+# Task-scoped binding `(session_outputs_dict, session_key, restored_state)` set by
+# `AgentLoopWorkerTQ` so `FullyAsyncLLMServerClient.generate` can restore and expose
+# cumulative `TokenOutput` prefixes without threading state through `AgentLoopBase`.
+_partial_rollout_session: ContextVar[tuple[dict[str, TokenOutput], str, dict[str, Any] | None] | None] = ContextVar(
+    "_partial_rollout_session", default=None
+)
 
 
 class LLMServerClient:
@@ -249,8 +256,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         Returns:
             TokenOutput: token output
         """
+        session_ctx = _partial_rollout_session.get()
         resume_state = kwargs.pop("partial_rollout_state", None)
-        checkpoint_callback = kwargs.pop("partial_rollout_checkpoint_callback", None)
+        if resume_state is None and session_ctx is not None:
+            resume_state = session_ctx[2]
         prompt_ids = normalize_token_ids(prompt_ids)
 
         limit_key = None
@@ -276,61 +285,35 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 original_max_tokens = response_length
                 sampling_params[limit_key] = response_length
 
-        final_output = TokenOutput(
-            token_ids=[],
-            log_probs=[],
-            num_preempted=0,
-        )
-        min_global_steps, max_global_steps = None, None
-        # Prefix-cache hits are reported per prefill. The base client returns the
-        # server's TokenOutput directly (so sync mode surfaces num_cached_tokens),
-        # but here we rebuild a fresh TokenOutput across resume iterations, so we
-        # must carry it forward explicitly or the consumer sees 0. Take the first
-        # (initial-prompt) prefill's hit count, matching single-prefill semantics.
-        num_cached_tokens = None
-
-        complete = False
         if resume_state is not None:
-            if resume_state.get("schema_version") != 1:
-                raise ValueError("Unsupported partial rollout checkpoint schema")
-            if resume_state["prompt_ids"] != prompt_ids or resume_state["sampling_params"] != sampling_params:
-                raise ValueError("Partial rollout checkpoint prompt or sampling parameters changed")
-            final_output = TokenOutput(**copy.deepcopy(resume_state["output"]))
-            min_global_steps = resume_state["min_global_steps"]
-            max_global_steps = resume_state["max_global_steps"]
-            num_cached_tokens = resume_state["num_cached_tokens"]
-            complete = resume_state["complete"]
+            final_output = TokenOutput.model_validate(resume_state)
+            if final_output.log_probs is None:
+                final_output.log_probs = []
+            if final_output.num_preempted is None:
+                final_output.num_preempted = 0
             if original_max_tokens is not None:
                 remaining = original_max_tokens - len(final_output.token_ids)
                 if remaining < 0:
                     raise ValueError("Partial rollout checkpoint exceeds response budget")
                 sampling_params[limit_key] = remaining
-                complete = complete or remaining == 0
+                if remaining == 0 and final_output.stop_reason in (None, "aborted", "abort"):
+                    final_output.stop_reason = "length"
+        else:
+            final_output = TokenOutput(
+                token_ids=[],
+                log_probs=[],
+                num_preempted=0,
+            )
 
-        # Persist at client-visible attempt boundaries. KV is rebuilt from tokens on restart.
-        checkpoint_sampling_params = dict(sampling_params)
-        if limit_key:
-            checkpoint_sampling_params[limit_key] = original_max_tokens
-        global_steps = max_global_steps
+        # Register the live cumulative output before yielding to the event loop. Attempt merges
+        # below contain no `await`, so worker snapshots always observe an attempt boundary.
+        if session_ctx is not None:
+            session_ctx[0][session_ctx[1]] = final_output
 
-        def publish_state():
-            if checkpoint_callback is not None:
-                # The callback is synchronous; worker snapshotting runs on this same event loop.
-                checkpoint_callback(
-                    {
-                        "schema_version": 1,
-                        "prompt_ids": prompt_ids,
-                        "sampling_params": checkpoint_sampling_params,
-                        "output": final_output,
-                        "min_global_steps": min_global_steps,
-                        "max_global_steps": max_global_steps,
-                        "num_cached_tokens": num_cached_tokens,
-                        "complete": complete,
-                    }
-                )
+        if final_output.stop_reason not in (None, "aborted", "abort"):
+            return final_output
 
-        publish_state()
-        while not complete:
+        while True:
             # 1. generate tokens
             output = await super().generate(
                 request_id=request_id,
@@ -369,22 +352,24 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     )
             final_output.stop_reason = output.stop_reason
 
-            # carry the initial prefill's prefix-cache hit count forward
-            if num_cached_tokens is None:
-                num_cached_tokens = output.extra_fields.get("num_cached_tokens")
+            # Prefix-cache hits are reported per prefill. Preserve the initial-prompt prefill's
+            # hit count across resume iterations so single-prefill semantics stay intact.
+            if final_output.extra_fields.get("num_cached_tokens") is None:
+                final_output.extra_fields["num_cached_tokens"] = output.extra_fields.get("num_cached_tokens")
 
-            # update model weights version
+            # Update model weights version bounds on final_output so attempt snapshots stay self-contained.
             global_steps = output.extra_fields.get("global_steps", None)
-            if min_global_steps is None:
-                min_global_steps = global_steps
-            max_global_steps = global_steps
+            if final_output.extra_fields.get("min_global_steps") is None:
+                final_output.extra_fields["min_global_steps"] = global_steps
+            final_output.extra_fields["max_global_steps"] = global_steps
+            final_output.extra_fields["global_steps"] = global_steps
 
             # 3. update max_new_tokens
             if original_max_tokens is not None:
                 sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
                 if len(final_output.token_ids) >= original_max_tokens:
                     final_output.stop_reason = "length"
-                    complete = True
+                    break
 
             # 4. check stop reason
             # If partial rollout not enable, aborted samples will be dropped.
@@ -392,15 +377,11 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             should_retry = True
             if hasattr(self.config, "async_training") and not self.config.async_training.partial_rollout:
                 should_retry = False
-            complete = complete or output.stop_reason not in ("aborted", "abort") or not should_retry
-            publish_state()
-            if not complete:
-                await asyncio.sleep(1)
+            if output.stop_reason not in ("aborted", "abort") or not should_retry:
+                break
 
-        final_output.extra_fields["global_steps"] = global_steps
-        final_output.extra_fields["min_global_steps"] = min_global_steps
-        final_output.extra_fields["max_global_steps"] = max_global_steps
-        final_output.extra_fields["num_cached_tokens"] = num_cached_tokens
+            await asyncio.sleep(1)
+
         return final_output
 
 

@@ -400,13 +400,15 @@ Partial rollout checkpoint recovery
 
 For single-turn agents using the v1 asynchronous trainer, checkpoints include
 client-visible generation prefixes at completed attempt boundaries. Before saving
-the TransferQueue snapshot, workers flush per-session tokens, log probabilities,
-routes, generation budgets, and weight-version bounds into the prompt rows.
-Finished trajectories are preserved. Pending sessions without a saved prefix
-restart from their prompt, including sessions from older checkpoints.
+the TransferQueue snapshot, workers flush non-empty in-flight ``TokenOutput``
+states (tokens, log probabilities, routes, sampler top-k heads, and weight-version
+bounds) into the prompt rows. Finished trajectories—including completed sibling
+sessions of an in-flight prompt group—are preserved without re-generation or
+duplicate checkpoint storage. Pending sessions without a saved prefix restart from
+their prompt, including sessions from older checkpoints.
 
 Restored sessions append newly generated tokens to their saved prefix and consume
-only the remaining response budget. Changed prompts or sampling parameters are
+only the remaining response budget; prefixes exceeding the configured budget are
 rejected. Backend KV cache and random-generator state are not checkpointed, so
 continuation does not guarantee identical future tokens. Multi-turn agent state
 is not supported.

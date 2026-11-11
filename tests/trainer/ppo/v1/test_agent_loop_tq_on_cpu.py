@@ -111,7 +111,8 @@ async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypa
 
 
 def test_prompt_dispatch_restores_each_session_and_releases_live_states(monkeypatch):
-    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
+    from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, _partial_rollout_session
+    from verl.workers.rollout.replica import TokenOutput
 
     async def fake_put(**kwargs):
         pass
@@ -119,23 +120,32 @@ def test_prompt_dispatch_restores_each_session_and_releases_live_states(monkeypa
     monkeypatch.setattr("verl.trainer.ppo.v1.agent_loop_tq.tq.async_kv_put", fake_put)
     worker_cls = AgentLoopWorkerTQ.__ray_actor_class__
     worker = worker_cls.__new__(worker_cls)
-    worker.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"n": 2}}})
+    worker.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"n": 3}}})
     worker.llm_client = FullyAsyncLLMServerClient(config=worker.config)
     worker.partial_rollout_states = {}
     received = {}
 
     async def run_session(params, *, session_id, **kwargs):
-        received[session_id] = kwargs["partial_rollout_state"]
-        kwargs["partial_rollout_checkpoint_callback"]({"session": session_id})
-        assert worker.partial_rollout_states["prompt"][str(session_id)] == {"session": session_id}
+        assert "partial_rollout_state" not in kwargs
+        assert "completed_sessions" not in kwargs
+        states, key, restored = _partial_rollout_session.get()
+        received[session_id] = restored
+        states[key] = TokenOutput(token_ids=[session_id + 1])
+        assert worker.partial_rollout_states["prompt"][str(session_id)].token_ids == [session_id + 1]
 
     worker._run_agent_loop = run_session
     asyncio.run(
         worker._run_prompt(
-            {"uid": "prompt", "agent_name": "single_turn_agent", "partial_rollout_states": {"0": {"prefix": [7]}}},
+            {
+                "uid": "prompt",
+                "agent_name": "single_turn_agent",
+                "partial_rollout_states": {"0": {"token_ids": [7]}},
+                "completed_sessions": [2],
+            },
             {},
             {"validate": False},
         )
     )
-    assert received == {0: {"prefix": [7]}, 1: None}
+    assert received == {0: {"token_ids": [7]}, 1: None}
     assert worker.partial_rollout_states == {}
+    assert _partial_rollout_session.get() is None

@@ -924,25 +924,30 @@ class PPOTrainer(ABC):
             return 0
 
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
-        # TQ batch reads return only columns shared by every requested row. Older/pending
-        # prompts may have no partial state column, so recover it per tagged prompt.
-        partial_states = []
-        for uid in inflight_uids:
-            state = {}
-            if items[uid].get("has_partial_rollout", False):
-                row = tq.kv_batch_get(keys=[uid], partition_id=partition_id)
-                state = tu.unwrap_non_tensor_data(row["partial_rollout_states"][0])
-            partial_states.append(state)
-        if any(partial_states):
-            tu.assign_non_tensor_stack(batch, "partial_rollout_states", partial_states)
+        # TQ batch reads return only columns shared by every requested row, so fetch saved
+        # prefixes in one separate batch over the tagged prompt subset.
+        partial_uids = [uid for uid in inflight_uids if items[uid].get("has_partial_rollout", False)]
+        if partial_uids:
+            partial_rows = tq.kv_batch_get(
+                keys=partial_uids, partition_id=partition_id, select_fields=["partial_rollout_states"]
+            )
+            states_by_uid = dict(zip(partial_uids, tu.get(partial_rows, "partial_rollout_states"), strict=True))
+            tu.assign_non_tensor_stack(
+                batch, "partial_rollout_states", [states_by_uid.get(uid, {}) for uid in inflight_uids]
+            )
+        # Finished sibling trajectories under an in-flight prompt were written atomically via
+        # `async_kv_batch_put`; retain them and pass their session ids so workers skip re-running them.
         inflight_uid_set = set(inflight_uids)
-        old_trajectory_keys = [
-            key
-            for key, tag in items.items()
-            if not tag.get("is_prompt", False) and key.split("_", 1)[0] in inflight_uid_set
-        ]
-        if old_trajectory_keys:
-            tq.kv_clear(keys=old_trajectory_keys, partition_id=partition_id)
+        completed_by_uid: dict[str, set[int]] = defaultdict(set)
+        for key, tag in items.items():
+            if not tag.get("is_prompt", False):
+                parts = key.rsplit("_", 2)
+                if len(parts) == 3 and parts[0] in inflight_uid_set:
+                    completed_by_uid[parts[0]].add(int(parts[1]))
+        if completed_by_uid:
+            tu.assign_non_tensor_stack(
+                batch, "completed_sessions", [sorted(completed_by_uid.get(uid, ())) for uid in inflight_uids]
+            )
 
         # Treat this as a new dispatch attempt for the resumed training step.
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
@@ -952,7 +957,7 @@ class PPOTrainer(ABC):
 
         logger.info(
             f"Re-issued {len(inflight_uids)} in-flight prompts for step {self.global_steps}; "
-            f"cleared {len(old_trajectory_keys)} old trajectories from partition {partition_id}"
+            f"retained {sum(len(s) for s in completed_by_uid.values())} completed sibling sessions in {partition_id}"
         )
         return len(inflight_uids)
 
