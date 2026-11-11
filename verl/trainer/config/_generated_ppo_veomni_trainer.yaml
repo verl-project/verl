@@ -60,7 +60,8 @@ actor_rollout_ref:
       dsa_indexer_implementation: eager
       dsa_attention_implementation: eager
       mhc_implementation: eager
-      qat_implementation: none
+      linear_implementation: eager
+      kv_round_implementation: none
       force_use_huggingface: false
       enable_async_activation_offload: false
       activation_offload_modules: []
@@ -252,7 +253,8 @@ actor_rollout_ref:
       dsa_indexer_implementation: eager
       dsa_attention_implementation: eager
       mhc_implementation: eager
-      qat_implementation: none
+      linear_implementation: ${oc.select:actor_rollout_ref.actor.veomni.linear_implementation,eager}
+      kv_round_implementation: ${oc.select:actor_rollout_ref.actor.veomni.kv_round_implementation,none}
       force_use_huggingface: false
       enable_async_activation_offload: false
       activation_offload_modules: []
@@ -572,7 +574,8 @@ critic:
     dsa_indexer_implementation: eager
     dsa_attention_implementation: eager
     mhc_implementation: eager
-    qat_implementation: none
+    linear_implementation: eager
+    kv_round_implementation: none
     force_use_huggingface: false
     enable_async_activation_offload: false
     activation_offload_modules: []

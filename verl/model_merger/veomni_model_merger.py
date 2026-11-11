@@ -275,14 +275,17 @@ class VeOmniModelMerger(FSDPModelMerger):
         """Build the VeOmni model on the meta device, giving the converter and key names the engine uses."""
         from veomni.arguments import OpsImplementationConfig
         from veomni.models.auto import build_foundation_model
-        from veomni.models.checkpoint_tensor_loading import prepare_fqn_to_index_mapping_for_model
+        from veomni.models.checkpoint import prepare_fqn_to_index_mapping_for_model
 
         from verl.workers.engine.veomni.utils import load_safetensors_index
 
         # Nothing runs forward, so every op takes its reference implementation, which every model accepts.
-        ops_implementation = OpsImplementationConfig(
-            **{f.name: "eager" for f in fields(OpsImplementationConfig) if f.name.endswith("_implementation")}
-        )
+        reference = {f.name: "eager" for f in fields(OpsImplementationConfig) if f.name.endswith("_implementation")}
+        # `kv_round` is the one family whose reference row is "none": "eager" there rounds
+        # the stored tensors instead of leaving them alone.
+        if "kv_round_implementation" in reference:
+            reference["kv_round_implementation"] = "none"
+        ops_implementation = OpsImplementationConfig(**reference)
         module = build_foundation_model(
             config_path=self.hf_model_config_path,
             torch_dtype="float32",
@@ -295,7 +298,7 @@ class VeOmniModelMerger(FSDPModelMerger):
 
     def _map_to_module_keys(self, module: torch.nn.Module, state_dict: dict) -> dict[str, str]:
         """Map checkpoint keys to the module's, renaming keys saved by older VeOmni versions like its loader does."""
-        from veomni.models.checkpoint_tensor_loading import (
+        from veomni.models.checkpoint import (
             get_checkpoint_tensor_converter,
             maybe_convert_checkpoint_tensor,
         )
@@ -336,7 +339,7 @@ class VeOmniModelMerger(FSDPModelMerger):
     def merge_and_save(self):
         if self.config.operation != "merge":
             raise NotImplementedError(f"VeOmni merger does not support operation {self.config.operation!r}")
-        from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
+        from veomni.models.checkpoint import get_checkpoint_tensor_converter
 
         world_size = self._get_world_size()
         state_dicts = self._load_rank_state_dicts(world_size)
