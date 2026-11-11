@@ -31,7 +31,6 @@ from verl.workers.engine.utils import enable_batch_invariance
 
 def test_batch_invariant_is_off_by_default():
     assert FSDPEngineConfig().batch_invariant is False
-    assert FSDPEngine._batch_invariant is False
 
 
 def test_batch_invariant_rejects_fused_kernels(monkeypatch):
@@ -136,7 +135,7 @@ def test_batch_invariant_log_probs_divide_fp32_logits_by_temperature(use_remove_
     tu.assign_non_tensor(micro_batch, use_remove_padding=use_remove_padding, pad_mode=DatasetPadMode.NO_PADDING)
     engine = object.__new__(FSDPEngineWithLMHead)
     engine.use_ulysses_sp = False
-    engine._batch_invariant = True
+    engine.engine_config = FSDPEngineConfig(batch_invariant=True)
 
     narrow = torch.nested.narrow
     with patch.object(torch.nested, "narrow", wraps=narrow) as narrow_calls:

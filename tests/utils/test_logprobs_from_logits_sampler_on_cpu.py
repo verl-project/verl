@@ -14,14 +14,14 @@
 
 import torch
 
-from verl.utils.torch_functional import logprobs_from_logits_sampler, logprobs_from_logits_v2
+from verl.utils.torch_functional import logprobs_from_logits, logprobs_from_logits_sampler, logprobs_from_logits_v2
 
 
 def test_sampler_formula_is_fp32_log_softmax_gather():
     torch.manual_seed(0)
     logits = torch.randn(3, 5, 11, dtype=torch.bfloat16)
     labels = torch.randint(0, 11, (3, 5))
-    out = logprobs_from_logits_sampler(logits, labels, inplace_backward=False)
+    out = logprobs_from_logits_sampler(logits, labels)
     ref = torch.log_softmax(logits.float(), dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
     assert out.dtype == torch.float32
     assert out.shape == labels.shape
@@ -88,3 +88,13 @@ def test_greedy_temperature_reports_unscaled_log_probs_like_the_vllm_sampler():
     temperature = torch.tensor([0.0, 1e-6, 0.0, 1.0, 0.0, 0.0])
     ref = torch.log_softmax(logits.float(), dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
     assert torch.equal(logprobs_from_logits_sampler(logits, labels, temperature=temperature), ref)
+
+
+def test_logprobs_from_logits_takes_the_sampler_path_when_batch_invariant():
+    torch.manual_seed(0)
+    logits = torch.randn(50, 64, dtype=torch.bfloat16) * 4
+    labels = torch.randint(0, 64, (50,))
+    temperature = torch.full((50,), 0.7)
+    out = logprobs_from_logits(logits, labels, batch_invariant=True, temperature=temperature)
+    assert torch.equal(out, logprobs_from_logits_sampler(logits, labels, temperature=temperature))
+    assert logprobs_from_logits(logits, labels).dtype == torch.bfloat16

@@ -71,7 +71,7 @@ def gather_from_labels(data: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
     return output
 
 
-def logprobs_from_logits(logits, labels, inplace_backward=True):
+def logprobs_from_logits(logits, labels, inplace_backward=True, batch_invariant=False, temperature=None):
     """
     Compute per-token log-probabilities for the given labels.
 
@@ -84,10 +84,15 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
         logits (Tensor): Model outputs of shape (..., vocab_size).
         labels (LongTensor): True class indices of shape matching logits[..., :-1].
         inplace_backward (bool): If True and Flash-Attn is available, perform backward in-place.
+        batch_invariant (bool): If True, use the vLLM sampler formula (see ``logprobs_from_logits_sampler``).
+        temperature (Tensor, optional): Per-row temperature for the ``batch_invariant`` path, which takes
+            unscaled logits. The other paths expect logits that are already scaled.
 
     Returns:
         Tensor: Log-probabilities of the target labels, shape logits.shape[:-1].
     """
+    if batch_invariant:
+        return logprobs_from_logits_sampler(logits, labels, temperature=temperature)
     # The flash-attn Triton cross-entropy kernel's reduction may be non-deterministic
     # and is NOT controlled by FLASH_ATTENTION_DETERMINISTIC (that only governs the
     # attention kernels) nor by torch.use_deterministic_algorithms (Triton custom ops
@@ -211,7 +216,6 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels: torch.Tensor) -> 
 def logprobs_from_logits_sampler(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    inplace_backward: bool = True,
     chunk_size: int = 2048,
     temperature: Optional[torch.Tensor] = None,
 ):
@@ -222,7 +226,6 @@ def logprobs_from_logits_sampler(
     log_softmax is row-wise, so processing chunks of rows gives the same values as one call on the
     whole tensor while bounding the fp32 copy to one chunk. Each chunk is checkpointed, so backward
     recomputes its fp32 log_softmax instead of keeping one full-vocabulary copy per chunk alive.
-    ``inplace_backward`` is accepted for call-site compatibility and unused.
     """
     temperatures = [None] * len(logits.split(chunk_size)) if temperature is None else temperature.split(chunk_size)
     logprobs_labels = []

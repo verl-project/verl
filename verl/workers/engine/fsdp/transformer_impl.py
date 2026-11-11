@@ -62,7 +62,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.seqlen_balancing import ceildiv
-from verl.utils.torch_functional import logprobs_from_logits, logprobs_from_logits_sampler
+from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_group,
@@ -110,8 +110,6 @@ class FSDPEngine(BaseEngine):
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
-
-    _batch_invariant = False
 
     def __init__(
         self,
@@ -164,7 +162,6 @@ class FSDPEngine(BaseEngine):
                     "batch_invariant does not support use_fused_kernels: the fused kernel computes its own log-probs"
                 )
             enable_batch_invariance()
-            self._batch_invariant = True
         # full_determinism runs last so its env settings win over batch invariance
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
@@ -1292,6 +1289,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         # through prepare_model_inputs. Without the optimization metadata, fall
         # back to the original out-of-place scaling path.
         temperature_is_one = output_args.get("temperature_is_one", False)
+        batch_invariant = self.engine_config.batch_invariant
 
         input_ids = micro_batch["input_ids"]
 
@@ -1366,18 +1364,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     # entropy and the score centering hook reuse the logits in their backward
                     inplace_backward = not (calculate_entropy or score_centering)
-                    if self._batch_invariant:
-                        log_probs = logprobs_from_logits_sampler(
-                            logits=unscaled_logits_rmpad,
-                            labels=input_ids_rmpad_rolled,
-                            temperature=None if temperature_is_one else temperature_rmpad,
-                        )
-                    else:
-                        log_probs = logprobs_from_logits(
-                            logits=logits_rmpad,
-                            labels=input_ids_rmpad_rolled,
-                            inplace_backward=inplace_backward,
-                        )
+                    log_probs = logprobs_from_logits(
+                        logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
+                        labels=input_ids_rmpad_rolled,
+                        inplace_backward=inplace_backward,
+                        batch_invariant=batch_invariant,
+                        temperature=None if temperature_is_one else temperature_rmpad,
+                    )
 
             # gather across the ulysses sp group and drop the packed-sequence padding
             pad_size = output_args["pad_size"]
@@ -1450,7 +1443,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
                     logits = torch.nested.narrow(logits, 1, starts, seq_lengths, layout=torch.jagged)
                     logits_rmpad = torch.cat([t for t in logits.unbind()])
-                    if self._batch_invariant:
+                    if batch_invariant:
                         if temperature_is_one:
                             unscaled_logits_rmpad = logits_rmpad
                         else:
@@ -1476,20 +1469,15 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
-                        if self._batch_invariant:
-                            log_probs = logprobs_from_logits_sampler(
-                                logits=unscaled_logits_rmpad,
-                                labels=input_ids_rmpad_rolled,
-                                temperature=None
-                                if temperature_is_one
-                                else temperature.flatten().repeat_interleave(seq_lengths),
-                            )
-                        else:
-                            log_probs = logprobs_from_logits(
-                                logits=logits_rmpad,
-                                labels=input_ids_rmpad_rolled,
-                                inplace_backward=not score_centering,
-                            )
+                        log_probs = logprobs_from_logits(
+                            logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
+                            labels=input_ids_rmpad_rolled,
+                            inplace_backward=not score_centering,
+                            batch_invariant=batch_invariant,
+                            temperature=None
+                            if temperature_is_one
+                            else temperature.flatten().repeat_interleave(seq_lengths),
+                        )
 
                     # (bsz, j1), for each sample, length of each sample: [real_prompt_length + real_response_length]
                     if not distillation_only:
