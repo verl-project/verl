@@ -15,7 +15,8 @@
 #
 # Required: MODEL_PATH (node-local on every node), LORA_ADAPTER_PATH (initial peft adapter), TRAIN_FILES, VAL_FILES;
 # RAY_ADDRESS for NNODES > 1. VERL_ROOT, MEGATRON_ROOT, K31_PLUGIN_ROOT come from the image; K31_PLUGIN_PATH
-# overrides the arm's plugins. DRY_RUN=1 prints the environment and command, COMPOSE_ONLY=1 the resolved config.
+# overrides the arm's plugins. DROP_MODEL_PAGE_CACHE=1 evicts MODEL_PATH from this node's page cache first.
+# DRY_RUN=1 prints the environment and command, COMPOSE_ONLY=1 the resolved config.
 # Extra arguments are Hydra overrides (last wins).
 set -euo pipefail
 
@@ -46,6 +47,25 @@ else
   : "${K31_PLUGIN_PATH:=${K31_PLUGIN_ROOT}/k31lora:${K31_PLUGIN_ROOT}/k31xlora}"
 fi
 [[ -s "${MODEL_PATH}/config.json" ]] || die "missing ${MODEL_PATH}/config.json"
+# Optional: drop this node's page cache for MODEL_PATH (posix_fadvise DONTNEED, no root); also runs under DRY_RUN.
+if [[ "${DROP_MODEL_PAGE_CACHE:-0}" == 1 ]]; then
+  python3 -I - "${MODEL_PATH}" <<'PY'
+import os, sys
+n = 0
+for root, _, files in os.walk(sys.argv[1]):
+    for name in files:
+        try:
+            fd = os.open(os.path.join(root, name), os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            n += 1
+        finally:
+            os.close(fd)
+print(f"dropped page cache of {n} files under {sys.argv[1]}", file=sys.stderr)
+PY
+fi
 
 # --- Workload (shared by both arms) -------------------------------------------------------------------------------
 : "${NNODES:=2}" "${NGPUS_PER_NODE:=8}"
