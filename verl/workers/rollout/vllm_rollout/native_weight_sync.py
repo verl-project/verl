@@ -24,11 +24,11 @@ from verl.workers.rollout.replica import RolloutMode, RolloutReplica, get_rollou
 
 
 def get_native_rollout_endpoints(replicas: Sequence[RolloutReplica]) -> tuple[int, list[tuple[ActorHandle, int]]]:
-    """Assign a disjoint range of HCCL ranks to each independent vLLM engine."""
+    """Count the model workers and assign a disjoint HCCL rank range to each vLLM engine."""
     if not replicas:
         raise ValueError("Native HCCL requires at least one rollout replica")
     vllm_replica = get_rollout_replica_class("vllm")
-    next_rank = 1  # The trainer sender owns rank 0.
+    num_receivers = 0
     endpoints = []
     seen = set()
     for replica in replicas:
@@ -42,9 +42,9 @@ def get_native_rollout_endpoints(replicas: Sequence[RolloutReplica]) -> tuple[in
         if server._actor_id in seen:
             raise ValueError(f"Duplicate vLLM server for replica {replica.replica_rank}")
         seen.add(server._actor_id)
-        endpoints.append((server, next_rank))
-        next_rank += replica.world_size
-    return next_rank, endpoints
+        endpoints.append((server, 1 + num_receivers))  # The trainer sender owns rank 0.
+        num_receivers += replica.world_size
+    return num_receivers, endpoints
 
 
 class RayWeightSyncClient:

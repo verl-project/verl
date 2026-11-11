@@ -41,8 +41,8 @@ class FakeReplica:
 def test_assigns_one_rank_interval_and_one_frontend_per_replica(monkeypatch):
     monkeypatch.setattr(sync, "get_rollout_replica_class", lambda _: FakeReplica)
     replicas = [FakeReplica(0, 2), FakeReplica(1, 4)]
-    world_size, endpoints = sync.get_native_rollout_endpoints(replicas)
-    assert world_size == 7
+    num_receivers, endpoints = sync.get_native_rollout_endpoints(replicas)
+    assert num_receivers == 6
     assert endpoints == [(replicas[0].server_handle, 1), (replicas[1].server_handle, 3)]
     with pytest.raises(ValueError, match="Duplicate"):
         sync.get_native_rollout_endpoints([replicas[0], replicas[0]])

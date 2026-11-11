@@ -18,7 +18,6 @@ from .base import (
     CheckpointEngineRegistry,
     CheckpointEngineWorker,
     ColocatedCheckpointEngine,
-    DirectRolloutCheckpointEngine,
     TensorMeta,
 )
 
@@ -27,7 +26,6 @@ __all__ = [
     "CheckpointEngineRegistry",
     "TensorMeta",
     "ColocatedCheckpointEngine",
-    "DirectRolloutCheckpointEngine",
     "CheckpointEngineManager",
     "CheckpointEngineWorker",
 ]

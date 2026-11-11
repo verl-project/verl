@@ -24,6 +24,13 @@ Checkpoint Engine is an unified abstract layer to synchronize weights between va
 
 #### Direct full-weight updates with vLLM-Ascend
 
+Both Ascend paths use the same `CheckpointEngine` base class and registry. Select the receiving process with `actor_rollout_ref.rollout.checkpoint_engine.backend`:
+
+| Backend on Ascend | Weight path |
+| --- | --- |
+| `nccl` (registered by `HCCLCheckpointEngine`) | Training worker → HCCL → rollout checkpoint worker → local IPC → vLLM model worker |
+| `vllm_native_hccl` | Training worker → native HCCL → vLLM model worker |
+
 All training ranks export each full parameter in the same order. Training rank 0 broadcasts it directly to the rollout model workers. Ray carries control messages to the head server of each replica. Each head dispatches them to its model workers, which receive and load the weights through vLLM-Ascend. For example, four training ranks and two TP=2 replicas use five HCCL transfer ranks: one sender and four receivers. The other three trainers participate in FSDP2 gathers.
 
 Install compatible vLLM and vLLM-Ascend builds on **both** worker pools. The trainer requires the native `WeightSource`, `WeightTransferTrainerFactory` and `HCCLTrainerInitInfo` APIs. The trainer's rendezvous address and HCCL network must be reachable from every rollout worker.

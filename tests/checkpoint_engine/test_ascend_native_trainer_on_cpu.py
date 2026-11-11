@@ -82,9 +82,13 @@ def test_trainer_replays_current_export_and_rebuilds_session(native, monkeypatch
     for step in range(3):
         # A replacement manager may configure a new group with its own generation 1.
         if step in (0, 2):
-            engine.configure("host", 5000 + step, 2, [("server", 1)], generation=1)
+            trainer_kwargs, relay_kwargs = engine.build_topology(2, 1, [("host", 5000 + step), None])
+            assert relay_kwargs == {}
+            engine.init_process_group(
+                **{key: args[rank] for key, args in trainer_kwargs.items()}, endpoints=[("server", 1)], generation=1
+            )
         model.get_per_tensor_param.return_value = (iter([("w", torch.tensor([float(step)]))]), None)
-        asyncio.run(engine.send_weights(model, step))
+        asyncio.run(engine.send_weights(weights=model, global_steps=step))
     assert values == [0.0, 1.0, 2.0]
     assert len(initializations) == 2
     initializations[0].shutdown.assert_called_once_with()
@@ -94,7 +98,7 @@ def test_trainer_replays_current_export_and_rebuilds_session(native, monkeypatch
 
 def test_trainer_preflight_rejects_bad_export_before_worker_rendezvous(native):
     engine = backend.AscendNativeCheckpointEngine(512)
-    engine.configure("host", 5123, 2, [("server", 1)], 1)
+    engine.init_process_group("host", 5123, 2, [("server", 1)], 1)
     model = Mock()
     model.get_weight_transfer_metadata.side_effect = NotImplementedError("unmerged adapter")
     with pytest.raises(RuntimeError, match="preflight failed on rank 0:.*unmerged adapter"):
@@ -110,7 +114,7 @@ def test_training_rank_schema_mismatch_does_not_start_worker_rendezvous(native, 
         lambda output, value: output.__setitem__(slice(None), [value, (None, "other")]),
     )
     engine = backend.AscendNativeCheckpointEngine(512)
-    engine.configure("host", 5123, 2, [("server", 1)], 1)
+    engine.init_process_group("host", 5123, 2, [("server", 1)], 1)
     model = Mock()
     model.get_weight_transfer_metadata.return_value = [("w", torch.float32, (1,))]
     with pytest.raises(ValueError, match="identical full-weight metadata"):
@@ -120,7 +124,7 @@ def test_training_rank_schema_mismatch_does_not_start_worker_rendezvous(native, 
 
 def test_failed_native_session_is_discarded(native):
     engine = backend.AscendNativeCheckpointEngine(512, packed=False)
-    engine.configure("host", 5123, 2, [("server", 1)], 1)
+    engine.init_process_group("host", 5123, 2, [("server", 1)], 1)
     model = Mock()
     model.get_weight_transfer_metadata.return_value = [("w", torch.float32, (1,))]
     broken = Mock()
@@ -130,7 +134,7 @@ def test_failed_native_session_is_discarded(native):
     with pytest.raises(RuntimeError, match="worker failed"):
         asyncio.run(engine.send_weights(model))
     broken.shutdown.assert_called_once_with()
-    engine.configure("host", 5124, 2, [("replacement", 1)], 2)
+    engine.init_process_group("host", 5124, 2, [("replacement", 1)], 2)
     asyncio.run(engine.send_weights(model))
     good.send_weights.assert_called_once_with()
     assert native.trainer_init.call_args.args[0].packed is False

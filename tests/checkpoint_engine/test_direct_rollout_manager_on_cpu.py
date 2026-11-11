@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from verl.checkpoint_engine import base
-from verl.checkpoint_engine.base import CheckpointEngineManager, CheckpointEngineRegistry, DirectRolloutCheckpointEngine
+from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineManager, CheckpointEngineRegistry
 
 
 class Replica:
@@ -41,7 +41,9 @@ class Replica:
         self.events.append("resume")
 
 
-class Transport(DirectRolloutCheckpointEngine):
+class Transport(CheckpointEngine):
+    direct_rollout = True
+
     @staticmethod
     def get_rollout_endpoints(replicas):
         if not replicas:
@@ -51,7 +53,17 @@ class Transport(DirectRolloutCheckpointEngine):
         for replica in replicas:
             endpoints.append((replica.server, offset))
             offset += replica.size
-        return offset, endpoints
+        return offset - 1, endpoints
+
+    @classmethod
+    def build_topology(cls, actor_wg_world_size, rollout_world_size, metadata):
+        assert metadata == [("host", 1234)] + [None] * (actor_wg_world_size - 1)
+        address, port = metadata[0]
+        return {
+            "master_address": [address] * actor_wg_world_size,
+            "master_port": [port] * actor_wg_world_size,
+            "world_size": [1 + rollout_world_size] * actor_wg_world_size,
+        }, {}
 
     @staticmethod
     async def finish_rollout_update(replicas, step):
@@ -73,7 +85,7 @@ class Trainers:
         assert len(method) == self.world_size
         if method[0] == "prepare":
             return [asyncio.sleep(0, result=addr) for addr in [("host", 1234), None, None, None]]
-        assert method == ["configure"] * self.world_size
+        assert method == ["init_process_group"] * self.world_size
         assert all(len(v) == self.world_size for v in kwargs.values())
         settings = [{k: vals[i] for k, vals in kwargs.items()} for i in range(self.world_size)]
         assert all(s == settings[0] for s in settings)
@@ -211,7 +223,6 @@ async def test_rollout_worker_still_receives_for_relayed_transports(monkeypatch)
     applied = []
     monkeypatch.setattr(base.Worker, "__init__", lambda self: None)
     monkeypatch.setattr(base, "initialize_global_process_group_ray", lambda **kwargs: None)
-    monkeypatch.setitem(CheckpointEngineRegistry._registry, "direct_test", Transport)
     monkeypatch.setitem(CheckpointEngineRegistry._registry, "relay_test", Relay)
     config = SimpleNamespace(
         backend="relay_test", update_weights_bucket_megabytes=1, engine_kwargs={}, custom_backend_module=None
@@ -221,8 +232,9 @@ async def test_rollout_worker_still_receives_for_relayed_transports(monkeypatch)
     await worker.update_weights(13)
     assert applied == [13]
 
-    config.backend = "direct_test"
+    config.backend = "vllm_native_hccl"
     placement_worker = base.CheckpointEngineWorker(rollout, None, server_adapter=Adapter())
     assert placement_worker.checkpoint_engine is None
     with pytest.raises(RuntimeError, match="directly"):
         await placement_worker.update_weights(14)
+    assert applied == [13]

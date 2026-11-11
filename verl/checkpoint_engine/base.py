@@ -54,7 +54,7 @@ class TensorMeta:
 class CheckpointEngineRegistry:
     """Checkpoint engine registry."""
 
-    _registry: dict[str, type["CheckpointEngine | DirectRolloutCheckpointEngine"]] = {}
+    _registry: dict[str, type["CheckpointEngine"]] = {}
 
     # Engine modules whose import failed, keyed by module name. Each engine pulls
     # its own transport dependency (cupy for nccl/nixl, nixl, torch_npu for hccl,
@@ -69,7 +69,7 @@ class CheckpointEngineRegistry:
             backend: The backend of the checkpoint engine.
         """
 
-        def wrapper(cls: type["CheckpointEngine | DirectRolloutCheckpointEngine"]):
+        def wrapper(cls: type["CheckpointEngine"]):
             CheckpointEngineRegistry._registry[backend] = cls
             return cls
 
@@ -86,7 +86,7 @@ class CheckpointEngineRegistry:
         cls._import_errors[module] = error
 
     @classmethod
-    def get(cls, backend: str) -> type["CheckpointEngine | DirectRolloutCheckpointEngine"]:
+    def get(cls, backend: str) -> type["CheckpointEngine"]:
         """Get the checkpoint engine class.
 
         Args:
@@ -104,7 +104,7 @@ class CheckpointEngineRegistry:
         return cls._registry[backend]
 
     @classmethod
-    def new(cls, backend: str, *args, **kwargs) -> "CheckpointEngine | DirectRolloutCheckpointEngine":
+    def new(cls, backend: str, *args, **kwargs) -> "CheckpointEngine":
         """Create a new checkpoint engine instance.
 
         Args:
@@ -118,49 +118,20 @@ class CheckpointEngineRegistry:
         return cls.get(backend)(*args, **kwargs)
 
 
-class DirectRolloutCheckpointEngine(ABC):
-    """Trainer-side transport whose peers install weights inside the rollout engine."""
-
-    support_publish_weights = False
-
-    @staticmethod
-    @abstractmethod
-    def get_rollout_endpoints(replicas: list[RolloutReplica]) -> tuple[int, list[tuple[Any, int]]]:
-        """Return the group size and control endpoints with their receiver rank offsets."""
-
-    @abstractmethod
-    def prepare(self) -> tuple[str, int] | None:
-        """Return the trainer rendezvous address on rank zero."""
-
-    @abstractmethod
-    def configure(
-        self, master_address: str, master_port: int, world_size: int, endpoints: list[tuple[Any, int]], generation: int
-    ) -> None:
-        """Install the current transfer membership on this trainer."""
-
-    @abstractmethod
-    async def send_weights(self, model_engine: "BaseEngine", global_steps: int | None = None):
-        """Export on every trainer and wait for all receivers to install the version."""
-
-    @staticmethod
-    @abstractmethod
-    async def finish_rollout_update(replicas: list[RolloutReplica], global_steps: int | None):
-        """Apply replica-level cache invalidation and version bookkeeping after installation."""
-
-
 class CheckpointEngine(ABC):
-    """CheckpointEngine is an abstraction to transfer weights from actor to rollout.
+    """Transport weights from the training workers to rollout replicas.
 
-    In actor process:
-    >>> actor = EngineRegistry.new(...) # FSDP, Megatron, VeOmini, TorchTitan, ...
-    >>> engine = CheckpointEngine.new(...) # NCCLCheckpointEngine, NIXLCheckpointEngine, ...
-    >>> await engine.send_weights(actor.get_per_tensor_param())
-
-    In rollout process:
-    >>> engine = CheckpointEngine.new(...)
-    >>> server_adapter = ServerAdapter()
-    >>> await server_adapter.update_weights(engine.get_weights()) # update weights via cuda ipc
+    Relayed backends produce named tensors in a rollout checkpoint worker via
+    ``receive_weights()``. Its server adapter installs them in the model workers.
+    With ``direct_rollout=True``, the model workers receive and install the weights
+    themselves. The manager uses their control endpoints to configure the trainers.
     """
+
+    direct_rollout = False
+
+    # Some exporters need repeated traversal or access to the training engine's
+    # metadata. Both delivery paths can otherwise consume the named-tensor stream.
+    requires_model_engine = False
 
     # Whether send_weights() publishes an immutable trainer-side snapshot independently
     # of rollout consumers. When True, the manager may return after publishing while
@@ -175,37 +146,37 @@ class CheckpointEngine(ABC):
     wire_format = "named_tensors"
 
     @abstractmethod
-    def prepare(self) -> dict[str, Any]:
-        """Prepare checkpoint engine before each step send_weights/receive_weights.
-
-        1. Allocate weight bucket.
-        2. [Optional] Register weight bucket for RDMA.
-        3. Return metadata to build communication topology: master ip:port, register RDMA description, etc.
-
-        Args:
-            worker_group: The worker group that the checkpoint engine will be used.
-
-        Returns:
-            A dictionary that contains the metadata of the worker group.
-        """
+    def prepare(self) -> Any:
+        """Prepare local resources and return backend-specific rendezvous metadata."""
         raise NotImplementedError
+
+    @staticmethod
+    def get_rollout_endpoints(replicas: list[RolloutReplica]) -> tuple[int, list[Any]]:
+        """For direct delivery, return the model worker count and backend-specific control endpoints."""
+        raise NotImplementedError("Direct rollout delivery requires model-worker endpoints")
+
+    @staticmethod
+    async def finish_rollout_update(replicas: list[RolloutReplica], global_steps: int | None):
+        """For direct delivery, finish replica cache and version bookkeeping after the workers install weights."""
+        raise NotImplementedError("Direct rollout delivery requires a replica commit hook")
 
     @classmethod
     @abstractmethod
     def build_topology(
-        cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]
+        cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[Any]
     ) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
-        """Build communication topology between all workers.
+        """Build per-rank arguments for ``init_process_group``.
 
         Args:
             actor_wg_world_size: The world size of the actor worker group.
-            rollout_world_size: The world size of the rollout replica.
-            metadata: A list of metadata `prepare` from all workers.
+            rollout_world_size: The number of rollout workers participating in the transfer.
+            metadata: The results of ``prepare`` on trainers, followed by rollout checkpoint workers for
+                relayed delivery. Direct delivery gets metadata only from the trainers.
 
         Returns:
-            A tuple of two dictionaries that contains the communication topology for actor and rollout worker group.
-            Each dict value should be a list argument equal to the world size of the worker group to dispatch to
-            `init_process_group`.
+            A pair of dictionaries for trainers and rollout checkpoint workers. Each value is a list with
+            one entry per worker in the corresponding group. Direct delivery returns an empty second dictionary.
+            The manager supplies the trainers with ``endpoints`` and ``generation`` for direct delivery.
 
             ```
             world_size = rollout.world_size + actor_wg.world_size
@@ -223,40 +194,33 @@ class CheckpointEngine(ABC):
         """Init process group for checkpoint engine.
 
         Args:
-            **kwargs: Keyword arguments from `build_topology`.
+            **kwargs: Backend-specific group membership for this worker.
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def finalize(self):
-        """Finalize checkpoint engine after each step send_weights/receive_weights.
-
-        1. Free weight bucket.
-        1. [Optional] Deregister weight bucket for RDMA.
-        2. [Optional] Destroy process group.
-        """
-        raise NotImplementedError
+    def finalize(self) -> None:
+        """Override when the relayed transfer owns resources that must be released after each update."""
+        return None
 
     @abstractmethod
     async def send_weights(
         self,
-        weights: Generator[tuple[str, torch.Tensor], None, None],
+        weights: "Generator[tuple[str, torch.Tensor], None, None] | BaseEngine",
         global_steps: int | None = None,
     ):
         """Send the weights of the model.
 
         Args:
-            weights: A generator that yields the name of the weight tensor and the tensor itself.
+            weights: Named tensors, or the training model engine when ``requires_model_engine`` is set.
             global_steps: Optional trainer step/version associated with this weight update.
         """
         raise NotImplementedError
 
-    @abstractmethod
-    async def receive_weights(
+    def receive_weights(
         self,
         global_steps: int | None = None,
-    ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        """Receive the weights of the model.
+    ) -> Generator[tuple[str, torch.Tensor], None, None] | AsyncGenerator[tuple[str, torch.Tensor], None]:
+        """Yield weights to the server adapter for relayed delivery.
 
         Args:
             global_steps: Optional trainer step/version associated with this weight update.
@@ -264,7 +228,7 @@ class CheckpointEngine(ABC):
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
         """
-        raise NotImplementedError
+        raise NotImplementedError("Relayed delivery requires a checkpoint-worker receiver")
 
 
 class CheckpointEngineWithCache(CheckpointEngine):
@@ -377,7 +341,7 @@ class CheckpointEngineWorker(Worker):
         import_external_libs(self.rollout_config.checkpoint_engine.custom_backend_module or None)
         engine_cls = CheckpointEngineRegistry.get(backend)
         self.checkpoint_engine = None
-        if not issubclass(engine_cls, DirectRolloutCheckpointEngine):
+        if not getattr(engine_cls, "direct_rollout", False):
             self.checkpoint_engine = engine_cls(bucket_size=bucket_size, **engine_kwargs)
         self.extra_rollout_args = args
         self.extra_rollout_kwargs = kwargs
@@ -500,7 +464,7 @@ class CheckpointEngineManager:
         self._update_ticket = None
         # Direct submissions and their commits share the manager's background loop.
         self._direct_submit_lock = asyncio.Lock()
-        self._direct_topology: tuple[int, list[tuple[Any, int]]] | None = None
+        self._direct_topology: tuple[int, list[Any]] | None = None
         self._direct_generation = 0
         self._background_loop = asyncio.new_event_loop()
         self._background_loop_ready = threading.Event()
@@ -651,23 +615,18 @@ class CheckpointEngineManager:
             await asyncio.gather(*self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
             return {}
 
-        if issubclass(self.backend_cls, DirectRolloutCheckpointEngine):
-            ticket = await self.submit_update(global_steps)
-            return await ticket.wait_committed()
-
         # Wait previous update to be committed
         if self._update_ticket is not None:
             await self._update_ticket.wait_committed()
 
-        self._update_ticket = await self.submit_update(global_steps=global_steps)
+        ticket = await self.submit_update(global_steps=global_steps)
         if self.backend_cls.support_publish_weights:
-            published = await self._update_ticket.wait_published()
+            published = await ticket.wait_published()
             return self._merge_sync_metrics(published)
-        else:
-            return await self._update_ticket.wait_committed()
+        return await ticket.wait_committed()
 
     async def submit_update(self, global_steps: int | None, rollout_quiesced: bool = False) -> WeightUpdateTicket:
-        if issubclass(self.backend_cls, DirectRolloutCheckpointEngine):
+        if getattr(self.backend_cls, "direct_rollout", False):
             submission = asyncio.run_coroutine_threadsafe(
                 self._submit_direct_update(list(self.replicas), global_steps, rollout_quiesced), self._background_loop
             )
@@ -701,11 +660,12 @@ class CheckpointEngineManager:
             ),
             self._background_loop,
         )
-        return WeightUpdateTicket(
+        self._update_ticket = WeightUpdateTicket(
             version=global_steps,
             trainer_published=trainer_published,
             rollout_committed=rollout_committed,
         )
+        return self._update_ticket
 
     async def _submit_direct_update(
         self, replicas: list[RolloutReplica], global_steps: int | None, rollout_quiesced: bool
@@ -719,14 +679,16 @@ class CheckpointEngineManager:
                 self._direct_generation += 1
                 num_trainers = self.actor_wg.world_size
                 metadata = await asyncio.gather(*self.actor_wg.execute_checkpoint_engine(["prepare"] * num_trainers))
-                address, port = metadata[0]
-                world_size, endpoints = topology
+                rollout_world_size, endpoints = topology
+                trainer_kwargs, relay_kwargs = self.backend_cls.build_topology(
+                    num_trainers, rollout_world_size, metadata
+                )
+                if relay_kwargs:
+                    raise ValueError("Direct rollout delivery received topology arguments for a checkpoint relay")
                 await asyncio.gather(
                     *self.actor_wg.execute_checkpoint_engine(
-                        method=["configure"] * num_trainers,
-                        master_address=[address] * num_trainers,
-                        master_port=[port] * num_trainers,
-                        world_size=[world_size] * num_trainers,
+                        method=["init_process_group"] * num_trainers,
+                        **trainer_kwargs,
                         endpoints=[endpoints] * num_trainers,
                         generation=[self._direct_generation] * num_trainers,
                     )

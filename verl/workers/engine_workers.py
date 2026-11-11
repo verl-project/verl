@@ -28,7 +28,7 @@ from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
-from verl.checkpoint_engine import CheckpointEngineRegistry, DirectRolloutCheckpointEngine
+from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
@@ -817,13 +817,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
-            if effective_mode == "delta_sharded" or isinstance(self.checkpoint_engine, DirectRolloutCheckpointEngine):
-                # These backends drive the training export themselves. A native
-                # trainer needs both its metadata and a fresh weight stream.
-                metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
+            # Legacy delta_sharded plugins already consume the model engine.
+            if effective_mode == "delta_sharded" or getattr(self.checkpoint_engine, "requires_model_engine", False):
+                weight_source = self.actor.engine
             else:
-                per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-                metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+                weight_source, _ = self.actor.engine.get_per_tensor_param()
+            metrics = await self.checkpoint_engine.send_weights(weight_source, global_steps=global_steps)
             if self.actor.engine.is_param_offload_enabled:
                 self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
             return metrics or {}

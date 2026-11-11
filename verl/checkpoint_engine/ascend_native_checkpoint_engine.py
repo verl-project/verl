@@ -19,7 +19,7 @@ from functools import cached_property
 import ray
 import torch
 
-from verl.checkpoint_engine.base import CheckpointEngineRegistry, DirectRolloutCheckpointEngine
+from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.net_utils import get_free_port
 
@@ -60,8 +60,11 @@ def _make_source(model_engine):
 
 
 @CheckpointEngineRegistry.register("vllm_native_hccl")
-class AscendNativeCheckpointEngine(DirectRolloutCheckpointEngine):
+class AscendNativeCheckpointEngine(CheckpointEngine):
     """Trainer endpoint for dense weight updates to disaggregated vLLM-Ascend workers."""
+
+    direct_rollout = True
+    requires_model_engine = True
 
     def __init__(self, bucket_size: int, is_master: bool = False, packed: bool = True):
         if bucket_size <= 0:
@@ -95,7 +98,18 @@ class AscendNativeCheckpointEngine(DirectRolloutCheckpointEngine):
             return address, port
         return None
 
-    def configure(self, master_address, master_port, world_size, endpoints, generation):
+    @classmethod
+    def build_topology(cls, actor_wg_world_size, rollout_world_size, metadata):
+        address, port = metadata[0]
+        # The trainer sender owns rank 0; vLLM initializes every receiving rank via RPC.
+        trainer_kwargs = {
+            "master_address": [address] * actor_wg_world_size,
+            "master_port": [port] * actor_wg_world_size,
+            "world_size": [1 + rollout_world_size] * actor_wg_world_size,
+        }
+        return trainer_kwargs, {}
+
+    def init_process_group(self, master_address, master_port, world_size, endpoints, generation):
         self.master_address = master_address
         self.master_port = master_port
         self.world_size = world_size
@@ -170,14 +184,14 @@ class AscendNativeCheckpointEngine(DirectRolloutCheckpointEngine):
                     logger.exception("Could not close failed native HCCL trainer")
                 raise
 
-    async def send_weights(self, model_engine, global_steps=None):
+    async def send_weights(self, weights, global_steps=None):
         if self.generation is None:
             raise RuntimeError("Configure the native rollout endpoints before sending weights")
         device = get_torch_device()
         # The synchronous native engine waits on worker RPCs and enters HCCL rendezvous.
         # Capture device/stream on the Ray actor before crossing the thread boundary.
         transfer = asyncio.create_task(
-            asyncio.to_thread(self._send, model_engine, device.current_device(), device.current_stream())
+            asyncio.to_thread(self._send, weights, device.current_device(), device.current_stream())
         )
         try:
             await asyncio.shield(transfer)
