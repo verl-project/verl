@@ -107,8 +107,38 @@ def _validate_score_centering_config(config: DictConfig) -> None:
             )
     if not config.trainer.get("use_v1", True):
         raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
-    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "megatron"):
-        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
+    actor_cfg = config.actor_rollout_ref.actor
+    strategy = actor_cfg.get("strategy")
+    if strategy not in ("fsdp", "fsdp2", "megatron", "veomni"):
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2, megatron, or veomni.")
+    model_cfg = config.actor_rollout_ref.get("model") or {}
+    use_fused = bool(model_cfg.get("use_fused_kernels", False) or actor_cfg.get("use_fused_kernels", False))
+    use_remove_padding = bool(model_cfg.get("use_remove_padding", True))
+    if strategy == "megatron" and not use_remove_padding:
+        raise ValueError("score centering on megatron requires actor_rollout_ref.model.use_remove_padding=True.")
+    fsdp_cfg = actor_cfg.get("fsdp_config") or {}
+    megatron_cfg = actor_cfg.get("megatron") or {}
+    veomni_cfg = actor_cfg.get("veomni") or {}
+    if any(bool(cfg.get("pad_to_length", False)) for cfg in (actor_cfg, fsdp_cfg, megatron_cfg, veomni_cfg)):
+        raise ValueError("score centering does not support pad_to_length=True.")
+    if use_fused:
+        fused_opts = model_cfg.get("fused_kernel_options") or {}
+        impl_backend = fused_opts.get("impl_backend", "triton" if strategy == "megatron" else "torch")
+        if model_cfg.get("use_liger", False) and strategy == "megatron":
+            impl_backend = "liger"
+        if impl_backend != "tilelang":
+            raise ValueError(
+                "score centering with use_fused_kernels=True requires "
+                "actor_rollout_ref.model.fused_kernel_options.impl_backend='tilelang'."
+            )
+        if actor_cfg.get("calculate_sum_pi_squared", False):
+            raise ValueError(
+                "score centering with use_fused_kernels=True does not support calculate_sum_pi_squared=True."
+            )
+        if fsdp_cfg.get("batch_invariant", False):
+            raise ValueError(
+                "score centering with use_fused_kernels=True does not support fsdp_config.batch_invariant=True."
+            )
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
