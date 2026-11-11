@@ -92,6 +92,10 @@ jobs:
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: "error"
+      VERL_HCCL_DIAGNOSTICS: "1"
+      HYDRA_FULL_ERROR: "1"
+      RAY_DEDUP_LOGS: "0"
+      ASCEND_PROCESS_LOG_PATH: ${{ github.workspace }}/ci-ascend-diagnostics/ascend
     steps:
       - name: Check npu and CANN info
         run: |
@@ -110,6 +114,10 @@ jobs:
         with:
           fetch-depth: 0
           clean: true
+      - name: Capture Ascend baseline
+        env:
+          RUNNER_NAME: ${{ runner.name }}
+        run: bash .github/scripts/collect_ascend_diagnostics.sh before
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
@@ -131,6 +139,9 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
           ray stop --force
+          bash .github/scripts/collect_ascend_diagnostics.sh monitor &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true' EXIT
           NUM_GPUS=16 TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging DDP+FSDP checkpoints (Qwen Actor)
         run: |
@@ -168,6 +179,19 @@ jobs:
       #     ray stop --force
       #     TRAIN_TRAJ_MICRO_BSZ_PER_GPU=4 ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
       #       +actor_rollout_ref.model.lora.fully_sharded_loras=True
+
+      - name: Capture Ascend final diagnostics
+        if: ${{ always() }}
+        continue-on-error: true
+        run: bash .github/scripts/collect_ascend_diagnostics.sh after
+      - name: Upload Ascend diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-hccl-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-ascend-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
 
   e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
     if: github.repository_owner == 'verl-project'
