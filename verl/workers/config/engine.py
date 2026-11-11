@@ -382,6 +382,7 @@ class VeOmniEngineConfig(EngineConfig):
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
+        batch_invariant (bool): Not supported by the VeOmni engine, must stay false.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         low_precision_reduce_scatter_comm (bool): Use VeOmni's node-local BF16 ReduceScatter
             transport while retaining FP32 accumulation and output. Requires mixed precision
@@ -468,10 +469,14 @@ class VeOmniEngineConfig(EngineConfig):
     basic_modules: Optional[list[str]] = field(default_factory=list)
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    batch_invariant: bool = False
 
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+        if self.batch_invariant:
+            raise ValueError("batch_invariant is not supported by the VeOmni engine")
 
         if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (
             self.activation_offload_host_cache_limit_gb < 0

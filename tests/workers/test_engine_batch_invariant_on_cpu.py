@@ -23,7 +23,7 @@ from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
-from verl.workers.config.engine import FSDPEngineConfig
+from verl.workers.config.engine import FSDPEngineConfig, VeOmniEngineConfig
 from verl.workers.engine.fsdp import transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
 from verl.workers.engine.utils import enable_batch_invariance
@@ -146,3 +146,36 @@ def test_batch_invariant_log_probs_divide_fp32_logits_by_temperature(use_remove_
     if not use_remove_padding:
         # at T=1 the unscaled logits are the scaled ones, so they are packed once
         assert narrow_calls.call_count == (1 if temperature == 1.0 else 2)
+
+
+def test_veomni_engine_config_rejects_batch_invariant():
+    assert VeOmniEngineConfig().batch_invariant is False
+    with pytest.raises(ValueError, match="batch_invariant"):
+        VeOmniEngineConfig(batch_invariant=True)
+
+
+def test_prepare_model_outputs_runs_with_a_veomni_engine_config():
+    # VeOmniEngineWithLMHead reuses this method with its own engine config.
+    torch.manual_seed(0)
+    total_nnz, vocab_size = 5, 16
+    cu_seqlens = torch.tensor([0, 3, 5])
+    input_ids = torch.nested.nested_tensor_from_jagged(torch.randint(0, vocab_size, (total_nnz,)), offsets=cu_seqlens)
+    labels = torch.randint(0, vocab_size, (total_nnz,))
+    logits = torch.randn(total_nnz, vocab_size)
+    output = types.SimpleNamespace(logits=logits.clone().unsqueeze(0))
+    output_args = {
+        "input_ids_rmpad_rolled": labels,
+        "temperature_is_one": True,
+        "temperature_rmpad": torch.ones(total_nnz),
+        "pad_size": 0,
+    }
+    micro_batch = TensorDict({"input_ids": input_ids}, batch_size=[])
+    tu.assign_non_tensor(micro_batch, use_remove_padding=True, pad_mode=DatasetPadMode.NO_PADDING)
+    engine = object.__new__(FSDPEngineWithLMHead)
+    engine.use_ulysses_sp = False
+    engine.engine_config = VeOmniEngineConfig()
+
+    model_output = FSDPEngineWithLMHead.prepare_model_outputs(engine, output, output_args, micro_batch, None)
+
+    ref = torch.log_softmax(logits, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    assert torch.allclose(model_output["log_probs"].values(), ref)
