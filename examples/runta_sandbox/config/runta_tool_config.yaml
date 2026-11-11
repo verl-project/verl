@@ -18,19 +18,22 @@ tools:
       # Runtime names are <name_prefix>-<8 hex chars>, which makes leftovers easy to find.
       name_prefix: verl-sandbox
 
-      # Size of each runtime. One runtime is alive per in-flight trajectory that called the tool.
+      # Size of a runtime created from the base runtime. One runtime is alive per in-flight
+      # trajectory that called the tool. Ignored when `checkpoint_id` is set; remove both keys
+      # then to avoid the warning.
       vcpus: 1
       memory_mib: 1024
 
       # Create runtimes from a Runta checkpoint, e.g. one with task dependencies preinstalled.
-      # null starts from the base runtime.
+      # Such a runtime keeps the size stored in the checkpoint. null starts from the base runtime.
       checkpoint_id: null
 
       # Seconds to wait for a new runtime to become ready.
       create_timeout: 240
 
       # Server-side backstop for runtimes the trainer could not delete (e.g. it was killed):
-      # shut down after this many seconds, then delete this many seconds after shutdown.
+      # shut down this many seconds after the runtime started (not after its last use), then
+      # delete this many seconds after shutdown. Must exceed the longest trajectory.
       auto_shutdown_after_secs: 3600
       auto_delete_after_secs: 300
 

@@ -2,7 +2,7 @@
 Runta Sandbox Tool Integration
 ==============================
 
-Last updated: 11/10/2026.
+Last updated: 11/11/2026.
 
 `Runta <https://pypi.org/project/runta-sdk/>`_ provides managed sandbox runtimes. The example in
 ``examples/runta_sandbox`` lets the policy execute the code it writes inside such a runtime
@@ -77,6 +77,14 @@ Tool: ``RuntaSandboxTool``
   inside the ``AgentLoopWorker`` loop and reuses it for all trajectories of that worker.
 - Without ``agent_data`` the tool falls back to ``instance_id`` as the key, and ``release``
   deletes that runtime. Used directly, it behaves like a regular ``BaseTool``.
+- A runtime can die before its trajectory ends: it crashes, or it reaches
+  ``auto_shutdown_after_secs``, which limits the running session rather than the idle time. When
+  a call fails, the tool asks Runta for the runtime's status; if it is shut down, crashed or
+  deleted, the tool deletes it, logs a warning, creates a fresh runtime and runs that call once
+  more. Files from earlier turns are lost. ``release_trajectory`` deletes whichever runtime the
+  trajectory ends with.
+- A markdown fence around the code is removed only when the whole argument is a single fenced
+  block. Code that merely contains a fence, e.g. in a string literal, runs unchanged.
 
 Agent loop: ``RuntaToolAgentLoop``
 ----------------------------------
@@ -148,7 +156,11 @@ Tool Response
 +----------------------------------+--------------------------------------------------------------+
 | Non-zero exit                    | stdout, stderr, then ``[exit code N]``                       |
 +----------------------------------+--------------------------------------------------------------+
-| Timeout                          | stdout so far, then ``Execution timed out after N seconds.`` |
+| Program ran into the timeout     | stdout and stderr so far, then                               |
+|                                  | ``Execution timed out after N seconds.``                     |
++----------------------------------+--------------------------------------------------------------+
+| No answer from Runta in time     | ``Sandbox error: no response from the sandbox within N``     |
+|                                  | ``seconds. ...``                                             |
 +----------------------------------+--------------------------------------------------------------+
 | Runta error during execution     | ``Sandbox error: <error>``                                   |
 +----------------------------------+--------------------------------------------------------------+
@@ -156,9 +168,20 @@ Tool Response
 |                                  | (produced by ``ToolAgentLoop``)                              |
 +----------------------------------+--------------------------------------------------------------+
 
-Runta kills a command that exceeds its timeout and reports exit code 124, which the tool turns
-into the timeout message. ``ToolAgentLoop`` then truncates the text to
-``multi_turn.max_tool_response_length``.
+Runta kills a command that exceeds its timeout and reports exit code 124. The result carries no
+timed-out flag and a program can exit with 124 on its own, so the tool reports a timeout only
+when the command also ran for about ``default_timeout``; otherwise the model sees an ordinary
+``[exit code 124]``. A call that Runta does not answer within ``default_timeout`` plus 10 seconds
+is reported as a sandbox error, not as a timeout of the program. ``ToolAgentLoop`` then truncates
+the text to ``multi_turn.max_tool_response_length``.
+
+.. note::
+
+   The last three outcomes are infrastructure failures, but a tool cannot fail or skip a
+   trajectory: ``ToolAgentLoop`` passes the text to the model with a step reward of ``0.0`` and
+   training continues. With an expired token, an exhausted quota or an outage this affects every
+   tool call. The tool logs authentication and quota failures at ``ERROR`` with the cause and
+   other sandbox failures at ``WARNING``; watch the agent loop worker logs.
 
 Configuration Parameters
 ------------------------
@@ -178,13 +201,16 @@ Keys under ``config`` in ``examples/runta_sandbox/config/runta_tool_config.yaml`
 +------------------------------+----------------------------------------------------------------+
 | ``name_prefix``              | Prefix of runtime names. Default: ``verl-sandbox``             |
 +------------------------------+----------------------------------------------------------------+
-| ``vcpus`` / ``memory_mib``   | Size of each runtime. Default: 1 / 1024                        |
+| ``vcpus`` / ``memory_mib``   | Size of a runtime created from the base runtime. Default:      |
+|                              | 1 / 1024. Ignored, with a warning, if ``checkpoint_id`` is set |
 +------------------------------+----------------------------------------------------------------+
-| ``checkpoint_id``            | Runta checkpoint to create runtimes from. Default: none        |
+| ``checkpoint_id``            | Runta checkpoint to create runtimes from; they keep the        |
+|                              | checkpoint's size. Default: none                               |
 +------------------------------+----------------------------------------------------------------+
 | ``create_timeout``           | Seconds to wait for a new runtime. Default: 240                |
 +------------------------------+----------------------------------------------------------------+
-| ``auto_shutdown_after_secs`` | Server-side limit on running time. Default: 3600               |
+| ``auto_shutdown_after_secs`` | Server-side limit on running time, counted from the start of   |
+|                              | the runtime. Default: 3600                                     |
 +------------------------------+----------------------------------------------------------------+
 | ``auto_delete_after_secs``   | Delete this long after shutdown. Default: 300                  |
 +------------------------------+----------------------------------------------------------------+
@@ -235,10 +261,20 @@ runs in the CPU test workflow without the SDK or an account:
 - **test_parallel_calls_of_one_trajectory_share_one_runtime**: concurrent calls create one runtime.
 - **test_release_trajectory_deletes_only_that_runtime**: release is idempotent and scoped.
 - **test_runtime_that_never_becomes_ready_is_deleted_and_retried**: no leak on a failed creation.
-- **test_response_text**: success, empty output, non-zero exit, timeout, client-side timeout and
-  SDK error texts.
-- **test_agent_loop_deletes_runtime_when_trajectory_ends**: the runtime is deleted when ``run``
-  returns and when it raises.
+- **test_dead_runtime_is_replaced_and_the_command_retried** and the tests next to it: a runtime
+  that was shut down, crashed or deleted is evicted and replaced, once per call, while a failed
+  call on a running runtime keeps it.
+- **test_response_text**: success, empty output, non-zero exit, a program exiting with 124,
+  client-side timeout and SDK error texts.
+- **test_runtime_timeout_is_reported_and_keeps_stderr** /
+  **test_exit_code_124_after_a_slow_call_is_not_a_timeout**: exit code 124 is a timeout only
+  when the command ran for the configured time, and stderr is kept.
+- **test_fence_is_stripped_only_when_it_wraps_the_whole_input**: code containing a fence runs
+  unchanged.
+- **test_auth_and_quota_failures_are_logged_as_errors**: the cause is named at ``ERROR``.
+- **test_agent_loop_deletes_runtime_when_trajectory_ends** /
+  **test_agent_loop_deletes_the_replacement_of_a_dead_runtime**: the runtime the trajectory ends
+  with is deleted when ``run`` returns and when it raises.
 
 Live Test
 ---------

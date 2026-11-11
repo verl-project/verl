@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,16 @@ class FakeCommandResult:
     exit_code: int = 0
     stdout_text: str = ""
     stderr_text: str = ""
+    duration: float | None = None  # seconds the command ran inside the runtime, when reported
+
+
+class FakeApiError(Exception):
+    """Shaped like ``runta.ApiError``: an HTTP status plus a Runta error code."""
+
+    def __init__(self, message: str, status_code: int | None = None, code: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
 
 
 class FakeRuntime:
@@ -53,6 +64,17 @@ class FakeRuntime:
         self.create_kwargs = create_kwargs
         self.exec_calls: list[dict] = []
         self.deleted = False
+        self.status = "running"
+
+    def kill(self, status: str = "shutdown"):
+        """What the tool sees once Runta shut the runtime down, it crashed, or it was deleted."""
+        self.status = status
+
+    async def refresh_info(self):
+        await asyncio.sleep(0)
+        if self.status == "deleted":
+            raise FakeApiError("runtime not found", status_code=404, code="not_found")
+        return SimpleNamespace(status=self.status)
 
     async def wait_until_ready(self, timeout: float):
         await asyncio.sleep(0)
@@ -61,7 +83,9 @@ class FakeRuntime:
 
     async def exec(self, command, timeout=None, stdin=None, cwd=None, max_output_bytes=None):
         self.exec_calls.append({"command": command, "timeout": timeout, "stdin": stdin, "cwd": cwd})
-        await asyncio.sleep(0)
+        await asyncio.sleep(self.sdk.exec_secs)
+        if self.status != "running":
+            raise FakeApiError(f"runtime is {self.status}")
         return self.sdk.on_exec(stdin)
 
     async def delete(self):
@@ -75,14 +99,20 @@ class FakeSdk:
         self.clients: list = []
         self.runtimes: list[FakeRuntime] = []
         self.fail_ready = False
+        self.fail_create: Exception | None = None
+        self.exec_secs = 0.0  # wall-clock time every `exec` takes
         self.on_exec = lambda code: FakeCommandResult(stdout_text=f"ran:{code}")
+        self.on_create = lambda runtime: None
 
         sdk = self
 
         class FakeRuntimeManager:
             async def create(self, name, **kwargs):
                 await asyncio.sleep(0)
+                if sdk.fail_create is not None:
+                    raise sdk.fail_create
                 runtime = FakeRuntime(sdk, name, kwargs)
+                sdk.on_create(runtime)
                 sdk.runtimes.append(runtime)
                 return runtime
 
@@ -273,6 +303,102 @@ def test_runtime_that_never_becomes_ready_is_deleted_and_retried(sdk):
     assert [runtime.deleted for runtime in sdk.runtimes] == [True, False]
 
 
+@pytest.mark.parametrize("status", ["shutdown", "crashed", "deleted"])
+def test_dead_runtime_is_replaced_and_the_command_retried(sdk, caplog, status):
+    """E.g. the runtime reached ``auto_shutdown_after_secs``: the trajectory must not be stuck with it."""
+    tool = _make_tool()
+    agent_data = _agent_data("trajectory-a")
+
+    async def scenario():
+        await _call(tool, "first", agent_data)
+        sdk.runtimes[0].kill(status)
+        with caplog.at_level(logging.WARNING):
+            second = await _call(tool, "second", agent_data)
+        third = await _call(tool, "third", agent_data)
+        released = await tool.release_trajectory("trajectory-a")
+        return second, third, released
+
+    second, third, released = asyncio.run(scenario())
+
+    dead, fresh = sdk.runtimes
+    assert [call["stdin"] for call in dead.exec_calls] == ["first", "second"]
+    assert [call["stdin"] for call in fresh.exec_calls] == ["second", "third"]
+    assert (second[0].text, second[2]) == ("ran:second", {"exit_code": 0, "timed_out": False})
+    assert third[0].text == "ran:third"
+    assert f"is {status}; replacing it" in caplog.text
+    # The dead runtime was deleted on eviction, the fresh one when the trajectory was released.
+    assert released and dead.deleted and fresh.deleted
+    assert tool._runtimes == {}
+
+
+def test_runtime_that_keeps_dying_is_replaced_once_per_call(sdk):
+    """A program that takes its runtime down must not be rerun forever."""
+    sdk.on_create = lambda runtime: runtime.kill("crashed")
+    tool = _make_tool()
+    agent_data = _agent_data("trajectory-a")
+
+    async def scenario():
+        failed = await _call(tool, "boom", agent_data)
+        sdk.on_create = lambda runtime: None
+        recovered = await _call(tool, "print(1)", agent_data)
+        return failed, recovered
+
+    failed, recovered = asyncio.run(scenario())
+
+    assert failed[0].text == "Sandbox error: FakeApiError: runtime is crashed"
+    assert recovered[0].text == "ran:print(1)"
+    assert [runtime.deleted for runtime in sdk.runtimes] == [True, True, False]
+    assert [[call["stdin"] for call in runtime.exec_calls] for runtime in sdk.runtimes] == [
+        ["boom"],
+        ["boom"],
+        ["print(1)"],
+    ]
+
+
+def test_parallel_calls_on_a_dead_runtime_share_one_replacement(sdk):
+    tool = _make_tool()
+    agent_data = _agent_data("trajectory-a")
+
+    async def scenario():
+        await _call(tool, "first", agent_data)
+        sdk.runtimes[0].kill()
+        return await asyncio.gather(*(_call(tool, f"job {i}", agent_data) for i in range(3)))
+
+    results = asyncio.run(scenario())
+
+    assert sorted(response.text for response, _, _ in results) == [f"ran:job {i}" for i in range(3)]
+    assert [runtime.deleted for runtime in sdk.runtimes] == [True, False]
+
+
+def test_exec_error_on_a_running_runtime_keeps_the_runtime(sdk):
+    """A failed call alone is no reason to throw away the files of the trajectory."""
+    tool = _make_tool()
+    agent_data = _agent_data("trajectory-a")
+
+    async def scenario():
+        sdk.on_exec = _api_down
+        failed = await _call(tool, "first", agent_data)
+        sdk.on_exec = lambda code: FakeCommandResult(stdout_text=f"ran:{code}")
+        return failed, await _call(tool, "second", agent_data)
+
+    failed, recovered = asyncio.run(scenario())
+
+    assert failed[0].text == "Sandbox error: RuntimeError: HTTP 503: unavailable"
+    assert recovered[0].text == "ran:second"
+    assert len(sdk.runtimes) == 1 and not sdk.runtimes[0].deleted
+
+
+def test_checkpoint_with_explicit_size_warns_that_the_size_is_ignored(sdk, caplog):
+    with caplog.at_level(logging.WARNING):
+        _make_tool(checkpoint_id="ckpt-1")
+        assert caplog.text == ""
+        _make_tool(vcpus=4)
+        assert caplog.text == ""
+        _make_tool(checkpoint_id="ckpt-1", vcpus=4)
+
+    assert "`vcpus` / `memory_mib` are ignored because `checkpoint_id` is set" in caplog.text
+
+
 def test_close_deletes_all_runtimes_and_closes_client(sdk):
     tool = _make_tool()
 
@@ -315,17 +441,23 @@ def _api_down(code):
             {"exit_code": 1, "timed_out": False},
         ),
         (lambda code: FakeCommandResult(2, "", ""), "[exit code 2]", {"exit_code": 2, "timed_out": False}),
-        # Runta kills the command and reports exit code 124 plus its own notice on stderr.
+        # The program itself exits with 124 (`sys.exit(124)`, bash `timeout 1 cmd`) long before the
+        # tool's timeout: an ordinary failure whose stderr the model must see.
         (
-            lambda code: FakeCommandResult(124, "step 1\n", "Terminated\nCommand timed out after 7.0 seconds.\n"),
-            "step 1\nExecution timed out after 7 seconds.",
-            {"exit_code": 124, "timed_out": True},
+            lambda code: FakeCommandResult(124, "partial\n", "inner command timed out\n"),
+            "partial\ninner command timed out\n[exit code 124]",
+            {"exit_code": 124, "timed_out": False},
         ),
-        # The runtime never answered: the client-side deadline fires instead.
-        (_hang_forever, "Execution timed out after 7 seconds.", {"timed_out": True}),
+        # The runtime never answered: the client-side deadline fires, which says nothing about the program.
+        (
+            _hang_forever,
+            "Sandbox error: no response from the sandbox within 17 seconds. This is a sandbox or network "
+            "problem, not a timeout of the program, which may not have run or finished.",
+            {"sandbox_timed_out": True},
+        ),
         (_api_down, "Sandbox error: RuntimeError: HTTP 503: unavailable", {}),
     ],
-    ids=["ok", "no-output", "nonzero-exit", "nonzero-exit-silent", "timeout", "client-timeout", "sdk-error"],
+    ids=["ok", "no-output", "nonzero-exit", "nonzero-exit-silent", "program-exits-124", "client-timeout", "sdk-error"],
 )
 def test_response_text(sdk, on_exec, expected_text, expected_metrics):
     sdk.on_exec = on_exec
@@ -338,12 +470,85 @@ def test_response_text(sdk, on_exec, expected_text, expected_metrics):
     assert metrics == expected_metrics
 
 
-def test_markdown_fence_is_stripped(sdk):
+def test_runtime_timeout_is_reported_and_keeps_stderr(sdk):
+    """Runta kills the command at the timeout: exit code 124 plus its own notice at the end of stderr."""
+    sdk.exec_secs = 0.2
+    sdk.on_exec = lambda code: FakeCommandResult(
+        124, "step 1\n", "Traceback: KeyboardInterrupt\nCommand timed out after 0.2 seconds."
+    )
+    tool = _make_tool(default_timeout=0.2)
+
+    response, _, metrics = asyncio.run(_call(tool, "while True: pass", _agent_data("trajectory-a")))
+
+    assert response.text == "step 1\nTraceback: KeyboardInterrupt\nExecution timed out after 0.2 seconds."
+    assert metrics == {"exit_code": 124, "timed_out": True}
+
+
+def test_exit_code_124_after_a_slow_call_is_not_a_timeout(sdk):
+    """The call took as long as the timeout, but the SDK says the command itself returned at once."""
+    sdk.exec_secs = 0.2
+    sdk.on_exec = lambda code: FakeCommandResult(124, "", "boom\n", duration=0.01)
+    tool = _make_tool(default_timeout=0.2)
+
+    response, _, metrics = asyncio.run(_call(tool, "import sys; sys.exit(124)", _agent_data("trajectory-a")))
+
+    assert response.text == "boom\n[exit code 124]"
+    assert metrics == {"exit_code": 124, "timed_out": False}
+
+
+@pytest.mark.parametrize(
+    ("code", "executed"),
+    [
+        ("```python\nprint(1)\n```", "print(1)\n"),
+        ("\n```\nprint(1)\n```\n", "print(1)\n"),
+        ("```python\nprint('```')\n```", "print('```')\n"),
+        # A fence inside the code (here a string literal) is part of the program.
+        ('doc = """\n```python\nprint(1)\n```\n"""\nprint(len(doc))', None),
+        # Neither prose around a block nor several blocks say which code is meant: run as is.
+        ("Here it is:\n```python\nprint(1)\n```", None),
+        ("```python\nprint(1)\n```\n```python\nprint(2)\n```", None),
+    ],
+    ids=["fenced", "fenced-no-language", "fenced-with-backticks", "fence-in-string", "prose-and-block", "two-blocks"],
+)
+def test_fence_is_stripped_only_when_it_wraps_the_whole_input(sdk, code, executed):
     tool = _make_tool()
 
-    asyncio.run(_call(tool, "```python\nprint(1)\n```", _agent_data("trajectory-a")))
+    asyncio.run(_call(tool, code, _agent_data("trajectory-a")))
 
-    assert sdk.runtimes[0].exec_calls[0]["stdin"] == "print(1)\n"
+    assert sdk.runtimes[0].exec_calls[0]["stdin"] == (code if executed is None else executed)
+
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (FakeApiError("token expired", status_code=401, code="unauthenticated"), "Runta authentication failed"),
+        (FakeApiError("too many runtimes", status_code=429, code="rate_limited"), "Runta quota or rate limit"),
+    ],
+    ids=["auth", "quota"],
+)
+@pytest.mark.parametrize("stage", ["create", "exec"])
+def test_auth_and_quota_failures_are_logged_as_errors(sdk, caplog, stage, error, cause):
+    """The model only gets tool text either way, so the log must say that the run itself is broken."""
+    tool = _make_tool()
+
+    def raise_error(code):
+        raise error
+
+    async def scenario():
+        if stage == "create":
+            sdk.fail_create = error
+            with pytest.raises(FakeApiError):
+                await _call(tool, "print(1)", _agent_data("trajectory-a"))
+        else:
+            sdk.on_exec = raise_error
+            response, _, _ = await _call(tool, "print(1)", _agent_data("trajectory-a"))
+            assert response.text.startswith("Sandbox error: FakeApiError")
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(scenario())
+
+    errors = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == 1 and errors[0].startswith(cause)
 
 
 @pytest.mark.parametrize("code", [None, "", "   ", 42])
@@ -400,6 +605,25 @@ def test_agent_loop_deletes_runtime_when_trajectory_ends(sdk, monkeypatch, fails
     assert seen == [("ran:print(1)", False), ("ran:print(1)", False)]
     assert len(sdk.runtimes) == 1
     assert sdk.runtimes[0].deleted
+    assert tool._runtimes == {}
+
+
+def test_agent_loop_deletes_the_replacement_of_a_dead_runtime(sdk, monkeypatch):
+    tool = _make_tool()
+    agent_loop = _make_agent_loop(tool)
+    tool_call = SimpleNamespace(name="code_interpreter", arguments='{"code": "print(1)"}')
+
+    async def fake_run(self, sampling_params, **kwargs):
+        agent_data = _agent_data("trajectory-a")
+        await self._call_tool(tool_call, agent_data.tools_kwargs, agent_data)
+        sdk.runtimes[0].kill()
+        response, _, _ = await self._call_tool(tool_call, agent_data.tools_kwargs, agent_data)
+        return response.text
+
+    monkeypatch.setattr(ToolAgentLoop, "run", fake_run)
+
+    assert asyncio.run(agent_loop.run({})) == "ran:print(1)"
+    assert [runtime.deleted for runtime in sdk.runtimes] == [True, True]
     assert tool._runtimes == {}
 
 

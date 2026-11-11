@@ -60,10 +60,13 @@ cannot own a sandbox that has to outlive a single call. Instead:
    `agent_data.request_id`. A trajectory that never calls the tool never creates one.
 2. Later calls of the same trajectory reuse it. Every call starts a new interpreter process:
    files and installed packages persist, variables do not.
-3. `RuntaToolAgentLoop.run()` deletes the runtime in a `finally` block, whether the trajectory
-   finished, failed or was cancelled.
+3. If a call fails and Runta reports the runtime as shut down, crashed or deleted (for example
+   because it reached `auto_shutdown_after_secs`), the tool deletes it, logs a warning, creates
+   a fresh runtime and runs that call once more on it. Files from earlier turns are gone.
+4. `RuntaToolAgentLoop.run()` deletes the runtime the trajectory ends with in a `finally` block,
+   whether the trajectory finished, failed or was cancelled.
 
-If the trainer process is killed, step 3 cannot run. Every runtime is therefore created with
+If the trainer process is killed, step 4 cannot run. Every runtime is therefore created with
 `auto_shutdown_after_secs` / `auto_delete_after_secs`, so Runta reclaims it on its own. Leftovers
 are easy to spot by their name prefix:
 
@@ -82,10 +85,10 @@ Keys under `config:` in `config/runta_tool_config.yaml`:
 | `max_output_bytes` | `65536` | bytes kept per output stream |
 | `workdir` | runtime default | working directory inside the runtime |
 | `name_prefix` | `verl-sandbox` | runtimes are named `<name_prefix>-<8 hex chars>` |
-| `vcpus` / `memory_mib` | `1` / `1024` | size of each runtime |
-| `checkpoint_id` | `null` | start from a Runta checkpoint instead of the base runtime |
+| `vcpus` / `memory_mib` | `1` / `1024` | size of a runtime created from the base runtime; ignored (with a warning) when `checkpoint_id` is set |
+| `checkpoint_id` | `null` | start from a Runta checkpoint instead of the base runtime; the runtime keeps the checkpoint's size |
 | `create_timeout` | `240` | seconds to wait for a new runtime to become ready |
-| `auto_shutdown_after_secs` | `3600` | server-side limit on a runtime's running time |
+| `auto_shutdown_after_secs` | `3600` | server-side limit on a runtime's running time, counted from its start, not from its last use |
 | `auto_delete_after_secs` | `300` | delete this long after shutdown |
 
 Things to size before a real run:
@@ -94,8 +97,10 @@ Things to size before a real run:
   up to `train_batch_size * rollout.n` at once. Check this against your Runta quota.
 - **Dependencies.** The base runtime is Ubuntu with Python 3 and pip. Runta runtimes are not
   created from container images, so to preinstall packages, set one runtime up by hand, take a
-  checkpoint and pass its id as `checkpoint_id`.
-- **`auto_shutdown_after_secs`** must exceed the longest trajectory you expect.
+  checkpoint and pass its id as `checkpoint_id`. Size that runtime as the trajectories need it:
+  `vcpus` / `memory_mib` do not apply to runtimes created from a checkpoint.
+- **`auto_shutdown_after_secs`** must exceed the longest trajectory you expect. A trajectory
+  that outlives it continues in a fresh runtime, without its earlier files.
 
 ## What the model sees
 
@@ -103,9 +108,28 @@ Things to size before a real run:
 | --- | --- |
 | success | stdout followed by stderr, or `(no output)` |
 | non-zero exit | stdout, stderr, then `[exit code N]` |
-| timeout | stdout so far, then `Execution timed out after N seconds.` |
+| the program ran into `default_timeout` | stdout and stderr so far, then `Execution timed out after N seconds.` |
+| no answer from Runta within `default_timeout` + 10 s | `Sandbox error: no response from the sandbox within N seconds. ...` |
 | Runta API/transport error during execution | `Sandbox error: <error>` |
 | runtime could not be created | `Error executing tool 'code_interpreter': <error>` (from `ToolAgentLoop`) |
+
+Runta reports a command it killed with exit code 124, which a program can also return itself
+(`sys.exit(124)`, bash `timeout 5 cmd`). The tool only calls it a timeout when the command ran
+for about `default_timeout`; otherwise it is an ordinary `[exit code 124]`.
+
+Code wrapped in a markdown fence is unwrapped only when the whole argument is one fenced block.
+Anything else, including code that contains a fence in a string, runs unchanged.
+
+## Limitation: infrastructure failures do not stop training
+
+The last three rows are not the model's fault, but `ToolAgentLoop` has no way to fail or skip a
+trajectory from inside a tool: the error text goes to the model, the step reward is 0 and
+training continues. With an expired token, an exhausted quota or a Runta outage, every tool
+call of the run fails this way, and the policy is trained on those trajectories.
+
+Watch the logs of the agent loop workers. Authentication and quota failures are logged at
+`ERROR` with the cause, e.g. `Runta authentication failed: the token is invalid or expired`;
+other sandbox failures and replaced runtimes are logged at `WARNING`.
 
 ## Tests
 
