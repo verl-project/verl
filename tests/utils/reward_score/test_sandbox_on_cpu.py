@@ -124,6 +124,32 @@ def test_prime_code():
         assert float(score) == score_
 
 
+_ADD_CALL_BASED_GT = json.dumps({"fn_name": "add", "inputs": ["1\n2", "-1\n1", "10\n5"], "outputs": ["3", "0", "15"]})
+
+
+@pytest.mark.parametrize(
+    "solution, expected",
+    [
+        ("def add(a, b):\n    return a + b\n", 1.0),
+        ("def add(a, b):\n    return a - b\n", 0.0),
+        # Subclasses of builtin types whose __eq__ always returns True must not pass (#8656).
+        (
+            "class _Any(int):\n    def __eq__(self, other):\n        return True\n    __hash__ = int.__hash__\n"
+            "def add(a, b):\n    return _Any(0)\n",
+            0.0,
+        ),
+        (
+            "class _Any(list):\n    def __eq__(self, other):\n        return True\ndef add(a, b):\n    return _Any()\n",
+            0.0,
+        ),
+    ],
+    ids=["correct", "wrong", "always_equal_int", "always_equal_list"],
+)
+def test_prime_code_call_based_rejects_always_equal(solution, expected):
+    score = default_compute_score("codecontests", f"```python\n{solution}```", _ADD_CALL_BASED_GT)
+    assert float(score) == expected
+
+
 # Use the pytest.mark.skipif decorator to skip the test
 @pytest.mark.skipif(not os.environ.get("SANDBOX_FUSION_URL"), reason="SANDBOX_FUSION_URL environment variable not set")
 def test_prime_code_sandbox_fusion():
