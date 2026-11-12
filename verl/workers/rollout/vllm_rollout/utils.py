@@ -476,13 +476,14 @@ class vLLMColocateWorkerExtension:
                     out["layer_range"] = (int(mod.start_layer), int(mod.end_layer))
                     break
         if getattr(pc, "enable_expert_parallel", False):
-            # expert_map: global expert id -> local slot, negative for experts on other ranks; on the
-            # MoE module or, in newer vLLM, on its expert_map_manager
+            # expert_map: global expert id -> local slot, -1 for experts on other ranks. Newer vLLM keeps
+            # it on the expert_map_manager; the module's own expert_map is the 0/1 expert_mask there when
+            # an AITER kernel is active, which would make every expert look resident.
             for name, mod in model.named_modules():
                 mgr = getattr(mod, "expert_map_manager", None)
-                emap = getattr(mod, "expert_map", None)
-                if emap is None and mgr is not None:
-                    emap = getattr(mgr, "expert_map", None)
+                emap = getattr(mgr, "expert_map", None) if mgr is not None else None
+                if emap is None:
+                    emap = getattr(mod, "expert_map", None)
                 if emap is None:
                     continue
                 m = _LAYER_RE.search(name + ".")

@@ -355,6 +355,14 @@ def test_get_weight_ownership_rejects_eplb():
         ownership = _make_worker(enable_eplb=False).get_weight_ownership()
         assert ownership["local_experts"] == {0: [3, 4, 5]}
         assert (ownership["ep_size"], ownership["ep_rank"]) == (2, 1)
+
+        # Newer vLLM with an AITER kernel: the module's expert_map is the 0/1 expert_mask (with a
+        # trailing sentinel), and only the manager holds the canonical -1/local-slot map.
+        canonical = layer0.mlp.expert_map
+        layer0.mlp.expert_map = torch.tensor([0, 0, 0, 1, 1, 1, 0], dtype=torch.int32)
+        layer0.mlp.expert_map_manager = types.SimpleNamespace(expert_map=canonical, ep_size=2, ep_rank=1)
+        ownership = _make_worker(enable_eplb=False).get_weight_ownership()
+        assert ownership["local_experts"] == {0: [3, 4, 5]}
     finally:
         for k, prev in saved.items():
             if prev is None:
