@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import os
+import sys
 
 import pytest
 
-from verl.utils.import_utils import load_extern_object
+from verl.utils.import_utils import load_extern_object, load_module
 
 # Path to the test module
 TEST_MODULE_PATH = os.path.join(os.path.dirname(__file__), "_test_module.py")
@@ -95,3 +96,62 @@ def test_load_extern_object_invalid_module():
         # Clean up the temporary file
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def test_load_extern_object_supports_dataclass_with_postponed_annotations(tmp_path):
+    module_path = tmp_path / "dataclass_plugin.py"
+    module_path.write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class Plugin:\n"
+        "    value: int = 1\n"
+    )
+
+    plugin_class = load_extern_object(str(module_path), "Plugin")
+
+    assert plugin_class().value == 1
+    assert plugin_class.__module__ not in sys.modules
+
+
+def test_load_module_registers_explicit_name_before_execution(tmp_path):
+    module_path = tmp_path / "self_checking_plugin.py"
+    module_path.write_text("import sys\nregistered_module = sys.modules[__name__]\n")
+    module_name = "verl_test_self_checking_plugin"
+
+    try:
+        module = load_module(str(module_path), module_name=module_name)
+
+        assert module.registered_module is module
+        assert sys.modules[module_name] is module
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_load_module_rejects_name_collision_before_execution(tmp_path):
+    marker_path = tmp_path / "executed"
+    module_path = tmp_path / "plugin.py"
+    module_path.write_text(f"from pathlib import Path\nPath({str(marker_path)!r}).touch()\n")
+    module_name = "verl_test_existing_module"
+    existing_module = sys
+    sys.modules[module_name] = existing_module
+
+    try:
+        with pytest.raises(RuntimeError, match="already exists"):
+            load_module(str(module_path), module_name=module_name)
+
+        assert sys.modules[module_name] is existing_module
+        assert not marker_path.exists()
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_load_module_removes_partial_module_after_failure(tmp_path):
+    module_path = tmp_path / "broken_plugin.py"
+    module_path.write_text("raise ValueError('broken')\n")
+    module_name = "verl_test_broken_plugin"
+
+    with pytest.raises(RuntimeError, match="Error loading module"):
+        load_module(str(module_path), module_name=module_name)
+
+    assert module_name not in sys.modules
