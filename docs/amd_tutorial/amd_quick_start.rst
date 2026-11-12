@@ -100,7 +100,11 @@ Feature Support Matrix
 Example Workflow
 ----------------
 
-The fully async recipes below require verl <= v0.9.1.
+The fully async recipes use the V0 trainer at verl v0.9.1 commit
+``1876b06d0a3e4e71e06230be10af14492ca8a75b``. Follow the
+`recipe setup <https://github.com/Begunner/verl-recipe/blob/776a0f47dd5321cdac75b676e183b921064f40fe/fully_async_policy/README.md#required-verl-version>`_
+to check out both repositories, then use the ROCm environment described above
+and run the scripts from the pinned verl checkout.
 
 .. list-table:: 
    :header-rows: 1
@@ -120,11 +124,11 @@ The fully async recipes below require verl <= v0.9.1.
    * - Fully Async
      - vLLM
      - FSDP2
-     -  `bash recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_
+     -  `bash recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <https://github.com/Begunner/verl-recipe/blob/776a0f47dd5321cdac75b676e183b921064f40fe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_
    * - Fully Async
      - vLLM
      - Megatron
-     -  `bash recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_
+     -  `bash recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <https://github.com/Begunner/verl-recipe/blob/776a0f47dd5321cdac75b676e183b921064f40fe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_
    * - Colocate
      - SGLang
      - FSDP
@@ -136,11 +140,11 @@ The fully async recipes below require verl <= v0.9.1.
    * - Fully Async
      - SGLang
      - FSDP2
-     -  `bash recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_ (vllm->sglang)
+     -  `bash recipe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <https://github.com/Begunner/verl-recipe/blob/776a0f47dd5321cdac75b676e183b921064f40fe/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_ (vllm->sglang)
    * - Fully Async
      - SGLang
      - Megatron
-     -  `bash recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_ (vllm->sglang)
+     -  `bash recipe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <https://github.com/Begunner/verl-recipe/blob/776a0f47dd5321cdac75b676e183b921064f40fe/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_ (vllm->sglang)
    
    
 

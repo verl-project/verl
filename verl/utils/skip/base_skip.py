@@ -44,7 +44,6 @@ class BaseSkip:
         self.enable = local_config.enable
         self.dump_dir = local_config.dump_dir
         self.steps = local_config.steps
-        self.global_config = global_config
         if self.action not in self.support_actions:
             raise ValueError(f"Unsupported action: {self.action}. Supported actions are: {self.support_actions}")
 

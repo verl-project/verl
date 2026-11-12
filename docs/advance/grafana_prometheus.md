@@ -125,6 +125,8 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
     -- python3 -m verl.trainer.main_ppo \
     trainer.v1.trainer_mode=colocate_async \
+    trainer.nnodes=1 \
+    trainer.n_gpus_per_node=4 \
     data.return_raw_chat=True \
     actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
     actor_rollout_ref.rollout.mode=async \
