@@ -352,3 +352,120 @@ def test_fsdp2_root_only_layout_preserves_filtered_adapter_fallback(lora_model, 
 
     _assert_adapter_equals(actual, expected)
     assert fsdp_seam.events == []
+
+
+class _BiasOnlyModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bias = nn.Parameter(torch.tensor([0.25, -0.5, 0.75, -1.0]))
+
+
+class _TinyBiasModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q_proj = nn.Linear(4, 4, bias=False)
+        self.extra = _BiasOnlyModule()
+        self.unadapted = nn.Linear(4, 4, bias=False)
+
+
+@pytest.mark.parametrize("flattened", [True, False])
+@pytest.mark.parametrize("bias", ["all", "none"])
+def test_separate_bias_unit_matches_real_peft_export(bias, flattened, fsdp_seam):
+    model = get_peft_model(_TinyBiasModel(), LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj"], bias=bias))
+    expected = {name: tensor.detach().clone() for name, tensor in get_peft_model_state_dict(model).items()}
+    bias_name = "base_model.model.extra.bias"
+    assert (bias_name in expected) is (bias == "all")
+    body = model.base_model.model
+    adapter = _CpuFSDP(body.q_proj, flattened=flattened)
+    bias_only = _CpuFSDP(body.extra, flattened=flattened)
+    unrelated = _CpuFSDP(body.unadapted, flattened=flattened)
+    assert all("lora_" not in name for name, _ in bias_only.owned_parameters)
+    assert [name for name, _ in bias_only.owned_parameters] == ["bias"]
+    root = _root(
+        model,
+        {
+            "base_model.model.q_proj": adapter,
+            "base_model.model.extra": bias_only,
+            "base_model.model.unadapted": unrelated,
+        },
+        fsdp_seam,
+    )
+
+    actual = fsdp_utils.collect_lora_params(root, layered_summon=True, base_sync_done=True)
+
+    _assert_adapter_equals(actual, expected)
+    expected_events = [("lazy_init", root), ("summon", adapter)]
+    if bias == "all":
+        expected_events.append(("summon", bias_only))
+    assert fsdp_seam.events == expected_events
+
+
+def _skipped_container_layout(skip_kind, owns_adapter, fsdp_seam):
+    body = nn.Module()
+    body.layers = _Block()
+    body.layers.inner = _Block()
+    model = get_peft_model(body, LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj"]))
+    with torch.no_grad():
+        for index, (name, param) in enumerate(model.named_parameters(), start=1):
+            if "lora_" in name:
+                param.fill_(index / 10)
+    expected = {name: tensor.detach().clone() for name, tensor in get_peft_model_state_dict(model).items()}
+    assert len(expected) == 4
+    child = _CpuFSDP(body.layers.inner)
+    local_units = {"inner": child}
+    if not owns_adapter:
+        local_units["q_proj"] = _CpuFSDP(body.layers.q_proj)
+
+    if skip_kind == "root":
+        units = {f"base_model.model.layers.{name}": unit for name, unit in local_units.items()}
+        root = _root(model, units, fsdp_seam)
+        skipped = root
+    elif skip_kind == "model":
+        units = {f"layers.{name}": unit for name, unit in local_units.items()}
+        skipped = _CpuFSDP(body, children=units)
+        root = _root(model, {"base_model.model": skipped}, fsdp_seam)
+    else:
+        assert skip_kind == "layers"
+        skipped = _CpuFSDP(body.layers, children=local_units)
+        root = _root(model, {"base_model.model.layers": skipped}, fsdp_seam)
+    return root, skipped, child, expected
+
+
+@pytest.mark.parametrize("skip_kind", ["root", "model", "layers"])
+def test_skipped_fsdp1_owner_rejects_nonempty_partial_adapter_export(skip_kind, fsdp_seam):
+    root, skipped, child, expected = _skipped_container_layout(skip_kind, True, fsdp_seam)
+    # The skipped unit exposes only metadata before summon; its LoRA keys are
+    # hidden in the real FlatParameter's original-name metadata.
+    assert skipped.flat_parameter is not None
+    assert any("lora_" in name for name in skipped.flat_parameter._fqns)
+    assert "_flat_param" in dict(skipped.named_parameters())
+    child_names = {name.replace(".default", "") for name in expected if ".inner." in name}
+    assert child_names and child_names < set(expected)
+
+    with pytest.raises(RuntimeError, match="skipped FSDP1 unit"):
+        fsdp_utils.collect_lora_params(root, layered_summon=True, base_sync_done=True)
+
+    assert fsdp_seam.events == [("lazy_init", root)]
+    assert not skipped.gathered and not child.gathered
+
+
+@pytest.mark.parametrize("skip_kind", ["root", "model", "layers"])
+def test_skipped_fsdp1_container_excludes_nested_adapter_owners(skip_kind, fsdp_seam):
+    root, skipped, child, expected = _skipped_container_layout(skip_kind, False, fsdp_seam)
+    if skipped.flat_parameter is not None:
+        assert not any("lora_" in name for name in skipped.flat_parameter._fqns)
+    # The container sees its child's flattened metadata recursively. It must
+    # normalize wrapper segments and exclude that ownership before deciding
+    # whether the skipped container itself has an unexportable adapter.
+    assert any(
+        "lora_" in original_name
+        for _, param in skipped.named_parameters()
+        for original_name in (getattr(param, "_fqns", None) or ())
+    )
+
+    actual = fsdp_utils.collect_lora_params(root, layered_summon=True, base_sync_done=True)
+
+    _assert_adapter_equals(actual, expected)
+    assert ("summon", child) in fsdp_seam.events
+    assert all(unit is not skipped for event, unit in fsdp_seam.events if event == "summon")
+    assert not skipped.gathered and not child.gathered

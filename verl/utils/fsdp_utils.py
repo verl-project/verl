@@ -647,6 +647,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     """
     lora_params = OrderedDict()
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+    save_all_biases = getattr(peft_model.peft_config["default"], "bias", "none") == "all"
     if fsdp_version(fsdp_module) == 1:
         # Initialize handles from the actual root before summoning children.
         _lazy_init(fsdp_module, fsdp_module)
@@ -656,15 +657,13 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         return ".".join(part for part in name.split(".") if part != "_fsdp_wrapped_module")
 
     for name, submodule in fsdp_module.named_modules():
-        if name == "":
-            # Skip root: full summon defeats the purpose.
-            continue
         if fsdp_version(submodule) == 0:
             continue
         # Strip every ``_fsdp_wrapped_module.`` segment to match the names
         # downstream consumers (vllm LoRA loader, peft state_dict) expect.
         clean_prefix = without_fsdp_wrappers(name)
-        if not clean_prefix or clean_prefix.endswith(".model") or clean_prefix.endswith(".layers"):
+        skipped = not clean_prefix or clean_prefix.endswith((".model", ".layers"))
+        if skipped and fsdp_version(submodule) != 1:
             continue
 
         # FSDP1 needs the explicit summon context; FSDP2 ``DTensor`` params
@@ -689,10 +688,17 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
         ]
         if not any(
             "lora_" in f"{clean_prefix}.{original_name}"
+            or (save_all_biases and "bias" in f"{clean_prefix}.{original_name}")
             for n, p in owned_params
             for original_name in (getattr(p, "_fqns", None) or (n,))
         ):
             continue
+
+        if skipped:
+            raise RuntimeError(
+                f"layered_summon found adapter parameters owned by skipped FSDP1 unit {clean_prefix or '<root>'!r}; "
+                "refusing full-model fallback. Check the FSDP wrapping policy and adapter parameter names."
+            )
 
         summon_ctx = FSDP.summon_full_params(submodule, recurse=False, writeback=False) if is_fsdp1 else nullcontext()
 
