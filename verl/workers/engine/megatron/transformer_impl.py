@@ -42,6 +42,7 @@ from verl.utils.dynamic_cp_scheduler import (
     get_megatron_dynamic_cp_scheduler_cls,
     postprocess_dynamic_cp_batch,
 )
+from verl.utils.hccl_diagnostics import hccl_diagnostic_stage, print_megatron_hccl_topology
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
@@ -189,7 +190,15 @@ class MegatronEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
         _check_dcp_unsupported_features(self.engine_config, self.model_config)
-        self._init_device_mesh()
+        with hccl_diagnostic_stage(
+            "megatron.parallel_groups",
+            forward_only=self.engine_config.forward_only,
+            tp_size=self.engine_config.tensor_model_parallel_size,
+            pp_size=self.engine_config.pipeline_model_parallel_size,
+            ep_size=self.engine_config.expert_model_parallel_size,
+        ):
+            self._init_device_mesh()
+        print_megatron_hccl_topology(mpu, forward_only=self.engine_config.forward_only)
 
         set_random_seed(seed=self.engine_config.seed)
 
@@ -457,16 +466,17 @@ class MegatronEngine(BaseEngine):
         )
         override_ddp_config = self._resolve_override_ddp_config()
 
-        module, updated_tf_config = make_megatron_module(
-            wrap_config=wrap_config,
-            hf_config=self.model_config.hf_config,
-            bridge=self.bridge,
-            provider=self.provider,
-            override_model_config=self.engine_config.override_mcore_model_config,
-            override_ddp_config=override_ddp_config,
-            peft_cls=self.peft_cls,
-            peft_config=self.model_config.get("lora", None),
-        )
+        with hccl_diagnostic_stage("megatron.build_model", forward_only=self.engine_config.forward_only):
+            module, updated_tf_config = make_megatron_module(
+                wrap_config=wrap_config,
+                hf_config=self.model_config.hf_config,
+                bridge=self.bridge,
+                provider=self.provider,
+                override_model_config=self.engine_config.override_mcore_model_config,
+                override_ddp_config=override_ddp_config,
+                peft_cls=self.peft_cls,
+                peft_config=self.model_config.get("lora", None),
+            )
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
@@ -476,9 +486,14 @@ class MegatronEngine(BaseEngine):
             )
         else:
             allowed_mismatched_params = ["output_layer.weight"] if self.is_value_model else []
-            self.bridge.load_hf_weights(
-                module, self.model_config.local_path, allowed_mismatched_params=allowed_mismatched_params
-            )
+            with hccl_diagnostic_stage(
+                "megatron.load_hf_weights",
+                forward_only=self.engine_config.forward_only,
+                model_path=self.model_config.local_path,
+            ):
+                self.bridge.load_hf_weights(
+                    module, self.model_config.local_path, allowed_mismatched_params=allowed_mismatched_params
+                )
 
         if torch.distributed.get_rank() == 0:
             print_model_size(module[0])

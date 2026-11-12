@@ -146,40 +146,7 @@ jobs:
               --retry-delay 10 \
               --retry-all-errors \
               "${SUBMITTER_URL}/api/v1/rayjobs/${job_id}/watch?format=ndjson" \
-          | while IFS= read -r event; do
-              [[ -z "${event}" ]] && continue
-              if ! printf '%s' "${event}" | jq . >/dev/null 2>&1; then
-                  echo "[watch raw] ${event}"
-                  continue
-              fi
-
-              type="$(printf '%s' "${event}" | jq -r '.type // empty')"
-              case "${type}" in
-                  log)
-                      printf '%s' "${event}" | jq -r '.line // ""'
-                      ;;
-                  status)
-                      status="$(printf '%s' "${event}" | jq -r '.status // "UNKNOWN"')"
-                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
-                      rayjob_status="$(printf '%s' "${event}" | jq -r '.rayjob_status // ""')"
-                      deployment_status="$(printf '%s' "${event}" | jq -r '.job_deployment_status // ""')"
-                      echo "[rayjob status] status=${status} rayjob_status=${rayjob_status} deployment_status=${deployment_status} ${message}"
-                      ;;
-                  final)
-                      status="$(printf '%s' "${event}" | jq -r '.status // "UNKNOWN"')"
-                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
-                      echo "[rayjob final] ${status} ${message}"
-                      printf '%s' "${status}" > "${final_status_file}"
-                      ;;
-                  error)
-                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
-                      echo "[rayjob error] ${message}"
-                      ;;
-                  *)
-                      echo "${event}"
-                      ;;
-              esac
-          done
+          | python3 "${GITHUB_WORKSPACE}/.github/scripts/watch_rayjob_diagnostics.py" "${final_status_file}"
           set -e
 
           final_status=""
@@ -338,7 +305,7 @@ jobs:
           PY
 
           cd "${WORK_REPO}"
-          bash "${script_path}" "${script_args[@]}"
+          python3 "${WORK_REPO}/.github/scripts/run_multinode_hccl_diagnostics.py" --repo "${WORK_REPO}" -- bash "${script_path}" "${script_args[@]}"
           rm -rf "$HOME/ckpts"
           EOF
           sed -i 's/^          //' /root/.cache/verl_ci/run_multinode_testing.sh
@@ -378,11 +345,15 @@ jobs:
           set -euo pipefail
           LOG_DIR=/root/.cache/temp
           mkdir -p "$LOG_DIR"
+          diagnostic_env="$(jq -cn \
+            --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+            --arg sha "${GITHUB_SHA}" --arg job "${GITHUB_JOB}" --arg runner "${RUNNER_NAME}" \
+            '{HCCL_INTER_HCCS_DISABLE:"TRUE",VERL_HCCL_DIAGNOSTICS:"1",HYDRA_FULL_ERROR:"1",RAY_DEDUP_LOGS:"0",PYTHONUNBUFFERED:"1",ASCEND_PROCESS_LOG_PATH:("/tmp/verl-hccl-"+$run+"-"+$attempt+"/ascend"),VERL_DIAGNOSTIC_COMMIT:$sha,GITHUB_SHA:$sha,GITHUB_RUN_ID:$run,GITHUB_RUN_ATTEMPT:$attempt,GITHUB_JOB:$job,RUNNER_NAME:$runner}')"
           /root/.cache/verl_ci/submit_and_wait_rayjob.sh \
             multinode-e2e \
             /root/.cache/verl_ci/run_multinode_testing.sh \
             '["--script-path","/verl/tests/special_npu/nightly_ci_ascend/run_grpo_glm52_top16_megatron_npu_multinode.sh"]' \
-            '{"HCCL_INTER_HCCS_DISABLE":"TRUE"}' \
+            "${diagnostic_env}" \
             '[
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"1536Gi"},

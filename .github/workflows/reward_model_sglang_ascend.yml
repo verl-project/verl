@@ -59,7 +59,7 @@ env:
 
 jobs:
   reward_model_sglang_ascend:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') && (github.repository_owner == 'verl-project') }}
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
