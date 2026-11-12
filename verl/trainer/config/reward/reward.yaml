@@ -4,6 +4,9 @@ _target_: verl.workers.config.RewardConfig
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
+# CPU reserved per reward loop worker actor; 0 reserves none
+num_cpus_per_worker: 0.0
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.

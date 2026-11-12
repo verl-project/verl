@@ -72,6 +72,9 @@ class CustomAsyncServerConfig(BaseConfig):
 @dataclass
 class AgentLoopConfig(BaseConfig):
     num_workers: int = 8
+    # CPU reserved per agent-loop worker actor. 0 reserves none, like the
+    # previous behavior; set a fraction to make placement CPU-aware.
+    num_cpus_per_worker: float = 0.0
     default_agent_loop: str = "single_turn_agent"
     agent_loop_config_path: Optional[str] = None
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
