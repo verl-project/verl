@@ -31,8 +31,10 @@
 
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  workflow_dispatch:
+  # Temporarily disabled: restore this PR trigger to re-enable PR runs.
+  # pull_request:
+  #   types: [opened, edited, synchronize]
 
 jobs:
   check-title:

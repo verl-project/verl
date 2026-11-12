@@ -32,45 +32,52 @@
 name: e2e_ppo_trainer_megatron_sglang_2_ascend
 
 on:
-  # Trigger on pull requests targeting main or v0.* branches.
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      # Other entrypoints
-      - "!docker/**"
-      # Docs
-      - "!**/*.md"
-      - "!docs/**"
-      - "!examples/**"
-      - "!tests/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
-      - "!verl/workers/**/*dp_*.py"
-      - "!verl/utils/fsdp_utils.py"
-      - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
-      - "!verl/model_merger/fsdp_model_merger.py"
-      # Entrypoints
-      - "verl/worksers/rollout/sglang_rollout/*"
-      - ".github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml"
-      - "examples/data_preprocess/gsm8k.py"
-      - "examples/data_preprocess/geo3k.py"
-      - "tests/special_e2e/run_ppo_trainer_megatron.sh"
-      - "verl/trainer/main_ppo.py"
-      - "verl/trainer/config/ppo_megatron_trainer.yaml"
+  # Temporarily paused for the coverage-only run; uncomment these events to restore normal CI.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "**/*.py"
+  #     # Other entrypoints
+  #     - "!docker/**"
+  #     # Docs
+  #     - "!**/*.md"
+  #     - "!docs/**"
+  #     - "!examples/**"
+  #     - "!tests/**"
+  #     - "!verl/trainer/main_*.py"
+  #     - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
+  #     - "!verl/workers/**/*dp_*.py"
+  #     - "!verl/utils/fsdp_utils.py"
+  #     - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
+  #     - "!verl/model_merger/fsdp_model_merger.py"
+  #     # Entrypoints
+  #     - "verl/worksers/rollout/sglang_rollout/*"
+  #     - ".github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml"
+  #     - "examples/data_preprocess/gsm8k.py"
+  #     - "examples/data_preprocess/geo3k.py"
+  #     - "tests/special_e2e/run_ppo_trainer_megatron.sh"
+  #     - "verl/trainer/main_ppo.py"
+  #     - "verl/trainer/config/ppo_megatron_trainer.yaml"
+  workflow_call:
+    inputs:
+      coverage_mode:
+        description: Collect raw branch coverage for the existing workload steps
+        type: boolean
+        required: false
+        default: false
 
-# Cancel jobs on the same ref if a new one is triggered
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: e2e_ppo_trainer_megatron_sglang_2_ascend-${{ inputs.coverage_mode && 'coverage' || 'pr' }}-${{ github.ref }}
+  cancel-in-progress: ${{ !inputs.coverage_mode && github.ref != 'refs/heads/main' }}
 
 # Declare permissions just read content.
 permissions:
   contents: read
 
 env:
+  VERL_COVERAGE_ENABLED: ${{ inputs.coverage_mode }}
   # Disposable cache; preprocessing rebuilds it when missing.
   HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
@@ -81,7 +88,7 @@ jobs:
   e2e_ppo_trainer_fsdp_sglang_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
-    timeout-minutes: 90 # Increase this timeout value as needed
+    timeout-minutes: ${{ inputs.coverage_mode && 210 || 90 }} # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
@@ -128,11 +135,43 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Initialize coverage (optional)
+        if: inputs.coverage_mode
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_ppo_trainer_megatron_sglang_2_ascend.yml/${{ github.job }}/data
+          VERL_COVERAGE_WORKFLOW: e2e_ppo_trainer_megatron_sglang_2_ascend.yml
+          VERL_COVERAGE_JOB: ${{ github.job }}
+        run: |
+          # Persist identity for subsequent workload steps, but not instrumentation.
+          printf 'VERL_COVERAGE_ROOT=%s\n' "$VERL_COVERAGE_ROOT" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_WORKFLOW=%s\n' "$VERL_COVERAGE_WORKFLOW" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_JOB=%s\n' "$VERL_COVERAGE_JOB" >> "$GITHUB_ENV"
+          command -v uv >/dev/null || python -m pip install uv
+          uv pip install --python "$(python -c 'import sys; print(sys.executable)')" "coverage==7.8.2" "PyYAML==6.0.2"
+          python scripts/ci/coverage/collect.py init
       - name: Prepare GSM8K dataset
         run: |
           ray stop --force
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Running GSM8K E2E training tests on 8 NPUs with rmpad using function rm and save ckpt
         run: |
           ray stop --force
           ENGINE=sglang bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+        shell: python scripts/ci/coverage/collect.py run step-08 {0}
+      - name: Package coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_ppo_trainer_megatron_sglang_2_ascend.yml/${{ github.job }}/data
+        run: python scripts/ci/coverage/collect.py package
+      - name: Retain coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-coverage-e2e_ppo_trainer_megatron_sglang_2_ascend.yml-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_ppo_trainer_megatron_sglang_2_ascend.yml/${{ github.job }}/coverage.tar.gz
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 14

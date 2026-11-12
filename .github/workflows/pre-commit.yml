@@ -5,7 +5,8 @@ name: pre-commit
 on:
   schedule:
     - cron: "0 0 * * 0"
-  pull_request:
+  # Temporarily disabled: restore this PR trigger to re-enable PR runs.
+  # pull_request:
   push:
     branches:
       - main

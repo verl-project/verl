@@ -32,37 +32,44 @@
 name: e2e_ppo_trainer_megatron_vllm_ascend
 
 on:
-  # Trigger on pull requests targeting main or v0.* branches.
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      # Entrypoints and fixtures used by the job below.
-      - ".github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml"
-      - "examples/data_preprocess/geo3k.py"
-      - "examples/grpo_trainer/run_qwen3_5_35b_megatron.sh"
-      - "tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh"
-      - "verl/trainer/main_ppo.py"
-      - "verl/trainer/config/ppo_megatron_trainer.yaml"
-      - "verl/trainer/ppo/**"
-      - "verl/workers/engine_workers.py"
-      - "verl/workers/engine/**"
-      - "verl/workers/rollout/**"
-      - "verl/utils/megatron_utils.py"
-      - "pyproject.toml"
-      - "requirements-npu.txt"
-      - "setup.py"
+  # Temporarily paused for the coverage-only run; uncomment these events to restore normal CI.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     # Entrypoints and fixtures used by the job below.
+  #     - ".github/workflows/e2e_ppo_trainer_megatron_vllm_ascend.yml"
+  #     - "examples/data_preprocess/geo3k.py"
+  #     - "examples/grpo_trainer/run_qwen3_5_35b_megatron.sh"
+  #     - "tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh"
+  #     - "verl/trainer/main_ppo.py"
+  #     - "verl/trainer/config/ppo_megatron_trainer.yaml"
+  #     - "verl/trainer/ppo/**"
+  #     - "verl/workers/engine_workers.py"
+  #     - "verl/workers/engine/**"
+  #     - "verl/workers/rollout/**"
+  #     - "verl/utils/megatron_utils.py"
+  #     - "pyproject.toml"
+  #     - "requirements-npu.txt"
+  #     - "setup.py"
+  workflow_call:
+    inputs:
+      coverage_mode:
+        description: Collect raw branch coverage for the existing workload steps
+        type: boolean
+        required: false
+        default: false
 
-# Cancel jobs on the same ref if a new one is triggered
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: e2e_ppo_trainer_megatron_vllm_ascend-${{ inputs.coverage_mode && 'coverage' || 'pr' }}-${{ github.ref }}
+  cancel-in-progress: ${{ !inputs.coverage_mode && github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 env:
+  VERL_COVERAGE_ENABLED: ${{ inputs.coverage_mode }}
   # Disposable cache; preprocessing rebuilds it when missing.
   HF_DATASETS_CACHE: /root/.cache/temp/hf-datasets
   MEGATRON_CONFIG_LOCK_DIR: /root/.cache/temp/megatron-config-locks
@@ -72,7 +79,7 @@ jobs:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend GRPO Qwen3.5-35B Megatron testing
     runs-on: linux-aarch64-a3-800i-16
-    timeout-minutes: 120 # Increase this timeout value as needed
+    timeout-minutes: ${{ inputs.coverage_mode && 270 || 120 }} # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
@@ -116,9 +123,25 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Initialize coverage (optional)
+        if: inputs.coverage_mode
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_ppo_trainer_megatron_vllm_ascend.yml/${{ github.job }}/data
+          VERL_COVERAGE_WORKFLOW: e2e_ppo_trainer_megatron_vllm_ascend.yml
+          VERL_COVERAGE_JOB: ${{ github.job }}
+        run: |
+          # Persist identity for subsequent workload steps, but not instrumentation.
+          printf 'VERL_COVERAGE_ROOT=%s\n' "$VERL_COVERAGE_ROOT" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_WORKFLOW=%s\n' "$VERL_COVERAGE_WORKFLOW" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_JOB=%s\n' "$VERL_COVERAGE_JOB" >> "$GITHUB_ENV"
+          command -v uv >/dev/null || python -m pip install uv
+          uv pip install --python "$(python -c 'import sys; print(sys.executable)')" "coverage==7.8.2" "PyYAML==6.0.2"
+          python scripts/ci/coverage/collect.py init
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+        shell: python scripts/ci/coverage/collect.py run step-06 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
@@ -130,3 +153,19 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/run_qwen3_5_35b_grpo_megatron.sh
+        shell: python scripts/ci/coverage/collect.py run step-08 {0}
+      - name: Package coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_ppo_trainer_megatron_vllm_ascend.yml/${{ github.job }}/data
+        run: python scripts/ci/coverage/collect.py package
+      - name: Retain coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-coverage-e2e_ppo_trainer_megatron_vllm_ascend.yml-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/e2e_ppo_trainer_megatron_vllm_ascend.yml/${{ github.job }}/coverage.tar.gz
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 14

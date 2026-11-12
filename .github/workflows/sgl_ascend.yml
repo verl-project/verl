@@ -32,44 +32,52 @@
 name: sglang_ascend
 
 on:
-  #  workflow_dispatch: # Manual
-  # Trigger on pull requests targeting main or v0.* branches.
-  pull_request:
-    branches:
-      - main
-      - v0.*
-    paths:
-      - "**/*.py"
-      # Other entrypoints
-      - "!examples/**"
-      - "!tests/**"
-      - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
-      - "!verl/workers/**/*dp_*.py"
-      # Megatron
-      - "!verl/workers/**/megatron_*.py"
-      # vLLM
-      - "!**/*vllm*"
+  # Temporarily paused for the coverage-only run; uncomment these events to restore normal CI.
+  # pull_request:
+  #   branches:
+  #     - main
+  #     - v0.*
+  #   paths:
+  #     - "**/*.py"
+  #     # Other entrypoints
+  #     - "!examples/**"
+  #     - "!tests/**"
+  #     - "!verl/trainer/main_*.py"
+  #     - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
+  #     - "!verl/workers/**/*dp_*.py"
+  #     # Megatron
+  #     - "!verl/workers/**/megatron_*.py"
+  #     # vLLM
+  #     - "!**/*vllm*"
 
-      # Entrypoints
-      - ".github/workflows/sgl_ascend.yml"
-      - "tests/rollout/*sglang*"
-      - "tests/rollout/async_rollout_utils.py"
+  #     # Entrypoints
+  #     - ".github/workflows/sgl_ascend.yml"
+  #     - "tests/rollout/*sglang*"
+  #     - "tests/rollout/async_rollout_utils.py"
+  workflow_call:
+    inputs:
+      coverage_mode:
+        description: Collect raw branch coverage for the existing workload steps
+        type: boolean
+        required: false
+        default: false
 
-# Cancel jobs on the same ref if a new one is triggered
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: sgl_ascend-${{ inputs.coverage_mode && 'coverage' || 'pr' }}-${{ github.ref }}
+  cancel-in-progress: ${{ !inputs.coverage_mode && github.ref != 'refs/heads/main' }}
 
 # Declare permissions just read content.
 permissions:
   contents: read
 
+env:
+  VERL_COVERAGE_ENABLED: ${{ inputs.coverage_mode }}
+
 jobs:
   sglang_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
-    timeout-minutes: 90 # Increase this timeout value as needed
+    timeout-minutes: ${{ inputs.coverage_mode && 210 || 90 }} # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
@@ -118,12 +126,44 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
-      - name:  Prepare gsm8k dataset
+      - name: Initialize coverage (optional)
+        if: inputs.coverage_mode
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/sgl_ascend.yml/${{ github.job }}/data
+          VERL_COVERAGE_WORKFLOW: sgl_ascend.yml
+          VERL_COVERAGE_JOB: ${{ github.job }}
+        run: |
+          # Persist identity for subsequent workload steps, but not instrumentation.
+          printf 'VERL_COVERAGE_ROOT=%s\n' "$VERL_COVERAGE_ROOT" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_WORKFLOW=%s\n' "$VERL_COVERAGE_WORKFLOW" >> "$GITHUB_ENV"
+          printf 'VERL_COVERAGE_JOB=%s\n' "$VERL_COVERAGE_JOB" >> "$GITHUB_ENV"
+          command -v uv >/dev/null || python -m pip install uv
+          uv pip install --python "$(python -c 'import sys; print(sys.executable)')" "coverage==7.8.2" "PyYAML==6.0.2"
+          python scripts/ci/coverage/collect.py init
+      - name: Prepare gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
+        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
           export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
           ROLLOUT_NAME=sglang pytest -svvv --ignore=tests/experimental/agent_loop/test_multi_modal.py -k "not test_standalone_rollout[4]" tests/experimental/agent_loop
+        shell: python scripts/ci/coverage/collect.py run step-08 {0}
+      - name: Package coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        shell: bash
+        env:
+          VERL_COVERAGE_ROOT: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/sgl_ascend.yml/${{ github.job }}/data
+        run: python scripts/ci/coverage/collect.py package
+      - name: Retain coverage (optional)
+        if: ${{ always() && inputs.coverage_mode }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-coverage-sgl_ascend.yml-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci-coverage/${{ github.run_id }}-${{ github.run_attempt }}/sgl_ascend.yml/${{ github.job }}/coverage.tar.gz
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 14
