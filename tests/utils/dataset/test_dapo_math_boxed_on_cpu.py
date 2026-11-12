@@ -33,6 +33,7 @@ from verl.utils.reward_score import default_compute_score
 
 @pytest.fixture
 def sample_raw_rows():
+    """Construct synthetic dapo_filter rows matching the upstream Parquet schema."""
     return [
         {
             "data_source": RAW_DATA_SOURCE,
@@ -46,11 +47,13 @@ def sample_raw_rows():
 
 
 def test_raw_dapo_filter_data_source_requires_rewrite():
+    """Verify raw data_source='dapo_filter' fails reward dispatch without preprocessing."""
     with pytest.raises(NotImplementedError):
         default_compute_score(RAW_DATA_SOURCE, r"\boxed{42}", "42")
 
 
 def test_prepare_train_rows_rewrites_only_data_source_and_preserves_order(sample_raw_rows, tmp_path):
+    """Verify only data_source changes and Parquet round-trip is lossless."""
     before = deepcopy(sample_raw_rows)
     prepared = prepare_train_rows(sample_raw_rows, expected_rows=len(sample_raw_rows))
     assert sample_raw_rows == before
@@ -67,9 +70,32 @@ def test_prepare_train_rows_rewrites_only_data_source_and_preserves_order(sample
     assert pq.read_table(tmp_path / "train.parquet").to_pylist() == prepared
 
 
+def test_aaabiao_prompt_deduplication_matches_jiawei415_rows(sample_raw_rows, tmp_path):
+    """Verify prompt deduplication on aaabiao/dapo_filter produces identical rows to Jiawei415/DPAO_filter."""
+    with_duplicate_prompt = deepcopy(sample_raw_rows)
+    duplicate_entry = deepcopy(sample_raw_rows[1])
+    duplicate_entry["extra_info"]["index"] = "00000000-0000-4000-8000-000000009999"
+    with_duplicate_prompt.insert(2, duplicate_entry)
+
+    from_jiawei = prepare_train_rows(sample_raw_rows, deduplicate_prompts=False, expected_rows=len(sample_raw_rows))
+    from_aaabiao = prepare_train_rows(
+        with_duplicate_prompt,
+        deduplicate_prompts=True,
+        expected_raw_rows=len(with_duplicate_prompt),
+        expected_rows=len(sample_raw_rows),
+    )
+    assert from_aaabiao == from_jiawei
+    art_j = write_parquet(from_jiawei, tmp_path / "jiawei.parquet")
+    art_a = write_parquet(from_aaabiao, tmp_path / "aaabiao.parquet")
+    assert art_a["canonical_rows_sha256"] == art_j["canonical_rows_sha256"]
+
+
 def test_row_count_mismatch_is_rejected(sample_raw_rows):
-    with pytest.raises(ValueError, match="Expected 12691 training rows"):
+    """Reject unexpected unique or raw row counts."""
+    with pytest.raises(ValueError, match="Expected 12691 unique training rows"):
         prepare_train_rows(sample_raw_rows)
+    with pytest.raises(ValueError, match="Expected 10 raw training rows"):
+        prepare_train_rows(sample_raw_rows, expected_raw_rows=10, expected_rows=len(sample_raw_rows))
 
 
 @pytest.mark.parametrize(
@@ -91,22 +117,26 @@ def test_row_count_mismatch_is_rejected(sample_raw_rows):
     ],
 )
 def test_corrupted_or_duplicate_rows_are_rejected(sample_raw_rows, mutator, match):
+    """Reject corrupted rows, invalid metadata, and un-deduplicated duplicates."""
     mutator(sample_raw_rows)
     with pytest.raises(ValueError, match=match):
         prepare_train_rows(sample_raw_rows, expected_rows=len(sample_raw_rows))
 
 
-def test_offline_cli_verifies_hash_and_writes_manifest(sample_raw_rows, tmp_path, monkeypatch):
-    spec = deepcopy(generator.DAPO_FILTER_TRAIN_SOURCE)
+def test_offline_cli_verifies_hash_manifest_and_hdfs_copy_failure(sample_raw_rows, tmp_path, monkeypatch):
+    """Verify offline CLI hash checking, lineage manifest fields, and HDFS copy error handling."""
+    sources = deepcopy(generator.DAPO_FILTER_SOURCES)
+    spec = sources["Jiawei415/DPAO_filter"]
     cache = tmp_path / "sources"
     staged = cache / spec["repo_id"].replace("/", "--") / spec["filename"]
     staged.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(sample_raw_rows), staged)
     spec["bytes"] = staged.stat().st_size
     spec["sha256"] = generator.digest(staged)
+    spec["raw_rows"] = len(sample_raw_rows)
 
-    monkeypatch.setattr(generator, "DAPO_FILTER_TRAIN_SOURCE", spec)
-    monkeypatch.setattr(generator, "EXPECTED_ROWS", len(sample_raw_rows))
+    monkeypatch.setattr(generator, "DAPO_FILTER_SOURCES", sources)
+    monkeypatch.setattr(generator, "EXPECTED_UNIQUE_ROWS", len(sample_raw_rows))
 
     output = tmp_path / "prepared"
     monkeypatch.setattr(
@@ -120,20 +150,35 @@ def test_offline_cli_verifies_hash_and_writes_manifest(sample_raw_rows, tmp_path
     assert manifest["source"]["repo_id"] == "Jiawei415/DPAO_filter"
     assert manifest["source"]["license"] is None
     assert "no usage rights inferred" in manifest["source"]["license_status"]
-    assert manifest["transform"] == {
-        "description": (
-            "Rewrite only data_source from 'dapo_filter' to 'math_dapo' for reward dispatch; "
-            "preserve prompt, reward_model, extra_info, UUID indices, and row order verbatim."
-        ),
-        "prompt_suffix": BOXED_SUFFIX,
-        "raw_data_source": RAW_DATA_SOURCE,
-        "target_data_source": TARGET_DATA_SOURCE,
-    }
+    assert manifest["lineage"]["difficulty_filtered_source"]["repo_id"] == "aaabiao/dapo_filter"
+    assert manifest["lineage"]["prompt_deduplicated_source"]["repo_id"] == "Jiawei415/DPAO_filter"
+    assert manifest["transform"]["raw_data_source"] == RAW_DATA_SOURCE
+    assert manifest["transform"]["target_data_source"] == TARGET_DATA_SOURCE
+
     train_info = manifest["artifacts"]["train"]
     train_parquet = output / Path(train_info["path"]).name
     assert train_info["rows"] == len(sample_raw_rows)
     assert train_info["bytes"] == train_parquet.stat().st_size
     assert train_info["sha256"] == generator.digest(train_parquet)
+
+    # Verify failed HDFS copy surfaces RuntimeError rather than exiting 0.
+    monkeypatch.setattr(generator, "makedirs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(generator, "copy", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dapo_math_boxed",
+            "--source-dir",
+            str(cache),
+            "--output-dir",
+            str(output),
+            "--hdfs-dir",
+            "hdfs://mock-cluster/dapo",
+        ],
+    )
+    with pytest.raises(RuntimeError, match="Failed to copy"):
+        generator.main()
 
     # Tampering with the staged file must fail SHA-256 verification.
     tampered_rows = deepcopy(sample_raw_rows)
