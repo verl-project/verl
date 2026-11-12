@@ -608,6 +608,21 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     return metrics
 
 
+def compute_agent_loop_timing_metrics(agent_loop_metrics: list[dict[str, float]]) -> dict[str, float]:
+    """Aggregate per-trajectory compute-score timings for one training iteration."""
+    compute_score = np.asarray(
+        [metric["compute_score"] for metric in agent_loop_metrics if metric.get("compute_score") is not None],
+        dtype=np.float64,
+    )
+    if compute_score.size == 0:
+        return {}
+    return {
+        "timing_s/agent_loop/compute_score/min": compute_score.min(),
+        "timing_s/agent_loop/compute_score/mean": compute_score.mean(),
+        "timing_s/agent_loop/compute_score/max": compute_score.max(),
+    }
+
+
 def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.
