@@ -1894,6 +1894,7 @@ class PPOTrainer(ABC):
             "rm_scores",
             "num_turns",
         ]
+        
         if self.config.algorithm.use_kl_in_reward:
             fields.append("token_level_rewards")
         if self.use_critic:
