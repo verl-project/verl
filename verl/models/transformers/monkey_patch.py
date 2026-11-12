@@ -29,6 +29,7 @@ from verl.utils.ulysses import (
     gather_heads_scatter_seq,
     gather_seq_scatter_heads,
     get_ulysses_sequence_parallel_group,
+    get_ulysses_sequence_parallel_rank,
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,
 )
@@ -84,6 +85,55 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep, head_dim)
 
 
+def _cu_seqlens_from_packed_position_ids(position_ids: torch.Tensor) -> Optional[torch.Tensor]:
+    """Compute cu_seqlens of the full (gathered) packed sequence from this rank's local shard.
+
+    In the Ulysses SP varlen path each rank holds a contiguous shard of a single packed row
+    (bsz == 1) produced by ulysses input slicing. Sequence boundaries are the positions where
+    position_ids resets to 0 (channel 0 for 3D mrope position_ids, e.g. Qwen2-VL/Qwen3.5); the
+    SP padding appended by ulysses_pad is an arange and therefore forms one extra trailing
+    segment, matching the previous position_ids-based behavior.
+
+    Boundary indices are exchanged with a tiny all_gather (num_boundaries << seq_len), which
+    replaces the previous full position_ids all_gather and avoids handing (possibly 3D mrope)
+    position_ids to `prepare_fa_kwargs_from_position_ids` downstream.
+
+    Returns:
+        torch.Tensor: int32 cu_seqlens (on the input device) of the full packed sequence,
+        or None if no boundary can be determined (caller falls back to the legacy path).
+    """
+    group = get_ulysses_sequence_parallel_group()
+    sp_rank = get_ulysses_sequence_parallel_rank()
+    sp_size = get_ulysses_sequence_parallel_world_size()
+    local_len = position_ids.size(-1)
+    pos = position_ids[0, 0] if position_ids.dim() == 3 else position_ids[0]
+
+    # Global indices (within the gathered sequence) of sequence starts in this shard.
+    bounds = torch.nonzero(pos == 0).squeeze(-1).to(torch.int32) + sp_rank * local_len
+
+    count = torch.tensor([bounds.numel()], device=position_ids.device, dtype=torch.int32)
+    counts = [torch.empty_like(count) for _ in range(sp_size)]
+    torch.distributed.all_gather(counts, count, group=group)
+    max_count = max(int(c.item()) for c in counts)
+    total_len = sp_size * local_len
+    if max_count == 0:
+        return None
+
+    # Pad with total_len as sentinel (deduped away by torch.unique when a real boundary exists).
+    padded = torch.full((max_count,), total_len, device=position_ids.device, dtype=torch.int32)
+    padded[: bounds.numel()] = bounds
+    gathered = [torch.empty_like(padded) for _ in range(sp_size)]
+    torch.distributed.all_gather(gathered, padded, group=group)
+
+    cu_seqlens = torch.unique(torch.cat(gathered))  # sorted and deduped
+    if cu_seqlens[0] != 0:
+        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
+    if cu_seqlens[-1] != total_len:
+        # the total_len sentinel may have been squeezed out of the fixed-size all_gather buffer
+        cu_seqlens = torch.cat([cu_seqlens, cu_seqlens.new_tensor([total_len])])
+    return cu_seqlens
+
+
 def _ulysses_flash_attention_forward(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -116,7 +166,8 @@ def _ulysses_flash_attention_forward(
     ########## AlltoAll for Ulysses ##########
     # TODO: Disable sp for ViT, there's no elegent way to determine whether it's ViT or not.
     # Use `position_ids` as condition since ViT doesn't pass it to flash attention.
-    if ulysses_sp_size > 1 and position_ids is not None:
+    ulysses_sp_active = ulysses_sp_size > 1 and position_ids is not None
+    if ulysses_sp_active:
         # NOTE: repeat kv heads to be divided by sequence parallel. Instead of repeating nheads_q//nheads_k,
         # we choose to repeat sp_size//nheads_k, since flash_attention supports MQA/GQA.
         # For example:
@@ -132,14 +183,43 @@ def _ulysses_flash_attention_forward(
         key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
         value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
 
-        # TODO: all_gather position_ids because `prepare_fa2_from_position_ids` needs it, we can eliminate
-        # this all_gather by passing cu_seq_lens_q, cu_seq_lens_k, max_length_k, max_length_q explicitly.
-        # https://github.com/huggingface/transformers/pull/33932
+        # Pass cu_seq_lens_q/cu_seq_lens_k/max_length_q/max_length_k explicitly (natively supported by
+        # `_flash_attention_forward`, https://github.com/huggingface/transformers/pull/33932) instead of
+        # letting downstream re-derive sequence boundaries from position_ids. Deriving boundaries from
+        # position_ids breaks for 3D mrope position_ids (e.g. Qwen3.5, shape (mrope_dim, 1, seq)):
+        # `prepare_fa_kwargs_from_position_ids` treats the leading mrope dim as batch and produces
+        # corrupted cu_seqlens, leading to illegal memory access in the FA varlen kernel.
+        if kwargs.get("cu_seq_lens_q") is None:
+            cu_seqlens = None
+            # Only packed varlen inputs (attention_mask is None, single packed row) are eligible.
+            if attention_mask is None and position_ids.size(-2) == 1:
+                cu_seqlens = _cu_seqlens_from_packed_position_ids(position_ids)
+            if cu_seqlens is not None:
+                max_length = int(cu_seqlens.diff().max())
+                kwargs.update(
+                    cu_seq_lens_q=cu_seqlens,
+                    cu_seq_lens_k=cu_seqlens,
+                    max_length_q=max_length,
+                    max_length_k=max_length,
+                )
+            else:
+                # Fallback (e.g. padded batches with an attention_mask): keep the legacy
+                # position_ids-based path. Ulysses slicing produces non-contiguous views, so the
+                # all_gather buffers must explicitly be made contiguous.
+                position_ids = position_ids.contiguous()
+                position_ids_list = [
+                    torch.empty_like(position_ids, memory_format=torch.contiguous_format)
+                    for _ in range(ulysses_sp_size)
+                ]
+                torch.distributed.all_gather(
+                    position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group()
+                )
+                position_ids = torch.concat(position_ids_list, dim=-1)
 
-        # (bsz, seq_len/n) -> (bsz, seq_len)
-        position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
-        torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
-        position_ids = torch.concat(position_ids_list, dim=-1)
+        # Explicit cu_seq_lens (derived above or supplied by the caller) fully describe the varlen
+        # layout; drop position_ids so downstream never re-parses boundaries from it.
+        if kwargs.get("cu_seq_lens_q") is not None:
+            position_ids = None
 
     # (bsz, seq_len, n_head/n, head_dim)
     query_length = query_states.size(1)
@@ -148,7 +228,7 @@ def _ulysses_flash_attention_forward(
     )
 
     ########## AlltoAll for Ulysses ##########
-    if ulysses_sp_size > 1 and position_ids is not None:
+    if ulysses_sp_active:
         # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
         attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
 
