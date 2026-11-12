@@ -242,10 +242,11 @@ class TestEngineKwargsManagedArgs:
     """engine_kwargs may not set vLLM args that verl derives from its own config."""
 
     @staticmethod
-    def _preprocess(engine_kwargs):
+    def _preprocess(engine_kwargs, backend=None):
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-        server = SimpleNamespace(config=SimpleNamespace(checkpoint_engine=None))
+        checkpoint_engine = SimpleNamespace(backend=backend) if backend else None
+        server = SimpleNamespace(config=SimpleNamespace(checkpoint_engine=checkpoint_engine))
         vLLMHttpServer._preprocess_engine_kwargs(server, engine_kwargs)
 
     @pytest.mark.parametrize(
@@ -266,6 +267,11 @@ class TestEngineKwargsManagedArgs:
         engine_kwargs = {"max_num_seqs": 8}
         self._preprocess(engine_kwargs)
         assert engine_kwargs["max_num_seqs"] == 8
+
+    @pytest.mark.parametrize("key", ["enable_eplb", "enable-eplb"])
+    def test_sharded_nixl_rejects_eplb(self, key):
+        with pytest.raises(NotImplementedError, match="EPLB"):
+            self._preprocess({key: True}, backend="sharded_nixl")
 
 
 class TestVllmColocateZmqHandle:

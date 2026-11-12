@@ -98,6 +98,8 @@ class BucketedWeightSender:
         self.socket = None
         self.buffer = None
         self.shm = None
+        self._reply_pending = False
+        self._sent_last = False
 
     async def async_send_weights(self, weights):
         """
@@ -108,6 +110,8 @@ class BucketedWeightSender:
         """
         from verl.workers.rollout.utils import ensure_async_iterator
 
+        self._reply_pending = False
+        self._sent_last = False
         try:
             self._init_socket()
             self._init_buffer()
@@ -132,8 +136,7 @@ class BucketedWeightSender:
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
-                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                    self.socket.recv()
+                    self._request({"bucket_meta": bucket_meta, "is_last": False})
                     bucket_meta = {}
                     offset = 0
 
@@ -160,14 +163,17 @@ class BucketedWeightSender:
             # send the last bucket
             name = weight = None
             get_torch_device().synchronize()
-            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-            self.socket.recv()
+            self._request({"bucket_meta": bucket_meta, "is_last": True}, is_last=True)
         except BaseException:
             # A sender that fails or is cancelled, even before the buffer handshake, would leave the receiver
-            # waiting forever. POLLOUT waits for the receiver to connect and never fires mid-request.
+            # waiting forever. REQ alternates send and recv, so a reply still owed is taken first; POLLOUT
+            # then waits for the receiver to connect unless is_last was already sent.
             if self.socket is not None:
                 try:
-                    if self.socket.poll(10_000, zmq.POLLOUT):
+                    if self._reply_pending and self.socket.poll(10_000):
+                        self.socket.recv()
+                        self._reply_pending = False
+                    if not self._reply_pending and not self._sent_last and self.socket.poll(10_000, zmq.POLLOUT):
                         self.socket.send_pyobj({"abort": True}, flags=zmq.NOBLOCK)
                         if self.socket.poll(10_000):
                             self.socket.recv()
@@ -193,8 +199,7 @@ class BucketedWeightSender:
         buffer, shm = None, None
         if not self.use_shm:
             buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
-            handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
+            comm_metadata = reduce_tensor(buffer)
         else:
             import uuid
 
@@ -204,11 +209,19 @@ class BucketedWeightSender:
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
             comm_metadata = {"name": shm_name, "size": self.bucket_size}
-            self.socket.send_pyobj(comm_metadata)
 
-        self.socket.recv()
+        self._request(comm_metadata)
         self.buffer = buffer
         self.shm = shm
+
+    def _request(self, message, *, is_last: bool = False):
+        """Send one message and wait for its reply; ``_reply_pending`` tells the abort path a reply is owed."""
+        self.socket.send_pyobj(message)
+        self._reply_pending = True
+        if is_last:
+            self._sent_last = True
+        self.socket.recv()
+        self._reply_pending = False
 
     def _cleanup(self):
         """clean up"""
@@ -245,8 +258,7 @@ class BucketedWeightSender:
             "offset": 0,
             "handle": handle,
         }
-        self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-        self.socket.recv()
+        self._request({"bucket_meta": bucket_meta, "is_last": False})
 
 
 class BucketedWeightReceiver:

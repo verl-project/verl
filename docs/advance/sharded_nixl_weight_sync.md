@@ -1,6 +1,6 @@
 # Sharded NIXL Weight Sync
 
-Last updated: 10/22/2026.
+Last updated: 11/12/2026.
 
 RFC for the ``sharded_nixl`` checkpoint engine: trainer-to-rollout weight sync in which every trainer rank
 writes the shards it holds straight into the rollout workers' buffers over NIXL, with no trainer-side
@@ -65,10 +65,12 @@ parameter gets a slice; anything else is sent whole and goes through ``load_weig
 are copied straight into their parameter views.
 
 **Integrity and failure.** Every written slice carries a 64-bit hash, checked on the rollout side before
-any weight is applied, and sync ids must match. A sync that fails part-way leaves a mix of old and new
-weights, so ``CheckpointEngineManager`` keeps ``resume_generation_replicas`` raising until a later
-``update_weights`` completes; every sync is dense, so that retry repairs every weight. Before the retry,
-``prepare`` cancels the failed sync's leftover send or receive and drops its stale notifications.
+any weight is applied, and sync ids (which combine a monotonic attempt counter with the step) must match.
+A sync that fails part-way leaves a mix of old and new weights, so ``CheckpointEngineManager`` keeps
+``resume_generation_replicas`` raising until a later ``update_weights`` completes; every sync is dense, so
+that retry repairs every weight. Before the retry, ``prepare`` cancels the failed sync's leftover send or
+receive, waits for any in-flight NIXL WRITEs to quiesce before reusing staging buffers, and drops stale
+notifications.
 
 **API.** Two opt-in ``CheckpointEngine`` class attributes, both ``False`` by default:
 ``send_weights_takes_engine`` (``send_weights`` gets the training engine instead of an all-gathered
@@ -122,6 +124,8 @@ It needs ``pip install nixl`` (tested with 1.4.1) and a trainer mode with a sepa
 
 ## Limitations and roadmap
 
+- Quantized rollouts / QAT and vLLM EPLB (redundant/rebalanced experts) are rejected at startup until
+  shard export and dynamic expert ownership support them.
 - Rank-local slices need vLLM with plain bf16, TP>1 and a local checkpoint; quantization, LoRA,
   speculative decoding and PP fall back to full tensors.
 - The fail-closed marker lives in ``CheckpointEngineManager``, so a replica resumed through another

@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU tests of the ``sharded_nixl`` bucket layout and write planning (``sharded_nixl_layout``)."""
 
+import functools
+
 import pytest
 import torch
 
@@ -253,11 +255,62 @@ def test_ownership_filter_ep_and_pp():
     assert RolloutLayout.from_dict(d) == rl
 
 
+@functools.cache
+def _load_sharded_nixl_engine_mod():
+    """Import ``sharded_nixl_checkpoint_engine`` even when ``nixl``/``cupy`` are absent (CPU CI)."""
+    try:
+        from verl.checkpoint_engine import sharded_nixl_checkpoint_engine as mod
+
+        return mod
+    except ImportError:
+        pass
+
+    import dataclasses
+    import importlib.util
+    import sys
+    import types
+    from pathlib import Path
+
+    from verl.checkpoint_engine.base import CheckpointEngineRegistry
+
+    stub_name = "verl.checkpoint_engine.nixl_checkpoint_engine"
+    stub = types.ModuleType(stub_name)
+
+    @dataclasses.dataclass
+    class NixlAgentMetadata:
+        agent_name: str
+        agent_metadata: bytes
+        zmq_ip: str
+        zmq_port: int
+
+    class NixlAgent:
+        pass
+
+    stub.NixlAgentMetadata = NixlAgentMetadata
+    stub.NixlAgent = NixlAgent
+    path = Path(__file__).resolve().parents[2] / "verl/checkpoint_engine/sharded_nixl_checkpoint_engine.py"
+    spec = importlib.util.spec_from_file_location("_sharded_nixl_ce_cpu_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    prev = sys.modules.get(stub_name)
+    try:
+        sys.modules[stub_name] = stub
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+    finally:
+        # the stub-backed class must not stay registered: other tests expect the recorded import error
+        CheckpointEngineRegistry._registry.pop("sharded_nixl", None)
+        sys.modules.pop(spec.name, None)
+        if prev is None:
+            sys.modules.pop(stub_name, None)
+        else:
+            sys.modules[stub_name] = prev
+    return mod
+
+
 def test_slice_hash_is_64_bit_and_alignment_free():
     """The per-slice checksum is the XOR of the slice's 8-byte words (an 8-bit XOR of its bytes
     misses swapped bytes) and does not depend on where the slice sits in the buffer."""
-    pytest.importorskip("nixl")
-    from verl.checkpoint_engine.sharded_nixl_checkpoint_engine import _hash_u8_many
+    _hash_u8_many = _load_sharded_nixl_engine_mod()._hash_u8_many
 
     torch.manual_seed(0)
     data = torch.randint(0, 256, (37,), dtype=torch.uint8)
@@ -596,3 +649,191 @@ def test_slices_validation_and_rolloutlayout_roundtrip():
         plan_rank_local_writes(
             {"w": [ParamEntry("w", (4, 6), BF16, "w", 0)]}, {"w": (0, 48)}, {"w": []}, normalize_slices(sl)
         )
+
+
+# ---------------------------------------------------------------- retry quiescence & guards
+
+
+class _FakeNixlAgent:
+    """Minimal ``NixlAgent`` stand-in backed by an inproc ZMQ PULL socket for ``prepare`` tests."""
+
+    def __init__(self, name: str):
+        import asyncio
+        from collections import defaultdict, deque
+
+        import zmq
+        import zmq.asyncio
+
+        self.agent_name = name
+        self._ctx = zmq.asyncio.Context()
+        self.socket = self._ctx.socket(zmq.PULL)
+        self.socket.bind(f"inproc://snx-test-{name}-{id(self)}")
+        self.messages: dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)
+        self._notifs: dict[str, deque[bytes]] = defaultdict(deque)
+
+    def close(self):
+        self.socket.close(0)
+        self._ctx.term()
+
+    def get_agent_metadata(self):
+        mod = _load_sharded_nixl_engine_mod()
+        return mod.NixlAgentMetadata(self.agent_name, b"meta", "127.0.0.1", 0)
+
+    def add_remote_agent(self, meta):
+        return meta.agent_name
+
+    def remove_remote_agent(self, name):
+        pass
+
+    def get_new_notifs(self):
+        out = {k: list(v) for k, v in self._notifs.items() if v}
+        self._notifs.clear()
+        return out
+
+    async def read_message(self, peer: str):
+        return await self.messages[peer].get()
+
+
+def _cpu_engine(name: str, **kwargs):
+    """A ``device="cpu"`` engine on a ``_FakeNixlAgent``, with its staging buffers set so ``prepare``
+    allocates none (pinned host memory needs a GPU driver)."""
+    eng = _load_sharded_nixl_engine_mod().ShardedNixlCheckpointEngine(bucket_size=1024, device="cpu", **kwargs)
+    eng.agent = _FakeNixlAgent(name)
+    eng.bufs = [torch.zeros(1024, dtype=torch.uint8) for _ in range(eng.num_buffers)]
+    eng.buf_descs = [(buf.data_ptr(), 1024, 0) for buf in eng.bufs]
+    return eng
+
+
+def test_quiesce_waits_for_proc_transfers_before_reuse():
+    """``prepare`` on retry must wait for active ``PROC`` WRITEs to finish before releasing handles
+    or draining notifications, so staging buffers are not reused under an in-flight DMA."""
+    mod = _load_sharded_nixl_engine_mod()
+    eng = _cpu_engine("trainer0", notif_timeout_s=1.0)
+    agent = eng.agent
+    try:
+        polls = 0
+        released = []
+        handle = object()
+
+        def check_xfer_state(h):
+            nonlocal polls
+            assert h is handle
+            polls += 1
+            if polls < 3:
+                return "PROC"
+            # Emulate UCX posting the trailing notification as the WRITE completes.
+            agent._notifs["gen0"].append(b"ACK" + mod._ACK_HDR.pack(1, 0))
+            return "DONE"
+
+        def release_xfer_handle(h):
+            assert h is handle and polls >= 3, "released while the WRITE was still running"
+            released.append(h)
+
+        agent.check_xfer_state = check_xfer_state
+        agent.release_xfer_handle = release_xfer_handle
+        eng._inflight[0] = [handle]
+
+        meta = eng.prepare()
+
+        assert polls == 3 and released == [handle] and eng._inflight == {}
+        assert agent.get_new_notifs() == {}
+        assert meta.attempt == 1
+    finally:
+        agent.close()
+
+
+def test_quiesce_keeps_running_transfer_and_blocks_retry():
+    """A WRITE still running at the deadline is never released (UCX can only try to cancel it, and it
+    may still land): ``prepare`` raises and keeps the handle until a later ``prepare`` finds it stopped."""
+    eng = _cpu_engine("trainer0", notif_timeout_s=0.01)
+    try:
+        handle, state, released = object(), ["PROC"], []
+        eng.agent.check_xfer_state = lambda h: state[0]
+        eng.agent.release_xfer_handle = released.append
+        eng._inflight[0] = [handle]
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="still running"):
+                eng.prepare()
+            assert eng._inflight == {0: [handle]} and released == []
+
+        state[0] = "DONE"
+        eng.prepare()
+        assert eng._inflight == {} and released == [handle]
+    finally:
+        eng.agent.close()
+
+
+def test_retry_same_global_steps_uses_distinct_sync_id_and_ignores_late_notifs():
+    """Retrying the same ``global_steps`` advances the attempt half of the 64-bit sync ID so delayed
+    notifications and ZMQ messages from the failed attempt cannot match the retry, while a step
+    mismatch within the same attempt still reaches the callers' sync-id checks."""
+    import asyncio
+
+    mod = _load_sharded_nixl_engine_mod()
+    cls = mod.ShardedNixlCheckpointEngine
+    t_eng = _cpu_engine("t0", is_master=True, notif_timeout_s=1.0)
+    g_eng = _cpu_engine("g0", notif_timeout_s=1.0)
+    g_agent = g_eng.agent
+
+    def _connect():
+        metas = [t_eng.prepare(), g_eng.prepare()]
+        tkw, gkw = cls.build_topology(1, 1, metas)
+        t_eng.init_process_group(**{k: v[0] for k, v in tkw.items()})
+        g_eng.init_process_group(**{k: v[0] for k, v in gkw.items()})
+
+    try:
+        _connect()
+        s1_t, s1_g = t_eng._next_sync_id(global_steps=1), g_eng._next_sync_id(global_steps=1)
+        assert s1_t == s1_g
+
+        # Retry the same global_steps=1 after a failure.
+        _connect()
+        s2_t, s2_g = t_eng._next_sync_id(global_steps=1), g_eng._next_sync_id(global_steps=1)
+        assert s2_t == s2_g and s2_t != s1_t and (s2_t >> 32) > (s1_t >> 32)
+
+        # Attempt-1 traffic arriving after prepare() is dropped; attempt-2 traffic for another step is
+        # kept (parked or returned), so a version mismatch still fails fast instead of timing out.
+        stale_snx = b"SNX" + mod._SNX_HDR.pack(s1_t, 0, 0, 0)
+        other_step_snx = b"SNX" + mod._SNX_HDR.pack(s2_t + 1, 0, 0, 0)
+        fresh_snx = b"SNX" + mod._SNX_HDR.pack(s2_t, 0, 0, 0)
+        g_agent._notifs["t0"].extend([stale_snx, other_step_snx, fresh_snx])
+        assert asyncio.run(g_eng._wait_notif("t0", b"SNX", s2_g, 0, 1.0)) == fresh_snx
+        assert list(g_eng._notifs.values()) == [other_step_snx]
+
+        g_agent.messages["t0"].put_nowait({"type": "hashes", "sync": s1_t, "k": 0, "rank": 0, "hashes": []})
+        g_agent.messages["t0"].put_nowait({"type": "sync", "sync": s2_t + 1})
+        assert asyncio.run(g_eng._read("t0", "sync", 1.0))["sync"] == s2_t + 1
+    finally:
+        t_eng.agent.close()
+        g_agent.close()
+
+
+def test_sharded_nixl_rejects_quantized_rollout_and_qat():
+    """``sharded_nixl``'s shard export bypasses the trainer-side rollout weight quantizer, so a quantized
+    checkpoint (also one under ``text_config``) or QAT must fail at startup; BF16 and other backends pass."""
+    from types import SimpleNamespace
+
+    from verl.utils.qat import dispatch_rollout_weight_quantizer
+
+    def _rollout(backend="sharded_nixl"):
+        return SimpleNamespace(
+            name="vllm",
+            checkpoint_engine=SimpleNamespace(backend=backend),
+            quantization=SimpleNamespace(linear=None, moe=None, ignore=[], config_file=None),
+        )
+
+    def _model(quantization_config=None, text_config=None, model_type="deepseek_v4"):
+        hf_config = SimpleNamespace(
+            model_type=model_type, quantization_config=quantization_config, text_config=text_config
+        )
+        return SimpleNamespace(local_path="/model", hf_config=hf_config)
+
+    fp8 = {"quant_method": "fp8"}
+    assert dispatch_rollout_weight_quantizer(model_config=_model(), rollout_config=_rollout()) is None
+    # DeepSeek-V4's native FP8 still passes through for the other backends
+    assert dispatch_rollout_weight_quantizer(model_config=_model(fp8), rollout_config=_rollout("nixl")) is not None
+    vlm = _model(text_config=SimpleNamespace(model_type="qwen3", quantization_config=fp8), model_type="qwen3_vl")
+    for model, qat in ((_model(fp8), None), (vlm, None), (_model(fp8), SimpleNamespace(enable=True, mode="fp8"))):
+        with pytest.raises(NotImplementedError, match="sharded_nixl"):
+            dispatch_rollout_weight_quantizer(model_config=model, rollout_config=_rollout(), qat_config=qat)

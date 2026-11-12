@@ -452,6 +452,11 @@ class vLLMColocateWorkerExtension:
         from vllm.distributed import parallel_state as ps
 
         pc = self.model_runner.vllm_config.parallel_config
+        if getattr(pc, "enable_eplb", False):
+            raise NotImplementedError(
+                "get_weight_ownership does not support EPLB: expert_map indexes physical expert slots, "
+                "not logical checkpoint IDs, and EPLB rebalances slots across ranks during generation"
+            )
         out = {
             "tp_size": int(pc.tensor_parallel_size),
             "tp_rank": int(ps.get_tensor_model_parallel_rank()),

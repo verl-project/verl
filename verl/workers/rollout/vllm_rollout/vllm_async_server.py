@@ -1475,6 +1475,9 @@ class vLLMHttpServer:
                     f"but got {weight_transfer_backend!r}"
                 )
             engine_kwargs["weight_transfer_config"] = {"backend": VERL_DELTA_WEIGHT_TRANSFER_BACKEND}
+        elif getattr(checkpoint_config, "backend", None) == "sharded_nixl":
+            if engine_kwargs.get("enable_eplb", False) or engine_kwargs.get("enable-eplb", False):
+                raise NotImplementedError("sharded_nixl with vLLM does not support EPLB")
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""
