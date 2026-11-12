@@ -281,10 +281,9 @@ Two registered families:
     teacher's top-k support.
   - `forward_kl_topk_tail`: a coarse-grained forward KL that additionally
     collapses every non-top-k token into one aggregate tail bucket.
-- **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
-  `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
-  computed from the student's `log_probs` and the teacher's single
-  `log_prob` at the sampled token.
+- **Single-token losses** (`kl`, `k1`, `abs`, `mse`, `k2`,
+  `low_var_kl`, `k3`): computed from the student and teacher log
+  probabilities at the sampled token.
 
 ### `distillation.distillation_loss.topk` (int, optional)
 
@@ -341,27 +340,17 @@ How the distillation signal is applied. `true` corresponds to PG OPD, `false` to
 
 - `use_policy_gradient=False` + `loss_mode="k1"` or `"kl"` $\to$ `ValueError`.
   The direct loss gradient is independent of the teacher log probabilities.
-- `use_policy_gradient=True` + `loss_mode="k3"` or `"low_var_kl"` $\to$ `ValueError`.
-  Use `k1` or `kl` for reverse-KL policy-gradient distillation. Although the k1
-  and k3 estimators have the same on-policy expectation, using a detached k3
-  reward omits a parameter-dependent term. With student distribution $p$ and
-  teacher distribution $q$, at a fixed state with all clamps and PPO clipping
-  inactive, the expected on-policy loss gradient is
-  $\nabla_\theta \mathrm{KL}(p\|q) - \nabla_\theta \mathrm{KL}(q\|p)$,
-  which can point against the reverse-KL gradient.
+- `use_policy_gradient=True` with `abs`, `mse`, `k2`, `k3`, or `low_var_kl`
+  raises `ValueError`. Use `k1` or `kl` for reverse-KL policy gradients.
+  These non-negative losses can be large whether the student overestimates or
+  underestimates the teacher's token probability. As negative rewards, they
+  favor tokens with smaller penalties, which can move the student away from
+  the teacher. The k1 estimator keeps the sign of
+  $\log \pi_\theta(y_t \mid s_t) - \log \nu(y_t \mid s_t)$.
 - `use_policy_gradient=True` with either teacher-top-k forward KL mode $\to$
   warning. The
   PG update only moves $\nabla_\theta\log\pi_\theta(y_t|s_t)$ for the sampled token $y_t$, so the top-$k$
   distributional signal is largely unused.
-
-**Compatibility:** The Python `DistillationLossConfig` default for
-`use_policy_gradient` is now `False`, matching the existing YAML default and
-retaining `loss_mode="k3"`. Previously accepted k3/low_var_kl PG configurations
-now fail at construction. For reverse-KL PG, set both `loss_mode="k1"` (or
-`"kl"`) and `use_policy_gradient=True`. Direct supervised k3 remains available;
-it is a different update, not an equivalent replacement for reverse-KL PG.
-This validation does not change the loss formulas, PPO clipping, or other
-estimators' behavior.
 
 ### `distillation.distillation_loss.policy_loss_mode` (str)
 

@@ -51,7 +51,8 @@ class DistillationLossConfig(BaseConfig):
     use_policy_gradient (bool):
         Whether to incorporate distillation loss as a reward, as done
         by https://thinkingmachines.ai/blog/on-policy-distillation/. Use loss_mode=k1 or kl for
-        reverse-KL policy gradients; k3 and low_var_kl are rejected.
+        reverse-KL policy gradients. The non-negative single-token losses abs, mse, k2, k3,
+        and low_var_kl are rejected in this mode.
         Otherwise, distillation loss is directly backpropagated as a supervised loss,
         as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
     policy_loss_mode (str):
@@ -103,6 +104,7 @@ class DistillationLossConfig(BaseConfig):
     loss_settings: Optional[dict] = None
 
     def __post_init__(self):
+        """Resolve the loss settings and validate the selected update mode."""
         self._mutable_fields.add("loss_settings")
         from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 
@@ -122,7 +124,7 @@ class DistillationLossConfig(BaseConfig):
                 "should move) is largely unused."
             )
 
-        if self.use_policy_gradient and self.loss_mode in ("k3", "low_var_kl"):
+        if self.use_policy_gradient and self.loss_mode in ("abs", "mse", "k2", "k3", "low_var_kl"):
             raise ValueError(
                 f"Using {self.loss_mode} with use_policy_gradient=True does not give the reverse-KL policy gradient. "
                 "Use loss_mode='k1' or 'kl' for reverse-KL policy-gradient distillation."

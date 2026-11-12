@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Guard distillation estimator/mode compatibility and valid policy gradients."""
+"""Check distillation loss compatibility and signed policy-gradient rewards."""
 
 from pathlib import Path
 
@@ -40,10 +40,10 @@ def test_k1_aliases_reject_direct_backpropagation(loss_mode, from_omegaconf):
             DistillationLossConfig(**settings)
 
 
-@pytest.mark.parametrize("loss_mode", ["k3", "low_var_kl"])
+@pytest.mark.parametrize("loss_mode", ["abs", "mse", "k2", "k3", "low_var_kl"])
 @pytest.mark.parametrize("from_omegaconf", [False, True])
-def test_k3_aliases_reject_policy_gradient(loss_mode, from_omegaconf):
-    """Reject detached k3 rewards through direct and OmegaConf construction."""
+def test_nonnegative_losses_reject_policy_gradient(loss_mode, from_omegaconf):
+    """Reject non-negative single-token losses as policy-gradient rewards."""
     settings = {"loss_mode": loss_mode, "use_policy_gradient": True}
     with pytest.raises(ValueError, match="reverse-KL policy gradient"):
         if from_omegaconf:
@@ -63,49 +63,30 @@ def test_default_distillation_mode_matches_yaml():
 
 
 @pytest.mark.parametrize(
-    "loss_mode,use_policy_gradient", [("k1", True), ("kl", True), ("k3", False), ("low_var_kl", False)]
+    "loss_mode,use_policy_gradient",
+    [
+        ("k1", True),
+        ("kl", True),
+        ("abs", False),
+        ("mse", False),
+        ("k2", False),
+        ("k3", False),
+        ("low_var_kl", False),
+    ],
 )
 def test_supported_distillation_modes_remain_available(loss_mode, use_policy_gradient):
-    """The guard must preserve PG k1 aliases and supervised k3 aliases."""
+    """Allow signed k1 rewards and direct backpropagation of non-negative losses."""
     config = DistillationLossConfig(loss_mode=loss_mode, use_policy_gradient=use_policy_gradient)
     assert config.loss_settings.use_estimator
     assert not config.loss_settings.use_topk
 
 
 @pytest.mark.parametrize("loss_mode", ["k1", "kl"])
-@pytest.mark.parametrize(
-    "student_probabilities,teacher_probabilities",
-    [
-        ([0.5, 0.5], [0.5, 0.5]),
-        ([0.6, 0.4], [0.55, 0.45]),
-        ([0.99, 0.01], [0.01, 0.99]),
-        ([0.8, 0.2], [0.2, 0.8]),
-        ([0.2, 0.8], [0.8, 0.2]),
-        ([0.2, 0.3, 0.5], [0.5, 0.4, 0.1]),
-    ],
-    ids=["equal", "mild", "severe", "opposing", "swapped", "three-actions"],
-)
-def test_k1_alias_policy_gradient_matches_reverse_kl(loss_mode, student_probabilities, teacher_probabilities):
-    """The exact expected API gradient must match autograd and finite differences of reverse KL."""
-    student_probs = torch.tensor(student_probabilities, dtype=torch.float64)
-    teacher_probs = torch.tensor(teacher_probabilities, dtype=torch.float64)
-    logits = student_probs.log().requires_grad_()
-    log_probs = logits.log_softmax(dim=-1)
-    teacher_log_probs = teacher_probs.log()
-    reference_kl = (log_probs.exp() * (log_probs - teacher_log_probs)).sum()
-    reference_gradient = torch.autograd.grad(reference_kl, logits, retain_graph=True)[0]
-
-    finite_difference = torch.empty_like(logits)
-    for index in range(logits.numel()):
-        delta = torch.zeros_like(logits)
-        delta[index] = 1e-6
-        plus = (logits.detach() + delta).log_softmax(dim=-1)
-        minus = (logits.detach() - delta).log_softmax(dim=-1)
-        plus_kl = (plus.exp() * (plus - teacher_log_probs)).sum()
-        minus_kl = (minus.exp() * (minus - teacher_log_probs)).sum()
-        finite_difference[index] = (plus_kl - minus_kl) / 2e-6
-    torch.testing.assert_close(reference_gradient, finite_difference, rtol=1e-7, atol=1e-10)
-
+@pytest.mark.parametrize("student_prob,teacher_prob", [(0.8, 0.2), (0.2, 0.8)], ids=["over", "under"])
+def test_policy_gradient_k1_aliases_use_signed_log_ratio(loss_mode, student_prob, teacher_prob):
+    """At ratio one, the policy loss must equal the signed student-teacher log ratio."""
+    student_log_prob, teacher_log_prob = torch.tensor([student_prob, teacher_prob], dtype=torch.float64).log()
+    padding = torch.zeros_like(student_log_prob)
     actor = ActorConfig(strategy="fsdp", rollout_n=1, ppo_mini_batch_size=1, ppo_micro_batch_size_per_gpu=1)
     config = DistillationConfig(
         enabled=True,
@@ -125,38 +106,18 @@ def test_k1_alias_policy_gradient_matches_reverse_kl(loss_mode, student_probabil
             log_prob_min_clamp=None,
         ),
     )
-    # Validated configuration only; no model, worker, distributed group, or GPU is created.
-    expected_loss = logits.sum() * 0.0
-    for action in range(student_probs.numel()):
-        sampled_log_prob = log_probs[action]
-        ratio = (sampled_log_prob - sampled_log_prob.detach()).exp()
-        assert 1.0 - config.distillation_loss.clip_ratio_low < ratio.item()
-        assert ratio.item() < 1.0 + config.distillation_loss.clip_ratio_high
-        data = TensorDict(
-            {
-                "prompts": torch.tensor([[0]]),
-                "responses": torch.tensor([[action]]),
-                "attention_mask": torch.ones(1, 2, dtype=torch.int64),
-                "response_mask": torch.ones(1, 1, dtype=torch.bool),
-                "old_log_probs": sampled_log_prob.detach().reshape(1, 1),
-                "teacher_logprobs": torch.stack([teacher_log_probs[action], teacher_log_probs.new_zeros(())]).reshape(
-                    2, 1
-                ),
-            },
-            batch_size=[],
-        )
-        tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=1, global_batch_size=1)
-        output = {"log_probs": torch.stack([sampled_log_prob, sampled_log_prob.new_zeros(())])}
-        loss, _ = distillation_loss(actor, config, output, data)
-        # Sampling weights are fixed when taking the expectation of the SGD estimator.
-        expected_loss = expected_loss + student_probs[action].detach() * loss
-
-    actual_gradient = torch.autograd.grad(expected_loss, logits)[0]
-    torch.testing.assert_close(actual_gradient, reference_gradient, rtol=1e-10, atol=1e-12)
-    updated_log_probs = (logits.detach() - 0.01 * actual_gradient).log_softmax(dim=-1)
-    updated_kl = (updated_log_probs.exp() * (updated_log_probs - teacher_log_probs)).sum()
-    if torch.equal(student_probs, teacher_probs):
-        torch.testing.assert_close(actual_gradient, torch.zeros_like(actual_gradient), atol=1e-12, rtol=0)
-        torch.testing.assert_close(updated_kl, reference_kl.detach(), atol=1e-12, rtol=0)
-    else:
-        assert updated_kl < reference_kl.detach()
+    data = TensorDict(
+        {
+            "prompts": torch.tensor([[0]]),
+            "responses": torch.tensor([[1]]),
+            "attention_mask": torch.ones(1, 2, dtype=torch.int64),
+            "response_mask": torch.ones(1, 1, dtype=torch.bool),
+            "old_log_probs": student_log_prob.reshape(1, 1),
+            "teacher_logprobs": torch.stack([teacher_log_prob, padding]).unsqueeze(-1),
+        },
+        batch_size=[],
+    )
+    tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=1, global_batch_size=1)
+    output = {"log_probs": torch.stack([student_log_prob, padding])}
+    loss, _ = distillation_loss(actor, config, output, data)
+    torch.testing.assert_close(loss, student_log_prob - teacher_log_prob)
