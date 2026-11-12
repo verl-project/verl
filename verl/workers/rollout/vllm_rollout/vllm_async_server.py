@@ -302,9 +302,9 @@ class vLLMHttpServer:
         project = self.config.trace.project_name
         experiment_name = self.config.trace.experiment_name
         try:
-            from rl_insight import get_run_context
+            from rl_insight import get_context
 
-            context = get_run_context()
+            context = get_context()
         except ImportError:
             return project, experiment_name
         if context is None:
