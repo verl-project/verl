@@ -70,7 +70,7 @@ env:
 
 jobs:
   e2e_sft_llm_ascend:
-    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (github.repository_owner == 'verl-project') }}
+    if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:

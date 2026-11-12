@@ -60,7 +60,7 @@ env:
 
 jobs:
   model_rmpad_ascend:
-    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (github.repository_owner == 'verl-project') }}
+    if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
@@ -117,7 +117,7 @@ jobs:
   # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
-    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (github.repository_owner == 'verl-project') }}
+    if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
