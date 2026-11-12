@@ -67,12 +67,12 @@ class TestAllGatherActorV2(Worker):
 
 def test_all_gather_torch():
     """
-    In this test, we instantiate 4 GPUs in a group and test the all_gather
+    Test all_gather with four workers by default, or the count requested by CI.
     """
     ray.init()
 
-    # create 4 workers, each hold a GPU
-    resource_pool = RayResourcePool([4], use_gpu=True)
+    world_size = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", "4"))
+    resource_pool = RayResourcePool([world_size], use_gpu=True)
     class_with_args = RayClassWithInitArgs(cls=TestAllGatherActor, size=2)
 
     worker_group = RayWorkerGroup(
@@ -88,19 +88,19 @@ def test_all_gather_torch():
 
     output = output[0]
     print(output)
-    assert torch.all(output == torch.tensor([0, 0, 1, 1, 2, 2, 3, 3], dtype=torch.int64))
+    assert torch.all(output == torch.arange(world_size, dtype=torch.int64).repeat_interleave(2))
 
     ray.shutdown()
 
 
 def test_all_gather_torch_v2():
     """
-    In this test, we instantiate 4 GPUs in a group and test the all_gather
+    Test all_gather with four workers by default, or the count requested by CI.
     """
     ray.init()
 
-    # create 4 workers, each hold a GPU
-    resource_pool = RayResourcePool([4], use_gpu=True)
+    world_size = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", "4"))
+    resource_pool = RayResourcePool([world_size], use_gpu=True)
     class_with_args = RayClassWithInitArgs(cls=TestAllGatherActorV2, size=2)
 
     worker_group = RayWorkerGroup(
@@ -113,6 +113,6 @@ def test_all_gather_torch_v2():
 
     output = output[0]
     print(output)
-    assert torch.all(output == torch.tensor([0, 0, 1, 1, 2, 2, 3, 3], dtype=torch.int64))
+    assert torch.all(output == torch.arange(world_size, dtype=torch.int64).repeat_interleave(2))
 
     ray.shutdown()

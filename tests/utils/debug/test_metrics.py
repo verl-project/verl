@@ -63,6 +63,21 @@ class TestMetrics(unittest.TestCase):
         assert metrics["training/rollout_logprobs_diff_max"] == (rollout[0, 0] - actor[0, 0]).abs().item()
         assert metrics["training/rollout_logprobs_diff_mean"] == metrics["training/rollout_logprobs_diff_max"] / 2
 
+    def test_mismatch_count_follows_the_casted_diff_across_dtypes(self):
+        rollout = torch.tensor([[-0.5, -2.0, -0.25]], dtype=torch.bfloat16)
+        actor = torch.tensor([[-0.5, -2.0, -0.75]], dtype=torch.float32)
+        data = DataProto.from_dict(
+            {
+                "rollout_log_probs": rollout,
+                "old_log_probs": actor,
+                "response_mask": torch.tensor([[1, 1, 1]]),
+                "responses": torch.zeros((1, 3)),
+            }
+        )
+        metrics = calculate_debug_metrics(data)
+        assert metrics["training/rollout_logprobs_mismatch_count"] == 1
+        assert metrics["training/rollout_logprobs_diff_max"] == 0.5
+
     def test_all_masked_returns_invalid(self):
         data = DataProto.from_dict(
             {

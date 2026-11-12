@@ -1,7 +1,7 @@
 Ascend Image Guide
 ===================================
 
-Last updated: 11/09/2026.
+Last updated: 11/11/2026.
 
 
 Image Acquisition and Public Image Addresses
@@ -44,6 +44,20 @@ The ``_v0.9.1`` builds and their image tags retain the original dependencies and
 
 The current A2/A3/950 vLLM latest Dockerfiles use ``requirements-npu.txt`` from the cloned repository, then install ``triton-ascend==3.6.0.post2`` after installing verl.
 For example, build from the repository root with ``docker build -f docker/ascend/Dockerfile.ascend_9.2.1_a2 .``.
+
+.. note::
+
+   The CANN 9.2.1 A2/A3/950 vLLM Dockerfiles apply
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_
+   to Megatron-Bridge ``v0.5.0``. When Transformers already provides a native
+   Qwen3-ASR configuration, the patch skips Megatron-Bridge's vendored
+   AutoConfig, AutoModel, and AutoProcessor registrations to avoid a duplicate
+   ``qwen3_asr`` registration error during import. Otherwise, the vendored
+   registrations are retained.
+
+   Use the repository root as the Docker build context so that the Dockerfiles
+   can copy this patch. The images apply it during the build; no manual patching
+   is required inside the resulting containers.
 
 A2/A3 vLLM Current Dockerfile Target Component Versions
 -------------------------------------------------------------------

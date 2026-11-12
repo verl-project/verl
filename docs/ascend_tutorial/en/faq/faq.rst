@@ -188,9 +188,9 @@ Taking ``model.embed_tokens.weight`` from this example:
 References
 ----------
 
-- :doc:`Ascend Performance Tuning Guide <../dev_guide/performance/perf_tuning_on_ascend>`
-- :doc:`Ascend Quick Start Guide <../get_start/quick_start>`
-- :doc:`NPU-CI Contribution Guide <../contribution_guide/ascend_ci_guide>`
+- `Ascend Performance Tuning Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/performance/perf_tuning_on_ascend.html>`_
+- `Ascend Quick Start Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/quick_start.html>`_
+- `NPU-CI Contribution Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/contribution_guide/ascend_ci_guide.html>`_
 - Ascend NPU documentation: https://www.hiascend.com/en/document
 - CANN toolkit documentation: https://www.hiascend.com/eng/cann
 

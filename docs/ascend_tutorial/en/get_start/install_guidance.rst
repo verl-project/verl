@@ -1,7 +1,7 @@
 Ascend Installation Guide
 ==========================
 
-Last updated: 11/06/2026.
+Last updated: 11/11/2026.
 
 .. contents:: Table of Contents
    :local:
@@ -48,13 +48,13 @@ Atlas 800T A3
 ..
 
    [Note] For software installation on Ascend 950PR&950DT products,
-   refer to :doc:`Installation Guide (Ascend 950PR&950DT products) <install_guidance_950>`.
+   refer to `Installation Guide (Ascend 950PR&950DT products) <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance_950.html>`_.
 
 
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our :doc:`Ascend Image Guide <dockerfile_build_guidance>` or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our `Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_ or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -72,8 +72,10 @@ Deployment Guide
 1. Docker Image Acquisition, Build, and Usage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can obtain the relevant images from `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, or build them yourself from the Dockerfile. For details, refer to the
-:doc:`Ascend Image Guide <dockerfile_build_guidance>`.
+We recommend using the prebuilt images available from
+`quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ to reduce environment setup and dependency installation work.
+If you need a custom environment, you can build an image from the Dockerfile. For details on obtaining, building, and using images, refer to the
+`Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_.
 
 
 2. Custom Installation - vLLM + FSDP/Megatron
@@ -146,6 +148,17 @@ Source Installation
 ^^^^^^^^^^^^^^^^^^^^
 
 We provide a conda-based one-stop `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
+
+.. note::
+
+   When the Megatron backend is enabled, the script automatically applies
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_
+   to Megatron-Bridge ``v0.5.0``. With the Transformers ``5.14.1`` environment
+   used here, the patch preserves any native Qwen3-ASR registration and skips
+   the vendored AutoConfig, AutoModel, and AutoProcessor registrations when the
+   configuration is already registered. This prevents duplicate ``qwen3_asr``
+   registration errors when importing Megatron-Bridge. Keep the patch file in
+   the cloned verl repository when running the installation script.
 
 .. code:: bash
 
