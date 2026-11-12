@@ -641,13 +641,19 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     expert) — including MoE models where wrap typically lands at
     ``layers.<i>.mlp`` rather than the transformer-layer level.
 
-    Safe with nested units: ``submodule.state_dict()`` returns gathered tensors
-    for the unit being summoned but only sharded tensors for nested children.
-    Sharded entries collected first get overwritten when the child unit is
-    summoned later, so every LoRA tensor is gathered exactly once.
+    Nested units are collected during their own visit, without recursively
+    gathering them from a parent. Returned CPU tensors own their storage so
+    that resharding parameters after a summon cannot invalidate the export.
     """
     lora_params = OrderedDict()
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+    if fsdp_version(fsdp_module) == 1:
+        # Initialize handles from the actual root before summoning children.
+        _lazy_init(fsdp_module, fsdp_module)
+
+    def without_fsdp_wrappers(name):
+        """Normalize ownership paths before and during an FSDP1 summon."""
+        return ".".join(part for part in name.split(".") if part != "_fsdp_wrapped_module")
 
     for name, submodule in fsdp_module.named_modules():
         if name == "":
@@ -657,8 +663,8 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
             continue
         # Strip every ``_fsdp_wrapped_module.`` segment to match the names
         # downstream consumers (vllm LoRA loader, peft state_dict) expect.
-        clean_prefix = name.replace("_fsdp_wrapped_module.", "")
-        if clean_prefix.endswith(".model") or clean_prefix.endswith(".layers"):
+        clean_prefix = without_fsdp_wrappers(name)
+        if not clean_prefix or clean_prefix.endswith(".model") or clean_prefix.endswith(".layers"):
             continue
 
         # FSDP1 needs the explicit summon context; FSDP2 ``DTensor`` params
@@ -667,37 +673,48 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
 
         # Exclude nested FSDP children from both the pre-check and the state_dict so
         # their params are not gathered here and again when their own unit is visited.
-        nested_fsdp_names = {n for n, m in submodule.named_modules() if n != "" and fsdp_version(m) > 0}
+        # FSDP1 strips wrapper segments from parameter names during summon.
+        # Compare ownership in the same namespace before and inside the context.
+        nested_fsdp_names = {
+            without_fsdp_wrappers(n) for n, m in submodule.named_modules() if n != "" and fsdp_version(m) > 0
+        }
+        nested_prefixes = tuple(f"{name}." if name else "" for name in nested_fsdp_names)
 
+        # FSDP1 hides original names in FlatParameter._fqns. An independently
+        # wrapped LoRA leaf may expose only "weight", so include its prefix.
+        owned_params = [
+            (without_fsdp_wrappers(n), p)
+            for n, p in submodule.named_parameters()
+            if not without_fsdp_wrappers(n).startswith(nested_prefixes)
+        ]
         if not any(
-            "lora_" in n
-            for n, _ in submodule.named_parameters()
-            if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
+            "lora_" in f"{clean_prefix}.{original_name}"
+            for n, p in owned_params
+            for original_name in (getattr(p, "_fqns", None) or (n,))
         ):
             continue
 
-        if is_fsdp1:
-            submodule._is_root = True
-        summon_ctx = FSDP.summon_full_params(submodule, writeback=False) if is_fsdp1 else nullcontext()
+        summon_ctx = FSDP.summon_full_params(submodule, recurse=False, writeback=False) if is_fsdp1 else nullcontext()
 
         with summon_ctx:
+            # PEFT matches against whole-model module names. Add the unit's
+            # global prefix before filtering, while preserving adapter names.
             sub_state_dict = {
-                n: p
+                f"{clean_prefix}.{without_fsdp_wrappers(n)}": p
                 for n, p in submodule.named_parameters()
-                if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
+                if not without_fsdp_wrappers(n).startswith(nested_prefixes)
             }
             sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=sub_state_dict)
-            if not sub_lora_params:
-                continue
-            sub_lora_params = {
-                f"{clean_prefix}.{key}": (
-                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
-                )
-                for key, param in sub_lora_params.items()
-            }
-            lora_params.update(sub_lora_params)
-            if is_fsdp1:
-                submodule._is_root = False
+            lora_params.update(
+                {
+                    key: (
+                        param.full_tensor().detach().cpu().clone()
+                        if hasattr(param, "full_tensor")
+                        else param.detach().cpu().clone()
+                    )
+                    for key, param in sub_lora_params.items()
+                }
+            )
         get_torch_device().empty_cache()
 
     return lora_params
@@ -721,23 +738,20 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                 )
             lora_params = layered_summon_lora_params(module)
             if not lora_params:
-                import logging
-
-                logging.getLogger(__name__).warning("layered_summon returned empty, falling back to full summon")
-                # FSDP2 ``DTensor`` params all-gather via ``param.full_tensor()``;
-                # only FSDP1 needs the explicit summon context.
-                is_fsdp1 = fsdp_version(module) == 1
-                summon_ctx = (
-                    FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True) if is_fsdp1 else nullcontext()
-                )
-                with summon_ctx:
-                    lora_params = get_peft_model_state_dict(peft_model)
-                    lora_params = {
-                        name: param.full_tensor().detach().cpu()
-                        if hasattr(param, "full_tensor")
-                        else param.detach().cpu()
-                        for name, param in lora_params.items()
-                    }
+                if fsdp_version(module) == 1:
+                    raise RuntimeError(
+                        "layered_summon returned no LoRA parameters; refusing full-model fallback. "
+                        "Check the FSDP wrapping policy and adapter parameter names."
+                    )
+                # FSDP2 retains DTensor references without gathering base weights.
+                # Preserve its root-only layout fallback, materializing only LoRA.
+                lora_params = get_peft_model_state_dict(peft_model)
+                lora_params = {
+                    name: param.full_tensor().detach().cpu().clone()
+                    if hasattr(param, "full_tensor")
+                    else param.detach().cpu().clone()
+                    for name, param in lora_params.items()
+                }
                 get_torch_device().empty_cache()
         else:
             with FSDP.summon_full_params(module, writeback=False):
