@@ -109,19 +109,23 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
         orig_ndim = hidden_states.ndim
         assert orig_ndim in (2, 3), f"Invalid hidden_states shape, received {hidden_states.shape}"
 
+        # Capture requires_grad BEFORE any reshaping: forward() runs with grad mode
+        # disabled, so flatten() of a NON-contiguous input returns a *copy* whose
+        # requires_grad is False (a contiguous input returns a view and keeps the
+        # flag). The saved tensor's flag is therefore unreliable; backward() gates
+        # on ctx.needs_input_grad instead of re-stamping the flag here.
+        output_requires_grad = hidden_states.requires_grad or vocab_weights.requires_grad
+
         orig_batch_size = -1
         if orig_ndim == 3:
             assert input_ids.ndim == 2, f"input_ids shape doesn't match, {hidden_states.shape} {input_ids.shape}"
             orig_batch_size = hidden_states.shape[0]
-            hidden_states_requires_grad = hidden_states.requires_grad
             hidden_states = hidden_states.flatten(0, 1)
-            hidden_states.requires_grad_(hidden_states_requires_grad)
             input_ids = input_ids.flatten(0, 1)
 
         T = hidden_states.shape[0]
 
         # Allocate memory for outputs
-        output_requires_grad = hidden_states.requires_grad or vocab_weights.requires_grad
         # Logits are upcasted to fp32 before computing log_probs, which are also fp32
         log_probs = torch.zeros(T, device=hidden_states.device, dtype=torch.float32, requires_grad=output_requires_grad)
         entropy = hidden_states.new_zeros(T, requires_grad=output_requires_grad)
@@ -171,12 +175,21 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
 
         T = hidden_states.shape[0]
 
-        # Allocate memory for outputs
+        # Allocate memory for outputs.
+        # Gate on ctx.needs_input_grad, NOT on the saved tensors' requires_grad:
+        # the tensor saved in forward() is the post-flatten one, and flatten of a
+        # NON-contiguous input (with grad mode off) returns a requires_grad=False
+        # copy. Gating on that flag silently returned dhidden_states=None, so the
+        # entire trunk upstream of the LM head trained with zero gradient while
+        # lm_head still updated and every forward-side metric looked normal (the
+        # only symptom was grad_norm dropping ~8x). needs_input_grad is recorded
+        # by autograd at apply() time and is immune to how saved tensors were
+        # transformed.
         dhidden_states = None
-        if hidden_states.requires_grad:
+        if ctx.needs_input_grad[0]:
             dhidden_states = torch.zeros_like(hidden_states)
         dvocab_weights = None
-        if vocab_weights.requires_grad:
+        if ctx.needs_input_grad[1]:
             dvocab_weights = torch.zeros_like(vocab_weights)
 
         # Perform backward one chunk at a time
@@ -198,13 +211,13 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
                 temperature=temperature,
             )
 
-            if hidden_states.requires_grad:
+            if dhidden_states is not None:
                 dhidden_states[chunk_start:chunk_end] += h
-            if vocab_weights.requires_grad:
+            if dvocab_weights is not None:
                 dvocab_weights += v
 
         # Cast the output back to the original input dimension
-        if orig_ndim == 3 and hidden_states.requires_grad:
+        if orig_ndim == 3 and dhidden_states is not None:
             hidden_size = hidden_states.shape[-1]
             dhidden_states = dhidden_states.view(orig_batch_size, -1, hidden_size)
 
