@@ -83,6 +83,7 @@ if [ "$mode" = before ]; then
     emit_snapshot "$root/before"
 fi
 
+
 if [ "$mode" = after ]; then
     # Console output is sufficient for users who cannot access the runner or artifacts.
     emit_snapshot "$root/after"
