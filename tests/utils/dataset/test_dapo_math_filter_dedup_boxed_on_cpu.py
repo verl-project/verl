@@ -20,8 +20,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from examples.data_preprocess import dapo_math_boxed as generator
-from examples.data_preprocess.dapo_math_boxed import (
+from examples.data_preprocess import dapo_math_filter_dedup_boxed as generator
+from examples.data_preprocess.dapo_math_filter_dedup_boxed import (
     BOXED_SUFFIX,
     RAW_DATA_SOURCE,
     TARGET_DATA_SOURCE,
@@ -33,7 +33,7 @@ from verl.utils.reward_score import default_compute_score
 
 @pytest.fixture
 def sample_raw_rows():
-    """Construct synthetic dapo_filter rows matching the upstream Parquet schema."""
+    """Construct synthetic Jiawei415/DPAO_filter rows matching the upstream Parquet schema."""
     return [
         {
             "data_source": RAW_DATA_SOURCE,
@@ -70,32 +70,10 @@ def test_prepare_train_rows_rewrites_only_data_source_and_preserves_order(sample
     assert pq.read_table(tmp_path / "train.parquet").to_pylist() == prepared
 
 
-def test_aaabiao_prompt_deduplication_matches_jiawei415_rows(sample_raw_rows, tmp_path):
-    """Verify prompt deduplication on aaabiao/dapo_filter produces identical rows to Jiawei415/DPAO_filter."""
-    with_duplicate_prompt = deepcopy(sample_raw_rows)
-    duplicate_entry = deepcopy(sample_raw_rows[1])
-    duplicate_entry["extra_info"]["index"] = "00000000-0000-4000-8000-000000009999"
-    with_duplicate_prompt.insert(2, duplicate_entry)
-
-    from_jiawei = prepare_train_rows(sample_raw_rows, deduplicate_prompts=False, expected_rows=len(sample_raw_rows))
-    from_aaabiao = prepare_train_rows(
-        with_duplicate_prompt,
-        deduplicate_prompts=True,
-        expected_raw_rows=len(with_duplicate_prompt),
-        expected_rows=len(sample_raw_rows),
-    )
-    assert from_aaabiao == from_jiawei
-    art_j = write_parquet(from_jiawei, tmp_path / "jiawei.parquet")
-    art_a = write_parquet(from_aaabiao, tmp_path / "aaabiao.parquet")
-    assert art_a["canonical_rows_sha256"] == art_j["canonical_rows_sha256"]
-
-
 def test_row_count_mismatch_is_rejected(sample_raw_rows):
-    """Reject unexpected unique or raw row counts."""
-    with pytest.raises(ValueError, match="Expected 12691 unique training rows"):
+    """Reject unexpected row counts."""
+    with pytest.raises(ValueError, match="Expected 12691 training rows"):
         prepare_train_rows(sample_raw_rows)
-    with pytest.raises(ValueError, match="Expected 10 raw training rows"):
-        prepare_train_rows(sample_raw_rows, expected_raw_rows=10, expected_rows=len(sample_raw_rows))
 
 
 @pytest.mark.parametrize(
@@ -117,7 +95,7 @@ def test_row_count_mismatch_is_rejected(sample_raw_rows):
     ],
 )
 def test_corrupted_or_duplicate_rows_are_rejected(sample_raw_rows, mutator, match):
-    """Reject corrupted rows, invalid metadata, and un-deduplicated duplicates."""
+    """Reject corrupted rows, invalid metadata, and duplicate UUIDs or prompts."""
     mutator(sample_raw_rows)
     with pytest.raises(ValueError, match=match):
         prepare_train_rows(sample_raw_rows, expected_rows=len(sample_raw_rows))
@@ -125,32 +103,31 @@ def test_corrupted_or_duplicate_rows_are_rejected(sample_raw_rows, mutator, matc
 
 def test_offline_cli_verifies_hash_manifest_and_hdfs_copy_failure(sample_raw_rows, tmp_path, monkeypatch):
     """Verify offline CLI hash checking, lineage manifest fields, and HDFS copy error handling."""
-    sources = deepcopy(generator.DAPO_FILTER_SOURCES)
-    spec = sources["Jiawei415/DPAO_filter"]
+    spec = deepcopy(generator.DAPO_FILTER_DEDUP_TRAIN_SOURCE)
     cache = tmp_path / "sources"
     staged = cache / spec["repo_id"].replace("/", "--") / spec["filename"]
     staged.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(sample_raw_rows), staged)
     spec["bytes"] = staged.stat().st_size
     spec["sha256"] = generator.digest(staged)
-    spec["raw_rows"] = len(sample_raw_rows)
 
-    monkeypatch.setattr(generator, "DAPO_FILTER_SOURCES", sources)
-    monkeypatch.setattr(generator, "EXPECTED_UNIQUE_ROWS", len(sample_raw_rows))
+    monkeypatch.setattr(generator, "DAPO_FILTER_DEDUP_TRAIN_SOURCE", spec)
+    monkeypatch.setattr(generator, "EXPECTED_ROWS", len(sample_raw_rows))
 
     output = tmp_path / "prepared"
     monkeypatch.setattr(
         sys,
         "argv",
-        ["dapo_math_boxed", "--source-dir", str(cache), "--output-dir", str(output)],
+        ["dapo_math_filter_dedup_boxed", "--source-dir", str(cache), "--output-dir", str(output)],
     )
     generator.main()
 
     manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["dataset_name"] == "dapo_math_filter_dedup_boxed"
     assert manifest["source"]["repo_id"] == "Jiawei415/DPAO_filter"
     assert manifest["source"]["license"] is None
     assert "no usage rights inferred" in manifest["source"]["license_status"]
-    assert manifest["lineage"]["difficulty_filtered_source"]["repo_id"] == "aaabiao/dapo_filter"
+    assert manifest["lineage"]["difficulty_filtered_predecessor"]["repo_id"] == "aaabiao/dapo_filter"
     assert manifest["lineage"]["prompt_deduplicated_source"]["repo_id"] == "Jiawei415/DPAO_filter"
     assert manifest["transform"]["raw_data_source"] == RAW_DATA_SOURCE
     assert manifest["transform"]["target_data_source"] == TARGET_DATA_SOURCE
@@ -168,7 +145,7 @@ def test_offline_cli_verifies_hash_manifest_and_hdfs_copy_failure(sample_raw_row
         sys,
         "argv",
         [
-            "dapo_math_boxed",
+            "dapo_math_filter_dedup_boxed",
             "--source-dir",
             str(cache),
             "--output-dir",

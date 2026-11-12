@@ -11,32 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare pinned filtered & deduplicated DAPO-Math boxed training data.
+"""Prepare pinned filtered & deduplicated DAPO-Math boxed training data (dapo_math_filter_dedup_boxed).
 
 Upstream lineage:
-1. ``aaabiao/dapo_filter`` (used in SimpleTIR, arXiv:2509.02479) filters
-   ``BytedTsinghua-SIA/DAPO-Math-17k`` by initial-model solve rate to discard overly
-   easy or overly hard tasks, formats prompts with the ``\\boxed{}`` suffix, and stores
-   13,044 rows (12,691 unique prompts plus 353 duplicate-prompt entries).
-2. ``Jiawei415/DPAO_filter`` (linked in ``docs/algo/otb.md``, arXiv:2602.07078) applies
+1. ``BytedTsinghua-SIA/DAPO-Math-17k`` provides the base verifiable math problem pool.
+2. ``aaabiao/dapo_filter`` (used in SimpleTIR, arXiv:2509.02479) filters tasks according
+   to initial-model accuracy—discarding problems with overly high or overly low solve
+   rates—and formats prompts with the ``\\boxed{}`` suffix, producing 13,044 rows
+   (12,691 unique prompts plus 353 duplicate-prompt entries).
+3. ``Jiawei415/DPAO_filter`` (linked in ``docs/algo/otb.md``, arXiv:2602.07078) applies
    first-occurrence ``prompt`` deduplication to ``aaabiao/dapo_filter``, yielding the
-   exact same 12,691 rows in the same order (``train/dapo_filter.parquet``).
+   12,691 unique rows in ``train/dapo_filter.parquet``.
 
-Both upstream files store ``data_source="dapo_filter"``, which raises
-``NotImplementedError`` in ``verl.utils.reward_score.default_compute_score``. This
-standalone script verifies pinned source bytes/SHA-256, deduplicates by ``prompt`` when
-loading ``aaabiao/dapo_filter`` so both sources produce the exact same 12,691 rows,
-rewrites only ``data_source`` to ``"math_dapo"`` while preserving prompts, answers,
-UUID indices, row order, and metadata verbatim, verifies reward dispatch on every row,
-and writes ``train.parquet`` plus a provenance ``manifest.json``.
+In ``Jiawei415/DPAO_filter``, ``train/dapo_filter.parquet`` stores
+``data_source="dapo_filter"``, which raises ``NotImplementedError`` in
+``verl.utils.reward_score.default_compute_score``. This standalone script verifies the
+pinned source bytes/SHA-256, rewrites only ``data_source`` to ``"math_dapo"`` while
+preserving prompts, ground-truth answers, UUID indices, row order, and metadata
+verbatim, verifies reward dispatch on every row, and writes ``train.parquet`` plus an
+auditable provenance ``manifest.json``.
 
 Validation data is intentionally kept separate from training preparation (for example,
 use dedicated AIME validation preprocessing rather than ``Jiawei415/DPAO_filter``'s
 ``test/`` files, where ``test/aime24.parquet`` and ``test/aime25.parquet`` are
 byte-identical).
 
-    python examples/data_preprocess/dapo_math_boxed.py \
-        --output-dir ~/data/dapo-math-boxed
+    python examples/data_preprocess/dapo_math_filter_dedup_boxed.py \
+        --output-dir ~/data/dapo_math_filter_dedup_boxed
 """
 
 import argparse
@@ -53,40 +54,19 @@ from verl.utils.hdfs_io import copy, makedirs
 from verl.utils.reward_score import default_compute_score
 
 BOXED_SUFFIX = "\n\nLet's think step by step and output the final answer within \\boxed{}."
-EXPECTED_UNIQUE_ROWS = 12691
+EXPECTED_ROWS = 12691
 RAW_DATA_SOURCE = "dapo_filter"
 TARGET_DATA_SOURCE = "math_dapo"
-DEFAULT_SOURCE = "Jiawei415/DPAO_filter"
 
-DAPO_FILTER_SOURCES = {
-    "Jiawei415/DPAO_filter": {
-        "repo_id": "Jiawei415/DPAO_filter",
-        "revision": "d4bb0f1f83c32cfa06424eee48bf0e4b90990ebd",
-        "filename": "train/dapo_filter.parquet",
-        "sha256": "47a9806fdb10be56336651384f0c1a7d2c7de6be2883b1b64a7d559bf6f9e39c",
-        "bytes": 2428814,
-        "raw_rows": 12691,
-        "deduplicate_prompts": False,
-        "license": None,
-        "license_status": "Not declared in the pinned Hugging Face dataset metadata; no usage rights inferred",
-        "repo_url": (
-            "https://huggingface.co/datasets/Jiawei415/DPAO_filter/tree/d4bb0f1f83c32cfa06424eee48bf0e4b90990ebd"
-        ),
-    },
-    "aaabiao/dapo_filter": {
-        "repo_id": "aaabiao/dapo_filter",
-        "revision": "0b10fea35812902fe4f6985f2064424ec460f9c0",
-        "filename": "train.parquet",
-        "sha256": "78b9c05dfa36982ac4b44c76c9a05335979c1d37371425271fa7f29fd2e7e436",
-        "bytes": 2395267,
-        "raw_rows": 13044,
-        "deduplicate_prompts": True,
-        "license": None,
-        "license_status": "Not declared in the pinned Hugging Face dataset metadata; no usage rights inferred",
-        "repo_url": (
-            "https://huggingface.co/datasets/aaabiao/dapo_filter/tree/0b10fea35812902fe4f6985f2064424ec460f9c0"
-        ),
-    },
+DAPO_FILTER_DEDUP_TRAIN_SOURCE = {
+    "repo_id": "Jiawei415/DPAO_filter",
+    "revision": "d4bb0f1f83c32cfa06424eee48bf0e4b90990ebd",
+    "filename": "train/dapo_filter.parquet",
+    "sha256": "47a9806fdb10be56336651384f0c1a7d2c7de6be2883b1b64a7d559bf6f9e39c",
+    "bytes": 2428814,
+    "license": None,
+    "license_status": "Not declared in the pinned Hugging Face dataset metadata; no usage rights inferred",
+    "repo_url": "https://huggingface.co/datasets/Jiawei415/DPAO_filter/tree/d4bb0f1f83c32cfa06424eee48bf0e4b90990ebd",
 }
 
 
@@ -102,23 +82,6 @@ def digest(path: str | Path) -> str:
 def canonical(value) -> str:
     """Serialize nested row values deterministically for semantic hashing."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def prompt_dedupe_key(prompt) -> str:
-    """Compute deterministic JSON key matching Jiawei415/DPAO_filter dedupe_downsample.py."""
-    return json.dumps(prompt, ensure_ascii=True, sort_keys=True)
-
-
-def dedupe_rows_by_prompt(raw_rows: list[dict]) -> list[dict]:
-    """Keep the first occurrence of each normalized prompt while preserving row order."""
-    seen: set[str] = set()
-    deduped: list[dict] = []
-    for row in raw_rows:
-        key = prompt_dedupe_key(row.get("prompt"))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(row)
-    return deduped
 
 
 def fetch_source(source: dict, local_dir: Path) -> Path:
@@ -170,30 +133,20 @@ def write_parquet(rows: list[dict], path: Path) -> dict:
     }
 
 
-def prepare_train_rows(
-    raw_rows: list[dict],
-    *,
-    deduplicate_prompts: bool = False,
-    expected_raw_rows: int | None = None,
-    expected_rows: int | None = None,
-) -> list[dict]:
-    """Validate raw dapo_filter training rows, optionally dedupe prompts, and rewrite data_source."""
+def prepare_train_rows(raw_rows: list[dict], *, expected_rows: int | None = None) -> list[dict]:
+    """Validate raw Jiawei415/DPAO_filter training rows and rewrite data_source to math_dapo."""
     if expected_rows is None:
-        expected_rows = EXPECTED_UNIQUE_ROWS
-    if expected_raw_rows is not None and len(raw_rows) != expected_raw_rows:
-        raise ValueError(f"Expected {expected_raw_rows} raw training rows, got {len(raw_rows)}")
+        expected_rows = EXPECTED_ROWS
+    if len(raw_rows) != expected_rows:
+        raise ValueError(f"Expected {expected_rows} training rows, got {len(raw_rows)}")
     if not raw_rows:
         raise ValueError("Training dataset cannot be empty")
-
-    candidate_rows = dedupe_rows_by_prompt(raw_rows) if deduplicate_prompts else raw_rows
-    if len(candidate_rows) != expected_rows:
-        raise ValueError(f"Expected {expected_rows} unique training rows, got {len(candidate_rows)}")
 
     seen_indices: set[str] = set()
     seen_prompts: set[str] = set()
     prepared: list[dict] = []
 
-    for row in candidate_rows:
+    for row in raw_rows:
         if row.get("data_source") != RAW_DATA_SOURCE:
             raise ValueError(f"Expected raw data_source={RAW_DATA_SOURCE!r}, got {row.get('data_source')!r}")
 
@@ -246,7 +199,7 @@ def prepare_train_rows(
 
 
 def main() -> None:
-    """Parse CLI arguments, verify pinned dapo_filter source, and write prepared Parquet + manifest."""
+    """Parse CLI arguments, verify pinned Jiawei415/DPAO_filter source, and write train.parquet + manifest."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output-dir",
@@ -257,16 +210,10 @@ def main() -> None:
         help="Local directory where train.parquet and manifest.json will be written.",
     )
     parser.add_argument(
-        "--source",
-        choices=tuple(DAPO_FILTER_SOURCES),
-        default=DEFAULT_SOURCE,
-        help="Pinned Hugging Face dataset repository to prepare (both produce the exact same 12,691 rows).",
-    )
-    parser.add_argument(
         "--source-dir",
         type=Path,
         default=None,
-        help="Optional offline checked source cache (<source-dir>/<publisher>--<dataset>/<filename>).",
+        help="Optional offline checked source cache (<source-dir>/Jiawei415--DPAO_filter/train/dapo_filter.parquet).",
     )
     parser.add_argument(
         "--hdfs-dir",
@@ -281,7 +228,7 @@ def main() -> None:
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    source = DAPO_FILTER_SOURCES[args.source]
+    source = DAPO_FILTER_DEDUP_TRAIN_SOURCE
     directory = source["repo_id"].replace("/", "--")
     if args.source_dir is not None:
         source_path = args.source_dir.expanduser().resolve() / directory / source["filename"]
@@ -291,35 +238,31 @@ def main() -> None:
         source_path = fetch_source(source, output / "raw" / directory)
 
     raw_rows = list(iter_parquet(source_path))
-    prepared_rows = prepare_train_rows(
-        raw_rows,
-        deduplicate_prompts=source["deduplicate_prompts"],
-        expected_raw_rows=source["raw_rows"],
-        expected_rows=EXPECTED_UNIQUE_ROWS,
-    )
+    prepared_rows = prepare_train_rows(raw_rows)
     train_artifact = write_parquet(prepared_rows, output / "train.parquet")
 
     manifest = {
+        "dataset_name": "dapo_math_filter_dedup_boxed",
         "schema_version": 1,
         "source": source,
         "lineage": {
             "upstream_base_dataset": "BytedTsinghua-SIA/DAPO-Math-17k",
-            "difficulty_filtered_source": {
+            "difficulty_filtered_predecessor": {
                 "repo_id": "aaabiao/dapo_filter",
-                "revision": DAPO_FILTER_SOURCES["aaabiao/dapo_filter"]["revision"],
-                "raw_rows": DAPO_FILTER_SOURCES["aaabiao/dapo_filter"]["raw_rows"],
+                "repo_url": "https://huggingface.co/datasets/aaabiao/dapo_filter",
+                "rows": 13044,
                 "description": (
-                    "Curated in the SimpleTIR setup by filtering DAPO-Math-17k according to initial-model "
-                    "accuracy to remove tasks with overly high or overly low solve rates, formatted with "
-                    "the boxed answer instruction."
+                    "Curated in the SimpleTIR setup (arXiv:2509.02479) by filtering DAPO-Math-17k according "
+                    "to initial-model accuracy to remove tasks with overly high or overly low solve rates, "
+                    "formatted with the boxed answer instruction."
                 ),
             },
             "prompt_deduplicated_source": {
                 "repo_id": "Jiawei415/DPAO_filter",
-                "revision": DAPO_FILTER_SOURCES["Jiawei415/DPAO_filter"]["revision"],
-                "rows": EXPECTED_UNIQUE_ROWS,
+                "revision": source["revision"],
+                "rows": EXPECTED_ROWS,
                 "description": (
-                    "Exact first-occurrence prompt deduplication of aaabiao/dapo_filter (removing 353 "
+                    "First-occurrence prompt deduplication of aaabiao/dapo_filter (removing 353 "
                     "duplicate-prompt entries while preserving all 12,691 unique rows and order verbatim)."
                 ),
             },
@@ -327,13 +270,9 @@ def main() -> None:
         "transform": {
             "raw_data_source": RAW_DATA_SOURCE,
             "target_data_source": TARGET_DATA_SOURCE,
-            "deduplicated_prompts": source["deduplicate_prompts"],
-            "raw_rows": len(raw_rows),
-            "prepared_rows": len(prepared_rows),
             "description": (
-                "Deduplicate by prompt if loading aaabiao/dapo_filter (13,044 -> 12,691 rows), then "
-                "rewrite only data_source from 'dapo_filter' to 'math_dapo' for reward dispatch while "
-                "preserving prompt, reward_model, extra_info, UUID indices, and row order verbatim."
+                "Rewrite only data_source from 'dapo_filter' to 'math_dapo' for reward dispatch; "
+                "preserve prompt, reward_model, extra_info, UUID indices, and row order verbatim."
             ),
             "prompt_suffix": BOXED_SUFFIX,
         },
@@ -347,7 +286,7 @@ def main() -> None:
         },
         "artifacts": {"train": train_artifact},
         "generator": {
-            "path": "examples/data_preprocess/dapo_math_boxed.py",
+            "path": "examples/data_preprocess/dapo_math_filter_dedup_boxed.py",
             "sha256": digest(__file__),
         },
     }
@@ -356,14 +295,14 @@ def main() -> None:
 
     if args.hdfs_dir is not None:
         makedirs(args.hdfs_dir)
-        if not copy(src=str(output), dst=args.hdfs_dir):
+        if copy(src=str(output), dst=args.hdfs_dir) is False:
             raise RuntimeError(f"Failed to copy prepared outputs from {output} to {args.hdfs_dir}")
 
     print(
         json.dumps(
             {
+                "dataset_name": manifest["dataset_name"],
                 "manifest": str(manifest_path),
-                "source": source["repo_id"],
                 "rows": train_artifact["rows"],
                 "artifacts": {"train": train_artifact},
             },
