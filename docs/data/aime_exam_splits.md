@@ -17,8 +17,6 @@ AIME validation datasets are kept strictly separate from training dataset varian
 | [`MathArena/aime_2025`](https://huggingface.co/datasets/MathArena/aime_2025) (`_I` / `_II`) | 2025 (I + II) | 30 (15 + 15) | Raw benchmark table (`problem_idx, problem, answer`) | `cc-by-nc-sa-4.0` | Pinned by `aime_exam_splits.py`; combined `1..15` = I, `16..30` = II, verified verbatim against `_I` and `_II`. |
 | [`MathArena/aime_2026`](https://huggingface.co/datasets/MathArena/aime_2026) (`_I`) | 2026 (I + II) | 30 (`_I`: 15) | Raw benchmark table (`problem_idx, problem, answer`) | `cc-by-nc-sa-4.0` | Pinned by `aime_exam_splits.py`; retains publisher's regional II #10 variant (sum = `850`, see [discussion #2](https://huggingface.co/datasets/MathArena/aime_2026/discussions/2)). |
 
-> **Warning**: Do **not** use `test/aime24.parquet` or `test/aime25.parquet` inside `Jiawei415/DPAO_filter`—those two files are byte-for-byte identical (`sha256: 3fc9f2a8c3c27f8e86a99dc4b6d13629a4851f81ce7dffc5dfad59feeb6f5804`) and both contain AIME 2024.
-
 ---
 
 ## Preparing 2024–2026 & I/II Splits with `aime_exam_splits.py`
