@@ -107,8 +107,8 @@ def _validate_score_centering_config(config: DictConfig) -> None:
             )
     if not config.trainer.get("use_v1", True):
         raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
-    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2"):
-        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp or fsdp2.")
+    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "megatron"):
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
@@ -141,6 +141,10 @@ def validate_config(
         agent = config.actor_rollout_ref.rollout.get("agent", {})
         if agent.get("default_agent_loop", "single_turn_agent") != "single_turn_agent":
             raise ValueError("Partial KV offload initially supports single_turn_agent")
+    if config.data.get("custom_dataloader") is not None:
+        if not config.trainer.get("use_v1", True):
+            raise ValueError("data.custom_dataloader requires the V1 PPO trainer.")
+
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

@@ -67,10 +67,10 @@ permissions:
 jobs:
   npu_unit_tests:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-800i-8
+    runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -117,6 +117,8 @@ jobs:
               printf "%-16s %10.3f GiB\n", $1, $2/1048576
           }' /proc/meminfo
       - name: Run all NPU unit tests
+        env:
+          VERL_TEST_N_GPUS_PER_NODE: "16"
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
           # -c also avoids a <stdin> main module that multiprocessing.spawn cannot reload.
@@ -165,7 +167,7 @@ jobs:
           '
       - name: Running FSDP2 NPU model transfer regression
         run: |
-          PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=2 tests/special_distributed/test_fsdp2_model_cpu_offload.py
+          PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=16 tests/special_distributed/test_fsdp2_model_cpu_offload.py
       - name: Running NPU checkpoint_engine unit tests
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.

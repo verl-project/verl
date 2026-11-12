@@ -179,7 +179,7 @@ Lightweight Collection of Inference Data
 
 **Agent Loop Mode Notes**:
 
-In :doc:`Agent Loop <../../../../advance/agent_loop>` mode, performance data for the Rollout phase **must be collected using discrete mode**. In this case, the Profiler is triggered by the inference engine backend.
+In `Agent Loop <https://verl.readthedocs.io/en/latest/advance/agent_loop.html>`_ mode, performance data for the Rollout phase **must be collected using discrete mode**. In this case, the Profiler is triggered by the inference engine backend.
 
 1. Rank Definition: ranks in the Rollout configuration are global GPU ranks (the same as the training roles). Because each rollout replica spans ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` GPUs, each listed rank is mapped to the replica that owns it (``replica = rank // world_size``) and the whole replica is profiled; for example, with ``tp=8``, ``ranks: [0, 8]`` profiles the replicas holding global ranks 0 and 8 (that is replica 0 and replica 1).
 

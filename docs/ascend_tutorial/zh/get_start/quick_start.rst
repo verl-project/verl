@@ -45,7 +45,7 @@
 环境准备
 ~~~~~~~~~~~~~~~
 
-运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 :doc:`昇腾安装指南 <./install_guidance>` 。
+运行本文脚本前，请确认已完成 verl Ascend 环境安装。环境安装详见 `昇腾安装指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance.html>`_ 。
 
 权重准备
 ~~~~~~~~~~~~~~~
@@ -111,9 +111,9 @@
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-脚本内具体参数说明详见 :doc:`训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics>`。
+脚本内具体参数说明详见 `训练配置参数与指标说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/dev_guide/model_dev/parameter_and_metrics.html>`_。
 
-多节点任务拉起详见 :doc:`多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice>`。
+多节点任务拉起详见 `多机任务拉起操作指南 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/model_support/examples/multi-machine_task_startup_practice.html>`_。
 
 附录
 -------------------------------------------

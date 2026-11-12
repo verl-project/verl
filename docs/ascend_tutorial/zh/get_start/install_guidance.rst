@@ -1,7 +1,7 @@
 昇腾安装指南
 =================
 
-Last updated: 11/03/2026.
+Last updated: 11/11/2026.
 
 .. contents:: 目录
    :local:
@@ -45,13 +45,13 @@ Atlas 800T A3
 
 ..
 
-   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 :doc:`安装指南（Ascend 950PR&950DT系列产品） <install_guidance_950>`。
+   [说明] Ascend 950PR&950DT系列产品的软件安装请参考 `安装指南（Ascend 950PR&950DT系列产品） <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/install_guidance_950.html>`_。
 
 
 框架后端支持说明
 ----------------
 
-当前NPU上支持以下常见训推后端的部署，您可以根据我们的 :doc:`昇腾镜像说明 <dockerfile_build_guidance>` 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_ 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -69,8 +69,9 @@ Atlas 800T A3
 1. Docker镜像获取、构建和使用
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
-:doc:`昇腾镜像说明 <dockerfile_build_guidance>`\ 。
+推荐优先使用 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 提供的已有镜像，以减少环境配置和依赖安装工作。
+如需自定义环境，也可以根据 Dockerfile 自行构建镜像。镜像获取、构建和使用方法请参照
+`昇腾镜像说明 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/get_start/dockerfile_build_guidance.html>`_\ 。
 
 
 2. 自定义安装-vLLM + FSDP/Megatron
@@ -83,8 +84,8 @@ Atlas 800T A3
 ============= ======================================= ===================
 依赖          版本                                     说明
 ============= ======================================= ===================
-HDK           ``26.0.rc1``                            NPU硬件驱动与固件
-CANN          ``9.1.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
+HDK           ``26.2.rc1``                            NPU硬件驱动与固件
+CANN          ``9.2.1``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
 Python        ``>=3.10, <3.13``\ ，推荐 ``3.12``      
 torch         ``2.10.0``                              PyTorch 深度学习框架基础包
 torch_npu     ``2.10.0.post7``                        NPU PyTorch 适配插件
@@ -95,11 +96,16 @@ transformers  ``5.14.1``                              Hugging Face 大模型库�
 xgrammar      ``>=0.2.1,<1.0.0``                       vLLM 结构化输出依赖
 vLLM          ``0.30.0``                              高性能 LLM 推理与服务引擎
 vLLM-Ascend   ``0.30.0``                              NPU vLLM 后端适配
-Megatron-LM   ``core_v0.18.0``                        大规模分布式训练框架
-MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
+Megatron-LM   ``core_v0.18.2``                        大规模分布式训练框架
+MindSpeed     ``26.2.0_core_r0.18.0``                 Megatron-LM 在昇腾 NPU 上的适配和优化组件
 ============= ======================================= ===================
 
 .. note::
+
+   MegatronAdaptor 使用 ``26.2.0_core_r0.18.0``。
+   MindSpeed-Bridge 使用 ``26.2.0_v0.5.0``。
+   TransformerEngineNPU 使用 ``26.2.0_release_v2.17``。
+   MindSpeed-Ops 使用 ``26.2.0``。
 
    本表按 `vLLM-Ascend 0.30.0 安装依赖 <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_
    对齐 torch、torch_npu、torchvision、torchaudio、triton-ascend 和 transformers；xgrammar 使用
@@ -114,7 +120,7 @@ MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
-或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download?versionId=723&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ 下载安装
+或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download>`_ 下载安装
 
 .. code:: bash
 
@@ -126,10 +132,10 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    sudo yum install -y gcc python3 python3-pip kernel-headers-$(uname -r) kernel-devel-$(uname -r) 
    sudo curl https://repo.oepkgs.net/ascend/cann/ascend.repo -o /etc/yum.repos.d/ascend.repo && yum makecache
    # 安装NPU驱动
-   sudo yum install -y Atlas-A3-hdk-npu-driver-26.0.rc1
+   sudo yum install -y Atlas-A3-hdk-npu-driver-26.2.rc1
    # 安装Toolkit，可指定--install-path 自定义路径
-   sudo yum install -y Ascend-cann-toolkit-9.1.0
-   sudo yum install -y Ascend-cann-A3-ops-9.1.0
+   sudo yum install -y Ascend-cann-toolkit-9.2.1
+   sudo yum install -y Ascend-cann-A3-ops-9.2.1
    # 安装后验证
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
@@ -138,6 +144,15 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 我们提供了基于conda一键部署 `安装脚本 <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`__ ， 脚本分步骤安装环境，如果中途遇到安装报错，请根据当前步骤报错信息提示查看原因，或通过issue给我们留言，我们将尽快解决。
+
+.. note::
+
+   启用 Megatron 后端时，安装脚本会自动向 Megatron-Bridge ``v0.5.0`` 应用
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
+   在本文使用的 Transformers ``5.14.1`` 环境中，补丁会保留已有的原生 Qwen3-ASR 注册，
+   并在该配置已注册时跳过内置的 AutoConfig、AutoModel 和 AutoProcessor 注册，
+   避免导入 Megatron-Bridge 时出现 ``qwen3_asr`` 重复注册错误。
+   运行安装脚本时，请保留克隆的 verl 仓库中的该补丁文件。
 
 .. code:: bash
 
@@ -183,7 +198,7 @@ Megatron-LM   ``core_r0.18.0``                        大规模分布式训练�
 MindSpeed     ``core_r0.18.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
 ============= ======================================= ===================
 
-昇腾 Megatron 依赖组合以 ``install_vllm_mcore_npu.sh`` 为基准：
+昇腾 Megatron 依赖组合以 ``install_sglang_mcore_npu.sh`` 为基准：
 Megatron-LM、MindSpeed、MegatronAdaptor 使用 ``core_r0.18.0``，
 Megatron-Bridge 使用 ``v0.5.0``；MindSpeed-Bridge 使用仓库默认分支，
 当前未固定 tag 或 commit。SGLang 安装脚本和当前 CI 镜像构建文件使用同一组合。

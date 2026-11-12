@@ -27,7 +27,7 @@ The example model script and its required hardware conditions are as follows:
 
 Environment Setup
 -----------------------------------
-We provide two methods for building the environment in the :doc:`Ascend Installation Guide <../../get_start/install_guidance>`: 1. Build from a Dockerfile image file 2. Build from a custom Conda environment.
+We provide two methods for building the environment in the `Ascend Installation Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance.html>`_: 1. Build from a Dockerfile image file 2. Build from a custom Conda environment.
 
 In this practice, we additionally specify the verl commit id to avoid introducing other issues.
 
@@ -270,7 +270,7 @@ After training, the model's score on Math-500 improved significantly.
 
 Performance Collection
 -----------------------------------
-For detailed documentation on NPU profiling, refer to the :doc:`Profiling Collection Guide <../../dev_guide/performance/ascend_profiling>`.
+For detailed documentation on NPU profiling, refer to the `Profiling Collection Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/performance/ascend_profiling.html>`_.
 
 The script for `Qwen3-30B`_ provides a basic performance collection option PROF_CONFIG. By default, global_profiler.steps=null disables collection. Developers can modify the parameters according to their actual needs.
 
