@@ -4,8 +4,7 @@
 set -xeuo pipefail
 
 # GB200 NCCL WAR for async-RL Megatron: disable NVLS/MNNVL transports so NCCL
-# falls back to IB. Required on GB200 nodes without IMEX channel support, where
-# mbridge `export_weights -> all_gather` otherwise raises ncclUnhandledCudaError 801.
+# falls back to IB on GB200 nodes without IMEX channel support.
 export TLLM_DISABLE_NVLS_MNNVL=1
 
 project_name=${PROJECT_NAME:-'DAPO-Qwen3-8b-Base-MATH-fully-async-trtllm'}
@@ -103,7 +102,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
-    actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.actor.megatron.context_parallel_size=${train_cp} \

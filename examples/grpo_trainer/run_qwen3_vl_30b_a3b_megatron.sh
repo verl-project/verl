@@ -6,7 +6,7 @@
 #   - verl==release/0.7.1
 #   - vllm==v0.13.0
 #   - Megatron-LM==0.16.0
-#   - mbridge==0.15.1
+#   - Megatron-Bridge: r0.5.0
 #
 # Requirements on Ascend:
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
@@ -15,7 +15,8 @@
 #   - vllm-ascend==releases/v0.13.0
 #   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
-#   - mbridge==0.15.1
+#   - Megatron-Bridge: v0.5.0
+#   - MindSpeed-Bridge: repository default branch
 #
 # Tested parallelism config (8 GPUs / 1 node):
 #   TP=4 PP=1 CP=1 EP=8 ETP=1 GEN_TP=4
@@ -98,7 +99,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.param_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True

@@ -21,9 +21,23 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import torch
 from omegaconf import MISSING
 
 from verl.base_config import BaseConfig
+
+# Device type -> the `ProfilerActivity` recording it. torch names one member per backend it can
+# profile after that device type, so `get_torch_profiler` resolves the active platform's
+# `device_name` here. `CPU` is excluded (always collected, never resolved from a platform) and so is
+# `PrivateUse1` (torch's out-of-tree slot, not a device type any platform reports).
+DEVICE_ACTIVITIES = {
+    name.lower(): member
+    for name, member in torch.profiler.ProfilerActivity.__members__.items()
+    if name not in ("CPU", "PrivateUse1")
+}
+
+# `contents` keywords selecting a device activity rather than a profiler option.
+DEVICE_CONTENTS = frozenset(DEVICE_ACTIVITIES) | {"cpu"}
 
 
 @dataclass
@@ -108,7 +122,8 @@ class TorchProfilerToolConfig(BaseConfig):
     (see :class:`TorchProfilerScheduleConfig`).
     """
 
-    # options: cuda, cpu, memory, shapes, stack. Empty means collect everything.
+    # options: the active platform's device type, cpu, memory, shapes, stack.
+    # Empty means collect everything.
     # CPU activity is collected either way (the per-stage record_function markers are CPU-side
     # events), so listing "cpu" here is redundant; the other options are honored as written.
     contents: list[str] = field(default_factory=list)
@@ -126,7 +141,7 @@ class TorchProfilerToolConfig(BaseConfig):
 
     def __post_init__(self) -> None:
         """config validation logics go here"""
-        __support_contents = ["cuda", "cpu", "memory", "shapes", "stack"]
+        __support_contents = sorted(DEVICE_CONTENTS | {"memory", "shapes", "stack"})
         for content in self.contents:
             assert content in __support_contents, (
                 f"Profiler contents only supports {__support_contents}, but gets {content}"
@@ -144,15 +159,18 @@ class TorchProfilerToolConfig(BaseConfig):
 
 @dataclass
 class TorchMemoryToolConfig(BaseConfig):
-    """Torch memory profiler tool config.
+    """Torch memory profiler tool config. CUDA/NPU OOM snapshots are enabled automatically.
 
     Args:
         trace_alloc_max_entries (int): Maximum number of memory allocation entries to track.
         stack_depth (int): Stack trace depth for memory allocations.
+        memory_snapshot_num_steps (int): Number of profiled RL steps to retain before
+            dumping a memory snapshot.
     """
 
     trace_alloc_max_entries: int = 100_000
     stack_depth: int = 32
+    memory_snapshot_num_steps: int = 1
     name: str = "torch_memory"
 
     def __post_init__(self) -> None:
@@ -165,6 +183,12 @@ class TorchMemoryToolConfig(BaseConfig):
             f"trace_alloc_max_entries must be positive, got {self.trace_alloc_max_entries}"
         )
         assert self.stack_depth > 0, f"stack_depth must be positive, got {self.stack_depth}"
+        assert isinstance(self.memory_snapshot_num_steps, int), (
+            f"memory_snapshot_num_steps must be int, got {type(self.memory_snapshot_num_steps)}"
+        )
+        assert self.memory_snapshot_num_steps > 0, (
+            f"memory_snapshot_num_steps must be positive, got {self.memory_snapshot_num_steps}"
+        )
 
 
 @dataclass

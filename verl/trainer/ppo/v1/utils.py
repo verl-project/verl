@@ -47,6 +47,7 @@ class MetricsAggregator:
                 "validation/filter_groups/discarded_surplus_samples",
                 "training/rollout_failure/evicted_samples",
                 "validation/rollout_failure/evicted_samples",
+                "training/rollout_logprobs_mismatch_count",
             ],
             "last": [
                 "training/global_step",

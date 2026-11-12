@@ -108,7 +108,7 @@ def megatron_bridge_stubs(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
-        "verl.models.mcore.config_converter.get_hf_rope_theta",
+        "verl.utils.megatron_utils.get_hf_rope_theta",
         lambda hf_config: hf_config.rope_theta,
     )
     bridge_helpers = types.ModuleType("verl.models.mcore.bridge")
@@ -132,7 +132,6 @@ def test_megatron_bridge_provider_defers_ddp_for_layerwise_muon(megatron_bridge_
     )
     model, _ = make_megatron_module(
         wrap_config=wrap_config,
-        tf_config=_DummyConfig(),
         hf_config=_minimal_hf_config(),
         bridge=object(),
         provider=megatron_bridge_stubs["provider"],
@@ -167,7 +166,6 @@ def test_megatron_bridge_provider_keeps_standard_ddp_without_layerwise(megatron_
     )
     model, _ = make_megatron_module(
         wrap_config=wrap_config,
-        tf_config=_DummyConfig(),
         hf_config=_minimal_hf_config(),
         bridge=object(),
         provider=megatron_bridge_stubs["provider"],
@@ -189,7 +187,6 @@ def test_megatron_bridge_layerwise_rejects_megatron_fsdp(megatron_bridge_stubs):
     with pytest.raises(ValueError, match="incompatible with Megatron FSDP"):
         make_megatron_module(
             wrap_config=wrap_config,
-            tf_config=_DummyConfig(),
             hf_config=_minimal_hf_config(),
             bridge=object(),
             provider=megatron_bridge_stubs["provider"],

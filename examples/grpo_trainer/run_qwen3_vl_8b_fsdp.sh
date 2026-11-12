@@ -95,7 +95,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}

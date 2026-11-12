@@ -29,10 +29,7 @@ to build a full trainer.
 
 A second group of tests covers the ``tq.save_checkpoint``/``tq.load_checkpoint``
 round-trip that backs checkpoint consistency (matching ``_save_checkpoint``/
-``_load_checkpoint``). These call the real checkpoint APIs, so they skip on
-builds that lack them (the same ``_tq_supports_checkpoint`` gate the trainer uses
-to decide whether to save/load); one test additionally asserts the trainer
-short-circuits re-issue when the gate reports the feature unsupported.
+``_load_checkpoint``), calling the real checkpoint APIs.
 """
 
 import uuid
@@ -47,14 +44,6 @@ from verl.trainer.ppo.v1 import trainer_base
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 from verl.utils import tensordict_utils as tu
 
-# Capture the real compatibility guard before the autouse fixture patches it. The save/load round-trip
-# tests call the real APIs, so they must skip on builds that do not provide them.
-_REAL_TQ_SUPPORTS_CHECKPOINT = trainer_base._tq_supports_checkpoint
-requires_tq_checkpoint = pytest.mark.skipif(
-    not _REAL_TQ_SUPPORTS_CHECKPOINT(),
-    reason="TransferQueue >= 0.1.9 with save_checkpoint/load_checkpoint is required",
-)
-
 
 @pytest.fixture(scope="module")
 def tq_init():
@@ -63,39 +52,10 @@ def tq_init():
     tq.close()
 
 
-@pytest.fixture(autouse=True)
-def _force_tq_checkpoint_supported(monkeypatch):
-    """Force the compatibility guard open so the re-issue logic itself is exercised, not the guard.
-
-    The locally installed TransferQueue may not support checkpointing, which short-circuits re-issue.
-    The save/load round-trip tests instead use ``requires_tq_checkpoint`` and call the actual APIs.
-    """
-    monkeypatch.setattr(trainer_base, "_tq_supports_checkpoint", lambda: True)
-
-
 @pytest.fixture
 def partition_id():
     """A unique partition per test to isolate TransferQueue state across tests."""
     return f"test-{uuid.uuid4().hex}"
-
-
-def test_tq_checkpoint_guard_checks_version_and_api_capabilities(monkeypatch):
-    """Checkpoint support requires TransferQueue 0.1.9 or newer and both callable APIs."""
-
-    def checkpoint_api(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(tq, "save_checkpoint", checkpoint_api, raising=False)
-    monkeypatch.setattr(tq, "load_checkpoint", checkpoint_api, raising=False)
-
-    monkeypatch.setattr(tq, "__version__", "0.1.8", raising=False)
-    assert _REAL_TQ_SUPPORTS_CHECKPOINT() is False
-
-    monkeypatch.setattr(tq, "__version__", "0.1.9")
-    assert _REAL_TQ_SUPPORTS_CHECKPOINT() is True
-
-    monkeypatch.setattr(tq, "load_checkpoint", None)
-    assert _REAL_TQ_SUPPORTS_CHECKPOINT() is False
 
 
 def _uid() -> str:
@@ -163,6 +123,19 @@ def _clear_partition(partition_id: str) -> None:
     keys = list(tq.kv_list(partition_id=partition_id).get(partition_id, {}).keys())
     if keys:
         tq.kv_clear(keys=keys, partition_id=partition_id)
+
+
+def test_count_tq_prompt_groups_includes_every_prompt_status(tq_init, partition_id):
+    """Prompt groups occupy the prefetch window whatever their status; trajectories are not prompts."""
+    uids = {status: _uid() for status in ("pending", "running", "finished", "failure")}
+    for status, uid in uids.items():
+        _submit_prompt(partition_id, uid, status, global_steps=2)
+    _add_trajectory(partition_id, uids["finished"], session_id=0, global_steps=2)
+
+    try:
+        assert trainer_base._count_tq_prompt_groups(partition_id) == 4
+    finally:
+        _clear_partition(partition_id)
 
 
 def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
@@ -347,14 +320,10 @@ def test_reissue_noop_for_sync_mode(tq_init, partition_id):
 # --------------------------------------------------------------------------- #
 # tq.save_checkpoint / tq.load_checkpoint round-trip
 #
-# These call the real TransferQueue checkpoint APIs (matching _save_checkpoint/_load_checkpoint),
-# so they skip on builds that lack them. The defensive gate (_tq_supports_checkpoint) is what the
-# trainer uses to decide whether to save/load at all; here we skip on the same condition and
-# additionally assert the trainer short-circuits when the gate reports unsupported.
+# These call the real TransferQueue checkpoint APIs (matching _save_checkpoint/_load_checkpoint).
 # --------------------------------------------------------------------------- #
 
 
-@requires_tq_checkpoint
 def test_save_load_roundtrip_restores_prompts(tq_init, partition_id, tmp_path):
     """save_checkpoint then load_checkpoint (into a cleared queue) restores prompt status and data."""
     pending = _uid()
@@ -393,7 +362,6 @@ def test_save_load_roundtrip_restores_prompts(tq_init, partition_id, tmp_path):
         _clear_partition(partition_id)
 
 
-@requires_tq_checkpoint
 def test_save_load_then_reissue_only_inflight(tq_init, partition_id, tmp_path):
     """End-to-end recovery: after a save/load round-trip, only in-flight prompts are re-issued."""
     pending = _uid()
@@ -418,17 +386,23 @@ def test_save_load_then_reissue_only_inflight(tq_init, partition_id, tmp_path):
         _clear_partition(partition_id)
 
 
-def test_reissue_short_circuits_when_checkpoint_unsupported(tq_init, partition_id, monkeypatch):
-    """The defensive gate: when TransferQueue lacks checkpoint support, re-issue is a no-op.
+def test_save_load_terminal_only_counts_prompts_without_reissue(tq_init, partition_id, tmp_path):
+    """A terminal-only checkpoint re-issues nothing, yet its groups still fill the prefetch window,
+    so warmup must be gated on the prompt count rather than on the re-issue count."""
+    finished = _uid()
+    failure = _uid()
+    _submit_prompt(partition_id, finished, "finished", global_steps=6)
+    _submit_prompt(partition_id, failure, "failure", global_steps=6)
+    _add_trajectory(partition_id, finished, session_id=0, global_steps=6)
 
-    This overrides the autouse fixture (which forces the gate open) to assert the real guard, so
-    an old TransferQueue never tries to read back / re-submit prompts that were never persisted.
-    """
-    monkeypatch.setattr(trainer_base, "_tq_supports_checkpoint", lambda: False)
-    _submit_prompt(partition_id, _uid(), "running", global_steps=1)
+    ckpt_dir = str(tmp_path / "transfer_queue")
+    tq.save_checkpoint(ckpt_dir, metadata={"global_steps": 6})
+    _clear_partition(partition_id)
+    tq.load_checkpoint(ckpt_dir)
 
-    stub = _make_trainer_stub()
+    stub = _make_trainer_stub(global_steps=7)
     try:
+        assert trainer_base._count_tq_prompt_groups(partition_id) == 2
         assert stub._reissue_inflight_prompts(partition_id) == 0
         assert stub.agent_loop_manager.batches == []
     finally:

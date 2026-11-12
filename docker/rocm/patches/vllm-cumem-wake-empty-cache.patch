@@ -1,0 +1,22 @@
+Backport of vllm-project/vllm#49857 onto vLLM 0.26.0.
+
+Release transient Python and accelerator allocator memory before CuMem wake
+remaps sleeping allocations. During an RL weight refit the rollout worker
+builds temporary device tensors (dtype conversion, MXFP4/FP8 requantization,
+kernel-layout swizzling). They are freed but stay in PyTorch's caching
+allocator as reserved-not-allocated, which create_and_map() cannot use, so
+wake_up(["kv_cache"]) can OOM even though the allocator reports free capacity.
+
+diff --git a/vllm/device_allocator/cumem.py b/vllm/device_allocator/cumem.py
+--- a/vllm/device_allocator/cumem.py
++++ b/vllm/device_allocator/cumem.py
+@@ -291,6 +291,9 @@ class CuMemAllocator:
+                 back to GPU memory. If None, all memory allocation will be loaded
+                 back to GPU memory.
+         """
++        gc.collect()
++        torch.accelerator.empty_cache()
++
+         for ptr, data in self.pointer_to_data.items():
+             if tags is None or data.tag in tags:
+                 handle = data.handle

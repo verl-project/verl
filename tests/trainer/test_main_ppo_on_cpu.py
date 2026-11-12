@@ -22,7 +22,8 @@ from verl.trainer import main_ppo
 def test_run_ppo_uses_resolved_controller_nsight_options(monkeypatch):
     config = OmegaConf.create(
         {
-            "actor_rollout_ref": {"rollout": {"full_determinism": False}},
+            "actor_rollout_ref": {"actor": {}, "ref": {}, "rollout": {"full_determinism": False}},
+            "critic": {},
             "reward": {"reward_model": {"enable": False, "rollout": {}}},
             "trainer": {"logger": []},
             "global_profiler": {"tool": "nsys", "steps": [1]},

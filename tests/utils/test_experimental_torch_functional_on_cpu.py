@@ -81,7 +81,7 @@ def test_fused_linear_for_ppo_dispatches_to_liger(monkeypatch):
     weight = torch.randn(7, 5)
     labels = torch.randint(7, (2, 3), dtype=torch.int32)
 
-    log_probs, entropy = experimental_F.FusedLinearForPPO()(hidden, weight, labels, temperature=0.8)
+    log_probs, entropy = experimental_F.FusedLinearForPPO(impl_backend="liger")(hidden, weight, labels, temperature=0.8)
 
     assert len(calls) == 1
     liger_hidden, liger_weight, liger_labels, temperature, ignore_index, m_tiles, return_entropy = calls[0]
@@ -95,6 +95,38 @@ def test_fused_linear_for_ppo_dispatches_to_liger(monkeypatch):
     assert return_entropy is True
     torch.testing.assert_close(log_probs, -torch.arange(6, dtype=torch.float32).reshape(2, 3))
     torch.testing.assert_close(entropy, (torch.arange(6, dtype=hidden.dtype) + 10).reshape(2, 3))
+
+
+def test_fused_linear_for_ppo_torch_backend_does_not_dispatch_to_liger(monkeypatch):
+    class UnexpectedLigerFusedLinearScaledCrossEntropyFunction:
+        @staticmethod
+        def apply(*args):
+            raise AssertionError("The torch backend must not dispatch to Liger")
+
+    monkeypatch.setattr(
+        experimental_F,
+        "_LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY",
+        UnexpectedLigerFusedLinearScaledCrossEntropyFunction,
+    )
+    monkeypatch.setattr(experimental_F, "_FLASH_ATTN_CROSS_ENTROPY_AVAILABLE", False)
+
+    hidden = torch.randn(2, 3, 5)
+    weight = torch.randn(7, 5)
+    labels = torch.randint(7, (2, 3))
+
+    log_probs, entropy = experimental_F.FusedLinearForPPO()(hidden, weight, labels)
+
+    logits = (hidden @ weight.t()).float()
+    expected_log_probs = logits.log_softmax(dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    probs = logits.softmax(dim=-1)
+    expected_entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
+    torch.testing.assert_close(log_probs, expected_log_probs)
+    torch.testing.assert_close(entropy, expected_entropy)
+
+
+def test_fused_linear_for_ppo_rejects_unknown_backend():
+    with pytest.raises(ValueError, match="Unsupported FusedLinearForPPO backend"):
+        experimental_F.FusedLinearForPPO(impl_backend="unknown")
 
 
 def test_fused_linear_for_ppo_fallback_preserves_chunking(monkeypatch):

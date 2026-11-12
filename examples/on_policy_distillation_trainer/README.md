@@ -19,6 +19,6 @@ the single-teacher scripts. The MOPD script exposes per-teacher overrides.
 - `distillation.enabled=True`
 - `distillation.teacher_models.teacher_model.model_path=<HF path>` (single-teacher)
 - `+distillation.teacher_models.<name>.{key,model_path,num_replicas,inference.*}` (multi-teacher)
-- `distillation.distillation_loss.loss_mode={k1, k3, forward_kl_topk, ...}`
+- `distillation.distillation_loss.loss_mode={k1, k3, forward_kl_topk, forward_kl_topk_tail, ...}`
 - `distillation.distillation_loss.use_policy_gradient=True|False`
 - `distillation.distillation_loss.topk=64`

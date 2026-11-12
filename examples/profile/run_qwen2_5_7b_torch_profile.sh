@@ -150,7 +150,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.n=${rollout_n}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
+    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length))
     # Enable the torch profiler on the vLLM rollout engine (inference). This is
     # collected by vLLM's engine-side profiler and REQUIRES discrete mode, so we
     # force discrete=True here independently of the actor's discrete setting above.

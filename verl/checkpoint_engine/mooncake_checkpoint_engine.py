@@ -225,6 +225,8 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         }
         self.store.send_obj(info, 1)
         await self.wait_for_complete(magic_slots[idx])
+        if should_wait:
+            await self.wait_for_complete(magic_slots[idx ^ 1])
 
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
@@ -313,6 +315,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
             if info["is_last"]:
                 break
+
+        if self.rank < self.world_size - 1:
+            for slot in range(min(idx, 2)):
+                await self.wait_for_complete(magic_slots[slot])
 
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)

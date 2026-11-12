@@ -101,7 +101,6 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
-    actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.actor.entropy_coeff=0 \

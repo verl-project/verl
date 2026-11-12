@@ -40,6 +40,7 @@ exercises the full path on 2 GPUs.
 """
 
 import contextlib
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -157,7 +158,7 @@ def _patch_fused_kernels():
     so the CPU test exercises only the routing layer. Yields a dict that
     captures the `input_ids` arg the kernel would have received.
     """
-    captured: dict[str, torch.Tensor] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_log_probs_and_entropy(input_ids: torch.Tensor):
         if input_ids.dim() == 1:
@@ -170,6 +171,7 @@ def _patch_fused_kernels():
 
     def fake_fused_linear_forward(self, hidden_states, vocab_weights, input_ids, temperature=1.0):
         captured["input_ids"] = input_ids.detach().clone()
+        captured["impl_backend"] = self.impl_backend
         return _fake_log_probs_and_entropy(input_ids)
 
     def fake_linear_ce(hidden_states, vocab_weights, input_ids, temperature, reduction):
@@ -218,9 +220,29 @@ ALL_ADAPTERS = [
     glm4v.forward_with_triton_backend,
 ]
 
+TORCH_ADAPTERS = [
+    dense_common.forward_with_torch_backend,
+    qwen3_5.forward_with_torch_backend,
+    qwen3_vl.forward_with_torch_backend,
+    qwen2_vl.forward_with_torch_backend,
+    glm4v.forward_with_torch_backend,
+]
+
 
 def _adapter_id(forward_fn) -> str:
     return f"{forward_fn.__module__.rsplit('.', 1)[-1]}.{forward_fn.__name__}"
+
+
+@pytest.mark.parametrize("forward_fn", TORCH_ADAPTERS, ids=_adapter_id)
+def test_torch_adapter_propagates_fused_linear_backend(forward_fn):
+    model = _make_fake_lm()
+    model._verl_fused_kernels_backend = "liger"
+    input_ids = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+
+    with _patch_fused_kernels() as captured:
+        forward_fn(model, input_ids=input_ids, labels=None, temperature=1.0, return_dict=True)
+
+    assert captured["impl_backend"] == "liger"
 
 
 @pytest.mark.parametrize("forward_fn", ALL_ADAPTERS, ids=_adapter_id)

@@ -75,7 +75,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${actor_tp}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${actor_pp}
     actor_rollout_ref.actor.megatron.param_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
 )
 

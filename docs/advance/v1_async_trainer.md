@@ -1,11 +1,11 @@
 # V1 Async Trainer
 
-Last updated: 08/20/2026.
+Last updated: 09/21/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
 - `colocate_async` runs generation and training on the same GPU pool.
-- `separate_async` runs generation continuously on standalone rollout GPUs and trains on a hybrid GPU pool. It can optionally lend idle hybrid trainer GPUs to generation.
+- `separate_async` runs generation continuously on standalone rollout GPUs and trains on a hybrid GPU pool. The trainer GPUs run no inference engine by default; setting `trainer.v1.separate_async.hybrid_rollout.enable_switch=True` additionally colocates hybrid replicas on the training GPUs and lends them to generation between steps.
 
 Both modes use the V1 `TransferQueue`, asynchronous replay buffer, and partial rollout client. This guide explains their execution model, configuration, and tuning.
 
@@ -18,8 +18,8 @@ Set the mode with `trainer.v1.trainer_mode`.
 | ---------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | `sync`                       | Hybrid rollout replicas colocated with the trainer                 | Baseline PPO and workloads where strict synchronization is preferred                          |
 | `colocate_async`             | Hybrid rollout replicas colocated with the trainer                 | Use warmup batches + partial rollout to accelerate.                                           |
-| `separate_async`             | Dedicated standalone rollout replicas plus hybrid trainer replicas | Separate resources without switch and offload costs. More compact and efficient rollout pool. |
-| `separate_async` with switch | Same as `separate_async`                                           | Reduce trainer idle time when it's hard to set a perfect rollouter-trainer ratio.             |
+| `separate_async`             | Standalone rollout replicas only                                   | Trainer GPUs never run an inference engine; separate resources without switch and offload costs. |
+| `separate_async` with switch | Standalone rollout replicas plus hybrid trainer replicas           | Reduce trainer idle time when it's hard to set a perfect rollouter-trainer ratio.             |
 
 
 `colocate_async` and `separate_async` both enable partial-rollout through `FullyAsyncLLMServerClient`. If generation is aborted during a mode transition, completed tokens are retained and the remaining generation is retried. A resumed trajectory can therefore span multiple model versions.
@@ -66,8 +66,8 @@ The V1 sampler controls staleness in model-version units:
 
 | Parameter                                     | Default | Meaning                                                                                                                                                                      |
 | --------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `trainer.v1.sampler.max_off_policy_threshold` | `8`     | Maximum model versions from first generation to being trained before staleness handling is triggered                                                                         |
-| `trainer.v1.sampler.max_off_policy_strategy`  | `drop`  | `drop` evicts stale prompt groups (for GRPO, one stale trajectory, the whole sample dropped); `wait` blocks for threshold-reaching in-flight groups instead of dropping them |
+| `trainer.v1.sampler.max_off_policy_threshold` | `8`     | Maximum model versions from first generation to being trained before staleness handling is triggered. `null` disables off-policy version control entirely: no samples are dropped or awaited for staleness |
+| `trainer.v1.sampler.max_off_policy_strategy`  | `drop`  | `drop` evicts stale prompt groups (for GRPO, one stale trajectory, the whole sample dropped); `wait` blocks for threshold-reaching in-flight groups instead of dropping them. Ignored when `max_off_policy_threshold` is `null` |
 
 
 Monitor both forms of off-policy behavior:
@@ -91,6 +91,8 @@ The reasons are unioned before eviction, so a group matching multiple conditions
 Refill can repeat if replacement groups also fail or are filtered. This keeps the requested training batch size stable without training on groups rejected by the active sampling policy. Refill applies to the training partition; validation does not perform staleness, filtering, or failure refill.
 
 With `max_off_policy_strategy=wait`, stale groups are not evicted or refilled. Instead, sampling blocks when an in-flight prompt reaches the threshold, allowing it to finish and remain trainable. DAPO-filtered and failed groups are still evicted and replaced normally.
+
+With `max_off_policy_threshold=null` (set via `trainer.v1.sampler.max_off_policy_threshold=null`), off-policy version control is disabled entirely: no samples are dropped or awaited for staleness, and the off-policy degree is only bounded by rollout concurrency and the feed/consume balance of the replay buffer.
 
 When async trainer saves a checkpoint, pending and running groups have already consumed dataloader entries, so they are reissued from their saved prompts during `load_checkpoint` recovery. Finished groups and their completed trajectories are restored as-is and remain available for sampling; they are not regenerated.
 
@@ -116,6 +118,8 @@ Enable step switching with:
 ```bash
 trainer.v1.separate_async.hybrid_rollout.enable_switch=True
 ```
+
+`enable_switch` also *creates* the hybrid replicas: without it, no inference engine exists on the training GPUs at all, so warmup and validation generation are served by the standalone pool alone.
 
 The switch addresses a specific idle window: after a PPO step finishes, the trainer may have to wait for standalone rollout to produce enough sampleable groups for the next step. During that window, the trainer's hybrid replicas can join the standalone load balancer and help generate samples.
 
@@ -164,6 +168,23 @@ All settings under `trainer.v1.separate_async.hybrid_rollout` are ignored unless
 
 Temporarily, step switching cannot be combined with rollout PD disaggregation.
 
+## Separate Async without Hybrid Replicas (default)
+
+`separate_async` creates no rollout replicas on the training GPUs unless `trainer.v1.separate_async.hybrid_rollout.enable_switch=True`:
+
+- No inference engine is initialized on the training GPUs; rollout (including warmup and validation) is served exclusively by the standalone rollout pool.
+- The mode-switch hooks (`switch_to_rollout` / `switch_to_trainer`) and load-balancer updates are no-ops.
+- Combining `actor_rollout_ref.hybrid_engine=False` with `hybrid_rollout.enable_switch=True` keeps the `hybrid_engine=False` behavior: the conflicting `enable_switch` is ignored with a warning instead of failing startup.
+
+Without hybrid replicas, warmup takes longer (standalone pool only) and validation runs on the standalone pool while it keeps producing training data. In exchange, every training step avoids the colocated engine's costs: no engine init, no startup weight sync, and no `param_offload` / `optimizer_offload` or GPU headroom reserved for replica wake-ups.
+
+`actor_rollout_ref.hybrid_engine=False` (the v0 fully-async convention) is accepted and behaves the same as the default, so v0 fully-async commands work unchanged:
+
+```bash
+actor_rollout_ref.hybrid_engine=False \
+trainer.v1.trainer_mode=separate_async
+```
+
 ## Configuration
 
 ### Colocate async
@@ -176,7 +197,7 @@ trainer.v1.trainer_mode=colocate_async \
 trainer.v1.colocate_async.num_warmup_batches=1
 ```
 
-The warmup batch starts generation before the first training step, reducing the initial empty-buffer wait.
+The warmup batch starts generation before the first training step, reducing the initial empty-buffer wait. Fractional values are supported: e.g. `num_warmup_batches=1.5` with `train_batch_size=64` dispatches one full batch (64 prompts) plus half a batch (32 prompts); the fractional part is rounded down to a whole number of `data.gen_batch_size` chunks.
 
 ### Separate async
 
@@ -196,6 +217,17 @@ trainer.v1.separate_async.parameter_sync_step=4 \
 trainer.v1.separate_async.num_warmup_batches=1
 ```
 
+`num_warmup_batches` also accepts fractional values (see [colocate async](#colocate-async)).
+
+Hybrid replicas use `actor_rollout_ref.rollout.gpu_memory_utilization`. To give dedicated standalone rollout GPUs a different memory budget, set the existing `standalone_gpu_memory_utilization` override:
+
+```bash
+actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+actor_rollout_ref.rollout.standalone_gpu_memory_utilization=0.85
+```
+
+Choose both fractions for the memory available on their respective GPU pools. By default, `standalone_gpu_memory_utilization` follows `gpu_memory_utilization`. Setting it to `null` also falls back to `gpu_memory_utilization`. The override also applies when `actor_rollout_ref.hybrid_engine=False`, and does not change the trainer's or hybrid replicas' configuration.
+
 `separate_async` requires a non-`naive` checkpoint-engine backend such as `nccl`, `nixl`, or `mooncake` for standalone rollout weight synchronization.
 
 To enable step switching, add:
@@ -209,7 +241,7 @@ trainer.v1.separate_async.hybrid_rollout.adaptive_switch_threshold=True
 
 Start with the following timing metrics:
 
-- `timing_s/gen`: trainer time spent waiting for the next trainable train-batch. (Also means idle time for separate_async's hybrid gpus)
+- `timing_s/gen`: trainer time spent waiting for the next trainable train-batch. (Also means idle time for separate_async's hybrid GPUs when `enable_switch=True`; without it the training GPUs simply have nothing else to do)
 - `timing_s/update_actor`: actor update time.
 - `timing_s/update_weights`: standalone weight synchronization time in `separate_async`.
 - `timing_s/switch_wait`: time during which lent hybrid replicas help fill the switch-to-trainer threshold. (It is not idle.)
@@ -240,7 +272,7 @@ When the installed TransferQueue supports checkpointing, V1 async checkpoints pe
 
 Validation shares the same AgentLoop and rollout server pool with unfinished training trajectories. Those partial trajectories continue running alongside validation requests, so `timing_s/testing` includes the contention and rollout capacity they consume rather than measuring validation generation in isolation.
 
-In `separate_async`, validation makes hybrid replicas available for rollout if they are currently in trainer mode.
+In `separate_async` with `enable_switch=True`, validation makes hybrid replicas available for rollout if they are currently in trainer mode. Without it there are no hybrid replicas and validation is served by the standalone pool.
 
 ## Benchmark
 

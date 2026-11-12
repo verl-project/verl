@@ -20,10 +20,35 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_capability, get_device_name
 from verl.workers.rollout.utils import ensure_async_iterator
 
 SGLANG_LORA_NAME = "verl_actor_lora_name"
+
+_DEEPSEEK_V4_FUSION_MEMBERS = (
+    ("wq_a.weight", "wkv.weight"),
+    ("wq_a.scale", "wkv.scale"),
+    ("wq_a.weight_scale_inv", "wkv.weight_scale_inv"),
+    ("compressor.wkv.weight", "compressor.wgate.weight"),
+    ("indexer.compressor.wkv.weight", "indexer.compressor.wgate.weight"),
+)
+DEEPSEEK_V4_FUSION_GROUPS = tuple(
+    tuple(f".{attention}.{member}" for member in members)
+    for attention in ("self_attn", "attn")
+    for members in _DEEPSEEK_V4_FUSION_MEMBERS
+)
+
+
+def _fusion_key(name: str, groups: tuple[tuple[str, ...], ...]):
+    matches = [
+        (index, suffix, len(group)) for index, group in enumerate(groups) for suffix in group if name.endswith(suffix)
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"{name!r} matches multiple fusion groups: {matches}")
+    if not matches:
+        return None
+    index, suffix, size = matches[0]
+    return name[: -len(suffix)], index, size
 
 
 def normalize_peft_config_for_sglang(peft_config: dict) -> dict:
@@ -75,6 +100,29 @@ def sglang_lora_target_modules(target_modules: Any) -> list[str]:
             f"against the whole parameter key. Use `all-linear`, or list the module names."
         )
     return list(target_modules)
+
+
+def default_moe_runner_backend(quantization: Optional[str], engine_kwargs: Any, hf_config: Any = None) -> Optional[str]:
+    """MoE runner verl asks SGLang for when the user leaves it to ``auto``; None keeps SGLang's choice.
+
+    On Blackwell (compute capability 10.x) SGLang resolves ``moe_runner_backend="auto"`` to ``flashinfer_trtllm``
+    for unquantized Qwen3-MoE- and DeepSeek-family checkpoints when no ``moe_a2a_backend`` is set. That runner keeps
+    bf16 expert weights in a block layout, and ``update_weights_from_tensor`` restores the load-time shape only for
+    ``flashinfer_trtllm_routed``, so the first weight sync fails in ``FusedMoE._load_w13`` and the scheduler exits
+    (sgl-project/sglang#27787, still in sglang 0.5.21). Under the same conditions verl asks for the Triton runner,
+    which SGLang's unquantized MoE method falls back to everywhere else and which takes weight updates. A quantized
+    rollout or checkpoint uses SGLang's quantized MoE methods instead and is left alone.
+    """
+    if engine_kwargs.get("moe_runner_backend") not in (None, "auto"):
+        return None  # the user picked a runner
+    if engine_kwargs.get("moe_a2a_backend") not in (None, "none"):
+        return None  # with an a2a backend SGLang does not pick flashinfer_trtllm
+    if quantization is not None or getattr(hf_config, "quantization_config", None) is not None:
+        return None  # quantized rollout or checkpoint: not the bf16 path
+    if torch.version.hip is not None:
+        return None
+    major, _ = get_device_capability()
+    return "triton" if major == 10 else None
 
 
 def broadcast_pyobj(
@@ -139,7 +187,9 @@ def _compact_for_bucket(tensor: torch.Tensor) -> torch.Tensor:
 
 
 async def get_named_tensor_buckets(
-    iterable: Iterator[tuple[str, torch.Tensor]], bucket_bytes: int
+    iterable: Iterator[tuple[str, torch.Tensor]],
+    bucket_bytes: int,
+    fusion_groups: tuple[tuple[str, ...], ...] = (),
 ) -> Iterator[list[tuple[str, torch.Tensor]]]:
     """
     Group tensors into buckets based on a specified size in megabytes.
@@ -163,16 +213,46 @@ async def get_named_tensor_buckets(
 
     current_bucket = []
     current_size = 0
+    # Members of a fused destination param (SGLang's DSv4 wqkv_a / wkv_gate) are
+    # held here until the group is whole, then placed in one bucket: that loader
+    # cats both halves inside a single load_weights call and asserts its cache
+    # empty on return, so a bucket boundary between them makes it fire. A full
+    # sync contains every member by construction, so this only ever delays a
+    # tensor by its sibling -- nothing is dropped.
+    staged: dict = {}
+
+    def _place(entries):
+        """Put an indivisible run of entries in a bucket, cutting before it if
+        it would not fit rather than partway through."""
+        nonlocal current_bucket, current_size
+        total = sum(sz for _, _, sz in entries)
+        if current_bucket and current_size + total > bucket_bytes:
+            out, current_bucket, current_size = current_bucket, [], 0
+            return out, entries
+        return None, entries
+
     async for name, tensor in ensure_async_iterator(iterable):
         tensor_size = tensor.element_size() * tensor.numel()
-        if current_size + tensor_size > bucket_bytes:
-            if current_bucket:
-                yield current_bucket
-            current_bucket = [(name, _compact_for_bucket(tensor))]
-            current_size = tensor_size
+        match = _fusion_key(name, fusion_groups)
+        if match is not None:
+            prefix, group_index, expected_size = match
+            key = (prefix, group_index)
+            slot = staged.setdefault(key, [])
+            slot.append((name, _compact_for_bucket(tensor), tensor_size))
+            if len(slot) < expected_size:
+                continue
+            entries = staged.pop(key)
         else:
-            current_bucket.append((name, _compact_for_bucket(tensor)))
-            current_size += tensor_size
+            entries = [(name, _compact_for_bucket(tensor), tensor_size)]
 
+        flushed, entries = _place(entries)
+        if flushed:
+            yield flushed
+        for n, t, sz in entries:
+            current_bucket.append((n, t))
+            current_size += sz
+
+    if staged:
+        raise ValueError(f"fused parameter groups never completed in this sync: {sorted(staged)}")
     if current_bucket:
         yield current_bucket

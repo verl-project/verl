@@ -87,7 +87,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${actor_pp}
     actor_rollout_ref.actor.megatron.context_parallel_size=${actor_cp}
     actor_rollout_ref.actor.megatron.param_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
 )

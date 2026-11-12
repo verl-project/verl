@@ -211,7 +211,7 @@ class SGLangPDReplica(SGLangReplica):
             ),
             runtime_env={"env_vars": {f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}": "1"}},
             name=actor_name,
-            max_concurrency=self.max_concurrency,
+            max_concurrency=self.config.ray_actor_max_concurrency,
         ).remote(
             config=pool_config,
             model_config=self.model_config,

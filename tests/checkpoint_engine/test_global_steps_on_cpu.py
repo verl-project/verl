@@ -20,22 +20,32 @@ from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
 class _FakeTrainerEngine:
-    def __init__(self):
+    def __init__(self, events=None):
         self.weights = [("w", object())]
+        self.events = events
+        self.is_param_offload_enabled = True
 
     def get_per_tensor_param(self):
         return iter(self.weights), None
 
+    def to(self, device, *, model, optimizer, grad):
+        assert (device, model, optimizer, grad) == ("cpu", True, False, False)
+        if self.events is not None:
+            self.events.append("offload")
+
 
 class _FakeCheckpointEngine:
-    def __init__(self):
+    def __init__(self, events=None):
         self.sent_global_steps = None
         self.received_global_steps = None
         self.sent_weights = None
+        self.events = events
 
     async def send_weights(self, weights, global_steps=None):
         self.sent_global_steps = global_steps
         self.sent_weights = list(weights)
+        if self.events is not None:
+            self.events.append("send_weights_complete")
 
     def receive_weights(self, global_steps=None):
         self.received_global_steps = global_steps
@@ -57,14 +67,15 @@ class _FakeServerAdapter:
 
 
 def test_actor_worker_passes_global_steps_to_checkpoint_engine_send():
-    checkpoint_engine = _FakeCheckpointEngine()
+    events = []
+    checkpoint_engine = _FakeCheckpointEngine(events)
     worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
     worker.config = SimpleNamespace(
         rollout=SimpleNamespace(
             checkpoint_engine=SimpleNamespace(backend="modelexpress"),
         ),
     )
-    worker.actor = SimpleNamespace(engine=_FakeTrainerEngine())
+    worker.actor = SimpleNamespace(engine=_FakeTrainerEngine(events))
     worker.checkpoint_engine = checkpoint_engine
 
     asyncio.run(
@@ -77,6 +88,7 @@ def test_actor_worker_passes_global_steps_to_checkpoint_engine_send():
 
     assert checkpoint_engine.sent_global_steps == 17
     assert checkpoint_engine.sent_weights == worker.actor.engine.weights
+    assert events == ["send_weights_complete", "offload"]
 
 
 def test_checkpoint_worker_passes_global_steps_to_receive_and_rollout_update():

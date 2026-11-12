@@ -29,7 +29,7 @@ from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutCo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
-@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(4, 12)])
 # 128MB bucket is smaller than the largest weight of Qwen3-8B (embed_tokens, ~1.2GB in bf16),
 # so it exercises the chunked transfer path for weights larger than the bucket.
 @pytest.mark.parametrize("bucket_size_mb", [3072, 128])
@@ -40,7 +40,7 @@ async def test_hccl_checkpoint_engine(
     num_rollout,
     bucket_size_mb,
     num_nodes=1,
-    num_gpus_per_node=8,
+    num_gpus_per_node=16,
     check_allclose=True,
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
@@ -85,14 +85,14 @@ async def test_hccl_checkpoint_engine(
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
-@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(4, 12)])
 @auto_await
 async def test_kimi_checkpoint_engine(
     rebuild_group,
     num_trainer,
     num_rollout,
     num_nodes=1,
-    num_gpus_per_node=8,
+    num_gpus_per_node=16,
     check_allclose=True,
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
@@ -134,7 +134,7 @@ async def test_kimi_checkpoint_engine(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
 @pytest.mark.parametrize("device", ["npu"])
-@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(4, 12)])
 @auto_await
 async def test_mooncake_checkpoint_engine(
     rebuild_group,
@@ -142,7 +142,7 @@ async def test_mooncake_checkpoint_engine(
     num_rollout,
     device,
     num_nodes=1,
-    num_gpus_per_node=8,
+    num_gpus_per_node=16,
     check_allclose=True,
     model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
@@ -183,10 +183,10 @@ async def test_mooncake_checkpoint_engine(
 if __name__ == "__main__":
     test_hccl_checkpoint_engine(
         rebuild_group=False,
-        num_trainer=2,
-        num_rollout=6,
+        num_trainer=4,
+        num_rollout=12,
         num_nodes=1,
-        num_gpus_per_node=8,
+        num_gpus_per_node=16,
         check_allclose=False,
         model_path=os.environ["HDFS_ROOT"] + "/model/Qwen3-30B-A3B-Base",
     )

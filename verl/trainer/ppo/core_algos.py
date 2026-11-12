@@ -1600,9 +1600,10 @@ def compute_policy_loss_gspo(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    # NOTE: differ from GSPO original paper that aggregate the loss at the sequence level (seq-mean-token-mean),
+    # we support aggregate the loss in different modes, default is token-mean.
     pg_loss = agg_loss(
-        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean", **config.global_batch_info
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
@@ -2337,6 +2338,7 @@ def compute_policy_loss_reinforce(
     loss_agg_mode: str = "seq-mean-token-sum",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: Optional[torch.Tensor] = None,
+    sc_correction: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute REINFORCE-style policy gradient loss with optional IS correction.
 
@@ -2366,6 +2368,8 @@ def compute_policy_loss_reinforce(
         config: Actor config (required for global_batch_info).
         rollout_is_weights: Pre-computed IS weights (π_current / π_rollout).
             Shape: (batch_size, seq_length). None to disable IS correction.
+        sc_correction: Score-centering term per token, added as ``advantages * sc_correction``
+            after the IS weighting. Shape: (batch_size, seq_length). None to disable.
 
     Returns:
         Tuple of (loss, metrics):
@@ -2389,6 +2393,8 @@ def compute_policy_loss_reinforce(
     else:
         # Standard REINFORCE: L = -E[log π · A]
         pg_losses = -advantages * log_prob
+    if sc_correction is not None:
+        pg_losses = pg_losses + advantages * sc_correction
 
     # Aggregate loss
     pg_loss = agg_loss(
@@ -2405,6 +2411,8 @@ def compute_policy_loss_reinforce(
     pg_metrics = {
         "actor/ppo_kl": kl_divergence.detach().item(),
     }
+    if sc_correction is not None:
+        pg_metrics["actor/sc_correction"] = verl_F.masked_mean(sc_correction.detach(), response_mask).item()
 
     return pg_loss, pg_metrics
 
@@ -2418,6 +2426,7 @@ def compute_policy_loss_bypass_mode(
     loss_agg_mode: str = "token-mean",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
+    sc_correction: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Bypass mode policy loss supporting both REINFORCE and PPO-clip.
 
@@ -2452,6 +2461,7 @@ def compute_policy_loss_bypass_mode(
         loss_agg_mode: Loss aggregation mode (passed to underlying loss function).
         config: Actor config containing rollout_correction settings in policy_loss.
         rollout_is_weights: Pre-computed IS weights (ignored, computed internally).
+        sc_correction: Score-centering term from the logits processor; only with loss_type="reinforce".
 
     Config options (in config.policy_loss.rollout_correction):
         loss_type: "ppo_clip" (default) or "reinforce"
@@ -2523,6 +2533,7 @@ def compute_policy_loss_bypass_mode(
             loss_agg_mode=loss_agg_mode,
             config=config,
             rollout_is_weights=computed_is_weights,
+            sc_correction=sc_correction,
         )
 
     elif loss_type == "ppo_clip":

@@ -21,6 +21,7 @@ import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
+from verl.utils.dataset.dataloader import DataLoaderExhausted
 from verl.utils.skip import SkipManager
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS", "60"))
 
 DAPO_FILTERED_REWARD_COUNTS_KEY = "_dapo_filtered_reward_counts"
+FILTER_GROUPS_REWARD_METRIC = "reward"
 
 
 def _accumulate_eviction_metrics(acc: dict, new: dict, stale_count: int) -> None:
@@ -115,12 +117,17 @@ class ReplayBuffer:
     Args:
         trainer_mode (str): Trainer mode.
         trainer_config (DictConfig): Trainer configuration.
-        max_off_policy_threshold (int): Maximum number of model versions that trajectory can span.
+        max_off_policy_threshold (int | None): Maximum number of model versions that trajectory can span.
+            None disables off-policy version control entirely: no samples are dropped or awaited for
+            staleness (off-policy degree is then only bounded by rollout concurrency and feed/consume
+            balance).
         max_off_policy_strategy (str): How to handle trajectory that exceeds the maximum number of model versions.
+            Ignored when ``max_off_policy_threshold`` is None.
         sampler_kwargs (dict): Additional kwargs for the custom sampler.
         poll_interval (float, optional): Poll interval in seconds. Defaults to 2.0.
         refill_fn (callable, optional): Trainer-injected function that submits an exact number of fresh prompts.
-        filter_groups_metric (str, optional): DAPO group-filtering metric read from each trajectory's
+        filter_groups_metric (str, optional): DAPO group-filtering metric. ``"reward"`` reads the canonical
+            pre-KL reward from ``rm_scores``; other names read each trajectory's
             ``extra_fields.reward_extra_info``. ``None`` disables DAPO filtering.
         train_batch_size (int, optional): Prompt count represented by one Sync DAPO in-flight batch.
         gen_batch_size (int, optional): Dataloader fetch granularity for refill dispatches.
@@ -132,7 +139,7 @@ class ReplayBuffer:
         self,
         trainer_mode: str,
         trainer_config: DictConfig,
-        max_off_policy_threshold: int,
+        max_off_policy_threshold: int | None,
         max_off_policy_strategy: str,
         sampler_kwargs: DictConfig,
         poll_interval: float = 2.0,
@@ -155,10 +162,19 @@ class ReplayBuffer:
         self.gen_batch_size = gen_batch_size
         self.max_inflight_gen_batches = max_inflight_gen_batches
         self.sync_refill_failed_groups = sync_refill_failed_groups
+        # Set by the trainer only after a custom source actually raises StopIteration.
+        self.input_exhausted = False
 
-        assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
-            f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
-        )
+        if self.max_off_policy_threshold is not None:
+            assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
+                f"Invalid max off policy threshold: {self.max_off_policy_threshold}, "
+                "must be an integer greater than 0, or null to disable off-policy version control"
+            )
+        else:
+            logger.info(
+                "[V1ReplayBuffer] off-policy version control disabled (max_off_policy_threshold is null): "
+                "no samples will be dropped or awaited for staleness"
+            )
         assert self.max_off_policy_strategy in ["drop", "wait"], (
             f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
         )
@@ -262,6 +278,7 @@ class ReplayBuffer:
 
         new_finished_uids = finished_uids - classification_cache.keys()
         trajectory_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in new_finished_uids]
+        use_canonical_reward = self.filter_groups_metric == FILTER_GROUPS_REWARD_METRIC
         metrics_by_uid: dict[str, list[float]] = defaultdict(list)
         missing_metric_uids = new_finished_uids - {key.split("_")[0] for key in trajectory_keys}
 
@@ -269,20 +286,23 @@ class ReplayBuffer:
             data = tq.kv_batch_get(
                 keys=trajectory_keys,
                 partition_id=partition_id,
-                select_fields=["extra_fields"],
+                select_fields=["rm_scores"] if use_canonical_reward else ["extra_fields"],
             )
-            extra_fields_list = list(data["extra_fields"])
+            metric_data = list(data["rm_scores"] if use_canonical_reward else data["extra_fields"])
         else:
-            extra_fields_list = []
+            metric_data = []
 
-        for key, extra_fields in zip(trajectory_keys, extra_fields_list, strict=True):
+        for key, value in zip(trajectory_keys, metric_data, strict=True):
             uid = key.split("_")[0]
-            extra_fields = getattr(extra_fields, "data", extra_fields)
-            reward_extra_info = extra_fields.get("reward_extra_info", {}) if isinstance(extra_fields, dict) else {}
-            if self.filter_groups_metric not in reward_extra_info:
-                missing_metric_uids.add(uid)
+            if use_canonical_reward:
+                metrics_by_uid[uid].append(float(value.sum().item()))
             else:
-                metrics_by_uid[uid].append(float(reward_extra_info[self.filter_groups_metric]))
+                extra_fields = getattr(value, "data", value)
+                reward_extra_info = extra_fields.get("reward_extra_info", {}) if isinstance(extra_fields, dict) else {}
+                if self.filter_groups_metric not in reward_extra_info:
+                    missing_metric_uids.add(uid)
+                else:
+                    metrics_by_uid[uid].append(float(reward_extra_info[self.filter_groups_metric]))
 
         if missing_metric_uids:
             raise RuntimeError(
@@ -501,7 +521,7 @@ class ReplayBufferAsync(ReplayBuffer):
         pass
 
     def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
-        if partition_id == "val" or self.max_off_policy_strategy != "drop":
+        if partition_id == "val" or self.max_off_policy_threshold is None or self.max_off_policy_strategy != "drop":
             return set()
         prompt_global_steps = self.prompt_global_steps[partition_id]
         terminal_keys = self.finished_keys[partition_id]
@@ -530,7 +550,7 @@ class ReplayBufferAsync(ReplayBuffer):
     ) -> bool:
         # Dropless off-policy control: block sampling while any in-flight prompt has reached the staleness
         # threshold, so it can finish and be trained on instead of dropped.
-        if self.max_off_policy_strategy == "wait":
+        if self.max_off_policy_threshold is not None and self.max_off_policy_strategy == "wait":
             for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
                 prompt_global_steps = self.prompt_global_steps[partition_id][key]
                 if (global_steps - prompt_global_steps + 1) >= self.max_off_policy_threshold:
@@ -570,6 +590,20 @@ class ReplayBufferAsync(ReplayBuffer):
             if self._has_enough_samples(global_steps, partition_id, target_count, sampleable_keys):
                 return sampleable_keys, eviction_metrics
 
+            if (
+                partition_id == "train"
+                and self.input_exhausted
+                and not (self.pending_keys[partition_id] or self.running_keys[partition_id])
+            ):
+                logger.info(
+                    "Custom training source drained; discarding %s remaining prompt groups "
+                    "(%s required for a complete update).",
+                    len(sampleable_keys),
+                    target_count,
+                )
+                self._clear_groups(partition_id, sampleable_keys)
+                raise DataLoaderExhausted
+
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
@@ -580,7 +614,11 @@ class ReplayBufferAsync(ReplayBuffer):
             partition_id, sampleable_keys, batch_size
         )
 
-        if partition_id != "val" and self.max_off_policy_strategy == "drop":
+        if (
+            partition_id != "val"
+            and self.max_off_policy_threshold is not None
+            and self.max_off_policy_strategy == "drop"
+        ):
             selected_spans = [
                 global_steps - prompt_global_steps_snapshot.get(uid, global_steps) + 1 for uid in selected_prompt_uids
             ]

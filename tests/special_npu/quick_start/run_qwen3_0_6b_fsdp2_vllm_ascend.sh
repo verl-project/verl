@@ -6,7 +6,7 @@ NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${NDEVICES_PER_NODE:-8}}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
@@ -77,7 +77,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.calculate_log_probs=True

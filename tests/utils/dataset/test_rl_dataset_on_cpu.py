@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import os
+import threading
 from copy import deepcopy
 from pathlib import Path
 
@@ -185,6 +187,36 @@ def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
         {"type": "text", "text": "Describe "},
         {"type": "image", "image": image_path},
     ]
+
+
+def test_process_multi_modal_info_keeps_event_loop_responsive(monkeypatch):
+    processing_started = threading.Event()
+    observer_ran = threading.Event()
+
+    def blocking_process_multi_modal_info(cls, messages, image_patch_size, config):
+        processing_started.set()
+        observer_ran.wait(timeout=0.2)
+        return None, None, None
+
+    monkeypatch.setattr(
+        RLHFDataset,
+        "_process_multi_modal_info",
+        classmethod(blocking_process_multi_modal_info),
+    )
+
+    async def run():
+        async def observe_event_loop():
+            await asyncio.sleep(0)
+            observer_ran.set()
+
+        observer = asyncio.create_task(observe_event_loop())
+        await RLHFDataset.process_multi_modal_info([], image_patch_size=14, config=OmegaConf.create({}))
+        observer_ran_while_processing = observer_ran.is_set()
+        await observer
+        return observer_ran_while_processing
+
+    assert asyncio.run(run())
+    assert processing_started.is_set()
 
 
 def test_image_rl_data():

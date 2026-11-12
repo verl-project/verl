@@ -72,7 +72,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=False
     actor_rollout_ref.rollout.n=${ROLLOUT_N}

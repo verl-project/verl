@@ -1,6 +1,6 @@
 # Delta Weight Sync
 
-Last updated: 07/10/2026.
+Last updated: 08/23/2026.
 
 ## Motivation
 
@@ -87,13 +87,12 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
 - **Transport**: the sparse payload is broadcast over the existing NCCL collective group in
   bucket-sized flushes (streamed: each flush is sent and freed as it is produced, so sender peak
   memory stays ~2 buckets regardless of model size).
-- **Apply**: each rollout worker hands its local copy of the sparse payload to its colocated SGLang
-  TP worker via same-GPU ``update_weights_from_tensor`` IPC, where a verl-shipped loader —
-  registered automatically through SGLang's stock ``--custom-weight-loader`` hook, so **no SGLang
-  fork or patch is needed** — verifies the flush checksum (fail loud), densifies each parameter's
-  delta into a NaN-masked tensor, and overwrites only the changed positions *in place* on the live
-  weights. No full-model mirror is staged anywhere on the rollout side: receiver peak memory is one
-  bucket plus one decode chunk, independent of model size.
+- **Apply**: each rollout worker forwards its local copy over same-GPU IPC. SGLang uses a
+  VERL loader registered through the stock ``--custom-weight-loader`` hook, so no SGLang
+  patch is needed. vLLM uses a VERL ``WeightTransferEngine`` adapter and vLLM's checkpoint
+  patch API. The native model loader still handles checkpoint names, packed
+  parameters, and TP slicing. Both paths verify the checksum and update live weights
+  without keeping a full rollout-model copy.
 - **Seeding**: the first sync is an explicit **dense** pass — the raw weights stream through the same
   bucketed wire with no positions attached (values only), populating the trainer-side snapshot as they
   go — so a dummy-initialized rollout gets a correct base without any sparse-encoding overhead.
@@ -198,10 +197,16 @@ Correctness evidence (details in the PR):
 A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_sharded_2_6.sh`` —
 the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
 
-Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2/TorchTitan
-training engines.
-Selecting a delta backend with any other rollout engine raises ``NotImplementedError`` at worker startup;
-a per-backend apply interface (vllm/trt-llm plugins) is planned.
+Current scope is disaggregated (``hybrid_engine=False``) BF16 rollout. The
+producer side supports FSDP1, FSDP2, and TorchTitan training engines; the
+rollout consumer may be SGLang or vLLM. The vLLM path requires CUDA IPC,
+``data_parallel_size=1``, ``pipeline_parallel_size=1``, a non-quantized model,
+and vLLM's checkpoint patch API. For sparse updates, the model loader's final
+runtime write must be a floating-point ``copy_`` whose source and destination
+have the same shape. The vLLM path does not support ``verify_every > 0``, PD
+disaggregation, speculative decoding, or EPLB. vLLM MoE delta updates require
+the Triton backend. Selecting any other rollout engine raises
+``NotImplementedError`` at worker startup.
 
 ## Roadmap
 

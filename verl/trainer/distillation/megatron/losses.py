@@ -21,6 +21,7 @@ from verl.models.mcore.util import (
     preprocess_bshd_engine,
     preprocess_thd_engine,
 )
+from verl.trainer.distillation.tail_kl import compute_tail_aware_logit_gradient, compute_tail_bucket_kl
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
@@ -68,6 +69,8 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_logps: torch.Tensor,
         target_topk_indices: torch.Tensor,
         log_prob_min_clamp: Optional[float],
+        include_tail: bool,
+        tail_mass_eps: float,
     ):
         """
         NOTE:
@@ -109,13 +112,13 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_indices[~topk_indices_in_vocab_mask] = 0
 
         # Target probs/logps (teacher distribution restricted to top-k), masked to this shard.
-        # Note: `target_topk_mass` is computed *before* masking-out-of-shard entries, so it represents
-        # the mass of the provided top-k distribution (global), independent of TP sharding.
+        # Compute the logging metric before clamping and masking so it represents the original
+        # mass of the provided top-k distribution (global), independent of TP sharding.
+        target_topk_mass = torch.sum(torch.exp(target_topk_logps.float()), dim=-1)
         if log_prob_min_clamp is not None:
             target_topk_logps = target_topk_logps.clamp_min(log_prob_min_clamp)
         target_topk_logps = target_topk_logps.float()
         target_topk_probs = torch.exp(target_topk_logps)
-        target_topk_mass = torch.sum(target_topk_probs, dim=-1)
         target_topk_probs[~topk_indices_in_vocab_mask] = 0
         target_topk_logps[~topk_indices_in_vocab_mask] = 0
 
@@ -127,6 +130,22 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)
         ]  # (b*s, topk)
         vp_source_topk_logps = vp_source_topk_logps_2d.view(target_topk_indices.shape)  # (b, s, topk)
+
+        if include_tail and log_prob_min_clamp is not None:
+            raise ValueError(
+                "Tail-aware top-k KL requires log_prob_min_clamp=None because per-entry clamping "
+                "breaks the coarse-grained probability distribution."
+            )
+
+        # For logging: mass of student probs that lands on the teacher's top-k indices.
+        # Compute it before clamping; entries outside this TP shard contribute zero.
+        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
+        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
+        torch.distributed.all_reduce(
+            per_token_topk_mass,
+            op=torch.distributed.ReduceOp.SUM,
+            group=get_tensor_model_parallel_group(),
+        )
 
         # `active_mask` tracks entries that should receive gradient.
         # If clamping is enabled, entries with log p_i <= clamp have zero gradient w.r.t. logits.
@@ -162,15 +181,25 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             group=get_tensor_model_parallel_group(),
         )
 
-        ctx.save_for_backward(vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass)
+        tail_loss = torch.zeros_like(per_token_kl_loss)
+        if include_tail:
+            tail_loss = compute_tail_bucket_kl(
+                student_topk_mass=per_token_topk_mass,
+                teacher_topk_mass=target_topk_mass,
+                tail_mass_eps=tail_mass_eps,
+            )
+            per_token_kl_loss = per_token_kl_loss + tail_loss
 
-        # For logging: mass of student probs that lands on the teacher's top-k indices.
-        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
-        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
-        torch.distributed.all_reduce(
+        ctx.include_tail = include_tail
+        ctx.tail_mass_eps = tail_mass_eps
+        ctx.save_for_backward(
+            vp_source_probs,
+            target_topk_probs,
+            target_topk_indices,
+            active_mask,
+            target_active_mass,
             per_token_topk_mass,
-            op=torch.distributed.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
+            target_topk_mass,
         )
 
         # Compute the student's global top-k ids from per-rank vocab-shard candidates.
@@ -211,9 +240,19 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_mass = target_topk_mass.detach()
         overlap_count = overlap_count.detach()
         overlap_token_advantage = overlap_token_advantage.detach()
-        ctx.mark_non_differentiable(per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage)
+        tail_loss = tail_loss.detach()
+        ctx.mark_non_differentiable(
+            per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage, tail_loss
+        )
 
-        return per_token_kl_loss, per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage
+        return (
+            per_token_kl_loss,
+            per_token_topk_mass,
+            target_topk_mass,
+            overlap_count,
+            overlap_token_advantage,
+            tail_loss,
+        )
 
     @staticmethod
     def backward(
@@ -223,6 +262,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         grad_target_mass: torch.Tensor,
         grad_overlap_count: torch.Tensor,
         grad_overlap_token_advantage: torch.Tensor,
+        grad_tail_loss: torch.Tensor,
     ):
         """
         Backprop for the per-token loss:
@@ -241,24 +281,44 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         Then for any vocab index j on this shard (with p = softmax(logits)):
             dL/dz_j = m_A * p_j - q_j * 1[j in A]
         """
-        vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass = ctx.saved_tensors
+        (
+            vp_source_probs,
+            target_topk_probs,
+            target_topk_indices,
+            active_mask,
+            target_active_mass,
+            student_topk_mass,
+            teacher_topk_mass,
+        ) = ctx.saved_tensors
 
-        # Scale by m_A: grad starts as m_A * p_j for all j on this shard.
-        grad_input = vp_source_probs * target_active_mass.unsqueeze(-1)  # [b, s, vocab_shard]
+        if ctx.include_tail:
+            grad_input = compute_tail_aware_logit_gradient(
+                student_probs=vp_source_probs,
+                teacher_topk_probs=target_topk_probs,
+                teacher_topk_indices=target_topk_indices,
+                teacher_topk_mask=active_mask,
+                student_topk_mass=student_topk_mass,
+                teacher_topk_mass=teacher_topk_mass,
+                tail_mass_eps=ctx.tail_mass_eps,
+            )
+        else:
+            # Scale by m_A: grad starts as m_A * p_j for all j on this shard.
+            outside_scale = target_active_mass
+            grad_input = vp_source_probs * outside_scale.unsqueeze(-1)  # [b, s, vocab_shard]
 
         topk = target_topk_indices.size(-1)
         grad_input_2d = grad_input.view(-1, grad_input.size(-1))
-        target_topk_probs_flat = target_topk_probs.view(-1, topk)  # (b*s, topk)
         target_topk_indices_flat = target_topk_indices.view(-1, topk)  # (b*s, topk)
 
         # Subtract q_j for active entries (i.e., j in A), accumulating repeats via scatter_add_.
         # Index 0 is used as a dummy for top-k entries not on this shard (their q is zeroed by mask),
         # but index 0 may also be a real token index; scatter_add_ correctly accumulates duplicates.
-        sub = target_topk_probs_flat * active_mask.view(-1, topk).to(grad_input_2d.dtype)  # (b*s, topk)
-        grad_input_2d.scatter_add_(dim=1, index=target_topk_indices_flat, src=-sub)
+        if not ctx.include_tail:
+            correction = -target_topk_probs * active_mask.to(vp_source_probs.dtype)
+            grad_input_2d.scatter_add_(dim=1, index=target_topk_indices_flat, src=correction.view(-1, topk))
 
         grad_input.mul_(grad_loss.unsqueeze(dim=-1))
-        return grad_input, None, None, None
+        return grad_input, None, None, None, None, None
 
 
 def compute_forward_kl_topk(
@@ -267,46 +327,78 @@ def compute_forward_kl_topk(
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute forward KL distillation loss using top-k log probabilities.
+    *,
+    include_tail: bool = False,
+    quant_align_size: Optional[int] = None,
+    cp_layout: str = "zigzag",
+    local_cp_size: Optional[int] = None,
+) -> dict[str, torch.Tensor]:
+    """Compute truncated or tail-aware teacher-top-k KL with the Megatron backend.
 
     Args:
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         teacher_topk_log_probs: (bsz, seqlen, topk).
         teacher_topk_ids: (bsz, seqlen, topk).
+        config: distillation config, providing ``log_prob_min_clamp`` and ``tail_mass_eps``.
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+        include_tail: whether to collapse all non-top-k tokens into one aggregate
+            bucket, which turns the truncated objective into the exact forward KL
+            between the two coarse-grained ``K + 1``-class distributions.
+            Selected by ``loss_mode=forward_kl_topk_tail``.
+        quant_align_size: the alignment the model forward padded the student's packed inputs to for the
+            low-precision GEMMs (``verl.models.mcore.util.get_thd_quant_align_size``), so that the teacher
+            tensors are packed into the same rows as ``student_logits``.
+        cp_layout, local_cp_size: how the model forward split the student's THD rows across CP ranks (the row
+            layout, and the dynamic CP group size when dynamic CP scheduled the micro-batch). With another
+            layout or group, the teacher rows can match ``student_logits`` in shape but hold other tokens.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
+    - tail_loss: (bsz, seqlen/cp_size), only when ``include_tail=True``
     """
     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
 
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
     if data_format == "thd":
-        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
+        # packed exactly like the student's inputs in the model forward
+        thd_kwargs = dict(quant_align_size=quant_align_size, local_cp_size=local_cp_size, cp_layout=cp_layout)
+        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(
+            teacher_topk_log_probs, pre_process=True, **thd_kwargs
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True, **thd_kwargs)
     else:
-        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
+        # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
+        use_fp8_padding = quant_align_size is not None
+        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_log_probs, pre_process=True, use_fp8_padding=use_fp8_padding
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_ids, pre_process=True, use_fp8_padding=use_fp8_padding
+        )
     assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
 
     # 2. compute token-wise KL divergence across tp groups
     distillation_loss_config: DistillationLossConfig = config.distillation_loss
-    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage = (
+    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage, tail_loss = (
         _VocabParallelKLDivergence.apply(
             student_logits,
             teacher_topk_log_probs_cp_split,
             teacher_topk_ids_cp_split,
             distillation_loss_config.log_prob_min_clamp,
+            include_tail,
+            distillation_loss_config.tail_mass_eps,
         )
     )
 
-    return {
+    outputs = {
         "distillation_losses": distillation_losses,
         "student_mass": student_mass,
         "teacher_mass": teacher_mass,
         "overlap_count": overlap_count,
         "overlap_token_advantage": overlap_token_advantage,
     }
+    if include_tail:
+        outputs["tail_loss"] = tail_loss
+    return outputs

@@ -15,8 +15,10 @@
 """Keep the uv launch path GPU-only, so Ascend NPU runs keep using ambient python.
 
 The uv flow (``pyproject.toml`` / ``uv.lock``) resolves only the CUDA backends —
-x86_64 Linux, CPython 3.12, cu130 — so ``vllm-ascend`` / ``sglang-ascend`` /
-``mindspeed`` cannot come from it. Shell scripts therefore invoke uv only inside
+Linux x86_64 / aarch64, CPython 3.12, cu130 — so ``vllm-ascend`` /
+``sglang-ascend`` / ``mindspeed`` cannot come from it. The gate below is on
+``DEVICE``, not on the arch, precisely because both CUDA arches share one lock
+and one set of extras. Shell scripts therefore invoke uv only inside
 a branch gated on both toggles::
 
     LAUNCH=(python3)
@@ -178,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         for err in errors:
             print("  - " + err, file=sys.stderr)
         print(
-            "\nThe uv lockfile resolves CUDA backends only (x86_64 Linux / cp312 / cu130), so every\n"
+            "\nThe uv lockfile resolves CUDA backends only (Linux x86_64/aarch64 / cp312 / cu130), so every\n"
             "uv command — including the py_executable string passed to Ray — must live inside\n"
             '  if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then\n'
             "and NPU-only scripts must not reference uv at all. See docs/start/install.rst.\n",

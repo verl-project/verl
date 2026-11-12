@@ -158,4 +158,4 @@ For more RL-Insight server installation details, see the [RL-Insight server inst
 ## Related documentation
 
 - [Agent Loop protocol](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/agent_loop_protocol.md)
-- [Uni-Agent RL-Insight instrumentation guide](https://github.com/verl-project/uni-agent/blob/rlinsight/docs/source/concepts/rl-insight-integration.md)
+- [Uni-Agent RL-Insight instrumentation guide](https://github.com/verl-project/uni-agent/blob/main/docs/source/concepts/rl-insight-integration.md)

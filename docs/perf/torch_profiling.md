@@ -33,7 +33,11 @@ You can customize the PyTorch Profiler behavior using the following fields under
         verl's per-stage markers are CPU-side events, so a device-only trace would be bare kernels
         with no way to tell which stage they belong to. Listing it is therefore redundant, and the
         rest of `contents` is honored as written.
-    *   **`cuda`**: Profile CUDA activities.
+    *   **`cuda`**: Profile CUDA activities. This is the device keyword on NVIDIA and on AMD
+        ROCm (PyTorch exposes HIP as `torch.cuda`). On another accelerator, use that platform's
+        device type instead — `xpu`, `hpu`, `mtia` — which is the one `torch.profiler` activity
+        that session records. Naming a device that is not the running platform's records no
+        device activity and logs a warning.
     *   **`memory`**: Track tensor memory allocation/free.
     *   **`shapes`**: Record shapes of operator inputs.
     *   **`stack`**: Record source code file and line number.

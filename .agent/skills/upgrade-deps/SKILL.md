@@ -45,7 +45,9 @@ python manage_envs.py run vllm fsdp -- python -c "import vllm; print(vllm.__vers
 
 Pick a `sync` combo that exercises the changed package. Mutually exclusive extras (see `[tool.uv].conflicts`) can't be synced together; `manage_envs.py` validates this and prints the conflict sets. Run `python manage_envs.py list` to see all extras and conflict rules.
 
-The uv flow targets **Linux x86_64 + Python 3.12 only** — `uv lock` / `uv sync` fail on macOS or other platforms. If there is no `uv` on the host, regenerate the lock inside Docker with `docker build -f docker/Dockerfile.uv.cu130 --target=lock ...` and copy `uv.lock` back out.
+The uv flow targets **Linux + Python 3.12, on x86_64 and aarch64** — `uv sync` fails on macOS or other platforms. (`uv lock` only resolves, so it runs anywhere; it always writes both arches, since `[tool.uv].environments` declares a marker for each.) If there is no `uv` on the host, regenerate the lock inside Docker with `docker build -f docker/Dockerfile.uv.cu130 --target=lock ...` and copy `uv.lock` back out.
+
+A bumped version must have wheels for **both** arches, or the lock will fail or silently drop the package on one of them. Check the package's PyPI files (or the [wheelhouse index](https://verl-project.github.io/verl-wheelhouse/simple/) for `apex` / `flash-attn` / `transformer-engine`) for an `aarch64` wheel alongside the `x86_64` one before pinning. If only one arch has it, gate it with a `platform_machine` marker inside the extra rather than forking the extra — see the `environments` comment in `pyproject.toml`.
 
 ### 5. Sync Dockerfile system pins (after the re-lock)
 

@@ -1,6 +1,6 @@
 # TransferQueue Data System
 
-Last updated: 07/27/2026.
+Last updated: 10/10/2026.
 
 This doc introduce [TransferQueue](https://github.com/Ascend/TransferQueue), an asynchronous streaming data management system for efficient post-training.
 
@@ -25,6 +25,8 @@ TransferQueue offers **fine-grained, sub-sample-level** data management and **lo
 
 <h2 id="updates"> Updates</h2>
 
+ - **September 8, 2026**: 🔥 TransferQueue has been adopted in [Meshy](https://github.com/OpenBMB/Meshy). Meshy models each role as a dedicated service, and TransferQueue serves as the data flow manager that connects each role.
+ - **August 14, 2026**: 🔥 TransferQueue has been adopted in [Dressage](https://github.com/Accio-Lab/Dressage). By integrating TQ, peak memory usage of the data plane on the master node is reduced by 91% in a 32-node GLM-5.2 setup. Refer to the [report](https://github.com/Accio-Lab/Dressage/blob/main/docs/trajectory-storage-refactor-en.md) for details.
  - **June 18, 2026**: 🔥 TransferQueue has been adopted in [ROLL](https://github.com/alibaba/ROLL/pull/463). This integration introduces a [`RemoteBatch`](https://github.com/alibaba/ROLL/blob/main/docs_roll/docs/User%20Guides/Advanced%20Features/remote_batch_transfer.md) abstraction, enabling seamless compatibility with existing `DataProto` design.
  - **June 9, 2026**: 🔥 TransferQueue has been adopted in [UniRL](https://github.com/Tencent-Hunyuan/UniRL), a unified RL framework for multimodal models developed by Tencent Hunyuan.
  - **April 15, 2026**: 🔥 TransferQueue has been adopted in [Relax](https://github.com/redai-infra/Relax)! By leveraging the `StreamingDataLoader` abstraction, it schedules training data across the cluster at micro-batch granularity, reducing synchronization barriers in a single-controller setup.
@@ -160,7 +162,7 @@ We have experimentally implemented a **standardized, fully-streamed distributed*
 
 By leveraging the `RankAwareSampler` and `StreamingDataLoader` interfaces, we achieve a **streamlined micro-batch-level producer-consumer pipeline**. This design eliminates the need to manually determine data dispatching logic across varying parallelism strategies—a typical complexity in the single-controller paradigm—thereby greatly simplifying framework design. 
 
-Please refer to our [Roadmap](https://github.com/Ascend/TransferQueue/issues/1) and [tutorials/05_streaming_dataloader.py](https://github.com/Ascend/TransferQueue/blob/main/tutorial/05_streaming_dataloader.py) for more details.
+Please refer to our [Roadmap](https://github.com/Ascend/TransferQueue/issues/1) and [tutorials/06_streaming_dataloader.py](https://github.com/Ascend/TransferQueue/blob/main/tutorial/06_streaming_dataloader.py) for more details.
 
 <p align="center">
   <img src="https://github.com/TransferQueue/community_doc/blob/main/docs/tq_streaming_dataloader.png?raw=true" width="70%">
@@ -279,7 +281,6 @@ batch_meta = client.get_meta(
     batch_size=8,
     partition_id="train_0",
     task_name="generate_sequences",
-    sampling_config={"n_samples_per_prompt": 4}  # Put the required sampling parameters here
 )
 ```
 

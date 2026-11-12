@@ -13,10 +13,18 @@
 # limitations under the License.
 
 import logging
+import sys
 import unittest
-from unittest.mock import Mock, mock_open, patch
+from unittest.mock import MagicMock, Mock, mock_open, patch
 
-from verl.utils.device import check_ipc_version_support, get_npu_versions
+from verl.utils.device import AscendHardwareVersion, check_ipc_version_support, get_npu_versions
+
+
+def _fake_torch_npu(device_name):
+    """Build a fake torch_npu module whose get_device_name returns device_name."""
+    fake = MagicMock()
+    fake.npu.get_device_name.return_value = device_name
+    return fake
 
 
 class TestCheckIPCVersionSupport(unittest.TestCase):
@@ -154,7 +162,7 @@ class TestGetNPUVersions(unittest.TestCase):
         # Mock path exists
         mock_exists.return_value = True
 
-        software_version, cann_version = get_npu_versions()
+        _, software_version, cann_version = get_npu_versions()
 
         self.assertEqual(software_version, "25.5.0")
         self.assertEqual(cann_version, "8.3.rc1")
@@ -234,6 +242,124 @@ class TestGetNPUVersions(unittest.TestCase):
             get_npu_versions()
 
         self.assertIn("Could not find version in CANN toolkit info file", str(context.exception))
+
+    @patch.dict(sys.modules, {"torch_npu": _fake_torch_npu("Ascend910_95")})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_a5_910_95(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.A5)
+
+    @patch.dict(sys.modules, {"torch_npu": _fake_torch_npu("Ascend950")})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_a5_950(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.A5)
+
+    @patch.dict(sys.modules, {"torch_npu": _fake_torch_npu("Ascend910_93")})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_a3(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.A3)
+
+    @patch.dict(sys.modules, {"torch_npu": _fake_torch_npu("Ascend910B3")})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_a2_910b(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.A2)
+
+    @patch.dict(sys.modules, {"torch_npu": _fake_torch_npu("A2G")})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_a2_a2g(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.A2)
+
+    @patch.dict(sys.modules, {"torch_npu": _fake_torch_npu("Ascend910_99")})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_max_version(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.MAX_VERSION)
+
+    @patch.dict(sys.modules, {"torch_npu": None})
+    @patch("subprocess.run")
+    @patch("platform.machine")
+    @patch("os.path.exists")
+    @patch("builtins.open", new_callable=mock_open, read_data="version=8.3.rc1\n")
+    def test_hardware_version_none_when_torch_npu_unavailable(self, mock_file, mock_exists, mock_machine, mock_run):
+        mock_run.return_value = Mock(stdout="Software Version : 25.5.0\n", check=True)
+        mock_machine.return_value = "x86_64"
+        mock_exists.return_value = True
+        hardware_version, _, _ = get_npu_versions()
+        self.assertEqual(hardware_version, AscendHardwareVersion.NONE)
+
+
+class TestIsIPCSupported(unittest.TestCase):
+    """Test PlatformNPU.is_ipc_supported A5 short-circuit behavior."""
+
+    @patch("verl.utils.device.check_ipc_version_support")
+    @patch("verl.utils.device.get_npu_versions")
+    def test_a5_short_circuit_returns_true(self, mock_get_versions, mock_check):
+        mock_get_versions.return_value = (AscendHardwareVersion.A5, "24.0.0", "7.0.0")
+        from verl.plugin.platform.platform_npu import PlatformNPU
+
+        platform = PlatformNPU()
+        self.assertTrue(platform.is_ipc_supported())
+        mock_check.assert_not_called()
+
+    @patch("verl.utils.device.check_ipc_version_support", return_value=True)
+    @patch("verl.utils.device.get_npu_versions")
+    def test_non_a5_delegates_to_version_check_true(self, mock_get_versions, mock_check):
+        mock_get_versions.return_value = (AscendHardwareVersion.A3, "25.5.0", "8.3.0")
+        from verl.plugin.platform.platform_npu import PlatformNPU
+
+        platform = PlatformNPU()
+        self.assertTrue(platform.is_ipc_supported())
+        mock_check.assert_called_once_with("25.5.0", "8.3.0")
+
+    @patch("verl.utils.device.check_ipc_version_support", return_value=False)
+    @patch("verl.utils.device.get_npu_versions")
+    def test_non_a5_delegates_to_version_check_false(self, mock_get_versions, mock_check):
+        mock_get_versions.return_value = (AscendHardwareVersion.A3, "24.0.0", "7.0.0")
+        from verl.plugin.platform.platform_npu import PlatformNPU
+
+        platform = PlatformNPU()
+        self.assertFalse(platform.is_ipc_supported())
+        mock_check.assert_called_once_with("24.0.0", "7.0.0")
 
 
 if __name__ == "__main__":

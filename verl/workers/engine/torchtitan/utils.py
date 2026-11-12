@@ -167,6 +167,28 @@ def enable_fsdp_gradient_division(model: nn.Module, dp_size: int) -> None:
             module.set_gradient_divide_factor(float(dp_size))
 
 
+class ContextParallelGather(torch.autograd.Function):
+    """All-gather along dim 0 whose backward keeps only the local slice.
+
+    Every CP rank computes the same loss on the gathered tensor, so the upstream gradient is
+    identical across CP ranks and its local slice is already the full gradient of the local shard.
+    Summing it across ranks (the default all-gather backward) would scale gradients by the CP size.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, group: torch.distributed.ProcessGroup) -> torch.Tensor:
+        ctx.rank = torch.distributed.get_rank(group)
+        ctx.world_size = torch.distributed.get_world_size(group)
+        tensor = tensor.contiguous()
+        gathered = tensor.new_empty((tensor.size(0) * ctx.world_size, *tensor.shape[1:]))
+        torch.distributed.all_gather_into_tensor(gathered, tensor, group=group)
+        return gathered
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output.chunk(ctx.world_size, dim=0)[ctx.rank], None
+
+
 def get_attention_masks(
     input_batch: torch.Tensor,
     positions: torch.Tensor,
@@ -245,7 +267,6 @@ def _create_varlen_metadata_for_document(input_batch: torch.Tensor, positions: t
                 torch.tensor([seq_len], dtype=torch.int32, device=device),
             ]
         )
-        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
 
         seq_lengths = torch.diff(sample_cu_seqlens)
         all_seq_lengths.append(seq_lengths)

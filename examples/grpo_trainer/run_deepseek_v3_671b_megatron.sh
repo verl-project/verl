@@ -5,9 +5,10 @@
 #   CUDA_DEVICE_MAX_CONNECTIONS=1
 #   NCCL_NVLS_ENABLE=0
 #   VLLM_USE_V1=1
-#   pip install git+https://github.com/ISEEKYAN/mbridge
+#   CUDA environment from uv.lock: Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2.
+#   The launcher selects the vllm and megatron extras for the driver and workers.
 # Also: remove `quantization_config` from DeepSeek-V3 config.json and set
-# `num_nextn_predict_layers=0` (MTP not yet supported).
+# `num_nextn_predict_layers=0` (this example runs with MTP disabled).
 # Minimum 12 nodes x 8x 80GB+ GPUs recommended.
 
 set -xeuo pipefail
@@ -107,7 +108,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.context_parallel_size=${actor_cp}
     actor_rollout_ref.actor.megatron.param_offload=${offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${optim_offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${offload}
     actor_rollout_ref.actor.megatron.use_mbridge=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
