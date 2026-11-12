@@ -44,3 +44,40 @@ def test_compute_score_assignments(answer, ground_truth, expected_correct):
     result = compute_score(f"Answer: {answer}", ground_truth)
     assert result["acc"] is expected_correct
     assert result["score"] == (1.0 if expected_correct else -1.0)
+
+
+@pytest.mark.parametrize(
+    "answer_format",
+    [
+        "x=%s, y=%s",
+        r"x=%s,\text{and } y=%s",
+        r"x=%s \text{and} y=%s",
+        "The values are $x=%s, y=%s$.",
+        "$x=%s$, y=%s",
+        "x=%s, $y=%s$",
+        "$x=%s$, $y=%s$",
+        r"$x=%s$,\text{and } $y=%s$",
+        r"The values are $x=%s,\text{and } y=%s$.",
+    ],
+)
+@pytest.mark.parametrize(
+    "values, expected_score",
+    [(("1", "3"), 1.0), (("2", "3"), -1.0), (("1", "4"), -1.0)],
+)
+def test_compute_score_assignment_format(answer_format, values, expected_score):
+    answer = answer_format % values
+    assert compute_score(f"Answer: {answer}", "x=1,y=3")["score"] == expected_score
+    formatted_ground_truth = answer_format % ("1", "3")
+    assert compute_score(f"Answer: {answer}", formatted_ground_truth)["score"] == expected_score
+
+
+@pytest.mark.parametrize(
+    "answer, ground_truth",
+    [
+        (r"x=2,\text{and } y=3", r"x=1,\text{and } y=3"),
+        ("$x=1, y=3$, z=5", "$x=1, y=3$, z=4"),
+        ("x=2, $y=3, z=4$", "x=1, $y=3, z=4$"),
+    ],
+)
+def test_compute_score_compares_assignments_on_both_sides(answer, ground_truth):
+    assert compute_score(f"Answer: {answer}", ground_truth)["score"] == -1.0

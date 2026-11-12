@@ -130,21 +130,25 @@ def normalize_final_answer(final_answer: str) -> str:
     Returns:
         Normalized answer string
     """
-    # Detect later assignments even when individual terms are wrapped in math delimiters.
+    # Apply separator substitutions before looking for comma-separated assignments.
+    for before, after in SUBSTITUTIONS:
+        final_answer = final_answer.replace(before, after)
+
     has_multiple_assignments = re.search(
         r"=[^=]+,\s*(?:\\[A-Za-z]+|[^\W\d_])\w*(?:_\{[^{}]+\})?\s*=", final_answer.replace("$", "")
     )
     if not has_multiple_assignments:
         final_answer = final_answer.split("=")[-1]
 
-    # Apply substitutions and removals
-    for before, after in SUBSTITUTIONS:
-        final_answer = final_answer.replace(before, after)
     for expr in REMOVED_EXPRESSIONS:
         final_answer = final_answer.replace(expr, "")
 
-    # Keep all assignments when only part of the answer is inside math delimiters.
-    if not has_multiple_assignments:
+    if has_multiple_assignments:
+        # Strip surrounding prose only when one math span contains every assignment.
+        math_span = re.fullmatch(r"[^$=]*\$([^$]+)\$[^$=]*", final_answer)
+        if math_span:
+            final_answer = math_span[1]
+    else:
         final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
 
     # Normalize LaTeX math
