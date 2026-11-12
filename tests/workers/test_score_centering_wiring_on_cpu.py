@@ -75,7 +75,7 @@ def test_megatron_logits_processor_runs_score_centering_hook_and_log_probs(score
     calls = []
 
     def logits_processor(student_logits, data, data_format, **packing):
-        calls.append(data_format)
+        calls.append((data_format, packing))
         return {"sc_correction": torch.zeros(student_logits.shape[:2])}
 
     with patch(
@@ -94,12 +94,80 @@ def test_megatron_logits_processor_runs_score_centering_hook_and_log_probs(score
             logits_processor_func=logits_processor,
             batch=TensorDict({}, batch_size=[]),
             data_format="thd",
+            pad_to_length_bucket=512,
         )
 
     mock_log_probs.assert_called_once()
     assert "log_probs" in ret
-    assert calls == (["thd"] if score_centering else [])
+    expected_packing = {
+        "quant_align_size": None,
+        "pad_to_length_bucket": 512,
+        "cp_layout": "zigzag",
+        "local_cp_size": None,
+    }
+    assert calls == ([("thd", expected_packing)] if score_centering else [])
     assert ("sc_correction" in ret) is score_centering
+
+
+@pytest.mark.parametrize("use_fused_kernels", [False, True])
+def test_megatron_forward_step_supports_pad_to_length_with_score_centering(use_fused_kernels):
+    eng = object.__new__(MegatronEngineWithLMHead)
+    eng.engine_config = SimpleNamespace(
+        use_fused_kernels=use_fused_kernels,
+        pad_to_length=True,
+        pad_to_length_bucket=512,
+        use_remove_padding=True,
+        dynamic_context_parallel=False,
+    )
+    eng.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(),
+        tokenizer=SimpleNamespace(pad_token_id=0),
+        mtp=SimpleNamespace(enable=False, enable_train=False),
+    )
+    eng.tf_config = SimpleNamespace(fp8=None)
+    eng.enable_routing_replay = True
+
+    input_ids = torch.nested.as_nested_tensor([torch.tensor([1, 2, 3]), torch.tensor([4, 5])], layout=torch.jagged)
+    loss_mask = torch.nested.as_nested_tensor([torch.ones(3), torch.ones(2)], layout=torch.jagged)
+    rollout_topk_ids = torch.nested.as_nested_tensor(
+        [torch.tensor([[1, 2], [2, 3], [3, 4]]), torch.tensor([[4, 5], [5, 6]])],
+        layout=torch.jagged,
+    )
+    batch = TensorDict(
+        {
+            "input_ids": input_ids,
+            "loss_mask": loss_mask,
+            "temperature": torch.ones(2),
+            "rollout_topk_ids": rollout_topk_ids,
+        },
+        batch_size=[2],
+    )
+    tu.assign_non_tensor(batch, score_centering=True)
+    model = SimpleNamespace(config=SimpleNamespace(experimental_attention_variant=None))
+    captured = {}
+
+    def forward_fn(*args, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    with (
+        patch("verl.workers.engine.megatron.transformer_impl.get_device_id", return_value="cpu"),
+        patch("verl.models.mcore.get_mcore_engine_forward_fn", return_value=forward_fn),
+        patch("verl.models.mcore.get_mcore_forward_fused_model_engine_fn", return_value=forward_fn),
+        patch(
+            "verl.workers.engine.megatron.transformer_impl.RouterReplayHelper.is_replay_backward_action",
+            return_value=False,
+        ),
+        patch(
+            "verl.workers.engine.megatron.transformer_impl.RouterReplayHelper.is_replay_forward_action",
+            return_value=False,
+        ),
+    ):
+        eng.forward_step(iter([batch]), model, lambda **_kwargs: {}, lambda *args, **kwargs: None)
+
+    assert captured["pad_to_length_bucket"] == 512
+    processor_key = "auxiliary_logits_processor" if use_fused_kernels else "logits_processor"
+    assert captured[processor_key].keywords["pad_to_length_bucket"] == 512
 
 
 def test_megatron_log_probs_do_not_touch_the_logits_score_centering_saved():

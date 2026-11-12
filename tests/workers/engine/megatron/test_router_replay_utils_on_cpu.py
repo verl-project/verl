@@ -99,19 +99,32 @@ def test_record_replay_roundtrip_uses_model_padding(monkeypatch, nested, precisi
     mask = torch.tensor([[True, True, True, False, False], [True] * 5])
     routes = (torch.arange(20) + 300).reshape(2, 5, 1, 2).to(torch.int16)
     quant_align_size = rr_utils.get_thd_quant_align_size(config)
+    pad_to_length_bucket = 16 if nested else None
     if nested:
         input_ids = torch.nested.as_nested_tensor([input_ids[0, :3], input_ids[1]], layout=torch.jagged)
         routes = torch.nested.as_nested_tensor([routes[0, :3], routes[1]], layout=torch.jagged)
         mask = None
-        packed, _, _ = rr_utils.preprocess_thd_engine(routes, quant_align_size=quant_align_size)
+        packed, _, _ = rr_utils.preprocess_thd_engine(
+            routes,
+            quant_align_size=quant_align_size,
+            pad_to_length_bucket=pad_to_length_bucket,
+        )
     else:
         packed, _ = rr_utils.preprocess_packed_seqs(routes, mask, quant_align_size=quant_align_size)
-    assert packed.shape[1] == (8 if precision == "bf16" else 128)
+    expected_packed_rows = (16 if nested else 8) if precision == "bf16" else 128
+    assert packed.shape[1] == expected_packed_rows
     router = _FakeRouter(packed[0, :, 0, :].clone(), RouterReplayAction.RECORD)
     model = object()
     monkeypatch.setattr(rr_utils, "iter_model_routers", lambda _model: iter([(1, router)]))
     recorded = []
-    rr_utils.merge_router_topk_indices(mask, input_ids, recorded, config, model=model)
+    rr_utils.merge_router_topk_indices(
+        mask,
+        input_ids,
+        recorded,
+        config,
+        pad_to_length_bucket=pad_to_length_bucket,
+        model=model,
+    )
     assert len(recorded) == 1
     if nested:
         torch.testing.assert_close(recorded[0].values(), routes.values())
@@ -119,7 +132,13 @@ def test_record_replay_roundtrip_uses_model_padding(monkeypatch, nested, precisi
     else:
         torch.testing.assert_close(recorded[0][mask], routes[mask])
         assert torch.count_nonzero(recorded[0][~mask]) == 0
-    rr_utils.set_router_replay_data(recorded[0], mask, config, model=model)
+    rr_utils.set_router_replay_data(
+        recorded[0],
+        mask,
+        config,
+        pad_to_length_bucket=pad_to_length_bucket,
+        model=model,
+    )
     torch.testing.assert_close(router.target_topk_idx, router.recorded_topk_idx.to(torch.int64))
 
 

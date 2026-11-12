@@ -334,6 +334,7 @@ def compute_forward_kl_topk(
     min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """Compute truncated or tail-aware teacher-top-k KL with the Megatron backend.
 
@@ -350,6 +351,7 @@ def compute_forward_kl_topk(
         quant_align_size: the alignment the model forward padded the student's packed inputs to for the
             low-precision GEMMs (``verl.models.mcore.util.get_thd_quant_align_size``), so that the teacher
             tensors are packed into the same rows as ``student_logits``.
+        pad_to_length_bucket: the static bucket alignment applied to the student's total packed length.
         cp_layout, local_cp_size: how the model forward split the student's THD rows across CP ranks (the row
             layout, and the dynamic CP group size when dynamic CP scheduled the micro-batch). With another
             layout or group, the teacher rows can match ``student_logits`` in shape but hold other tokens.
@@ -368,6 +370,7 @@ def compute_forward_kl_topk(
         thd_kwargs = dict(
             quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             local_cp_size=local_cp_size,
             cp_layout=cp_layout,
         )

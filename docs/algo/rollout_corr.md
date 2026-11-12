@@ -671,7 +671,12 @@ algorithm:
           score_centering: true
   ```
 
-- Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
+- Fused kernels are optional. Megatron score centering supports
+  `actor_rollout_ref.model.use_fused_kernels: true` with
+  `actor_rollout_ref.model.fused_kernel_options.impl_backend: tilelang`; use `false` for fused
+  backends that cannot return log-probs for the recorded top-k labels
+- Megatron static `pad_to_length` is supported; the sampler heads and router-replay tensors use
+  the same bucket padding as the student rows. Dynamic context parallelism remains unsupported
 - v1 trainer (`trainer.use_v1: true`) with an FSDP or Megatron actor; single-turn agent loop only. Under Megatron tensor parallelism the head log-probs are normalized over the vocab-parallel shards
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position

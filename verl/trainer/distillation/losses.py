@@ -133,12 +133,13 @@ def compute_topk_loss(
     min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ) -> torch.Tensor:
     """Compute the topk loss in logit processor.
 
-    ``quant_align_size``, ``cp_layout`` and ``local_cp_size`` are how the Megatron engine packed the student's
-    inputs (low-precision alignment, CP row layout, dynamic CP group size); the Megatron loss packs the teacher
-    tensors with them.
+    ``quant_align_size``, ``pad_to_length_bucket``, ``cp_layout`` and ``local_cp_size`` are how the Megatron
+    engine packed the student's inputs (low-precision alignment, static bucket padding, CP row layout,
+    dynamic CP group size); the Megatron loss packs the teacher tensors with them.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -168,6 +169,7 @@ def compute_topk_loss(
     if config.strategy == "megatron":
         backend_kwargs = {
             "quant_align_size": quant_align_size,
+            "pad_to_length_bucket": pad_to_length_bucket,
             "cp_layout": cp_layout,
             "local_cp_size": local_cp_size,
         }
@@ -214,6 +216,7 @@ def distillation_ppo_loss(
     min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -238,8 +241,8 @@ def distillation_ppo_loss(
           - teacher_ids: (bsz, seqlen, topk)
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
-        quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs, see
-            ``compute_topk_loss``.
+        quant_align_size, pad_to_length_bucket, cp_layout, local_cp_size: how the Megatron engine packed
+            the student inputs, see ``compute_topk_loss``.
 
     Returns:
     - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
@@ -257,6 +260,7 @@ def distillation_ppo_loss(
             student_topk_log_probs=student_topk_log_probs,
             quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )

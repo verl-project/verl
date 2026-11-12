@@ -344,6 +344,7 @@ def score_centering_logits_processor(
     min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """Per-token centering term from the trainer logits, in the engine's logits-processor slot.
 
@@ -354,8 +355,8 @@ def score_centering_logits_processor(
             sampler heads of shape [B, j, k] and the optional ``rollout_support_complete`` receipts.
         config: Actor configuration, used for ``strategy`` and ``policy_loss.rollout_correction``.
         data_format: "thd" or "bshd". Only "thd" is supported.
-        quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs,
-            so the sampler heads are packed into the same rows as ``student_logits``.
+        quant_align_size, pad_to_length_bucket, cp_layout, local_cp_size: how the Megatron engine packed
+            the student inputs, so the sampler heads are packed into the same rows as ``student_logits``.
 
     Returns:
         Dict with, each of shape (1, nnz/sp):
@@ -379,6 +380,7 @@ def score_centering_logits_processor(
         thd_kwargs = dict(
             quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             local_cp_size=local_cp_size,
             cp_layout=cp_layout,
         )
@@ -443,6 +445,7 @@ def score_centering_ppo_loss(
     min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ):
     """Actor loss function used both for the logits processor and the final policy loss.
     - student_logits is not None, compute the centering term in the logits processor.
@@ -455,8 +458,8 @@ def score_centering_ppo_loss(
         dp_group: Data parallel group for ``ppo_loss``.
         student_logits: (1, nnz/sp, V).
         data_format: "thd" or "bshd". Only "thd" is supported.
-        quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs, see
-            ``score_centering_logits_processor``.
+        quant_align_size, pad_to_length_bucket, cp_layout, local_cp_size: how the Megatron engine packed
+            the student inputs, see ``score_centering_logits_processor``.
 
     Returns:
         student_logits is not None: dict from ``score_centering_logits_processor``.
@@ -471,6 +474,7 @@ def score_centering_ppo_loss(
             student_topk_log_probs=student_topk_log_probs,
             quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )

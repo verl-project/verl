@@ -699,8 +699,12 @@ def test_logits_processor_megatron_splits_head_by_cp_and_uses_tp_group():
         ) as mock_split,
         patch("megatron.core.parallel_state.get_tensor_model_parallel_group", return_value=None) as mock_group,
     ):
-        out = score_centering_logits_processor(student_logits=logits, data=data, config=config)
+        out = score_centering_logits_processor(
+            student_logits=logits, data=data, config=config, pad_to_length_bucket=512
+        )
     assert mock_split.call_count == 2 and mock_group.call_count == 1
+    for call in mock_split.call_args_list:
+        assert call.kwargs["pad_to_length_bucket"] == 512
     for key in expected:
         torch.testing.assert_close(out[key], expected[key])
 

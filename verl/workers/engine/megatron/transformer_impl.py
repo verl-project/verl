@@ -1192,6 +1192,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        pad_to_length_bucket: int | None = None,
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
     ):
@@ -1236,6 +1237,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     data=batch,
                     data_format=data_format,
                     quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,
                 )
@@ -1272,11 +1274,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
             else None
         )
-
-        if pad_to_length_bucket is not None and (distillation_use_topk or score_centering):
-            raise RuntimeError("pad_to_length is not supported with top-K distillation or score centering")
-        if pad_to_length_bucket is not None and self.enable_routing_replay:
-            raise RuntimeError("pad_to_length is not supported with router replay")
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1337,6 +1334,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vp_rank,
                 replay_mask=replay_mask,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
             )
 
@@ -1364,6 +1362,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     data_format="thd",
                     quant_align_size=get_thd_quant_align_size(self.tf_config),
                     min_local_rows=min_local_rows,
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,
                 )
@@ -1406,6 +1405,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
                 local_cp_size=local_cp_size,
             )
@@ -1459,6 +1459,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
             )
 
