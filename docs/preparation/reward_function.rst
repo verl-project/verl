@@ -51,22 +51,17 @@ We already pre-implemented some reward functions in `reward_score directory <htt
   the implementation in `lm-evaluation-harness repository <https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py>`_.
 - Additional built-in presets include ``math_dapo``, ``math_verify``, ``prime_math``, ``prime_code``, ``geo3k``, ``search_r1_like_qa_em``, and ``search_r1_like_qa_subem``.
 
-Selecting Presets via CLI without Modifying Parquet Files
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Selecting a Fallback Preset via CLI without Modifying Parquet Files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-By default, ``default_compute_score`` dispatches to a built-in preset based on each row's ``data_source`` column. When using a public Parquet file whose ``data_source`` is not in the built-in table (for example, ``"dapo_filter"`` or sub-source tags such as ``"MATH##Aops"``), or when switching a known dataset to a different built-in scorer (such as ``math_verify``), you can configure preset routing directly on the command line without editing the Parquet file:
+By default, ``default_compute_score`` dispatches to a built-in preset based on each row's ``data_source`` column. When using a public Parquet file whose ``data_source`` is not in the built-in table (for example, ``"dapo_filter"`` or sub-source tags such as ``"MATH##Aops"``), you can set ``reward.preset=<preset_name>`` directly on the command line without editing the Parquet file:
 
 - ``reward.preset=<preset_name>`` sets the fallback preset for any unmapped ``data_source`` while keeping built-in ``data_source`` mappings (such as ``openai/gsm8k`` or ``aime*``) intact for multi-dataset validation.
-- ``reward.data_source_presets`` maps exact ``data_source`` strings or ``fnmatch`` globs (such as ``"MATH##*"`` or ``"*"``) to a built-in preset, taking precedence over the built-in ``data_source`` table. It accepts either a YAML dictionary (``+reward.data_source_presets.dapo_filter=math_dapo``) or a Hydra list of ``"pattern=preset"`` strings when keys contain ``/``, ``#``, or ``*``.
 
 .. code:: bash
 
-  # Use math_dapo as the fallback preset for unmapped data_source values (e.g. dapo_filter)
+  # Use math_dapo as the fallback preset for unmapped data_source values (e.g. dapo_filter or MATH##Aops)
   python3 -m verl.trainer.main_ppo ... reward.preset=math_dapo
-
-  # Map specific data_source names or globs while preserving other validation scorers
-  python3 -m verl.trainer.main_ppo ... \
-      'reward.data_source_presets=["dapo_filter=math_dapo","MATH##*=math_dapo","HuggingFaceH4/MATH-500=math_verify"]'
 
 Customized
 ~~~~~~~~~~

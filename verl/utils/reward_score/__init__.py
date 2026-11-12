@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Mapping, Sequence
-from fnmatch import fnmatchcase
+import importlib.util
 
 from verl.utils.import_utils import deprecated
 
@@ -30,49 +29,22 @@ REWARD_PRESETS: tuple[str, ...] = (
 )
 
 
+def _ensure_preset_dependency(preset: str, *, context: str = "reward.preset") -> None:
+    """Verify optional runtime dependencies required by a selected preset scorer."""
+    if preset == "math_verify" and importlib.util.find_spec("math_verify") is None:
+        raise ImportError(
+            f"The 'math_verify' reward preset configured in {context} requires the optional 'math-verify' package. "
+            "Install it with `pip install math-verify`."
+        )
+
+
 def validate_reward_preset(preset: str, *, context: str = "reward.preset") -> str:
-    """Validate that ``preset`` names a supported built-in reward scorer."""
+    """Validate that ``preset`` names a supported built-in reward scorer and its dependencies exist."""
     if not isinstance(preset, str) or preset not in REWARD_PRESETS:
         available = ", ".join(REWARD_PRESETS)
         raise ValueError(f"Unknown preset reward function {preset!r} in {context}. Available presets: {available}")
+    _ensure_preset_dependency(preset, context=context)
     return preset
-
-
-def normalize_data_source_presets(
-    data_source_presets: Mapping[str, str] | Sequence[str] | None,
-) -> dict[str, str]:
-    """Normalize and validate ``data_source_presets`` from either a dict or ``["pattern=preset", ...]`` list.
-
-    Hydra's CLI override grammar restricts unquoted dict keys to simple identifiers, so supporting
-    ``["HuggingFaceH4/MATH-500=math_verify", "MATH##*=math_dapo"]`` alongside ``Mapping[str, str]``
-    lets users map arbitrary ``data_source`` names (containing ``/``, ``#``, or ``*``) directly on the CLI.
-    """
-    if not data_source_presets:
-        return {}
-
-    normalized: dict[str, str] = {}
-    if isinstance(data_source_presets, Mapping):
-        for pattern, target in data_source_presets.items():
-            if not isinstance(pattern, str) or not pattern:
-                raise ValueError(f"Invalid empty data_source pattern in reward.data_source_presets: {pattern!r}")
-            normalized[pattern] = validate_reward_preset(target, context=f"reward.data_source_presets[{pattern!r}]")
-        return normalized
-
-    if isinstance(data_source_presets, Sequence) and not isinstance(data_source_presets, str | bytes):
-        for item in data_source_presets:
-            if not isinstance(item, str) or "=" not in item:
-                raise ValueError(f"Invalid entry {item!r} in reward.data_source_presets; expected 'data_source=preset'")
-            pattern, target = item.rsplit("=", 1)
-            pattern, target = pattern.strip(), target.strip()
-            if not pattern:
-                raise ValueError(f"Invalid empty data_source pattern in reward.data_source_presets entry {item!r}")
-            normalized[pattern] = validate_reward_preset(target, context=f"reward.data_source_presets[{pattern!r}]")
-        return normalized
-
-    raise ValueError(
-        "reward.data_source_presets must be a mapping or a list of 'data_source=preset' strings, "
-        f"got {type(data_source_presets).__name__}"
-    )
 
 
 def _builtin_preset_for_data_source(data_source: str) -> str | None:
@@ -111,37 +83,18 @@ def _builtin_preset_for_data_source(data_source: str) -> str | None:
     return None
 
 
-def resolve_reward_preset(
-    data_source: str,
-    *,
-    preset: str | None = None,
-    data_source_presets: Mapping[str, str] | Sequence[str] | None = None,
-) -> str | None:
+def resolve_reward_preset(data_source: str, *, preset: str | None = None) -> str | None:
     """Resolve which built-in preset scorer applies to ``data_source``.
 
-    Precedence:
-    1. Exact ``data_source`` key in ``data_source_presets``.
-    2. Glob pattern (``*``, ``?``, ``[``) in ``data_source_presets`` matched via ``fnmatchcase``.
-    3. Built-in ``data_source`` routing table.
-    4. Fallback ``preset`` when ``data_source`` is otherwise unmapped.
+    Any supplied ``preset`` fallback is validated upfront (including optional dependency checks)
+    even when ``data_source`` matches a built-in route, so invalid fallback presets never fail
+    lazily midway through training.
     """
-    normalized_map = normalize_data_source_presets(data_source_presets)
-    if normalized_map:
-        if data_source in normalized_map:
-            return normalized_map[data_source]
-        if isinstance(data_source, str):
-            for pattern, target in normalized_map.items():
-                if any(ch in pattern for ch in "*?[") and fnmatchcase(data_source, pattern):
-                    return target
-
+    validated_fallback = validate_reward_preset(preset) if preset is not None else None
     builtin = _builtin_preset_for_data_source(data_source)
     if builtin is not None:
         return builtin
-
-    if preset is not None:
-        return validate_reward_preset(preset)
-
-    return None
+    return validated_fallback
 
 
 def _compute_preset_score(
@@ -163,6 +116,7 @@ def _compute_preset_score(
 
         return math_reward.compute_score(solution_str, ground_truth)
     if preset_name == "math_verify":
+        _ensure_preset_dependency("math_verify", context="preset_name='math_verify'")
         from . import math_verify
 
         return math_verify.compute_score(solution_str, ground_truth)
@@ -208,19 +162,17 @@ def default_compute_score(
     concurrent_semaphore=None,
     memory_limit_mb=None,
     preset: str | None = None,
-    data_source_presets: Mapping[str, str] | Sequence[str] | None = None,
     **kwargs,
 ):
-    """Compute the score for a given solution based on ``data_source`` or configured presets.
+    """Compute the score for a given solution based on ``data_source`` or fallback ``preset``.
 
     Args:
         data_source (str): The source dataset identifier which determines the scoring method.
         solution_str (str): The solution string to be evaluated.
         ground_truth (str): The ground truth answer for comparison.
         extra_info (dict, optional): Additional information that might be needed for scoring. Defaults to None.
-        preset (str, optional): Fallback built-in preset name when ``data_source`` is not otherwise mapped.
-        data_source_presets (Mapping[str, str] | Sequence[str], optional): Explicit ``data_source``
-            (exact or ``fnmatch`` glob) to built-in preset overrides.
+        preset (str, optional): Fallback built-in preset name when ``data_source`` is not mapped in the
+            built-in table.
 
     Returns:
         float | dict: The computed score as a float, or a dictionary containing ``"score"`` and extra fields.
@@ -228,11 +180,7 @@ def default_compute_score(
     Raises:
         NotImplementedError: If no reward function is configured or implemented for ``data_source``.
     """
-    resolved_preset = resolve_reward_preset(
-        data_source,
-        preset=preset,
-        data_source_presets=data_source_presets,
-    )
+    resolved_preset = resolve_reward_preset(data_source, preset=preset)
     if resolved_preset is None:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 
@@ -279,7 +227,6 @@ def get_default_compute_score(reward_name: str | None):
 __all__ = [
     "REWARD_PRESETS",
     "default_compute_score",
-    "normalize_data_source_presets",
     "resolve_reward_preset",
     "validate_reward_preset",
 ]

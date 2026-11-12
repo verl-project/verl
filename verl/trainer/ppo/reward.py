@@ -19,11 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from verl import DataProto
-from verl.utils.reward_score import (
-    get_default_compute_score,
-    normalize_data_source_presets,
-    validate_reward_preset,
-)
+from verl.utils.reward_score import get_default_compute_score, validate_reward_preset
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -139,13 +135,10 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
         preset = config.reward.get("preset")
         if preset is not None:
             validate_reward_preset(preset)
-        data_source_presets = normalize_data_source_presets(config.reward.get("data_source_presets"))
 
         default_kwargs: dict[str, Any] = {}
         if preset is not None:
             default_kwargs["preset"] = preset
-        if data_source_presets:
-            default_kwargs["data_source_presets"] = data_source_presets
 
         sandbox_config = config.reward.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None

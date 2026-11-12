@@ -4,17 +4,10 @@ _target_: verl.workers.config.RewardConfig
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
-# Fallback built-in preset reward function when `data_source` is not matched by
-# `data_source_presets` or the built-in `default_compute_score` table.
-# Options: math_dapo, math_reward, math_verify, gsm8k, prime_math, prime_code,
-# geo3k, search_r1_like_qa_em, search_r1_like_qa_subem.
+# Fallback built-in preset reward function when `data_source` is not matched in
+# `default_compute_score`. Options: math_dapo, math_reward, math_verify, gsm8k,
+# prime_math, prime_code, geo3k, search_r1_like_qa_em, search_r1_like_qa_subem.
 preset: null
-
-# Optional mapping from `data_source` (exact name or fnmatch glob such as "MATH##*" or "*")
-# to a built-in preset reward function, taking precedence over built-in `data_source` routing.
-# Accepts either a dict (`+reward.data_source_presets.dapo_filter=math_dapo`) or a list of
-# `pattern=preset` strings (`reward.data_source_presets='["MATH##*=math_dapo","HuggingFaceH4/MATH-500=math_verify"]'`).
-data_source_presets: null
 
 # custom reward function definition
 custom_reward_function:

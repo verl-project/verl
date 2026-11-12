@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,6 @@ from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.reward_score import (
     REWARD_PRESETS,
     default_compute_score,
-    normalize_data_source_presets,
     resolve_reward_preset,
     validate_reward_preset,
 )
@@ -38,43 +38,44 @@ def test_fallback_preset_routes_unmapped_without_overriding_builtin_sources():
     dapo_res = default_compute_score("dapo_filter", r"\boxed{34}", "34", preset="math_dapo")
     assert dapo_res["acc"] is True and dapo_res["score"] == 1.0
 
+    sub_source_res = default_compute_score("MATH##Aops", r"\boxed{34}", "34", preset="math_dapo")
+    assert sub_source_res["acc"] is True and sub_source_res["score"] == 1.0
+
     # Built-in openai/gsm8k continues to use gsm8k scorer (#### format) even when fallback preset is math_dapo.
     gsm_res = default_compute_score("openai/gsm8k", "Step 1. #### 42", "42", preset="math_dapo")
     assert gsm_res == 1.0
 
 
-def test_data_source_presets_exact_and_glob_override_builtin_table():
-    """Verify exact and fnmatch glob mappings in data_source_presets take precedence over built-in routing."""
-    presets = {
-        "dapo_filter": "math_dapo",
-        "MATH##*": "math_dapo",
-        "HuggingFaceH4/MATH-500": "math_dapo",
-    }
-    assert resolve_reward_preset("dapo_filter", data_source_presets=presets) == "math_dapo"
-    assert resolve_reward_preset("MATH##Aops", data_source_presets=presets) == "math_dapo"
-    # Built-in HuggingFaceH4/MATH-500 normally returns float 1.0 via math_reward; math_dapo returns a dict.
-    overridden = default_compute_score("HuggingFaceH4/MATH-500", r"\boxed{7}", "7", data_source_presets=presets)
-    assert isinstance(overridden, dict) and overridden["score"] == 1.0
-
-    # Wildcard '*' overrides all data sources when explicitly requested.
-    assert resolve_reward_preset("openai/gsm8k", data_source_presets=["*=math_reward"]) == "math_reward"
-
-
-def test_invalid_preset_name_or_entry_fails_eagerly():
-    """Reject unknown preset names and malformed list entries eagerly."""
+def test_invalid_preset_or_missing_optional_dependency_fails_eagerly(monkeypatch):
+    """Reject unknown preset names, non-string falsy values, and missing math-verify dependency eagerly."""
     assert "math_dapo" in REWARD_PRESETS
+    for invalid in ("nonexistent_preset", "", False, 0):
+        with pytest.raises(ValueError, match="Unknown preset reward function"):
+            validate_reward_preset(invalid)  # type: ignore[arg-type]
+
+    # Direct calls with a built-in data_source must still validate an invalid fallback preset upfront.
     with pytest.raises(ValueError, match="Unknown preset reward function"):
-        validate_reward_preset("nonexistent_preset")
+        resolve_reward_preset("openai/gsm8k", preset="nonexistent_preset")
     with pytest.raises(ValueError, match="Unknown preset reward function"):
-        normalize_data_source_presets({"dapo_filter": "nonexistent_preset"})
-    with pytest.raises(ValueError, match="expected 'data_source=preset'"):
-        normalize_data_source_presets(["malformed_entry_without_equals"])
+        default_compute_score("openai/gsm8k", "#### 42", "42", preset="nonexistent_preset")
+
+    # Selecting math_verify without optional math-verify installed must fail fast with ImportError
+    # rather than silently returning 0.0 for every sample during training.
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *args, **kwargs: None if name == "math_verify" else real_find_spec(name, *args, **kwargs),
+    )
+    with pytest.raises(ImportError, match="pip install math-verify"):
+        validate_reward_preset("math_verify")
+    with pytest.raises(ImportError, match="pip install math-verify"):
+        default_compute_score("dapo_filter", r"\boxed{42}", "42", preset="math_verify")
 
     bad_cfg = OmegaConf.create(
         {
             "reward": {
                 "preset": "nonexistent_preset",
-                "data_source_presets": {},
                 "custom_reward_function": {"path": None, "name": "compute_score"},
                 "reward_manager": {"source": "register", "name": "naive", "module": {"path": None, "name": None}},
                 "sandbox_fusion": {"url": None, "max_concurrent": 64, "memory_limit_mb": 1024},
@@ -85,33 +86,13 @@ def test_invalid_preset_name_or_entry_fails_eagerly():
         load_reward_manager(bad_cfg, tokenizer=None)
 
 
-def test_hydra_cli_overrides_wire_into_load_reward_manager():
-    """Verify Hydra CLI overrides for reward.preset and reward.data_source_presets (dict & list) wire end-to-end."""
+def test_hydra_cli_reward_preset_wires_into_load_reward_manager():
+    """Verify Hydra CLI override reward.preset=math_dapo wires end-to-end through load_reward_manager."""
     config_dir = str((Path(__file__).resolve().parents[3] / "verl/trainer/config").resolve())
-
-    # 1. Dict-style +reward.data_source_presets.<id>=<preset>
     with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg_dict = compose(
-            config_name="ppo_trainer",
-            overrides=[
-                "reward.preset=math_dapo",
-                "+reward.data_source_presets.custom_gsm=gsm8k",
-            ],
-        )
-    manager_dict = load_reward_manager(cfg_dict, tokenizer=None)
-    assert manager_dict.compute_score("dapo_filter", r"\boxed{12}", "12")["score"] == 1.0
-    assert manager_dict.compute_score("custom_gsm", "#### 12", "12") == 1.0
-    assert manager_dict.compute_score("openai/gsm8k", "#### 12", "12") == 1.0
+        cfg = compose(config_name="ppo_trainer", overrides=["reward.preset=math_dapo"])
 
-    # 2. List-style reward.data_source_presets=["pattern=preset", ...] for keys containing '/', '#', or '*'
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg_list = compose(
-            config_name="ppo_trainer",
-            overrides=[
-                'reward.data_source_presets=["dapo_filter=math_dapo","MATH##*=math_dapo","HuggingFaceH4/MATH-500=math_dapo"]',
-            ],
-        )
-    manager_list = load_reward_manager(cfg_list, tokenizer=None)
-    assert manager_list.compute_score("dapo_filter", r"\boxed{12}", "12")["score"] == 1.0
-    assert manager_list.compute_score("MATH##Aops", r"\boxed{12}", "12")["score"] == 1.0
-    assert isinstance(manager_list.compute_score("HuggingFaceH4/MATH-500", r"\boxed{12}", "12"), dict)
+    manager = load_reward_manager(cfg, tokenizer=None)
+    assert manager.compute_score("dapo_filter", r"\boxed{12}", "12")["score"] == 1.0
+    assert manager.compute_score("MATH##Aops", r"\boxed{12}", "12")["score"] == 1.0
+    assert manager.compute_score("openai/gsm8k", "#### 12", "12") == 1.0
