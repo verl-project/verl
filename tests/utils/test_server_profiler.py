@@ -12,119 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import os
 import tempfile
 import unittest
-from functools import partial
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
+
+import pytest
 
 from verl.utils.profiler.config import (
-    NPUToolConfig,
+    NsightToolConfig,
     ProfilerConfig,
     TorchProfilerToolConfig,
-    build_sglang_profiler_args,
-    build_vllm_profiler_args,
     relocate_rollout_traces,
     rollout_profiler_global_ranks,
     rollout_trace_dir,
     rollout_trace_local_rank,
 )
-from verl.utils.profiler.profile import DistProfiler, build_rollout_dist_profiler
-
-
-class TestServerProfilerArgs(unittest.TestCase):
-    def test_build_vllm_profiler_args(self):
-        # Case 1: All features enabled
-        tool_config = TorchProfilerToolConfig(contents=["stack", "shapes", "memory"])
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-
-        # Patch environ to avoid side effects and verify calls
-        with patch.dict(os.environ, {}, clear=True):
-            args = build_vllm_profiler_args(config, tool_config, rank=0)
-
-            # Check Env vars (backward compatibility)
-            self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_DIR"), "/tmp/test/agent_loop_rollout_replica_0")
-            self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_WITH_STACK"), "1")
-            self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_RECORD_SHAPES"), "1")
-            self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY"), "1")
-
-            # Check Args (new API)
-            self.assertIn("profiler_config", args)
-            profiler_config_dict = json.loads(args["profiler_config"])
-            self.assertEqual(profiler_config_dict["torch_profiler_dir"], "/tmp/test/agent_loop_rollout_replica_0")
-            self.assertTrue(profiler_config_dict["torch_profiler_with_stack"])
-            self.assertTrue(profiler_config_dict["torch_profiler_record_shapes"])
-            self.assertTrue(profiler_config_dict["torch_profiler_with_memory"])
-            self.assertEqual(profiler_config_dict["delay_iterations"], 0)
-            self.assertEqual(profiler_config_dict["max_iterations"], 0)
-
-    def test_build_vllm_profiler_args_skips_legacy_env(self):
-        """vLLM >= 0.13.0 rejects the VLLM_TORCH_PROFILER_* names, so they must stay unset."""
-        tool_config = TorchProfilerToolConfig(contents=["stack"])
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-
-        with patch.dict(os.environ, {}, clear=True):
-            args = build_vllm_profiler_args(config, tool_config, rank=0, legacy_env=False)
-
-            for name in (
-                "VLLM_TORCH_PROFILER_DIR",
-                "VLLM_TORCH_PROFILER_WITH_STACK",
-                "VLLM_TORCH_PROFILER_RECORD_SHAPES",
-                "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY",
-            ):
-                self.assertNotIn(name, os.environ)
-
-            # The argument-based config is still built.
-            profiler_config_dict = json.loads(args["profiler_config"])
-            self.assertEqual(profiler_config_dict["torch_profiler_dir"], "/tmp/test/agent_loop_rollout_replica_0")
-
-    def test_build_vllm_profiler_args_with_profile_window(self):
-        tool_config = TorchProfilerToolConfig(contents=["stack"], profile_token_start=12, profile_token_end=46)
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-
-        args = build_vllm_profiler_args(config, tool_config, rank=1)
-        profiler_config_dict = json.loads(args["profiler_config"])
-        self.assertEqual(profiler_config_dict["delay_iterations"], 12)
-        self.assertEqual(profiler_config_dict["max_iterations"], 34)
-
-    def test_build_vllm_profiler_args_with_npu_profile_window(self):
-        tool_config = NPUToolConfig(contents=["npu"], profile_token_start=5, profile_token_end=13)
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-        args = build_vllm_profiler_args(config, tool_config, rank=0)
-        profiler_config_dict = json.loads(args["profiler_config"])
-        self.assertEqual(profiler_config_dict["delay_iterations"], 5)
-        self.assertEqual(profiler_config_dict["max_iterations"], 8)
-
-    def test_rollout_trace_dir_matches_what_the_engines_write_to(self):
-        """The finish hook derives its directory from this helper, so it must not drift."""
-        tool_config = TorchProfilerToolConfig(contents=["cpu"])
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-        expected = rollout_trace_dir(config, rank=2)
-
-        self.assertEqual(build_sglang_profiler_args(config, tool_config, rank=2)["output_dir"], expected)
-        with patch.dict(os.environ, {}, clear=True):
-            args = build_vllm_profiler_args(config, tool_config, rank=2, legacy_env=False)
-        self.assertEqual(json.loads(args["profiler_config"])["torch_profiler_dir"], expected)
-
-    def test_build_sglang_profiler_args(self):
-        # Case 1: Basic features
-        tool_config = TorchProfilerToolConfig(contents=["stack", "shapes", "memory"])
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-        with self.assertWarns(UserWarning):
-            args = build_sglang_profiler_args(config, tool_config, rank=0)
-        self.assertEqual(args["output_dir"], "/tmp/test/agent_loop_rollout_replica_0")
-        self.assertTrue(args["with_stack"])
-        self.assertTrue(args["record_shapes"])
-        self.assertIsNone(args["start_step"])
-        self.assertIsNone(args["num_steps"])
-
-    def test_build_sglang_profiler_args_with_profile_window(self):
-        tool_config = TorchProfilerToolConfig(contents=["stack"], profile_token_start=7, profile_token_end=16)
-        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-        args = build_sglang_profiler_args(config, tool_config, rank=0)
-        self.assertEqual(args["start_step"], 7)
-        self.assertEqual(args["num_steps"], 9)
+from verl.utils.profiler.profile import DistProfiler
 
 
 class TestRolloutTraceRelocation(unittest.TestCase):
@@ -443,148 +348,126 @@ class TestRolloutFinishHook(unittest.TestCase):
             self.assertEqual(sorted(sent), ["step1.json.gz", "step2.json.gz"])  # each exactly once
 
 
-class TestBuildRolloutDistProfiler(unittest.TestCase):
-    """Rollout `ranks` are global GPU ranks; the helper maps each to the replica that owns it."""
+class TestVllmProfiler:
+    @pytest.fixture
+    def backend(self):
+        return pytest.importorskip("verl.workers.rollout.vllm_rollout.vllm_async_server")
 
-    def _config(self, **kwargs) -> ProfilerConfig:
-        return ProfilerConfig(tool=None, enable=True, save_path="/tmp/test", tool_config=None, **kwargs)
+    @pytest.fixture
+    def server(self, backend):
+        server = backend.vLLMHttpServer.__new__(backend.vLLMHttpServer)
+        server.node_rank = 0
+        server.profiler_controller = Mock(_tool="nsys")
+        server.profiler_controller.check_enable.return_value = True
+        server.profiler_controller.check_this_rank.return_value = True
+        server.profiler_controller.is_discrete_mode.return_value = False
+        server.engine = AsyncMock()
+        return server
 
-    def _selected(self, replica_rank: int, world_size: int, **cfg) -> bool:
-        profiler = build_rollout_dist_profiler(replica_rank, world_size, config=self._config(**cfg))
-        return profiler.check_enable() and profiler.check_this_rank()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool, discrete, expected_calls, collect_traces",
+        [
+            ("torch", True, [call.engine_start(profile_step=3), call.engine_stop()], True),
+            (
+                "nsys",
+                False,
+                [
+                    call.server_start(profile_step=3),
+                    call.engine_start(),
+                    call.engine_stop(),
+                    call.server_stop(run_command=False),
+                ],
+                False,
+            ),
+        ],
+        ids=["torch", "nsys"],
+    )
+    async def test_start_stop_profile(self, backend, server, tool, discrete, expected_calls, collect_traces):
+        server.profiler_controller._tool = tool
+        server.profiler_controller.is_discrete_mode.return_value = discrete
+        server.profiler_controller.config = ProfilerConfig(save_path="/tmp/test", tool_config=None)
+        server.replica_rank = 3
+        server.replica_world_size = 2
+        server.profiler_keep_global_ranks = {6}
+        events = Mock()
+        events.attach_mock(server.profiler_controller.start, "server_start")
+        events.attach_mock(server.profiler_controller.stop, "server_stop")
+        events.attach_mock(server.engine.start_profile, "engine_start")
+        events.attach_mock(server.engine.stop_profile, "engine_stop")
 
-    def test_global_ranks_map_to_the_owning_replica(self):
-        # world_size 8 (e.g. tp=8): global rank 0 lives on replica 0, global rank 8 lives on replica 1.
-        self.assertTrue(self._selected(0, 8, ranks=[0, 8]))
-        self.assertTrue(self._selected(1, 8, ranks=[0, 8]))
-        # This is the whole point of the fix: [0, 8] no longer means replica indices 0 and 8.
-        self.assertFalse(self._selected(8, 8, ranks=[0, 8]))
-        self.assertFalse(self._selected(2, 8, ranks=[0, 8]))
+        with patch.object(backend, "relocate_rollout_traces") as relocate:
+            await server.start_profile(profile_step=3)
+            await server.stop_profile()
 
-    def test_a_rank_inside_a_replica_selects_that_whole_replica(self):
-        # Any global rank owned by a replica selects it, not just the replica's base rank.
-        self.assertTrue(self._selected(0, 8, ranks=[3]))  # rank 3 is on replica 0
-        self.assertTrue(self._selected(1, 8, ranks=[9]))  # rank 9 is on replica 1
-        self.assertFalse(self._selected(0, 8, ranks=[9]))
+        assert events.mock_calls == expected_calls
+        if collect_traces:
+            relocate.assert_called_once_with(server.profiler_controller.config, 3, 2, {6})
+        else:
+            relocate.assert_not_called()
+        # The training worker owns the shared directory's end-of-run upload.
+        server.profiler_controller.run_finish_hook.assert_not_called()
 
-    def test_all_ranks_profiles_every_replica(self):
-        for replica_rank in range(4):
-            self.assertTrue(self._selected(replica_rank, 8, all_ranks=True, ranks=[0]))
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool, server_calls", [("torch", 0), ("nsys", 1)])
+    @pytest.mark.parametrize(
+        "node_rank, enabled, selected",
+        [(1, True, True), (0, False, True), (0, True, False)],
+        ids=["secondary-node", "disabled", "unselected"],
+    )
+    async def test_skipped_engine_does_not_collect_traces(
+        self, backend, server, tool, server_calls, node_rank, enabled, selected
+    ):
+        server.profiler_controller._tool = tool
+        server.profiler_controller.is_discrete_mode.return_value = True
+        server.node_rank = node_rank
+        server.profiler_controller.check_enable.return_value = enabled
+        server.profiler_controller.check_this_rank.return_value = selected
 
-    def test_empty_ranks_defaults_to_the_replica_owning_global_rank_0(self):
-        self.assertTrue(self._selected(0, 8, ranks=[]))
-        self.assertFalse(self._selected(1, 8, ranks=[]))
+        with patch.object(backend, "relocate_rollout_traces") as relocate:
+            await server.start_profile(profile_step=3)
+            await server.stop_profile()
 
-    def test_world_size_one_keeps_global_ranks_equal_to_replica_ranks(self):
-        # tp=dp=pp=1: the replica index equals the global rank, so [0, 8] selects replicas 0 and 8.
-        self.assertTrue(self._selected(0, 1, ranks=[0, 8]))
-        self.assertTrue(self._selected(8, 1, ranks=[0, 8]))
-        self.assertFalse(self._selected(1, 1, ranks=[0, 8]))
+        server.engine.start_profile.assert_not_awaited()
+        server.engine.stop_profile.assert_not_awaited()
+        relocate.assert_not_called()
+        assert server.profiler_controller.start.call_count == server_calls
+        assert server.profiler_controller.stop.call_count == server_calls
 
-    def test_source_config_is_not_mutated(self):
-        config = self._config(ranks=[0, 8])
-        build_rollout_dist_profiler(1, 8, config=config)
-        # The caller's (frozen) config still holds the original global ranks.
-        self.assertEqual(list(config.ranks), [0, 8])
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["start", "stop"])
+    async def test_engine_failure_still_stops_server_profiler(self, backend, server, action):
+        error = RuntimeError("engine failed")
+        getattr(server.engine, f"{action}_profile").side_effect = error
 
+        with patch.object(backend, "relocate_rollout_traces") as relocate:
+            with pytest.raises(RuntimeError, match="engine") as exc:
+                await getattr(server, f"{action}_profile")()
 
-class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
-    async def test_vllm_start_stop_profile(self):
-        try:
-            # Import strictly inside test to avoid import errors if dependencies missing
-            from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-        except ImportError:
-            self.skipTest("vllm or dependencies not installed")
-            return
+        assert exc.value is error
+        server.profiler_controller.stop.assert_called_once_with(run_command=False)
+        relocate.assert_not_called()
 
-        # Mock dependencies
-        mock_profiler = MagicMock()
-        mock_profiler.check_enable.return_value = True
-        mock_profiler.check_this_rank.return_value = True
-        mock_profiler.is_discrete_mode.return_value = True
-        mock_profiler.config = ProfilerConfig(save_path="/tmp/test", tool_config=None)
-
-        mock_engine = AsyncMock()
-
-        # Mock self object
-        mock_self = MagicMock()
-        mock_self.node_rank = 0
-        mock_self.replica_rank = 3
-        mock_self.profiler_controller = mock_profiler
-        mock_self.engine = mock_engine
-        mock_self._should_profile = partial(vLLMHttpServer._should_profile, mock_self)
-
-        # Test start_profile using the unbound method
-        await vLLMHttpServer.start_profile(mock_self)
-        mock_engine.start_profile.assert_called_once()
-
-        # Test stop_profile
-        with patch("verl.workers.rollout.vllm_rollout.vllm_async_server.relocate_rollout_traces") as mock_relocate:
-            await vLLMHttpServer.stop_profile(mock_self)
-        mock_engine.stop_profile.assert_called_once()
-        # Relocation runs every profiled step so the engine's traces accumulate in save_path.
-        mock_relocate.assert_called_once_with(
-            mock_profiler.config,
-            mock_self.replica_rank,
-            mock_self.replica_world_size,
-            mock_self.profiler_keep_global_ranks,
+    def test_init_accepts_nsight_and_sets_report_role(self, backend):
+        profiler_config = ProfilerConfig(tool="nsys", tool_config={"nsys": NsightToolConfig()})
+        server = backend.vLLMHttpServer.__new__(backend.vLLMHttpServer)
+        server.config = SimpleNamespace(
+            profiler=profiler_config,
+            tensor_model_parallel_size=2,
+            data_parallel_size=1,
+            pipeline_model_parallel_size=1,
         )
-        # The engine does NOT run the finish command itself: it shares save_path with the colocated
-        # training worker, whose single end-of-run upload covers these relocated traces too. Running
-        # it here as well would upload the shared directory twice.
-        mock_profiler.run_finish_hook.assert_not_called()
+        server.replica_rank = 3
+        server.node_rank = 1
+        with patch.object(backend, "build_rollout_dist_profiler") as build_profiler:
+            server._init_profiler()
 
-    async def test_vllm_stop_profile_skips_relocation_when_not_profiled(self):
-        try:
-            from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-        except ImportError:
-            self.skipTest("vllm or dependencies not installed")
-            return
+        build_profiler.assert_called_once_with(3, 2, config=profiler_config, tool_config=NsightToolConfig())
+        assert server.profiler_controller is build_profiler.return_value
+        assert server.profiler_controller.save_file_prefix == "rollout_server_node_1"
 
-        mock_profiler = MagicMock()
-        mock_profiler.check_enable.return_value = True
-        mock_profiler.check_this_rank.return_value = False
-        mock_profiler.is_discrete_mode.return_value = True
 
-        mock_engine = AsyncMock()
-
-        mock_self = MagicMock()
-        mock_self.node_rank = 0
-        mock_self.profiler_controller = mock_profiler
-        mock_self.engine = mock_engine
-        mock_self._should_profile = partial(vLLMHttpServer._should_profile, mock_self)
-
-        with patch("verl.workers.rollout.vllm_rollout.vllm_async_server.relocate_rollout_traces") as mock_relocate:
-            await vLLMHttpServer.stop_profile(mock_self)
-        mock_engine.stop_profile.assert_not_called()
-        mock_relocate.assert_not_called()
-
-    async def test_vllm_start_stop_profile_non_master_node(self):
-        try:
-            from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
-        except ImportError:
-            self.skipTest("vllm or dependencies not installed")
-            return
-
-        mock_profiler = MagicMock()
-        mock_profiler.check_enable.return_value = True
-        mock_profiler.check_this_rank.return_value = True
-        mock_profiler.is_discrete_mode.return_value = True
-
-        mock_engine = AsyncMock()
-
-        mock_self = MagicMock()
-        mock_self.node_rank = 1  # non-master node, should skip
-        mock_self.profiler_controller = mock_profiler
-        mock_self.engine = mock_engine
-        mock_self._should_profile = partial(vLLMHttpServer._should_profile, mock_self)
-
-        await vLLMHttpServer.start_profile(mock_self)
-        mock_engine.start_profile.assert_not_called()
-
-        await vLLMHttpServer.stop_profile(mock_self)
-        mock_engine.stop_profile.assert_not_called()
-
+class TestSGLangProfiler(unittest.IsolatedAsyncioTestCase):
     async def test_sglang_start_stop_profile(self):
         try:
             # Import strictly inside test to avoid import errors if dependencies missing
@@ -635,6 +518,40 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
                 mock_self.profiler_keep_global_ranks,
             )
             mock_profiler.run_finish_hook.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "options, expected_env",
+    [
+        (
+            {"o": "rendered_%p"},
+            {"env_vars": {"NOSET_DEVICE": "1", "EXTRA": "value"}, "nsight": {"o": "rendered_%p"}},
+        ),
+        (None, {"env_vars": {"NOSET_DEVICE": "1", "EXTRA": "value"}}),
+    ],
+    ids=["nsight", "no-nsight"],
+)
+def test_vllm_replica_build_server_runtime_env(options, expected_env):
+    backend = pytest.importorskip("verl.workers.rollout.vllm_rollout.vllm_async_server")
+    replica = SimpleNamespace(
+        world_size=4,
+        replica_rank=3,
+        config=SimpleNamespace(profiler={}),
+    )
+
+    platform = Mock()
+    platform.ray_noset_envvars.return_value = ["NOSET_DEVICE"]
+    platform.rollout_env_vars.return_value = {"EXTRA": "value"}
+    with (
+        patch.object(backend, "get_platform", return_value=platform),
+        patch.object(backend, "_build_rollout_ray_actor_nsight_launch_options", return_value=options) as build_options,
+    ):
+        runtime_env = backend.vLLMReplica._build_server_runtime_env(replica, node_rank=1)
+
+    build_options.assert_called_once_with(
+        replica.config.profiler, replica_rank=3, replica_world_size=4, role="rollout_server_node_1"
+    )
+    assert runtime_env == expected_env
 
 
 if __name__ == "__main__":
