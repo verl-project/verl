@@ -1,6 +1,10 @@
 # NPU 模型与算法支持情况
 
-Last updated: 09/21/2026.
+Last updated: 11/12/2026.
+
+更多昇腾场景下的模型与算法训练示例，请参考 [verl-ascend-recipe 仓库](https://github.com/verl-project/verl-ascend-recipe)。
+
+请根据目标模型和算法选择对应示例，并按照示例文档中的版本要求、环境配置和运行步骤执行。
 
 ## Table 1 RL Algorithms
 
