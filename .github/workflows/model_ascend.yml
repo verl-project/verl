@@ -112,6 +112,13 @@ jobs:
       - name: Run distributed test
         run: |
           bash tests/special_distributed/run_all.sh
+      - name: Run shared fused-forward contract tests
+        env:
+          VERL_USE_EXTERNAL_MODULES: megatron_adaptor
+        run: |
+          # Initialize Ascend patches before test modules import Megatron.
+          # Keep pytest arguments away from MegatronAdaptor's argument parser.
+          python -c 'import verl; import pytest; raise SystemExit(pytest.main(["-s", "-x", "tests/models/test_model_forward_fused.py"]))'
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it

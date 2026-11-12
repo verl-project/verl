@@ -64,6 +64,8 @@ def _nested_tensor(rows: list[torch.Tensor]) -> torch.Tensor:
 
 def _check_topk_preprocess(monkeypatch, device: torch.device):
     mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch)
+    # Exercise the real NPU mask layout as well as device-side padding.
+    monkeypatch.setattr(mcore_util, "is_npu_available", device.type == "npu")
     topk = 64
 
     logprob_rows = [
@@ -82,10 +84,32 @@ def _check_topk_preprocess(monkeypatch, device: torch.device):
     torch.testing.assert_close(logprobs_bshd[1, :2], logprob_rows[1])
     torch.testing.assert_close(logprobs_bshd[0, 3], torch.zeros(topk, dtype=torch.float32, device=device))
     torch.testing.assert_close(logprobs_bshd[1, 2:], torch.zeros(2, topk, dtype=torch.float32, device=device))
-    torch.testing.assert_close(
-        attention_mask,
-        torch.tensor([[True, True, True, False], [True, True, False, False]], device=device),
-    )
+    if device.type == "npu":
+        # True masks padding and future tokens in the NPU B1SS layout.
+        expected_mask = torch.tensor(
+            [
+                [
+                    [
+                        [False, True, True, True],
+                        [False, False, True, True],
+                        [False, False, False, True],
+                        [True, True, True, True],
+                    ]
+                ],
+                [
+                    [
+                        [False, True, True, True],
+                        [False, False, True, True],
+                        [True, True, True, True],
+                        [True, True, True, True],
+                    ]
+                ],
+            ],
+            device=device,
+        )
+    else:
+        expected_mask = torch.tensor([[True, True, True, False], [True, True, False, False]], device=device)
+    torch.testing.assert_close(attention_mask, expected_mask)
     torch.testing.assert_close(
         position_ids,
         torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long, device=device),
@@ -171,10 +195,10 @@ def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_cpu(monkeypatch):
     _check_topk_preprocess(monkeypatch, torch.device("cpu"))
 
 
-def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu(monkeypatch):
-    if not torch.cuda.is_available():
-        pytest.skip("Requires CUDA")
-    _check_topk_preprocess(monkeypatch, torch.device("cuda"))
+def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_accelerator(monkeypatch):
+    if not device_module.is_device_available():
+        pytest.skip("Requires an accelerator")
+    _check_topk_preprocess(monkeypatch, torch.device(device_module.get_device_name()))
 
 
 def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):

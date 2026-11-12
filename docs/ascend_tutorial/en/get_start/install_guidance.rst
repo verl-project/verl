@@ -39,11 +39,9 @@ Key Updates
 Hardware Support
 -----------------
 
-Atlas 200T A2 Box16
+Atlas A2 training products
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3 training products
 
 ..
 

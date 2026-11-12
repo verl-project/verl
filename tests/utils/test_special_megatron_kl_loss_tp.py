@@ -17,19 +17,26 @@ import gc
 import os
 from functools import partial
 
-import megatron.core.parallel_state as mpu
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from verl.trainer.distillation.fsdp.losses import (
+from verl.utils.device import get_device_name, get_torch_device, is_npu_available
+
+if is_npu_available:
+    # Apply Ascend patches before importing Megatron-Core.
+    import megatron_adaptor  # noqa: F401
+
+import megatron.core.parallel_state as mpu  # noqa: E402
+
+from verl.trainer.distillation.fsdp.losses import (  # noqa: E402
     compute_forward_kl_topk as compute_forward_kl_topk_ref,
 )
-from verl.trainer.distillation.megatron.losses import (
+from verl.trainer.distillation.megatron.losses import (  # noqa: E402
     compute_forward_kl_topk as compute_forward_kl_topk_vp,
 )
-from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
-from verl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group  # noqa: E402
+from verl.workers.config import DistillationConfig, DistillationLossConfig  # noqa: E402
 
 compute_forward_kl_topk_tail_ref = partial(compute_forward_kl_topk_ref, include_tail=True)
 compute_forward_kl_topk_tail_vp = partial(compute_forward_kl_topk_vp, include_tail=True)
@@ -44,7 +51,7 @@ class TestVocabParallelKLDivergence:
 
         self.local_rank = local_rank
         self.world_size = world_size
-        self.device = torch.device(f"cuda:{local_rank}")
+        self.device = torch.device(f"{get_device_name()}:{local_rank}")
         self.group = mpu.get_tensor_model_parallel_group()
         print(f"[INFO]: Local rank: {self.local_rank}, World size: {self.world_size}")
 
@@ -55,10 +62,10 @@ class TestVocabParallelKLDivergence:
         destroy_global_process_group()
 
     def cleanup(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().empty_cache()
+        get_torch_device().reset_peak_memory_stats()
         gc.collect()
-        torch.cuda.synchronize()
+        get_torch_device().synchronize()
 
     def generate_hyper(self):
         if self.test_case_idx == 0:

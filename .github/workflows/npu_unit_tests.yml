@@ -105,6 +105,8 @@ jobs:
         run: |
           # Match the GPU CI ModelOpt version and keep the shared quantization tests unchanged.
           uv pip install mlflow pytest-asyncio "nvidia-modelopt==0.44.0"
+          # Match GPU CI's PEFT for GPT-OSS target_parameters LoRA coverage.
+          uv pip install "peft==0.19.1"
       - name: Check final pip list
         run: |
           uv pip list
@@ -145,11 +147,10 @@ jobs:
               "--ignore-glob=tests/checkpoint_engine",
               "--ignore-glob=*test_shared_memory*",
               "--ignore-glob=tests/workers/rollout/rollout_trtllm",
-              "--ignore-glob=*test_fsdp_lora_merge*",
               "--ignore-glob=*test_optimizer_offload_and_load.py*",
               "tests/",
               "-k",
-              "not test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu and not test_sender_accepts_strided_tensor",
+              "not test_sender_accepts_strided_tensor",
           ]))
           '
       - name: Running NPU profiling unit tests
@@ -168,6 +169,9 @@ jobs:
       - name: Running FSDP2 NPU model transfer regression
         run: |
           PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=16 tests/special_distributed/test_fsdp2_model_cpu_offload.py
+      - name: Running Megatron tensor parallel KL correctness on 2 NPUs
+        run: |
+          PYTHONPATH="$PWD:$PYTHONPATH" torchrun --standalone --nproc-per-node=2 tests/utils/test_special_megatron_kl_loss_tp.py
       - name: Running NPU checkpoint_engine unit tests
         run: |
           # Keep pytest options out of sys.argv: MegatronAdaptor parses it during imports.
@@ -192,5 +196,7 @@ jobs:
               "-s",
               "-x",
               "tests/checkpoint_engine/test_global_steps_on_cpu.py",
+              "tests/checkpoint_engine/test_block_placement.py",
+              "tests/checkpoint_engine/test_sharded_delta.py",
           ]))
           '
