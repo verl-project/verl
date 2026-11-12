@@ -787,6 +787,12 @@ def dispatch_rollout_weight_quantizer(
             "deltas bypass the trainer-side rollout weight quantizer"
         )
 
+    if getattr(getattr(rollout_config, "checkpoint_engine", None), "backend", None) == "sharded_nixl":
+        raise NotImplementedError(
+            "checkpoint_engine.backend='sharded_nixl' does not support quantized rollouts: its shard "
+            "export bypasses the trainer-side rollout weight quantizer"
+        )
+
     quant_method = str(quantization_config.get("quant_method", "")).lower()
     per_token = quant_method == "compressed-tensors" and any(
         is_nvfp4_per_token_scheme(scheme.weights, scheme.input_activations)
