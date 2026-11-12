@@ -10,12 +10,12 @@ Validation benchmarks (such as AIME 2024–2026) are kept **separate** from DAPO
 
 ## Primary Public Hugging Face Datasets
 
-| Hugging Face Dataset | Parquet Path | Rows | Curation / Why Use It | Prompt Format | Raw `data_source` | `verl` Usage Notes |
+| Hugging Face Dataset | Parquet Path | Rows | Curation / Why Use It | Prompt Format | Raw `data_source` | Direct `verl` CLI Usage |
 | --- | --- | ---: | --- | --- | --- | --- |
 | [`BytedTsinghua-SIA/DAPO-Math-17k`](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k) | `data/dapo-math-17k.parquet` | 1,791,700 | Official release: 100× exact repeats of 17,917 UUIDs (17,398 unique prompts) | `Answer: $Answer` prefix + suffix | `"math_dapo"` | Ready out-of-the-box (`default_compute_score` routes `"math_dapo"` to `math_dapo.compute_score`). |
 | [`open-r1/DAPO-Math-17k-Processed`](https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed) | `all/` / `en/` / `cn/` | 17,398 (`en`: 14,116, `cn`: 3,282) | Widely used prompt-deduplicated & language-split (`en` / `cn`) release | Plain `str` (`prompt: str`, unwrapped problem text) | `"math_dapo"` | `prompt` is a plain string (`source_prompt` stores the original chat list); wrap `prompt` into `[{"role": "user", "content": ...}]` before loading with `RLHFDataset`. |
-| [`aaabiao/dapo_filter`](https://huggingface.co/datasets/aaabiao/dapo_filter) | `train.parquet` | 13,044 | **Non-trivial offline curation**: filtered by initial-model solve rate ([SimpleTIR](https://arxiv.org/abs/2509.02479)) to drop overly easy/hard tasks; 12,691 unique prompts + 353 duplicate-prompt rows | `\boxed{}` suffix | `"dapo_filter"` | Route `"dapo_filter"` to `math_dapo` (see below), or use `Jiawei415/DPAO_filter` for the prompt-deduplicated split. |
-| [`Jiawei415/DPAO_filter`](https://huggingface.co/datasets/Jiawei415/DPAO_filter) | `train/dapo_filter.parquet` | 12,691 | `aaabiao/dapo_filter` + first-occurrence `prompt` dedup ([OTB](https://arxiv.org/abs/2602.07078), linked in `docs/algo/otb.md`) | `\boxed{}` suffix | `"dapo_filter"` | Route `"dapo_filter"` to `math_dapo` (see below). **Ignore** `test/aime24.parquet` & `test/aime25.parquet` (byte-identical). |
+| [`aaabiao/dapo_filter`](https://huggingface.co/datasets/aaabiao/dapo_filter) | `train.parquet` | 13,044 | **Non-trivial offline curation**: filtered by initial-model solve rate ([SimpleTIR](https://arxiv.org/abs/2509.02479)) to drop overly easy/hard tasks; 12,691 unique prompts + 353 duplicate-prompt rows | `\boxed{}` suffix | `"dapo_filter"` | Zero-edit with `reward.preset=math_dapo` (prefer `Jiawei415/DPAO_filter` for the prompt-deduplicated split). |
+| [`Jiawei415/DPAO_filter`](https://huggingface.co/datasets/Jiawei415/DPAO_filter) | `train/dapo_filter.parquet` | 12,691 | `aaabiao/dapo_filter` + first-occurrence `prompt` dedup ([OTB](https://arxiv.org/abs/2602.07078), linked in `docs/algo/otb.md`) | `\boxed{}` suffix | `"dapo_filter"` | Zero-edit with `reward.preset=math_dapo`. **Ignore** `test/aime24.parquet` & `test/aime25.parquet` (byte-identical). |
 
 ---
 
@@ -29,31 +29,21 @@ Unlike simple UUID/prompt deduplication or prompt-template swaps, the `dapo_filt
 
 ---
 
-## Using `Jiawei415/DPAO_filter` in `verl`
+## Zero-Edit Usage in `verl`
 
-Download the pinned training Parquet file:
+Download the pinned training Parquet file and pass `reward.preset=math_dapo` so unmapped `data_source="dapo_filter"` rows route directly to `math_dapo.compute_score` without modifying the Parquet file (while built-in validation `data_source` values such as `aime*` continue using their native scorers):
 
 ```bash
 hf download Jiawei415/DPAO_filter train/dapo_filter.parquet \
     --repo-type dataset \
     --revision d4bb0f1f83c32cfa06424eee48bf0e4b90990ebd \
     --local-dir ~/data/dapo_filter
+
+python3 -m verl.trainer.main_ppo \
+    data.train_files=~/data/dapo_filter/train/dapo_filter.parquet \
+    reward.preset=math_dapo \
+    ...
 ```
-
-Because `train/dapo_filter.parquet` sets `data_source="dapo_filter"` (which is not in `default_compute_score`'s hardcoded table), route it to `math_dapo` in either of two ways:
-
-- **Option A — One-line Parquet `data_source` normalization** (works on any `verl` version):
-
-  ```bash
-  python3 -c '
-  import pyarrow as pa, pyarrow.parquet as pq
-  p = "train/dapo_filter.parquet"
-  t = pq.read_table(p)
-  pq.write_table(t.set_column(t.schema.get_field_index("data_source"), "data_source", pa.array(["math_dapo"] * len(t))), "train_math_dapo.parquet")
-  '
-  ```
-
-- **Option B — Custom reward wrapper** via `reward.custom_reward_function.path` delegating `(data_source, solution_str, ground_truth, extra_info=None)` to `verl.utils.reward_score.math_dapo.compute_score(solution_str, ground_truth)` (or CLI fallback preset `reward.preset=math_dapo` when available).
 
 For multi-turn tool-integrated reasoning (`code_interpreter` `tools_kwargs`), see `examples/data_preprocess/dapo_multiturn_w_tool.py`.
 
