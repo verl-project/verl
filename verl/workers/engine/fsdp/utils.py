@@ -87,7 +87,12 @@ def get_sharding_strategy(device_mesh, zero3_enable=True):
     return sharding_strategy
 
 
-def unfuse_moe_params(weights, model_type: str | None = None):
+def unfuse_moe_params(
+    weights,
+    model_type: str | None = None,
+    hidden_size: int | None = None,
+    npu_gmm_layout: bool = False,
+):
     """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
 
     Transformers 5 stores Qwen-style MoE experts as packed 3D parameters:
@@ -96,7 +101,16 @@ def unfuse_moe_params(weights, model_type: str | None = None):
     ``mlp.experts.down_proj`` with shape
     ``[num_experts, hidden_size, intermediate_size]``. vLLM's Qwen MoE reload
     path still accepts the original per-expert checkpoint keys during live
-    weight sync, so stream those keys without materializing a full dict.
+    weight sync, so stream those keys without materializing a full dict. NPU
+    grouped-GEMM patches store the same tensors as
+    ``[num_experts, hidden_size, 2 * intermediate_size]`` and
+    ``[num_experts, intermediate_size, hidden_size]``; ``hidden_size`` lets us
+    normalize that layout before streaming.
+
+    ``npu_gmm_layout`` states the layout instead of inferring it from shapes,
+    which is required when a tensor is square (``hidden_size == 2 * intermediate``
+    for ``gate_up_proj``, or ``hidden_size == intermediate`` for ``down_proj``)
+    and the two layouts cannot be told apart by shape alone.
     """
     for name, tensor in weights:
         # GPT-OSS checkpoint weights use packed 3D expert tensors directly.
@@ -107,7 +121,17 @@ def unfuse_moe_params(weights, model_type: str | None = None):
             continue
 
         if name.endswith(".mlp.experts.gate_up_proj") and tensor.dim() == 3:
-            gate, up = tensor.chunk(2, dim=1)
+            # npu_gmm_layout is authoritative when the caller knows the producer. The
+            # shape check covers callers that do not, and stays ambiguous when
+            # 2 * intermediate == hidden: keep the standard layout instead of guessing.
+            if npu_gmm_layout or (
+                hidden_size is not None and tensor.size(1) == hidden_size and tensor.size(2) != hidden_size
+            ):
+                # NPU GMM layout: [experts, hidden, 2 * intermediate].
+                gate, up = (part.transpose(1, 2) for part in tensor.chunk(2, dim=2))
+            else:
+                # Standard layout: [experts, 2 * intermediate, hidden].
+                gate, up = tensor.chunk(2, dim=1)
             base = name.removesuffix(".gate_up_proj")
             for expert_id in range(tensor.size(0)):
                 yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id].contiguous()
@@ -116,8 +140,16 @@ def unfuse_moe_params(weights, model_type: str | None = None):
 
         if name.endswith(".mlp.experts.down_proj") and tensor.dim() == 3:
             base = name.removesuffix(".down_proj")
+            # NPU GMM layout: [experts, intermediate, hidden]. Same precedence and
+            # ambiguity rule as the gate_up_proj branch above.
+            down_proj = (
+                tensor.transpose(1, 2)
+                if npu_gmm_layout
+                or (hidden_size is not None and tensor.size(2) == hidden_size and tensor.size(1) != hidden_size)
+                else tensor
+            )
             for expert_id in range(tensor.size(0)):
-                yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id].contiguous()
+                yield f"{base}.{expert_id}.down_proj.weight", down_proj[expert_id].contiguous()
             continue
 
         yield name, tensor
