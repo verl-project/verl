@@ -77,6 +77,27 @@ class _FakeTorchDevice:
         pass
 
 
+class _BucketReplyFails:
+    """Sender socket whose wait for a bucket's reply raises, leaving that reply owed."""
+
+    def __init__(self, socket, *, on_last: bool = False):
+        self.socket, self.last, self.failed, self.on_last = socket, {}, False, on_last
+
+    def __getattr__(self, name):
+        return getattr(self.socket, name)
+
+    def send_pyobj(self, message, **kwargs):
+        self.last = message
+        return self.socket.send_pyobj(message, **kwargs)
+
+    def recv(self, *args):
+        is_target = isinstance(self.last, dict) and "bucket_meta" in self.last and self.last["is_last"] is self.on_last
+        if is_target and not self.failed:
+            self.failed = True
+            raise ValueError("producer failed")
+        return self.socket.recv(*args)
+
+
 def test_sender_accepts_strided_tensor(monkeypatch):
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
@@ -122,21 +143,31 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert torch.equal(recovered, weight)
 
 
-@pytest.mark.parametrize("fail_at", ["buffer", "stream"])
+@pytest.mark.parametrize("fail_at", ["buffer", "stream", "reply", "last_reply"])
 def test_sender_failure_aborts_receiver(monkeypatch, fail_at):
-    """A sender that fails while setting up its buffer or mid-stream must not leave the receiver
-    waiting, where it would block the next update_weights on the same vLLM worker."""
+    """A sender that fails while setting up its buffer, mid-stream, or while a bucket's reply is owed
+    must not leave the receiver waiting, where it would block the next update_weights on the same vLLM
+    worker."""
     import threading
 
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
+    sender_cls = bucketed_weight_transfer.BucketedWeightSender
+    init_socket = sender_cls._init_socket
+
     def no_buffer(*args):
         raise MemoryError("producer failed")
+
+    def reply_fails(sender):
+        init_socket(sender)
+        sender.socket = _BucketReplyFails(sender.socket, on_last=(fail_at == "last_reply"))
 
     monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
     monkeypatch.setattr(bucketed_weight_transfer, "is_support_ipc", lambda: False)
     if fail_at == "buffer":
         monkeypatch.setattr(bucketed_weight_transfer, "create_shared_memory", no_buffer)
+    if fail_at in {"reply", "last_reply"}:
+        monkeypatch.setattr(sender_cls, "_init_socket", reply_fails)
     zmq_handle = _unique_zmq_handle()
     errors = []
 
@@ -148,17 +179,22 @@ def test_sender_failure_aborts_receiver(monkeypatch, fail_at):
             errors.append(str(e))
 
     def weights():
-        yield "w", torch.ones(4)
-        raise ValueError("producer failed")
+        yield "w0", torch.ones(1 << 18)  # fills the 1 MiB bucket, so w1 sends it first
+        yield "w1", torch.ones(4)
+        if fail_at != "last_reply":
+            raise ValueError("producer failed")
 
     receiver_thread = threading.Thread(target=receive, daemon=True)
     receiver_thread.start()
-    sender = bucketed_weight_transfer.BucketedWeightSender(zmq_handle, bucket_size_mb=1, use_shm=True)
+    sender = sender_cls(zmq_handle, bucket_size_mb=1, use_shm=True)
     with pytest.raises((MemoryError, ValueError), match="producer failed"):
         asyncio.run(sender.async_send_weights(weights()))
     receiver_thread.join(timeout=PROCESS_TIMEOUT)
     assert not receiver_thread.is_alive(), "receiver still waiting for the sender"
-    assert errors and "aborted" in errors[0]
+    if fail_at == "last_reply":
+        assert not errors
+    else:
+        assert errors and "aborted" in errors[0]
 
 
 # ---------------------------------------------------------------------------

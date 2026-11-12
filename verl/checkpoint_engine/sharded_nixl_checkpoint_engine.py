@@ -98,6 +98,7 @@ class ShardedNixlWorkerMeta:
     mem_type: str  # "VRAM" | "DRAM"
     bucket_size: int
     num_buffers: int
+    attempt: int = 0
 
 
 @dataclass
@@ -217,6 +218,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         self._uses_hf_shard_export = False
         self._hf_runs: dict[str, list[list[tuple[int, int, int]]]] = {}  # src_name -> index_runs per entry
         self._sync_counter = 0
+        self._attempt = 0
         self._rollout_layout: Optional[RolloutLayout] = None
         self._gen_plans: dict[tuple[str, str], dict[int, list[tuple[int, int]]]] = {}  # (trainer, plan_key) -> tables
         # rank_local_named_tensors, trainer side: local-shapes key -> layout; plan_key -> this rank's
@@ -239,23 +241,23 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             self._drop_stale_traffic()
         if not self.bufs:
             self._alloc_buffers(self.bucket_size)
+        self._attempt += 1
         return ShardedNixlWorkerMeta(
             agent=self.agent.get_agent_metadata(),
             buffers=list(self.buf_descs),
             mem_type=self.mem_type,
             bucket_size=self.bucket_size,
             num_buffers=self.num_buffers,
+            attempt=self._attempt,
         )
 
     def _drop_stale_traffic(self):
-        """Drop what a failed sync left behind: its send/receive if still running, transfer handles,
-        ZMQ messages, NIXL notifications.
+        """Quiesce leftover transfers and drop stale messages/notifications from a failed sync.
 
-        The manager returns as soon as one side fails, so the other side may still be waiting; left
-        running, it would race the retry for its notifications. Otherwise the next sync reads the old
-        messages first, and a retry of the same sync id can match an old ACK and overwrite a slot the
-        generator still reads. The manager runs every worker's ``prepare`` before any sync traffic,
-        so nothing current is dropped.
+        The manager returns as soon as one side fails, so the other side may still be running;
+        ``finalize`` waits for every outstanding NIXL WRITE to leave ``PROC`` (or fails ``prepare``
+        if one is still running at the deadline) before the staging buffers are reused, and each retry
+        advances ``_attempt`` so delayed notifications or ZMQ messages cannot match the new sync.
         """
         # prepare runs on the actor's event loop, so the old task cannot poll again before it unwinds
         if self._sync_task is not None and not self._sync_task.done():
@@ -317,12 +319,14 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         """Full bipartite topology: every trainer gets every generator's metadata and vice versa."""
         T, G = actor_wg_world_size, rollout_world_size
         trainer_meta, rollout_meta = list(metadata[:T]), list(metadata[T : T + G])
+        attempt = max((m.attempt for m in metadata), default=1)
         actor_wg_kwargs = {
             "role": ["trainer"] * T,
             "rank": list(range(T)),
             "world_size": [T] * T,
             "peers": [rollout_meta] * T,
             "num_trainers": [T] * T,
+            "attempt": [attempt] * T,
         }
         rollout_kwargs = {
             "role": ["rollout"] * G,
@@ -330,14 +334,23 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             "world_size": [G] * G,
             "peers": [trainer_meta] * G,
             "num_trainers": [T] * G,
+            "attempt": [attempt] * G,
         }
         return actor_wg_kwargs, rollout_kwargs
 
     def init_process_group(
-        self, role: str, rank: int, world_size: int, peers: list[ShardedNixlWorkerMeta], num_trainers: int
-    ):
+        self,
+        role: str,
+        rank: int,
+        world_size: int,
+        peers: list[ShardedNixlWorkerMeta],
+        num_trainers: int,
+        attempt: int = 0,
+    ) -> None:
         """Adds new peers and drops vanished ones; existing connections are kept."""
         self.role, self.rank, self.world_size, self.num_trainers = role, rank, world_size, num_trainers
+        if attempt:
+            self._attempt = max(self._attempt, int(attempt))
         new_order = []
         seen = set()
         for i, meta in enumerate(peers):
@@ -360,17 +373,44 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
                 self.agent.remove_remote_agent(name)
                 del self.peers[name]
         self.peer_order = new_order
-        logger.info(f"sharded_nixl init_process_group role={role} rank={rank}/{world_size} peers={len(self.peers)}")
+        logger.info(
+            f"sharded_nixl init_process_group role={role} rank={rank}/{world_size} peers={len(self.peers)}, "
+            f"num_trainers={num_trainers}, attempt={self._attempt}, new_order={new_order}"
+        )
 
-    def finalize(self):
-        for hs in self._inflight.values():
-            for h in hs:
-                try:
-                    self.agent.release_xfer_handle(h)
-                except Exception:  # noqa: BLE001
-                    pass
-        self._inflight = {}
+    def finalize(self) -> None:
+        """Release the transfer handles once their WRITEs have stopped and clear parked notifications."""
+        self._quiesce_inflight()
         self._notifs = {}
+
+    def _quiesce_inflight(self) -> None:
+        """Release the WRITE handles left in ``_inflight`` once their WRITEs have stopped.
+
+        Releasing a running handle only asks UCX to cancel it, and the WRITE can still land, so a handle
+        still running at the deadline is kept, not released, and ``prepare`` fails instead of reusing buffers.
+        """
+
+        def running(h) -> bool:
+            try:
+                return self.agent.check_xfer_state(h) == "PROC"
+            except Exception:  # noqa: BLE001 - NIXL raises for a failed transfer, which has stopped
+                return False
+
+        handles = [h for hs in self._inflight.values() for h in hs]
+        deadline = time.monotonic() + self.notif_timeout_s
+        while any(running(h) for h in handles):
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"sharded_nixl: NIXL WRITEs still running after {self.notif_timeout_s}s")
+            time.sleep(0.001)
+        for h in handles:
+            self.agent.release_xfer_handle(h)
+        self._inflight = {}
+
+    def _next_sync_id(self, global_steps: int | None) -> int:
+        """64-bit sync ID ``(attempt << 32) | step`` so retries of ``global_steps`` get a fresh ID."""
+        step = (global_steps if global_steps is not None else self._sync_counter) + self._debug_sync_offset
+        self._sync_counter += 1
+        return ((self._attempt & 0xFFFFFFFF) << 32) | (step & 0xFFFFFFFF)
 
     # ------------------------------------------------------------------ ownership
     def set_rollout_layout(self, layout) -> None:
@@ -447,20 +487,25 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
 
     # ------------------------------------------------------------------ side channel helpers
     async def _read(self, peer: str, typ: str, timeout: float) -> dict:
-        """The next ZMQ message from ``peer``, which must be of type ``typ`` (messages per peer are
-        FIFO, so anything else is a protocol error)."""
-        try:
-            msg = await asyncio.wait_for(self.agent.read_message(peer), timeout=timeout)
-        except asyncio.TimeoutError as e:
-            raise TimeoutError(f"sharded_nixl: timed out waiting for {typ!r} from {peer}") from e
-        if msg.get("type") != typ:
-            raise RuntimeError(f"sharded_nixl: expected {typ!r} from {peer}, got {msg.get('type')!r}")
-        return msg
+        """The next ZMQ message from ``peer`` for the current attempt, which must be of type ``typ``."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                msg = await asyncio.wait_for(self.agent.read_message(peer), timeout=remaining)
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(f"sharded_nixl: timed out waiting for {typ!r} from {peer}") from e
+            if "sync" in msg and (int(msg["sync"]) >> 32) < self._attempt:
+                continue
+            if msg.get("type") != typ:
+                raise RuntimeError(f"sharded_nixl: expected {typ!r} from {peer}, got {msg.get('type')!r}")
+            return msg
 
     async def _wait_notif(self, peer: str, kind: bytes, sync: int, k: int, timeout: float) -> bytes:
         """Poll NIXL notifications until ``(peer, kind, sync, k)`` arrives, parking the others."""
         key = (peer, kind, sync, k)
-        t0 = time.time()
+        attempt = sync >> 32
+        t0 = time.monotonic()
         while key not in self._notifs:
             for remote, msgs in self.agent.get_new_notifs().items():
                 for m in msgs:
@@ -471,16 +516,23 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
                     else:
                         logger.warning(f"sharded_nixl: ignoring unknown notification {m[:16]!r} from {remote}")
                         continue
+                    if (sync_k[0] >> 32) < attempt:
+                        continue
                     self._notifs[(remote, m[:3], *sync_k)] = m
             if key in self._notifs:
                 break
-            if time.time() - t0 > timeout:
+            if time.monotonic() - t0 > timeout:
                 raise TimeoutError(f"sharded_nixl: timed out waiting for {kind!r} sync={sync} bucket={k} from {peer}")
             await asyncio.sleep(0)
         return self._notifs.pop(key)
 
-    async def _wait_xfers_done(self, handles: list[Any], timeout: float):
-        t0 = time.time()
+    async def _wait_xfers_done(self, k: int, timeout: float):
+        """Wait for bucket ``k``'s WRITEs to complete, then release and remove each handle."""
+        handles = self._inflight.get(k)
+        if not handles:
+            self._inflight.pop(k, None)
+            return
+        t0 = time.monotonic()
         pending = list(handles)
         while pending:
             still = []
@@ -492,11 +544,13 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
                     still.append(h)
             pending = still
             if pending:
-                if time.time() - t0 > timeout:
+                if time.monotonic() - t0 > timeout:
                     raise TimeoutError("sharded_nixl: timed out waiting for NIXL WRITE completion")
                 await asyncio.sleep(0)
-        for h in handles:
-            self.agent.release_xfer_handle(h)
+        while handles:
+            self.agent.release_xfer_handle(handles[0])
+            handles.pop(0)
+        self._inflight.pop(k, None)
 
     # ------------------------------------------------------------------ trainer side
     def _iter_export(self, engine):
@@ -582,9 +636,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         assert self.role == "trainer", f"send_weights called on role={self.role}"
         self._sync_task = asyncio.current_task()
         t_start = time.time()
-        S = (global_steps if global_steps is not None else self._sync_counter) + self._debug_sync_offset
-        # counted per attempt on both sides, so a sync that fails on one side only does not split them
-        self._sync_counter += 1
+        S = self._next_sync_id(global_steps)
         gens = [self.peers[n] for n in self.peer_order]
         nb = self.num_buffers
 
@@ -670,7 +722,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             slot = k % nb
             if k >= nb:
                 # the slot's previous bucket must be written and ACKed by every generator
-                await self._wait_xfers_done(self._inflight.pop(k - nb, []), self.notif_timeout_s)
+                await self._wait_xfers_done(k - nb, self.notif_timeout_s)
                 for g in gens:
                     await self._wait_notif(g.name, b"ACK", S, k - nb, self.ack_timeout_s)
             send_buf = self.bufs[slot]
@@ -718,7 +770,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
                 send_buf[off0] ^= 0xFF
                 if self.device == "cuda":
                     torch.cuda.synchronize()
-            handles = []
+            handles = self._inflight[k] = []
             for g in gens:
                 table = g.tables.get(k, [])
                 if not table:
@@ -734,11 +786,10 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
                 )
                 notif = self._encode_snx(S, k, table, hashes, g)
                 h = self.agent.initialize_xfer("WRITE", local_descs, remote_descs, g.name, notif)
+                handles.append(h)
                 if self.agent.transfer(h) == "ERR":
                     raise RuntimeError(f"sharded_nixl: NIXL WRITE to {g.name} failed at bucket {k}")
-                handles.append(h)
                 stats["payload"] += sum(t[1] for t in table)
-            self._inflight[k] = handles
 
         model_type = self._model_type(engine)
         n_params = 0
@@ -788,9 +839,8 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
         meta_bytes += stats["meta"]
 
         # 4. drain: the last NB buckets were never waited on by a later flush
-        for k in sorted(self._inflight):
-            await self._wait_xfers_done(self._inflight[k], self.notif_timeout_s)
-        self._inflight = {}
+        for k in sorted(list(self._inflight)):
+            await self._wait_xfers_done(k, self.notif_timeout_s)
         for k in range(max(0, layout.num_buckets - nb), layout.num_buckets):
             for g in gens:
                 await self._wait_notif(g.name, b"ACK", S, k, self.ack_timeout_s)
@@ -864,8 +914,7 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
     async def _receive_chunks(self, global_steps: int | None):
         assert self.role == "rollout", f"receive_weights called on role={self.role}"
         self._sync_task = asyncio.current_task()
-        S = (global_steps if global_steps is not None else self._sync_counter) + self._debug_sync_offset
-        self._sync_counter += 1  # per attempt, as on the trainer
+        S = self._next_sync_id(global_steps)
         trainers = [self.peers[n] for n in self.peer_order]
         master = trainers[0].name
         nb = self.num_buffers
@@ -911,6 +960,8 @@ class ShardedNixlCheckpointEngine(CheckpointEngine):
             cached = self._gen_plans.get((t.name, plan_key))
             if cached is None:
                 pm = await self._read(t.name, "plan", self.notif_timeout_s)
+                if pm.get("sync", S) != S:
+                    raise RuntimeError(f"sharded_nixl: trainer {t.name} is at sync {pm.get('sync')}, generator at {S}")
                 if pm["plan_key"] != plan_key:
                     raise RuntimeError(f"sharded_nixl: plan key mismatch from {t.name}")
                 cached = {int(k): [tuple(x) for x in v] for k, v in pm["tables"].items()}
