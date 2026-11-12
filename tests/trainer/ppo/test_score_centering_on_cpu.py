@@ -148,6 +148,21 @@ def test_score_centering_config_accepts_megatron_actor():
     _validate_score_centering_config(_config(**{"actor_rollout_ref.actor.strategy": "megatron"}))
 
 
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "veomni", "megatron"])
+@pytest.mark.parametrize("use_fused_kernels", [False, True])
+def test_score_centering_config_accepts_supported_strategies_and_tilelang_fused(strategy, use_fused_kernels):
+    overrides = {
+        "actor_rollout_ref.actor.strategy": strategy,
+        "actor_rollout_ref.model.use_remove_padding": True,
+        "actor_rollout_ref.model.use_fused_kernels": use_fused_kernels,
+    }
+    if use_fused_kernels:
+        overrides["actor_rollout_ref.model.fused_kernel_options.impl_backend"] = "tilelang"
+    if strategy == "megatron":
+        overrides["actor_rollout_ref.actor.megatron.pad_to_length"] = True
+    _validate_score_centering_config(_config(**overrides))
+
+
 def test_score_centering_config_skips_checks_when_off():
     _validate_score_centering_config(
         _config(
@@ -166,7 +181,38 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
         ({"trainer.use_v1": False}, "use_v1"),
-        ({"actor_rollout_ref.actor.strategy": "veomni"}, "strategy"),
+        ({"actor_rollout_ref.actor.strategy": "torchtitan"}, "strategy"),
+        (
+            {
+                "actor_rollout_ref.actor.strategy": "megatron",
+                "actor_rollout_ref.model.use_remove_padding": False,
+            },
+            "use_remove_padding=True",
+        ),
+        ({"actor_rollout_ref.actor.fsdp_config.pad_to_length": True}, "pad_to_length"),
+        (
+            {
+                "actor_rollout_ref.model.use_fused_kernels": True,
+                "actor_rollout_ref.model.fused_kernel_options.impl_backend": "triton",
+            },
+            "tilelang",
+        ),
+        (
+            {
+                "actor_rollout_ref.model.use_fused_kernels": True,
+                "actor_rollout_ref.model.fused_kernel_options.impl_backend": "tilelang",
+                "actor_rollout_ref.actor.calculate_sum_pi_squared": True,
+            },
+            "calculate_sum_pi_squared",
+        ),
+        (
+            {
+                "actor_rollout_ref.model.use_fused_kernels": True,
+                "actor_rollout_ref.model.fused_kernel_options.impl_backend": "tilelang",
+                "actor_rollout_ref.actor.fsdp_config.batch_invariant": True,
+            },
+            "batch_invariant",
+        ),
         ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
         ({"actor_rollout_ref.rollout.temperature": 0}, "temperature"),

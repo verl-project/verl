@@ -49,6 +49,8 @@ verl is fast with:
 
    preparation/prepare_data
    preparation/reward_function
+   data/dapo_math_variants.md
+   data/aime_variants.md
 
 .. toctree::
    :maxdepth: 2

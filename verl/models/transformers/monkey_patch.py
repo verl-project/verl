@@ -394,7 +394,29 @@ def patch_veomni_forward_with_backends(
 
     @wraps(original_forward)
     def forward_with_fused_linear(*args, **kwargs):
-        output = original_forward(*args, **kwargs)
+        if kwargs.get("return_log_probs", False):
+            # VeOmni's generated forwards call self.lm_head(hidden_states) before self.loss_function
+            # on the eager OpSlot branch (and bypass self.loss_function altogether on non-eager OpSlots).
+            # Replace self.lm_head with a no-op returning None and force the module OpSlot to fall through
+            # to self.loss_function for this call so [T, V] logits are never materialized.
+            model_module = sys.modules.get(type(model).__module__)
+            causal_lm_slot = getattr(model_module, "veomni_causal_lm_loss", None) if model_module else None
+            saved_slot_kernel = getattr(causal_lm_slot, "_kernel", None) if causal_lm_slot is not None else None
+            lm_head = getattr(model, "lm_head", None)
+            saved_lm_head_forward = lm_head.forward if lm_head is not None else None
+            if causal_lm_slot is not None and saved_slot_kernel is not None:
+                causal_lm_slot._kernel = None
+            if lm_head is not None:
+                lm_head.forward = lambda _hidden: None
+            try:
+                output = original_forward(*args, **kwargs)
+            finally:
+                if lm_head is not None:
+                    lm_head.forward = saved_lm_head_forward
+                if causal_lm_slot is not None and saved_slot_kernel is not None:
+                    causal_lm_slot._kernel = saved_slot_kernel
+        else:
+            output = original_forward(*args, **kwargs)
         auxiliary_output = getattr(output, "fused_linear_aux", None)
         if auxiliary_output is not None and auxiliary_output.topk_log_probs is not None:
             output.topk_log_probs = auxiliary_output.topk_log_probs
