@@ -321,9 +321,9 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `algorithm.kl_ctrl.kl_coef` | `0.001` | KL 惩罚系数 |
 | `algorithm.kl_ctrl.horizon` | `10000` | KL 适配器的 horizon |
 | `algorithm.kl_ctrl.target_kl` | `0.1` | 目标 KL 散度 |
-| `algorithm.use_pf_ppo` | `false` | 是否使用 PF-PPO |
-| `algorithm.pf_ppo.reweight_method` | `pow` | PF-PPO 重加权方法 |
-| `algorithm.pf_ppo.weight_pow` | `2.0` | PF-PPO 加权幂次 |
+| `algorithm.use_pf_ppo` | `false` | 是否使用 PF-PPO。与 GAE 联用时目前需要 V0 训练器（`trainer.use_v1=False`）；默认 V1 训练器会在优势计算时拒绝该组合 |
+| `algorithm.pf_ppo.reweight_method` | `pow` | PF-PPO 重加权方法（仅在 `use_pf_ppo=true` 时生效） |
+| `algorithm.pf_ppo.weight_pow` | `2.0` | PF-PPO 加权幂次（仅在 `use_pf_ppo=true` 时生效） |
 
 #### 1.1.18 Rollout Correction 配置
 

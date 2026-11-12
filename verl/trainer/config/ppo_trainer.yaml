@@ -122,7 +122,9 @@ algorithm:
     # Target KL divergence (used for adaptive controller)
     target_kl: 0.1
 
-  # Whether to enable preference feedback PPO
+  # Whether to enable preference feedback PPO. GAE + PF-PPO currently requires
+  # the v0 trainer (trainer.use_v1=False); the default v1 trainer rejects this
+  # combination at advantage computation.
   use_pf_ppo: False
 
   # Preference feedback PPO settings
