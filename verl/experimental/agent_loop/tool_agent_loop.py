@@ -184,6 +184,8 @@ class ToolAgentLoop(AgentLoopBase):
         # Finalize output
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
+        if len(response_ids) > self.response_length and "ended_with_eos" in agent_data.extra_fields:
+            agent_data.extra_fields["ended_with_eos"] = False
         multi_modal_data = {}
         if agent_data.image_data is not None:
             multi_modal_data["images"] = agent_data.image_data
@@ -270,6 +272,8 @@ class ToolAgentLoop(AgentLoopBase):
             for key in SPEC_DECODE_EXTRA_KEYS:
                 if key in output.extra_fields and key in agent_data.extra_fields:
                     agent_data.extra_fields[key] = int(agent_data.extra_fields[key]) + int(output.extra_fields[key])
+            if "ended_with_eos" in output.extra_fields:
+                agent_data.extra_fields["ended_with_eos"] = output.extra_fields["ended_with_eos"]
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
@@ -394,6 +398,8 @@ class ToolAgentLoop(AgentLoopBase):
             tools=schemas,
         )
         if len(response_mask) >= self.response_length:
+            if "ended_with_eos" in agent_data.extra_fields:
+                agent_data.extra_fields["ended_with_eos"] = False
             return AgentState.TERMINATED
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask

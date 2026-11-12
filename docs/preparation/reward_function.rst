@@ -1,7 +1,7 @@
 Implement Reward Function for Dataset
 ======================================
 
-Last updated: 06/02/2025.
+Last updated: 11/12/2026.
 
 For each dataset, we need to implement a reward function or utilize a reward model to compute the rewards for the generated responses.
 We already pre-implemented some reward functions in `reward_score directory <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score>`_.
@@ -69,3 +69,8 @@ If you are testing only a single customized reward function, you can simply name
 
 To run multiple tests with different customized reward functions, you can modify both ``custom_reward_function.path`` and ``custom_reward_function.name`` for each trial. 
 For instance, you might create a single `my_reward.py` file and implement multiple reward functions within it. This way, for different trials, you only need to adjust ``custom_reward_function.name``, making it more convenient to conduct multiple tests within scripts.
+
+Rollout Metadata in ``extra_info``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When scoring through the reward loop, rollout ``extra_fields`` are forwarded into ``extra_info`` before calling ``compute_score``. For example, vLLM rollouts populate ``extra_info["ended_with_eos"]`` (``bool``) indicating whether the final generation terminated on an effective native EOS token ID (combining the renderer's primary EOS token ID and ``generation_config.json`` ``eos_token_id`` entries, and setting ``False`` if post-processing or tool-budget limits truncate the response). Because ``ended_with_eos`` is omitted when a rollout backend or engine does not expose native EOS token IDs, custom reward functions should check ``extra_info.get("ended_with_eos") is False`` before penalizing unfinished responses so unknown backends remain unaffected.

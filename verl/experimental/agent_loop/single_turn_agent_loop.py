@@ -90,6 +90,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
         )
         response_ids = merge_result.token_ids[-len(response_mask) :] if response_mask else []
         prompt_ids = merge_result.token_ids[: len(merge_result.token_ids) - len(response_mask)]
+        if len(response_ids) > self.response_length and "ended_with_eos" in output.extra_fields:
+            output.extra_fields["ended_with_eos"] = False
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,

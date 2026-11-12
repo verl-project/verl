@@ -376,3 +376,30 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
 
     except Exception as e:
         logger.error(f"Failed to update Prometheus configuration: {e}")
+
+
+def ended_with_native_eos(completion, input_processor, *, ignore_eos: bool = False) -> bool | None:
+    """Return whether a vLLM completion terminated on an effective native EOS token ID.
+
+    Collects both the renderer's primary EOS token ID and any additional ``eos_token_id``
+    entries from ``generation_config_fields`` (e.g., ``<|im_end|>`` and ``<|endoftext|>``),
+    without mistaking user stop strings, custom non-EOS ``stop_token_ids``, or post-processing
+    tokens for native EOS termination. A completion that emits a native EOS on the exact final
+    ``max_tokens`` / ``max_model_len`` budget slot still returns ``True``. Returns ``None``
+    when the engine's EOS token IDs are unavailable.
+    """
+    renderer = getattr(input_processor, "renderer", None)
+    primary = renderer.get_eos_token_id() if renderer is not None else None
+    generation = getattr(input_processor, "generation_config_fields", {}) or {}
+    additional = generation.get("eos_token_id", [])
+    additional = [additional] if isinstance(additional, int) else (additional or [])
+    eos_ids = {token for token in [primary, *additional] if isinstance(token, int) and not isinstance(token, bool)}
+    if not eos_ids:
+        return None
+    if ignore_eos or completion is None:
+        return False
+    tokens = getattr(completion, "token_ids", None) or []
+    if not tokens:
+        return False
+    finish = getattr(completion, "finish_reason", None)
+    return int(tokens[-1]) in eos_ids and finish in ("stop", "length")

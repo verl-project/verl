@@ -57,6 +57,7 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
+    ended_with_native_eos,
     extract_response_topk_logprobs_with_coverage,
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
@@ -734,6 +735,13 @@ class vLLMHttpServer:
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
+        ended_eos = ended_with_native_eos(
+            final_res.outputs[0] if final_res.outputs else None,
+            getattr(self.engine, "input_processor", None),
+            ignore_eos=sampling_params.ignore_eos,
+        )
+        if ended_eos is not None:
+            extra_fields["ended_with_eos"] = ended_eos
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".
