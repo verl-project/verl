@@ -130,8 +130,11 @@ def normalize_final_answer(final_answer: str) -> str:
     Returns:
         Normalized answer string
     """
-    # Preserve comma-separated assignments so every variable is compared.
-    if not re.search(r"=[^=]+,\s*[A-Za-z][A-Za-z0-9_]*\s*=", final_answer):
+    # Detect later assignments even when individual terms are wrapped in math delimiters.
+    has_multiple_assignments = re.search(
+        r"=[^=]+,\s*(?:\\[A-Za-z]+|[^\W\d_])\w*(?:_\{[^{}]+\})?\s*=", final_answer.replace("$", "")
+    )
+    if not has_multiple_assignments:
         final_answer = final_answer.split("=")[-1]
 
     # Apply substitutions and removals
@@ -140,8 +143,11 @@ def normalize_final_answer(final_answer: str) -> str:
     for expr in REMOVED_EXPRESSIONS:
         final_answer = final_answer.replace(expr, "")
 
-    # Extract and normalize LaTeX math
-    final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+    # Keep all assignments when only part of the answer is inside math delimiters.
+    if not has_multiple_assignments:
+        final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+
+    # Normalize LaTeX math
     final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
     final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
     final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)

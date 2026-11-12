@@ -29,6 +29,15 @@ from verl.utils.reward_score.math_dapo import compute_score
         ("x=3", "3", True),
         ("x=1,234", "1234", True),
         ("x=y=3", "3", True),
+        ("$x=1$, y=3", "x=1,y=3", True),
+        ("$x=1$, y=4", "$x=1$, y=3", False),
+        ("x=2, $y=3$", "x=1, $y=3$", False),
+        ("$x=1$, $y=3$", "$x=1, y=3$", True),
+        ("x=1, y_{1}=3", "x=1,y_{1}=3", True),
+        ("x=2, y_{1}=3", "x=1,y_{1}=3", False),
+        (r"x=1, \beta=3", r"x=1,\beta=3", True),
+        (r"x=2, \beta=3", r"x=1,\beta=3", False),
+        ("The value is $3$.", "3", True),
     ],
 )
 def test_compute_score_assignments(answer, ground_truth, expected_correct):
