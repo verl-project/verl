@@ -381,6 +381,9 @@ class ServerAdapter(BaseRollout):
                     device_mesh=self.device_mesh,
                     load_format=load_format,
                 )
+                # Keep the IPC tensors alive through the awaited update, then
+                # release them before asking the generator to build another bucket.
+                del params_batch
             if use_quantized_refit:
                 await sgl_update_weights(
                     engine=self._engine,
