@@ -24,7 +24,10 @@ Scope and maintenance
 ---------------------
 
 The caller lists 14 Ascend PR workload workflows containing 19 declared jobs.
-The two originally disabled Megatron/SGLang jobs remain disabled. Nightly,
+All four SGLang workflow calls are temporarily disabled in the collector with
+``if: ${{ false }}`` while SGLang issues are resolved. Restore the commented
+repository-owner condition on those calls to resume collection. The two
+originally disabled Megatron/SGLang jobs also remain disabled. Nightly,
 multi-node, image-build and documentation workloads are excluded. CPU test
 steps inside an Ascend job are included.
 

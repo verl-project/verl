@@ -24,12 +24,16 @@ jobs:
     with:
       coverage_mode: true
   e2e_ppo_trainer_megatron_sglang_2_ascend:
-    if: github.repository_owner == 'verl-project'
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
     uses: ./.github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml
     with:
       coverage_mode: true
   e2e_ppo_trainer_megatron_sglang_ascend:
-    if: github.repository_owner == 'verl-project'
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
     uses: ./.github/workflows/e2e_ppo_trainer_megatron_sglang_ascend.yml
     with:
       coverage_mode: true
@@ -69,7 +73,9 @@ jobs:
     with:
       coverage_mode: true
   reward_model_sglang_ascend:
-    if: github.repository_owner == 'verl-project'
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
     uses: ./.github/workflows/reward_model_sglang_ascend.yml
     with:
       coverage_mode: true
@@ -79,7 +85,9 @@ jobs:
     with:
       coverage_mode: true
   sgl_ascend:
-    if: github.repository_owner == 'verl-project'
+    # Temporarily pause SGLang coverage until its issues are fixed.
+    # Restore: if: github.repository_owner == 'verl-project'
+    if: ${{ false }}
     uses: ./.github/workflows/sgl_ascend.yml
     with:
       coverage_mode: true
