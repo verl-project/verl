@@ -48,6 +48,15 @@ CORRECTION_CONFIGS = [
         id="sequence_is_seq_rs",
     ),
     pytest.param(dict(rollout_rs="seq_sum_k3,token_k2", rollout_rs_threshold="0.5,0.02"), id="rs_only"),
+    pytest.param(
+        dict(
+            rollout_is="seq_mask_tis",
+            rollout_is_threshold="0.9_1.1",
+            rollout_rs="seq_mean_abs_exp",
+            rollout_rs_threshold=1.5,
+        ),
+        id="seq_mask_tis_abs_exp",
+    ),
 ]
 
 

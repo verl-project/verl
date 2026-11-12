@@ -239,6 +239,11 @@ Importance sampling weights aggregation level:
 - `"sequence"`: Per-sequence weight ρ_seq = ∏_t ρ_t
   - Multiplicative aggregation across sequence
   - Typical threshold: 2.0 - 10.0
+- `"seq_mask_tis"`: Sequence-masked truncated IS (Tunix / MLPerf DeepSWE `seq-mask-tis`)
+  - Per-token weight ρ_t, capped at 5 (non-finite ratios get weight 0)
+  - Every sequence whose geometric-mean ratio exp(mean_t log ρ_t) leaves `[lower, upper]` gets all-zero weights
+  - Requires a `"lower_upper"` `rollout_is_threshold` (e.g. `"0.998_1.002"`)
+  - `response_mask` is unchanged, so masked sequences stay in the loss denominator (unlike `rollout_rs`)
 
 All IS weights are safety-bounded to [exp(-20), exp(20)] ≈ [2e-9, 5e8]
 
@@ -279,6 +284,7 @@ Rejection sampling aggregation modes. Supply a comma-separated string (spaces op
 - `seq_mean_k3`: Sequence-level rejection with mean of `exp(log r) - 1 - log r` (upper bound only)
 - `seq_max_k2`: Sequence-level rejection with max of `0.5 * (log r)^2` (upper bound only)
 - `seq_max_k3`: Sequence-level rejection with max of `exp(log r) - 1 - log r` (upper bound only)
+- `seq_mean_abs_exp`: Sequence-level rejection with mean of `exp(|log r|)` (upper bound only; Tunix `seq_logprob_error_threshold`). Uses absolute values so opposite-sign errors cannot cancel; a token with zero rollout probability rejects the sequence
 
 ### `rollout_rs_threshold` (str, float, or null)
 
