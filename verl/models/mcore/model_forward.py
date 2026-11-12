@@ -13,12 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import replace
 from typing import Optional
 
 import torch
+from megatron.core.utils import unwrap_model
 from torch.nested._internal.nested_tensor import NestedTensor
-
-from verl.utils.megatron_utils import unwrap_model
 
 from .util import (
     build_vlm_attn_mask_bshd,
@@ -132,18 +132,22 @@ def gptmodel_forward_model_engine(
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
     position_ids: torch.Tensor | None = None,
+    output_processor=None,
+    output_processor_context=None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
-    pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
-    quant_align_size = get_thd_quant_align_size(unwrap_model(model).config)
-    # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
-    use_fp8_padding = quant_align_size is not None
+    config = unwrap_model(model).config
+    fp8 = config.fp8
+    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
+    logits_processor_args = dict(logits_processor_args or {})
     model_kwargs = {}
+    if output_processor is not None:
+        model_kwargs["output_processor"] = output_processor
     if "pixel_values" in multi_modal_inputs:
         model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
     if "image_grid_thw" in multi_modal_inputs:
@@ -157,7 +161,12 @@ def gptmodel_forward_model_engine(
     if data_format == "thd":
         attention_mask = None
         thd_kwargs = dict(
-            quant_align_size=quant_align_size,
+            min_local_rows=(
+                config.csa_window_size
+                if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
+                else None
+            ),
+            quant_align_size=get_thd_quant_align_size(config),
             local_cp_size=local_cp_size,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
@@ -194,10 +203,7 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=True,
-                    quant_align_size=quant_align_size,
-                    local_cp_size=local_cp_size,
-                    pad_to_length_bucket=pad_to_length_bucket,
-                    cp_layout=cp_layout,
+                    **thd_kwargs,
                 )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
@@ -210,6 +216,12 @@ def gptmodel_forward_model_engine(
 
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
+
+        if output_processor_context is not None:
+            packed_labels = preprocess_thd_engine(
+                logits_processor_args["label"], pre_process=True, need_roll=True, **thd_kwargs
+            )[0]
+            model_kwargs["output_processor_context"] = replace(output_processor_context, labels=packed_labels)
 
         output_orig = model(
             input_ids=input_ids_rmpad,
@@ -225,10 +237,7 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=(k == "label"),
-                    quant_align_size=quant_align_size,
-                    local_cp_size=local_cp_size,
-                    pad_to_length_bucket=pad_to_length_bucket,
-                    cp_layout=cp_layout,
+                    **thd_kwargs,
                 )[0]
                 for k, v in logits_processor_args.items()
             }
@@ -244,6 +253,19 @@ def gptmodel_forward_model_engine(
                     cp_layout=cp_layout,
                 )
                 for k, v in output_dict.items()
+            }
+        elif output_processor is not None and post_process:
+            output = {
+                k: postprocess_thd_engine(
+                    v.unsqueeze(0) if v.dim() == 1 else v,
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
+                )
+                for k, v in output_orig.items()
             }
         else:
             output = postprocess_thd_engine(
@@ -267,7 +289,7 @@ def gptmodel_forward_model_engine(
 
         input_ids_bshd, attention_mask_bshd, position_ids_bshd = preprocess_bshd_engine(
             input_ids,
-            pre_process=pre_process or (post_process and mtp_enable_train),
+            pre_process=True,
             use_fp8_padding=use_fp8_padding,
             forced_max_seqlen=forced_max_seqlen,
         )
@@ -309,6 +331,16 @@ def gptmodel_forward_model_engine(
         else:
             attention_mask = attention_mask_bshd
 
+        if output_processor_context is not None:
+            packed_labels = preprocess_bshd_engine(
+                logits_processor_args["label"],
+                pre_process=True,
+                need_roll=True,
+                use_fp8_padding=use_fp8_padding,
+                forced_max_seqlen=forced_max_seqlen,
+            )[0]
+            model_kwargs["output_processor_context"] = replace(output_processor_context, labels=packed_labels)
+
         output_orig = model(
             input_ids=input_ids_bshd,
             attention_mask=attention_mask,
@@ -330,6 +362,11 @@ def gptmodel_forward_model_engine(
             output = {
                 k: postprocess_bshd_engine(v, attention_mask_bshd, post_process=post_process)
                 for k, v in output_dict.items()
+            }
+        elif output_processor is not None and post_process:
+            output = {
+                k: postprocess_bshd_engine(v, attention_mask_bshd, post_process=post_process)
+                for k, v in output_orig.items()
             }
         else:
             output = postprocess_bshd_engine(output_orig, attention_mask_bshd, post_process=post_process)

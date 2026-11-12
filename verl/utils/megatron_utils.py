@@ -28,10 +28,10 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.parallel_state import get_global_memory_buffer
-from megatron.core.transformer import MLATransformerConfig, TransformerConfig
-from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import unwrap_model as unwrap_model
 from transformers import PretrainedConfig
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
@@ -377,36 +377,10 @@ def make_megatron_module(
 
     # Extract TransformerConfig from the created model
     tf_config = get_model_config(model[0] if isinstance(model, list) else model)
-    if isinstance(tf_config, MLATransformerConfig):
-        # Apply MLA compatibility patches after model creation.
-        from verl.models.mcore.patch import apply_patch
+    from verl.models.mcore.compat import apply_construction_patches
 
-        apply_patch()
+    apply_construction_patches(tf_config)
     return model, tf_config
-
-
-try:
-    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as _MegatronFSDP
-    from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
-
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module, _MegatronFSDP, MegatronFSDP)
-except ImportError:
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
-
-
-def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
-    return_list = True
-    if not isinstance(model, list):
-        model = [model]
-        return_list = False
-    unwrapped_model = []
-    for model_module in model:
-        while isinstance(model_module, module_instances):
-            model_module = model_module.module
-        unwrapped_model.append(model_module)
-    if not return_list:
-        return unwrapped_model[0]
-    return unwrapped_model
 
 
 def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
@@ -1227,21 +1201,9 @@ def patch_engine_mtp(module, model_config):
         module: The model module to patch. Can be a single module or a list of modules.
         model_config: The model configuration containing MTP settings.
     """
-    logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import (
-        patch_mtp_layer_checkpointed_forward,
-        patch_mtp_layer_get_embeddings,
-        patch_postprocess,
-    )
+    from verl.models.mcore.compat import apply_model_patches
 
-    print(module)
-
-    modules = module if isinstance(module, list) else [module]
-    for m in modules:
-        patch_postprocess(m)
-        patch_mtp_layer_checkpointed_forward(m)
-        if model_config.mtp.detach_encoder:
-            patch_mtp_layer_get_embeddings(m)
+    apply_model_patches(module, mtp_enabled=True, detach_encoder=model_config.mtp.detach_encoder)
 
 
 @torch.no_grad()
