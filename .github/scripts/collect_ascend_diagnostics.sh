@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # Capture host-side evidence without stopping processes or changing HCCL settings.
 set -u
 
