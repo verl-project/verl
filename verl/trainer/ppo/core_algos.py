@@ -2417,6 +2417,64 @@ def compute_policy_loss_reinforce(
     return pg_loss, pg_metrics
 
 
+def compute_bypass_mode_rollout_correction(
+    log_prob: torch.Tensor,
+    rollout_log_prob: torch.Tensor,
+    response_mask: torch.Tensor,
+    config: ActorConfig,
+) -> tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any]]:
+    """Compute the IS weights and rejection mask of bypass mode from the current and rollout log probs.
+
+    Args:
+        log_prob: Current policy log probabilities.
+        rollout_log_prob: Rollout policy log probabilities (old_log_prob in bypass mode).
+        response_mask: Valid token mask (1=valid, 0=padding).
+        config: Actor config containing rollout_correction settings in policy_loss.
+
+    Returns:
+        Tuple of (rollout_is_weights, response_mask, metrics): IS weights (None if disabled), the response mask
+        without the rejected tokens, and rollout correction metrics.
+    """
+    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
+
+    # Extract rollout_correction config from policy_loss
+    rollout_corr_config = config.policy_loss.get("rollout_correction", None) if hasattr(config, "policy_loss") else None
+
+    if rollout_corr_config is None:
+        raise ValueError(
+            "rollout_correction config not found in policy_loss. "
+            "When using loss_mode='bypass_mode', ensure rollout_correction config is passed."
+        )
+
+    # Extract parameters
+    rollout_is = rollout_corr_config.get("rollout_is", None)
+    rollout_is_threshold = rollout_corr_config.get("rollout_is_threshold", 2.0)
+    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
+    rollout_rs = rollout_corr_config.get("rollout_rs", None)
+    rollout_rs_threshold = rollout_corr_config.get("rollout_rs_threshold", None)
+
+    # Compute IS weights and rejection mask
+    # Note: For PPO-clip, we still compute IS weights for metrics, but don't apply them
+    with torch.no_grad():
+        rollout_is_weights_proto, modified_response_mask, rollout_metrics = (
+            compute_rollout_correction_and_rejection_mask(
+                old_log_prob=log_prob,  # Current policy (for IS ratio: π_current / π_rollout)
+                rollout_log_prob=rollout_log_prob,  # Rollout policy
+                response_mask=response_mask,
+                rollout_is=rollout_is,
+                rollout_is_threshold=rollout_is_threshold,
+                rollout_is_batch_normalize=rollout_is_batch_normalize,
+                rollout_rs=rollout_rs,
+                rollout_rs_threshold=rollout_rs_threshold,
+            )
+        )
+
+    # Extract IS weights tensor (or None if disabled)
+    computed_is_weights = rollout_is_weights_proto.batch["rollout_is_weights"] if rollout_is_weights_proto else None
+
+    return computed_is_weights, modified_response_mask, rollout_metrics
+
+
 @register_policy_loss("bypass_mode")
 def compute_policy_loss_bypass_mode(
     old_log_prob: torch.Tensor,
@@ -2427,6 +2485,7 @@ def compute_policy_loss_bypass_mode(
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
     sc_correction: Optional[torch.Tensor] = None,
+    rollout_correction: Optional[tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any]]] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Bypass mode policy loss supporting both REINFORCE and PPO-clip.
 
@@ -2462,6 +2521,7 @@ def compute_policy_loss_bypass_mode(
         config: Actor config containing rollout_correction settings in policy_loss.
         rollout_is_weights: Pre-computed IS weights (ignored, computed internally).
         sc_correction: Score-centering term from the logits processor; only with loss_type="reinforce".
+        rollout_correction: Output of compute_bypass_mode_rollout_correction for these inputs, if already computed.
 
     Config options (in config.policy_loss.rollout_correction):
         loss_type: "ppo_clip" (default) or "reinforce"
@@ -2476,51 +2536,17 @@ def compute_policy_loss_bypass_mode(
             loss: Scalar policy loss
             metrics: Dictionary with rollout correction metrics and actor/ppo_kl
     """
-    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
-
     assert config is not None, "config is required for bypass_mode loss"
-
-    # Extract rollout_correction config from policy_loss
-    rollout_corr_config = config.policy_loss.get("rollout_correction", None) if hasattr(config, "policy_loss") else None
-
-    if rollout_corr_config is None:
-        raise ValueError(
-            "rollout_correction config not found in policy_loss. "
-            "When using loss_mode='bypass_mode', ensure rollout_correction config is passed."
-        )
-
-    # Extract parameters
-    loss_type = rollout_corr_config.get("loss_type", "ppo_clip")
-    rollout_is = rollout_corr_config.get("rollout_is", None)
-    rollout_is_threshold = rollout_corr_config.get("rollout_is_threshold", 2.0)
-    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
-    rollout_rs = rollout_corr_config.get("rollout_rs", None)
-    rollout_rs_threshold = rollout_corr_config.get("rollout_rs_threshold", None)
 
     # In bypass mode: old_log_prob IS rollout_log_prob
     rollout_log_prob = old_log_prob
 
-    # Compute IS weights and rejection mask
-    # Note: For PPO-clip, we still compute IS weights for metrics, but don't apply them
-    with torch.no_grad():
-        rollout_is_weights_proto, modified_response_mask, rollout_metrics = (
-            compute_rollout_correction_and_rejection_mask(
-                old_log_prob=log_prob,  # Current policy (for IS ratio: π_current / π_rollout)
-                rollout_log_prob=rollout_log_prob,  # Rollout policy
-                response_mask=response_mask,
-                rollout_is=rollout_is,
-                rollout_is_threshold=rollout_is_threshold,
-                rollout_is_batch_normalize=rollout_is_batch_normalize,
-                rollout_rs=rollout_rs,
-                rollout_rs_threshold=rollout_rs_threshold,
-            )
-        )
-
-    # Extract IS weights tensor (or None if disabled)
-    computed_is_weights = rollout_is_weights_proto.batch["rollout_is_weights"] if rollout_is_weights_proto else None
+    if rollout_correction is None:
+        rollout_correction = compute_bypass_mode_rollout_correction(log_prob, rollout_log_prob, response_mask, config)
+    loss_type = config.policy_loss.get("rollout_correction").get("loss_type", "ppo_clip")
 
     # Apply rejection mask (RS + veto)
-    effective_mask = modified_response_mask
+    computed_is_weights, effective_mask, rollout_metrics = rollout_correction
 
     # Dispatch to appropriate loss function based on loss_type
     if loss_type == "reinforce":
