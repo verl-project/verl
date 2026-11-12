@@ -125,3 +125,17 @@ def test_reward_loop_construct_with_overlong_buffer_disabled():
         config=config, tokenizer=_DummyTokenizer(), compute_score=_constant_compute_score
     )
     assert reward_manager.max_resp_len is None
+
+
+def test_call_return_dict_includes_valid_response_and_max_resp_len():
+    reward_manager = DAPORewardManager(
+        tokenizer=_DummyTokenizer(),
+        num_examine=0,
+        compute_score=_constant_compute_score,
+    )
+    result = reward_manager(_make_data(), return_dict=True)
+    reward_extra_info = result["reward_extra_info"]
+    assert "valid_response_length" in reward_extra_info
+    assert "max_resp_len" in reward_extra_info
+    assert len(reward_extra_info["valid_response_length"]) == 2
+    assert len(reward_extra_info["max_resp_len"]) == 2
