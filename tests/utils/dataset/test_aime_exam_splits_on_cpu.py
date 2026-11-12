@@ -230,3 +230,11 @@ def test_prompt_format_variants(sources, prompt_format):
 def test_invalid_prompt_format_is_rejected(sources):
     with pytest.raises(ValueError, match="Unsupported prompt_format"):
         prepare_validation(sources, prompt_format="unknown")
+
+
+def test_generated_yearly_file_is_accepted_as_existing_input(sources):
+    first = prepare_validation(sources)
+    yearly_2024 = deepcopy(first["aime2024-I"] + first["aime2024-II"])
+    second = prepare_validation(sources, {"aime2024": yearly_2024})
+    assert second["aime2024-I"] == first["aime2024-I"]
+    assert second["aime2024-II"] == first["aime2024-II"]

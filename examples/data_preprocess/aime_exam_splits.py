@@ -320,10 +320,12 @@ def prepare_validation(sources, existing=None, *, prompt_format="boxed"):
             if not isinstance(problem, str) or not problem or any(ord(c) < 32 and c not in "\n\r" for c in problem):
                 raise ValueError(f"Invalid {dataset} mathematical text/control characters")
             index, answer = source_index(raw, year), source_answer(raw, year)
+            session, number = exam_identity(raw, year)
+            key = f"{dataset}-{session}"
             prompt = [{"role": "user", "content": format_aime_prompt(problem, prompt_format)}]
             if old_rows is not None:
                 row = deepcopy(old[index])
-                if row["data_source"] != dataset or row["prompt"] != prompt:
+                if row["data_source"] not in (dataset, key) or row["prompt"] != prompt:
                     raise ValueError(f"Existing {dataset}/{index} prompt differs from pinned {prompt_format} source")
                 if row["reward_model"] != {"style": "rule", "ground_truth": answer}:
                     raise ValueError(f"Existing {dataset}/{index} ground truth differs from pinned source")
@@ -335,8 +337,6 @@ def prepare_validation(sources, existing=None, *, prompt_format="boxed"):
                     "reward_model": {"style": "rule", "ground_truth": answer},
                     "extra_info": {"index": index, "split": "validation", "source_split": "train"},
                 }
-            session, number = exam_identity(raw, year)
-            key = f"{dataset}-{session}"
             row["data_source"] = key
             row["extra_info"].update(year=year, session=session, problem_number=number)
             grouped[key].append(row)
