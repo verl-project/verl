@@ -61,6 +61,40 @@ def _postprocess(model, packed_seq_params):
     )
 
 
+def test_postprocess_forwards_output_processor_without_labels():
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 1, 4)
+    model = _model()
+    calls = []
+
+    def output_layer(hidden, **_kwargs):
+        calls.append("output_layer")
+        return hidden, None
+
+    def output_processor(**kwargs):
+        calls.append("output_processor")
+        assert kwargs["labels"] is None
+        assert kwargs["hidden_states"] is hidden_states
+        assert kwargs["context"] == "fused-context"
+        return "fused-output"
+
+    model.output_layer = output_layer
+    result = mtp_patch._megatron_gptmodel_postprocess(
+        model,
+        hidden_states=hidden_states,
+        input_ids=torch.arange(4).reshape(1, 4),
+        position_ids=None,
+        labels=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        output_processor=output_processor,
+        output_processor_context="fused-context",
+    )
+
+    assert result == "fused-output"
+    assert calls == ["output_processor"]
+
+
 def test_process_mtp_loss_uses_dynamic_group_and_token_scale(monkeypatch):
     dynamic_group = object()
     model = _model()

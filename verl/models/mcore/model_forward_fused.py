@@ -100,6 +100,9 @@ class FusedOutputProcessorContext:
 
     temperature: float
     impl_backend: str = "triton"
+    # Hook path keeps labels off model(labels=...). That argument also gates the
+    # MTP drafter inside the patched GPTModel._postprocess.
+    labels: Tensor | None = None
 
 
 def fused_output_processor(
@@ -124,6 +127,11 @@ def fused_output_processor(
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
+
+    # The patched _postprocess forwards labels=None so the MTP drafter stays off.
+    # The hook path stashes the real labels on the context.
+    if labels is None:
+        labels = getattr(context, "labels", None)
 
     temperature = context.temperature
     hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
@@ -345,12 +353,16 @@ def fused_forward_model_engine(vision_model: bool = False):
         )
         if _use_output_processor_hook(model):
             impl_backend = get_fused_impl_backend(model)
+            # labels also wake the MTP drafter in the patched _postprocess. Inference
+            # MTP must leave that branch dormant, so carry labels on the context.
+            hook_kwargs = {key: value for key, value in forward_kwargs.items() if key != "labels"}
             output_orig: CausalLMOutputForPPO = model(
-                **forward_kwargs,
+                **hook_kwargs,
                 output_processor=fused_output_processor,
                 output_processor_context=FusedOutputProcessorContext(
                     temperature=temperature,
                     impl_backend=impl_backend,
+                    labels=labels_rmpad,
                 ),
             )
         else:
