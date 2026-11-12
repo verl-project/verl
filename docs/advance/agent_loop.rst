@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 10/03/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -207,6 +207,11 @@ LLMServerClient serve as proxy to multiple AsyncLLMServer instances, provides:
 
 LLMServerClient is passed to ``AgentLoopBase.__init__``, whenever user want to interact with LLM in agent loop,
 they can call ``LLMServerClient.generate`` to generate response_ids.
+
+If ``generate()`` is cancelled while waiting for a router allocation, cancellation returns
+without waiting for the router. When the allocation arrives, the client releases it so it
+does not leave an in-flight request count behind. This also applies to
+``FullyAsyncLLMServerClient``; it does not abort requests already dispatched to an inference server.
 
 .. code:: python
 

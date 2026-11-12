@@ -78,7 +78,19 @@ class LLMServerClient:
             self._lb_require_acquire_fields = list(acquire_fields)
             self._lb_require_release_fields = list(release_fields)
         fields = {name: extra[name] for name in self._lb_require_acquire_fields if name in extra}
-        return await self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
+        acquire = asyncio.ensure_future(self._load_balancer.acquire_server.remote(request_id=request_id, **fields))
+        try:
+            return await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            # Cancelling the local wait does not undo the router's allocation. Release it
+            # when the RPC completes, without delaying cancellation on a slow router.
+            def release_when_acquired(future):
+                if not future.cancelled() and future.exception() is None:
+                    server_id, _ = future.result()
+                    self._release_server(server_id, request_id=request_id)
+
+            acquire.add_done_callback(release_when_acquired)
+            raise
 
     def _release_server(self, server_id: str, request_id: str | None = None) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
