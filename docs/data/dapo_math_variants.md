@@ -53,7 +53,7 @@ Because `train/dapo_filter.parquet` sets `data_source="dapo_filter"` (which is n
   '
   ```
 
-- **Option B — Custom reward wrapper** via `reward.custom_reward_function.path` delegating `(data_source, solution_str, ground_truth, extra_info=None)` to `verl.utils.reward_score.math_dapo.compute_score(solution_str, ground_truth)` (or CLI preset routing `+reward.data_source_presets.dapo_filter=math_dapo` when available).
+- **Option B — Custom reward wrapper** via `reward.custom_reward_function.path` delegating `(data_source, solution_str, ground_truth, extra_info=None)` to `verl.utils.reward_score.math_dapo.compute_score(solution_str, ground_truth)` (or CLI fallback preset `reward.preset=math_dapo` when available).
 
 For multi-turn tool-integrated reasoning (`code_interpreter` `tools_kwargs`), see `examples/data_preprocess/dapo_multiturn_w_tool.py`.
 
