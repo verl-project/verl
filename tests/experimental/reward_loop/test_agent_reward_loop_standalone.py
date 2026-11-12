@@ -40,6 +40,10 @@ def test_agent_reward_loop_standalone():
     with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
         config = compose(config_name="ppo_trainer")
 
+    # Split the available devices evenly between the rollout and reward pools (TP=2 each).
+    n_gpus_per_node = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", "8"))
+    assert n_gpus_per_node >= 4 and n_gpus_per_node % 4 == 0
+
     rollout_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B-Instruct")
     reward_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-1.5B-Instruct")
 
@@ -60,13 +64,13 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.rollout.nnodes = 1
     # No trainer to sync weights from, so the server must load them from disk.
     config.actor_rollout_ref.rollout.load_format = "auto"
-    config.trainer.n_gpus_per_node = 4
+    config.trainer.n_gpus_per_node = n_gpus_per_node // 2
     config.trainer.nnodes = 1
 
     config.reward.reward_manager.name = "dapo"
     config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = True
-    config.reward.reward_model.n_gpus_per_node = 4
+    config.reward.reward_model.n_gpus_per_node = n_gpus_per_node // 2
     config.reward.reward_model.nnodes = 1
     config.reward.reward_model.model_path = reward_model_path
     config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")

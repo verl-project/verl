@@ -25,7 +25,7 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.tokenizer import normalize_token_ids
 
 
-def create_data_samples(tokenizer) -> DataProto:
+def create_data_samples(tokenizer, min_samples) -> DataProto:
     convs = [
         [
             {
@@ -56,6 +56,8 @@ def create_data_samples(tokenizer) -> DataProto:
             },
         ],
     ]
+    # Provide at least one concurrent request per reward-model replica.
+    convs *= max(1, (min_samples + len(convs) - 1) // len(convs))
     raw_prompt = [conv[:1] for conv in convs]
     data_source = ["gsm8k"] * len(convs)
     reward_info = [{"ground_truth": "Not Used"}] * len(convs)
@@ -129,7 +131,7 @@ def test_reward_model_manager():
     config.reward.reward_manager.name = "dapo"
     config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = True
-    config.reward.reward_model.n_gpus_per_node = 8
+    config.reward.reward_model.n_gpus_per_node = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", "8"))
     config.reward.reward_model.nnodes = 1
     config.reward.reward_model.model_path = reward_model_name
     config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
@@ -144,7 +146,10 @@ def test_reward_model_manager():
 
     # 2. init test data
     rollout_tokenizer = hf_tokenizer(rollout_model_name)
-    data, convs = create_data_samples(rollout_tokenizer)
+    num_replicas = (
+        config.reward.reward_model.n_gpus_per_node // config.reward.reward_model.rollout.tensor_model_parallel_size
+    )
+    data, convs = create_data_samples(rollout_tokenizer, min_samples=num_replicas)
 
     # 3. generate responses
     outputs = reward_loop_manager.compute_rm_score(data)
