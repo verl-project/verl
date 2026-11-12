@@ -115,7 +115,6 @@ jobs:
           python scripts/ci/coverage/collect.py init
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/modelscope/dataset/openai/gsm8k"
-        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
@@ -205,7 +204,6 @@ jobs:
           python scripts/ci/coverage/collect.py init
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/modelscope/dataset/openai/gsm8k"
-        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {

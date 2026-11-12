@@ -154,7 +154,6 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
-        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (DeepSeek)
         run: |
           ray stop --force
@@ -268,7 +267,6 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
-        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
           ray stop --force

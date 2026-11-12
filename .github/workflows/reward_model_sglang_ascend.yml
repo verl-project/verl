@@ -134,7 +134,6 @@ jobs:
         run: |
           ray stop --force
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
-        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Running sglang generative reward model tests on 8 NPUs
         run: |
           ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py

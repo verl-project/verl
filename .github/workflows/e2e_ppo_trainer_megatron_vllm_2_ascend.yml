@@ -144,7 +144,6 @@ jobs:
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
       # Function RM
-        shell: python scripts/ci/coverage/collect.py run step-06 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
@@ -275,7 +274,6 @@ jobs:
       - name: Prepare GEO3K dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
-        shell: python scripts/ci/coverage/collect.py run step-06 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {

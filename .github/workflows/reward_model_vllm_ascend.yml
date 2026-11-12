@@ -120,7 +120,6 @@ jobs:
         run: |
           ray stop --force
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k --local_dir ${HOME}/data/gsm8k
-        shell: python scripts/ci/coverage/collect.py run step-06 {0}
       - name: Print system memory before tests
         run: |
           awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {

@@ -143,7 +143,6 @@ jobs:
       - name: Prepare gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k
-        shell: python scripts/ci/coverage/collect.py run step-07 {0}
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto

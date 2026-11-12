@@ -49,8 +49,8 @@ Each reusable workflow sets ``VERL_COVERAGE_ENABLED`` from
 are kept out of the step-level ``shell`` field.
 
 When adding a workload step, use this shell with a unique step ID in that job.
-The command itself stays in the step's single ``run`` block. Setup and cleanup
-steps do not need the coverage shell. Existing commands, environments and
+The command itself stays in the step's single ``run`` block. Data preparation,
+setup and cleanup steps must not use the coverage shell. Existing commands, environments and
 parameters can be edited normally without changing the collector. A new job
 needs the optional setup/package/upload steps and coverage shells; a completely
 new workflow also needs one ``uses`` entry in the caller.
@@ -68,8 +68,8 @@ interpreter with uv. A dedicated opt-in ``.pth`` hook preserves the image's
 existing ``sitecustomize`` and ``PYTHONPATH``. If a workload introduces another
 Python environment, coverage and the hook must be installed there too.
 
-Each original Actions ``run`` block is one collection entry. Its exact script
-is retained as ``command.sh``. Multiple commands in a block share coverage,
+Each coverage-marked Actions ``run`` block is one collection entry. Its exact
+script is retained as ``command.sh``. Multiple commands in a block share coverage,
 preserving heredocs, shell state, checkpoint/resume ordering and validation
 commands. Different steps invoking the same script remain separate entries.
 
@@ -79,7 +79,9 @@ before and after a block so subsequent steps do not reuse workers with stale
 coverage identity. Original commands and their exit status are preserved;
 cleanup failures also fail the collection step. Coverage uses branch data,
 parallel process files, multiprocessing support and SIGTERM handling. It does
-not instrument installation or packaging commands.
+not instrument data preparation, installation or packaging commands. Data
+preparation runs with the normal container shell and is excluded from the
+coverage manifest and artifacts.
 
 Original failure and dependency behavior is retained. Following a failure,
 later dependent work may be skipped; its manifest entries remain explicitly
@@ -109,9 +111,8 @@ Different workflows, jobs and run attempts have separate workspace directories.
 
 ``collection_complete`` requires all planned steps to pass, valid branch data
 for test/training steps, and data files for the observed interpreter startups.
-Preprocessing may legitimately execute no verl code. Missing data, hook errors,
-unrun steps and corrupt files cause finalization to fail, but the partial tar
-is still uploaded. ``worker_coverage_verified`` and ``selection_ready`` remain
+Missing data, hook errors, unrun steps and corrupt files cause finalization to
+fail, but the partial tar is still uploaded. ``worker_coverage_verified`` and ``selection_ready`` remain
 false: process counts cannot prove every Ray actor or engine subprocess was
 instrumented. Forked processes do not necessarily produce a separate startup
 record.
