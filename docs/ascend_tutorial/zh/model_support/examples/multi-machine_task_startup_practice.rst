@@ -178,7 +178,7 @@ Last updated: 07/28/2026.
    * - ``NNODES``
      - 参与训练的节点数量
    * - ``NPUS_PER_NODE``
-     - 每个节点的 NPU 数量, 如 Atlas A3 系列产品 通常为16
+     - 每个节点的 NPU 数量, 如 Atlas A3训练系列产品 通常为16
    * - ``MASTER_ADDR``
      - 主节点 IP, 所有节点的该参数必须相同
    * - ``SOCKET_IFNAME``

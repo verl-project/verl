@@ -34,7 +34,7 @@ The entry function is typically `verl.trainer.main_ppo`. For a complete runnable
 
 ## Base Environment
 
-Currently, Atlas A3 series products are supported. Completing this best practice requires 4 Atlas A3 series systems.
+Currently, Atlas A3 training products are supported. Completing this best practice requires 4 systems from the Atlas A3 training products range.
 
 ### Install Base Environment
 

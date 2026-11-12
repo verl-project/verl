@@ -39,9 +39,9 @@ Key Updates
 Hardware Support
 -----------------
 
-Atlas A2 series products
+Atlas A2 training products
 
-Atlas A3 series products
+Atlas A3 training products
 
 ..
 

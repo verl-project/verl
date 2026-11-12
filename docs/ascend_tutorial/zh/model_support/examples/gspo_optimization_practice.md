@@ -34,7 +34,7 @@ actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响�
 
 ## 基础环境
 
-当前支持 Atlas A3 系列产品。完成本次最佳实践需要 4 台 Atlas A3 系列产品。
+当前支持 Atlas A3训练系列产品。完成本次最佳实践需要 4 台 Atlas A3训练系列产品。
 
 ### 安装基础环境
 

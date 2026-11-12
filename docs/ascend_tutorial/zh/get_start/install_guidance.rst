@@ -37,9 +37,9 @@ Last updated: 11/03/2026.
 硬件支持
 --------
 
-Atlas A2 系列产品
+Atlas A2训练系列产品
 
-Atlas A3 系列产品
+Atlas A3训练系列产品
 
 ..
 

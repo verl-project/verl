@@ -110,8 +110,8 @@ docker exec -it {your_docker_name} bash
 ```text
 | Chip Series | Product Examples                      | Architecture   |
 |-------------|---------------------------------------|----------------|
-| Ascend 910B | Atlas A2 series products              | ARM64 / x86_64 |
-| Ascend A3   | Atlas A3 series products              | ARM64 / x86_64 |
+| Ascend 910B | Atlas A2 training products              | ARM64 / x86_64 |
+| Ascend A3   | Atlas A3 training products              | ARM64 / x86_64 |
 ```
 ---
 
