@@ -130,7 +130,9 @@ def normalize_final_answer(final_answer: str) -> str:
     Returns:
         Normalized answer string
     """
-    final_answer = final_answer.split("=")[-1]
+    # Preserve comma-separated assignments so every variable is compared.
+    if not re.search(r"=[^=]+,\s*[A-Za-z][A-Za-z0-9_]*\s*=", final_answer):
+        final_answer = final_answer.split("=")[-1]
 
     # Apply substitutions and removals
     for before, after in SUBSTITUTIONS:
