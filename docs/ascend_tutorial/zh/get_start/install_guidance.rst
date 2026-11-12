@@ -37,11 +37,9 @@ Last updated: 11/11/2026.
 硬件支持
 --------
 
-Atlas 200T A2 Box16
+Atlas A2训练系列产品
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3训练系列产品
 
 ..
 
