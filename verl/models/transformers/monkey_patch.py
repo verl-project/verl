@@ -16,7 +16,7 @@ Apply monkey-patch function to models
 """
 
 import sys
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Optional
 
 import torch
@@ -273,10 +273,19 @@ def patch_forward_with_backends(
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
     else:
-        from verl.models.transformers.dense_common import forward_with_torch_backend, forward_with_triton_backend
+        from verl.models.transformers.dense_common import (
+            forward_with_torch_backend,
+            forward_with_triton_backend,
+            fused_lm_head_forward,
+        )
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
+        if fused_kernels_backend in ("torch", "liger") and not hasattr(model.lm_head, "_verl_original_forward"):
+            # Install before FSDP2 wrapping; retain ordinary logits calls and
+            # avoid overwriting the original method when patching repeatedly.
+            model.lm_head._verl_original_forward = model.lm_head.forward
+            model.lm_head.forward = MethodType(fused_lm_head_forward, model.lm_head)
 
     model._verl_fused_kernels_backend = fused_kernels_backend
     if fused_kernels_backend == "triton":
