@@ -79,6 +79,13 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     config.global_batch_info["global_batch_size"] = data["global_batch_size"]
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
+    loss_agg_mode = config.loss_agg_mode
+    segment_boundaries = tu.get_non_tensor_data(data, key="segment_boundaries", default=None)
+    if segment_boundaries is not None and hasattr(segment_boundaries, "tolist"):
+        segment_boundaries = segment_boundaries.tolist()
+    n_rollouts = tu.get_non_tensor_data(data, key="n_rollouts", default=None)
+    if n_rollouts is None and "n_rollouts" in data.keys():
+        n_rollouts = data["n_rollouts"]
     # assumes that if any of the global batch info is set, the policy_loss_fn will
     # normalize using dp_size/global_bsz/global_token; in this case, metric aggregation should be SUM
     # to reflect the mean loss over the global batch
@@ -111,19 +118,27 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_agg_mode = config.loss_agg_mode
 
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    if loss_mode == "vanilla" and loss_agg_mode == "seg-mean-token-mean" and segment_boundaries:
+        config.global_batch_info["segment_boundaries"] = list(segment_boundaries)
+    if loss_mode == "vanilla" and n_rollouts is not None:
+        config.global_batch_info["n_rollouts"] = int(n_rollouts)
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
-    pg_loss, pg_metrics = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
-        config=config,
-        rollout_is_weights=rollout_is_weights,
-        **policy_loss_kwargs,
-    )
+    try:
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+            rollout_is_weights=rollout_is_weights,
+            **policy_loss_kwargs,
+        )
+    finally:
+        config.global_batch_info.pop("segment_boundaries", None)
+        config.global_batch_info.pop("n_rollouts", None)
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
