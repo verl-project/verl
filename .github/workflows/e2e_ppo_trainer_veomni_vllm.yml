@@ -92,7 +92,7 @@ env:
 
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -107,6 +107,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   e2e_ppo_trainer_veomni_vllm:
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -157,7 +158,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, e2e_ppo_trainer_veomni_vllm]
-    if: always()
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

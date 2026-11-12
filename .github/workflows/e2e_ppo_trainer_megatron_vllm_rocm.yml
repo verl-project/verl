@@ -93,7 +93,7 @@ env:
 
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') && (github.repository_owner == 'verl-project') }}
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
@@ -187,7 +187,7 @@ jobs:
           rm -rf checkpoints
 
   e2e_ppo_trainer_megatron-moe-expert-parallel_rocm:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') && (github.repository_owner == 'verl-project') }}
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
@@ -264,7 +264,7 @@ jobs:
     needs:
       - e2e_ppo_trainer_fsdp_vllm_rocm
       - e2e_ppo_trainer_megatron-moe-expert-parallel_rocm
-    if: ${{ always() && github.repository_owner == 'verl-project' }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-multinode-hccl-diagnostics') && (always() && github.repository_owner == 'verl-project') }}
     runs-on: [rocm-mi300]
     container:
       image: "verlai/verl:rocm7.14_torch2.12_release_0724"

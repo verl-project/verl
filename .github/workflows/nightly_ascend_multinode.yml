@@ -1,6 +1,8 @@
 name: nightly_ci_ascend_multinode
 
 on:
+  # Temporary trigger for validating multinode CI in pull requests; remove after validation.
+  pull_request:
   schedule:
     - cron: "0 17 * * *"
 
@@ -12,6 +14,7 @@ env:
   SUBMITTER_URL: http://rayjob-submitter.ci-system.svc.cluster.local
   IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
   WORKER_REPLICAS: "2"
+  VERL_HCCL_RUN_ROOT: /root/.cache/verl_ci/hccl/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
   ASCEND_RECIPE_BASELINE_URL: "https://raw.githubusercontent.com/verl-project/verl-ascend-recipe/main/baseline"
 
 jobs:
@@ -29,23 +32,24 @@ jobs:
           fetch-depth: 0
           clean: true
 
-      - name: Copy checkout to shared cache
+      - name: Package checkout in a run-specific cache
+        shell: bash
         run: |
-          rm -rf /root/.cache/verl_ci/verl
-          mkdir -p /root/.cache/verl_ci/verl
-          tar \
-            --exclude=.git \
-            --exclude=.venv \
-            --exclude=__pycache__ \
-            --exclude=.pytest_cache \
-            -cf - . | tar -xf - -C /root/.cache/verl_ci/verl
-          chmod -R 777 /root/.cache/verl_ci/verl
-          ls -l /root/.cache/verl_ci
-          ls -l /root/.cache/verl_ci/verl
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          mkdir -p "${VERL_HCCL_RUN_ROOT%/*}"
+          mkdir "${VERL_HCCL_RUN_ROOT}"
+          mkdir "${VERL_HCCL_RUN_ROOT}/repo"
+          git archive HEAD | tar -xf - -C "${VERL_HCCL_RUN_ROOT}/repo"
+          python3 .github/scripts/verify_ci_source.py --repo "${VERL_HCCL_RUN_ROOT}/repo" --write "${GITHUB_SHA}"
+          manifest_sha256="$(sha256sum "${VERL_HCCL_RUN_ROOT}/repo/.verl-ci-source.json" | cut -d ' ' -f 1)"
+          printf 'VERL_HCCL_SOURCE_MANIFEST_SHA256=%s\n' "${manifest_sha256}" >> "${GITHUB_ENV}"
+          chmod -R a+rX "${VERL_HCCL_RUN_ROOT}"
+          echo "[VERL_HCCL_SOURCE] packaged commit=${GITHUB_SHA} repo=${VERL_HCCL_RUN_ROOT}/repo manifest_sha256=${manifest_sha256}"
 
       - name: Prepare RayJob submit helper
         run: |
-          cat > /root/.cache/verl_ci/submit_and_wait_rayjob.sh <<'EOF'
+          cat > "${VERL_HCCL_RUN_ROOT}/submit_and_wait_rayjob.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
 
@@ -144,40 +148,7 @@ jobs:
               --retry-delay 10 \
               --retry-all-errors \
               "${SUBMITTER_URL}/api/v1/rayjobs/${job_id}/watch?format=ndjson" \
-          | while IFS= read -r event; do
-              [[ -z "${event}" ]] && continue
-              if ! printf '%s' "${event}" | jq . >/dev/null 2>&1; then
-                  echo "[watch raw] ${event}"
-                  continue
-              fi
-
-              type="$(printf '%s' "${event}" | jq -r '.type // empty')"
-              case "${type}" in
-                  log)
-                      printf '%s' "${event}" | jq -r '.line // ""'
-                      ;;
-                  status)
-                      status="$(printf '%s' "${event}" | jq -r '.status // "UNKNOWN"')"
-                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
-                      rayjob_status="$(printf '%s' "${event}" | jq -r '.rayjob_status // ""')"
-                      deployment_status="$(printf '%s' "${event}" | jq -r '.job_deployment_status // ""')"
-                      echo "[rayjob status] status=${status} rayjob_status=${rayjob_status} deployment_status=${deployment_status} ${message}"
-                      ;;
-                  final)
-                      status="$(printf '%s' "${event}" | jq -r '.status // "UNKNOWN"')"
-                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
-                      echo "[rayjob final] ${status} ${message}"
-                      printf '%s' "${status}" > "${final_status_file}"
-                      ;;
-                  error)
-                      message="$(printf '%s' "${event}" | jq -r '.message // ""')"
-                      echo "[rayjob error] ${message}"
-                      ;;
-                  *)
-                      echo "${event}"
-                      ;;
-              esac
-          done
+          | python3 "${GITHUB_WORKSPACE}/.github/scripts/watch_rayjob_diagnostics.py" "${final_status_file}"
           set -e
 
           final_status=""
@@ -191,19 +162,24 @@ jobs:
               *) echo "Watch ended without successful final status."; exit 1 ;;
           esac
           EOF
-          sed -i 's/^          //' /root/.cache/verl_ci/submit_and_wait_rayjob.sh
-          chmod +x /root/.cache/verl_ci/submit_and_wait_rayjob.sh
-          cat /root/.cache/verl_ci/submit_and_wait_rayjob.sh
+          sed -i 's/^          //' "${VERL_HCCL_RUN_ROOT}/submit_and_wait_rayjob.sh"
+          chmod +x "${VERL_HCCL_RUN_ROOT}/submit_and_wait_rayjob.sh"
+          cat "${VERL_HCCL_RUN_ROOT}/submit_and_wait_rayjob.sh"
 
       - name: Prepare multinode testing helper
         run: |
-          cat > /root/.cache/verl_ci/run_multinode_testing.sh <<'EOF'
+          cat > "${VERL_HCCL_RUN_ROOT}/run_multinode_testing.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euxo pipefail
 
-          CACHE_REPO=${CACHE_REPO:-/root/.cache/verl_ci/verl}
+          : "${CACHE_REPO:?A run-specific source bundle is required}"
+          : "${VERL_DIAGNOSTIC_COMMIT:?The checkout commit is required}"
+          : "${VERL_HCCL_SOURCE_MANIFEST_SHA256:?The expected source manifest is required}"
+          : "${VERL_HCCL_HELPER_SHA256:?The expected testing helper is required}"
           WORK_REPO=${WORK_REPO:-/verl}
           EXPECTED_WORKERS=${EXPECTED_WORKERS:-2}
+          printf '%s  %s\n' "${VERL_HCCL_HELPER_SHA256}" "$0" | sha256sum --check
+          echo "[VERL_HCCL_SOURCE] helper=$0 sha256=${VERL_HCCL_HELPER_SHA256}"
 
           script_path=""
           script_args=()
@@ -232,9 +208,11 @@ jobs:
           fi
 
           copy_repo() {
+              python3 "${CACHE_REPO}/.github/scripts/verify_ci_source.py" --repo "${CACHE_REPO}"
               rm -rf "${WORK_REPO}"
               mkdir -p "${WORK_REPO}"
               cp -a "${CACHE_REPO}/." "${WORK_REPO}/"
+              python3 "${WORK_REPO}/.github/scripts/verify_ci_source.py" --repo "${WORK_REPO}"
           }
 
           install_repo() {
@@ -249,6 +227,7 @@ jobs:
               uv pip list --system
               uv pip install --system --no-deps -e "${WORK_REPO}"
               uv pip list --system
+              python3 "${WORK_REPO}/.github/scripts/verify_ci_source.py" --repo "${WORK_REPO}" --check-import
           }
 
           copy_repo
@@ -256,18 +235,19 @@ jobs:
 
           python3 - <<'PY'
           import os
+          import shlex
           import socket
           import subprocess
           import ray
           from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-          CACHE_REPO = os.environ.get("CACHE_REPO", "/root/.cache/verl_ci/verl")
+          CACHE_REPO = os.environ["CACHE_REPO"]
           WORK_REPO = os.environ.get("WORK_REPO", "/verl")
           EXPECTED_WORKERS = int(os.environ.get("EXPECTED_WORKERS", "2"))
 
           def run_cmd(cmd: str) -> None:
               print(f"\n===== RUN: {cmd} =====", flush=True)
-              subprocess.run(cmd, shell=True, executable="/bin/bash", check=True)
+              subprocess.run(["bash", "-euo", "pipefail", "-c", cmd], check=True)
 
           @ray.remote(num_cpus=1)
           def setup_worker() -> str:
@@ -278,10 +258,11 @@ jobs:
               run_cmd("npu-smi info")
               run_cmd(
                   f"""
-                  rm -rf {WORK_REPO}
-                  mkdir -p {WORK_REPO}
-                  ls -l {CACHE_REPO}
-                  cp -a {CACHE_REPO}/. {WORK_REPO}/
+                  python3 {shlex.quote(CACHE_REPO + '/.github/scripts/verify_ci_source.py')} --repo {shlex.quote(CACHE_REPO)}
+                  rm -rf {shlex.quote(WORK_REPO)}
+                  mkdir -p {shlex.quote(WORK_REPO)}
+                  cp -a {shlex.quote(CACHE_REPO)}/. {shlex.quote(WORK_REPO)}/
+                  python3 {shlex.quote(WORK_REPO + '/.github/scripts/verify_ci_source.py')} --repo {shlex.quote(WORK_REPO)}
 
                   if ! command -v uv >/dev/null 2>&1; then
                       curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -290,10 +271,11 @@ jobs:
 
                   export PATH="$HOME/.local/bin:$PATH"
 
-                  cd {WORK_REPO}
+                  cd {shlex.quote(WORK_REPO)}
                   uv pip list --system
-                  uv pip install --system --no-deps -e {WORK_REPO}
+                  uv pip install --system --no-deps -e {shlex.quote(WORK_REPO)}
                   uv pip list --system
+                  python3 {shlex.quote(WORK_REPO + '/.github/scripts/verify_ci_source.py')} --repo {shlex.quote(WORK_REPO)} --check-import
 
                   test -r /root/.cache/modelscope/hub/datasets/lxb007981/GLM-5___2-top16-DAPO-17k-Tuned/dapo-math-17k-8k.verl.jsonl
                   """
@@ -327,7 +309,12 @@ jobs:
 
           refs = [
               setup_worker.options(
-                  scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False)
+                  scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False),
+                  runtime_env={"env_vars": {
+                      key: os.environ[key] for key in (
+                          "CACHE_REPO", "VERL_DIAGNOSTIC_COMMIT", "VERL_HCCL_SOURCE_MANIFEST_SHA256"
+                      )
+                  }},
               ).remote()
               for node in worker_nodes
           ]
@@ -336,12 +323,14 @@ jobs:
           PY
 
           cd "${WORK_REPO}"
-          bash "${script_path}" "${script_args[@]}"
+          python3 "${WORK_REPO}/.github/scripts/run_multinode_hccl_diagnostics.py" --repo "${WORK_REPO}" -- bash "${script_path}" "${script_args[@]}"
           rm -rf "$HOME/ckpts"
           EOF
-          sed -i 's/^          //' /root/.cache/verl_ci/run_multinode_testing.sh
-          chmod +x /root/.cache/verl_ci/run_multinode_testing.sh
-          cat /root/.cache/verl_ci/run_multinode_testing.sh
+          sed -i 's/^          //' "${VERL_HCCL_RUN_ROOT}/run_multinode_testing.sh"
+          chmod +x "${VERL_HCCL_RUN_ROOT}/run_multinode_testing.sh"
+          helper_sha256="$(sha256sum "${VERL_HCCL_RUN_ROOT}/run_multinode_testing.sh" | cut -d ' ' -f 1)"
+          printf 'VERL_HCCL_HELPER_SHA256=%s\n' "${helper_sha256}" >> "${GITHUB_ENV}"
+          cat "${VERL_HCCL_RUN_ROOT}/run_multinode_testing.sh"
 
       - name: Setup and Verify Cluster Network
         run: |
@@ -376,11 +365,17 @@ jobs:
           set -euo pipefail
           LOG_DIR=/root/.cache/temp
           mkdir -p "$LOG_DIR"
-          /root/.cache/verl_ci/submit_and_wait_rayjob.sh \
+          diagnostic_env="$(jq -cn \
+            --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" \
+            --arg sha "${GITHUB_SHA}" --arg job "${GITHUB_JOB}" --arg runner "${RUNNER_NAME}" \
+            --arg cache "${VERL_HCCL_RUN_ROOT}/repo" --arg manifest "${VERL_HCCL_SOURCE_MANIFEST_SHA256}" \
+            --arg helper "${VERL_HCCL_HELPER_SHA256}" \
+            '{CACHE_REPO:$cache,VERL_HCCL_SOURCE_MANIFEST_SHA256:$manifest,VERL_HCCL_HELPER_SHA256:$helper,HCCL_INTER_HCCS_DISABLE:"TRUE",VERL_HCCL_DIAGNOSTICS:"1",HYDRA_FULL_ERROR:"1",RAY_DEDUP_LOGS:"0",PYTHONUNBUFFERED:"1",ASCEND_PROCESS_LOG_PATH:("/tmp/verl-hccl-"+$run+"-"+$attempt+"/ascend"),VERL_DIAGNOSTIC_COMMIT:$sha,GITHUB_SHA:$sha,GITHUB_RUN_ID:$run,GITHUB_RUN_ATTEMPT:$attempt,GITHUB_JOB:$job,RUNNER_NAME:$runner}')"
+          "${VERL_HCCL_RUN_ROOT}/submit_and_wait_rayjob.sh" \
             multinode-e2e \
-            /root/.cache/verl_ci/run_multinode_testing.sh \
+            "${VERL_HCCL_RUN_ROOT}/run_multinode_testing.sh" \
             '["--script-path","/verl/tests/special_npu/nightly_ci_ascend/run_grpo_glm52_top16_megatron_npu_multinode.sh"]' \
-            '{"HCCL_INTER_HCCS_DISABLE":"TRUE"}' \
+            "${diagnostic_env}" \
             '[
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/memory","value":"1536Gi"},
@@ -403,3 +398,4 @@ jobs:
         run: |
           curl -sS -X DELETE \
             "${SUBMITTER_URL}/api/v1/workflows/${GITHUB_RUN_ID}?attempt=${GITHUB_RUN_ATTEMPT:-1}"
+          rm -rf -- "${VERL_HCCL_RUN_ROOT}"
