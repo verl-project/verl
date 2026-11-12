@@ -1504,23 +1504,21 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         return model_output
 
+    def _get_forward_autocast_context(self) -> ContextManager:
+        """Use the autocast dtype resolved during FSDP setup."""
+        # Some subclasses bypass FSDPEngine's mixed-precision initialization.
+        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
+        if autocast_dtype == torch.float32:
+            return nullcontext()
+        return torch.autocast(device_type=get_device_name(), dtype=autocast_dtype)
+
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
-        # autocast is a no-op at best and a footgun at worst, so skip it entirely.
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
-        # and _build_fsdp_module, so self._autocast_dtype may not be set.
-        autocast_dtype = getattr(self, "_autocast_dtype", torch.bfloat16)
-        autocast_ctx: ContextManager = (
-            nullcontext()
-            if autocast_dtype == torch.float32
-            else torch.autocast(device_type=device_name, dtype=autocast_dtype)
-        )
-        with autocast_ctx:
+        with self._get_forward_autocast_context():
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,

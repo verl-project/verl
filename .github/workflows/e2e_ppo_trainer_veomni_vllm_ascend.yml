@@ -101,7 +101,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@10a26aca258f91a7af3e698cc0db8c6c51705989" --ignore-requires-python --no-deps
+          pip install "veomni @ git+https://github.com/ByteDance-Seed/VeOmni.git@a8d357cec86643ab8fec12acc6c60a26bc7d1d29" --ignore-requires-python --no-deps
           pip install transformers==5.16.1
       - name: Check final pip list
         run: |

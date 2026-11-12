@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 for _mod in (
     "veomni",
@@ -30,6 +31,7 @@ for _mod in (
     "veomni.distributed.torch_parallelize",
     "veomni.models",
     "veomni.models.auto",
+    "veomni.models.checkpoint",
     "veomni.models.checkpoint_tensor_loading",
     "veomni.optim",
     "veomni.utils",
@@ -38,6 +40,7 @@ for _mod in (
     sys.modules.setdefault(_mod, MagicMock())
 
 from verl.workers.config import VeOmniEngineConfig  # noqa: E402
+from verl.workers.engine.fsdp import transformer_impl as fsdp  # noqa: E402
 from verl.workers.engine.veomni import transformer_impl  # noqa: E402
 
 
@@ -64,11 +67,17 @@ def parallel_state():
 
 
 @pytest.mark.parametrize(
-    ("world_size", "fsdp_size", "ulysses_size", "ep_size", "replicate_size", "shard_size"),
-    [(1, -1, 1, 1, 1, 1), (8, -1, 2, 2, 1, 4), (16, 4, 2, 4, 2, 4), (8, 8, 1, 2, 1, 8)],
+    ("world_size", "fsdp_size", "ulysses_size", "ep_size", "ple_size", "replicate_size", "shard_size"),
+    [
+        (1, -1, 1, 1, 1, 1, 1),
+        (8, -1, 2, 2, 1, 1, 4),
+        (16, 4, 2, 4, 8, 2, 4),
+        (8, 8, 1, 2, 1, 1, 8),
+        (8, -1, 2, 8, 8, 1, 4),
+    ],
 )
 def test_current_api_preserves_parallel_topology(
-    monkeypatch, parallel_state, world_size, fsdp_size, ulysses_size, ep_size, replicate_size, shard_size
+    monkeypatch, parallel_state, world_size, fsdp_size, ulysses_size, ep_size, ple_size, replicate_size, shard_size
 ):
     accelerator = SimpleNamespace(dp_size=world_size // ulysses_size)
     make_accelerator = MagicMock(return_value=accelerator)
@@ -84,6 +93,9 @@ def test_current_api_preserves_parallel_topology(
         fsdp_size=fsdp_size,
         ulysses_parallel_size=ulysses_size,
         expert_parallel_size=ep_size,
+        ple_parallel_size=ple_size,
+        ep_sharded_stream_load=True,
+        broadcast_model_weights_from_rank0=False,
     )
 
     make_fsdp_config.assert_called_once_with(fsdp_mode="fsdp2")
@@ -91,6 +103,9 @@ def test_current_api_preserves_parallel_topology(
         dp_replicate_size=replicate_size,
         dp_shard_size=shard_size,
         ep_size=ep_size,
+        extra_parallel_sizes=[ple_size],
+        extra_parallel_placement_innermost=[False],
+        extra_parallel_names=["ple"],
         ulysses_size=ulysses_size,
         init_device="meta",
         fsdp_config=fsdp_config,
@@ -110,6 +125,22 @@ def test_current_api_rejects_world_size_mismatch(monkeypatch, parallel_state):
 def test_invalid_hsdp_fails_before_mesh_creation(monkeypatch, parallel_state):
     with pytest.raises(ValueError, match="must be divisible by fsdp_size"):
         _init_engine(monkeypatch, parallel_state, fsdp_size=3)
+    parallel_state.init_parallel_state_from_config.assert_not_called()
+
+
+@pytest.mark.parametrize("dimension", ["expert_parallel_size", "ple_parallel_size"])
+def test_extra_parallel_cannot_span_hsdp_replicas(monkeypatch, parallel_state, dimension):
+    with pytest.raises(ValueError, match=f"must be divisible by {dimension}"):
+        _init_engine(
+            monkeypatch,
+            parallel_state,
+            world_size=16,
+            fsdp_size=2,
+            ulysses_parallel_size=2,
+            ep_sharded_stream_load=True,
+            broadcast_model_weights_from_rank0=False,
+            **{dimension: 8},
+        )
     parallel_state.init_parallel_state_from_config.assert_not_called()
 
 
@@ -135,3 +166,15 @@ def test_full_shard_uses_veomni_reshard_option(monkeypatch, enable_full_shard):
     assert "enable_full_shard" not in parallelize.call_args.kwargs
     assert engine.module is module
     assert engine.optimizer is None
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_veomni_controls_inherited_autocast(monkeypatch, enabled):
+    monkeypatch.setattr(fsdp, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(transformer_impl, "get_device_name", lambda: "cpu")
+    engine = object.__new__(transformer_impl.VeOmniEngineWithLMHead)
+    engine.engine_config = SimpleNamespace(enable_autocast=enabled)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        with engine._get_forward_autocast_context():
+            assert torch.is_autocast_enabled("cpu") == enabled
+        assert torch.is_autocast_enabled("cpu")

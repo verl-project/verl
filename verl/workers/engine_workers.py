@@ -634,6 +634,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            from verl.utils.veomni.frozen_ple import validate_frozen_ple_rollout
+
+            validate_frozen_ple_rollout(
+                getattr(actor_config.engine, "freeze_ple_embeddings", False),
+                self.config.rollout.name,
+                self.config.rollout.load_format,
+            )
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )

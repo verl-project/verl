@@ -514,7 +514,7 @@ apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
 transformer-engine   = { index = "verl-wheelhouse" }
 megatron-bridge      = { index = "verl-wheelhouse" }
-veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "10a26aca258f91a7af3e698cc0db8c6c51705989" }
+veomni              = { git = "https://github.com/ByteDance-Seed/VeOmni.git", rev = "a8d357cec86643ab8fec12acc6c60a26bc7d1d29" }
 
 # megatron-core isn't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.6.2 (v0.6.2 tag) pairs with
