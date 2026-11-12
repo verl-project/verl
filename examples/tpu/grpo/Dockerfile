@@ -56,7 +56,6 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM_TORCHTPU
     pip install --no-build-isolation --pre --no-deps -e .
 cd /
 
-# TransferQueue must satisfy verl's requirement in pyproject.toml: V1 async checkpoints use its checkpoint API.
 pip install accelerate codetiming datasets dill hydra-core peft "pyarrow>=19.0.0" pybind11 pylatexenc \
     "${tensordict}" orjson torchdata "${transformers}" wandb "packaging>=20.0" uvicorn "fastapi<0.137" \
     latex2sympy2_extended math_verify tensorboard TransferQueue==0.1.11
