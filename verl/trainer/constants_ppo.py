@@ -207,6 +207,8 @@ def get_ppo_ray_runtime_env(config=None):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
     # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
     for key in (
+        "VERL_HCCL_DIAGNOSTICS",
+        "ASCEND_PROCESS_LOG_PATH",
         "VLLM_DISABLE_COMPILE_CACHE",
         "PYTHONHASHSEED",
         "CUBLAS_WORKSPACE_CONFIG",

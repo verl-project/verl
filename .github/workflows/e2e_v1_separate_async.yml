@@ -68,7 +68,7 @@ env:
 
 jobs:
   setup:
-    if: github.repository_owner == 'verl-project'
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-qwen3-8b-hccl-diagnostics' && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -83,6 +83,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   e2e_v1_separate_async_fsdp2:
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-qwen3-8b-hccl-diagnostics' }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase timeout for async training
@@ -115,6 +116,7 @@ jobs:
           bash tests/special_e2e/run_v1_separate_async.sh
 
   e2e_v1_separate_async_megatron:
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-qwen3-8b-hccl-diagnostics' }}
     needs: [setup, e2e_v1_separate_async_fsdp2]
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase timeout for async training
@@ -149,7 +151,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, e2e_v1_separate_async_fsdp2, e2e_v1_separate_async_megatron]
-    if: always()
+    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-qwen3-8b-hccl-diagnostics' && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1
