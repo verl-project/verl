@@ -346,11 +346,14 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
-            if min_global_steps is None:
-                min_global_steps = (
-                    output.extra_fields.get("min_global_steps", global_steps) if segments else global_steps
+            if output.token_ids:
+                if min_global_steps is None:
+                    min_global_steps = (
+                        output.extra_fields.get("min_global_steps", global_steps) if segments else global_steps
+                    )
+                max_global_steps = (
+                    output.extra_fields.get("max_global_steps", global_steps) if segments else global_steps
                 )
-            max_global_steps = output.extra_fields.get("max_global_steps", global_steps) if segments else global_steps
 
             # 3. update max_new_tokens
             if original_max_tokens is not None:
@@ -370,6 +373,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
 
             await asyncio.sleep(1)
 
+        # Empty retries carry no token-version evidence. If the whole trajectory is
+        # empty, explicitly fall back to the final attempt's version.
+        if not final_output.token_ids:
+            min_global_steps = max_global_steps = global_steps
         final_output.extra_fields["global_steps"] = global_steps
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps

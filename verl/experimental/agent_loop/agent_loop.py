@@ -755,6 +755,10 @@ class AgentLoopWorker:
         trace: bool = True,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
+        # Dataset agent_name overrides the default; guard the effective loop at the
+        # shared dispatch boundary used by both DataProto and TransferQueue workers.
+        if self.rollout_config.get("partial_rollout_kv_offload", False) and agent_name != "single_turn_agent":
+            raise ValueError(f"Partial KV offload only supports single_turn_agent, got {agent_name!r}")
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],

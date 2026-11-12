@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 11/09/2026.
+Last updated: 11/12/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -97,6 +97,8 @@ cached hidden states equal. Original token IDs, sampling logprobs, top-k heads
 and routed experts stay on their native output paths. `policy_version_segments`
 in response `extra_fields` records the actual EngineCore version for every token
 range; the async client carries it and the minimum/maximum versions across retries.
+An attempt that returns no tokens does not expand that version range. If the
+entire trajectory is empty, its range falls back to the last attempt's version.
 Each physical request receives a unique prefix-cache salt, so unrelated requests
 cannot reuse its historical KV. Ordinary vLLM memory-pressure preemption can still
 recompute a prefix; this option avoids recomputation at the training handoff.
@@ -125,12 +127,18 @@ single-turn text requests through verl's Ray clients. TP is supported; rollout
 DP/PP/DCP/PCP must be 1. LoRA, MTP/speculative decoding, PD disaggregation,
 external KV connectors and alternative sleep backends are rejected. Custom agent
 loops and direct OpenAI-server requests are outside this initial contract.
+Dataset-selected `agent_name` values are checked before dispatch as well as the
+configured default; only `single_turn_agent` is accepted while this option is on.
 
 Checkpoint, scheduled evaluation and final-step boundaries use abort/discard
 instead of preserving in-flight KV. The CPU backups are **not durable checkpoints**
 and do not survive an engine restart. Existing async prompt/sample checkpoint
 semantics remain unchanged. The default `partial_rollout_kv_offload: false`
 retains the existing abort/retry/re-prefill behavior.
+
+When validation yields the GPUs to a colocated reward model, it restores weights
+with the current policy version, restores KV, and then reopens generation
+admission before the next batch. A failed restore leaves admission closed.
 
 Focused checks:
 

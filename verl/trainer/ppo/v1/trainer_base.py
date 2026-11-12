@@ -1175,7 +1175,10 @@ class PPOTrainer(ABC):
             if self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
                 batch = self._compute_reward_colocate(batch)
-                self.checkpoint_manager.update_weights()
+                # Even an unchanged policy must be committed before the partial-KV pool wakes.
+                self.checkpoint_manager.update_weights(self.global_steps)
+                if self.config.actor_rollout_ref.rollout.get("partial_rollout_kv_offload", False):
+                    self.checkpoint_manager.resume_generation_replicas()
 
             # 4. collect necessary data for logging
             # For multi-output agent loops, only use the final output per session for metrics.
