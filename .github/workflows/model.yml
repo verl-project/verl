@@ -193,6 +193,13 @@ jobs:
           $UV_RUN ray stop --force
           $UV_RUN pytest -s -x tests/models/test_engine.py
           $UV_RUN pytest -s -x tests/models/test_model_forward_fused.py
+      - name: Check fused LM-head parameter readiness with DDP overlap
+        run: |
+          FUSED_READY_OUTPUT=$(mktemp -d)
+          for tied in 0 1; do
+            $UV_RUN torchrun --standalone --nproc-per-node=2 tests/special_distributed/test_megatron_fused_param_sync.py \
+              --output "$FUSED_READY_OUTPUT/tied-$tied" --overlap 1 --tied "$tied" --expect pass
+          done
 
   cleanup:
     runs-on: ubuntu-latest
