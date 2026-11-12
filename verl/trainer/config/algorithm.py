@@ -86,6 +86,8 @@ class RolloutCorrectionConfig(BaseConfig):
             - None: No IS weights (metrics only)
             - "token": Per-token IS weights (low variance, biased)
             - "sequence": Per-sequence IS weights (unbiased, high variance)
+            - "seq_mask_tis": Per-token TIS weights (capped at 5) with whole sequences zeroed when their geometric-mean
+              ratio leaves the ``"lower_upper"`` ``rollout_is_threshold`` band (Tunix / MLPerf DeepSWE ``seq-mask-tis``)
             Default: "sequence"
 
         rollout_is_threshold (str | float): Threshold specification for IS weighting.
@@ -116,6 +118,8 @@ class RolloutCorrectionConfig(BaseConfig):
             - "seq_mean_k3": Sequence mean of rejection with ``exp(log r) - 1 - log r`` (upper bound only)
             - "seq_max_k2": Sequence max of rejection with ``0.5 * (log r)^2`` (upper bound only)
             - "seq_max_k3": Sequence max of rejection with ``exp(log r) - 1 - log r`` (upper bound only)
+            - "seq_mean_abs_exp": Sequence mean of ``exp(|log r|)`` (upper bound only; Tunix
+              ``seq_logprob_error_threshold``)
             names automatically. Default: None
 
         rollout_rs_threshold (Optional[Union[str, float]]): Threshold specification for rejection sampling.
