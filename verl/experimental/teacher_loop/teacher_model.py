@@ -44,6 +44,7 @@ class TeacherModelManager:
         distillation_config: DistillationConfig,
         teacher_model_config: DistillationTeacherModelConfig,
         resource_pool: RayResourcePool,
+        defer_init: bool = False,
     ):
         """
         Initialize the teacher model manager.
@@ -52,16 +53,24 @@ class TeacherModelManager:
             distillation_config (DistillationConfig): Distillation configuration.
             teacher_model_config (DistillationTeacherModelConfig): Teacher model configuration.
             resource_pool (RayResourcePool): Dedicated teacher resource pool.
+            defer_init (bool): Skip the blocking server launch and leave it to
+                :meth:`initialize`. Used by ``MultiTeacherModelManager`` to start every
+                teacher concurrently instead of one after another.
         """
 
         # Need dataclass conversion for max_logprobs handling in post_init
         self.distillation_config = distillation_config
         self.teacher_model_config = teacher_model_config
         self.resource_pool = resource_pool
-        self._initialize_llm_servers()
+        if not defer_init:
+            _run_all([self.initialize()])
+
+    async def initialize(self):
+        """Launch this teacher's rollout replicas, then its load balancer."""
+        await self._initialize_llm_servers()
         self._initialize_load_balancer_handle()
 
-    def _initialize_llm_servers(self):
+    async def _initialize_llm_servers(self):
         teacher_model_config = self.teacher_model_config
         per_replica_world_size = teacher_model_config.per_replica_world_size
         num_replicas = teacher_model_config.num_replicas
@@ -102,8 +111,8 @@ class TeacherModelManager:
         split_resource_pools = split_resource_pool(self.resource_pool, split_size=per_replica_world_size)
         assert len(split_resource_pools) == len(self.rollout_replicas)
         self._validate_replica_node_alignment(split_resource_pools, per_replica_world_size, gpus_per_node)
-        _run_all(
-            [
+        await asyncio.gather(
+            *[
                 server.init_colocated(resource_pool)
                 for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
             ]
@@ -206,16 +215,29 @@ class MultiTeacherModelManager:
         split_sizes = [teacher.world_size for teacher in teacher_models.values()]
         split_pools = split_resource_pool(self.resource_pool, split_size=split_sizes)
 
-        for (key, teacher_model_config), teacher_pool in zip(teacher_models.items(), split_pools, strict=True):
-            manager = TeacherModelManager(
+        managers = [
+            TeacherModelManager(
                 distillation_config=self.distillation_config,
                 teacher_model_config=teacher_model_config,
                 resource_pool=teacher_pool,
+                defer_init=True,
             )
+            for teacher_model_config, teacher_pool in zip(teacher_models.values(), split_pools, strict=True)
+        ]
+        # Teachers are independent servers on disjoint devices, so launch them together:
+        # starting them one by one costs a full vLLM startup (engine init + CUDA graph
+        # capture) per teacher and dominates the wall clock once there are many teachers.
+        _run_all([self._initialize_managers(managers)])
+
+        for key, manager in zip(teacher_models.keys(), managers, strict=True):
             self.teacher_model_managers[key] = manager
             self.server_addresses[key] = manager.server_addresses
             self.server_handles[key] = manager.server_handles
             self.load_balancer_handle[key] = manager.load_balancer_handle
+
+    @staticmethod
+    async def _initialize_managers(managers: list["TeacherModelManager"]):
+        await asyncio.gather(*[manager.initialize() for manager in managers])
 
     def get_client(self) -> dict[str, LLMServerClient]:
         """Get the LLMServerClient for each teacher model."""
