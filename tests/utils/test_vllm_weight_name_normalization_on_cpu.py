@@ -1119,6 +1119,59 @@ def test_fp8_weight_is_dequantized_for_live_bf16_projection(monkeypatch, vllm_qu
     assert Runner.model.loaded[0][1].dtype == torch.bfloat16
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("block_shape", [(128, 128), (32, 32), (32, 64)])
+@pytest.mark.parametrize("split_buckets", [False, True])
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_fp8_base_sync_preserves_values_for_live_float_projection(
+    vllm_quant_utils, dtype, block_shape, split_buckets, scale_first
+):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Partial edge blocks exercise cropping as well as 32x32 DSV4.1
+            # scales and rectangular native Fp8Config block sizes.
+            self.proj = torch.nn.Linear(81, 61, bias=False, dtype=dtype)
+
+        @torch.no_grad()
+        def load_weights(self, weights):
+            loaded = set()
+            for name, tensor in weights:
+                assert tensor.dtype == dtype
+                self.get_parameter(name).copy_(tensor)
+                loaded.add(name)
+            return loaded
+
+    model = Model()
+    runner = types.SimpleNamespace(
+        model=model,
+        vllm_config=types.SimpleNamespace(quant_config=types.SimpleNamespace(weight_block_size=block_shape)),
+    )
+    rows, cols = model.proj.weight.shape
+    scale_rows, scale_cols = (
+        (rows + block_shape[0] - 1) // block_shape[0],
+        (cols + block_shape[1] - 1) // block_shape[1],
+    )
+    scales = torch.arange(1, scale_rows * scale_cols + 1).reshape(scale_rows, scale_cols).float()
+    expanded = scales.repeat_interleave(block_shape[0], 0).repeat_interleave(block_shape[1], 1)[:rows, :cols]
+    weight = torch.full((rows, cols), 2.0, dtype=torch.float8_e4m3fn)
+    updates = [("proj.weight", weight), ("proj.weight_scale_inv", scales)]
+    if scale_first:
+        updates.reverse()
+    live_pointer = model.proj.weight.data_ptr()
+    if split_buckets:
+        state = {model: {}}
+        assert not vllm_quant_utils.load_quanted_weights(updates[:1], runner, peft_config={"r": 1}, reload_states=state)
+        # The transport reuses this storage before the second bucket arrives.
+        updates[0][1].fill_(4.0)
+        vllm_quant_utils.load_quanted_weights(updates[1:], runner, peft_config={"r": 1}, reload_states=state)
+        vllm_quant_utils.validate_fp8_weight_pairs(state[model]["pending_fp8"])
+    else:
+        vllm_quant_utils.load_quanted_weights(updates, runner, peft_config={"r": 1})
+    assert model.proj.weight.data_ptr() == live_pointer
+    torch.testing.assert_close(model.proj.weight, (2.0 * expanded).to(dtype), rtol=0, atol=0)
+
+
 def test_weight_scale_is_kept_for_live_int8_weight(monkeypatch, vllm_quant_utils):
     """Only unquantized live weights drop trainer scales; an int8 live weight keeps its scale."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
@@ -1136,6 +1189,70 @@ def test_weight_scale_is_kept_for_live_int8_weight(monkeypatch, vllm_quant_utils
     )
 
     assert [name.rsplit(".", 1)[-1] for name, _ in Runner.model.loaded] == ["weight", "weight_scale"]
+
+
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_dsv41_real_sender_scale_refits_unquantized_projection(vllm_quant_utils, scale_first):
+    from verl.utils.qat.compressed_tensors import Fp8ConfigWeightQuantizer
+
+    class Model(torch.nn.Module):
+        model_type = "deepseek_v41"
+
+        def __init__(self):
+            super().__init__()
+            layer = torch.nn.Module()
+            layer.attn = torch.nn.Module()
+            layer.attn.wq_a = torch.nn.Linear(96, 64, bias=False, dtype=torch.bfloat16)
+            self.layers = torch.nn.ModuleList([layer])
+
+        @torch.no_grad()
+        def load_weights(self, weights):
+            loaded = set()
+            for name, tensor in weights:
+                self.get_parameter(name).copy_(tensor)
+                loaded.add(name)
+            return loaded
+
+    model = Model()
+    config = {"quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [32, 32]}
+    quantizer = Fp8ConfigWeightQuantizer(config, model_types=[model.model_type])
+    # This branch receives Bridge's native FP8 + E8M0 pair and passes it through.
+    # Distinct powers of two make the receiver's dequantization exact.
+    blocks = torch.tensor([[1, 2, 4], [8, 16, 32]], dtype=torch.bfloat16)
+    source = blocks.repeat_interleave(32, 0).repeat_interleave(32, 1)
+    updates = list(
+        quantizer(
+            [
+                ("layers.0.attn.wq_a.weight", torch.ones(64, 96, dtype=torch.float8_e4m3fn)),
+                ("layers.0.attn.wq_a.scale", blocks.to(torch.float8_e8m0fnu)),
+            ]
+        )
+    )
+    assert [name for name, _ in updates] == ["layers.0.attn.wq_a.weight", "layers.0.attn.wq_a.scale"]
+    assert updates[1][1].dtype == torch.float8_e8m0fnu
+    if scale_first:
+        updates.reverse()
+    runner = types.SimpleNamespace(
+        model=model, vllm_config=types.SimpleNamespace(quant_config=types.SimpleNamespace(weight_block_size=[32, 32]))
+    )
+    state = {model: {}}
+    for update in updates:
+        vllm_quant_utils.load_quanted_weights([update], runner, peft_config={"r": 1}, reload_states=state)
+    vllm_quant_utils.validate_fp8_weight_pairs(state[model]["pending_fp8"])
+    torch.testing.assert_close(model.layers[0].attn.wq_a.weight, source, rtol=0, atol=0)
+
+
+def test_dsv_scale_stays_native_for_quantized_live_projection(vllm_quant_utils):
+    name = "layers.0.attn.wq_a"
+    model = _FakeModel({name + ".weight": torch.empty(64, 96, dtype=torch.float8_e4m3fn)})
+    model.model_type = "deepseek_v41"
+    weight = torch.ones(64, 96, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 3).to(torch.float8_e8m0fnu)
+    updates = [(name + ".weight", weight), (name + ".scale", scale)]
+    vllm_quant_utils.load_quanted_weights(updates, types.SimpleNamespace(model=model), peft_config={"r": 1})
+    assert [name for name, _ in model.loaded] == [name for name, _ in updates]
+    assert model.loaded[0][1] is weight
+    assert model.loaded[1][1] is scale
 
 
 @pytest.fixture

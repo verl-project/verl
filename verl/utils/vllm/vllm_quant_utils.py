@@ -296,7 +296,9 @@ def reset_uncalibrated_kv_cache_scales(model):
 def validate_fp8_weight_pairs(pending_fp8):
     orphaned_weights = [name for name, entry in pending_fp8.items() if "weight" in entry]
     if orphaned_weights:
-        raise RuntimeError("FP8 weights missing weight_scale or weight_scale_inv: " + ", ".join(orphaned_weights))
+        raise RuntimeError(
+            "FP8 weights missing weight_scale, weight_scale_inv or DeepSeek scale: " + ", ".join(orphaned_weights)
+        )
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None, reload_states=None):
@@ -379,15 +381,28 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
                                     return dtype
             return None
 
-        def dequant_fp8_block(weight, scale, block_size=128):
+        quant_config = getattr(getattr(model_runner, "vllm_config", None), "quant_config", None)
+        block_shape = getattr(quant_config, "weight_block_size", None) or (128, 128)
+
+        def dequant_fp8_block(weight, scale, dtype):
             rows, cols = weight.shape
-            pad_rows, pad_cols = -rows % block_size, -cols % block_size
-            if pad_rows or pad_cols:
-                weight = torch.nn.functional.pad(weight, (0, pad_cols, 0, pad_rows))
-            scale = scale.float().repeat_interleave(block_size, 0).repeat_interleave(block_size, 1)
-            return (weight.float() * scale).to(torch.bfloat16)[:rows, :cols].contiguous()
+            scale = scale.float().repeat_interleave(block_shape[0], 0).repeat_interleave(block_shape[1], 1)
+            return (weight.float() * scale[:rows, :cols]).to(dtype).contiguous()
 
         fp8_dtypes = {torch.float8_e4m3fn, torch.float8_e5m2}
+        scale_leaves = ("weight_scale", "weight_scale_inv")
+        # This branch's shared FP4 helper predates the V4.1 model identifier.
+        native_deepseek_scales = is_deepseek_v4_model(model) or any(
+            getattr(config, "model_type", None) == "deepseek_v41"
+            for config in (
+                model,
+                getattr(model, "config", None),
+                getattr(model, "hf_config", None),
+                getattr(getattr(model, "config", None), "text_config", None),
+            )
+        )
+        if native_deepseek_scales:
+            scale_leaves += ("scale",)
         reload_state = None if reload_states is None else reload_states[model]
         pending_fp8 = {} if reload_state is None else reload_state.setdefault("pending_fp8", {})
         bucket_parts = set()
@@ -395,24 +410,25 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
         for name, tensor in weights:
             resolved = resolve_weight_name(model, name, live_names, routed_expert_prefixes=routed_expert_prefixes)
             leaf = resolved.rsplit(".", 1)[-1]
-            if leaf in {"weight", "weight_scale", "weight_scale_inv"}:
+            if leaf == "weight" or leaf in scale_leaves:
                 weight_name = resolved.rsplit(".", 1)[0] + ".weight"
                 live_dtype = live_weight_dtype(weight_name)
-                if live_dtype == torch.bfloat16 and (
-                    leaf == "weight" and tensor.dtype in fp8_dtypes or leaf in {"weight_scale", "weight_scale_inv"}
+                if live_dtype in {torch.bfloat16, torch.float16, torch.float32} and (
+                    leaf == "weight" and tensor.dtype in fp8_dtypes or leaf in scale_leaves
                 ):
                     pairing_key = weight_name.replace(".base_layer.", ".")
                     entry = pending_fp8.setdefault(pairing_key, {})
                     entry[leaf] = tensor
                     if leaf == "weight":
                         entry["weight_name"] = resolved
-                    if "weight" in entry and ("weight_scale" in entry or "weight_scale_inv" in entry):
+                    if "weight" in entry and any(scale_leaf in entry for scale_leaf in scale_leaves):
                         normalized_weights.append(
                             (
                                 entry["weight_name"],
                                 dequant_fp8_block(
                                     entry["weight"],
-                                    entry.get("weight_scale", entry.get("weight_scale_inv")),
+                                    next(entry[scale_leaf] for scale_leaf in scale_leaves if scale_leaf in entry),
+                                    live_dtype,
                                 ),
                             )
                         )
