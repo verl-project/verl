@@ -253,8 +253,12 @@ class MultiTurnSFTDataset(Dataset):
             messages: List of messages with replaced placeholder.
         """
         messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
-        images = example[self.image_key] if self.image_key in example else []
-        videos = example[self.video_key] if self.video_key in example else []
+        # When text-only samples are mixed with multimodal samples, the media columns exist
+        # but hold None for the text-only rows.
+        images = example.get(self.image_key, None)
+        videos = example.get(self.video_key, None)
+        images = images if images is not None else []
+        videos = videos if videos is not None else []
 
         image_offset, video_offset = 0, 0
         for message in messages:

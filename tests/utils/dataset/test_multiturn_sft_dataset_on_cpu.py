@@ -532,3 +532,32 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
             f"pixel_values: {pixel_values.shape} should have shape "
             f"({num_patches}, 3 * {temporal_patch_size} * {patch_size} * {patch_size})"
         )
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+    ],
+)
+def test_multiturn_sft_vlm_dataset_null_media_on_cpu(model_path, vlm_data_file):
+    """Text-only rows mixed into a multimodal dataset may store None instead of an empty media list."""
+    df = pd.read_parquet(vlm_data_file)
+    df["images"] = [None if len(images) == 0 else images for images in df["images"]]
+    df["videos"] = [None] * len(df)
+    null_media_file = "test_data/test_vlm_null_media.parquet"
+    df.to_parquet(null_media_file)
+
+    tokenizer = hf_tokenizer(model_path)
+    processor = hf_processor(model_path)
+    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    expected = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
+    dataset = MultiTurnSFTDataset(
+        parquet_files=null_media_file, tokenizer=tokenizer, processor=processor, config=config
+    )
+
+    for i in range(len(dataset)):
+        item, expected_item = dataset[i], expected[i]
+        assert torch.equal(item["input_ids"], expected_item["input_ids"])
+        assert torch.equal(item["loss_mask"], expected_item["loss_mask"])
+        assert torch.equal(item["position_ids"], expected_item["position_ids"])
