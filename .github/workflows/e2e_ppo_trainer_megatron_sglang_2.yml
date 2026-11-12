@@ -101,7 +101,7 @@ env:
 
 jobs:
   setup:
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (github.repository_owner == 'verl-project') }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -116,7 +116,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   e2e_ppo_trainer_fsdp_sglang:
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 40 # Increase this timeout value as needed
@@ -150,7 +150,7 @@ jobs:
           ENGINE=sglang bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
   e2e_ppo_trainer_fsdp-qwen3_5-2b:
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -215,7 +215,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [setup, e2e_ppo_trainer_fsdp-qwen3_5-2b, e2e_ppo_trainer_fsdp_sglang]
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (always()) }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

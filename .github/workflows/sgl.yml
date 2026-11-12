@@ -90,7 +90,7 @@ env:
 
 jobs:
   setup:
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (github.repository_owner == 'verl-project') }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (github.repository_owner == 'verl-project') }}
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -105,7 +105,7 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   sgl:
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
@@ -147,7 +147,7 @@ jobs:
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_tool_agent
 
   sgl_checkpoint_engine:
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') }}
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
@@ -181,7 +181,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, sgl, sgl_checkpoint_engine]
-    if: ${{ github.event.pull_request.head.label != 'fangweii1:debug/ascend-hccl-ci-diagnostics' && (always()) }}
+    if: ${{ !startsWith(github.event.pull_request.head.label, 'fangweii1:debug/ascend-hccl-ci-diagnostics') && (always()) }}
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1
