@@ -1029,3 +1029,103 @@ def test_per_expert_leaf_routed_through_base_layer(monkeypatch):
     suffixed = "model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"
     assert _resolve(worker, model, suffixed) == suffixed
     assert _resolve(worker, model, "model.layers.0.mlp.experts.0.gate_proj.weight") == suffixed
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("block_shape", [(128, 128), (32, 32), (32, 64)])
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_fp8_lora_base_sync_preserves_values_across_reused_buckets(dtype, block_shape, scale_first):
+    model = _FakeModel({"proj.weight": torch.empty((81, 61), dtype=dtype)})
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, block_shape)
+    rows, cols = 81, 61
+    scale_rows = (rows + block_shape[0] - 1) // block_shape[0]
+    scale_cols = (cols + block_shape[1] - 1) // block_shape[1]
+    scales = torch.arange(1, scale_rows * scale_cols + 1).reshape(scale_rows, scale_cols).float()
+    expanded = scales.repeat_interleave(block_shape[0], 0).repeat_interleave(block_shape[1], 1)[:rows, :cols]
+    weight = torch.full((rows, cols), 2.0, dtype=torch.float8_e4m3fn)
+    updates = [("proj.weight", weight), ("proj.weight_scale_inv", scales)]
+    if scale_first:
+        updates.reverse()
+
+    assert normalizer.normalize(updates[:1]) == []
+    updates[0][1].fill_(4.0)
+    normalized = normalizer.normalize(updates[1:])
+    normalizer.validate_complete()
+
+    assert [name for name, _ in normalized] == ["proj.weight"]
+    torch.testing.assert_close(normalized[0][1], (2 * expanded).to(dtype), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("live_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_dsv41_native_fp8_scale_when_live_projection_is_quantized_or_float(live_dtype):
+    from verl.utils.qat.compressed_tensors import Fp8ConfigWeightQuantizer
+
+    prefix = "layers.0.attn.wq_a"
+    model = _FakeModel({f"{prefix}.weight": torch.empty(64, 96, dtype=live_dtype)})
+    model.model_type = "deepseek_v41"
+    config = {"quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [32, 32]}
+    quantizer = Fp8ConfigWeightQuantizer(config, model_types=[model.model_type])
+    blocks = torch.tensor([[1, 2, 4], [8, 16, 32]], dtype=torch.bfloat16)
+    updates = list(
+        quantizer(
+            [
+                (f"{prefix}.weight", torch.ones(64, 96, dtype=torch.float8_e4m3fn)),
+                (f"{prefix}.scale", blocks.to(torch.float8_e8m0fnu)),
+            ]
+        )
+    )
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, (32, 32))
+
+    normalized = normalizer.normalize(updates)
+    normalizer.validate_complete()
+
+    if live_dtype is torch.bfloat16:
+        assert [name for name, _ in normalized] == [f"{prefix}.weight"]
+        torch.testing.assert_close(normalized[0][1], blocks.repeat_interleave(32, 0).repeat_interleave(32, 1))
+    else:
+        assert [name for name, _ in normalized] == [f"{prefix}.weight", f"{prefix}.scale"]
+        assert all(actual is original for (_, actual), (_, original) in zip(normalized, updates, strict=True))
+
+
+@pytest.mark.parametrize("live_dtype", [torch.bfloat16, torch.int8])
+def test_lora_base_sync_keeps_scales_only_for_quantized_packed_weights(live_dtype):
+    model = _FakeModel(
+        {"layers.0.qkv_proj.base_layer.weight": torch.empty(2, 2, dtype=live_dtype)},
+        packed={"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+    )
+    normalizer = _vllm_utils_real.LoRABaseWeightNormalizer(model, (32, 32))
+    scale = ("layers.0.q_proj.weight_scale", torch.full((1, 1), 3.0))
+
+    normalized = normalizer.normalize([scale])
+
+    normalizer.validate_complete()
+    if live_dtype is torch.int8:
+        assert normalized == [scale]
+    else:
+        assert normalized == []
+
+
+def test_quantized_lora_base_sync_finishes_native_reload_before_report_and_retry(monkeypatch):
+    events = []
+    _install_fake_reload(monkeypatch, events)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda _: True)
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm.utils", _vllm_utils_real)
+    model = _FakeModel({"proj.weight": torch.empty(2, 2, dtype=torch.bfloat16)})
+    model.loaded = []
+    worker = _staging_sync_worker(model)
+    worker.model_runner.vllm_config.quant_config = types.SimpleNamespace(weight_block_size=(32, 32))
+    weight = ("proj.weight", torch.full((2, 2), 2.0, dtype=torch.float8_e4m3fn))
+    scale = ("proj.weight_scale_inv", torch.full((1, 1), 3.0))
+    _install_fake_receiver(monkeypatch, [([weight], True)])
+
+    with pytest.raises(ValueError, match="Incomplete FP8.*proj.weight"):
+        worker.update_weights_from_ipc(peft_config={"r": 1})
+    assert events == ["start_reload", "finish_reload"]
+    assert model.loaded == []
+
+    _install_fake_receiver(monkeypatch, [([scale], False), ([weight], True)])
+    worker.update_weights_from_ipc(peft_config={"r": 1})
+
+    assert events == ["start_reload", "finish_reload"] * 2
+    assert [name for name, _ in model.loaded] == ["proj.weight"]
+    torch.testing.assert_close(model.loaded[0][1], torch.full((2, 2), 6.0, dtype=torch.bfloat16))

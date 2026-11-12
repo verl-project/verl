@@ -380,6 +380,16 @@ class vLLMColocateWorkerExtension:
             for model in self._iter_all_models():
                 start_reload(model)
 
+        base_normalizers = {}
+        if peft_config is not None and not base_sync_done and is_quantized_model(self.model_runner.vllm_config):
+            from verl.utils.vllm.utils import LoRABaseWeightNormalizer
+
+            quant_config = self.model_runner.vllm_config.quant_config
+            block_shape = getattr(quant_config, "weight_block_size", None) or (128, 128)
+            base_normalizers = {
+                model: LoRABaseWeightNormalizer(model, block_shape) for model in self._iter_all_models()
+            }
+
         # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
@@ -435,6 +445,7 @@ class vLLMColocateWorkerExtension:
                 weights,
                 peft_config=peft_config,
                 base_sync_done=base_sync_done,
+                base_normalizers=base_normalizers,
             )
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
@@ -462,6 +473,9 @@ class vLLMColocateWorkerExtension:
                     reset_uncalibrated_kv_cache_scales(model)
                     refresh_rocm_attention_weight_caches(model)
 
+        for normalizer in base_normalizers.values():
+            normalizer.validate_complete()
+
         if not (peft_config and base_sync_done):
             for model in self._iter_all_models():
                 refreshed = refresh_weight_caches(model)
@@ -485,6 +499,7 @@ class vLLMColocateWorkerExtension:
         weights: list[tuple[str, torch.Tensor]],
         peft_config: dict,
         base_sync_done: bool,
+        base_normalizers=None,
     ):
         if peft_config and base_sync_done:
             # The caller already copied these out of the receiver's reused IPC bucket buffer (#6454).
@@ -503,12 +518,14 @@ class vLLMColocateWorkerExtension:
             if param_updates:
                 for model in self._iter_all_models():
                     model_updates = drop_tied_alias_updates(model, param_updates)
-                    if peft_config is None:
-                        model.load_weights(model_updates)
-                    else:
+                    if base_normalizers:
+                        model_updates = base_normalizers[model].normalize(model_updates)
+                    elif peft_config is not None:
                         names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
                         names.update(n for n, _ in model.named_buffers())
-                        model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
+                        model_updates = [(resolve_weight_name(model, n, names), t) for n, t in model_updates]
+                    if model_updates:
+                        model.load_weights(model_updates)
             loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
             logger.info(f"vLLM load weights, loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}")
 

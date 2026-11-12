@@ -222,10 +222,11 @@ def test_vllm_refreshes_derived_caches_after_all_weight_buckets(monkeypatch):
         assert torch.count_nonzero(cached_conv) == 0
         assert torch.count_nonzero(cached_gate) == 0
 
-    loader = types.ModuleType("vllm.model_executor.model_loader.utils")
-    loader.process_weights_after_loading = post_load
+    reload = types.ModuleType("vllm.model_executor.model_loader.reload")
+    reload.start_reload = lambda model: None
+    reload.finish_reload = post_load
     monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", Receiver)
-    monkeypatch.setitem(sys.modules, loader.__name__, loader)
+    monkeypatch.setitem(sys.modules, reload.__name__, reload)
 
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=True)
 
@@ -386,9 +387,9 @@ def test_bucketed_transfer_is_bracketed_by_vllm_reload(monkeypatch, fail_receive
     monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", Receiver)
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.device = torch.device("cpu")
-    worker.model_runner = _FakeModelRunner(_ToyModel())
-    monkeypatch.setattr(worker, "_iter_all_models", lambda: [None])
-    monkeypatch.setattr(worker, "_iter_all_models_with_config", lambda: [(None, None)])
+    model = _ToyModel()
+    worker.model_runner = _FakeModelRunner(model)
+    worker.model_runner.vllm_config.model_config = object()
     monkeypatch.setattr(worker, "_get_zmq_handle", lambda: "unused")
     monkeypatch.setattr(worker, "_update_weights", lambda *args, **kwargs: events.append("bucket"))
 

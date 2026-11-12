@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import torch
 from msgspec import field
 from packaging import version as vs
 
@@ -394,3 +395,121 @@ def resolve_weight_name(
             return alt
 
     return name
+
+
+class LoRABaseWeightNormalizer:
+    """Normalize a quantized LoRA base stream for one vLLM reload transaction."""
+
+    def __init__(self, model, block_shape):
+        self.model = model
+        self.block_shape = block_shape
+        parameters = dict(model.named_parameters(remove_duplicate=False))
+        self.live_names = set(parameters)
+        self.live_names.update(name for name, _ in model.named_buffers())
+        self.routed_expert_prefixes = {
+            prefix
+            for prefix in ("mlp.experts.", "ffn.experts.")
+            if any(f"{prefix}base_layer." in name for name in self.live_names)
+        }
+        self.packed_modules = getattr(model, "packed_modules_mapping", None) or {}
+        self.mapper = getattr(model, "hf_to_vllm_mapper", None)
+        self.suffix_dtypes = {}
+        for name, parameter in parameters.items():
+            segments = name.split(".")
+            for index in range(len(segments)):
+                self.suffix_dtypes.setdefault(".".join(segments[index:]), set()).add(parameter.dtype)
+        self.scale_leaves = ("weight_scale", "weight_scale_inv")
+        config = getattr(model, "config", None)
+        if any(
+            getattr(candidate, "model_type", None) in ("deepseek_v4", "deepseek_v41")
+            for candidate in (model, config, getattr(model, "hf_config", None), getattr(config, "text_config", None))
+        ):
+            self.scale_leaves += ("scale",)
+        self.pending_fp8: dict[str, dict] = {}
+
+    def _match_dtype(self, name):
+        dtypes = self.suffix_dtypes.get(name, ())
+        return next(iter(dtypes)) if len(dtypes) == 1 else None
+
+    def _live_weight_dtype(self, name):
+        if ".base_layer." in name:
+            alternate = name.replace(".base_layer.", ".", 1)
+        else:
+            prefix, leaf = name.rsplit(".", 1)
+            alternate = f"{prefix}.base_layer.{leaf}"
+        candidates = []
+        for candidate in (name, alternate):
+            candidates.append(candidate)
+            if self.mapper is not None:
+                mapped = self.mapper.apply_list([candidate])
+                if mapped and mapped[0] != candidate:
+                    candidates.append(mapped[0])
+        for candidate in candidates:
+            dtype = self._match_dtype(candidate)
+            if dtype is not None:
+                return dtype
+
+        # Checkpoint shards can be owned by a single packed live parameter.
+        for owner, shards in self.packed_modules.items():
+            for shard in shards:
+                for candidate in candidates:
+                    prefix, leaf = candidate.rsplit(".", 1)
+                    base_prefix = prefix.removesuffix(".base_layer")
+                    if not base_prefix.endswith(f".{shard}"):
+                        continue
+                    packed_prefix = base_prefix[: -len(shard)] + owner
+                    suffixes = (".base_layer",) if prefix != base_prefix else ("", ".base_layer")
+                    for suffix in suffixes:
+                        dtype = self._match_dtype(f"{packed_prefix}{suffix}.{leaf}")
+                        if dtype is not None:
+                            return dtype
+        return None
+
+    def normalize(self, weights):
+        """Return loader-ready weights, retaining incomplete FP8 pairs across transport buckets."""
+        updated = []
+        bucket_parts = set()
+        fp8_dtypes = {torch.float8_e4m3fn, torch.float8_e5m2}
+        float_dtypes = {torch.bfloat16, torch.float16, torch.float32}
+        for name, tensor in weights:
+            resolved = resolve_weight_name(
+                self.model, name, self.live_names, routed_expert_prefixes=self.routed_expert_prefixes
+            )
+            prefix, leaf = resolved.rsplit(".", 1)
+            if (leaf == "weight" and tensor.dtype in fp8_dtypes) or leaf in self.scale_leaves:
+                weight_name = f"{prefix}.weight"
+                dtype = self._live_weight_dtype(weight_name)
+                if dtype in float_dtypes:
+                    key = weight_name.replace(".base_layer.", ".")
+                    pair = self.pending_fp8.setdefault(key, {})
+                    pair[leaf] = tensor
+                    if leaf == "weight":
+                        pair["weight_name"] = resolved
+                    scale = next((pair[scale_leaf] for scale_leaf in self.scale_leaves if scale_leaf in pair), None)
+                    if "weight" in pair and scale is not None:
+                        weight = pair["weight"]
+                        rows, cols = weight.shape
+                        scale = scale.float().repeat_interleave(self.block_shape[0], 0)
+                        scale = scale.repeat_interleave(self.block_shape[1], 1)
+                        updated.append(
+                            (pair["weight_name"], (weight.float() * scale[:rows, :cols]).to(dtype).contiguous())
+                        )
+                        del self.pending_fp8[key]
+                    else:
+                        bucket_parts.add((key, leaf))
+                    continue
+            updated.append((resolved, tensor))
+
+        # Only unpaired parts survive the callback. IPC reuses the receive buffer.
+        for key, leaf in bucket_parts:
+            pair = self.pending_fp8.get(key)
+            if pair is not None and leaf in pair:
+                pair[leaf] = pair[leaf].clone()
+        return updated
+
+    def validate_complete(self):
+        """Report FP8 weights missing their scale after vLLM restores the live layout."""
+        orphaned_weights = sorted(name for name, pair in self.pending_fp8.items() if "weight" in pair)
+        if orphaned_weights:
+            names = ", ".join(orphaned_weights)
+            raise ValueError(f"Incomplete FP8 weight/scale pairs during LoRA base sync: {names}")
