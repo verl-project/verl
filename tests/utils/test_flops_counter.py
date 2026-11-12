@@ -148,6 +148,48 @@ CONFIG = {
         # 3*(4096*4096+4096*4096+4096*4096)*61*(192+128)*128
         "expected_flops_tuple": (848766538088448 / 1e12, 3145850406567936 / 1e12),
     },
+    "deepseek_v4": {
+        "config": {  # deepseek-ai/DeepSeek-V4-Flash
+            "model_type": "deepseek_v4",
+            "hidden_size": 4096,
+            "vocab_size": 129280,
+            "moe_intermediate_size": 2048,
+            "num_hidden_layers": 43,
+            "num_attention_heads": 64,
+            "head_dim": 512,
+            "q_lora_rank": 1024,
+            "o_groups": 8,
+            "o_lora_rank": 1024,
+            "sliding_window": 128,
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+            "index_topk": 512,
+            "n_routed_experts": 256,
+            "num_experts_per_tok": 6,
+            "n_shared_experts": 1,
+            "hc_mult": 4,
+            # 43 layers = [0, 0] + [4, 128] * 20 + [4]: 2 SWA, 21 CSA, 20 HCA
+            # (+ 1 trailing MTP entry, ignored)
+            "compress_ratios": [0, 0]
+            + [x for pair in zip([4] * 20, [128] * 20, strict=True) for x in pair]
+            + [4]
+            + [0],
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # attn_linear_N = 4096*1024 + 1024*64*512 + 4096*512 + 64*512*1024 + 8*1024*4096 = 106954752
+        # moe_N = 4096*256 + 4096*2048*7*3 = 177209344
+        # csa_compressor_N = 2*2*4096*512 = 8388608, hca_compressor_N = 2*4096*512 = 4194304
+        # indexer_N = 1024*64*128 + 4096*64 + 2*2*4096*128 = 10747904
+        # mhc_N = 2*(2+4)*4*4096 + 2*4*4*4096 = 327680 (hc_pre x2 + comb matmuls)
+        # layer_N = 43*(106954752+177209344+327680) + 21*(8388608+10747904) + 20*4194304 = 13087258880
+        # dense = 6*(layer_N + 129280*4096*2 + 4*4*4096)*token_sum
+        # core attn per layer per seq: 3*2*(win_sum + compressed_sum)*2*512*64, CSA adds
+        # 3*2*L*(L//4)*64*128 indexer scoring; win_sum = 128*129/2 + (L-128)*128,
+        # csa topk_sum = floor_sum(L, 4), hca_sum = floor_sum(L, 128)
+        # batch [512, 1024, 2048]: 6*13778026496*3584 + 14595064332288 = 310877746102272
+        # batch [4096, 4096, 4096]: 6*13778026496*12288 + 79620011458560 = 1095446348955648
+        "expected_flops_tuple": (310877746102272 / 1e12, 1095446348955648 / 1e12),
+    },
     "mistral": {
         "config": {  # mistralai/Mistral-Small-24B-Instruct-2501
             "model_type": "mistral",
@@ -533,6 +575,7 @@ CONFIG = {
         "qwen3",
         "qwen3_moe",
         "deepseek_v3",
+        "deepseek_v4",
         "mistral",
         "gemma3_text",
         "apertus",
