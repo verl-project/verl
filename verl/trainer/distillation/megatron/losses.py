@@ -332,6 +332,7 @@ def compute_forward_kl_topk(
     quant_align_size: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """Compute truncated or tail-aware teacher-top-k KL with the Megatron backend.
 
@@ -363,7 +364,12 @@ def compute_forward_kl_topk(
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
     if data_format == "thd":
         # packed exactly like the student's inputs in the model forward
-        thd_kwargs = dict(quant_align_size=quant_align_size, local_cp_size=local_cp_size, cp_layout=cp_layout)
+        thd_kwargs = dict(
+            quant_align_size=quant_align_size,
+            local_cp_size=local_cp_size,
+            cp_layout=cp_layout,
+            min_local_rows=min_local_rows,
+        )
         teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(
             teacher_topk_log_probs, pre_process=True, **thd_kwargs
         )

@@ -131,6 +131,7 @@ def compute_topk_loss(
     quant_align_size: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
 ) -> torch.Tensor:
     """Compute the topk loss in logit processor.
 
@@ -164,7 +165,12 @@ def compute_topk_loss(
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
     backend_kwargs = {}
     if config.strategy == "megatron":
-        backend_kwargs = {"quant_align_size": quant_align_size, "cp_layout": cp_layout, "local_cp_size": local_cp_size}
+        backend_kwargs = {
+            "quant_align_size": quant_align_size,
+            "cp_layout": cp_layout,
+            "local_cp_size": local_cp_size,
+            "min_local_rows": min_local_rows,
+        }
 
     if loss_mode not in loss_functions:
         raise NotImplementedError(f"Unsupported top-k distillation loss mode: {loss_mode}")
@@ -197,6 +203,7 @@ def distillation_ppo_loss(
     quant_align_size: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -240,6 +247,7 @@ def distillation_ppo_loss(
             quant_align_size=quant_align_size,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
+            min_local_rows=min_local_rows,
         )
 
     # Called as final policy loss
