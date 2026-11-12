@@ -49,6 +49,7 @@ import torch
 
 from verl.models.transformers import dense_common, glm4v, qwen2_vl, qwen3_5, qwen3_vl
 from verl.models.transformers.monkey_patch import patch_veomni_forward_with_backends
+from verl.utils.ulysses import all_gather_tensor
 
 # ---------------------------------------------------------------------------
 # 1. Root-cause demonstration: slice-then-local-roll != global-roll-then-slice.
@@ -92,6 +93,24 @@ def test_local_roll_diverges_from_global_roll_under_sp():
         assert not torch.equal(correct_last, buggy_last), (
             f"rank {rank}: expected divergence at shard boundary but got {correct_last}=={buggy_last}"
         )
+
+
+def test_all_gather_tensor_materializes_noncontiguous_input(monkeypatch):
+    local_tensor = torch.arange(16, dtype=torch.float32).reshape(8, 2)[:, 0]
+    assert not local_tensor.is_contiguous()
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 2)
+
+    def fake_all_gather_into_tensor(output, tensor, group=None, async_op=False):
+        del group, async_op
+        assert tensor.is_contiguous()
+        output.copy_(torch.cat((tensor, tensor)))
+
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", fake_all_gather_into_tensor)
+
+    gathered = all_gather_tensor(local_tensor, group=object())
+
+    torch.testing.assert_close(gathered, torch.cat((local_tensor, local_tensor)))
 
 
 # ---------------------------------------------------------------------------
