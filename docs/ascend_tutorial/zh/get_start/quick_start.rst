@@ -118,6 +118,9 @@
 更多训练示例
 ---------------------------------
 
+已支持的模型、算法、训推后端组合及启动脚本详见
+`NPU 模型与算法支持情况 <https://verl.readthedocs.io/en/latest/ascend_tutorial/zh/model_support/model_and_algorithm_support.html>`_。
+
 完成上述快速验证后，如需体验更多昇腾场景下的模型与算法训练示例，请访问
 `verl-ascend-recipe 仓库 <https://github.com/verl-project/verl-ascend-recipe>`_。
 

@@ -118,6 +118,9 @@ For multi-node task launch, see the `Multi-Machine Task Startup Practice Guide <
 More Training Examples
 ---------------------------------
 
+For supported models, algorithms, training and rollout backends, and launch scripts, see
+`NPU Model and Algorithm Support <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/model_support/model_and_algorithm_support.html>`_.
+
 After completing the quick validation above, visit the
 `verl-ascend-recipe repository <https://github.com/verl-project/verl-ascend-recipe>`_
 for more model and algorithm training examples on Ascend.
