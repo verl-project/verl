@@ -307,6 +307,7 @@ class RewardLoopManager:
 
         self.reward_loop_workers_class = ray.remote(RewardLoopWorker)
         self.reward_manager_cls = resolve_reward_manager_cls(config)
+        self.reward_manager_cls.get_extra_input_fields(config)
         self._init_reward_loop_workers()
 
     @property

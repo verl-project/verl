@@ -32,6 +32,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
@@ -45,6 +46,7 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
+from verl.experimental.reward_loop.reward_manager.base import OPTIONAL_REWARD_INPUT_FIELDS
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
@@ -75,6 +77,40 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+# Engine-internal transport handles and post-reward distillation staging keys never belong in
+# reward extra_info. Heavy per-token / multimodal trajectory fields in OPTIONAL_REWARD_INPUT_FIELDS
+# are omitted by default to avoid multi-megabyte Ray RPC payloads unless requested via
+# RewardManagerBase.get_extra_input_fields(config).
+# TODO: Unify default DataProto columns and RewardManagerBase.extra_input_fields under one
+# declarative input contract shared across streaming (_compute_score) and colocated
+# (_compute_reward_colocate) reward paths.
+_SYSTEM_NON_REWARD_EXTRA_FIELD_KEYS = frozenset({"kv_transfer_params", "teacher_ids", "teacher_logprobs"})
+_AGENT_LOOP_OUTPUT_EXTRA_ATTRS = frozenset(
+    {
+        "prompt_ids",
+        "response_logprobs",
+        "response_mask",
+        "routed_experts",
+        "multi_modal_data",
+    }
+)
+
+
+def _extract_reward_extra_fields(
+    output: "AgentLoopOutput",
+    extra_input_fields: Collection[str] = (),
+) -> dict[str, Any]:
+    """Return runtime metadata and any requested optional trajectory fields for reward scoring."""
+    requested = set(extra_input_fields)
+    excluded = _SYSTEM_NON_REWARD_EXTRA_FIELD_KEYS | (OPTIONAL_REWARD_INPUT_FIELDS - requested)
+    merged = {k: v for k, v in output.extra_fields.items() if k not in excluded}
+    for attr in requested & _AGENT_LOOP_OUTPUT_EXTRA_ATTRS:
+        if attr not in merged:
+            value = getattr(output, attr, None)
+            if value is not None:
+                merged[attr] = value
+    return merged
 
 
 class AgentLoopMetrics(BaseModel):
@@ -552,6 +588,16 @@ class AgentLoopWorker:
         self.llm_client = llm_client
         self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.reward_extra_input_fields: frozenset[str] = frozenset()
+        reward_cfg = config.get("reward") if config is not None else None
+        if (
+            self.reward_loop_worker_handles is not None
+            and reward_cfg is not None
+            and reward_cfg.get("reward_manager") is not None
+        ):
+            from verl.trainer.ppo.reward import resolve_reward_manager_cls
+
+            self.reward_extra_input_fields = resolve_reward_manager_cls(config).get_extra_input_fields(config)
 
         rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
@@ -1098,10 +1144,16 @@ class AgentLoopWorker:
                     },
                     batch_size=n,
                 )
+                extra_input_fields = getattr(self, "reward_extra_input_fields", ())
+                base_extra_info = kwargs.get("extra_info") or {}
+                reward_extra_infos = np.empty(n, dtype=object)
+                reward_extra_infos[:] = [
+                    {**base_extra_info, **_extract_reward_extra_fields(o, extra_input_fields)} for o in outputs
+                ]
                 non_tensor_batch = {
-                    **{k: np.array([v] * n) for k, v in kwargs.items()},
+                    **{k: np.array([v] * n) for k, v in kwargs.items() if k != "extra_info"},
+                    "extra_info": reward_extra_infos,
                     "__num_turns__": np.array([o.num_turns for o in outputs]),
-                    "tool_extra_fields": np.array([o.extra_fields for o in outputs], dtype=object),
                     "prompt_len": np.array([len(o.prompt_ids) for o in outputs]),
                     "response_len": np.array([len(o.response_ids) for o in outputs]),
                 }
