@@ -21,7 +21,7 @@ Prerequisites
 
 Before multi-node training, ensure that all nodes meet the following conditions:
 
-- All nodes have completed environment setup according to the `Ascend Installation Guide <../../get_start/install_guidance.rst>`_, and key components such as verl, Ray, PyTorch, torch-npu, and CANN have consistent versions across nodes
+- All nodes have completed environment setup according to the `Ascend Installation Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance.html>`_, and key components such as verl, Ray, PyTorch, torch-npu, and CANN have consistent versions across nodes
 - The training network segment is interconnected between all nodes, with access to Ray ports, Dashboard ports, and the HCCL port range configured later. ``ping`` only verifies basic connectivity; if the cluster has a firewall enabled, you must also confirm that TCP ports are not blocked
 - The training script paths and model/data/checkpoint paths are consistent across all nodes (a shared file system such as NFS is recommended)
 - All nodes have completed NPU driver and CANN software stack installation, and ``npu-smi info`` can properly identify the devices

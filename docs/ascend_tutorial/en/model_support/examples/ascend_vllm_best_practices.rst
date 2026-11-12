@@ -28,7 +28,7 @@ The example model script and its required hardware conditions are as follows:
 
 Environment Setup
 -----------------------------------
-We provide two methods for building the environment in the `Ascend Installation Guide <../../get_start/install_guidance.rst>`_: 1. Build from a DockerFile image file 2. Build from a custom Conda environment.
+We provide two methods for building the environment in the `Ascend Installation Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance.html>`_: 1. Build from a DockerFile image file 2. Build from a custom Conda environment.
 
 In this practice, we additionally specify the verl commit id to avoid introducing other issues.
 
@@ -299,8 +299,8 @@ After training, the model's score on aime2024 improved significantly.
 
 Performance Collection
 -----------------------------------
-For detailed documentation on NPU profiling, refer to the `Profiling Collection Guide <../../dev_guide/performance/ascend_profiling.rst>`_.
+For detailed documentation on NPU profiling, refer to the `Profiling Collection Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/performance/ascend_profiling.html>`_.
 
-After collection is complete, developers can use `MindStudio Insight <https://www.hiascend.com/document/detail/en/mindstudio/830/GUI_baseddevelopmenttool/MindStudioInsight/Insight_userguide_0002.html?framework=mindsporel>`_ for data parsing.
+After collection is complete, developers can use `MindStudio Insight <https://www.hiascend.com/document/detail/en/mindstudio/830/GUI_baseddevelopmenttool/MindStudioInsight/Insight_userguide_0002.html?framework=mindspore>`_ for data parsing.
 
 Note: Collecting full Profiling on the verl framework side generates massive and repetitive operator records. You can modify the code according to the documentation to collect only key stages.

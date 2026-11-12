@@ -198,7 +198,7 @@ def test_sync_failure_refill_overrides_dataloader_generation_batch_size():
         patch("verl.trainer.ppo.v1.trainer_base.create_rl_dataset", side_effect=[[{}, {}], [{}]]),
         patch("verl.trainer.ppo.v1.trainer_base.create_rl_sampler", return_value=None),
         patch("verl.trainer.ppo.v1.trainer_base.StatefulDataLoader") as dataloader,
-        patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning,
+        patch("verl.utils.dataset.dataloader.logger.warning") as warning,
     ):
         trainer._init_dataloader()
 
@@ -297,3 +297,25 @@ def test_codapo_step_uses_pending_focused_batch_before_fetching_new_prompts():
     fetch.assert_called_once_with()
     assert [call.args[0] for call in submit.call_args_list] == [original_batch, focused_batch]
     assert trainer._codapo_resampled_batch is None
+
+
+@pytest.mark.parametrize("trainer_mode", ["sync", "async"])
+@pytest.mark.parametrize("custom_dataloader", [None, {"path": "custom.py"}])
+def test_prepare_step_preserves_custom_async_source_wait(trainer_mode, custom_dataloader):
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 2, "custom_dataloader": custom_dataloader}})
+    trainer._codapo_enabled = False
+    trainer.trainer_mode = trainer_mode
+    trainer.global_steps = 3
+    metrics = {"source/wait": 1.0}
+    trainer.replay_buffer = MagicMock()
+    trainer.replay_buffer.wait_for_sampleable.return_value = (None, metrics)
+    with patch.object(trainer, "_add_batch_to_generate") as submit:
+        result = trainer.prepare_step()
+    submit.assert_called_once_with()
+    if custom_dataloader is not None and trainer_mode != "sync":
+        assert result == metrics
+        trainer.replay_buffer.wait_for_sampleable.assert_called_once_with(3, "train", 2)
+    else:
+        assert result == {}
+        trainer.replay_buffer.wait_for_sampleable.assert_not_called()

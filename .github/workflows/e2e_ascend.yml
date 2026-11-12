@@ -79,7 +79,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -121,15 +121,20 @@ jobs:
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path /root/.cache/modelscope/dataset/openai/gsm8k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen3_06b_ppo.sh
+          bash tests/special_npu/run_qwen3_06b_ppo.sh trainer.n_gpus_per_node=16
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
-          bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
+          PROFILE_RANKS='[2,4,10,12]' bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh trainer.n_gpus_per_node=16
           python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="./profiler_data-dis" --device="npu" \
             --stage actor_update actor_compute_log_prob '*_rollout_*'
           rm -rf ./profiler_data-dis
@@ -137,12 +142,12 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
-          USE_DIST_CKPT=False bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
+          USE_DIST_CKPT=False bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
-          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
+          USE_DIST_CKPT=False USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh trainer.n_gpus_per_node=16
 
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
@@ -151,7 +156,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 160
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 160g
     env:
@@ -183,6 +188,11 @@ jobs:
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
@@ -193,5 +203,6 @@ jobs:
           rm -rf /FSDPTurbo
           git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
           export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
+          pip install transformers==5.21.0
           ray stop --force
           bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh

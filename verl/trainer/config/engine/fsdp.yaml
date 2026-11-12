@@ -41,6 +41,9 @@ seed: 42
 # Whether to enable full determinism for distributed training, only for debugging.
 full_determinism: false
 
+# Whether to run the forward with vLLM's batch-invariant kernels and the vLLM sampler log-prob formula.
+batch_invariant: false
+
 # ulysses sequence parallel size
 ulysses_sequence_parallel_size: 1
 
