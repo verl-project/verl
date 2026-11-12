@@ -15,7 +15,7 @@ from copy import deepcopy
 
 import pytest
 
-from examples.data_preprocess.aime_exam_splits import (
+from examples.data_preprocess.aime import (
     BOXED_SUFFIX,
     DAPO_ANSWER_PREFIX,
     DAPO_ANSWER_SUFFIX,
@@ -182,7 +182,7 @@ def test_offline_cli_manifest_preserves_source_licenses_and_artifact_hashes(sour
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from examples.data_preprocess import aime_exam_splits as generator
+    from examples.data_preprocess import aime as generator
 
     specifications = deepcopy(generator.VALIDATION_SOURCES)
     cache = tmp_path / "sources"
@@ -194,7 +194,7 @@ def test_offline_cli_manifest_preserves_source_licenses_and_artifact_hashes(sour
         specification["sha256"] = generator.digest(path)
     monkeypatch.setattr(generator, "VALIDATION_SOURCES", specifications)
     output = tmp_path / "prepared"
-    monkeypatch.setattr(sys, "argv", ["aime_exam_splits", "--source-dir", str(cache), "--output-dir", str(output)])
+    monkeypatch.setattr(sys, "argv", ["aime", "--source-dir", str(cache), "--output-dir", str(output)])
     generator.main()
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["groups"] == {f"aime{year}-{session}": 15 for year in YEARS for session in SESSIONS}

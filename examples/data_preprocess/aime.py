@@ -20,7 +20,7 @@ AIME26 retains MathArena's published regional variant, including II question 10
 (sum, answer 850). The publisher explains the US/international variant difference
 at https://huggingface.co/datasets/MathArena/aime_2026/discussions/2.
 
-    python examples/data_preprocess/aime_exam_splits.py \
+    python examples/data_preprocess/aime.py \
         --output-dir /tmp/aime-validation \
         --existing-aime2024 /path/to/aime2024.parquet \
         --existing-aime2025 /path/to/aime2025.parquet
@@ -417,7 +417,7 @@ def main():
             for key, rows in grouped.items()
         },
         "artifacts": artifacts,
-        "generator": {"path": "examples/data_preprocess/aime_exam_splits.py", "sha256": digest(__file__)},
+        "generator": {"path": "examples/data_preprocess/aime.py", "sha256": digest(__file__)},
     }
     path = output / "manifest.json"
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
