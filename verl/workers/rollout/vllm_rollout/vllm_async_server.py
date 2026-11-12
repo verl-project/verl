@@ -1576,6 +1576,17 @@ class vLLMReplica(RolloutReplica):
         )
         self.server_class = ray.remote(vLLMHttpServer)
 
+    def _get_server_env_vars(self, node_ids: list[str]) -> dict[str, str]:
+        """Environment variables of this replica's server actors (one per node, ``node_ids`` in node-rank order).
+
+        Platforms whose engine needs per-replica settings (e.g. the device topology of the replica's hosts) can
+        override this instead of ``launch_servers``.
+        """
+        return {
+            **{var: "1" for var in get_platform().ray_noset_envvars()},
+            **get_platform().rollout_env_vars(),
+        }
+
     async def launch_servers(self):
         """Launch http server in each node."""
         assert len(self.workers) == self.world_size, (
@@ -1599,6 +1610,7 @@ class vLLMReplica(RolloutReplica):
 
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
+        env_vars = self._get_server_env_vars(worker_node_ids[::gpus_per_replica_node])
         for node_rank in range(nnodes):
             workers = self.workers[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             node_cuda_visible_devices = get_node_visible_devices(
@@ -1612,11 +1624,6 @@ class vLLMReplica(RolloutReplica):
                 name = f"{prefix}server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
             else:
                 name = f"{prefix}server_{self.replica_rank}_{node_rank}{self.name_suffix}"
-            env_vars = {
-                **{var: "1" for var in get_platform().ray_noset_envvars()},
-                **get_platform().rollout_env_vars(),
-            }
-
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
