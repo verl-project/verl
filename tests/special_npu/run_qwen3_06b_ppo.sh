@@ -55,8 +55,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
     trainer.total_training_steps=2 \
-    skip.rollout.enable=${SKIP_ENABLE} \
-    skip.rollout.dump_dir=${SKIP_DUMP_DIR} \
-    skip.rollout.steps=${SKIP_STEPS} \
-    skip.rollout.action=${SKIP_ACTION} \
+    skip.rollout_tq.enable=${SKIP_ENABLE} \
+    skip.rollout_tq.dump_dir=${SKIP_DUMP_DIR} \
+    skip.rollout_tq.steps=${SKIP_STEPS} \
+    skip.rollout_tq.action=${SKIP_ACTION} \
     "$@"

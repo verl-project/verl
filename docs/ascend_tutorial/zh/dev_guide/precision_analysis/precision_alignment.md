@@ -126,10 +126,7 @@ skip.rollout_tq.action=cache
 ### 6.2  推理结果对齐
 
 ```bash
-skip.rollout_tq.enable=True \
-skip.rollout_tq.dump_dir=/path/to/rollout_dump \
-'skip.rollout_tq.steps=[1,2,3]' \
-skip.rollout_tq.action=cache
+trainer.rollout_data_dir=/path/to/rollout_dump
 ```
 
 保存每步推理结果为jsonl文件，可以直接打开jsonl文件快速确认整网推理结果是否乱码，用于推理精度问题定界。

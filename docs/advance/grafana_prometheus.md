@@ -119,7 +119,6 @@ Use this colocated async snippet in your training script and pass the usual mode
 ```bash
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-TRAINER_MODE=${TRAINER_MODE:-colocate_async}
 ROLLOUT_NAME=${ROLLOUT_NAME:-vllm}  # vllm or sglang
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \

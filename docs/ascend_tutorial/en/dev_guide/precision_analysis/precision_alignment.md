@@ -127,10 +127,7 @@ When garbled inference output occurs, if the engine initialization uses **load_f
 ### 6.2  Inference Result Alignment
 
 ```bash
-skip.rollout_tq.enable=True \
-skip.rollout_tq.dump_dir=/path/to/rollout_dump \
-'skip.rollout_tq.steps=[1,2,3]' \
-skip.rollout_tq.action=cache
+trainer.rollout_data_dir=/path/to/rollout_dump
 ```
 
 Save the inference result of each step as a jsonl file. You can directly open the jsonl file to quickly confirm whether the whole-network inference result is garbled, which is used to scope inference precision issues.
