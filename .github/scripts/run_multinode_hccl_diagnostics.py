@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -32,6 +33,25 @@ class NodeDiagnostics:
             f"[VERL_HCCL_NODE] hostname={socket.gethostname()} mode={mode} exit_code={result.returncode}\n"
             + result.stdout
         )
+
+    def verify_source(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(self.repo / ".github/scripts/verify_ci_source.py"),
+                "--repo",
+                str(self.repo),
+                "--check-import",
+            ],
+            cwd=self.repo,
+            env=self.environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stdout)
+        return result.stdout
 
     def start(self):
         # Prove the worker copied the diagnostic checkout rather than a stale cache.
@@ -66,6 +86,9 @@ class NodeDiagnostics:
 
 def run_training(command, monitors, ray):
     try:
+        # Source mismatch must stop training; optional diagnostic collection may fail.
+        for monitor in monitors:
+            print(ray.get(monitor.verify_source.remote(), timeout=180), flush=True)
         for monitor in monitors:
             try:
                 print(ray.get(monitor.start.remote(), timeout=180), flush=True)
@@ -112,6 +135,7 @@ def main():
                 "VERL_HCCL_DIAGNOSTICS",
                 "ASCEND_PROCESS_LOG_PATH",
                 "VERL_DIAGNOSTIC_COMMIT",
+                "VERL_HCCL_SOURCE_MANIFEST_SHA256",
                 "GITHUB_RUN_ID",
                 "GITHUB_RUN_ATTEMPT",
                 "GITHUB_JOB",
