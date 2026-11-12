@@ -49,6 +49,7 @@ verl is fast with:
 
    preparation/prepare_data
    preparation/reward_function
+   data/aime_exam_splits.md
 
 .. toctree::
    :maxdepth: 2
