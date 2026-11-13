@@ -49,7 +49,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -91,6 +91,11 @@ jobs:
         run: ln -s /root/.cache/modelscope/hub/models "${HOME}/models"
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/modelscope/dataset/openai/gsm8k"
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Run V1 separate_async with FSDP2
         run: |
           ray stop --force
@@ -102,7 +107,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -144,6 +149,11 @@ jobs:
         run: ln -s /root/.cache/modelscope/hub/models "${HOME}/models"
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/modelscope/dataset/openai/gsm8k"
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Run V1 separate_async with Megatron
         run: |
           ray stop --force

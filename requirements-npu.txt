@@ -20,5 +20,5 @@ torchdata
 einops
 qwen_vl_utils
 hf_transfer
-triton-ascend==3.6.0.post2
-TransferQueue==0.1.10
+triton-ascend==3.2.2
+TransferQueue==0.1.11

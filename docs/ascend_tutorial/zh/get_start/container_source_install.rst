@@ -1,7 +1,7 @@
 基于 CANN 基础镜像的源码安装
 ============================================================
 
-Last updated: 11/03/2026.
+Last updated: 11/13/2026.
 
 本文提供 ARM64、A3、Ubuntu 22.04 环境下的安装入口：先准备包含 CANN 和
 NNAL/ATB 的基础容器，再按照 :doc:`昇腾安装指南 <install_guidance>` 的
@@ -35,7 +35,7 @@ NNAL/ATB 的基础容器，再按照 :doc:`昇腾安装指南 <install_guidance>
 .. code-block:: bash
    :name: container-image-vllm
 
-   export IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-a3-ubuntu22.04-py3.12
+   export IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.2.1-a3-ubuntu22.04-py3.12
    docker pull "$IMAGE"
 
 **SGLang：**

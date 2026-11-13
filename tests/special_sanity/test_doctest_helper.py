@@ -206,7 +206,7 @@ def isolated_repo(tmp_path):
 def test_matrix_follows_public_image_changes(helper, isolated_repo):
     """Changing a public image must update both training-engine cases without a Dockerfile."""
     guide = isolated_repo / helper.CONTAINER_DOC
-    guide.write_text(guide.read_text(encoding="utf-8").replace("9.1.0-a3-", "9.1.1-a3-"), encoding="utf-8")
+    guide.write_text(guide.read_text(encoding="utf-8").replace("9.2.1-a3-", "9.2.2-a3-"), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, str(isolated_repo / DOCTEST_PATH / "scripts/doctest_helper.py"), "matrix"],
         check=True,
@@ -216,7 +216,7 @@ def test_matrix_follows_public_image_changes(helper, isolated_repo):
     entries = json.loads(result.stdout)["include"]
     assert [entry["case"] for entry in entries] == list(CASES)
     for entry in entries:
-        expected = "9.1.1-a3-ubuntu22.04-py3.12" if entry["case"].endswith("_vllm") else "8.5.0-a3-ubuntu22.04-py3.11"
+        expected = "9.2.2-a3-ubuntu22.04-py3.12" if entry["case"].endswith("_vllm") else "8.5.0-a3-ubuntu22.04-py3.11"
         assert entry["image"].endswith(":" + expected)
 
 
