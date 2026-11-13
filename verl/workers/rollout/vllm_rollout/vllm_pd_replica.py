@@ -19,14 +19,19 @@ import logging
 import os
 import uuid
 from dataclasses import replace as _dc_replace
-from typing import Optional
+from typing import Any, Optional
 
 import ray
 from ray.actor import ActorHandle
 
 from verl.utils.device import get_device_name, get_resource_name, is_torch_npu_available
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import get_free_port_range, is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.vllm_rollout.kv_cache_pool import (
+    build_pd_kv_transfer_config,
+    mooncake_json_path,
+    validate_platform_cache_pool,
+)
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logger = logging.getLogger(__file__)
@@ -105,7 +110,21 @@ class vLLMPDReplica(vLLMReplica):
         assert len(self.workers) == self.world_size, (
             f"worker count {len(self.workers)} != PD world size {self.world_size}"
         )
-        assert not is_torch_npu_available(check_device=False), "vLLM PD on NPU not validated"
+        use_ascend_mooncake = self._is_ascend_platform()
+        transfer_backend = self.config.disaggregation.transfer_backend
+        if use_ascend_mooncake and transfer_backend == "nixl":
+            logger.warning("NixlConnector is not supported for Ascend PD; falling back to MooncakeConnectorV2")
+            transfer_backend = "mooncake"
+
+        pool = self.config.cache_pool
+        if pool.enabled:
+            self._validate_cache_pool_engine_kwargs(self.config)
+            validate_platform_cache_pool(cache_pool=pool, is_npu=use_ascend_mooncake)
+            if transfer_backend != "mooncake":
+                raise ValueError(
+                    "cache_pool.enabled=True requires transfer_backend='mooncake' "
+                    f"after NPU nixl remap; got {transfer_backend!r}."
+                )
 
         worker_infos = await asyncio.gather(
             *[
@@ -131,14 +150,20 @@ class vLLMPDReplica(vLLMReplica):
 
         # Keep side-channel sockets reserved until all actors bind.
         reserved_socks = []
-        prefill_side_channel_port, prefill_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
-        reserved_socks.append(prefill_sock)
+        span_p = self._kv_handshake_port_span(use_ascend_mooncake=use_ascend_mooncake, tp=self._prefill_tp)
+        prefill_side_channel_port = self._reserve_handshake_ports(prefill_host_ip, span_p, reserved_socks)
         try:
             prefill_kv_cfg = self._build_kv_transfer_config(
                 role="prefill",
                 engine_id=prefill_engine_id,
-                transfer_backend=self.config.disaggregation.transfer_backend,
+                transfer_backend=transfer_backend,
                 mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                use_ascend_mooncake=use_ascend_mooncake,
+                kv_port=prefill_side_channel_port,
+                prefill_tp=self._prefill_tp,
+                decode_tp=self._decode_tp,
+                cache_pool=pool,
+                prefill_tps=[self._prefill_tp],
             )
             self._prefill_servers = [
                 self._spawn_pd_server(
@@ -163,13 +188,19 @@ class vLLMPDReplica(vLLMReplica):
                 node_id_i = worker_infos[start][0]
                 devs_i = self._collect_cuda_devices(worker_infos[start:end])
 
-                decode_side_channel_port, decode_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
-                reserved_socks.append(decode_sock)
+                span_d = self._kv_handshake_port_span(use_ascend_mooncake=use_ascend_mooncake, tp=self._decode_tp)
+                decode_side_channel_port = self._reserve_handshake_ports(prefill_host_ip, span_d, reserved_socks)
                 decode_kv_cfg = self._build_kv_transfer_config(
                     role="decode",
                     engine_id=uuid.uuid4().hex,
-                    transfer_backend=self.config.disaggregation.transfer_backend,
+                    transfer_backend=transfer_backend,
                     mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                    use_ascend_mooncake=use_ascend_mooncake,
+                    kv_port=decode_side_channel_port,
+                    prefill_tp=self._prefill_tp,
+                    decode_tp=self._decode_tp,
+                    cache_pool=pool,
+                    prefill_tps=[self._prefill_tp],
                 )
                 self._decode_servers.append(
                     self._spawn_pd_server(
@@ -222,9 +253,88 @@ class vLLMPDReplica(vLLMReplica):
             len(self._decode_servers),
         )
 
+    async def sleep(self):
+        """Drain the prefill ingress, disconnect Mooncake peers, then sleep P/D."""
+        if self._is_ascend_platform():
+            if not self._prefill_servers:
+                raise RuntimeError("PD servers have not been launched")
+            await self._prefill_servers[0].wait_for_requests_to_drain.remote()
+            await asyncio.gather(
+                *[server.collective_rpc.remote(method="disconnect_kv_transfer_peers") for server in self.servers]
+            )
+            await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+            return
+        await super().sleep()
+
+    async def abort_all_requests(
+        self,
+        reject_request: bool = False,
+        reset_prefix_cache: bool = True,
+        abort_only: bool = False,
+    ) -> dict[str, Any]:
+        """Abort every prefill server before any decode server.
+
+        A finished prefill request keeps its KV blocks until decode sends DONE.
+        Pausing decode in the same gather closes its admission gate, so that
+        pull never starts and the prefill pause waits out the delayed-free
+        timeout. Prefill abort runs to completion first. Decode stays open
+        during that wait, finishes the pull, and sends DONE on the existing
+        path. Decode abort runs after the blocks have been released.
+        """
+        if not self._prefill_servers:
+            raise RuntimeError("PD servers have not been launched")
+
+        async def _abort_role(servers: list[ActorHandle]) -> list[dict[str, Any]]:
+            return list(
+                await asyncio.gather(
+                    *[
+                        server.abort_all_requests.remote(
+                            reject_request=reject_request,
+                            reset_prefix_cache=reset_prefix_cache,
+                            abort_only=abort_only,
+                        )
+                        for server in servers
+                    ]
+                )
+            )
+
+        prefill_results = await _abort_role(self._prefill_servers)
+        decode_results = await _abort_role(self._decode_servers)
+        results = prefill_results + decode_results
+        return {
+            "aborted_count": sum(result.get("aborted_count", 0) for result in results),
+            "request_ids": [request_id for result in results for request_id in result.get("request_ids", [])],
+            "server_results": results,
+        }
+
+    @staticmethod
+    def _is_ascend_platform() -> bool:
+        """Follow Verl's existing NPU availability convention."""
+        return is_torch_npu_available(check_device=False)
+
+    @staticmethod
+    def _kv_handshake_port_span(*, use_ascend_mooncake: bool, tp: int) -> int:
+        if tp < 1:
+            raise ValueError(f"tp must be >= 1, got {tp}")
+        # MooncakeConnectorV2 (DP=PP=PCP=1) uses worker ports [kv_port, kv_port+tp)
+        # plus one scheduler control port at kv_port+tp. GPU Mooncake uses one bootstrap port.
+        return tp + 1 if use_ascend_mooncake else 1
+
+    @staticmethod
+    def _reserve_handshake_ports(host, span, reserved_socks):
+        port, socks = get_free_port_range(host, span, with_alive_socks=True)
+        reserved_socks.extend(socks)
+        return port
+
     @staticmethod
     def _collect_cuda_devices(worker_infos) -> str:
         return ",".join(worker_info[1] for worker_info in worker_infos)
+
+    @staticmethod
+    def _validate_cache_pool_engine_kwargs(config: RolloutConfig) -> None:
+        vllm_kwargs = (config.engine_kwargs or {}).get("vllm") or {}
+        if vllm_kwargs.get("kv_transfer_config"):
+            raise ValueError("engine_kwargs.vllm.kv_transfer_config")
 
     @staticmethod
     def _build_kv_transfer_config(
@@ -232,25 +342,32 @@ class vLLMPDReplica(vLLMReplica):
         engine_id: str,
         transfer_backend: str,
         mooncake_protocol: Optional[str] = None,
+        use_ascend_mooncake: bool = False,
+        kv_port: Optional[int] = None,
+        prefill_tp: Optional[int] = None,
+        decode_tp: Optional[int] = None,
+        cache_pool=None,
+        prefill_tps: Optional[list[int]] = None,
     ) -> dict:
-        """Assemble vLLM's ``--kv-transfer-config`` payload."""
-        role_to_kv_role = {
-            "prefill": "kv_producer",
-            "decode": "kv_consumer",
-        }
-        connector = {
-            "nixl": "NixlConnector",
-            "mooncake": "MooncakeConnector",
-        }[transfer_backend]
-        cfg: dict = {
-            "kv_connector": connector,
-            "kv_role": role_to_kv_role[role],
-            "engine_id": engine_id,
-            "kv_buffer_device": get_device_name(),
-        }
-        if transfer_backend == "mooncake" and mooncake_protocol:
-            cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}
-        return cfg
+        """Assemble vLLM's ``--kv-transfer-config`` payload for one P/D server."""
+        if use_ascend_mooncake:
+            if transfer_backend != "mooncake":
+                raise ValueError("Ascend PD requires transfer_backend='mooncake'")
+            if kv_port is None or prefill_tp is None or decode_tp is None:
+                raise ValueError("MooncakeConnectorV2 requires kv_port, prefill_tp, and decode_tp")
+        return build_pd_kv_transfer_config(
+            role=role,
+            engine_id=engine_id,
+            kv_buffer_device=get_device_name(),
+            transfer_backend=transfer_backend,
+            mooncake_protocol=mooncake_protocol,
+            use_ascend_mooncake=use_ascend_mooncake,
+            kv_port=kv_port,
+            prefill_tp=prefill_tp,
+            decode_tp=decode_tp,
+            cache_pool=cache_pool,
+            prefill_tps=prefill_tps,
+        )
 
     def _spawn_pd_server(
         self,
@@ -268,6 +385,8 @@ class vLLMPDReplica(vLLMReplica):
     ) -> ActorHandle:
         """Construct one PD ``vLLMHttpServer`` actor."""
         per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
+        pool = self.config.cache_pool
+        job_id = ray.get_runtime_context().get_job_id()
 
         env_vars = {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
@@ -279,8 +398,11 @@ class vLLMPDReplica(vLLMReplica):
             # Avoid Mooncake TCP port exhaustion under validation concurrency.
             "MC_TCP_ENABLE_CONNECTION_POOL": os.environ.get("MC_TCP_ENABLE_CONNECTION_POOL", "1"),
             "VERL_ZMQ_BASE_TRAINER_RANK": str(zmq_base_trainer_rank),
-            "VERL_RAY_JOB_ID": ray.get_runtime_context().get_job_id(),
+            "VERL_RAY_JOB_ID": job_id,
         }
+        if pool.enabled:
+            env_vars["PYTHONHASHSEED"] = str(pool.python_hash_seed)
+            env_vars["MOONCAKE_CONFIG_PATH"] = pool.store.config_path or mooncake_json_path(job_id)
 
         return self.server_class.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(

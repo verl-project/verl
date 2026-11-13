@@ -89,3 +89,59 @@ def get_free_port(address: str, with_alive_sock: bool = False) -> tuple[int, soc
         return port, sock
     sock.close()
     return port, None
+
+
+def get_free_port_range(
+    address: str,
+    count: int,
+    with_alive_socks: bool = False,
+    max_tries: int = 100,
+) -> tuple[int, list[socket.socket] | None]:
+    """Find `count` consecutive free TCP ports on `address`.
+
+    When count==1, delegates to get_free_port. Otherwise the first port is
+    bind((address, 0)) with SO_REUSEADDR. For start+1..start+count-1, probe
+    without SO_REUSEADDR first (Linux otherwise allows overlapping REUSEADDR
+    binds on bound-but-not-listening sockets), then hold the port with
+    SO_REUSEADDR so the caller can bind before closing the reservation.
+    Set with_alive_socks=True to keep the sockets open; the caller must close them.
+    """
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
+    if count == 1:
+        port, sock = get_free_port(address, with_alive_sock=with_alive_socks)
+        return port, [sock] if sock is not None else None
+
+    family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
+    for _ in range(max_tries):
+        socks: list[socket.socket] = []
+        try:
+            sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+            socks.append(sock)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((address, 0))
+            start = sock.getsockname()[1]
+            if start + count - 1 > 65535:
+                raise OSError("port range exceeds 65535")
+            for offset in range(1, count):
+                # Probe without SO_REUSEADDR: Linux allows overlapping REUSEADDR binds on
+                # bound-but-not-listening sockets, which would collide PD handshake ranges.
+                probe = socket.socket(family=family, type=socket.SOCK_STREAM)
+                try:
+                    probe.bind((address, start + offset))
+                finally:
+                    probe.close()
+                extra = socket.socket(family=family, type=socket.SOCK_STREAM)
+                socks.append(extra)
+                extra.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                extra.bind((address, start + offset))
+        except OSError:
+            for sock in socks:
+                sock.close()
+            continue
+        if with_alive_socks:
+            return start, socks
+        for sock in socks:
+            sock.close()
+        return start, None
+    raise RuntimeError(f"Failed to find {count} consecutive free ports on {address}")

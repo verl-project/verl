@@ -530,3 +530,138 @@ disaggregation:
 
   # InfiniBand device (required for mooncake over RDMA).
   ib_device: null
+
+# KV Cache Pool. PD builds MultiConnector (P2P + Store). Non-PD builds one Store connector.
+cache_pool:
+
+  # Master switch. Requires rollout.name=vllm and enable_prefix_caching=true.
+  enabled: False
+
+  # NPU AscendStoreConnector backend.
+  backend: mooncake
+
+  # Injected as PYTHONHASHSEED on every vLLM server that attaches the pool.
+  python_hash_seed: 0
+
+  # Top-level kv_load_failure_policy. null = omit (vLLM default fail).
+  kv_load_failure_policy: null
+
+  # Merged into the Store connector extra after first-class fields.
+  extra_config: {}
+
+  # mooncake_master lifecycle.
+  master:
+
+    # If true, LLMServerManager starts or reuses one mooncake_master for this driver.
+    auto_start: True
+
+    # host:port. Required when auto_start=false and store.config_path is null.
+    # Overwritten with the actor bind address when auto_start=true.
+    address: null
+
+    # Bind port when auto_start=true. null or 0 = pick a free port. Negative values raise.
+    port: null
+
+    # mooncake_master --eviction_high_watermark_ratio. null = omit.
+    eviction_high_watermark_ratio: null
+
+    # mooncake_master --eviction_ratio. null = omit.
+    eviction_ratio: null
+
+    # mooncake_master --default_kv_lease_ttl. null = omit.
+    default_kv_lease_ttl: null
+
+    # mooncake_master --client_ttl. null = omit.
+    client_ttl: null
+
+    # When true, the master actor prints all mooncake_master stdout/stderr.
+    log_master_output: False
+
+    # mooncake_master --enable_multi_tenants. Requires quota type and uri.
+    enable_multi_tenants: False
+
+    # --tenant_quota_connector_type (e.g. file). Required when enable_multi_tenants=true.
+    tenant_quota_connector_type: null
+
+    # --tenant_quota_connector_uri. Required when enable_multi_tenants=true.
+    tenant_quota_connector_uri: null
+
+  # Fields written into mooncake_config.json.
+  store:
+
+    # If set, skip JSON generation and point MOONCAKE_CONFIG_PATH here.
+    # Mutually exclusive with master.auto_start=true.
+    config_path: null
+
+    # Only embedded is implemented. standalone-store raises.
+    mode: embedded
+
+    # null = rdma on GPU, ascend on NPU. Allowed: GPU rdma|tcp, NPU ascend.
+    protocol: null
+
+    # Mooncake metadata_server.
+    metadata_server: P2PHANDSHAKE
+
+    # Per-rank CPU segment. NPU must be 1GB-aligned.
+    global_segment_size: 4GB
+
+    # GPU JSON only.
+    local_buffer_size: 4GB
+
+    # Independent from disaggregation.ib_device. NPU must stay empty.
+    device_name: ""
+
+    # Mooncake tenant. Non-default needs Mooncake >= 0.3.12.
+    tenant_id: default
+
+    # GPU JSON enable_offload. True raises NotImplementedError on GPU. Ignored on NPU.
+    enable_offload: False
+
+    # NPU SSD directory. Non-null on GPU raises. Non-null on NPU enables SSD.
+    ssd_offload_path: null
+
+    # NPU JSON only. Non-default on GPU raises.
+    preferred_segment: False
+
+    # NPU JSON only. Non-default on GPU raises.
+    prefer_alloc_in_same_node: True
+
+  # Store child kv_connector_extra_config first-class fields.
+  connector:
+
+    # null = omit (GPU default true, NPU default false in vLLM).
+    load_async: null
+
+    # GPU. Written only when true.
+    lookup_async: False
+
+    # GPU. Written only when non-empty.
+    cache_prefix: ""
+
+    # PD decode on GPU and NPU. Written only when true. Non-PD rejects true.
+    save_decode_cache: False
+
+    # GPU. PD null = lcm(prefill_tp, decode_tp). Non-PD null = tensor_model_parallel_size.
+    store_tp_size: null
+
+    # GPU PD. Mutually exclusive with store_tp_size. null = auto-on when prefill TPs differ.
+    # Non-PD rejects true.
+    enable_store_tp_lcm: null
+
+    # GPU PD. Required in LCM mode. null = use runtime prefill TPs. Non-PD rejects a non-empty list.
+    prefill_tp_sizes: null
+
+    # NPU PD decode. Written only when true. Non-PD rejects true.
+    consumer_is_to_put: False
+
+    # NPU PD decode. Written only when true. Non-PD rejects true.
+    consumer_is_to_load: False
+
+    # NPU memcache prefill only. Not a GPU MooncakeStoreConnector field.
+    use_layerwise: False
+
+    # NPU PD PP. Written only when non-null. Non-PD rejects a value. PD still rejects PP>1.
+    prefill_pp_size: null
+
+    # NPU PD PP partition string. Written only when non-null. Non-PD rejects a value.
+    prefill_pp_layer_partition: null

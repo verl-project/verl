@@ -19,6 +19,7 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.cache_pool import KVCachePoolConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
@@ -315,6 +316,8 @@ class RolloutConfig(BaseConfig):
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
+    cache_pool: KVCachePoolConfig = field(default_factory=KVCachePoolConfig)
+
     router_config_path: Optional[str] = None
 
     def __post_init__(self):
@@ -384,6 +387,56 @@ class RolloutConfig(BaseConfig):
             raise ValueError(
                 f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
             )
+
+        if isinstance(self.cache_pool, dict):
+            object.__setattr__(self, "cache_pool", KVCachePoolConfig(**self.cache_pool))
+        elif not isinstance(self.cache_pool, KVCachePoolConfig):
+            if not isinstance(self.cache_pool, DictConfig):
+                raise TypeError(
+                    f"rollout.cache_pool must be dict, DictConfig, or KVCachePoolConfig; "
+                    f"got {type(self.cache_pool).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "cache_pool",
+                KVCachePoolConfig(**OmegaConf.to_container(self.cache_pool, resolve=True)),
+            )
+
+        if self.cache_pool.enabled:
+            if self.name != "vllm":
+                raise ValueError(f"rollout.cache_pool.enabled=True requires rollout.name='vllm'; got {self.name!r}.")
+            if not self.enable_prefix_caching:
+                raise ValueError("rollout.cache_pool.enabled=True requires enable_prefix_caching=True.")
+            if self.disaggregation.enabled:
+                if self.disaggregation.transfer_backend not in ("mooncake", "nixl"):
+                    raise ValueError(
+                        "rollout.cache_pool.enabled=True requires disaggregation.transfer_backend "
+                        f"in ('mooncake', 'nixl'); got {self.disaggregation.transfer_backend!r}."
+                    )
+            else:
+                connector = self.cache_pool.connector
+                if connector.enable_store_tp_lcm is True:
+                    raise ValueError(
+                        "cache_pool.connector.enable_store_tp_lcm requires rollout.disaggregation.enabled=True"
+                    )
+                if connector.prefill_tp_sizes:
+                    raise ValueError(
+                        "cache_pool.connector.prefill_tp_sizes requires rollout.disaggregation.enabled=True"
+                    )
+                if connector.save_decode_cache:
+                    raise ValueError(
+                        "cache_pool.connector.save_decode_cache requires rollout.disaggregation.enabled=True"
+                    )
+                if connector.consumer_is_to_put or connector.consumer_is_to_load:
+                    raise ValueError(
+                        "cache_pool.connector.consumer_is_to_put/consumer_is_to_load require "
+                        "rollout.disaggregation.enabled=True"
+                    )
+                if connector.prefill_pp_size is not None or connector.prefill_pp_layer_partition is not None:
+                    raise ValueError(
+                        "cache_pool.connector.prefill_pp_size/prefill_pp_layer_partition require "
+                        "rollout.disaggregation.enabled=True"
+                    )
 
         if self.topk_log_probs:
             if self.name != "vllm":
