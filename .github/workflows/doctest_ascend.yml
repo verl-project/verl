@@ -102,7 +102,7 @@ jobs:
           rm -f "$cache_probe"
       - uses: conda-incubator/setup-miniconda@v3
         with:
-          miniforge-version: latest
+          miniforge-version: '26.9.4-1'
           activate-environment: ""
           auto-activate: false
       - name: Install documented environment and run Quick Start

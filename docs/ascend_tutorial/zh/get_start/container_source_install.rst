@@ -95,14 +95,14 @@ NNAL/ATB 的基础容器，再按照 :doc:`昇腾安装指南 <install_guidance>
    apt-get update
    apt-get install -y gcc g++ cmake libnuma-dev wget git curl unzip build-essential ca-certificates
 
-如果尚未安装 Conda，可安装最新版 Miniforge。安装目录需要是尚不存在的目录；
+如果尚未安装 Conda，可安装与文档测试 CI 一致的 Miniforge 26.9.4-1。安装目录需要是尚不存在的目录；
 已有 Conda 时，直接加载其 ``etc/profile.d/conda.sh`` 即可。
 
 .. code-block:: bash
    :name: container-conda
 
    curl -fL -o Miniforge3.sh \
-       "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+       "https://github.com/conda-forge/miniforge/releases/download/26.9.4-1/Miniforge3-$(uname)-$(uname -m).sh"
    bash Miniforge3.sh -b -p "$HOME/miniforge3"
    source "$HOME/miniforge3/etc/profile.d/conda.sh"
    conda --version
