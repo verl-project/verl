@@ -34,7 +34,7 @@ actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响�
 
 ## 基础环境
 
-当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成本次最佳实践需要 4台Atlas 800T A3。
+当前支持 Atlas A3训练系列产品。完成本次最佳实践需要 4 台 Atlas A3训练系列产品。
 
 ### 安装基础环境
 
@@ -336,7 +336,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 使用方式（注意需要先安装jemalloc库）：`export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2`
 
-**安装使用教程：**[MindSpeed-RL/docs/install_guide.md · Ascend/MindSpeed-RL - AtomGit | GitCode](https://gitcode.com/Ascend/MindSpeed-RL/blob/master/docs/install_guide.md#高性能内存库-jemalloc-安装)
+**安装使用教程：**[MindSpeed-RL/docs/install_guide.md · Ascend/MindSpeed-RL - AtomGit | GitCode](https://gitcode.com/Ascend/MindSpeed-RL/blob/master/docs/zh/install_guide.md#高性能内存库-jemalloc-安装)
 
 #### 多流复用
 

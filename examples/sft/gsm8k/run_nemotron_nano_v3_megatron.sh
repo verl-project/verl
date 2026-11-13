@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 ################################################### environment ###################################################
-### # 1. use docker image `verlai/verl:vllm015.dev`` and install correct dependencies:
-# pip install nvidia-modelopt
+# CUDA baseline: uv.lock (Python 3.12, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2).
+# Bridge v0.6.2 registers NemotronHForCausalLM with a HybridModel provider.
+# Also build the SSM kernels for the active torch/CUDA environment:
 # MAX_JOBS=32 pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation --no-cache-dir
 # MAX_JOBS=32 pip install git+https://github.com/state-spaces/mamba.git --no-build-isolation --no-cache-dir
-# pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge 
-# pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_dev_r0.16.0
 # unset ROCR_VISIBLE_DEVICES
 # unset PYTORCH_CUDA_ALLOC_CONF
 
@@ -58,7 +57,6 @@ MEGATRON_ENGINE_CONFIG=(
     engine.context_parallel_size=${CP_SIZE}
     engine.use_mbridge=True
     engine.dtype=${DTYPE}
-    engine.vanilla_mbridge=False
     engine.expert_model_parallel_size=${EP_SIZE}
     engine.expert_tensor_parallel_size=${ETP_SIZE}
     engine.override_transformer_config.attention_backend=auto
@@ -70,6 +68,7 @@ MEGATRON_ENGINE_CONFIG=(
 ENGINE_CONFIG="${MEGATRON_ENGINE_CONFIG[@]}"
 echo "Using megatron engine"
 exp_name=${MODEL_NAME}-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}-megatron-20260210
+ckpts_home=${ckpts_home:-${HOME}/verl/checkpoints/${project_name}/${exp_name}}
 
 torchrun --nnodes=1 --nproc_per_node=8 ${ENTRYPOINT} \
     data.train_files="${TRAIN_FILES}" \

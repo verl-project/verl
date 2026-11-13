@@ -140,6 +140,7 @@ def _load_vllm_rollout_utils():
 
     fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
+    fake_vllm_quant.configure_fp8_ignored_layers_match_mode = lambda config: None
     fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
     fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
@@ -296,6 +297,7 @@ class _FakeVllmConfig:
 def _make_worker(model):
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.model_runner = types.SimpleNamespace(model=model, vllm_config=_FakeVllmConfig(), drafter=None)
+    worker._is_nvfp4_packed = False
     return worker
 
 
@@ -731,8 +733,7 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     worker.remove_lora = lambda lora_id: None
     worker.device = torch.device("cpu")
     worker.local_rank = 0
-    worker._is_qat_model = False
-    worker._is_modelopt_qat = False
+    worker._is_nvfp4_packed = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-lora.sock"
 
     worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
@@ -765,8 +766,7 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     worker = _make_worker(model)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
-    worker._is_qat_model = False
-    worker._is_modelopt_qat = False
+    worker._is_nvfp4_packed = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-std.sock"
 
     # Bypass the post-load process_weights_after_loading (needs real vLLM).
@@ -853,6 +853,27 @@ def test_drop_tied_alias_updates_maps_checkpoint_names_before_matching():
     assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
 
 
+def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
+    """The quantized branch loads per bucket like the standard one, so it must drop the alias too."""
+    pytest.importorskip("vllm")
+    model = _FakeTiedModel(torch.zeros(2))
+    model.named_parameters = lambda remove_duplicate=False: iter(())
+    model.named_buffers = lambda: iter(())
+    worker = _make_worker(model)
+    loaded = []
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "load_quanted_weights",
+        lambda weights, runner, is_drafter=False: loaded.extend(name for name, _ in weights) or [],
+    )
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    worker._update_weights(updates, peft_config=None, base_sync_done=False)
+
+    assert loaded == ["q.weight"]
+
+
 # ---------------------------------------------------------------------------
 # The standard (non-quantized) sync stages unquantized MoE layers whose kernel prep
 # reshaped the expert weights, and folds them back after the last bucket
@@ -888,8 +909,7 @@ def _staging_sync_worker(model):
     worker = _make_worker(model)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
-    worker._is_qat_model = False
-    worker._is_modelopt_qat = False
+    worker._is_nvfp4_packed = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-moe-staging.sock"
     return worker
 

@@ -1,33 +1,24 @@
 #!/usr/bin/env bash
 # Qwen3.5-397 MoE GRPO RL with Megatron
+# Using verlai/verl:uv.cu130.dev3 docker image
+# Requirements:
+#   - Image dependency cache: Megatron-Core 0.18.0 / Megatron-Bridge 0.5.2.
+#   - flash-linear-attention is installed by the launcher's megatron extra.
+#     The launcher uses dependencies from the current uv.lock.
 #
-# notes on vllm:
-#     by 20260225, the latest vllm nightly does not support qwen3.5 rollout, to use this script, you need to
-#         1. wait until vllm supports qwen3.5 officially, and build a verl docker with that version of vllm
-#         2. self build a verl docker image with vllm from source code with qwen3.5 support (main branch 20260225 is OK)
-#     I succeeded in running this script with the main branch of vllm on 20260225, yet there are still some minor issues
-#     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be
-#     fixed, either by verl team with supoorts to vllm0.16, or by vllm team.
+# CUDA dependencies from the current uv.lock (Python 3.12):
+#   Megatron-Core 0.19.2 / Megatron-Bridge 0.6.2; flash-linear-attention 0.5.2.
 #
-# Requirements on Ascend:
-#   - 16 nodes * A3 (16*8*2=256 die)
-#   - Additional packages on base image (v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm):
-#       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.0
-#   - MindSpeed==0.16.0
-#   - Megatron-Bridge==de93536e
-#   - verl==0.8.0
-#
-# Requirements on Ascend (Mindspeed-Bridge):
+# Requirements on Ascend (scripts/install_vllm_mcore_npu.sh baseline):
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
-#   - Megatron-LM==core_v0.18.0
+#   - Megatron-LM==core_r0.18.0
 #   - Megatron-Bridge==v0.5.0
 #   - MindSpeed==core_r0.18.0
 #   - MegatronAdaptor==core_r0.18.0
 #   - TransformerEngineNPU==main
 #   -   pip install decorator pybind11 diffusers
 #   - MindSpeed-Ops==master
-#   - Mindspeed-Bridge==master
+#   - MindSpeed-Bridge: repository default branch (no pinned tag/commit)
 #   - flash-linear-attention-npu==v26.1.0
 #       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
 #   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
@@ -35,14 +26,12 @@
 #       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
 #
 # Qwen3.5 architecture notes:
-#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
-#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
-#     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
-#     - actor.use_dynamic_bsz=False              (required for bshd mode)
-#
-#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
-#   can be set to True for better performance.
+#   This example uses BSHD compute format:
+#     - model.use_remove_padding=False
+#     - actor.megatron.use_remove_padding=False
+#     - actor.use_dynamic_bsz=False
+#   Megatron-Core 0.18.0 and 0.19.2 also support THD for GDN.
+#   The settings above retain BSHD for this example.
 #
 # Tested parallelism config (16 NPUs * 16 node A3):
 #   TP=2 PP=4 CP=1 EP=64 ETP=1 GEN_TP=16 GEN_DP=16 GEN_EP=256
@@ -162,7 +151,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_remove_padding=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -244,7 +232,6 @@ case "${DEVICE}" in
         ;;
     npu)
         ACTOR+=(
-            actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.checkpoint.strict=False
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall

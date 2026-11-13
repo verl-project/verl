@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from types import ModuleType
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 class PlatformBase(abc.ABC):
@@ -189,6 +189,18 @@ class PlatformBase(abc.ABC):
         """Stop the device profiler (no-op on unsupported platforms)."""
         ...
 
+    def profiler_markers(self) -> Optional[tuple[Callable, Callable, Callable, Callable]]:
+        """Return a ``(mark_start_range, mark_end_range, mark_annotate, marked_timer)`` tuple.
+
+        Lets a platform supply its own tracing-marker implementation (see
+        ``verl/utils/profiler/nvtx_profile.py`` / ``mstx_profile.py`` for the
+        expected signatures), asked for first by
+        ``verl/utils/profiler/__init__.py``. Return ``None`` (default) to use
+        ``nvtx``, the built-in device-specific module, or the generic
+        pure-Python fallback, in that order.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # vllm integration
     # ------------------------------------------------------------------
@@ -239,6 +251,15 @@ class PlatformBase(abc.ABC):
         one WorkerGroup.
         """
         return True
+
+    def get_ray_init_kwargs(self) -> dict[str, Any]:
+        """Return ``ray.init`` settings this platform needs, e.g. a ``worker_process_setup_hook``.
+
+        ``main_ppo`` merges the ``runtime_env`` entry between verl's defaults and
+        ``ray_kwargs.ray_init.runtime_env``, so the user's config wins. The merge goes through
+        OmegaConf, so give a setup hook as a module path string, not as the function itself.
+        """
+        return {}
 
     # ------------------------------------------------------------------
     # IPC support

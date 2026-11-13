@@ -4,7 +4,7 @@ codetiming
 datasets
 dill
 hydra-core
-liger-kernel>=0.8.2
+liger-kernel==0.8.4
 numpy>=2.0.0
 pandas
 peft
@@ -17,7 +17,7 @@ tensordict>=0.8.0,<=0.10.0,!=0.9.0
 torchdata
 # 5.6.0 ships a broken flash-attention path (crashes on s_aux=None for sink-less
 # models like Qwen2/Llama); fixed in 5.6.1. See huggingface/transformers#45588.
-transformers>=5.5.3,!=5.6.0,<5.13
+transformers>=5.5.3,!=5.6.0,<5.17
 wandb
 packaging>=20.0
 uvicorn
@@ -25,4 +25,4 @@ fastapi
 latex2sympy2_extended
 math_verify
 tensorboard
-TransferQueue==0.1.10
+TransferQueue==0.1.11

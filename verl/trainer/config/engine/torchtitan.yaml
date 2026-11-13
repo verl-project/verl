@@ -61,8 +61,9 @@ context_parallel_size: 1
 # Attention type for torchtitan's model (e.g., "sdpa", "flex", "varlen")
 attn_type: flex
 
-# torchtitan SPMD backend: "default", "full_dtensor", or "spmd_types"
-spmd_backend: spmd_types
+# torchtitan SPMD backend: "partial_dtensor", "full_dtensor", or "spmd_types"
+# ("spmd_types" requires torch>=2.14)
+spmd_backend: partial_dtensor
 
 # Activation checkpointing mode: "selective", "full", or "none".
 # Use "none" with spmd_backend=spmd_types when use_torch_compile=False (eager AC
@@ -71,6 +72,15 @@ activation_checkpoint: selective
 
 # Maximum sequence length for RoPE cache. If null, defaults to torchtitan's TrainingConfig.seq_len (2048).
 max_seq_len: null
+
+# Round every packed micro-batch up to a multiple of `pad_to_length_bucket` tokens, so the packed
+# shape only takes a handful of distinct values and torch.compile / kernel autotuning stop
+# re-specializing every step. Only applies with use_remove_padding=True. Under context
+# parallelism the padded length is additionally aligned to 2 * context_parallel_size.
+pad_to_length: false
+
+# Padding granularity in tokens. Only read when pad_to_length=true.
+pad_to_length_bucket: 1024
 
 # Strategy
 strategy: torchtitan

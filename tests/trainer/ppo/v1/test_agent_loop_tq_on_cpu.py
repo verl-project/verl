@@ -14,7 +14,13 @@
 
 import asyncio
 
-from verl.trainer.ppo.v1.agent_loop_tq import _settle_session_tasks
+import pytest
+import torch
+from omegaconf import OmegaConf
+
+import verl.trainer.ppo.v1.agent_loop_tq as agent_loop_tq_module
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
+from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session_tasks, apply_greedy_sampling_params
 
 
 def test_settle_session_tasks_waits_for_siblings_after_failure():
@@ -37,3 +43,103 @@ def test_settle_session_tasks_waits_for_siblings_after_failure():
         assert isinstance(errors[0], RuntimeError)
 
     asyncio.run(run())
+
+
+_WorkerTQ = AgentLoopWorkerTQ.__ray_metadata__.modified_class
+
+
+class _DummyWorker:
+    _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+    _compute_position_ids = AgentLoopWorker._compute_position_ids
+    _compute_score = AgentLoopWorker._compute_score
+    _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+    distillation_enabled = False
+
+    def __init__(self, topk_log_probs: int):
+        self.rollout_config = OmegaConf.create({"topk_log_probs": topk_log_probs})
+        self.processor = None
+        self.reward_loop_worker_handles = None
+
+
+def _output(extra_fields: dict) -> AgentLoopOutput:
+    return AgentLoopOutput(
+        prompt_ids=[101, 102, 103],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields=extra_fields,
+    )
+
+
+async def _postprocess(monkeypatch, worker: _DummyWorker, output: AgentLoopOutput, validate: bool):
+    captured = {}
+
+    async def async_kv_batch_put(*, keys, fields, tags, partition_id):
+        captured["fields"] = fields
+
+    monkeypatch.setattr(agent_loop_tq_module.tq, "async_kv_batch_put", async_kv_batch_put)
+    await _WorkerTQ._agent_loop_postprocess(
+        worker, output, validate, uid="u0", session_id=0, global_steps=1, raw_prompt=[{"role": "user", "content": "hi"}]
+    )
+    return captured["fields"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_tq_postprocess_stores_unpadded_rollout_topk(monkeypatch):
+    output = _output(
+        {"response_topk_ids": [[11, 13], [12, 14]], "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]]}
+    )
+
+    fields = await _postprocess(monkeypatch, _DummyWorker(topk_log_probs=2), output, validate=False)
+
+    ids, log_probs = fields["rollout_topk_ids"][0], fields["rollout_topk_log_probs"][0]
+    assert ids.shape == (5, 2) and ids.dtype == torch.int32
+    assert log_probs.shape == (5, 2) and log_probs.dtype == torch.float32
+    assert ids[2].tolist() == [11, 13] and ids[3].tolist() == [12, 14]
+    assert log_probs[2].tolist() == pytest.approx([-0.1, -2.0]) and log_probs[3].tolist() == pytest.approx([-0.2, -1.5])
+    assert ids[0].tolist() == [0, 1] and ids[4].tolist() == [0, 1]
+    assert "response_topk_ids" not in fields["extra_fields"][0]
+    assert fields["rollout_support_complete"][0].tolist() == [True, True, False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_tq_postprocess_stores_nested_provider_coverage(monkeypatch):
+    output = _output(
+        {
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[0.0, float("-inf")], [-0.2, -1.5]],
+            "response_support_complete": [True, False],
+        }
+    )
+    short_output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11],
+        response_mask=[1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[11, 13]],
+            "response_topk_log_probs": [[-0.1, -2.0]],
+            "response_support_complete": [False],
+        },
+    )
+    fields = await _postprocess(monkeypatch, _DummyWorker(topk_log_probs=2), [output, short_output], validate=False)
+    complete = fields["rollout_support_complete"]
+    assert complete.is_nested and complete.dtype == torch.bool
+    assert complete[0].tolist() == [True, True, True, False, True]
+    assert complete[1].tolist() == [True, False, True]
+
+
+def test_greedy_reward_baseline_does_not_request_score_centering_heads():
+    params = {"top_p": 0.9, "top_k": 64, "temperature": 1.0, "topk_log_probs": 128, "logprobs": True}
+    apply_greedy_sampling_params(params)
+    assert params == {"top_p": 1.0, "top_k": -1, "temperature": 0, "logprobs": True}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_tq_postprocess_skips_rollout_topk_on_validate(monkeypatch):
+    fields = await _postprocess(monkeypatch, _DummyWorker(topk_log_probs=2), _output({}), validate=True)
+
+    assert "rollout_topk_ids" not in fields.keys()
+    assert "rollout_topk_log_probs" not in fields.keys()

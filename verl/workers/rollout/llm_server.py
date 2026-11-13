@@ -155,6 +155,7 @@ class LLMServerClient:
                 video_data=video_data,
                 **multimodal_kwargs,
                 **priority_kwargs,
+                session_id=request_id,
                 **kwargs,
             )
             global_steps = output.extra_fields.get("global_steps")
@@ -314,6 +315,23 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                     )
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
+            # sampler top-k heads for score centering, one row per newly generated token
+            for key in ("response_topk_ids", "response_topk_log_probs"):
+                if key in output.extra_fields:
+                    previous = final_output.extra_fields.get(key)
+                    final_output.extra_fields[key] = (
+                        output.extra_fields[key]
+                        if previous is None
+                        else np.concatenate([previous, output.extra_fields[key]])
+                    )
+            if "response_topk_ids" in output.extra_fields:
+                current = output.extra_fields.get("response_support_complete")
+                if current is None:
+                    current = np.zeros(len(output.extra_fields["response_topk_ids"]), dtype=np.bool_)
+                previous = final_output.extra_fields.get("response_support_complete")
+                if previous is None:
+                    previous = np.zeros(len(final_output.token_ids) - len(output.token_ids), dtype=np.bool_)
+                final_output.extra_fields["response_support_complete"] = np.concatenate([previous, current])
             final_output.stop_reason = output.stop_reason
 
             # carry the initial prefill's prefix-cache hit count forward
@@ -411,7 +429,7 @@ class LLMServerManager:
         load balancer starts empty.
 
         Used by trainers that serve rollout exclusively from standalone
-        resources (e.g. v1 separate_async with ``actor_rollout_ref.hybrid_engine=False``)
+        resources (e.g. v1 separate_async without ``hybrid_rollout.enable_switch``)
         so that no inference engine is initialized on the training GPUs.
         """
         instance = cls(*args, **kwargs)

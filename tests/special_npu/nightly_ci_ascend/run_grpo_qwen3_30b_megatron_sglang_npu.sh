@@ -35,8 +35,8 @@ MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 # File System Paths
-TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
-TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
+TRAIN_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
+TEST_FILE=$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet
 
 # Data Length Configuration
 max_prompt_length=$((1024 * 2))
@@ -135,7 +135,6 @@ ACTOR_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     # Transformer Architecture Optimizations
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -161,7 +160,6 @@ REF_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
     actor_rollout_ref.ref.megatron.use_mbridge=True
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
 )
 
 ROLLOUT_CONFIG=(

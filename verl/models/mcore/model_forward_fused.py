@@ -26,19 +26,23 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_sequence_parallel_region,
+)
 from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine, preprocess_vlm_thd_engine
+from verl.models.mcore.util import get_thd_quant_align_size, preprocess_thd_engine, preprocess_vlm_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
-from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
+from .util import postprocess_thd_engine
 
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
+_FUSED_IMPL_BACKEND_ATTR = "_verl_fused_impl_backend"
 _HOOK_MODE = "hook"
 _LEGACY_MODE = "legacy"
 
@@ -73,11 +77,38 @@ def _use_output_processor_hook(model: torch.nn.Module) -> bool:
     return _get_fused_forward_mode(model) == _HOOK_MODE
 
 
+def get_fused_impl_backend(model: torch.nn.Module) -> str:
+    model = unwrap_model(model)
+    if hasattr(model, "language_model"):
+        model = model.language_model
+    return getattr(model, _FUSED_IMPL_BACKEND_ATTR, "triton")
+
+
+def _gather_fused_hidden_states(hidden_states: Tensor, sequence_parallel: bool, impl_backend: str) -> Tensor:
+    if not sequence_parallel:
+        # Triton and TileLang return the contribution from the local vocabulary
+        # shard. Match ColumnParallelLinear's replicated-input contract by
+        # reducing dHidden across TP ranks in backward.
+        if impl_backend.lower() != "liger":
+            return copy_to_tensor_model_parallel_region(hidden_states)
+        return hidden_states
+
+    # Liger TP-FLSCE already reduces dHidden across vocabulary shards. Its
+    # sequence-parallel gather must only split that gradient in backward.
+    tensor_parallel_output_grad = impl_backend.lower() != "liger"
+    return gather_from_sequence_parallel_region(
+        hidden_states,
+        tensor_parallel_output_grad=tensor_parallel_output_grad,
+    )
+
+
 @dataclass
 class FusedOutputProcessorContext:
     """Context passed through Megatron's native output-processor hook."""
 
     temperature: float
+    impl_backend: str = "triton"
+    topk_labels: Tensor | None = None
 
 
 def fused_output_processor(
@@ -99,22 +130,44 @@ def fused_output_processor(
         attentions=None,
     )
 
-    if config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
 
     temperature = context.temperature
-    logprobs, entropy = linear_cross_entropy(
+    hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
+    transpose_output = (
+        context.topk_labels is not None
+        and hidden_states.ndim == 3
+        and labels.ndim == 2
+        and hidden_states.shape[:2] == tuple(reversed(labels.shape))
+        and hidden_states.shape[:2] != labels.shape
+    )
+    kernel_policy_labels = labels.transpose(0, 1) if transpose_output else labels
+    kernel_topk_labels = (
+        context.topk_labels.transpose(0, 1)
+        if transpose_output and context.topk_labels is not None
+        else context.topk_labels
+    )
+    kernel_labels = kernel_policy_labels
+    if kernel_topk_labels is not None:
+        if kernel_topk_labels.shape[:-1] != kernel_policy_labels.shape:
+            raise ValueError("topk_labels must have labels.shape as its leading dimensions")
+        kernel_labels = torch.cat((kernel_policy_labels.unsqueeze(-1), kernel_topk_labels), dim=-1)
+    all_logprobs, entropy = linear_cross_entropy(
         hidden_states,
         weight,
-        labels,
+        kernel_labels,
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=context.impl_backend,
     )
+    if transpose_output:
+        all_logprobs = all_logprobs.transpose(0, 1)
+        entropy = entropy.transpose(0, 1)
+    logprobs = all_logprobs[..., 0] if context.topk_labels is not None else all_logprobs
+    topk_logprobs = all_logprobs[..., 1:] if context.topk_labels is not None else None
 
     if has_config_logger_enabled(config):
         payload = OrderedDict(
@@ -131,6 +184,7 @@ def fused_output_processor(
 
     output.entropy = entropy
     output.log_probs = logprobs
+    output.topk_log_probs = topk_logprobs
     return output
 
 
@@ -146,10 +200,86 @@ def _get_patching_model(model: torch.nn.Module):
     return model.language_model
 
 
-def patch_fused_forward(model: torch.nn.Module):
+def _validate_liger_moe_runtime(model: GPTModel) -> None:
+    config = model.config
+    if not getattr(config, "num_moe_experts", None):
+        return
+    legacy_deepep = getattr(config, "moe_enable_deepep", False) or (
+        getattr(config, "moe_token_dispatcher_type", None) == "flex"
+        and getattr(config, "moe_flex_dispatcher_backend", None) == "deepep"
+    )
+    if not legacy_deepep:
+        return
+
+    from deep_ep import Buffer
+
+    group = parallel_state.get_expert_tensor_and_model_parallel_group()
+    size = torch.distributed.get_world_size(group)
+    # Match the legacy dispatcher's public buffer-size hints without creating
+    # its lazy NVSHMEM-owning buffer after Liger has initialized the runtime.
+    hidden_bytes = config.hidden_size * 2
+    for options in (Buffer.get_dispatch_config(size), Buffer.get_combine_config(size)):
+        if options.get_rdma_buffer_size_hint(hidden_bytes, size) > 0:
+            raise RuntimeError(
+                "Native Liger and DeepEP V1 RDMA cannot share NVSHMEM in one process. "
+                "Use the alltoall dispatcher, a supported DeepEP V2 dispatcher, "
+                "or disable the Liger fused output head."
+            )
+
+
+def _configure_liger_runtime(model: GPTModel, engine_config) -> bool:
+    from verl.utils.kernel.linear_cross_entropy import configure_liger_flsce
+
+    token_limits = [
+        value
+        for value in (engine_config.max_token_len_per_gpu, engine_config.infer_max_token_len_per_gpu)
+        if value is not None
+    ]
+    reservation = getattr(engine_config, "_liger_flsce_capacity", None)
+    if not token_limits and reservation is None:
+        raise RuntimeError("Liger TP-FLSCE requires an existing max-token limit in the Megatron engine config")
+
+    process_group = parallel_state.get_tensor_model_parallel_group()
+    tp_size = torch.distributed.get_world_size(process_group)
+    # GPTModel keeps the padded vocabulary and hidden dimensions on every PP
+    # stage, including virtual chunks without an embedding or output weight.
+    if model.vocab_size % tp_size:
+        raise ValueError("Liger TP-FLSCE requires the model vocabulary to be divisible by TP size")
+    max_tokens = max(token_limits, default=0) * engine_config.context_parallel_size
+    min_tp_size = tp_size
+    if reservation is not None:
+        max_tokens = max(max_tokens, reservation[0])
+        min_tp_size = min(min_tp_size, reservation[1])
+    configured = configure_liger_flsce(
+        max_tokens=max_tokens,
+        hidden_size=model.config.hidden_size,
+        local_vocab_size=(model.vocab_size + min_tp_size - 1) // min_tp_size,
+        process_group=process_group,
+        device=next(model.parameters()).device,
+    )
+    if configured:
+        _validate_liger_moe_runtime(model)
+    return configured
+
+
+def patch_fused_forward(
+    model: torch.nn.Module,
+    model_config=None,
+    *,
+    engine_config=None,
+    impl_backend: str = "triton",
+):
     model = _get_patching_model(model)
     if model is None:
         return
+    if model_config is not None:
+        configured_backend = (model_config.fused_kernel_options or {}).get("impl_backend")
+        impl_backend = (
+            "liger" if model_config.use_liger else ("tilelang" if configured_backend == "tilelang" else "triton")
+        )
+    if impl_backend == "liger" and engine_config is not None and model.config.params_dtype == torch.bfloat16:
+        _configure_liger_runtime(model, engine_config)
+    setattr(model, _FUSED_IMPL_BACKEND_ATTR, impl_backend)
 
     mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
     if mode is None:
@@ -176,86 +306,6 @@ def unpatch_fused_forward(model: torch.nn.Module):
         delattr(model, "forward_backup")
 
 
-def fused_forward_model_gen(vision_model: bool = False):
-    def fused_forward_model(
-        model,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        attention_mask: Tensor,
-        labels: Tensor,
-        labels_mask: Tensor,
-        temperature: float,
-        multi_modal_inputs: dict,
-    ):
-        pre_process: bool = (
-            unwrap_model(model).pre_process if not vision_model else False
-        )  # vision model does not need pre_process, because we pack the input_ids to thd in the forward function
-        post_process: bool = unwrap_model(model).post_process
-
-        model_kwargs = {}
-        if "pixel_values" in multi_modal_inputs:
-            model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
-        if "image_grid_thw" in multi_modal_inputs:
-            model_kwargs["image_grid_thw"] = multi_modal_inputs["image_grid_thw"].to(input_ids.device)
-        if "pixel_values_videos" in multi_modal_inputs:
-            model_kwargs["pixel_values_videos"] = multi_modal_inputs["pixel_values_videos"].to(input_ids.device)
-        if "video_grid_thw" in multi_modal_inputs:
-            model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
-
-        batch_size, seq_len = attention_mask.shape[:2]
-        input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
-        input_ids_rmpad = input_ids_rmpad.contiguous()
-        labels_rmpad, _ = preprocess_packed_seqs(labels, attention_mask, pre_process=True)
-        labels_mask_rmpad, _ = preprocess_packed_seqs(labels_mask, attention_mask, pre_process=True)
-        labels_rmpad = labels_rmpad.contiguous()
-        labels_mask_rmpad = labels_mask_rmpad.contiguous()
-
-        input_args = dict(
-            input_ids=input_ids_rmpad,
-            attention_mask=None,
-            position_ids=position_ids if not vision_model else None,  # vision models will calculate position_ids
-            packed_seq_params=packed_seq_params,
-            labels=labels_rmpad,
-            temperature=temperature,
-            **model_kwargs,
-        )
-
-        if vision_model:
-            # workaround for supporting sequence packing with context parallelism
-            # cp split with sequence packing will make model lose vision token information, so we need to keep
-            # the original input_ids and pack them after vision embedding is calculated,
-            # cooporate with mbridge
-            input_args["input_ids"] = input_ids
-            input_args["attention_mask"] = attention_mask
-
-        if _use_output_processor_hook(model):
-            input_args.pop("temperature", None)
-            output_orig: CausalLMOutputForPPO = model(
-                **input_args,
-                output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
-            )
-        else:
-            output_orig: CausalLMOutputForPPO = model(**input_args)
-
-        if post_process:
-            # output_orig is in type of CausalLMOutputForPPO
-            output = postprocess_packed_seqs_for_dict_output(
-                labels_mask_rmpad,
-                output_orig,
-                packed_seq_params,
-                attention_mask,
-                batch_size,
-                seq_len,
-                post_process=post_process,
-            )
-        else:
-            output = output_orig
-        return output
-
-    return fused_forward_model
-
-
 def fused_forward_model_engine(vision_model: bool = False):
     def fused_forward_model_engine_inner(
         model,
@@ -270,19 +320,21 @@ def fused_forward_model_engine(vision_model: bool = False):
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
         position_ids: Tensor | None = None,
+        topk_labels: Tensor | None = None,
+        auxiliary_logits_processor=None,
+        distillation_only: bool = False,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         config = unwrap_model(model).config
+        quant_align_size = get_thd_quant_align_size(config)
         min_local_rows = (
             config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
         )
 
         thd_kwargs = dict(
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
@@ -315,13 +367,26 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels,
             pre_process=True,
             need_roll=True,
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
+        topk_labels_rmpad = None
+        if topk_labels is not None:
+            topk_labels_rmpad, _, _ = preprocess_thd_engine(
+                topk_labels,
+                pre_process=True,
+                need_roll=False,
+                quant_align_size=quant_align_size,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
+            topk_labels_rmpad = topk_labels_rmpad.contiguous()
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -331,38 +396,43 @@ def fused_forward_model_engine(vision_model: bool = False):
             **model_kwargs,
         )
         if _use_output_processor_hook(model):
+            impl_backend = get_fused_impl_backend(model)
             output_orig: CausalLMOutputForPPO = model(
                 **forward_kwargs,
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+                output_processor_context=FusedOutputProcessorContext(
+                    temperature=temperature,
+                    impl_backend=impl_backend,
+                    topk_labels=topk_labels_rmpad,
+                ),
             )
         else:
-            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
+            impl_backend = get_fused_impl_backend(model)
+            output_orig: CausalLMOutputForPPO = model(
+                temperature=temperature,
+                impl_backend=impl_backend,
+                topk_labels=topk_labels_rmpad,
+                **forward_kwargs,
+            )
 
         if not post_process:
             return output_orig
 
-        log_probs = output_orig.log_probs
-        if log_probs.dim() == 1:
-            log_probs = log_probs.unsqueeze(0)
-        log_probs = postprocess_thd_engine(
-            log_probs,
-            packed_seq_params,
-            input_ids,
-            input_ids.shape[0],
-            post_process=post_process,
-            cp_layout=cp_layout,
-            local_cp_size=local_cp_size,
-        )
-
-        output = {"log_probs": log_probs}
-
+        local_output = {}
+        if not distillation_only:
+            local_output["log_probs"] = output_orig.log_probs
         if calculate_entropy:
-            entropy = output_orig.entropy
-            if entropy.dim() == 1:
-                entropy = entropy.unsqueeze(0)
-            entropy = postprocess_thd_engine(
-                entropy,
+            local_output["entropy"] = output_orig.entropy
+        if topk_labels_rmpad is not None:
+            if output_orig.topk_log_probs is None:
+                raise RuntimeError("TileLang fused forward did not return topk_log_probs")
+            if auxiliary_logits_processor is None:
+                raise RuntimeError("An auxiliary logits processor is required with fused top-k labels")
+            local_output.update(auxiliary_logits_processor(student_topk_log_probs=output_orig.topk_log_probs))
+
+        return {
+            key: postprocess_thd_engine(
+                value.unsqueeze(0) if value.dim() == 1 else value,
                 packed_seq_params,
                 input_ids,
                 input_ids.shape[0],
@@ -370,9 +440,8 @@ def fused_forward_model_engine(vision_model: bool = False):
                 cp_layout=cp_layout,
                 local_cp_size=local_cp_size,
             )
-            output["entropy"] = entropy
-
-        return output
+            for key, value in local_output.items()
+        }
 
     return fused_forward_model_engine_inner
 
@@ -392,6 +461,8 @@ def _fused_GPTModel_forward(
     inference_params: Optional[BaseInferenceContext] = None,
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
+    impl_backend: str = "triton",
+    topk_labels: Tensor | None = None,
     padding_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
@@ -454,8 +525,7 @@ def _fused_GPTModel_forward(
         attentions=None,
     )
 
-    if model.config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+    hidden_states = _gather_fused_hidden_states(hidden_states, model.config.sequence_parallel, impl_backend)
 
     # Get the output weight - use embedding weight if output_layer is None or weight is shared
     if hasattr(model, "output_layer") and model.output_layer is not None and model.output_layer.weight is not None:
@@ -464,14 +534,34 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
-    logprobs, entropy = linear_cross_entropy(
+    transpose_output = (
+        topk_labels is not None
+        and hidden_states.ndim == 3
+        and labels.ndim == 2
+        and hidden_states.shape[:2] == tuple(reversed(labels.shape))
+        and hidden_states.shape[:2] != labels.shape
+    )
+    kernel_policy_labels = labels.transpose(0, 1) if transpose_output else labels
+    kernel_topk_labels = topk_labels.transpose(0, 1) if transpose_output and topk_labels is not None else topk_labels
+    kernel_labels = kernel_policy_labels
+    if kernel_topk_labels is not None:
+        if kernel_topk_labels.shape[:-1] != kernel_policy_labels.shape:
+            raise ValueError("topk_labels must have labels.shape as its leading dimensions")
+        kernel_labels = torch.cat((kernel_policy_labels.unsqueeze(-1), kernel_topk_labels), dim=-1)
+    all_logprobs, entropy = linear_cross_entropy(
         hidden_states,
         output_weight,
-        labels,
+        kernel_labels,
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=impl_backend,
     )
+    if transpose_output:
+        all_logprobs = all_logprobs.transpose(0, 1)
+        entropy = entropy.transpose(0, 1)
+    logprobs = all_logprobs[..., 0] if topk_labels is not None else all_logprobs
+    topk_logprobs = all_logprobs[..., 1:] if topk_labels is not None else None
 
     if has_config_logger_enabled(model.config):
         payload = OrderedDict(
@@ -488,5 +578,6 @@ def _fused_GPTModel_forward(
 
     output.entropy = entropy
     output.log_probs = logprobs
+    output.topk_log_probs = topk_logprobs
 
     return output

@@ -33,6 +33,7 @@ from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
 from verl.utils.vllm.vllm_quant_utils import (
     apply_vllm_quant_patches,
+    configure_fp8_ignored_layers_match_mode,
     is_quantized_model,
     load_quanted_weights,
     prepare_quanted_weights_for_loading,
@@ -160,6 +161,9 @@ class vLLMColocateWorkerExtension:
     2. Online FP8 quantization
     """
 
+    # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
+    _nvfp4_per_token_config = None
+
     def __new__(cls, **kwargs):
         set_death_signal()
 
@@ -186,24 +190,16 @@ class vLLMColocateWorkerExtension:
             )
 
             register_verl_delta_weight_transfer_engine()
-        # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
-        # fp8 from the HF config rather than an explicit rollout quantization arg.
-        if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_quantized_model(vllm_config):
+
+        # 2. patch the refit of quantized weights, whether the quantization_config comes
+        # from the checkpoint (e.g. DeepSeek-V4) or from rollout.quantization via hf_overrides.
+        nvfp4_per_token_config = None
+        if is_quantized_model(vllm_config):
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import nvfp4_per_token_quantization_config
+
+            configure_fp8_ignored_layers_match_mode(vllm_config)
             apply_vllm_quant_patches()
-        # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
-        quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
-        _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
-        _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
-        if _is_qat_model:
-            from verl.utils.qat import apply_qat_patches
-
-            apply_qat_patches()
-            logger.info("Applied QAT (compressed-tensors) patches in vLLM worker subprocess")
-        elif _is_modelopt_qat:
-            from verl.utils.modelopt import apply_modelopt_nvfp4_patches
-
-            apply_modelopt_nvfp4_patches()
-            logger.info("Applied ModelOpt NVFP4 patches in vLLM worker subprocess")
+            nvfp4_per_token_config = nvfp4_per_token_quantization_config(vllm_config)
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
@@ -214,8 +210,7 @@ class vLLMColocateWorkerExtension:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
         instance = super().__new__(cls)
-        instance._is_qat_model = _is_qat_model
-        instance._is_modelopt_qat = _is_modelopt_qat
+        instance._nvfp4_per_token_config = nvfp4_per_token_config
         return instance
 
     def _get_drafter_model(self):
@@ -257,6 +252,13 @@ class vLLMColocateWorkerExtension:
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
+        if self._nvfp4_per_token_config is not None:
+            from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
+
+            # get_model() unwraps vLLM's CUDA-graph wrapper.
+            model = self.model_runner.get_model()
+            attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
+            clear_kv_cache(model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -276,19 +278,7 @@ class vLLMColocateWorkerExtension:
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
 
-        if self._is_qat_model:
-            # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
-            from verl.utils.qat import prepare_qat_for_load_weights
-
-            for model in self._iter_all_models():
-                prepare_qat_for_load_weights(model, device=self.device)
-            logger.info("QAT: prepare_qat_for_load_weights completed")
-        elif self._is_modelopt_qat:
-            from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
-
-            prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
-            logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
-        elif peft_config and base_sync_done:
+        if peft_config and base_sync_done:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
@@ -316,11 +306,29 @@ class vLLMColocateWorkerExtension:
         # the bucketed transport may split one across buckets. Accumulate and
         # apply only after ``is_last``; standard base weights load per bucket.
         lora_weights: dict[str, torch.Tensor] | None = {} if (peft_config and base_sync_done) else None
+        lora_config = getattr(getattr(self.model_runner, "lora_manager", None), "lora_config", None)
+        lora_dtype = getattr(lora_config, "lora_dtype", None)
+        pin_memory = False
+        if lora_weights is not None and isinstance(lora_dtype, torch.dtype):
+            from vllm.utils.platform_utils import is_pin_memory_available
+
+            pin_memory = is_pin_memory_available()
 
         def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
             if lora_weights is not None:
-                # Clone: add_lora keeps these past the callback (reused IPC buffer, #6454).
-                lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                # Copy: add_lora keeps these past the callback (reused IPC buffer, #6454). One CPU block per
+                # bucket in vLLM's LoRA dtype turns vLLM's per-tensor cast and pin_memory into no-ops.
+                if isinstance(lora_dtype, torch.dtype) and weights:
+                    sizes = [tensor.numel() for _, tensor in weights]
+                    block = torch.empty(sum(sizes), dtype=lora_dtype, device="cpu", pin_memory=pin_memory)
+                    parts = block.split(sizes)
+                    for part, (_, tensor) in zip(parts, weights, strict=True):
+                        part.copy_(tensor.reshape(-1))
+                    lora_weights.update(
+                        (name, part.view(tensor.shape)) for (name, tensor), part in zip(weights, parts, strict=True)
+                    )
+                else:
+                    lora_weights.update((name, tensor.clone()) for name, tensor in weights)
                 if not is_last:
                     return
                 self._update_weights(
@@ -339,19 +347,7 @@ class vLLMColocateWorkerExtension:
         receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
-        if self._is_qat_model:
-            # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
-            from verl.utils.qat import manual_process_weights_after_loading
-
-            for model in self._iter_all_models():
-                manual_process_weights_after_loading(model)
-            logger.info("QAT: process_weights_after_loading completed")
-        elif self._is_modelopt_qat:
-            from verl.utils.modelopt.vllm_modelopt_patch import modelopt_process_weights_after_loading
-
-            modelopt_process_weights_after_loading(self.model_runner.model)
-            logger.info("ModelOpt QAT: process_weights_after_loading completed")
-        elif peft_config and base_sync_done:
+        if peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
@@ -383,9 +379,8 @@ class vLLMColocateWorkerExtension:
         base_sync_done: bool,
     ):
         if peft_config and base_sync_done:
-            # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
-            # past this callback, so views into the freed/overwritten buffer crash later (#6454).
-            weights = {name: tensor.clone() for name, tensor in weights}
+            # The caller already copied these out of the receiver's reused IPC bucket buffer (#6454).
+            weights = dict(weights)
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
@@ -402,10 +397,11 @@ class vLLMColocateWorkerExtension:
             if is_quantized_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
+                model_updates = drop_tied_alias_updates(self.model_runner.model, param_updates)
+                loaded_params = load_quanted_weights(model_updates, self.model_runner) if model_updates else []
                 # Keep the draft model in sync when present.
-                if self._use_mtp_drafter_weight_sync() and param_updates:
-                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True)
+                if self._use_mtp_drafter_weight_sync() and model_updates:
+                    load_quanted_weights(model_updates, self.model_runner, is_drafter=True)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
