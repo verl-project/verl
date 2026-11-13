@@ -15,7 +15,9 @@
 import os
 import unittest
 
-from verl.utils.config import omega_conf_to_dataclass
+from omegaconf import OmegaConf
+
+from verl.utils.config import _validate_v1_fsdp_strategy, omega_conf_to_dataclass
 from verl.workers.config import (
     ActorConfig,
     FSDPActorConfig,
@@ -76,16 +78,108 @@ class TestActorConfig(unittest.TestCase):
         self.assertEqual(config.strategy, "fsdp")
 
     def test_fsdp_actor_config_from_yaml(self):
-        """Test creating FSDPActorConfig from YAML file."""
+        """Test that supported top-level strategies reach the FSDP engine config."""
+        from hydra import compose, initialize_config_dir
+
+        for strategy in ("fsdp", "fsdp2", "fsdp_turbo"):
+            with self.subTest(strategy=strategy):
+                with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+                    cfg = compose(
+                        config_name="dp_actor",
+                        overrides=[f"strategy={strategy}", "ppo_micro_batch_size_per_gpu=128"],
+                    )
+
+                config = omega_conf_to_dataclass(cfg)
+
+                self.assertIsInstance(config, FSDPActorConfig)
+                self.assertEqual(config.strategy, strategy)
+                self.assertEqual(config.engine.strategy, strategy)
+
+    def test_fsdp_actor_config_accepts_matching_nested_strategy(self):
+        """Test compatibility with configs that redundantly set the same nested strategy."""
+        from hydra import compose, initialize_config_dir
+
+        for strategy in ("fsdp", "fsdp2", "fsdp_turbo"):
+            with self.subTest(strategy=strategy):
+                with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+                    cfg = compose(
+                        config_name="dp_actor",
+                        overrides=[
+                            f"strategy={strategy}",
+                            f"fsdp_config.strategy={strategy}",
+                            "ppo_micro_batch_size_per_gpu=128",
+                        ],
+                    )
+
+                config = omega_conf_to_dataclass(cfg)
+
+                self.assertEqual(config.strategy, strategy)
+                self.assertEqual(config.engine.strategy, strategy)
+
+    def test_v1_fsdp_actor_config_rejects_nested_strategy_override(self):
+        """Test that V1 rejects a nested strategy that conflicts with the top-level key."""
+        from hydra import compose, initialize_config_dir
+
+        for nested_strategy in ("fsdp2", "fsdp_turbo"):
+            with self.subTest(nested_strategy=nested_strategy):
+                with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+                    cfg = compose(
+                        config_name="dp_actor",
+                        overrides=[
+                            f"fsdp_config.strategy={nested_strategy}",
+                            "ppo_micro_batch_size_per_gpu=128",
+                        ],
+                    )
+
+                config = OmegaConf.create(
+                    {
+                        "trainer": {"use_v1": True},
+                        "actor_rollout_ref": {"actor": cfg},
+                    }
+                )
+                with self.assertRaisesRegex(ValueError, "top-level `strategy`.*source of truth"):
+                    _validate_v1_fsdp_strategy(config)
+
+    def test_legacy_fsdp_actor_config_preserves_nested_strategy_compatibility(self):
+        """Test that deprecated runners keep their existing nested-selector behavior."""
         from hydra import compose, initialize_config_dir
 
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
-            cfg = compose(config_name="dp_actor", overrides=["strategy=fsdp2", "ppo_micro_batch_size_per_gpu=128"])
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "fsdp_config.strategy=fsdp2",
+                    "ppo_micro_batch_size_per_gpu=128",
+                ],
+            )
+
+        global_config = OmegaConf.create(
+            {
+                "trainer": {"use_v1": False},
+                "actor_rollout_ref": {"actor": cfg},
+            }
+        )
+        _validate_v1_fsdp_strategy(global_config)
 
         config = omega_conf_to_dataclass(cfg)
+        self.assertEqual(config.strategy, "fsdp")
+        self.assertEqual(config.engine.strategy, "fsdp")
 
-        self.assertIsInstance(config, FSDPActorConfig)
-        self.assertEqual(config.strategy, "fsdp2")
+    def test_fsdp_actor_config_rejects_unsupported_top_level_strategy(self):
+        """Test that an FSDP actor cannot overwrite its engine with an invalid backend."""
+        for strategy in ("megatron", "typo"):
+            with self.subTest(strategy=strategy):
+                with self.assertRaisesRegex(ValueError, "Unsupported FSDP strategy"):
+                    FSDPActorConfig(strategy=strategy, use_dynamic_bsz=True, rollout_n=1)
+
+    def test_fsdp_actor_config_direct_constructor_uses_top_level_strategy(self):
+        """Test direct construction keeps the legacy nested default as an implicit value."""
+        for strategy in ("fsdp2", "fsdp_turbo"):
+            with self.subTest(strategy=strategy):
+                config = FSDPActorConfig(strategy=strategy, use_dynamic_bsz=True, rollout_n=1)
+
+                self.assertEqual(config.strategy, strategy)
+                self.assertEqual(config.engine.strategy, strategy)
 
     def test_megatron_actor_config_from_yaml(self):
         """Test creating McoreActorConfig from YAML file."""
