@@ -32,15 +32,15 @@ https://github.com/Begunner/verl-link/blob/main/v1_trainer.svg?raw=true)
 
 Choose how optimizer mini-batches are formed with `trainer.v1.mini_batch_mode`:
 
-- `fixed_rows` (default) uses fixed trajectory-row boundaries. A full mini-batch targets
+- `fixed_trajectory` (default) uses fixed trajectory boundaries. A full mini-batch targets
   `actor_rollout_ref.actor.ppo_mini_batch_size * actor_rollout_ref.rollout.n`
-  trajectory rows, and a UID may cross a boundary. Let `T` be the materialized
-  row count and `L` the least common multiple of the DP size and all active
-  actor/critic row mini-batch sizes. The shared batch is padded to
-  `P = ceil(T / L) * L`; each model performs `P / its row mini-batch size`
+  trajectories, and a UID may cross a boundary. Let `T` be the materialized
+  trajectory count and `L` the least common multiple of the DP size and all active
+  actor/critic trajectory mini-batch sizes. The shared batch is padded to
+  `P = ceil(T / L) * L`; each model performs `P / its trajectory mini-batch size`
   optimizer updates per PPO epoch. Actor and critic mini-batch sizes may differ.
-- `fixed_count` treats `ppo_mini_batch_size` as a source-prompt/UID count. All
-  trajectories from one UID stay in the same mini-batch, so row counts vary. If
+- `fixed_sample` treats `ppo_mini_batch_size` as a source-prompt/UID sample count. All
+  trajectories from one UID stay in the same mini-batch, so trajectory counts vary. If
   `R` sampled UID groups materialize at least one trajectory, the actor performs
   `ceil(R / ppo_mini_batch_size)` optimizer updates per PPO epoch.
 
@@ -48,19 +48,19 @@ Synthetic rows used to align actor, critic, and DP boundaries are excluded
 from sequence-level loss normalization.
 
 Both modes balance preserved optimizer mini-batches across data-parallel ranks.
-`fixed_count` supports trainer-side UID shuffle only for one PPO epoch; combining
-`shuffle=true` with `ppo_epochs > 1` is rejected. `fixed_rows` supports multiple
+`fixed_sample` supports trainer-side UID shuffle only for one PPO epoch; combining
+`shuffle=true` with `ppo_epochs > 1` is rejected. `fixed_trajectory` supports multiple
 shuffled epochs by falling back to whole-train-batch DP balancing and letting
-workers reshuffle trajectory rows independently for every epoch.
+workers reshuffle trajectories independently for every epoch.
 
 The built-in sync sampler can keep failed prompt groups that produced no trajectories by setting
-`trainer.v1.sampler.sync_refill_failed_groups=false`. Under `fixed_count`, only
-materialized UID groups are trained and the final UID mini-batch may be smaller.
+`trainer.v1.sampler.sync_refill_failed_groups=false`. Under `fixed_sample`, only
+materialized UID groups are trained and the final sample mini-batch may be smaller.
 Setting the option to `true` replaces empty failed groups and preserves the
-configured UID count at the cost of additional synchronous rollout work. Under
-`fixed_rows`, failures and multi-output expansion instead change the materialized
-trajectory-row count; refilling empty groups does not guarantee a fixed optimizer
-step count when prompts emit different numbers of rows.
+configured sample count at the cost of additional synchronous rollout work. Under
+`fixed_trajectory`, failures and multi-output expansion instead change the materialized
+trajectory count; refilling empty groups does not guarantee a fixed optimizer
+step count when prompts emit different numbers of trajectories.
 
 `sync` and `colocate_async` sample a full controller train batch at a time.
 `separate_async` streams `ppo_mini_batch_size` source prompts through the
@@ -74,9 +74,9 @@ data.train_batch_size
 ```
 
 For example, a train batch of 64 with a PPO mini-batch of 16 requires
-`parameter_sync_step=4`. With `fixed_count`, each controller batch normally
-corresponds to one UID-count optimizer update. With `fixed_rows`, variable-output
-expansion can produce more than one row-count optimizer update inside that
+`parameter_sync_step=4`. With `fixed_sample`, each controller batch normally
+corresponds to one sample-count optimizer update. With `fixed_trajectory`, variable-output
+expansion can produce more than one trajectory-count optimizer update inside that
 controller batch; parameter synchronization still follows
 `parameter_sync_step`.
 

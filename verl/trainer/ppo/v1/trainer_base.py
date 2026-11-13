@@ -64,7 +64,7 @@ from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY, append_padding_samp
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import (
-    MINI_BATCH_MODE_FIXED_ROWS,
+    MINI_BATCH_MODE_FIXED_TRAJECTORY,
     Role,
     create_rl_dataset,
     create_rl_sampler,
@@ -1624,7 +1624,7 @@ class PPOTrainer(ABC):
 
     def _get_mini_batch_mode(self) -> str:
         """Return the configured V1 optimizer mini-batch split mode."""
-        return self.config.trainer.v1.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_ROWS)
+        return self.config.trainer.v1.get("mini_batch_mode", MINI_BATCH_MODE_FIXED_TRAJECTORY)
 
     def _get_active_model_configs(self) -> list[DictConfig]:
         """Return model configs that perform optimizer updates in the current step."""
@@ -1636,7 +1636,7 @@ class PPOTrainer(ABC):
         return models
 
     def _get_balance_unit_size(self) -> int:
-        """Return the row or UID count balanced across DP ranks at a time."""
+        """Return the trajectory or sample count balanced across DP ranks at a time."""
         return get_balance_unit_size(
             self.config,
             use_critic=self.use_critic,
@@ -1647,13 +1647,13 @@ class PPOTrainer(ABC):
     def _get_model_mini_batch_size(self, model_config: DictConfig) -> int:
         """Resolve one model's mini-batch size in the configured mode's unit."""
         size = model_config.ppo_mini_batch_size
-        if self._get_mini_batch_mode() == MINI_BATCH_MODE_FIXED_ROWS:
+        if self._get_mini_batch_mode() == MINI_BATCH_MODE_FIXED_TRAJECTORY:
             size *= self.config.actor_rollout_ref.rollout.n
         return size
 
     def _use_worker_side_shuffle(self) -> bool:
-        """Whether fixed-row mini-batches must be reshuffled by workers each epoch."""
-        return self._get_mini_batch_mode() == MINI_BATCH_MODE_FIXED_ROWS and any(
+        """Whether fixed_trajectory mini-batches must be reshuffled by workers each epoch."""
+        return self._get_mini_batch_mode() == MINI_BATCH_MODE_FIXED_TRAJECTORY and any(
             model.shuffle and model.ppo_epochs > 1 for model in self._get_active_model_configs()
         )
 
@@ -1708,7 +1708,7 @@ class PPOTrainer(ABC):
         unit_count = self._get_balance_unit_size()
         shuffle_seed = self._get_shuffle_seed()
 
-        if mode == MINI_BATCH_MODE_FIXED_ROWS:
+        if mode == MINI_BATCH_MODE_FIXED_TRAJECTORY:
             mini_batch_sizes = [self._get_model_mini_batch_size(model) for model in self._get_active_model_configs()]
             batch_multiple = math.lcm(dp_size, *mini_batch_sizes)
             pad_size = (-len(batch)) % batch_multiple
@@ -1734,7 +1734,7 @@ class PPOTrainer(ABC):
             unit_count = unit_count or len(batch)
             if unit_count % dp_size != 0:
                 raise ValueError(
-                    f"fixed_rows balancing unit size {unit_count} must be divisible by actor dp_size={dp_size}"
+                    f"fixed_trajectory balancing unit size {unit_count} must be divisible by actor dp_size={dp_size}"
                 )
             order = (
                 np.random.default_rng(shuffle_seed).permutation(len(batch)).tolist()

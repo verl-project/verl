@@ -15,8 +15,8 @@ rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
 strategy: ???
 
 # Base size of one global PPO optimizer mini-batch.
-# V1 fixed_rows targets ppo_mini_batch_size * rollout.n trajectory rows.
-# V1 fixed_count uses ppo_mini_batch_size source-prompt/UID groups.
+# V1 fixed_trajectory targets ppo_mini_batch_size * rollout.n trajectories.
+# V1 fixed_sample uses ppo_mini_batch_size source-prompt/UID samples.
 ppo_mini_batch_size: 256
 
 # [Deprecated] Global micro batch size
@@ -121,10 +121,10 @@ kl_loss_type: low_var_kl
 ppo_epochs: 1
 
 # Shuffle training data before PPO updates.
-# V1 fixed_count shuffles UID groups on the trainer and requires ppo_epochs = 1.
-# V1 fixed_rows with multiple epochs falls back to whole-batch DP balancing and
-# reshuffles trajectory rows independently within each DP rank for every epoch.
-# V0 shuffles trajectory rows independently within each DP rank for every epoch.
+# V1 fixed_sample shuffles UID groups on the trainer and requires ppo_epochs = 1.
+# V1 fixed_trajectory with multiple epochs falls back to whole-batch DP balancing and
+# reshuffles trajectories independently within each DP rank for every epoch.
+# V0 shuffles trajectories independently within each DP rank for every epoch.
 shuffle: false
 
 # The seed used to construct mini-batch

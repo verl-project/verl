@@ -53,7 +53,7 @@ def stub_padding(monkeypatch):
     )
 
 
-def _minibatching_config(*, mode="fixed_count", dynamic=True, shuffle=False, epochs=1):
+def _minibatching_config(*, mode="fixed_sample", dynamic=True, shuffle=False, epochs=1):
     return OmegaConf.create(
         {
             "actor_rollout_ref": {
@@ -137,26 +137,26 @@ def test_padding_multiple_satisfies_active_stages(dynamic, dp_size, expected):
     )
 
 
-def test_fixed_count_multi_epoch_shuffle_is_rejected():
+def test_fixed_sample_multi_epoch_shuffle_is_rejected():
     config = _minibatching_config(shuffle=True, epochs=2)
 
     with pytest.raises(ValueError, match="does not support actor.shuffle=true"):
         validate_minibatching_config(config, use_critic=False)
 
 
-def test_fixed_rows_multi_epoch_shuffle_is_allowed():
-    config = _minibatching_config(mode="fixed_rows", shuffle=True, epochs=2)
+def test_fixed_trajectory_multi_epoch_shuffle_is_allowed():
+    config = _minibatching_config(mode="fixed_trajectory", shuffle=True, epochs=2)
 
     validate_minibatching_config(config, use_critic=True)
 
 
-def test_missing_mode_defaults_to_fixed_rows():
+def test_missing_mode_defaults_to_fixed_trajectory():
     config = _minibatching_config()
     del config.trainer.v1.mini_batch_mode
     trainer = _StubTrainer.__new__(_StubTrainer)
     trainer.config = config
 
-    assert trainer._get_mini_batch_mode() == "fixed_rows"
+    assert trainer._get_mini_batch_mode() == "fixed_trajectory"
 
 
 def test_invalid_mini_batch_mode_is_rejected():
@@ -174,8 +174,8 @@ def test_actor_and_critic_dp_sizes_must_match():
         trainer._balance_batch(_batch(["p0_0_0"]), metrics={})
 
 
-def test_fixed_rows_builds_fixed_trajectory_minibatches(stub_padding):
-    config = _minibatching_config(mode="fixed_rows", dynamic=True)
+def test_fixed_trajectory_builds_fixed_trajectory_minibatches(stub_padding):
+    config = _minibatching_config(mode="fixed_trajectory", dynamic=True)
     trainer = _trainer(config)
     result = trainer._balance_batch(_batch([f"row{index}" for index in range(15)]), metrics={})
 
@@ -194,8 +194,8 @@ def test_fixed_rows_builds_fixed_trajectory_minibatches(stub_padding):
     }
 
 
-def test_fixed_rows_multi_epoch_shuffle_uses_whole_batch_fallback(stub_padding):
-    config = _minibatching_config(mode="fixed_rows", dynamic=True, shuffle=True, epochs=2)
+def test_fixed_trajectory_multi_epoch_shuffle_uses_whole_batch_fallback(stub_padding):
+    config = _minibatching_config(mode="fixed_trajectory", dynamic=True, shuffle=True, epochs=2)
     trainer = _trainer(config, use_critic=False)
     result = trainer._balance_batch(_batch([f"row{index}" for index in range(5)]), metrics={})
     batching_info = trainer._get_update_minibatching_info(result, config.actor_rollout_ref.actor)
@@ -209,7 +209,7 @@ def test_fixed_rows_multi_epoch_shuffle_uses_whole_batch_fallback(stub_padding):
     }
 
 
-def test_fixed_count_preserves_multi_output_uid_minibatches(stub_padding):
+def test_fixed_sample_preserves_multi_output_uid_minibatches(stub_padding):
     config = _minibatching_config(dynamic=True)
     trainer = _trainer(config)
     output_counts = {"p0": 2, "p1": 1, "p2": 3, "p3": 2, "p4": 1}
