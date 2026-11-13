@@ -1,6 +1,15 @@
 set -ex
 
 USE_MEGATRON=${USE_MEGATRON:-1}
+# Select the hardware-specific FLA NPU package before starting installation.
+FLA_NPU_DEVICE=${FLA_NPU_DEVICE:-}
+case "$FLA_NPU_DEVICE" in
+    a2|a3|a5) ;;
+    *)
+        echo "Set FLA_NPU_DEVICE to a2 (Atlas A2), a3 (Atlas A3), or a5 (Ascend 950)." >&2
+        exit 1
+        ;;
+esac
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "1. install basic packages"
@@ -54,8 +63,8 @@ fi
 
 echo "4. install verl"
 cd verl
-pip install -v -e .
 pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+pip install -v -e . --no-deps
 # （可选）提示：为了更佳的使用体验，最好将 recipe 子模块更新至最新 commit
 cd recipe
 git checkout main
@@ -66,4 +75,8 @@ echo "5. May need to check other neccessary packages"
 pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
 # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin.
 pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+# Install the hardware-specific FLA NPU backend used by vLLM-Ascend.
+pip install --no-deps "flash-linear-attention-npu-${FLA_NPU_DEVICE}==26.9.1" \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
 echo "Successfully installed all packages"
