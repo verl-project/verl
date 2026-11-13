@@ -28,6 +28,13 @@ from verl.workers.rollout.llm_server import LLMServerManager
 
 
 def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerGroup:
+    agent_loop_manager, _, _ = init_agent_loop_manager_and_workers(config)
+    return agent_loop_manager
+
+
+def init_agent_loop_manager_and_workers(
+    config: DictConfig,
+) -> tuple[AgentLoopManager, RayWorkerGroup, CheckpointEngineManager]:
     # =========================== 1. Create hybrid ActorRollout workers ===========================
     # The unified model-engine ActorRolloutRefWorker supports both sync and async rollout modes.
     actor_rollout_cls = ActorRolloutRefWorker
@@ -103,4 +110,4 @@ def init_agent_loop_manager(config: DictConfig) -> AgentLoopManager | RayWorkerG
     checkpoint_manager.sleep_replicas()
     checkpoint_manager.update_weights()
 
-    return agent_loop_manager
+    return agent_loop_manager, actor_rollout_wg, checkpoint_manager

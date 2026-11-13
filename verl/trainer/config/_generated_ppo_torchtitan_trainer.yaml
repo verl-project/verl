@@ -142,16 +142,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
   ref:
     optim:
       _target_: verl.workers.config.TorchtitanOptimizerConfig
@@ -178,7 +168,7 @@ actor_rollout_ref:
       forward_prefetch: false
       use_orig_params: false
       mixed_precision: false
-      use_torch_compile: true
+      use_torch_compile: ${oc.select:actor_rollout_ref.actor.torchtitan.use_torch_compile,True}
       entropy_from_logits_with_chunking: false
       entropy_from_logits_chunk_size: 2048
       entropy_checkpointing: false
@@ -385,10 +375,14 @@ actor_rollout_ref:
       port: 9090
       file: /tmp/ray/session_latest/metrics/prometheus/prometheus.yml
       served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
-    quantization: null
-    quantization_config_file: null
+    quantization:
+      _target_: verl.workers.config.RolloutQuantizationConfig
+      linear: null
+      moe: null
+      moe_activation: null
+      ignore: []
+      config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-    qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
     disaggregation:
       enabled: false
       prefill_replicas: 1
@@ -494,6 +488,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
@@ -717,6 +712,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  preset: null
   custom_reward_function:
     path: null
     name: compute_score
@@ -770,8 +766,13 @@ reward:
       'n': 1
       prompt_length: 2048
       response_length: 2048
-      quantization: null
-      quantization_config_file: null
+      quantization:
+        _target_: verl.workers.config.RolloutQuantizationConfig
+        linear: null
+        moe: null
+        moe_activation: null
+        ignore: []
+        config_file: null
       mtp: null
       disaggregation:
         enabled: false
@@ -830,6 +831,7 @@ distillation:
     distillation_loss_coef: 1.0
     loss_max_clamp: null
     log_prob_min_clamp: null
+    tail_mass_eps: 1.0e-06
     use_policy_gradient: false
     policy_loss_mode: vanilla
     clip_ratio: 0.2

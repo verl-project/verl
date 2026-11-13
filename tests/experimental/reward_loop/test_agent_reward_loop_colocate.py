@@ -63,13 +63,13 @@ def test_agent_reward_loop_standalone():
     config.actor_rollout_ref.rollout.prompt_length = 1024
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
-    config.trainer.n_gpus_per_node = 8
+    config.trainer.n_gpus_per_node = int(os.getenv("VERL_TEST_N_GPUS_PER_NODE", "8"))
     config.trainer.nnodes = 1
 
     config.reward.reward_manager.name = "dapo"
     config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = False
-    config.reward.reward_model.n_gpus_per_node = 8
+    config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
     config.reward.reward_model.model_path = reward_model_path
     config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.reward.reward_model.rollout.gpu_memory_utilization = 0.8

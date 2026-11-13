@@ -16,10 +16,13 @@
 import math
 from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 
@@ -32,6 +35,7 @@ from verl.trainer.ppo.score_centering import (
     score_centering_correction,
     score_centering_logits_processor,
     score_centering_ppo_loss,
+    score_centering_support_correction,
     score_centering_weight_fn,
     topk_log_probs_from_logits,
 )
@@ -75,14 +79,24 @@ def test_score_centering_rejects_unsupported_modes(kwargs):
     [
         dict(name="sglang"),
         dict(calculate_log_probs=False),
-        dict(top_p=0.9),
-        dict(top_k=50),
         dict(logprobs_mode="raw_logprobs"),
     ],
 )
 def test_topk_log_probs_needs_the_vllm_sampling_distribution(kwargs):
     with pytest.raises(ValueError, match="topk_log_probs"):
         RolloutConfig(**{"name": "vllm", "topk_log_probs": 128, "calculate_log_probs": True, **kwargs})
+
+
+@pytest.mark.parametrize("kwargs", [dict(top_k=128), dict(top_p=0.9, top_k=64), dict(top_p=0.9)])
+def test_topk_log_probs_accepts_sampling_parameters_without_a_manual_centering_mode(kwargs):
+    RolloutConfig(**{"name": "vllm", "topk_log_probs": 128, "calculate_log_probs": True, **kwargs})
+
+
+@pytest.mark.parametrize("top_p", [1.0, 0.9])
+def test_topk_log_probs_warns_but_accepts_a_recording_budget_below_sampling_top_k(top_p):
+    with pytest.warns(UserWarning, match="smaller than the sampling top_k"):
+        config = RolloutConfig(name="vllm", topk_log_probs=128, calculate_log_probs=True, top_k=256, top_p=top_p)
+    assert config.top_k == 256 and config.top_p == top_p
 
 
 def test_topk_log_probs_raises_vllm_max_logprobs():
@@ -123,13 +137,24 @@ def _config(algorithm_rc=None, actor_rc=None, **overrides):
     return config
 
 
-def test_score_centering_config_accepts_consistent_settings():
-    _validate_score_centering_config(_config())
+@pytest.mark.parametrize("top_p, top_k", [(1.0, -1), (0.9, -1), (0.9, 64), (1.0, 256)])
+def test_score_centering_config_accepts_sampling_parameters_without_a_manual_centering_mode(top_p, top_k):
+    _validate_score_centering_config(
+        _config(**{"actor_rollout_ref.rollout.top_p": top_p, "actor_rollout_ref.rollout.top_k": top_k})
+    )
+
+
+def test_score_centering_config_accepts_megatron_actor():
+    _validate_score_centering_config(_config(**{"actor_rollout_ref.actor.strategy": "megatron"}))
 
 
 def test_score_centering_config_skips_checks_when_off():
     _validate_score_centering_config(
-        _config(algorithm_rc={"score_centering": False}, actor_rc=False, **{"trainer.use_v1": False})
+        _config(
+            algorithm_rc={"score_centering": False},
+            actor_rc=False,
+            **{"trainer.use_v1": False, "actor_rollout_ref.rollout.temperature": 0},
+        )
     )
 
 
@@ -141,9 +166,11 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
         ({"trainer.use_v1": False}, "use_v1"),
-        ({"actor_rollout_ref.actor.strategy": "megatron"}, "strategy"),
+        ({"actor_rollout_ref.actor.strategy": "veomni"}, "strategy"),
         ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
+        ({"actor_rollout_ref.rollout.temperature": 0}, "temperature"),
+        ({"actor_rollout_ref.rollout.temperature": -1}, "temperature"),
         ({"distillation.enabled": True}, "distillation"),
     ],
 )
@@ -171,6 +198,39 @@ def test_topk_log_probs_match_log_softmax_gather_with_gradient():
     logits.grad = None
     (ref * weight).sum().backward()
     torch.testing.assert_close(grad_chunked.float(), logits.grad.float(), atol=1e-2, rtol=1e-2)
+
+
+def _vocab_parallel_topk_worker(rank, world_size, rendezvous_file, out_dir):
+    dist.init_process_group(backend="gloo", init_method=f"file://{rendezvous_file}", rank=rank, world_size=world_size)
+    try:
+        torch.manual_seed(0)
+        logits = torch.randn(5, 36)
+        ids = torch.stack([torch.randperm(36)[:4] for _ in range(5)])
+        ids[0, 1] = ids[0, 0]  # a repeated id must accumulate its gradient twice
+        weight = torch.randn(5, 4)
+        shard = 36 // world_size
+        local = logits[:, rank * shard : (rank + 1) * shard].clone().requires_grad_(True)
+        out = topk_log_probs_from_logits(local, ids, chunk_size=2, process_group=dist.group.WORLD)
+        (out * weight).sum().backward()
+        torch.save({"out": out.detach(), "grad": local.grad}, f"{out_dir}/rank{rank}.pt")
+    finally:
+        dist.destroy_process_group()
+
+
+def test_topk_log_probs_vocab_parallel_matches_single_shard(tmp_path):
+    world_size = 2
+    mp.spawn(_vocab_parallel_topk_worker, args=(world_size, str(tmp_path / "rdzv"), str(tmp_path)), nprocs=world_size)
+    torch.manual_seed(0)
+    logits = torch.randn(5, 36, requires_grad=True)
+    ids = torch.stack([torch.randperm(36)[:4] for _ in range(5)])
+    ids[0, 1] = ids[0, 0]
+    weight = torch.randn(5, 4)
+    ref = topk_log_probs_from_logits(logits, ids, chunk_size=2)
+    (ref * weight).sum().backward()
+    shards = [torch.load(tmp_path / f"rank{r}.pt") for r in range(world_size)]
+    for shard in shards:
+        torch.testing.assert_close(shard["out"], ref.detach())
+    torch.testing.assert_close(torch.cat([s["grad"] for s in shards], dim=-1), logits.grad)
 
 
 def test_correction_is_zero_on_policy():
@@ -263,6 +323,59 @@ def test_composed_correction_uses_alpha_rho_f_one_over_rho():
     torch.testing.assert_close(correction, (residual * head_p).sum(-1))
 
 
+def _truncated_head(sampler_log_probs, top_p, k):
+    # The head as vLLM's processed log-probs return it under top-p: the kept tokens renormalized
+    # over the support, the remaining slots -inf with arbitrary valid ids.
+    probs, order = torch.sort(sampler_log_probs.exp(), dim=-1, descending=True)
+    keep = (probs.cumsum(-1) - probs) < top_p
+    assert int(keep.sum(-1).max()) <= k
+    sorted_log_probs = sampler_log_probs.gather(-1, order).masked_fill(~keep, float("-inf"))
+    return order[:, :k].to(torch.int32), torch.log_softmax(sorted_log_probs, dim=-1)[:, :k]
+
+
+def _support_mask(ids, head_log_probs, vocab):
+    mask = torch.zeros(ids.shape[0], vocab)
+    return mask.scatter_(1, ids.long(), head_log_probs.isfinite().float()).bool()
+
+
+def test_support_correction_is_zero_on_policy():
+    torch.manual_seed(6)
+    logits = (torch.randn(3, 11) * 2).requires_grad_(True)
+    ids, sampler_head = _truncated_head(torch.log_softmax(logits.detach(), dim=-1), top_p=0.7, k=6)
+    support_sizes = sampler_head.isfinite().sum(-1)
+    assert support_sizes.min() < 6 and support_sizes.max() > 1
+    head = topk_log_probs_from_logits(logits, ids)
+    correction, _, q_mass = score_centering_support_correction(
+        head, sampler_head, score_centering_weight_fn("token", 2.0)
+    )
+    torch.testing.assert_close(correction, torch.zeros(3), atol=1e-6, rtol=0)
+    torch.testing.assert_close(q_mass, torch.ones(3))
+    grad = torch.autograd.grad(correction.sum(), logits)[0]
+    torch.testing.assert_close(grad, torch.zeros_like(grad), atol=1e-6, rtol=0)
+
+
+def test_support_correction_gradient_matches_support_oracle():
+    # Exact centering over the support S: sum_S sg[q w] log p^S with p^S the trainer renormalized on S.
+    torch.manual_seed(7)
+    vocab, k = 11, 6
+    trainer_logits = torch.randn(3, vocab, requires_grad=True)
+    ids, sampler_head = _truncated_head(torch.log_softmax(torch.randn(3, vocab) * 2, dim=-1), top_p=0.7, k=k)
+    tis = score_centering_weight_fn("token", 2.0)
+    head = topk_log_probs_from_logits(trainer_logits, ids)
+    correction, log_support_mass, _ = score_centering_support_correction(head, sampler_head, tis)
+
+    in_support = _support_mask(ids, sampler_head, vocab)
+    log_p = torch.log_softmax(trainer_logits, dim=-1)
+    log_p_support = torch.log_softmax(log_p.masked_fill(~in_support, float("-inf")), dim=-1)
+    q = torch.zeros(3, vocab).scatter_(1, ids.long(), sampler_head.exp())
+    ratio = torch.where(in_support, (log_p_support - q.log()).exp(), torch.ones_like(q))
+    ref = ((q * tis(ratio)).detach() * log_p_support.masked_fill(~in_support, 0.0)).sum(-1)
+    grad_a = torch.autograd.grad(correction.sum(), trainer_logits, retain_graph=True)[0]
+    grad_b = torch.autograd.grad(ref.sum(), trainer_logits)[0]
+    torch.testing.assert_close(grad_a, grad_b, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(log_support_mass, log_p.masked_fill(~in_support, float("-inf")).logsumexp(-1))
+
+
 def test_dummy_rows_are_finite_distributions():
     ids, log_probs = dummy_rollout_topk(3, 4)
     assert ids.dtype == torch.int32 and log_probs.dtype == torch.float32
@@ -297,14 +410,14 @@ def test_extract_reads_sampled_token_and_head_by_rank():
     # position 0 samples the top-1 token; position 1 samples token 42, outside the head
     flat = _FlatLogprobs(
         token_ids=[7, 7, 3, 9, 42, 3, 7, 9],
-        logprobs=[-0.1, -0.1, -1.5, -2.0, -8.0, -0.2, -1.0, -1.9],
+        logprobs=[-0.6, -0.6, -1.5, -2.0, -8.0, -0.8, -1.5, -2.0],
         num_positions=2,
     )
     sampled, ids, log_probs = extract_response_topk_logprobs(flat, k=3)
-    assert sampled == pytest.approx([-0.1, -8.0])
+    assert sampled == pytest.approx([-0.6, -8.0])
     assert ids.dtype == np.int32 and log_probs.dtype == np.float32
     assert ids.tolist() == [[7, 3, 9], [3, 7, 9]]
-    np.testing.assert_allclose(log_probs, [[-0.1, -1.5, -2.0], [-0.2, -1.0, -1.9]], rtol=1e-6)
+    np.testing.assert_allclose(log_probs, [[-0.6, -1.5, -2.0], [-0.8, -1.5, -2.0]], rtol=1e-6)
 
 
 def test_extract_rejects_ragged_rows():
@@ -406,9 +519,9 @@ def test_padding_template_uses_dummy_heads():
     torch.testing.assert_close(template["rollout_topk_log_probs"].exp().sum(-1), torch.ones(seq_len))
 
 
-def _actor_config(rollout_correction):
+def _actor_config(rollout_correction, strategy="fsdp"):
     config = ActorConfig(
-        strategy="fsdp",
+        strategy=strategy,
         rollout_n=1,
         ppo_micro_batch_size_per_gpu=1,
         policy_loss=PolicyLossConfig(loss_mode="bypass_mode", rollout_correction=rollout_correction),
@@ -446,19 +559,56 @@ def test_bypass_mode_dispatches_correction_to_reinforce():
     assert "actor/sc_correction" in metrics
 
 
-def _nested_batch(lengths, k, vocab):
-    ids = torch.nested.as_nested_tensor(
-        [torch.randint(0, vocab, (n, k), dtype=torch.int32) for n in lengths], layout=torch.jagged
-    )
-    log_probs = torch.nested.as_nested_tensor(
-        [
-            torch.log_softmax(torch.randn(n, vocab), dim=-1).gather(-1, i.long())
-            for n, i in zip(lengths, ids.unbind(), strict=False)
-        ],
-        layout=torch.jagged,
-    )
+def _nested_batch(lengths, k, vocab, top_p=None):
+    rows = [torch.log_softmax(torch.randn(n, vocab) * 2, dim=-1) for n in lengths]
+    if top_p is None:
+        ids = [torch.randint(0, vocab, (n, k), dtype=torch.int32) for n in lengths]
+        log_probs = [row.gather(-1, i.long()) for row, i in zip(rows, ids, strict=True)]
+    else:
+        ids, log_probs = zip(*[_truncated_head(row, top_p, k) for row in rows], strict=True)
+    ids = torch.nested.as_nested_tensor(list(ids), layout=torch.jagged)
+    log_probs = torch.nested.as_nested_tensor(list(log_probs), layout=torch.jagged)
     data = TensorDict({"rollout_topk_ids": ids, "rollout_topk_log_probs": log_probs}, batch_size=[len(lengths)])
+    if top_p is not None:
+        # This synthetic provider knows its complete support, independently of head mass.
+        data["rollout_support_complete"] = torch.nested.as_nested_tensor(
+            [torch.ones(n, dtype=torch.bool) for n in lengths], layout=torch.jagged
+        )
     return data
+
+
+def _support_rollout_correction(rollout_is=None, **kwargs):
+    return RolloutCorrectionConfig(
+        bypass_mode=True,
+        loss_type="reinforce",
+        rollout_is=rollout_is,
+        score_centering=True,
+        **kwargs,
+    )
+
+
+def test_logits_processor_support_mode_adds_log_support_mass():
+    torch.manual_seed(8)
+    lengths, k, vocab = [3, 5], 8, 17
+    data = _nested_batch(lengths, k, vocab, top_p=0.7)
+    logits = torch.randn(1, sum(lengths), vocab, requires_grad=True)
+    out = score_centering_logits_processor(
+        student_logits=logits, data=data, config=_actor_config(_support_rollout_correction())
+    )
+    assert set(out) == {
+        "sc_correction",
+        "sc_sampler_head_mass",
+        "sc_train_head_mass",
+        "sc_log_support_mass",
+        "sc_support_aligned",
+        "sc_sampler_tail_mass",
+        "sc_support_unknown",
+    }
+    for v in out.values():
+        assert v.shape == (1, sum(lengths))
+    assert out["sc_correction"].requires_grad and out["sc_log_support_mass"].requires_grad
+    torch.testing.assert_close(out["sc_sampler_head_mass"], torch.ones(1, sum(lengths)))
+    torch.testing.assert_close(out["sc_train_head_mass"], out["sc_log_support_mass"].detach().exp())
 
 
 def test_logits_processor_returns_per_token_scalars():
@@ -468,11 +618,46 @@ def test_logits_processor_returns_per_token_scalars():
     logits = torch.randn(1, sum(lengths), vocab, requires_grad=True)
     config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
     out = score_centering_logits_processor(student_logits=logits, data=data, config=config)
-    assert set(out) == {"sc_correction", "sc_sampler_head_mass", "sc_train_head_mass"}
+    assert set(out) == {
+        "sc_correction",
+        "sc_sampler_head_mass",
+        "sc_train_head_mass",
+        "sc_log_support_mass",
+        "sc_support_aligned",
+        "sc_sampler_tail_mass",
+        "sc_support_unknown",
+    }
     for v in out.values():
         assert v.shape == (1, sum(lengths))
     assert out["sc_correction"].requires_grad
     assert (out["sc_sampler_head_mass"] <= 1.0 + 1e-6).all()
+
+
+def test_logits_processor_accepts_precomputed_topk_log_probs_with_gradient():
+    torch.manual_seed(21)
+    lengths, k, vocab = [3, 5], 4, 17
+    data = _nested_batch(lengths, k, vocab)
+    # Repeated query ids are valid and their gradient contributions must be preserved.
+    data["rollout_topk_ids"].values()[0, 1] = data["rollout_topk_ids"].values()[0, 0]
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
+
+    eager_logits = torch.randn(1, sum(lengths), vocab, requires_grad=True)
+    eager = score_centering_logits_processor(student_logits=eager_logits, data=data, config=config)
+    fused_logits = eager_logits.detach().clone().requires_grad_(True)
+    ids = data["rollout_topk_ids"].values()
+    precomputed = topk_log_probs_from_logits(fused_logits.squeeze(0), ids).unsqueeze(0)
+    fused = score_centering_logits_processor(
+        student_logits=None,
+        student_topk_log_probs=precomputed,
+        data=data,
+        config=config,
+    )
+
+    for key in eager:
+        torch.testing.assert_close(fused[key], eager[key])
+    eager["sc_correction"].sum().backward()
+    fused["sc_correction"].sum().backward()
+    torch.testing.assert_close(fused_logits.grad, eager_logits.grad)
 
 
 @pytest.mark.parametrize(
@@ -494,6 +679,32 @@ def test_logits_processor_reads_mapping_rollout_correction(preset, rollout_corre
     out = score_centering_logits_processor(
         student_logits=logits, data=data, config=_actor_config({**rollout_correction, "score_centering": True})
     )
+    for key in expected:
+        torch.testing.assert_close(out[key], expected[key])
+
+
+def test_logits_processor_megatron_splits_head_by_cp_and_uses_tp_group():
+    torch.manual_seed(5)
+    lengths, k, vocab = [3, 5], 4, 17
+    data = _nested_batch(lengths, k, vocab)
+    logits = torch.randn(1, sum(lengths), vocab)
+    expected = score_centering_logits_processor(
+        student_logits=logits, data=data, config=_actor_config(RolloutCorrectionConfig.bypass_pg_sc())
+    )
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc(), strategy="megatron")
+    with (
+        patch(
+            "verl.models.mcore.util.preprocess_thd_engine",
+            side_effect=lambda x, pre_process, **kwargs: (x.values().unsqueeze(0), None, None),
+        ) as mock_split,
+        patch("megatron.core.parallel_state.get_tensor_model_parallel_group", return_value=None) as mock_group,
+    ):
+        out = score_centering_logits_processor(
+            student_logits=logits, data=data, config=config, pad_to_length_bucket=512
+        )
+    assert mock_split.call_count == 2 and mock_group.call_count == 1
+    for call in mock_split.call_args_list:
+        assert call.kwargs["pad_to_length_bucket"] == 512
     for key in expected:
         torch.testing.assert_close(out[key], expected[key])
 
@@ -549,6 +760,45 @@ def test_ppo_loss_applies_score_centering_end_to_end():
     for key in ("sc_correction", "sc_sampler_head_mass", "sc_train_head_mass"):
         expected_metric = response_part(full[key])[mask].mean().item()
         assert math.isclose(metrics[f"actor/{key}"].aggregate(), expected_metric, rel_tol=1e-5)
+
+
+def test_score_centering_ppo_loss_shifts_log_probs_built_as_separate_nested_tensors():
+    """The Megatron engine nests every hook output on its own offsets, so the support-mass shift
+    cannot rely on nested pointwise arithmetic between log_probs and sc_log_support_mass."""
+    torch.manual_seed(6)
+    prompts = torch.tensor([[0, 5, 6], [7, 8, 9]])
+    responses = torch.tensor([[11, 12, 0], [13, 14, 15]])
+    attention_mask = torch.tensor([[0, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]])
+    data = TensorDict(
+        {
+            "prompts": prompts,
+            "responses": responses,
+            "input_ids": torch.cat([prompts, responses], dim=1),
+            "attention_mask": attention_mask,
+            "response_mask": attention_mask[:, 3:],
+            "position_ids": (attention_mask.cumsum(-1) - 1).clamp_min(0),
+            "old_log_probs": -torch.rand(2, 3),
+            "advantages": torch.randn(2, 3),
+        },
+        batch_size=[2],
+    )
+    tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=5, global_batch_size=2)
+    data = left_right_2_no_padding(data)
+    rows = {
+        "log_probs": [-torch.rand(4), -torch.rand(6)],
+        "sc_log_support_mass": [-torch.rand(4), -torch.rand(6)],
+        "sc_correction": [torch.randn(4), torch.randn(6)],
+    }
+    nest = lambda r: torch.nested.as_nested_tensor(r, layout=torch.jagged)
+    model_output = {key: nest(r) for key, r in rows.items()}
+    config = _actor_config(RolloutCorrectionConfig.bypass_pg_sc())
+    loss, _ = score_centering_ppo_loss(config, model_output=model_output, data=data)
+    shifted = {
+        "log_probs": nest([a - b for a, b in zip(rows["log_probs"], rows["sc_log_support_mass"], strict=True)]),
+        "sc_correction": model_output["sc_correction"],
+    }
+    expected, _ = ppo_loss(config, shifted, data)
+    torch.testing.assert_close(loss, expected)
 
 
 def test_ppo_loss_gradient_is_unchanged_on_policy():
@@ -618,6 +868,78 @@ def test_ppo_loss_gradient_is_unchanged_on_policy():
     assert metrics["actor/sc_correction"].aggregate() == 0.0
     assert torch.equal(loss_sc, loss_pg)
     assert torch.equal(grad_sc, grad_pg)
+
+
+def test_ppo_loss_support_mode_scores_the_sampled_token_on_the_support():
+    """On-policy under top-p, support mode is REINFORCE on the trainer renormalized over the
+    sampler's support: unit IS weights, zero centering, and the sampled token's log-prob shifted
+    by the trainer's log support mass."""
+    torch.manual_seed(6)
+    vocab, k = 9, 4
+    prompts = torch.tensor([[0, 5, 6], [7, 8, 1]])
+    responses = torch.tensor([[1, 2, 0], [3, 4, 5]])
+    attention_mask = torch.tensor([[0, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]])
+    response_mask = attention_mask[:, 3:]
+    advantages = torch.randn(2, 3)
+    data = TensorDict(
+        {
+            "prompts": prompts,
+            "responses": responses,
+            "input_ids": torch.cat([prompts, responses], dim=1),
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": (attention_mask.cumsum(-1) - 1).clamp_min(0),
+            "advantages": advantages,
+        },
+        batch_size=[2],
+    )
+    tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=int(response_mask.sum()), global_batch_size=2)
+    data = left_right_2_no_padding(data)
+    cu_seqlens = data["input_ids"].offsets()
+    nnz = int(cu_seqlens[-1])
+    logits = torch.randn(nnz, vocab) * 2
+    next_ids = torch.roll(data["input_ids"].values(), shifts=-1)
+    # A real sampled token must belong to the support; the original random response fixture
+    # could ask to score a token that had zero sampler probability.
+    logits[torch.arange(nnz), next_ids] = logits.max(-1).values + 2
+    topk_ids, topk_log_probs = _truncated_head(torch.log_softmax(logits, dim=-1), top_p=0.7, k=k)
+    in_support = _support_mask(topk_ids, topk_log_probs, vocab)
+    data["rollout_topk_ids"] = torch.nested.nested_tensor_from_jagged(topk_ids, cu_seqlens)
+    data["rollout_topk_log_probs"] = torch.nested.nested_tensor_from_jagged(topk_log_probs, cu_seqlens)
+    data["rollout_support_complete"] = torch.nested.nested_tensor_from_jagged(
+        torch.ones(nnz, dtype=torch.bool), cu_seqlens
+    )
+
+    def sampled_log_probs(logits_):
+        log_p = torch.log_softmax(logits_, dim=-1)
+        log_support_mass = log_p.masked_fill(~in_support, float("-inf")).logsumexp(-1)
+        return log_p.gather(-1, next_ids.unsqueeze(-1)).squeeze(-1), log_support_mass
+
+    full_vocab, log_support_mass = sampled_log_probs(logits)
+    old_log_probs = torch.nested.nested_tensor_from_jagged(full_vocab - log_support_mass, cu_seqlens)
+    data["old_log_probs"] = no_padding_2_padding(old_log_probs, data)
+
+    config = _actor_config(_support_rollout_correction(rollout_is="token", rollout_is_threshold=2.0))
+    logits_ = logits.clone().requires_grad_(True)
+    full_vocab_, _ = sampled_log_probs(logits_)
+    model_output = {"log_probs": torch.nested.nested_tensor_from_jagged(full_vocab_, cu_seqlens)}
+    hook = score_centering_ppo_loss(config, student_logits=logits_.unsqueeze(0), data=data)
+    model_output.update(
+        {key: torch.nested.nested_tensor_from_jagged(value.squeeze(0), cu_seqlens) for key, value in hook.items()}
+    )
+    loss, metrics = score_centering_ppo_loss(config, model_output=model_output, data=data)
+    grad = torch.autograd.grad(loss, logits_)[0]
+
+    logits_ref = logits.clone().requires_grad_(True)
+    full_vocab_ref, log_support_mass_ref = sampled_log_probs(logits_ref)
+    response = no_padding_2_padding(
+        torch.nested.nested_tensor_from_jagged(full_vocab_ref - log_support_mass_ref, cu_seqlens), data
+    )
+    loss_ref = (-advantages * response)[response_mask.bool()].mean()
+    grad_ref = torch.autograd.grad(loss_ref, logits_ref)[0]
+    assert abs(metrics["actor/sc_correction"].aggregate()) < 1e-6
+    torch.testing.assert_close(loss, loss_ref.detach())
+    torch.testing.assert_close(grad, grad_ref, atol=1e-6, rtol=1e-5)
 
 
 def test_score_centering_loss_rejects_missing_correction():

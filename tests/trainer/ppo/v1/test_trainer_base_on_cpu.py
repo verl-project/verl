@@ -19,7 +19,13 @@ import pytest
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
-from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.trainer.ppo.v1.trainer_base import PPOTrainer, apply_greedy_sampling_params
+
+
+def test_greedy_reward_baseline_does_not_request_score_centering_heads():
+    params = {"top_p": 0.9, "top_k": 64, "temperature": 1.0, "topk_log_probs": 128, "logprobs": True}
+    apply_greedy_sampling_params(params)
+    assert params == {"top_p": 1.0, "top_k": -1, "temperature": 0, "logprobs": True}
 
 
 class _StubTrainer(PPOTrainer):
@@ -145,7 +151,7 @@ def test_sync_failure_refill_overrides_dataloader_generation_batch_size():
         patch("verl.trainer.ppo.v1.trainer_base.create_rl_dataset", side_effect=[[{}, {}], [{}]]),
         patch("verl.trainer.ppo.v1.trainer_base.create_rl_sampler", return_value=None),
         patch("verl.trainer.ppo.v1.trainer_base.StatefulDataLoader") as dataloader,
-        patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning,
+        patch("verl.utils.dataset.dataloader.logger.warning") as warning,
     ):
         trainer._init_dataloader()
 

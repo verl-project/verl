@@ -133,6 +133,8 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             batch, key="distillation_only", default=False
         ):
             raise NotImplementedError("Dynamic CP does not support distillation")
+        if tu.get_non_tensor_data(batch, key="score_centering", default=False):
+            raise NotImplementedError("Dynamic CP does not support score centering")
 
 
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
@@ -204,7 +206,24 @@ class MegatronEngine(BaseEngine):
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
         if self._qat_enabled:
+            if self.engine_config.override_transformer_config.get("fp8"):
+                raise ValueError(
+                    "QAT and Transformer Engine FP8 training are mutually exclusive: QAT fake-quantizes weights "
+                    "inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs themselves to "
+                    "FP8. Disable one of them."
+                )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
+        self._rollout_weight_quantizer = None
+
+        # override_transformer_config.fp4 trains the routed experts in NVFP4.
+        from verl.utils.megatron.low_precision import bf16_layers_at_start_end
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        overrides = self.engine_config.override_transformer_config
+        self._real_nvfp4_enabled = real_nvfp4_enabled(overrides)
+        self._real_nvfp4_bf16_layers = bf16_layers_at_start_end(overrides)
+        if self._real_nvfp4_enabled:
+            logger.info("NVFP4 routed-expert training: BF16 layers at start/end=%d/%d", *self._real_nvfp4_bf16_layers)
 
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
@@ -282,6 +301,15 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import apply_real_nvfp4_overrides
+
+            apply_real_nvfp4_overrides(
+                override_transformer_config,
+                self.model_config.hf_config,
+                pipeline_size=self.engine_config.pipeline_model_parallel_size,
+                virtual_pipeline_size=self.engine_config.virtual_pipeline_model_parallel_size,
+            )
         if self.is_value_model:
             # A value head cannot share weights with the vocabulary embedding. Force the HF
             # flag off and record it for the checkpoint manager. Apply the
@@ -358,11 +386,6 @@ class MegatronEngine(BaseEngine):
                 provider_overrides["moe_enable_routing_replay"] = True
             else:
                 provider_overrides["enable_routing_replay"] = True
-
-        if self._qat_enabled:
-            from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
-
-            provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
         # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
         # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
@@ -482,7 +505,7 @@ class MegatronEngine(BaseEngine):
         from verl.models.mcore.model_forward_fused import patch_fused_forward
 
         for model in self.module:
-            patch_fused_forward(model)
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config)
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
@@ -528,8 +551,20 @@ class MegatronEngine(BaseEngine):
 
         self.module = self._build_megatron_module()
 
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import attest_real_nvfp4_runtime, finish_real_nvfp4_module_init
+
+            models = [unwrap_model(model_chunk) for model_chunk in self.module]
+            finish_real_nvfp4_module_init(models)
+            attest_real_nvfp4_runtime(
+                models,
+                self.tf_config,
+                self.model_config.hf_config,
+                *self._real_nvfp4_bf16_layers,
+            )
+
         if self._qat_enabled and not self.engine_config.forward_only:
-            from verl.utils.modelopt import apply_qat_to_modules
+            from verl.utils.qat.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
 
@@ -759,6 +794,16 @@ class MegatronEngine(BaseEngine):
         """
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.module)
+        if self._is_offload_optimizer:
+            # The optimizer was offloaded right after construction. Megatron's
+            # HybridDeviceOptimizer rebuilds its sub-optimizers inside
+            # ``load_state_dict`` and classifies every parameter by ``is_cuda``:
+            # a shard that is still parked on the CPU gets no pinned copy and is
+            # treated as a CPU-resident parameter, so once it is moved back to the
+            # GPU the first ``step`` fails (KeyError / "assign a gradient with
+            # device type 'cpu' to a tensor with device type 'cuda'"). Bring the
+            # optimizer back to the GPU first; it is offloaded again below.
+            load_megatron_optimizer(self.optimizer)
         self.checkpoint_mananager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
@@ -1000,13 +1045,16 @@ class MegatronEngine(BaseEngine):
                 else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
-        # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
-            from verl.utils.modelopt import export_qat_weights
-
-            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+            per_tensor_param = ((name, tensor) for name, tensor in per_tensor_param if "_quantizer." not in name)
+        if self._rollout_weight_quantizer is not None and not adapter_only:
+            # QAT-trained master weights quantize to the same values the fake quant used in training.
+            per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
 
         return per_tensor_param, peft_config
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
 
     def _mcore_export_index(self):
         """Build (once) the per-parameter delta export index: geometry specs and
@@ -1140,9 +1188,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_entropy: bool,
         distillation_use_topk: bool,
         distillation_only: bool,
+        score_centering: bool,
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        pad_to_length_bucket: int | None = None,
+        cp_layout: str = "zigzag",
+        local_cp_size: int | None = None,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
@@ -1175,10 +1227,26 @@ class MegatronEngineWithLMHead(MegatronEngine):
             logits_bak = logits
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
-        if distillation_use_topk:
-            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+        if distillation_use_topk or score_centering:
+            from verl.models.mcore.util import get_thd_quant_align_size
+
+            # the top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
+            ret.update(
+                logits_processor_func(
+                    student_logits=logits_bak,
+                    data=batch,
+                    data_format=data_format,
+                    quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                )
+            )
         if not distillation_only:
-            ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
+            # the cross entropy shifts fp32 logits in place; the score centering hook re-reads them in backward
+            ret["log_probs"] = vocab_parallel_log_probs_from_logits(
+                logits_bak.clone() if score_centering else logits_bak, label
+            )
 
         return ret
 
@@ -1200,16 +1268,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+        score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
             else None
         )
-
-        if pad_to_length_bucket is not None and distillation_use_topk:
-            raise RuntimeError("pad_to_length is not supported with top-K distillation")
-        if pad_to_length_bucket is not None and self.enable_routing_replay:
-            raise RuntimeError("pad_to_length is not supported with router replay")
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1235,6 +1299,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         unwrapped_model = unwrap_model(model)
         cp_layout = self._get_context_parallel_layout(unwrapped_model)
+        min_local_rows = (
+            self.tf_config.csa_window_size
+            if getattr(self.tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
+            else None
+        )
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1265,6 +1334,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vp_rank,
                 replay_mask=replay_mask,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
             )
 
@@ -1278,8 +1348,24 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
+            from verl.models.mcore.util import get_thd_quant_align_size
 
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
+            topk_labels = None
+            auxiliary_logits_processor = None
+            if distillation_use_topk or score_centering:
+                topk_key = "teacher_ids" if distillation_use_topk else "rollout_topk_ids"
+                topk_labels = batch[topk_key]
+                auxiliary_logits_processor = partial(
+                    logits_processor_func,
+                    data=batch,
+                    data_format="thd",
+                    quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    min_local_rows=min_local_rows,
+                    pad_to_length_bucket=pad_to_length_bucket,
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                )
             output = fused_forward_fn(
                 model=model,
                 input_ids=input_ids,
@@ -1293,6 +1379,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
                 position_ids=batch.get("position_ids", None),
+                topk_labels=topk_labels,
+                auxiliary_logits_processor=auxiliary_logits_processor,
+                distillation_only=distillation_only,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1312,9 +1401,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 distillation_use_topk=distillation_use_topk,
                 distillation_only=distillation_only,
+                score_centering=score_centering,
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
 
             response_attention_mask = None
@@ -1366,6 +1459,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
                 model=unwrapped_model,
             )
 

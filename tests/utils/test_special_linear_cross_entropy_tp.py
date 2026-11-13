@@ -29,8 +29,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
+from unittest.mock import patch
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -45,10 +48,11 @@ finally:
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
 import verl.utils.torch_functional as verl_F
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 
 compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
 
-MAX_TEST_CASES = os.environ.get("MAX_TEST_CASES", 5)
+MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 5))
 VERIFY_TORCH_SELF = os.environ.get("VERIFY_TORCH_SELF", False)
 LOW_MEMORY = os.environ.get("LOW_MEMORY", False)
 LOW_MEMORY_DIV_FACTOR = os.environ.get("LOW_MEMORY_DIV_FACTOR", 16)
@@ -180,13 +184,13 @@ run_torch_entropy_tp = TorchEntropyTP.apply
 
 class TestLinearCrossEntropy_TensorParallel:
     def __init__(self):
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend=get_nccl_backend())
         self.group = dist.group.WORLD
 
         self.local_rank = dist.get_rank(self.group)
         self.world_size = dist.get_world_size(self.group)
-        device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(device)
+        device = torch.device(f"{get_device_name()}:{self.local_rank}")
+        get_torch_device().set_device(device)
         print(f"[INFO]: Local rank: {self.local_rank}, World size: {self.world_size}")
 
     def initialize(self, test_case_idx: int, temperature: float = 1.5):
@@ -197,12 +201,12 @@ class TestLinearCrossEntropy_TensorParallel:
         dist.destroy_process_group()
 
     def cleanup(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().empty_cache()
+        get_torch_device().reset_peak_memory_stats()
         import gc
 
         gc.collect()
-        torch.cuda.synchronize()
+        get_torch_device().synchronize()
 
     def generate_hyper(self):
         global LOW_MEMORY, LOW_MEMORY_DIV_FACTOR, MAX_TEST_CASES
@@ -241,21 +245,23 @@ class TestLinearCrossEntropy_TensorParallel:
 
     def generate_forward_inputs(self):
         hidden = (
-            torch.empty((self.batch_size, self.num_tokens, self.hidden_size), dtype=self.dtype, device="cuda")
+            torch.empty(
+                (self.batch_size, self.num_tokens, self.hidden_size), dtype=self.dtype, device=get_device_name()
+            )
             .uniform_(-0.5, 0.5)
             .requires_grad_()
         )
         weight = (
-            torch.empty((self.vocab_size, self.hidden_size), dtype=self.dtype, device="cuda")
+            torch.empty((self.vocab_size, self.hidden_size), dtype=self.dtype, device=get_device_name())
             .uniform_(-0.5, 0.5)
             .requires_grad_()
         )
-        labels = torch.randint(0, self.vocab_size, (self.batch_size, self.num_tokens), device="cuda")
+        labels = torch.randint(0, self.vocab_size, (self.batch_size, self.num_tokens), device=get_device_name())
         return hidden, weight, labels
 
     def generate_backward_inputs(self):
-        g_entropy = torch.empty((self.num_tokens,), dtype=self.dtype, device="cuda").uniform_(-0.5, 0.5)
-        g_logprobs = torch.empty((self.num_tokens,), dtype=self.dtype, device="cuda").uniform_(-1, 1)
+        g_entropy = torch.empty((self.num_tokens,), dtype=self.dtype, device=get_device_name()).uniform_(-0.5, 0.5)
+        g_logprobs = torch.empty((self.num_tokens,), dtype=self.dtype, device=get_device_name()).uniform_(-1, 1)
         return g_entropy, g_logprobs
 
     def verify_torch_itself(self, iterations: int = 5):
@@ -338,22 +344,22 @@ class TestLinearCrossEntropy_TensorParallel:
         dist.broadcast(hidden, src=0, group=self.group)
         dist.broadcast(labels, src=0, group=self.group)
 
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().reset_peak_memory_stats()
         (tp_logprobs, tp_entropy) = run_torch_entropy_tp(hidden, weight, labels, self.temperature, self.group)
-        torch.cuda.synchronize()
-        forward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        get_torch_device().synchronize()
+        forward_max_memory = get_torch_device().max_memory_allocated() / 1024 / 1024
 
         g_entropy, g_logprobs = self.generate_backward_inputs()
         # NOTE: we need to manually synchronize g_entropy and g_logprobs among Process Group
         dist.broadcast(g_entropy, src=0, group=self.group)
         dist.broadcast(g_logprobs, src=0, group=self.group)
 
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().reset_peak_memory_stats()
         (d_tp_hidden, d_tp_weight) = torch.autograd.grad(
             (tp_entropy, tp_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
         )
-        torch.cuda.synchronize()
-        backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        get_torch_device().synchronize()
+        backward_max_memory = get_torch_device().max_memory_allocated() / 1024 / 1024
         # NOTE: all-reduce on hidden is conducted outside the kernel
         dist.all_reduce(d_tp_hidden, op=dist.ReduceOp.SUM, group=self.group)
 
@@ -370,8 +376,8 @@ class TestLinearCrossEntropy_TensorParallel:
         kernel_forward_latency = list()
         kernel_backward_latency = list()
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = get_torch_device().Event(enable_timing=True)
+        end_event = get_torch_device().Event(enable_timing=True)
 
         for i in range(iterations):
             hidden, weight, labels = self.generate_forward_inputs()
@@ -383,7 +389,7 @@ class TestLinearCrossEntropy_TensorParallel:
             start_event.record()
             (torch_logprobs, torch_entropy) = run_torch_entropy_tp(hidden, weight, labels, self.temperature, self.group)
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             torch_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
@@ -391,7 +397,7 @@ class TestLinearCrossEntropy_TensorParallel:
                 hidden, weight, labels, self.temperature, "none", self.group
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
 
             torch.testing.assert_close(torch_logprobs, kernel_logprobs, atol=1e-1, rtol=1e-2)
@@ -408,7 +414,7 @@ class TestLinearCrossEntropy_TensorParallel:
                 (torch_entropy, torch_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             torch_backward_latency.append(start_event.elapsed_time(end_event))
             # NOTE: all-reduce on hidden is conducted outside the kernel
             dist.all_reduce(torch_d_hidden, op=dist.ReduceOp.SUM, group=self.group)
@@ -418,7 +424,7 @@ class TestLinearCrossEntropy_TensorParallel:
                 (kernel_entropy, kernel_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
             )
             end_event.record()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             kernel_backward_latency.append(start_event.elapsed_time(end_event))
             # NOTE: all-reduce on hidden is conducted outside the kernel
             dist.all_reduce(kernel_d_hidden, op=dist.ReduceOp.SUM, group=self.group)
@@ -462,30 +468,107 @@ class TestLinearCrossEntropy_TensorParallel:
         dist.broadcast(hidden, src=0, group=self.group)
         dist.broadcast(labels, src=0, group=self.group)
 
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().reset_peak_memory_stats()
         (kernel_logprobs, kernel_entropy) = linear_cross_entropy(
             hidden, weight, labels, self.temperature, "none", self.group
         )
-        torch.cuda.synchronize()
-        kernel_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        get_torch_device().synchronize()
+        kernel_max_memory = get_torch_device().max_memory_allocated() / 1024 / 1024
 
         g_entropy, g_logprobs = self.generate_backward_inputs()
         # NOTE: we need to manually synchronize g_entropy and g_logprobs among Process Group
         dist.broadcast(g_entropy, src=0, group=self.group)
         dist.broadcast(g_logprobs, src=0, group=self.group)
 
-        torch.cuda.reset_peak_memory_stats()
+        get_torch_device().reset_peak_memory_stats()
         (d_kernel_hidden, d_kernel_weight) = torch.autograd.grad(
             (kernel_entropy, kernel_logprobs), (hidden, weight), (g_entropy, g_logprobs), retain_graph=False
         )
-        torch.cuda.synchronize()
-        kernel_backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        get_torch_device().synchronize()
+        kernel_backward_max_memory = get_torch_device().max_memory_allocated() / 1024 / 1024
         # NOTE: all-reduce on hidden is conducted outside the kernel
         dist.all_reduce(d_kernel_hidden, op=dist.ReduceOp.SUM, group=self.group)
 
         if self.local_rank == 0:
             print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
             print(f"[INFO]: Kernel Backward pass peak memory: {kernel_backward_max_memory:.2f} MB")
+
+    def verify_liger_correctness(self):
+        if importlib.util.find_spec("liger_cute_kernels") is None:
+            print("[SKIP] Optional native Liger is not installed")
+            return
+        from verl.utils.kernel.linear_cross_entropy import configure_liger_flsce
+
+        # Ref uses a larger TP size first; actor then needs more tokens and
+        # local vocabulary. Reserve both before the first native allocation.
+        tp_sizes = sorted({min(4, self.world_size), 2}, reverse=True)
+        if any(self.world_size % size for size in tp_sizes):
+            print("[SKIP] Native Liger multi-group parity requires an even world size")
+            return
+        hidden_size, vocab_size, capacity = 512, 8192, 256
+        generator = torch.Generator(device=get_device_name()).manual_seed(1234)
+        full_weight = (
+            torch.randn(vocab_size, hidden_size, device=get_device_name(), generator=generator).to(torch.bfloat16)
+            * 0.02
+        )
+        for tp_size in tp_sizes:
+            group = None
+            for start in range(0, self.world_size, tp_size):
+                ranks = list(range(start, start + tp_size))
+                candidate = dist.new_group(ranks)
+                if self.local_rank in ranks:
+                    group = candidate
+            configured = configure_liger_flsce(
+                max_tokens=capacity,
+                hidden_size=hidden_size,
+                local_vocab_size=vocab_size // min(tp_sizes),
+                process_group=group,
+                device=torch.device(get_device_name(), self.local_rank),
+            )
+            if not configured:
+                print("[SKIP] Native Liger does not support this device")
+                return
+            shard = full_weight.chunk(tp_size)[dist.get_rank(group)].detach().requires_grad_()
+            # Fail instead of accidentally comparing Triton against a fallback.
+            with patch(
+                "liger_kernel.ops.fused_linear_scaled_cross_entropy._apply_tp_fallback",
+                side_effect=AssertionError("Native Liger parity selected a fallback"),
+            ):
+                for tokens, temperature in ((64, 0.8), (137, 1.5), (capacity, 1.0)):
+                    x = torch.randn(tokens, hidden_size, device=get_device_name(), generator=generator).to(
+                        torch.bfloat16
+                    )
+                    labels = torch.randint(vocab_size, (tokens,), device=get_device_name(), generator=generator)
+                    grads = (
+                        torch.randn(tokens, device=get_device_name(), generator=generator) / tokens,
+                        torch.randn(tokens, device=get_device_name(), generator=generator) / tokens,
+                    )
+                    source = dist.get_process_group_ranks(group)[0]
+                    for tensor in (x, labels, *grads):
+                        dist.broadcast(tensor, src=source, group=group)
+                    x.requires_grad_()
+                    results = []
+                    for backend in ("triton", "liger"):
+                        outputs = linear_cross_entropy(
+                            x, shard, labels, temperature, "none", group, impl_backend=backend
+                        )
+                        derivatives = torch.autograd.grad(outputs, (x, shard), grads)
+                        if backend == "triton":
+                            dist.all_reduce(derivatives[0], group=group)
+                        results.append((*outputs, *derivatives))
+                    for index, (expected, actual) in enumerate(zip(*results, strict=True)):
+                        torch.testing.assert_close(
+                            actual, expected, atol=1e-3 if index >= 2 else 1e-2, rtol=3e-2 if index >= 2 else 1e-3
+                        )
+                with pytest.raises(ValueError, match="exceeds configured capacity"):
+                    linear_cross_entropy(
+                        torch.zeros(capacity + 1, hidden_size, device=get_device_name(), dtype=torch.bfloat16),
+                        shard,
+                        torch.zeros(capacity + 1, device=get_device_name(), dtype=torch.int64),
+                        dist_process_group=group,
+                        impl_backend="liger",
+                    )
+            print(f"[PASS] Native Liger forward/entropy/gradients/overflow, TP={tp_size}")
 
 
 if __name__ == "__main__":
@@ -511,4 +594,5 @@ if __name__ == "__main__":
         test.verify_kernel_correctness()
         test.check_kernel_storage()
 
+    test.verify_liger_correctness()
     test.shutdown()

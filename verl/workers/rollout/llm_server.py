@@ -324,6 +324,14 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                         if previous is None
                         else np.concatenate([previous, output.extra_fields[key]])
                     )
+            if "response_topk_ids" in output.extra_fields:
+                current = output.extra_fields.get("response_support_complete")
+                if current is None:
+                    current = np.zeros(len(output.extra_fields["response_topk_ids"]), dtype=np.bool_)
+                previous = final_output.extra_fields.get("response_support_complete")
+                if previous is None:
+                    previous = np.zeros(len(final_output.token_ids) - len(output.token_ids), dtype=np.bool_)
+                final_output.extra_fields["response_support_complete"] = np.concatenate([previous, current])
             final_output.stop_reason = output.stop_reason
 
             # carry the initial prefill's prefix-cache hit count forward
@@ -421,7 +429,7 @@ class LLMServerManager:
         load balancer starts empty.
 
         Used by trainers that serve rollout exclusively from standalone
-        resources (e.g. v1 separate_async with ``actor_rollout_ref.hybrid_engine=False``)
+        resources (e.g. v1 separate_async without ``hybrid_rollout.enable_switch``)
         so that no inference engine is initialized on the training GPUs.
         """
         instance = cls(*args, **kwargs)

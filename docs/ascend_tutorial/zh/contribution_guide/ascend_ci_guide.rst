@@ -63,15 +63,15 @@ NPU 相关的工作流主要包括：
 
 流水机器上的数据集与绝对路径：
 
-+--------------+---------------------------------------------------+
-| 数据集名称   | 绝对路径                                          |
-+==============+===================================================+
-| gsm8k        | ``${HOME}/.cache/datasets/openai/gsm8k``          |
-+--------------+---------------------------------------------------+
-| geo3k        | ``${HOME}/.cache/datasets/hiyouga/geometry3k``    |
-+--------------+---------------------------------------------------+
-| dapo-math-17k| ``$HOME/.cache/datasets/dapo-math-17k.parquet``   |
-+--------------+---------------------------------------------------+
++--------------+----------------------------------------------------------------+
+| 数据集名称   | 绝对路径                                                       |
++==============+================================================================+
+| gsm8k        | ``${HOME}/.cache/modelscope/dataset/openai/gsm8k``             |
++--------------+----------------------------------------------------------------+
+| geo3k        | ``${HOME}/.cache/modelscope/dataset/hiyouga/geometry3k``       |
++--------------+----------------------------------------------------------------+
+| dapo-math-17k| ``$HOME/.cache/modelscope/dataset/dapo-math-17k.parquet``      |
++--------------+----------------------------------------------------------------+
 
 **Note**
 
@@ -81,7 +81,7 @@ NPU 相关的工作流主要包括：
 
    以下为原始数据集，请按需进行数据处理，示例如下。
    
-   ``python examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k``
+   ``python examples/data_preprocess/gsm8k_multiturn_sft.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/openai/gsm8k``
 
 
 1. 工作流 YAML 模板
@@ -129,7 +129,7 @@ NPU 相关的工作流主要包括：
        timeout-minutes: 60          # 任务超时阈值（分钟）
        container:
          #运行镜像 该示例为vllm的镜像
-         image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+         image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
          options: >-
            --shm-size 16g  # 共享内存配置
        env:
@@ -154,7 +154,7 @@ NPU 相关的工作流主要包括：
            run: pip list
          # 以下为具体测试步骤（根据需求定制）
          - name: Preprocess dataset
-           run: python examples/data_preprocess/your_script.py --local_dataset_path ${HOME}/.cache/datasets/your_dataset
+           run: python examples/data_preprocess/your_script.py --local_dataset_path ${HOME}/.cache/modelscope/dataset/your_dataset
          - name: Execute NPU test
            run: |
              ray stop --force 

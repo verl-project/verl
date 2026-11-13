@@ -676,6 +676,15 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    """Offload optimizer state to CPU to free GPU memory.
+
+    Note: HybridDeviceOptimizer (HDO) is left untouched. It manages the
+    placement of its own sub-optimizer state (a CPU half plus the GPU-resident
+    half, split by ``optimizer_offload_fraction``). Offloading the GPU half
+    here corrupts the fused optimizer's device assumption and crashes the next
+    step (issue #8237).
+    """
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -685,18 +694,10 @@ def offload_megatron_optimizer(optimizers):
         offload_megatron_copy_params(_opt)
         ## worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
-            # HybridDeviceOptimizer: offload all sub-optimizer states to CPU
-            # TODO: this should be a method in Megatron-LM's HybridDeviceOptimizer
-            hdo = _opt.optimizer
-            if all(hasattr(hdo, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")):
-                for optimizer in hdo.sub_optimizers:
-                    for param, state in optimizer.state.items():
-                        for k, v in state.items():
-                            if not isinstance(v, torch.Tensor):
-                                continue
-                            orig_param = hdo.inner_param_to_orig_param.get(param, param)
-                            hdo.state[orig_param][k] = state[k] = v.to("cpu")
-            else:
+            # Only non-HDO optimizers below; HDO owns its own placement.
+            if not all(
+                hasattr(_opt.optimizer, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")
+            ):
                 opt_state_dict_values = _opt.optimizer.state.values()
                 for v in opt_state_dict_values:
                     if "exp_avg" in v:
@@ -1186,6 +1187,26 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         # Force the provider override so MTP remains disabled after that reload.
         engine_config.override_transformer_config["mtp_num_layers"] = None
         engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+
+        # Reference models may inherit an actor layout containing MTP layers.
+        # Reference scoring only needs next-token log probabilities, not auxiliary
+        # MTP predictions; So we remove MTP layers from the inherited layout.
+        pipeline_layout = engine_config.override_transformer_config.get("pipeline_model_parallel_layout")
+        if pipeline_layout is not None:
+            from megatron.core.transformer.enums import LayerType
+            from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+
+            if not isinstance(pipeline_layout, PipelineParallelLayerLayout):
+                pipeline_layout = PipelineParallelLayerLayout(
+                    pipeline_layout, engine_config.pipeline_model_parallel_size
+                )
+            # Convert [PP][VPP] back to stage order, retaining empty stages and
+            # building new lists so an inherited layout is not modified in place.
+            engine_config.override_transformer_config["pipeline_model_parallel_layout"] = [
+                [layer.name for layer in pipeline_layout.layout[pp_rank][vp_rank] if layer != LayerType.mtp]
+                for vp_rank in range(pipeline_layout.virtual_pipeline_model_parallel_size)
+                for pp_rank in range(pipeline_layout.pipeline_model_parallel_size)
+            ]
         return
 
     elif enable_mtp and not has_mtp:

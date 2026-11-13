@@ -21,6 +21,7 @@ import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
+from verl.utils.dataset.dataloader import DataLoaderExhausted
 from verl.utils.skip import SkipManager
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,8 @@ class ReplayBuffer:
         self.gen_batch_size = gen_batch_size
         self.max_inflight_gen_batches = max_inflight_gen_batches
         self.sync_refill_failed_groups = sync_refill_failed_groups
+        # Set by the trainer only after a custom source actually raises StopIteration.
+        self.input_exhausted = False
 
         if self.max_off_policy_threshold is not None:
             assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
@@ -587,6 +590,20 @@ class ReplayBufferAsync(ReplayBuffer):
             sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
             if self._has_enough_samples(global_steps, partition_id, target_count, sampleable_keys):
                 return sampleable_keys, eviction_metrics
+
+            if (
+                partition_id == "train"
+                and self.input_exhausted
+                and not (self.pending_keys[partition_id] or self.running_keys[partition_id])
+            ):
+                logger.info(
+                    "Custom training source drained; discarding %s remaining prompt groups "
+                    "(%s required for a complete update).",
+                    len(sampleable_keys),
+                    target_count,
+                )
+                self._clear_groups(partition_id, sampleable_keys)
+                raise DataLoaderExhausted
 
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 

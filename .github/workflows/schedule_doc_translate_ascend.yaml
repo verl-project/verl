@@ -23,12 +23,11 @@
 # (translate_md.py, skill.md) and the .po translation memory live in a separate
 # fork private repo.
 #
-# Repository variables (set in the upstream verl source repo):
-#   FORK_REPO    the fork private repo that carries the translation tooling
-#                and .po translation memory (e.g. my-org/verl-translation-fork).
-#
-# Required secrets (set in the upstream verl source repo):
-#   FORK_TOKEN           a PAT with contents:write on the fork private repo
+# Repository secrets (set in the upstream verl source repo):
+#   FORK_REPO            the fork private repo that carries the translation
+#                        tooling and .po translation memory (e.g.
+#                        my-org/verl-translation-fork).
+#   PAT_TOKEN           a PAT with contents:write on the fork private repo
 #                        (for checkout, push synced main, push clean branch).
 #   TRANSLATION_ASCEND   LLM API key (Volcengine glm-5.2, primary).
 #   LLM_API_KEY          LLM API key (used when api_base/model are overridden).
@@ -88,11 +87,11 @@ jobs:
     env:
       TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
       # The fork private repo that carries translate_md.py, skill.md, and .po cache.
-      FORK_REPO: ${{ vars.FORK_REPO }}
+      FORK_REPO: ${{ secrets.FORK_REPO }}
     steps:
       # -----------------------------------------------------------------
       # Resolve tokens:
-      #   FORK_TOKEN   — PAT with contents:write on the fork private repo.
+      #   PAT_TOKEN   — PAT with contents:write on the fork private repo.
       #                 Used for checkout, push synced main, push clean branch.
       #   GITHUB_TOKEN — job-scoped token for the upstream verl source repo
       #                 (this repo). Has pull-requests:write, used for PR
@@ -101,21 +100,21 @@ jobs:
       - name: Resolve tokens
         id: tokens
         env:
-          FORK_TOKEN: ${{ secrets.FORK_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$FORK_REPO" ]; then
             echo "::error::FORK_REPO variable is required (fork private repo, e.g. my-org/verl-translation-fork)"
             exit 1
           fi
-          if [ -z "$FORK_TOKEN" ]; then
-            echo "::error::FORK_TOKEN secret is required (token with contents:write on ${FORK_REPO})"
+          if [ -z "$PAT_TOKEN" ]; then
+            echo "::error::PAT_TOKEN secret is required (token with contents:write on ${FORK_REPO})"
             exit 1
           fi
-          echo "fork_token=${FORK_TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "fork_token=${PAT_TOKEN}" >> "$GITHUB_OUTPUT"
           echo "FORK_OWNER=${FORK_REPO%%/*}" >> "$GITHUB_ENV"
           echo "Upstream repo: ${{ github.repository }} (GITHUB_TOKEN)"
-          echo "Fork repo:     ${FORK_REPO} (FORK_TOKEN)"
+          echo "Fork repo:     ${FORK_REPO} (PAT_TOKEN)"
 
       # -----------------------------------------------------------------
       # Step 1: Checkout the fork private repo's main branch.
@@ -141,7 +140,7 @@ jobs:
       # -----------------------------------------------------------------
       - name: Sync fork with upstream verl source repo
         env:
-          FORK_TOKEN: ${{ steps.tokens.outputs.fork_token }}
+          PAT_TOKEN: ${{ steps.tokens.outputs.fork_token }}
         run: |
           set -euo pipefail
           # The upstream is this repo (public, no token needed for fetch).
@@ -150,7 +149,7 @@ jobs:
           git merge "upstream/${TARGET_BRANCH}" --no-edit -m "Sync with upstream ${{ github.repository }}@${TARGET_BRANCH}"
           # Push the synced main back to the fork so the .po translation
           # memory and the tooling stay on the fork's main branch.
-          git remote set-url origin "https://x-access-token:${FORK_TOKEN}@github.com/${FORK_REPO}.git"
+          git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${FORK_REPO}.git"
           git push origin "${TARGET_BRANCH}"
 
       # -----------------------------------------------------------------
@@ -227,7 +226,7 @@ jobs:
       - name: Commit translation memory to fork main
         if: steps.detect.outputs.has_changes == 'true'
         env:
-          FORK_TOKEN: ${{ steps.tokens.outputs.fork_token }}
+          PAT_TOKEN: ${{ steps.tokens.outputs.fork_token }}
         run: |
           set -euo pipefail
           # Only proceed if .po cache files were actually modified.
@@ -249,7 +248,7 @@ jobs:
           # branch is not created until Step 8).
           git commit -s -m "chore: update .po translation memory"
 
-          git remote set-url origin "https://x-access-token:${FORK_TOKEN}@github.com/${FORK_REPO}.git"
+          git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${FORK_REPO}.git"
           git push origin "${TARGET_BRANCH}"
           echo "Updated .po translation memory pushed to fork main"
 
@@ -317,7 +316,7 @@ jobs:
         if: steps.results.outputs.has_changes == 'true'
         id: ci_branch
         env:
-          FORK_TOKEN: ${{ steps.tokens.outputs.fork_token }}
+          PAT_TOKEN: ${{ steps.tokens.outputs.fork_token }}
         run: |
           set -euo pipefail
 
@@ -372,7 +371,7 @@ jobs:
 
           # Push the clean branch to the fork (force: overwrite previous
           # state so the existing PR is updated instead of opening a new one).
-          git remote set-url origin "https://x-access-token:${FORK_TOKEN}@github.com/${FORK_REPO}.git"
+          git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${FORK_REPO}.git"
           git push origin "${BRANCH_NAME}" --force
 
           echo "pushed=true" >> "$GITHUB_OUTPUT"

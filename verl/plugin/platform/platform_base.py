@@ -252,6 +252,15 @@ class PlatformBase(abc.ABC):
         """
         return True
 
+    def get_ray_init_kwargs(self) -> dict[str, Any]:
+        """Return ``ray.init`` settings this platform needs, e.g. a ``worker_process_setup_hook``.
+
+        ``main_ppo`` merges the ``runtime_env`` entry between verl's defaults and
+        ``ray_kwargs.ray_init.runtime_env``, so the user's config wins. The merge goes through
+        OmegaConf, so give a setup hook as a module path string, not as the function itself.
+        """
+        return {}
+
     # ------------------------------------------------------------------
     # IPC support
     # ------------------------------------------------------------------

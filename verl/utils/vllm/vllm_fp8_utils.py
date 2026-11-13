@@ -214,6 +214,25 @@ def _record_pristine_fp8_layout(layer, params):
         setattr(layer, _FP8_PRISTINE_ATTR, pristine)
 
 
+def _record_same_layout_repacks(layer, old_params):
+    """Record direct parameter replacements that shape/dtype checks cannot see."""
+    for name in _FP8_REFIT_PARAM_NAMES:
+        old_param = old_params.get(name)
+        new_param = getattr(layer, name, None)
+        if (
+            isinstance(old_param, torch.nn.Parameter)
+            and isinstance(new_param, torch.nn.Parameter)
+            and tuple(old_param.shape) == tuple(new_param.shape)
+            and old_param.dtype == new_param.dtype
+            and old_param.data_ptr() != new_param.data_ptr()
+        ):
+            repacked = getattr(layer, _FP8_REPACKED_ATTR, None)
+            if repacked is None:
+                repacked = set()
+                setattr(layer, _FP8_REPACKED_ATTR, repacked)
+            repacked.add(name)
+
+
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
     repacked = getattr(layer, _FP8_REPACKED_ATTR, None) or ()
     for name, (shape, dtype) in pristine.items():
@@ -313,14 +332,17 @@ def process_fp8_weights_after_loading(layers):
             delattr(layer, _FP8_LIVE_ATTR)
 
 
-def _make_process_weights_after_loading_for_vllm20(original_fn):
+def _make_process_weights_after_loading_for_vllm20(
+    original_fn, replace_parameter_path="vllm.model_executor.layers.quantization.fp8.replace_parameter"
+):
     def _patched_process_weights_after_loading(self, layer) -> None:
         old_params = dict(layer.named_parameters(recurse=False))
         _record_pristine_fp8_layout(layer, old_params)
-        with patch(
-            "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
-        ):
+        with patch(replace_parameter_path, replace_parameter_preserve_subclass):
             original_fn(self, layer)
+        # Some kernels assign ``Parameter`` objects directly rather than calling
+        # replace_parameter (for example the MXFP8 linear kernels).
+        _record_same_layout_repacks(layer, old_params)
         _restore_layer_param_subclass_attrs(layer, old_params)
 
     return _patched_process_weights_after_loading
@@ -446,6 +468,53 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
             )
 
 
+def _build_compressed_tensors_fp8_patchers():
+    """Same refit treatment for compressed-tensors FP8/MXFP8 linear and MoE methods."""
+    ct = "vllm.model_executor.layers.quantization.compressed_tensors"
+    ct_moe = f"{ct}.compressed_tensors_moe"
+    fp8_moe = f"{ct_moe}.compressed_tensors_moe_w8a8_fp8"
+    mxfp8_moe = f"{ct_moe}.compressed_tensors_moe_w8a8_mxfp8"
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+            CompressedTensorsW8A8Fp8MoEMethod,
+        )
+    except ImportError:
+        logger.warning("compressed-tensors FP8 methods not found in this vLLM; skipping their refit patches")
+        return []
+
+    wrap = _make_process_weights_after_loading_for_vllm20
+    patchers = [
+        patch(
+            f"{ct}.compressed_tensors.CompressedTensorsLinearMethod.process_weights_after_loading",
+            wrap(CompressedTensorsLinearMethod.process_weights_after_loading),
+        ),
+        patch(
+            f"{fp8_moe}.CompressedTensorsW8A8Fp8MoEMethod.process_weights_after_loading",
+            wrap(CompressedTensorsW8A8Fp8MoEMethod.process_weights_after_loading, f"{fp8_moe}.replace_parameter"),
+        ),
+    ]
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
+            CompressedTensorsW8A8Mxfp8MoEMethod,
+        )
+    except ImportError:
+        logger.info("compressed-tensors MXFP8 MoE method not found in this vLLM; skipping its refit patch")
+    else:
+        patchers.append(
+            patch(
+                f"{mxfp8_moe}.CompressedTensorsW8A8Mxfp8MoEMethod.process_weights_after_loading",
+                wrap(
+                    CompressedTensorsW8A8Mxfp8MoEMethod.process_weights_after_loading,
+                    f"{mxfp8_moe}.replace_parameter",
+                ),
+            )
+        )
+    return patchers
+
+
 def build_fp8_method_patchers(vllm_version):
     """Patchers that make the FP8 quant methods survive a refit, not yet started.
 
@@ -468,6 +537,7 @@ def build_fp8_method_patchers(vllm_version):
         return [
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
+            *_build_compressed_tensors_fp8_patchers(),
         ]
 
     return [
