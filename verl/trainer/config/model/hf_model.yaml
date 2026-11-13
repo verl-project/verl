@@ -63,8 +63,9 @@ use_fused_kernels: False
 # fused kernel options.
 fused_kernel_options:
 
-  # the implementation backend for fused kernels: torch, triton, or liger.
-  # Megatron only supports triton.
+  # the implementation backend for fused kernels: torch, triton, liger, or tilelang.
+  # tilelang is CUDA-only and supports auxiliary multi-label log-prob queries.
+  # Megatron supports triton, liger (through use_liger), and tilelang.
   impl_backend: torch
 
 # TiledMLP configuration for memory-efficient MLP computation.

@@ -347,12 +347,15 @@ def test_postprocess_thd_engine_contiguous_inverts_global_intervals(monkeypatch)
     )
     _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, cp_layout="contiguous")
     rank_outputs = [
-        torch.tensor([[100, 101, 102, 103, 104]], dtype=torch.float32),
-        torch.tensor([[105, 106, 107, 108, 109]], dtype=torch.float32),
+        torch.tensor([[[100, 0], [101, 0], [102, 0], [103, 0], [104, 0]]], dtype=torch.float32)[..., 0],
+        torch.tensor([[[105, 0], [106, 0], [107, 0], [108, 0], [109, 0]]], dtype=torch.float32)[..., 0],
     ]
+    assert not rank_outputs[0].is_contiguous()
 
     def fake_all_gather(outputs, local_output, group):
-        del local_output, group
+        del group
+        assert local_output.is_contiguous()
+        assert all(output.is_contiguous() for output in outputs)
         for destination, source in zip(outputs, rank_outputs, strict=True):
             destination.copy_(source)
 

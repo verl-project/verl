@@ -335,13 +335,16 @@ def score_centering_auto_correction(
 
 
 def score_centering_logits_processor(
-    student_logits: torch.Tensor,
+    student_logits: Optional[torch.Tensor],
     data: TensorDict,
     config: ActorConfig,
     data_format: str = "thd",
+    student_topk_log_probs: Optional[torch.Tensor] = None,
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """Per-token centering term from the trainer logits, in the engine's logits-processor slot.
 
@@ -352,8 +355,8 @@ def score_centering_logits_processor(
             sampler heads of shape [B, j, k] and the optional ``rollout_support_complete`` receipts.
         config: Actor configuration, used for ``strategy`` and ``policy_loss.rollout_correction``.
         data_format: "thd" or "bshd". Only "thd" is supported.
-        quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs,
-            so the sampler heads are packed into the same rows as ``student_logits``.
+        quant_align_size, pad_to_length_bucket, cp_layout, local_cp_size: how the Megatron engine packed
+            the student inputs, so the sampler heads are packed into the same rows as ``student_logits``.
 
     Returns:
         Dict with, each of shape (1, nnz/sp):
@@ -374,7 +377,13 @@ def score_centering_logits_processor(
 
         from verl.models.mcore.util import preprocess_thd_engine
 
-        thd_kwargs = dict(quant_align_size=quant_align_size, local_cp_size=local_cp_size, cp_layout=cp_layout)
+        thd_kwargs = dict(
+            quant_align_size=quant_align_size,
+            min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
+            local_cp_size=local_cp_size,
+            cp_layout=cp_layout,
+        )
         topk_ids, *_ = preprocess_thd_engine(data["rollout_topk_ids"], pre_process=True, **thd_kwargs)
         topk_log_probs, *_ = preprocess_thd_engine(data["rollout_topk_log_probs"], pre_process=True, **thd_kwargs)
         if receipt is not None:
@@ -396,9 +405,18 @@ def score_centering_logits_processor(
     weight_fn = score_centering_weight_fn(
         rollout_correction.get("rollout_is", None), rollout_correction.get("rollout_is_threshold", 2.0)
     )
-    train_head_log_probs = topk_log_probs_from_logits(
-        student_logits.squeeze(0), topk_ids.squeeze(0), process_group=process_group
-    )
+    if student_topk_log_probs is None:
+        if student_logits is None:
+            raise ValueError("Either student_logits or student_topk_log_probs must be provided")
+        train_head_log_probs = topk_log_probs_from_logits(
+            student_logits.squeeze(0), topk_ids.squeeze(0), process_group=process_group
+        )
+    else:
+        if student_logits is not None:
+            raise ValueError("Provide either student_logits or student_topk_log_probs, not both")
+        if student_topk_log_probs.shape != topk_ids.shape:
+            raise ValueError("student_topk_log_probs must match the aligned rollout_topk_ids shape")
+        train_head_log_probs = student_topk_log_probs.squeeze(0)
     complete = support_complete.squeeze(0)
     correction, log_support_mass, sampler_head_mass, train_head_mass = score_centering_auto_correction(
         train_head_log_probs, topk_log_probs.squeeze(0), weight_fn, complete
@@ -421,10 +439,13 @@ def score_centering_ppo_loss(
     data: TensorDict = None,
     dp_group=None,
     student_logits: torch.Tensor = None,
+    student_topk_log_probs: torch.Tensor = None,
     data_format: str = "thd",
     quant_align_size: Optional[int] = None,
+    min_local_rows: Optional[int] = None,
     cp_layout: str = "zigzag",
     local_cp_size: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
 ):
     """Actor loss function used both for the logits processor and the final policy loss.
     - student_logits is not None, compute the centering term in the logits processor.
@@ -437,20 +458,23 @@ def score_centering_ppo_loss(
         dp_group: Data parallel group for ``ppo_loss``.
         student_logits: (1, nnz/sp, V).
         data_format: "thd" or "bshd". Only "thd" is supported.
-        quant_align_size, cp_layout, local_cp_size: how the Megatron engine packed the student inputs, see
-            ``score_centering_logits_processor``.
+        quant_align_size, pad_to_length_bucket, cp_layout, local_cp_size: how the Megatron engine packed
+            the student inputs, see ``score_centering_logits_processor``.
 
     Returns:
         student_logits is not None: dict from ``score_centering_logits_processor``.
         student_logits is None: the (loss, metrics) tuple from ``ppo_loss``.
     """
-    if student_logits is not None:
+    if student_logits is not None or student_topk_log_probs is not None:
         return score_centering_logits_processor(
             student_logits,
             data,
             config,
             data_format,
+            student_topk_log_probs=student_topk_log_probs,
             quant_align_size=quant_align_size,
+            min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
