@@ -17,6 +17,7 @@ import inspect
 import logging
 import math
 import os
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from typing import Literal
 
@@ -32,7 +33,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 ContextParallelLayout = Literal["zigzag", "contiguous"]
 
 
-def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.Tensor):
+def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.Tensor, batch_size: int | None = None):
     if not multi_modal_inputs:
         return None
 
@@ -54,7 +55,9 @@ def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.T
     grids = grids.tolist()
     type_rows = multi_modal_inputs["vision_token_types"].tolist()
     pixel_values = multi_modal_inputs["pixel_values"]
-    images = [[] for _ in range(input_ids.shape[0])]
+    # A packed THD stream has one row holding every sequence, so its `shape[0]` is not the
+    # batch size; the caller passes it explicitly there.
+    images = [[] for _ in range(input_ids.shape[0] if batch_size is None else batch_size)]
     grid_index = 0
     patch_start = 0
 
@@ -73,6 +76,11 @@ def build_deepseek_v41_image_inputs(multi_modal_inputs: dict, input_ids: torch.T
                 position += 1
             position += 1
 
+            # expand_image_tokens encodes the end-of-image type as 3.
+            if position > len(row) or row[position - 1] != 3:
+                raise ValueError(f"Unterminated image span in batch row {batch_index} at position {start}")
+            if grid_index >= len(grids):
+                raise ValueError(f"Missing image grid for span in batch row {batch_index} at position {start}")
             n_vit_h, n_vit_w = grids[grid_index]
             patch_end = patch_start + n_vit_h * n_vit_w
             images[batch_index].append(
@@ -120,7 +128,11 @@ def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
 
 
 def preprocess_packed_seqs(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding: bool = False
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pre_process: bool = True,
+    use_fp8_padding: bool = False,
+    quant_align_size: int | None = None,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
@@ -135,8 +147,12 @@ def preprocess_packed_seqs(
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
-    if use_fp8_padding:
-        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size)
+    # One contract: ``quant_align_size`` is the alignment the model's quantization needs (32 for
+    # mxfp8, 16 for nvfp4 and the other fp8 recipes). ``use_fp8_padding`` is the older boolean form
+    # and maps to the 16-element choice it always meant; new callers should pass the size.
+    _quant = quant_align_size if quant_align_size is not None else (16 if use_fp8_padding else None)
+    if _quant is not None:
+        per_seq_align, total_align = _compute_quant_thd_align_size(align_size, _quant)
         align_size = per_seq_align
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
@@ -147,7 +163,7 @@ def preprocess_packed_seqs(
     cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
 
-    if use_fp8_padding:
+    if _quant is not None:
         pad_size_last = (total_align - cu_seqlens_padded[-1] % total_align) % total_align
         cu_seqlens_padded[-1] += pad_size_last
         seqlens_in_batch_padded[-1] += pad_size_last
@@ -302,6 +318,7 @@ def preprocess_thd_engine(
     pre_process: bool = True,
     need_roll: bool = False,
     use_fp8_padding: bool = False,
+    quant_align_size: int | None = None,
     local_cp_size: int | None = None,
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
@@ -355,10 +372,14 @@ def preprocess_thd_engine(
         cp_size = cp_size * cp_chunk_count
     cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
     align_size = tp_size * cp_size * cp_layout_factor
+    # One contract: the alignment the model's quantization needs (32 for mxfp8, 16 for nvfp4
+    # and the other fp8 recipes). ``use_fp8_padding`` is the older boolean form and maps to
+    # the 16-element choice it always meant; new callers pass the size.
+    _quant_align = quant_align_size if quant_align_size is not None else (16 if use_fp8_padding else None)
     seqlens_in_batch = input_ids.offsets().diff()
 
-    if use_fp8_padding:
-        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size)
+    if _quant_align is not None:
+        per_seq_align, total_align = _compute_quant_thd_align_size(align_size, _quant_align)
         align_size = per_seq_align
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
@@ -371,7 +392,7 @@ def preprocess_thd_engine(
 
     preprocess_for_mindspeed(input_ids, cu_seqlens_padded, seqlens_in_batch_padded, batch_size)
 
-    if use_fp8_padding:
+    if _quant_align is not None:
         # Pad the last sequence so total length is divisible by total_align for TE
         pad_size_last = (total_align - cu_seqlens_padded[-1] % total_align) % total_align
         cu_seqlens_padded[-1] += pad_size_last
@@ -388,7 +409,7 @@ def preprocess_thd_engine(
         if pad_to_length_bucket <= 0:
             raise ValueError("pad_to_length_bucket must be a positive integer")
         total_alignment = math.lcm(pad_to_length_bucket, cp_size)
-        if use_fp8_padding:
+        if _quant_align is not None:
             total_alignment = math.lcm(total_alignment, total_align)
         pad_size_last = (-cu_seqlens_padded[-1]) % total_alignment
         cu_seqlens_padded[-1] += pad_size_last
@@ -468,7 +489,12 @@ def preprocess_thd_engine(
             pad_target = max(align_size, seqlen_padded_i)
             if d.shape[0] < pad_target:
                 original_size = d.shape[0]
-                pad = torch.zeros((pad_target - d.shape[0], *d.shape[1:]), dtype=d.dtype, device=d.device)
+                pad = torch.full(
+                    (pad_target - d.shape[0], *d.shape[1:]),
+                    0 if pad_value is None else pad_value,
+                    dtype=d.dtype,
+                    device=d.device,
+                )
                 d = torch.cat([d, pad], dim=0)
                 logger.warning_once(
                     f"Padding tensor for context parallel alignment, original_size={original_size}, "
@@ -756,6 +782,77 @@ def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
     return (~attn_mask).unsqueeze(1).contiguous()
 
 
+def get_bshd_padded_seqlen(max_seqlen: int, batch_size: int, use_fp8_padding: bool = False) -> int:
+    """Align the raw BSHD sequence length for TP, zigzag CP, and low-precision GEMMs."""
+    cp_size = mpu.get_context_parallel_world_size()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    # For CP (zigzag), sequence length must be divisible by (2 * cp_size).
+    # After zigzag-CP split each rank holds s/cp_size tokens, which must also be
+    # divisible by tp_size for sequence-parallel scatter.  Therefore the total
+    # sequence length must be divisible by tp_size * cp_size * 2.
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    if align_size > 1:
+        pad_size = (align_size - max_seqlen % align_size) % align_size
+        max_seqlen += pad_size
+    if use_fp8_padding:
+        # For FP8 block quantization, batch_size * max_seqlen / tp_size must be divisible by 128.
+        # With CP, local sequence length is max_seqlen / cp_size.
+        # We need:
+        # 1) max_seqlen aligned for SP/CP splitting.
+        # 2) batch_size * max_seqlen % (128 * tp_size * cp_size) == 0.
+        # Compute the required alignment for max_seqlen:
+        fp8_total_align = 128 * tp_size * cp_size
+        fp8_seq_align = fp8_total_align // math.gcd(batch_size, fp8_total_align)
+        # Also ensure SP and CP split alignment.
+        fp8_seq_align = math.lcm(fp8_seq_align, align_size)
+        max_seqlen = ((max_seqlen + fp8_seq_align - 1) // fp8_seq_align) * fp8_seq_align
+
+    return max_seqlen
+
+
+def get_thd_min_local_rows(config, local_cp_size: int | None = None, use_fused_kernels: bool = False) -> int | None:
+    """Return the CSA minimum used by the active model forward's THD packing path."""
+    if use_fused_kernels:
+        needs_csa_rows = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
+    else:
+        cp_size = local_cp_size if local_cp_size is not None else getattr(config, "context_parallel_size", 1)
+        needs_csa_rows = getattr(config, "dsv4_version", None) == "v4.1" and cp_size > 1
+    return config.csa_window_size if needs_csa_rows else None
+
+
+def get_thd_quant_align_size(config) -> int | None:
+    """Return the token alignment each packed THD sequence needs for the model's low-precision GEMMs.
+
+    ``None`` when the TransformerConfig trains without a low-precision recipe. The packing
+    helpers only take this number, so a new recipe needs a branch here, not a new parameter.
+    """
+    if getattr(config, "fp8", None) in ("e4m3", "hybrid"):
+        # Same recipe->alignment mapping megatron applies to its MoE fp8 padding
+        # (experts.py / token_dispatcher.py): 32 for mxfp8's 32-element scale blocks, 16 otherwise.
+        from megatron.core.fp8_utils import get_fp8_align_size
+
+        return get_fp8_align_size(getattr(config, "fp8_recipe", None))
+    if getattr(config, "fp4", None):
+        # Megatron-Core defaults fp4_recipe to "nvfp4".
+        fp4_recipe = getattr(config, "fp4_recipe", "nvfp4")
+        if getattr(fp4_recipe, "value", fp4_recipe) != "nvfp4":
+            raise ValueError(f"No THD padding is defined for fp4_recipe={fp4_recipe!r}")
+        # NVFP4 uses 16-element scale blocks
+        return 16
+    return None
+
+
+def _compute_quant_thd_align_size(align_size: int, quant_align_size: int) -> tuple[int, int]:
+    """Alignment for a packed THD sequence under a low-precision recipe.
+
+    Each sequence must be padded to a multiple of ``lcm(quant_align_size, align_size)`` and the
+    total padded length must be divisible by ``align_size * 128`` for TransformerEngine. This is
+    ``_compute_fp8_thd_align_size`` with the hard-coded 16 replaced by the recipe's block size
+    (32 for mxfp8, 16 for nvfp4 and the other fp8 recipes).
+    """
+    return math.lcm(quant_align_size, align_size), align_size * 128
+
+
 def preprocess_bshd_engine(
     input_ids: torch.Tensor,
     pre_process: bool = True,
@@ -1012,6 +1109,17 @@ def accepts_packed_thd_vlm_inputs(model) -> bool:
     )
 
 
+def check_full_stream_cp_layout(local_cp_size: int | None = None, cp_layout: str = "zigzag", **_unused) -> None:
+    """Reject CP layouts that a model sharding the full stream itself cannot reproduce.
+
+    Such models split each sequence with Megatron-Core's zigzag partition on the static CP group.
+    """
+    if local_cp_size is not None:
+        raise ValueError("GLM-5.3-Flash does not support dynamic context parallelism (local_cp_size).")
+    if mpu.get_context_parallel_world_size() > 1 and cp_layout != "zigzag":
+        raise ValueError(f"GLM-5.3-Flash supports only the zigzag context-parallel layout, got {cp_layout!r}.")
+
+
 def preprocess_vlm_thd_engine(
     model,
     input_ids: torch.Tensor,
@@ -1026,8 +1134,13 @@ def preprocess_vlm_thd_engine(
     ``input_ids_rmpad`` / ``packed_seq_params`` come from ``preprocess_thd_engine(input_ids,
     pre_process=True, **thd_kwargs)``. VLMs that take rank-local THD inputs get them as-is plus
     verl's ``(bsz, 4, j)`` text/t/h/w positions repacked to Bridge's ``(3, 1, T)`` t/h/w in the same
-    row layout; other VLMs get dense BSHD inputs that the model repacks itself.
+    row layout; VLMs that shard the full stream themselves (GLM-5.3-Flash) get the unsharded
+    stream; other VLMs get dense BSHD inputs that the model repacks itself.
     """
+    if takes_full_packed_thd_vlm_inputs(model):
+        check_full_stream_cp_layout(**thd_kwargs)
+        return preprocess_thd_full_stream(input_ids, packed_seq_params), None, None
+
     if accepts_packed_thd_vlm_inputs(model) and is_mrope_position_ids(position_ids):
         mrope_nested = torch.nested.nested_tensor_from_jagged(
             position_ids.values()[1:].transpose(0, 1).contiguous(), offsets=input_ids.offsets()
@@ -1072,3 +1185,64 @@ def build_vlm_attn_mask_bshd(
         attention_mask[i, :seqlen] = True
 
     return input_ids_bshd, attention_mask
+
+
+def takes_full_packed_thd_vlm_inputs(model) -> bool:
+    """Whether the Megatron-Bridge VLM takes the whole packed THD stream and shards it across CP ranks itself.
+
+    GLM-5.3-Flash inserts vision features into the full stream, then selects its context-parallel
+    shard with Megatron-Core's zigzag partition. It takes a ``[1, total_tokens]`` stream, no
+    attention mask and full-stream labels.
+    """
+    from verl.utils.megatron_utils import unwrap_model
+
+    try:
+        from megatron.bridge.models.glm5next.glm53flash_bridge import GLM53FlashModel
+    except ImportError:
+        return False
+    return isinstance(unwrap_model(model), GLM53FlashModel)
+
+
+def preprocess_thd_full_stream(
+    values: torch.Tensor, packed_seq_params: PackedSeqParams, need_roll: bool = False
+) -> torch.Tensor:
+    """Place each nested sequence at its padded offset in one ``[1, total_tokens]`` row, without CP sharding.
+
+    The layout matches the ``packed_seq_params`` that ``preprocess_thd_engine`` returns. With
+    ``need_roll``, the stream shifts by one token, as ``preprocess_thd_engine`` does without CP.
+    """
+    cu_seqlens_padded = packed_seq_params.cu_seqlens_q_padded.tolist()
+    offsets = values.offsets().tolist()
+    flat = values.values()
+    stream = flat.new_zeros((cu_seqlens_padded[-1], *flat.shape[1:]))
+    for start, begin, end in zip(cu_seqlens_padded[:-1], offsets[:-1], offsets[1:], strict=True):
+        stream[start : start + end - begin] = flat[begin:end]
+    if need_roll:
+        stream = torch.roll(stream, shifts=-1, dims=0)
+    return stream.unsqueeze(0)
+
+
+@contextmanager
+def language_model_forward_kwargs(model, **kwargs):
+    """Add keyword arguments to a VLM wrapper's inner language-model forward for the duration of one call.
+
+    Megatron-Bridge wrappers such as GLM-5.3-Flash pass only Megatron-Core's own arguments to
+    ``language_model.forward``. verl hands its output processor and MTP choice to the inner model this way.
+    """
+    from verl.utils.megatron_utils import unwrap_model
+
+    language_model = unwrap_model(model).language_model
+    instance_forward = vars(language_model).get("forward")
+    forward = language_model.forward
+
+    def forward_with_kwargs(*args, **call_kwargs):
+        return forward(*args, **{**call_kwargs, **kwargs})
+
+    language_model.forward = forward_with_kwargs
+    try:
+        yield
+    finally:
+        if instance_forward is None:
+            del language_model.forward
+        else:
+            language_model.forward = instance_forward

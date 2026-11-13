@@ -26,7 +26,7 @@ that plays two roles:
 
 ``TeacherTopKDump`` satisfies both: the processor call computes the top-k, the loss
 call returns a zero loss so the dump run does not need a real objective. The engine
-keys the processor call off the batch's non-tensor ``distillation_use_topk`` flag.
+keys the processor call off the batch's non-tensor ``needs_vocab_logits`` flag.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def dump_consistency_stats(model_output, input_ids) -> dict:
     # Next-token targets; the last position of every sequence predicts nothing.
     true_next = torch.roll(in_v, shifts=-1)
     if getattr(input_ids, "is_nested", False):
-        bounds = (input_ids.offsets()[1:-1] - 1).to(in_v.device)
+        bounds = (input_ids.offsets()[1:] - 1).to(in_v.device)
     else:
         seq = input_ids.shape[1]
         bounds = torch.arange(seq - 1, in_v.numel(), seq, device=in_v.device)
@@ -110,7 +110,7 @@ def capture_dump_tensors(model_output, input_ids) -> dict:
     if DUMP_IDS_KEY not in model_output or DUMP_LOGPROBS_KEY not in model_output:
         raise KeyError(
             f"capture_dump_tensors needs {DUMP_IDS_KEY!r} and {DUMP_LOGPROBS_KEY!r}; "
-            "the batch must carry distillation_use_topk=True"
+            "the batch must carry needs_vocab_logits=True (distillation_use_topk also requires a teacher payload)"
         )
     nested = getattr(input_ids, "is_nested", False)
     # Save a nested tensor as values + offsets rather than the nested object itself:
@@ -166,7 +166,8 @@ class TeacherTopKDump:
             if key not in model_output:
                 raise KeyError(
                     f"teacher dump expected {key!r} in the model output — the batch must carry "
-                    "the non-tensor flag distillation_use_topk=True"
+                    "the non-tensor flag needs_vocab_logits=True "
+                    "(distillation_use_topk also requires a teacher payload)"
                 )
         device = model_output[DUMP_LOGPROBS_KEY].device
         return torch.zeros((), device=device), {"teacher_topk_dumped": float(self.calls)}

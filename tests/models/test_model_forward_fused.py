@@ -31,6 +31,13 @@ def _new_uninitialized_model(model_cls=GPTModel):
     return model
 
 
+def _skip_without_hybrid_hook():
+    if mff.HybridModel is None:
+        pytest.skip("Megatron does not provide HybridModel.")
+    if not mff._supports_output_processor_hook(_new_uninitialized_model(mff.HybridModel)):
+        pytest.skip("Installed HybridModel has no output-processor hook.")
+
+
 def test_mcore_gpt_forward_has_native_output_processor_contract():
     parameters = inspect.signature(GPTModel.forward).parameters
     assert {"output_processor", "output_processor_context"}.issubset(parameters)
@@ -50,11 +57,8 @@ def test_engine_registry_uses_supported_model_layout(monkeypatch, architecture, 
     assert registry.get_mcore_engine_forward_fn(config)()["vision_model"] is vision_model
 
 
-@pytest.mark.parametrize("model_cls", [GPTModel, mff.HybridModel])
-def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch, model_cls):
-    if model_cls is None:
-        pytest.skip("Megatron does not provide HybridModel.")
-    model = _new_uninitialized_model(model_cls)
+def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch):
+    model = _new_uninitialized_model()
     original_forward = model.forward.__func__
     signature_calls = 0
     original_signature = inspect.signature
@@ -78,14 +82,78 @@ def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch, 
     assert not hasattr(model, "forward_backup")
 
 
-@pytest.mark.parametrize("model_cls", [GPTModel, mff.HybridModel])
-def test_vlm_patching_target_preserves_wrapper_hook(model_cls):
-    if model_cls is None:
-        pytest.skip("Megatron does not provide HybridModel.")
+def test_hybrid_wrapper_without_hook_uses_its_language_model_hook():
+    """GLM-5.3-Flash: the wrapper forwards only Megatron-Core args, so the hook goes to its inner HybridModel."""
+    _skip_without_hybrid_hook()
     wrapper = torch.nn.Module()
-    wrapper.language_model = _new_uninitialized_model(model_cls)
-    expected = wrapper if model_cls is mff.HybridModel else wrapper.language_model
-    assert mff._get_patching_model(wrapper) is expected
+    wrapper.language_model = _new_uninitialized_model(mff.HybridModel)
+
+    assert mff.patch_fused_forward(wrapper) is True
+    mff.unpatch_fused_forward(wrapper)
+
+    assert getattr(wrapper, mff._FUSED_FORWARD_MODE_ATTR) == mff._LANGUAGE_MODEL_HOOK_MODE
+    assert not hasattr(wrapper, "forward_backup")
+    assert "forward" not in vars(wrapper)
+
+
+def test_engine_hands_hook_and_mtp_choice_to_language_model_of_full_stream_vlm(monkeypatch):
+    input_ids = torch.tensor([[1, 2, 3]])
+    labels = torch.tensor([[2, 3, 4]])
+    full_ids = torch.tensor([[1, 2, 3, 0]])
+    full_labels = torch.tensor([[2, 3, 0, 1]])
+    full_stream_calls = []
+
+    monkeypatch.setattr(mff, "preprocess_thd_engine", lambda value, **kwargs: (value, "packed", None))
+    monkeypatch.setattr(mff, "takes_full_packed_thd_vlm_inputs", lambda model: True)
+    monkeypatch.setattr(
+        mff,
+        "preprocess_vlm_thd_engine",
+        lambda model, ids, rmpad, params, position_ids, pad, **kw: (full_ids, None, None),
+    )
+
+    def fake_full_stream(values, packed_seq_params, need_roll=False):
+        full_stream_calls.append((values, packed_seq_params, need_roll))
+        return full_labels
+
+    monkeypatch.setattr(mff, "preprocess_thd_full_stream", fake_full_stream)
+
+    class LanguageModel:
+        def __init__(self):
+            self.calls = []
+
+        def forward(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(log_probs=torch.tensor([1.0]), entropy=torch.tensor([2.0]))
+
+    class Wrapper:
+        pre_process = True
+        post_process = False
+        config = SimpleNamespace(fp8=None)
+
+        def __init__(self):
+            self.language_model = LanguageModel()
+            self.calls = []
+            setattr(self, mff._FUSED_FORWARD_MODE_ATTR, mff._LANGUAGE_MODEL_HOOK_MODE)
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return self.language_model.forward(input_ids=kwargs["input_ids"], labels=kwargs["labels"])
+
+    model = Wrapper()
+    output = mff.fused_forward_model_engine(vision_model=True)(model, input_ids, labels, {}, 0.7, True, 0)
+
+    assert output.log_probs.tolist() == [1.0]
+    wrapper_kwargs = model.calls[-1]
+    assert wrapper_kwargs["input_ids"] is full_ids
+    assert wrapper_kwargs["labels"] is full_labels
+    assert wrapper_kwargs["attention_mask"] is None
+    assert not {"output_processor", "output_processor_context", "temperature"} & set(wrapper_kwargs)
+    assert full_stream_calls == [(labels, "packed", True)]
+    language_model_kwargs = model.language_model.calls[-1]
+    assert language_model_kwargs["output_processor"] is mff.fused_output_processor
+    assert language_model_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
+    assert language_model_kwargs["compute_mtp_loss"] is False
+    assert "forward" not in vars(model.language_model)
 
 
 def test_legacy_fallback_patch_and_unpatch_are_idempotent():
@@ -144,6 +212,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
             return SimpleNamespace(log_probs=torch.tensor([1.0]), entropy=torch.tensor([2.0]))
 
     hook_model = Model(mff._HOOK_MODE)
+    setattr(hook_model, mff._FUSED_IMPL_BACKEND_ATTR, "liger")
     output = mff.fused_forward_model_engine()(hook_model, input_ids, labels, {}, 0.7, True, 0, "dualpipev")
 
     hook_kwargs = hook_model.calls[-1]
@@ -151,10 +220,11 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     assert "temperature" not in hook_kwargs
     assert hook_kwargs["output_processor"] is mff.fused_output_processor
     assert hook_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
+    assert hook_kwargs["output_processor_context"].impl_backend == "liger"
     assert preprocess_calls == [
         {
             "pre_process": True,
-            "use_fp8_padding": True,
+            "quant_align_size": 16,
             "min_local_rows": 64,
             "pad_to_length_bucket": None,
             "cp_layout": "dualpipev",
@@ -163,7 +233,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
         {
             "pre_process": True,
             "need_roll": True,
-            "use_fp8_padding": True,
+            "quant_align_size": 16,
             "min_local_rows": 64,
             "pad_to_length_bucket": None,
             "cp_layout": "dualpipev",
@@ -172,9 +242,11 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     ]
 
     legacy_model = Model(mff._LEGACY_MODE)
+    setattr(legacy_model, mff._FUSED_IMPL_BACKEND_ATTR, "liger")
     mff.fused_forward_model_engine()(legacy_model, input_ids, labels, {}, 0.5, True, 0)
     legacy_kwargs = legacy_model.calls[-1]
     assert legacy_kwargs["temperature"] == pytest.approx(0.5)
+    assert legacy_kwargs["impl_backend"] == "liger"
     assert "output_processor" not in legacy_kwargs
     assert "output_processor_context" not in legacy_kwargs
 
@@ -195,6 +267,7 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
     model = _new_uninitialized_model()
     model.config = SimpleNamespace(
         fine_grained_activation_offloading=False,
+        freeze_base_model_for_mtp=False,
         cuda_graph_impl="none",
         moe_paged_stash=False,
         mtp_num_layers=0,
@@ -228,7 +301,7 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
 
     seen = {}
 
-    def fake_linear_cross_entropy(hidden, weight, labels, temperature, reduction, group):
+    def fake_linear_cross_entropy(hidden, weight, labels, temperature, reduction, group, **options):
         seen.update(
             hidden=hidden,
             weight=weight,
@@ -236,6 +309,7 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
             temperature=temperature,
             reduction=reduction,
             group=group,
+            options=options,
         )
         return torch.ones(2), torch.ones(2) * 2
 
@@ -250,7 +324,10 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
         attention_mask=None,
         labels=torch.tensor([1, 2]),
         output_processor=mff.fused_output_processor,
-        output_processor_context=mff.FusedOutputProcessorContext(temperature=0.7),
+        output_processor_context=mff.FusedOutputProcessorContext(
+            temperature=0.7,
+            impl_backend="liger",
+        ),
         fp32_output=False,
     )
 
@@ -260,6 +337,7 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
     assert output.entropy.tolist() == [2.0, 2.0]
     assert seen["temperature"] == pytest.approx(0.7)
     assert seen["weight"] is model.output_layer.weight
+    assert seen["options"] == {"impl_backend": "liger"}
 
 
 def test_output_processor_preserves_config_logger_payload(monkeypatch):
@@ -315,10 +393,20 @@ def test_output_processor_preserves_config_logger_payload(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("sequence_parallel", "use_tied_weight"),
-    [(True, True), (False, False)],
+    ("sequence_parallel", "use_tied_weight", "impl_backend", "tensor_parallel_output_grad"),
+    [
+        (True, True, "liger", False),
+        (True, False, "triton", True),
+        (False, False, "liger", None),
+    ],
 )
-def test_output_processor_gathers_before_kernel_and_resolves_weight(monkeypatch, sequence_parallel, use_tied_weight):
+def test_output_processor_gathers_before_kernel_and_resolves_weight(
+    monkeypatch,
+    sequence_parallel,
+    use_tied_weight,
+    impl_backend,
+    tensor_parallel_output_grad,
+):
     hidden_states = torch.tensor([[1.0]])
     gathered_hidden_states = torch.tensor([[3.0]])
     tied_weight = torch.tensor([[5.0]])
@@ -327,14 +415,21 @@ def test_output_processor_gathers_before_kernel_and_resolves_weight(monkeypatch,
     events = []
     seen = {}
 
-    def fake_gather(value):
+    def fake_gather(value, **kwargs):
         events.append("gather")
         assert value is hidden_states
+        assert kwargs == {"tensor_parallel_output_grad": tensor_parallel_output_grad}
         return gathered_hidden_states
 
-    def fake_linear_cross_entropy(hidden, weight, labels_arg, temperature, reduction, group):
+    def fake_linear_cross_entropy(hidden, weight, labels_arg, temperature, reduction, group, **options):
         events.append("linear_cross_entropy")
-        seen.update(hidden=hidden, weight=weight, labels=labels_arg, temperature=temperature)
+        seen.update(
+            hidden=hidden,
+            weight=weight,
+            labels=labels_arg,
+            temperature=temperature,
+            options=options,
+        )
         return torch.tensor([11.0]), torch.tensor([13.0])
 
     monkeypatch.setattr(mff, "gather_from_sequence_parallel_region", fake_gather)
@@ -347,7 +442,10 @@ def test_output_processor_gathers_before_kernel_and_resolves_weight(monkeypatch,
         output_layer=SimpleNamespace(weight=output_layer_weight),
         output_weight=output_weight,
         labels=labels,
-        context=mff.FusedOutputProcessorContext(temperature=0.9),
+        context=mff.FusedOutputProcessorContext(
+            temperature=0.9,
+            impl_backend=impl_backend,
+        ),
         config=SimpleNamespace(sequence_parallel=sequence_parallel),
     )
 
@@ -358,5 +456,6 @@ def test_output_processor_gathers_before_kernel_and_resolves_weight(monkeypatch,
     assert seen["weight"] is expected_weight
     assert seen["labels"] is labels
     assert seen["temperature"] == pytest.approx(0.9)
+    assert seen["options"] == {"impl_backend": impl_backend}
     assert output.log_probs.tolist() == [11.0]
     assert output.entropy.tolist() == [13.0]

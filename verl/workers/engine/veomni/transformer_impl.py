@@ -225,6 +225,7 @@ class VeOmniEngine(FSDPEngine):
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
         self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
+        self._rollout_weight_quantizer = None
 
     def initialize(self):
         """
@@ -273,7 +274,7 @@ class VeOmniEngine(FSDPEngine):
             processing_class=self.model_config.get_processor(),
             checkpoint_config=self.checkpoint_config,
             trust_remote_code=self.model_config.trust_remote_code,
-            per_tensor_param_fn=self.get_per_tensor_param,
+            per_tensor_param_fn=self._get_hf_export_per_tensor_param,
             hf_export_dtype=hf_export_dtype,
         )
 
@@ -287,13 +288,21 @@ class VeOmniEngine(FSDPEngine):
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
 
     def _build_optimizer(self, module):
-        optimizer = build_optimizer(
-            module,
-            lr=self.optimizer_config.lr,
-            betas=self.optimizer_config.betas,
-            weight_decay=self.optimizer_config.weight_decay,
-            optimizer_type=self.optimizer_config.optimizer,
-        )
+        optim_config = self.optimizer_config
+        # override_optimizer_config wins over the base arguments, as in the FSDP engine's builder.
+        optimizer_kwargs = {
+            "lr": optim_config.lr,
+            "betas": optim_config.betas,
+            "weight_decay": optim_config.weight_decay,
+            "optimizer_type": optim_config.optimizer,
+            **(optim_config.override_optimizer_config or {}),
+        }
+        if self.engine_config.enable_fsdp_offload:
+            # FSDP2 CPU offload keeps the sharded parameters, gradients and optimizer states on the
+            # host, where foreach AdamW materializes a temporary as large as the local fp32
+            # parameters at every step; the fused CPU kernel computes the same update in place.
+            optimizer_kwargs.setdefault("fused", True)
+        optimizer = build_optimizer(module, **optimizer_kwargs)
         get_optimizer_pre_hook = getattr(module, "get_optimizer_pre_hook", None)
         if get_optimizer_pre_hook is not None:
             optimizer_pre_hook = get_optimizer_pre_hook(module, module.config, self.data_parallel_mode)
@@ -306,7 +315,7 @@ class VeOmniEngine(FSDPEngine):
         lr_scheduler = build_lr_scheduler(
             optimizer,
             train_steps=optim_config.total_training_steps,
-            lr=optim_config.lr,
+            lr=(optim_config.override_optimizer_config or {}).get("lr", optim_config.lr),
             lr_min=optim_config.lr_min,
             lr_decay_style=optim_config.lr_scheduler_type,
             lr_decay_ratio=optim_config.lr_decay_ratio,
@@ -375,6 +384,7 @@ class VeOmniEngine(FSDPEngine):
             weights_path=self.model_config.local_path,
             enable_reshard_after_forward=self.engine_config.enable_full_shard,
             mixed_precision=veomni_mixed_precision_config,
+            low_precision_reduce_scatter_comm=self.engine_config.low_precision_reduce_scatter_comm,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
@@ -382,7 +392,8 @@ class VeOmniEngine(FSDPEngine):
             ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
-            broadcast_model_weights_from_rank0=True,
+            broadcast_model_weights_from_rank0=self.engine_config.broadcast_model_weights_from_rank0,
+            ep_sharded_stream_load=self.engine_config.ep_sharded_stream_load,
             fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
@@ -642,6 +653,11 @@ class VeOmniEngine(FSDPEngine):
     # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
+        per_tensor_param, peft_config = self._get_hf_export_per_tensor_param()
+        return self._quantize_for_rollout(per_tensor_param), peft_config
+
+    def _get_hf_export_per_tensor_param(self):
+        """Full HF-format weights without the rollout weight quantizer: the checkpoint 'hf_model' export."""
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
         # per-DTensor .to(device).full_tensor() in param_generator() below stages each
@@ -691,6 +707,16 @@ class VeOmniEngine(FSDPEngine):
 
         # TODO: support VeOmni LoRA
         return param_generator(), None
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
+
+    def _quantize_for_rollout(self, per_tensor_param):
+        # A converter that exports the checkpoint's own quantized layout (DeepSeek-V4's FP8 / FP4
+        # experts) meets a pass-through quantizer for that model type, as with Megatron-Bridge.
+        if self._rollout_weight_quantizer is None:
+            return per_tensor_param
+        return self._rollout_weight_quantizer(per_tensor_param)
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

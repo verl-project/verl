@@ -47,6 +47,16 @@ def test_single_rank_matches_log_softmax(k):
     torch.testing.assert_close(got_lp, want_lp, rtol=0, atol=1e-6)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_low_precision_logits_use_float32_normalizer(dtype):
+    generator = torch.Generator().manual_seed(1729)
+    logits = (torch.randn(1, 16, 64, generator=generator) * 0.15).to(dtype)
+    got_lp, got_ids = topk_logprobs_from_logits(logits, 6)
+    expected = logits.float().log_softmax(-1).gather(-1, got_ids)
+    assert got_lp.dtype == torch.float32
+    torch.testing.assert_close(got_lp, expected, rtol=0, atol=1e-6)
+
+
 def test_ids_are_global_not_local():
     """A two-shard merge must offset the second shard's ids by the shard width."""
     torch.manual_seed(1)

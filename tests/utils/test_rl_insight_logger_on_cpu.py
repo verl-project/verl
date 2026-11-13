@@ -40,6 +40,8 @@ def _reset_rl_insight_logger():
 def mock_rl_insight(monkeypatch):
     module = MagicMock()
     module.metric_gauge = MagicMock()
+    # Released 0.3.0 has no metric_log. MagicMock would otherwise invent one.
+    module.metric_log = None
 
     @contextmanager
     def _trace_state(*args, **kwargs):
@@ -99,6 +101,69 @@ def test_log_lazy_inits_and_writes_gauge(monkeypatch, mock_rl_insight):
     mock_rl_insight.init.assert_called_once_with()
     mock_rl_insight.metric_gauge.assert_called_once_with("reward_mean", 1.25)
     assert RLInsightLogger._init_done is True
+
+
+def test_log_uses_metric_log_with_step_when_available(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    mock_rl_insight.metric_log = MagicMock()
+
+    RLInsightLogger.log({"actor/pg_loss": 0.12, "bad": object()}, step=100)
+
+    mock_rl_insight.metric_log.assert_called_once_with("actor/pg_loss", 0.12, step=100)
+    mock_rl_insight.metric_gauge.assert_not_called()
+
+
+def test_trace_state_decorator_resolves_callable_lane(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+
+    class Worker:
+        rank = 2
+
+        @RLInsightLogger.trace_state_decorator("update_weight", state_lane_id=lambda self: f"rank_{self.rank}")
+        async def update_weights(self):
+            return "ok"
+
+    assert asyncio.run(Worker().update_weights()) == "ok"
+    mock_rl_insight.trace_state.assert_called_once_with("update_weight", state_lane_id="rank_2")
+
+
+def test_trace_state_decorator_passes_literal_lane(monkeypatch, mock_rl_insight):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+
+    class Server:
+        @RLInsightLogger.trace_state_decorator("sleep", state_lane_id="actor_0")
+        async def sleep(self):
+            return None
+
+    asyncio.run(Server().sleep())
+    mock_rl_insight.trace_state.assert_called_once_with("sleep", state_lane_id="actor_0")
+
+
+def test_trace_state_decorator_skips_trace_when_disabled(monkeypatch, mock_rl_insight):
+    monkeypatch.delenv(RLInsightLogger.ENABLE_ENV, raising=False)
+    lane_called = False
+
+    def lane_id(self):
+        nonlocal lane_called
+        lane_called = True
+        return "actor_0"
+
+    class Server:
+        @RLInsightLogger.trace_state_decorator("wake_up", state_lane_id=lane_id)
+        async def wake_up(self):
+            return "ok"
+
+    assert asyncio.run(Server().wake_up()) == "ok"
+    assert lane_called is False
+    mock_rl_insight.trace_state.assert_not_called()
+
+
+def test_trace_state_decorator_rejects_sync_method():
+    with pytest.raises(TypeError, match="async methods"):
+
+        @RLInsightLogger.trace_state_decorator("sleep")
+        def sleep(self):
+            return None
 
 
 def test_trace_state_lazy_inits_once_under_concurrent_async_tasks(monkeypatch, mock_rl_insight):

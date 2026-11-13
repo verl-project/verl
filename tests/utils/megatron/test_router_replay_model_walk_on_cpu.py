@@ -82,7 +82,7 @@ def _routers(model):
 @pytest.fixture
 def orphans_then_model():
     """Register routers that never make it into the model, then build the model — the registration
-    order an mbridge prebuild produces."""
+    order a preliminary model build can produce."""
     RouterReplay.router_instances.clear()
     orphans = [RouterReplay() for _ in range(NUM_LAYERS)]
     model = _build_model()
@@ -115,12 +115,8 @@ def test_targets_are_written_to_the_forwarded_models_own_routers(orphans_then_mo
 
 
 def test_block_indexed_routes_match_moe_ordinal_for_hybrid_model(monkeypatch):
-    """R3 on a hybrid model (e.g. GLM-5.3) captures one vLLM route per HF *block*,
-    indexed by block id, while Megatron expands each block into an attention +
-    FFN *module* pair (``num_layers == 2 * num_hidden_layers``). Dense blocks
-    produce zero rows the routers never read. The replay must map each FFN
-    module to its owning block, not to its MoE-ordinal (which is shifted by the
-    dense prefix)."""
+    """GLM-5.3: vLLM captures one route row per HF block, Megatron runs an attention + FFN
+    module pair per block. Each MoE module must read its owning block's row."""
     monkeypatch.setattr(router_replay_utils, "device_name", "cpu")
     monkeypatch.setattr(router_replay_utils, "preprocess_packed_seqs", lambda x, mask, **kwargs: (x, None))
     monkeypatch.setattr(router_replay_utils, "scatter_to_sequence_parallel_region", lambda x: x)

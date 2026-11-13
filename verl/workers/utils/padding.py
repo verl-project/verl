@@ -64,7 +64,13 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         else:  # (4, seq_len)
             valid_ids = curr_pos_ids[:, curr_mask]
         position_ids_list.append(valid_ids)
-    position_ids_nested = torch.nested.as_nested_tensor(position_ids_list, layout=torch.jagged)
+    # Pack along the token axis explicitly: equal-length mRoPE samples can make
+    # as_nested_tensor infer the component axis as the jagged dimension instead.
+    position_ids_nested = torch.nested.nested_tensor_from_jagged(
+        torch.cat(position_ids_list, dim=-1),
+        offsets=cu_seqlens,
+        jagged_dim=position_ids.dim() - 1,
+    )
 
     data["input_ids"] = input_ids_nested
     data["position_ids"] = position_ids_nested

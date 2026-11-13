@@ -126,7 +126,21 @@ class VLLMHijack:
         def do_hijack(target_cls, target_method_name, hooking_method):
             setattr(target_cls, target_method_name, hooking_method)
 
-        do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
+        try:
+            from vllm.lora.worker_manager import WorkerLoRAManager as _WLM
+        except ImportError:
+            _WLM = None
+        _owner = None
+        for _c in (LRUCacheWorkerLoRAManager, _WLM):
+            if _c is not None and hasattr(_c, "_load_adapter"):
+                _owner = _c
+                break
+        if _owner is None:
+            raise RuntimeError(
+                "Cannot hijack vLLM LoRA loading: neither LRUCacheWorkerLoRAManager nor WorkerLoRAManager "
+                "provides _load_adapter."
+            )
+        do_hijack(_owner, "_load_adapter", hijack__load_adapter)
 
 
 def is_version_ge(pkg: str = "vllm", minver: str = "0.7.3"):
@@ -189,17 +203,17 @@ def _inner_load_weights_is_strict(model) -> str | None:
     if cached is not None:
         return None if cached is _STRICT_PREFIX_MISS else cached
 
-    deeper = getattr(model, "model", None) or getattr(model, "language_model", None)
+    load_fn = getattr(model, "load_weights", None)
+    code = getattr(getattr(load_fn, "__func__", load_fn), "__code__", None)
     result: str | None = None
-    if deeper is not None and deeper is not model:
-        load_fn = getattr(deeper, "load_weights", None)
-        code = getattr(getattr(load_fn, "__func__", load_fn), "__code__", None)
-        if code is not None and "AutoWeightsLoader" not in code.co_names:
-            result = ""  # this level is strict, prefix is the path to here
-        else:
+    if code is not None and "AutoWeightsLoader" not in code.co_names:
+        result = ""
+    else:
+        attr = "model" if getattr(model, "model", None) is not None else "language_model"
+        deeper = getattr(model, attr, None)
+        if deeper is not None and deeper is not model:
             inner_prefix = _inner_load_weights_is_strict(deeper)
             if inner_prefix is not None:
-                attr = "model" if getattr(model, "model", None) is deeper else "language_model"
                 result = attr + "." + inner_prefix
     _inner_load_weights_is_strict_cache[cls] = result if result is not None else _STRICT_PREFIX_MISS
     return result
@@ -228,7 +242,9 @@ def _name_reaches_strict_loader(model, name: str) -> bool:
     return live.startswith(prefix)
 
 
-def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
+def resolve_weight_name(
+    model, name: str, model_weight_names: set[str], *, routed_expert_prefixes: set[str] | None = None
+) -> str:
     """Reconcile an incoming weight-sync name with the live vLLM namespace.
 
     Toggles one ``.base_layer`` segment: STRIP for flat loaders (Llama/Qwen3.5)
@@ -242,6 +258,11 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
     packed = getattr(model, "packed_modules_mapping", None) or {}
     leaf = name.rsplit(".", 1)[-1]
     is_leaf = leaf in {"weight", "bias"} or leaf.endswith(("_weight", "_bias"))
+
+    def _has_routed_experts(prefix: str) -> bool:
+        if routed_expert_prefixes is not None:
+            return prefix in routed_expert_prefixes
+        return any(f"{prefix}base_layer." in n for n in model_weight_names)
 
     def _exists(candidate: str) -> bool:
         # Bridge names are HF-style; the live namespace carries a ``model.``

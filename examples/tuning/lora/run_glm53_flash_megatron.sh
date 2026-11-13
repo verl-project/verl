@@ -9,6 +9,14 @@
 # both FP8/BF16-compatible weights. Use that original checkpoint for both
 # modes; BF16 disables vLLM quantization at runtime without rewriting config.
 #
+# The frozen megatron extra pins Megatron-Bridge 0.6.2, which lacks GLM53FlashModel.
+# On every node, activate the same GPU environment used by Ray, with the matching
+# Megatron-Core installed (Bridge's 3rdparty/Megatron-LM at 902feb8eea).
+#   uv pip install --python "$(command -v python3)" --no-deps --reinstall \
+#     'git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@58382ddf9201475cf63c4aad535620b958ba55aa'
+#   python3 -c 'from megatron.bridge.models.glm5next.glm53flash_bridge import GLM53FlashModel'
+# Use that environment on the driver and Ray workers when launching from the verl checkout.
+#   VERL_USE_UV=0 bash examples/tuning/lora/run_glm53_flash_megatron.sh
 # Megatron-Bridge must be installed and importable on every node.
 #
 # Knobs:
@@ -35,6 +43,8 @@ if [ "${USE_FP8}" = 1 ]; then
     # Transformer Engine import; TE applies it to input, weight, and gradient
     # block quantizers consistently.
     export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
+    ACTOR_TP=${ACTOR_TP:-4}
+    REF_TP=${REF_TP:-4}
 fi
 LORA_MERGE=${LORA_MERGE:-False}
 LORA_DTYPE=${LORA_DTYPE:-bf16}
@@ -55,8 +65,8 @@ LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-0}
 CLIP_GRAD=${CLIP_GRAD:-1.0}
 OPTIMIZER_OFFLOAD_FRACTION=${OPTIMIZER_OFFLOAD_FRACTION:-1}
 
-# TP=4 keeps the 64-output beta projection aligned to FP8 GEMM's 16-column
-# minimum; safe for both BF16 and FP8.
+# BF16 defaults to TP=8; FP8 defaults to TP=4 to keep the 64-output beta
+# projection aligned to FP8 GEMM's 16-column minimum.
 ACTOR_TP=${ACTOR_TP:-8}
 ACTOR_PP=${ACTOR_PP:-1}
 ACTOR_VPP=${ACTOR_VPP:-null}
@@ -77,11 +87,7 @@ ROLLOUT_PP=${ROLLOUT_PP:-1}
 ROLLOUT_DCP=${ROLLOUT_DCP:-1}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.35}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-$((1024 * 10))}
-if [ "${USE_FP8}" = 1 ]; then
-    ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
-else
-    ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-auto}
-fi
+ROLLOUT_KV_CACHE_DTYPE=${ROLLOUT_KV_CACHE_DTYPE:-fp8}
 ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-4096}
 ROUTER_REPLAY_MODE=${ROUTER_REPLAY_MODE:-R3}
 
@@ -130,7 +136,7 @@ DATA=(
     data.train_batch_size=${TRAIN_BATCH_SIZE}
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
-    +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-False} \
+    +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING:-False}
 )
 
 MODEL=(
@@ -183,6 +189,7 @@ ACTOR=(
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.mtp_num_layers=0
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_bias_update_rate=0.0
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_shared_expert_overlap=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
@@ -203,7 +210,7 @@ CP_ARGS=()
 if [ "${ACTOR_CP}" -gt 1 ]; then
     CP_ARGS=(
         ++actor_rollout_ref.actor.megatron.override_transformer_config.sequence_packing_scheduler=dp_balanced
-        ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank=$(((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH) / ACTOR_CP))
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank=$(((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ACTOR_CP - 1) / ACTOR_CP))
     )
 fi
 
@@ -282,27 +289,27 @@ EXTRA=(
 
 # FP8 hybrid blockwise training + FP8 rollout. When USE_FP8=1 the actor forward
 # uses E4M3 / backward E5M2 blockwise quantization, and the vLLM rollout runs in
-# FP8 with FP8 KV cache. kda_disable_fp8 and mla_proj_disable_quantization keep the
-# KDA and MLA attention paths in BF16 for numerical stability. The TE backward
+# FP8 with FP8 KV cache. kda_disable_fp8 and mla_proj_use_quantization=False keep
+# the KDA and MLA attention paths in BF16 for numerical stability. The TE backward
 # amax_epsilon=1e-12 fix (in Megatron-LM fp8_utils.py) is required to avoid NaN
-# grad_norm from all-zero gradient blocks. TP is forced to 4 to keep the
-# 64-output beta projection aligned to FP8 GEMM's 16-column minimum.
+# grad_norm from all-zero gradient blocks. TP defaults to 4 to keep the
+# 64-output beta projection aligned to FP8 GEMM's 16-column minimum. The FP8
+# rollout follows the checkpoint's own quantization_config (modules_to_not_convert
+# included), so it needs no rollout.quantization override.
 if [ "${USE_FP8}" = 1 ]; then
-    ACTOR_TP=4
-    REF_TP=4
     ACTOR+=(
         +actor_rollout_ref.actor.megatron.override_transformer_config.fp8=hybrid
         +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=blockwise
         +actor_rollout_ref.actor.megatron.override_transformer_config.kda_disable_fp8=True
-        +actor_rollout_ref.actor.megatron.override_transformer_config.mla_proj_disable_quantization=True
+        +actor_rollout_ref.actor.megatron.override_transformer_config.mla_proj_use_quantization=False
         +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
         +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
         +actor_rollout_ref.actor.optim.override_optimizer_config.fp8_recipe=blockwise
     )
-    ROLLOUT+=(+actor_rollout_ref.rollout.quantization=fp8)
 else
     # Keep the official checkpoint config on disk, but force a true BF16
-    # rollout instead of letting vLLM auto-detect its FP8 metadata.
+    # rollout instead of letting vLLM auto-detect its FP8 metadata. The trainer
+    # reads the same override and syncs BF16 weights.
     ROLLOUT+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config=null)
 fi
 # enforce_eager stays False for both modes (cudagraph auto-enables for Glm5Next).

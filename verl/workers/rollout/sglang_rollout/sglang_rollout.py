@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+from contextlib import asynccontextmanager
 from typing import Generator
 
 import ray
@@ -37,19 +38,32 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from verl.utils.device import get_device_id
 from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.sglang.sglang_quant_utils import (
+    LOADER_FQN,
+    finalize_tensors,
+    resolve_sglang_quantization_config,
+    uses_sglang_refit_loader,
+)
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import (
-    DEEPSEEK_V4_FUSION_GROUPS,
     SGLANG_LORA_NAME,
+    get_deepseek_v4_fusion_groups,
     get_named_tensor_buckets,
     lora_base_kept_on_sleep,
+    normalize_lora_weight_name_for_sglang,
     normalize_peft_config_for_sglang,
 )
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _uses_quantized_refit(config: RolloutConfig, model_config: HFModelConfig) -> bool:
+    quantization_config = resolve_sglang_quantization_config(config, model_config)
+    return quantization_config is not None and uses_sglang_refit_loader(quantization_config)
 
 
 def _strip_lora_base_layer(name: str) -> str:
@@ -130,17 +144,6 @@ class ServerAdapter(BaseRollout):
         replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
-        if self.config.get("quantization", None) == "fp8":
-            import sglang
-            from packaging import version
-
-            from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
-
-            assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
-                "sglang>=0.5.5 is required for FP8 quantization"
-            )
-            fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
-            self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
@@ -273,6 +276,19 @@ class ServerAdapter(BaseRollout):
             return self._pd_tp_local_rank == 0
         return self.device_mesh["infer_tp"].get_local_rank() == 0
 
+    @asynccontextmanager
+    async def _weight_update_session(self):
+        # SGLang restores packed parameters once before a refit and repacks only
+        # after every bucket (including the quantized finalizer) has arrived.
+        engine = self._engine if self._engine is not None and self._is_server_tp_leader() else None
+        if engine is not None:
+            await engine.begin_weight_update()
+        try:
+            yield
+        finally:
+            if engine is not None:
+                await engine.end_weight_update()
+
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
 
@@ -322,12 +338,18 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+        use_quantized_refit = _uses_quantized_refit(self.config, self.model_config)
 
         # Delta checkpoint-engine wire (standalone replicas): the generator yields
         # per-flush sparse payloads, applied in place through the verl custom
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
         if wire_format == "delta_flush":
+            if use_quantized_refit:
+                raise ValueError(
+                    "SGLang MXFP8/MXFP4 custom refit is not supported with wire_format='delta_flush'; "
+                    "use the regular bucketed weight sync"
+                )
             await self._update_weights_delta(weights, global_steps=global_steps)
             return
 
@@ -338,6 +360,8 @@ class ServerAdapter(BaseRollout):
         peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
         if peft_config and base_sync_done:
             if self.device_mesh["infer_tp"].get_local_rank() == 0:
+                # Consume collective exports before sending any server requests.
+                serialize_peft_config, serialize_named_tensors = self.wrap_lora_params(peft_config, weights)
                 # unload lora
                 models_result = await self._engine.available_models()
                 exists = any(item["id"] == SGLANG_LORA_NAME for item in models_result["data"])
@@ -345,7 +369,6 @@ class ServerAdapter(BaseRollout):
                     await self._engine.unload_lora_adapter(SGLANG_LORA_NAME)
 
                 # load lora by tensor
-                serialize_peft_config, serialize_named_tensors = self.wrap_lora_params(peft_config, weights)
                 from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
 
                 req = LoadLoRAAdapterFromTensorsReqInput(
@@ -355,34 +378,42 @@ class ServerAdapter(BaseRollout):
                 )
                 # send http request
                 await self._engine.load_lora_adapter_from_tensor(req)
-        else:
-            update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
-                from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
-
-                logger.info("Convert bf16 weights to fp8 format before loading")
-                fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
-                weights = fp8_quantizer_helper.quant_weights_by_name(
-                    weights,
-                    dtype=self.model_config.hf_config.dtype,
-                )
             else:
-                weights = weights
+                # Consume export collectives and any DTensor.full_tensor() gathers.
+                for _, tensor in weights:
+                    _preprocess_tensor_for_update_weights(tensor.detach())
+        else:
+            async with self._weight_update_session():
+                update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+                fusion_groups = get_deepseek_v4_fusion_groups(self.model_config.hf_config)
 
-            fusion_groups = (
-                DEEPSEEK_V4_FUSION_GROUPS
-                if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
-                else ()
-            )
-            async for params_batch in get_named_tensor_buckets(
-                weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
-            ):
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                )
+                async def canonical_base_weights(iterable):
+                    async for name, tensor in ensure_async_iterator(iterable):
+                        yield _strip_lora_base_layer(name), tensor
+
+                async for params_batch in get_named_tensor_buckets(
+                    canonical_base_weights(weights),
+                    update_weights_bucket_bytes,
+                    fusion_groups=fusion_groups,
+                ):
+                    load_format = None
+                    if use_quantized_refit:
+                        load_format = LOADER_FQN
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=[(name, _to_ipc_device(t)) for name, t in params_batch],
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=load_format,
+                    )
+                if use_quantized_refit:
+                    await sgl_update_weights(
+                        engine=self._engine,
+                        params_batch=[(name, _to_ipc_device(t)) for name, t in finalize_tensors()],
+                        device_mesh_key="infer_tp",
+                        device_mesh=self.device_mesh,
+                        load_format=LOADER_FQN,
+                    )
 
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
@@ -402,10 +433,11 @@ class ServerAdapter(BaseRollout):
         """
         assert self._pd_role is None, "delta checkpoint engine does not support PD disaggregation"
         applied = 0
-        for named, is_last in flushes:
-            await self._update_weights_delta_flush(named, flush_cache=is_last)
-            applied += 1
-            del named
+        async with self._weight_update_session():
+            for named, is_last in flushes:
+                await self._update_weights_delta_flush(named, flush_cache=is_last)
+                applied += 1
+                del named
         if self._engine is not None and self._is_server_tp_leader() and global_steps is not None:
             await self.server_actor.set_global_steps.remote(global_steps)
         logger.info("delta apply v=%s flushes=%d (in-place via sglang loader)", global_steps, applied)
@@ -463,8 +495,12 @@ class ServerAdapter(BaseRollout):
         peft_config_json = normalize_peft_config_for_sglang(peft_config)
 
         # lora weights
+        model_type = getattr(self.model_config.hf_config, "model_type", None)
         processed_weights: dict[str, torch.Tensor] = {
-            name: _to_ipc_device(_preprocess_tensor_for_update_weights(tensor.detach())) for name, tensor in weights
+            normalize_lora_weight_name_for_sglang(name, model_type): _to_ipc_device(
+                _preprocess_tensor_for_update_weights(tensor.detach())
+            )
+            for name, tensor in weights
         }
 
         # One serialized copy per TP rank, same field and shape as the weight sync above.

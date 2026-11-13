@@ -1,3 +1,5 @@
+# Disabled: this workflow needs Ascend/NPU runners, which this repository does not run.
+# Kept for reference; restore the commented triggers below to re-enable it.
 # DISABLED for the mint self-hosted fork: this workflow needs GPU runners
 # (L20x8 / ascend / rocm) that do not exist on the mint host. Re-enable by
 # restoring the trigger below and pointing the jobs at a GPU runner.
@@ -44,7 +46,9 @@ name: nightly_ci_ascend (disabled)
 #     - cron: "0 17 * * *"
 #     - cron: "0 18 * * *"
 #     - cron: "0 19 * * *"
-on: workflow_dispatch  # kept callable manually; never runs automatically
+# on: workflow_dispatch  # kept callable manually; never runs automatically
+on:
+  workflow_dispatch:
 
 # Declare permissions just read content.
 permissions:

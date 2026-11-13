@@ -20,12 +20,13 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_capability, get_device_name
 from verl.workers.rollout.utils import ensure_async_iterator
 
 SGLANG_LORA_NAME = "verl_actor_lora_name"
 
 _DEEPSEEK_V4_FUSION_MEMBERS = (
+    ("wo_a.weight", "wo_a.scale"),
     ("wq_a.weight", "wkv.weight"),
     ("wq_a.scale", "wkv.scale"),
     ("wq_a.weight_scale_inv", "wkv.weight_scale_inv"),
@@ -37,6 +38,34 @@ DEEPSEEK_V4_FUSION_GROUPS = tuple(
     for attention in ("self_attn", "attn")
     for members in _DEEPSEEK_V4_FUSION_MEMBERS
 )
+
+
+def get_deepseek_v4_fusion_groups(hf_config) -> tuple[tuple[str, ...], ...]:
+    model_type = getattr(hf_config, "model_type", None)
+    if model_type not in {"deepseek_v4", "deepseek_v41"}:
+        return ()
+    text_config = getattr(hf_config, "text_config", None) or hf_config
+    ratios = getattr(text_config, "compress_ratios", None)
+    if model_type != "deepseek_v41" or ratios is None:
+        return DEEPSEEK_V4_FUSION_GROUPS
+
+    # V4.1's ratio-1 compressor has only wkv; staging it for a nonexistent
+    # wgate would prevent the full base stream from completing.
+    groups = [group for group in DEEPSEEK_V4_FUSION_GROUPS if ".compressor." not in group[0]]
+    kv_sources = set(getattr(text_config, "kv_source_layer_ids", ()))
+    depth = getattr(text_config, "num_hidden_layers", len(ratios))
+    for layer, ratio in enumerate(ratios[:depth]):
+        compressors = []
+        if ratio in (4, 128) or (ratio == 2 and layer in kv_sources):
+            compressors.append("compressor")
+        if ratio == 4:
+            compressors.append("indexer.compressor")
+        for attention in ("self_attn", "attn"):
+            for compressor in compressors:
+                groups.append(
+                    tuple(f"layers.{layer}.{attention}.{compressor}.{member}.weight" for member in ("wkv", "wgate"))
+                )
+    return tuple(groups)
 
 
 def _fusion_key(name: str, groups: tuple[tuple[str, ...], ...]):
@@ -66,6 +95,16 @@ def normalize_peft_config_for_sglang(peft_config: dict) -> dict:
     target_modules = normalized["target_modules"]
     normalized["target_modules"] = target_modules if isinstance(target_modules, str) else list(target_modules)
     return normalized
+
+
+def normalize_lora_weight_name_for_sglang(name: str, model_type: str | None) -> str:
+    """Map DeepSeek-V4.1 checkpoint adapter names to SGLang's module names."""
+    if model_type != "deepseek_v41":
+        return name
+    name = name.replace(".attn.", ".self_attn.").replace(".ffn.", ".mlp.")
+    for source, target in (("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")):
+        name = name.replace(f".{source}.lora_", f".{target}.lora_")
+    return name
 
 
 def lora_rank_of(model_config) -> int:
@@ -110,6 +149,29 @@ def sglang_lora_target_modules(target_modules: Any) -> list[str]:
             f"against the whole parameter key. Use `all-linear`, or list the module names."
         )
     return list(target_modules)
+
+
+def default_moe_runner_backend(quantization: Optional[str], engine_kwargs: Any, hf_config: Any = None) -> Optional[str]:
+    """MoE runner verl asks SGLang for when the user leaves it to ``auto``; None keeps SGLang's choice.
+
+    On Blackwell (compute capability 10.x) SGLang resolves ``moe_runner_backend="auto"`` to ``flashinfer_trtllm``
+    for unquantized Qwen3-MoE- and DeepSeek-family checkpoints when no ``moe_a2a_backend`` is set. That runner keeps
+    bf16 expert weights in a block layout, and ``update_weights_from_tensor`` restores the load-time shape only for
+    ``flashinfer_trtllm_routed``, so the first weight sync fails in ``FusedMoE._load_w13`` and the scheduler exits
+    (sgl-project/sglang#27787, still in sglang 0.5.21). Under the same conditions verl asks for the Triton runner,
+    which SGLang's unquantized MoE method falls back to everywhere else and which takes weight updates. A quantized
+    rollout or checkpoint uses SGLang's quantized MoE methods instead and is left alone.
+    """
+    if engine_kwargs.get("moe_runner_backend") not in (None, "auto"):
+        return None  # the user picked a runner
+    if engine_kwargs.get("moe_a2a_backend") not in (None, "none"):
+        return None  # with an a2a backend SGLang does not pick flashinfer_trtllm
+    if quantization is not None or getattr(hf_config, "quantization_config", None) is not None:
+        return None  # quantized rollout or checkpoint: not the bf16 path
+    if torch.version.hip is not None:
+        return None
+    major, _ = get_device_capability()
+    return "triton" if major == 10 else None
 
 
 def broadcast_pyobj(

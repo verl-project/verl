@@ -700,6 +700,15 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    """Offload optimizer state to CPU to free GPU memory.
+
+    Note: HybridDeviceOptimizer (HDO) is left untouched. It manages the
+    placement of its own sub-optimizer state (a CPU half plus the GPU-resident
+    half, split by ``optimizer_offload_fraction``). Offloading the GPU half
+    here corrupts the fused optimizer's device assumption and crashes the next
+    step (issue #8237).
+    """
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -709,18 +718,10 @@ def offload_megatron_optimizer(optimizers):
         offload_megatron_copy_params(_opt)
         ## worker may hold zero parameter when enabling custom pipeline layout
         if _opt.optimizer is not None:
-            # HybridDeviceOptimizer: offload all sub-optimizer states to CPU
-            # TODO: this should be a method in Megatron-LM's HybridDeviceOptimizer
-            hdo = _opt.optimizer
-            if all(hasattr(hdo, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")):
-                for optimizer in hdo.sub_optimizers:
-                    for param, state in optimizer.state.items():
-                        for k, v in state.items():
-                            if not isinstance(v, torch.Tensor):
-                                continue
-                            orig_param = hdo.inner_param_to_orig_param.get(param, param)
-                            hdo.state[orig_param][k] = state[k] = v.to("cpu")
-            else:
+            # Only non-HDO optimizers below; HDO owns its own placement.
+            if not all(
+                hasattr(_opt.optimizer, attr) for attr in ("sub_optimizers", "inner_param_to_orig_param", "state")
+            ):
                 opt_state_dict_values = _opt.optimizer.state.values()
                 for v in opt_state_dict_values:
                     if "exp_avg" in v:
@@ -1063,25 +1064,62 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
     return offset
 
 
-def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
+def _get_megatron_grad_finalizer(model):
+    """Select the finalizer that reduces replicated expert adapter gradients across EP."""
     from megatron.core.distributed import finalize_model_grads
-    from megatron.core.utils import get_model_config
 
-    # Mint (glm52/glm53): shared expert LoRA weights (shared-outer and
-    # rank_shared layouts) are replicated across EP ranks. The bridge moves
-    # their cross-EP gradient sum from per-layer backward hooks to one
-    # coalesced all-reduce inside finalize_model_grads. Activate that path
-    # when the bridge is importable; without the bridge there are no shared
-    # expert adapters, so the stock finalize is correct and the EP sum is a
-    # no-op anyway.
     try:
-        from megatron.bridge.peft.utils import (
-            enable_expert_parallel_grad_sync_in_finalize,
-            finalize_model_grads_with_expert_adapter_sync,
-        )
+        from megatron.bridge.peft import utils as peft_utils
     except ImportError:
-        enable_expert_parallel_grad_sync_in_finalize = None
-        finalize_model_grads_with_expert_adapter_sync = None
+        return finalize_model_grads
+
+    enable_ep_sync = getattr(peft_utils, "enable_expert_parallel_grad_sync_in_finalize", None)
+    finalize_ep_grads = getattr(peft_utils, "finalize_model_grads_with_expert_adapter_sync", None)
+    if enable_ep_sync is not None and finalize_ep_grads is not None:
+        return finalize_ep_grads if enable_ep_sync(model) > 0 else finalize_model_grads
+
+    # Legacy Bridge hooks reduce autograd's wgrad, which fused MCore linears bypass.
+    for chunk in model:
+        ep_size = get_model_config(chunk).expert_model_parallel_size
+        for module in chunk.modules():
+            if isinstance(module, getattr(peft_utils, "SharedOuterGroupedExpertAdapter", ())):
+                outer = module.linear_in if module._is_fc1 else module.linear_out
+                # Broadcasting a frozen, unsharded projection only copies between replicas.
+                if (
+                    not outer.weight.requires_grad
+                    and (outer.tp_group is None or outer.tp_group.size() == 1)
+                    and getattr(outer, "gtp_remat_size", 1) == 1
+                ):
+                    continue
+                # Legacy Bridge also broadcasts the shared weight over this group during initialization.
+                stage = parallel_state.get_tensor_and_data_parallel_group(with_context_parallel=True)
+                ep = parallel_state.get_expert_model_parallel_group()
+                ep_ranks = set(torch.distributed.get_process_group_ranks(ep))
+                if set(torch.distributed.get_process_group_ranks(stage)) != ep_ranks:
+                    raise RuntimeError(
+                        "This Megatron-Bridge build synchronizes shared-outer LoRA weights across the entire "
+                        "pipeline stage. Use a Bridge build with expert-adapter gradient finalization when "
+                        "the stage and expert-parallel groups have different ranks."
+                    )
+                if len(ep_ranks) == 1:
+                    continue
+                shared = (outer,)
+            elif (
+                ep_size > 1
+                and isinstance(module, getattr(peft_utils, "ParallelLinearAdapter", ()))
+                and getattr(module, "_uses_grouped_expert_sharding", lambda: False)()
+            ):
+                shared = (module.linear_in, module.linear_out)
+            else:
+                continue
+            for linear in shared:
+                if linear.weight.requires_grad:
+                    linear.gradient_accumulation_fusion = False
+    return finalize_model_grads
+
+
+def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
+    from megatron.core.utils import get_model_config
 
     try:
         from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
@@ -1095,20 +1133,8 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     except ImportError:
         megatron_FSDP = DDP
 
-    # Shared-expert LoRA weights are EP-replicated; Bridge's finalize wrapper
-    # does a coalesced EP all-reduce after the DP sync (no-op without such
-    # adapters) and removes the broken per-layer fallback hook.
-    finalize_fn = finalize_model_grads
-    try:
-        from megatron.bridge.peft.utils import (
-            enable_expert_parallel_grad_sync_in_finalize,
-            finalize_model_grads_with_expert_adapter_sync,
-        )
-
-        if enable_expert_parallel_grad_sync_in_finalize(model) > 0:
-            finalize_fn = finalize_model_grads_with_expert_adapter_sync
-    except ImportError:
-        pass
+    # Keep both native Bridge EP finalization and the legacy unfused fallback.
+    finalize_fn = _get_megatron_grad_finalizer(model)
 
     for one_model in model:
         config = get_model_config(one_model)
@@ -1249,6 +1275,26 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         # Force the provider override so MTP remains disabled after that reload.
         engine_config.override_transformer_config["mtp_num_layers"] = None
         engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+
+        # Reference models may inherit an actor layout containing MTP layers.
+        # Reference scoring only needs next-token log probabilities, not auxiliary
+        # MTP predictions; So we remove MTP layers from the inherited layout.
+        pipeline_layout = engine_config.override_transformer_config.get("pipeline_model_parallel_layout")
+        if pipeline_layout is not None:
+            from megatron.core.transformer.enums import LayerType
+            from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+
+            if not isinstance(pipeline_layout, PipelineParallelLayerLayout):
+                pipeline_layout = PipelineParallelLayerLayout(
+                    pipeline_layout, engine_config.pipeline_model_parallel_size
+                )
+            # Convert [PP][VPP] back to stage order, retaining empty stages and
+            # building new lists so an inherited layout is not modified in place.
+            engine_config.override_transformer_config["pipeline_model_parallel_layout"] = [
+                [layer.name for layer in pipeline_layout.layout[pp_rank][vp_rank] if layer != LayerType.mtp]
+                for vp_rank in range(pipeline_layout.virtual_pipeline_model_parallel_size)
+                for pp_rank in range(pipeline_layout.pipeline_model_parallel_size)
+            ]
         return
 
     elif enable_mtp and not has_mtp:

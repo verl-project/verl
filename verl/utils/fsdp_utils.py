@@ -194,19 +194,10 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
-    # PyTorch currently allocates pinned host storage for CUDA-to-CPU
-    # Tensor.to() copies when non_blocking=True. This behavior is not strictly
-    # documented, so keep it covered by the FSDP2 model-transfer regression
-    # test. The pinned parameters also make the subsequent CPU-to-GPU copy
-    # asynchronous.
-    #
-    # The CPU tensors are not safe for host access until the D2H copy finishes.
-    # Current callers reload them on the same CUDA stream, whose ordering keeps
-    # the D2H-to-H2D round trip correct. A caller that reads the tensors on the
-    # host must synchronize first, and a caller that reloads them on another
-    # stream must establish an explicit stream dependency. empty_cache() below
-    # is not a synchronization point.
-    model.to("cpu", non_blocking=True)
+    # FSDPModule._apply may read CPU data to repad uneven shards or pin memory
+    # inside model.to(). Complete each D2H copy before those reads: synchronizing
+    # after model.to() cannot repair values copied from an unfinished transfer.
+    model.to("cpu", non_blocking=False)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -522,7 +513,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         dist.broadcast(buf, src=0)
 
     if cpu_offload:
-        model.to("cpu", non_blocking=True)
+        offload_fsdp2_model_to_cpu(model, empty_cache=False)
         for buf in model.buffers():
             buf.data = buf.data.to(get_device_id())
 
@@ -716,17 +707,29 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
     """
     collect lora params or full params if base model is not ready in vllm
     work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
+
+    For an FSDP2 base export the values stay sharded ``DTensor``s: the caller gathers them one at a
+    time while streaming, so no rank ever holds a full copy of the model.
     """
     from peft.utils.save_and_load import get_peft_model_state_dict
 
     lora_params = OrderedDict()
     peft_model = getattr(module, "_fsdp_wrapped_module", module)
+    if fsdp_version(module) == 2 and not layered_summon and not base_sync_done:
+        # Gathering every tensor here would keep a full copy of the model in host memory on each
+        # rank, on every sync when model.lora.resync_base=True.
+        for name, param in peft_model.base_model.model.state_dict().items():
+            if "lora_" in name:
+                continue
+            lora_params[name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")] = param
+        return lora_params
     if fsdp_version(module) > 0:
         if layered_summon:
             if not base_sync_done:
                 raise ValueError(
-                    "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
-                    "rollout.load_format=safetensors"
+                    "rollout.layered_summon=True cannot export the LoRA base weights. Preload the base model "
+                    "in the rollout (e.g. rollout.load_format=safetensors) and keep "
+                    "model.lora.resync_base=False, or set rollout.layered_summon=False."
                 )
             lora_params = layered_summon_lora_params(module)
             if not lora_params:

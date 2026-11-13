@@ -118,6 +118,9 @@ def test_chunk_driver_resets_mask_state_at_each_logical_step(monkeypatch):
         def __init__(self, count):
             self.count = count
 
+        def begin(self, index, mode):
+            pass
+
     chunk_tape_module = types.ModuleType("megatron.core.pipeline_parallel.chunk_tape")
     chunk_tape_module.ChunkTape = _Tape
     monkeypatch.setitem(sys.modules, "megatron.core.pipeline_parallel.chunk_tape", chunk_tape_module)
@@ -129,16 +132,19 @@ def test_chunk_driver_resets_mask_state_at_each_logical_step(monkeypatch):
     engine._dsv41_n0 = 4
     engine.get_context_parallel_group = lambda: None
     model = torch.nn.Linear(1, 1)
+    from megatron.core.transformer.transformer_config import TransformerConfig
+
+    model.config = TransformerConfig(num_layers=1, hidden_size=16, num_attention_heads=2)
     batch = _Batch()
     observed = []
     pass_contexts = []
 
     def forward_step(*args, **kwargs):
         def loss_callback(output):
-            pass_contexts.append(engine._dsv41_chunk_ctx[0])
-            return torch.zeros((), requires_grad=True), {}
+            pass_contexts.append(engine._dsv41_chunk_ctx)
+            return output["log_probs"].sum() * 0.0, {"loss": 0.0, "metrics": {}}
 
-        return {}, loss_callback
+        return {"log_probs": torch.ones(4)}, loss_callback
 
     engine.forward_step = forward_step
 
@@ -153,7 +159,7 @@ def test_chunk_driver_resets_mask_state_at_each_logical_step(monkeypatch):
     engine._dsv41_chunked_forward_step(batch, model, None, None, 2)
 
     assert observed == [(None, None), (None, None)]
-    assert pass_contexts == [1, 1]
+    assert pass_contexts == [None, None]
 
 
 def test_mask_shorter_than_log_probs_raises():

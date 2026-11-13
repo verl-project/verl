@@ -27,6 +27,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
+from verl.models.mcore.util import get_thd_min_local_rows, get_thd_quant_align_size
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -85,8 +86,6 @@ from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizer
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import detach_tree, postprocess_batch_func, prepare_micro_batches
 from .chunk_loss_mask import chunk_loss_data, reset_chunk_loss_mask_state
-from .chunk_losses import aggregate_pass_losses
-from .chunk_window import own_window_rows
 from .utils import set_random_seed
 
 logger = logging.getLogger(__file__)
@@ -217,7 +216,24 @@ class MegatronEngine(BaseEngine):
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
         if self._qat_enabled:
+            if self.engine_config.override_transformer_config.get("fp8"):
+                raise ValueError(
+                    "QAT and Transformer Engine FP8 training are mutually exclusive: QAT fake-quantizes weights "
+                    "inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs themselves to "
+                    "FP8. Disable one of them."
+                )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
+        self._rollout_weight_quantizer = None
+
+        # override_transformer_config.fp4 trains the routed experts in NVFP4.
+        from verl.utils.megatron.low_precision import bf16_layers_at_start_end
+        from verl.utils.real_nvfp4 import real_nvfp4_enabled
+
+        overrides = self.engine_config.override_transformer_config
+        self._real_nvfp4_enabled = real_nvfp4_enabled(overrides)
+        self._real_nvfp4_bf16_layers = bf16_layers_at_start_end(overrides)
+        if self._real_nvfp4_enabled:
+            logger.info("NVFP4 routed-expert training: BF16 layers at start/end=%d/%d", *self._real_nvfp4_bf16_layers)
 
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
@@ -295,6 +311,15 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import apply_real_nvfp4_overrides
+
+            apply_real_nvfp4_overrides(
+                override_transformer_config,
+                self.model_config.hf_config,
+                pipeline_size=self.engine_config.pipeline_model_parallel_size,
+                virtual_pipeline_size=self.engine_config.virtual_pipeline_model_parallel_size,
+            )
         if self.is_value_model:
             # A value head cannot share weights with the vocabulary embedding. Force the HF
             # flag off and record it for the checkpoint manager. Apply the
@@ -371,11 +396,6 @@ class MegatronEngine(BaseEngine):
                 provider_overrides["moe_enable_routing_replay"] = True
             else:
                 provider_overrides["enable_routing_replay"] = True
-
-        if self._qat_enabled:
-            from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
-
-            provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
         # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
         # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
@@ -492,10 +512,18 @@ class MegatronEngine(BaseEngine):
             self.engine_config.use_fused_kernels = False
             return
 
-        from verl.models.mcore.model_forward_fused import patch_fused_forward
+        from verl.models.mcore.model_forward_fused import patch_fused_forward, unpatch_fused_forward
 
+        if all(
+            patch_fused_forward(model, self.model_config, engine_config=self.engine_config) for model in self.module
+        ):
+            return
+
+        # The fused engine forward would pass kwargs the model cannot take. Restore any patched chunks.
         for model in self.module:
-            patch_fused_forward(model)
+            unpatch_fused_forward(model)
+        logger.warning_once("Fused kernels are not supported for this Megatron model; disabling.")
+        self.engine_config.use_fused_kernels = False
 
     def _build_optimizer(self):
         from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
@@ -509,6 +537,15 @@ class MegatronEngine(BaseEngine):
         # LoRA+: lr_B = lora_plus_ratio * lr_A (read from the lora config dict).
         lora_cfg = getattr(self.model_config, "lora", {})
         lora_plus_ratio = float(lora_cfg.get("lora_plus_ratio", 1.0))
+        if not 0 < lora_plus_ratio < float("inf"):  # also rejects nan
+            raise ValueError(
+                f"model.lora.lora_plus_ratio must be positive and finite (1.0 disables LoRA+), got {lora_plus_ratio}"
+            )
+        if lora_plus_ratio != 1.0 and self.optimizer_config.lr_warmup_init > 0:
+            raise ValueError(
+                "model.lora.lora_plus_ratio requires optim.lr_warmup_init=0: Megatron warms every param group up "
+                "from one shared init lr, so the LoRA+ B/A ratio would not hold during warmup."
+            )
         optimizer = get_megatron_optimizer(
             model=self.module,
             config=optim_config_megatron,
@@ -575,8 +612,20 @@ class MegatronEngine(BaseEngine):
             )
         # Profile-only NVTX instrumentation (DSV41_NVTX=1); no-op otherwise.
 
+        if self._real_nvfp4_enabled:
+            from verl.utils.real_nvfp4.megatron import attest_real_nvfp4_runtime, finish_real_nvfp4_module_init
+
+            models = [unwrap_model(model_chunk) for model_chunk in self.module]
+            finish_real_nvfp4_module_init(models)
+            attest_real_nvfp4_runtime(
+                models,
+                self.tf_config,
+                self.model_config.hf_config,
+                *self._real_nvfp4_bf16_layers,
+            )
+
         if self._qat_enabled and not self.engine_config.forward_only:
-            from verl.utils.modelopt import apply_qat_to_modules
+            from verl.utils.qat.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
 
@@ -822,6 +871,16 @@ class MegatronEngine(BaseEngine):
         """
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.module)
+        if self._is_offload_optimizer:
+            # The optimizer was offloaded right after construction. Megatron's
+            # HybridDeviceOptimizer rebuilds its sub-optimizers inside
+            # ``load_state_dict`` and classifies every parameter by ``is_cuda``:
+            # a shard that is still parked on the CPU gets no pinned copy and is
+            # treated as a CPU-resident parameter, so once it is moved back to the
+            # GPU the first ``step`` fails (KeyError / "assign a gradient with
+            # device type 'cpu' to a tensor with device type 'cuda'"). Bring the
+            # optimizer back to the GPU first; it is offloaded again below.
+            load_megatron_optimizer(self.optimizer)
         self.checkpoint_mananager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
@@ -900,26 +959,16 @@ class MegatronEngine(BaseEngine):
         # compute num_tokens in global batch for loss normalization
         loss_mask = data["loss_mask"]
         batch_num_tokens = (loss_mask.values().sum() if loss_mask.is_nested else loss_mask.sum()).to(get_device_id())
-        # Context parallelism: collectives over the data-parallel subgroup do not
-        # complete on this stack once CP is on (the group and its sizes agree on every
-        # rank, yet the reduce hangs). Under CP every rank holds an equal share of the
-        # global batch, so the rank-local count is the global count divided by the DP
-        # factor; normalising by the local count with dp_size=1 yields exactly the same
-        # per-token mean, and the training step no longer blocks on the collective.
-        cp_size = 1
-        try:
-            import megatron.core.parallel_state as _mpu
-
-            cp_size = _mpu.get_context_parallel_world_size()
-        except Exception:  # noqa: BLE001 - non-megatron paths keep the global reduce
-            cp_size = 1
-        local_normalisation = cp_size > 1
-        if not self.engine_config.dynamic_context_parallel and not local_normalisation:
+        # Static CP replicates each DP batch across its CP group. Reduce over DP
+        # only: replicas can have different numbers of supervised tokens even when
+        # they contain the same number of samples. DCP already replicates the whole
+        # logical batch across the DP x CP plane.
+        if not self.engine_config.dynamic_context_parallel:
             torch.distributed.all_reduce(
                 batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
             )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
-        tu.assign_non_tensor(data, dp_size=1 if local_normalisation else self.get_data_parallel_size())
+        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
         # Global routed-token count for the per-token-loss regime (consumed in
         # postprocess_micro_batch_func). Static CP replicates real tokens inside
@@ -1130,19 +1179,26 @@ class MegatronEngine(BaseEngine):
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if adapter_only:
-            # Keep the model tensor layout and vLLM serving format independent.
-            # 3D models use the existing stack_3d_moe export; 2D models use
-            # experts.w1/w2/w3 only when vLLM's shared-LoRA mode is enabled.
-            from verl.workers.rollout.vllm_rollout.utils import is_3d_moe_vllm_model
-
             export_kwargs = {}
-            if self.model_config.lora.get("experts_shared_outer_loras", False):
-                is_3d_moe = is_3d_moe_vllm_model(self.model_config.hf_config)
+            if (
+                self.model_config.lora.get("experts_shared_outer_loras", False)
+                and getattr(self, "rollout_name", "vllm") == "vllm"
+            ):
+                # Serving wrappers choose the adapter format independently of the
+                # base model's expert layout. Shared and mixed modes use 2D adapters.
                 vllm_shared = getattr(self, "vllm_enable_moe_shared_loras", False)
-                if is_3d_moe:
-                    export_kwargs["stack_3d_moe"] = True
-                elif vllm_shared:
+                is_3d_moe = False
+                if not vllm_shared and not getattr(self, "vllm_enable_mixed_moe_lora_format", False):
+                    try:
+                        from verl.workers.rollout.vllm_rollout.utils import is_3d_moe_vllm_model
+
+                        is_3d_moe = is_3d_moe_vllm_model(self.model_config.hf_config)
+                    except ModuleNotFoundError:
+                        pass
+                if vllm_shared:
                     export_kwargs["moe_shared_loras"] = True
+                elif is_3d_moe:
+                    export_kwargs["stack_3d_moe"] = True
                 else:
                     export_kwargs["expand_shared_outer"] = True
             per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
@@ -1158,13 +1214,16 @@ class MegatronEngine(BaseEngine):
                 else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
-        # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
-            from verl.utils.modelopt import export_qat_weights
-
-            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+            per_tensor_param = ((name, tensor) for name, tensor in per_tensor_param if "_quantizer." not in name)
+        if self._rollout_weight_quantizer is not None and not adapter_only:
+            # QAT-trained master weights quantize to the same values the fake quant used in training.
+            per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
 
         return per_tensor_param, peft_config
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
 
     def _mcore_export_index(self):
         """Build (once) the per-parameter delta export index: geometry specs and
@@ -1283,8 +1342,8 @@ def _declares_keyword(func, name: str) -> bool:
     The loss callable is a boundary to code this engine does not own (mint's closures, a
     user's loss, the distillation entries). Passing an argument a consumer's signature does
     not declare is a TypeError at the call site — after the forward has already run — so the
-    capability is checked here rather than assumed. A callable that takes ``**kwargs``
-    accepts it by definition.
+    capability is checked here rather than assumed. A callable that merely takes ``**kwargs``
+    does *not* count: see the note below the parameter lookup.
     """
     import inspect
 
@@ -1355,6 +1414,12 @@ def _resident_logits_payload(batch, *, distillation_use_topk: bool, needs_vocab_
             raise RuntimeError(f"{flag} is set but the micro-batch carries {ids_key} without {logprobs_key}")
         return ids, logprobs
 
+    if needs_vocab_logits and not distillation_use_topk and teacher_key is None:
+        # Teacher export and lookup-based SFT need logits without an incoming
+        # distribution. A partial sampler payload is still an error.
+        if batch.get(_SAMPLER_PAYLOAD_KEYS[1], None) is not None:
+            raise RuntimeError(f"{flag} carries {_SAMPLER_PAYLOAD_KEYS[1]} without {_SAMPLER_PAYLOAD_KEYS[0]}")
+        return None
     expected = " or ".join(f"{ids_key}/{logprobs_key}" for ids_key, logprobs_key in spellings)
     raise RuntimeError(f"{flag} is set but the micro-batch carries no top-k payload (expected {expected})")
 
@@ -1364,7 +1429,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
         input_ids = batch["input_ids"]
         loss_mask = batch["loss_mask"].to(bool)
-        multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+        multi_modal_inputs = extract_multi_modal_inputs(
+            batch.get("multi_modal_inputs", []), input_ids=input_ids if input_ids.is_nested else None
+        )
 
         routed_experts = batch.get("routed_experts", None)
 
@@ -1395,6 +1462,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
         needs_vocab_logits: bool = False,
         teacher_topk_ids: torch.Tensor | None = None,
         teacher_topk_logprobs: torch.Tensor | None = None,
+        cp_layout: str = "zigzag",
+        local_cp_size: int | None = None,
     ):
         if logits.shape[:2] != label.shape[:2]:
             # A bare assert hides which side is wrong; these are the two facts that matter.
@@ -1459,6 +1528,25 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 # prove its head is aligned with the supervised position (rather than
                 # correlating with it by accident) needs exactly this.
                 processor_kwargs["target_ids"] = label
+            # The distillation losses pack the teacher's top-k payload the way the student's
+            # inputs were packed, and that information lives here, not in the loss -- but only
+            # those losses declare the keywords. A policy loss plugged into the same slot does
+            # not, so the triple is offered only to a target that can take it.
+            if _declares_keyword(logits_processor_func, "quant_align_size"):
+                processor_kwargs["quant_align_size"] = get_thd_quant_align_size(self.tf_config)
+            if _declares_keyword(logits_processor_func, "cp_layout"):
+                processor_kwargs["cp_layout"] = cp_layout
+            if _declares_keyword(logits_processor_func, "local_cp_size"):
+                processor_kwargs["local_cp_size"] = local_cp_size
+            if _declares_keyword(logits_processor_func, "min_local_rows"):
+                processor_kwargs["min_local_rows"] = get_thd_min_local_rows(self.tf_config, local_cp_size)
+            chunk_ctx = getattr(self, "_dsv41_chunk_ctx", None)
+            for name, value in (
+                ("cp_chunk_index", chunk_ctx[0] if chunk_ctx else 0),
+                ("cp_chunk_count", chunk_ctx[1] if chunk_ctx else 1),
+            ):
+                if _declares_keyword(logits_processor_func, name):
+                    processor_kwargs[name] = value
             ret.update(
                 logits_processor_func(
                     student_logits=logits_bak,
@@ -1473,139 +1561,194 @@ class MegatronEngineWithLMHead(MegatronEngine):
         return ret
 
     def _dsv41_chunked_forward_step(
-        self, batch, model, logits_processor_func, postprocess_micro_batch_func, chunk_count
+        self, batch, model, logits_processor_func, postprocess_micro_batch_func, chunk_count, *, forward_only=False
     ):
-        """Run one logical micro-batch as `chunk_count` time-ordered passes.
+        """Differentiate the complete logical output, then replay one model graph at a time.
 
-        Each pass is a full model pass over one contiguous window of the packed timeline. A
-        ChunkTape lets a later pass see the compressed KV (and the 127-row attention halo)
-        that earlier passes published, and each pass's backward runs before the next pass's
-        forward starts - so only one activation graph is ever alive. That is the entire memory
-        win, and it is why the passes must not be fused into a single graph.
-
-        The forward and the loss come from the ordinary path: this method recurses into
-        ``forward_step`` with a one-element batch iterator, so there is exactly one loss
-        definition in the codebase.
+        A sequence-level policy objective cannot be evaluated independently on
+        zero-filled chunk outputs: its importance ratio or clipping decision can
+        depend on every token. Scan the complete output without activations,
+        differentiate that objective once, and replay each chunk with the resulting
+        output adjoints. The tape additionally carries model-state adjoints across
+        chunk boundaries.
         """
         from megatron.core.pipeline_parallel.chunk_tape import ChunkTape
+        from megatron.core.pipeline_parallel.schedules import backward_step, forward_step_calc_loss
 
         from verl.workers.engine.megatron.outer_chunk import run_chunked_step
 
+        config = unwrap_model(model).config
         tape = ChunkTape(chunk_count)
-        # The batch is reused for prefill, grad, and replay passes. These values belong to
-        # this logical step only; never let a previous step select a later mask window.
         reset_chunk_loss_mask_state(self)
-        # Only grad passes contribute: the no-grad scan is replayed before backward.
-        _pass_losses = []
+        cp_size = torch.distributed.get_world_size(self.get_context_parallel_group())
+        num_microbatches = tu.get_non_tensor_data(batch, key="num_micro_batch", default=1)
+        model_output = {}
+        report_loss_func = None
+        replay_rng = {}
+        final_rng = None
 
-        _dev0 = next(unwrap_model(model).parameters()).device
+        def capture_rng():
+            from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
 
-        def run_pass(index):
-            # No manual slicing: `preprocess_thd_engine` already implements the virtual-CP
-            # arithmetic, so telling it which pass this is makes it produce exactly this
-            # pass's rows - including the padding and alignment the unchunked path uses.
-            # Splitting by hand here would have to re-derive both.
+            return (
+                torch.get_rng_state(),
+                torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+                get_cuda_rng_tracker().get_states(),
+            )
+
+        def restore_rng(state):
+            from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+
+            torch.set_rng_state(state[0])
+            if state[1] is not None:
+                torch.cuda.set_rng_state(state[1])
+            get_cuda_rng_tracker().set_states(state[2])
+
+        def accumulate_output(output):
+            # Postprocessing already scatters each pass into its true padded-stream
+            # coordinates. A second window based on real_length // K drops valid rows
+            # whenever the packed stream contains alignment padding.
+            for key, value in output.items():
+                value = detach_tree(value)
+                if key not in model_output:
+                    model_output[key] = value
+                elif value.is_nested:
+                    previous = model_output[key]
+                    model_output[key] = torch.nested.nested_tensor_from_jagged(
+                        previous.values() + value.values(), offsets=previous.offsets()
+                    )
+                else:
+                    model_output[key] = model_output[key] + value
+
+        def forward_pass(index):
+            nonlocal report_loss_func
+            if not forward_only:
+                if index in replay_rng:
+                    restore_rng(replay_rng[index])
+                else:
+                    replay_rng[index] = capture_rng()
             self._dsv41_chunk_ctx = (index, chunk_count, tape)
             self._dsv41_in_chunk = True
             try:
                 output, loss_func = self.forward_step(
                     iter([batch]), model, logits_processor_func, postprocess_micro_batch_func
                 )
+                report_loss_func = loss_func
+                return output
             finally:
                 self._dsv41_in_chunk = False
                 self._dsv41_chunk_ctx = None
-            # loss_func returns the unnormalised sum (already scaled by num_micro_batch).
-            # The schedule normalises it before backward; skipping that here would multiply
-            # every gradient by ~1e8 and silently ruin the update.
-            # The loss closure selects this pass's mask window from the unchanged full mask.
 
-            # Zero the rows this pass did not compute, so each pass contributes only its own
-            # window to the loss. (Marking only this rank's 1/32 left most ranks with an
-            # all-zero loss and collapsed grad_norm to 0, which is why the window spans every
-            # rank of the pass rather than one rank's block.)
-            #
-            # DSV41_OWN_WINDOW selects the window arithmetic:
-            #   keep (default) - the shipped formula, byte-identical: width = cp * (numel // cp),
-            #                    start = index * width. That width IS the whole tensor, so pass 0
-            #                    keeps everything and every later pass gets an empty window.
-            #   k              - width = numel // chunk_count, start = index * width: the K-th of
-            #                    the timeline that the virtual-CP ownership rule implies.
-            #   off            - leave log_probs untouched.
-            # The default deliberately stays the shipped behaviour; the switch lets one
-            # deployment A/B the three modes instead of spending a cluster run per guess.
-            _lpk_w = None
-            for _k2w in ("log_probs", "logprobs"):
-                if isinstance(output, dict) and _k2w in output:
-                    _lpk_w = _k2w
-                    break
-            _ownw_mode = os.environ.get("DSV41_OWN_WINDOW", "k")
-            if _lpk_w is not None and getattr(output[_lpk_w], "is_nested", False) and _ownw_mode != "off":
-                _lpw = output[_lpk_w]
-                _vw = _lpw.values()
-                _tw = int(_vw.numel())
-                _cpw = torch.distributed.get_world_size(self.get_context_parallel_group())
-                _gs, _ge = own_window_rows(_tw, _cpw, chunk_count, index, _ownw_mode)
-                _ownw = torch.zeros(_tw, device=_vw.device, dtype=_vw.dtype)
-                _ownw[_gs:_ge] = 1
-                _kept = _vw.reshape(-1) * _ownw
-                output[_lpk_w] = torch.nested.nested_tensor_from_jagged(
-                    _kept,
-                    offsets=_lpw.offsets(),
-                    lengths=_lpw.lengths() if hasattr(_lpw, "lengths") else None,
+        # The full-output loss closure captures the complete device-local batch.
+        # Evaluate it outside any chunk context so masking/reduction sees the
+        # original logical sequence, including sequence-level PPO objectives.
+        with torch.no_grad():
+            for index in range(chunk_count):
+                tape.begin(index, "prefill")
+                accumulate_output(forward_pass(index))
+
+        if forward_only:
+            with torch.no_grad():
+                full_result = report_loss_func(model_output)
+        else:
+            leaves = {}
+            differentiable_output = {}
+            with torch.enable_grad():
+                for key, value in model_output.items():
+                    if not value.is_floating_point():
+                        differentiable_output[key] = value
+                        continue
+                    values = value.values() if value.is_nested else value
+                    leaf = values.detach().requires_grad_(True)
+                    leaves[key] = leaf
+                    differentiable_output[key] = (
+                        torch.nested.nested_tensor_from_jagged(leaf, offsets=value.offsets(), lengths=value.lengths())
+                        if value.is_nested
+                        else leaf
+                    )
+                if not leaves:
+                    raise ValueError("Outer-sequence chunk training requires floating-point model outputs")
+                full_result = report_loss_func(differentiable_output)
+                # This is the unscaled engine loss ABI: legacy loss*n_microbatches
+                # or a per-token loss sum. Core applies CP/microbatch and optimizer
+                # scaling once to each replay surrogate, exactly as for K=1.
+                full_loss = full_result[0]
+                gradients = (
+                    torch.autograd.grad(full_loss, tuple(leaves.values()), allow_unused=True)
+                    if full_loss.requires_grad
+                    else (None,) * len(leaves)
                 )
-            # forward_step returns a closure; keep the pass context live while that closure
-            # selects its loss-mask window.
-            self._dsv41_chunk_ctx = (index, chunk_count, tape)
+                output_adjoints = dict(zip(leaves, gradients, strict=True))
+            # Keep loss-function RNG consumption (e.g. Clip-Cov sampling), while
+            # model replays below use each pass's original RNG snapshot.
+            final_rng = capture_rng()
+
+            def run_pass(index):
+                if not torch.is_grad_enabled():
+                    # run_chunked_step's prefill is already complete. Avoid a
+                    # second scan while retaining its reverse-adjoint driver.
+                    return full_result[0].detach()
+                output = forward_pass(index)
+                surrogate = None
+                for key, adjoint in output_adjoints.items():
+                    if adjoint is None:
+                        continue
+                    value = output[key]
+                    values = value.values() if value.is_nested else value
+                    contribution = (values * adjoint).sum()
+                    surrogate = contribution if surrogate is None else surrogate + contribution
+                if surrogate is None:
+                    # A constant objective can still have model auxiliary losses.
+                    value = next(value for value in output.values() if value.is_floating_point())
+                    surrogate = (value.values() if value.is_nested else value).sum() * 0.0
+
+                def surrogate_loss(_output):
+                    if len(full_result) == 3:
+                        return surrogate, full_result[1], full_result[-1]
+                    return surrogate, full_result[-1]
+
+                records = []
+                loss, _num_tokens = forward_step_calc_loss(
+                    model=model,
+                    output_tensor=output,
+                    loss_func=surrogate_loss,
+                    config=config,
+                    vp_stage=getattr(unwrap_model(model), "vp_stage", None),
+                    collect_non_loss_data=False,
+                    num_microbatches=num_microbatches,
+                    forward_data_store=records,
+                    cp_group_size=cp_size,
+                    is_last_stage=True,
+                )
+                return loss
+
+            def backward(loss):
+                backward_step(None, loss, None, config)
+
+            chunk_step_kwargs = {
+                "run_pass": run_pass,
+                "tape": tape,
+                "chunk_count": chunk_count,
+                "backward": backward,
+            }
+            if os.environ.get("DSV41_MEM_PROFILE") == "1":
+                chunk_step_kwargs["profile_phase"] = log_memory_phase
             try:
-                _res = loss_func(output)
+                run_chunked_step(**chunk_step_kwargs)
             finally:
-                self._dsv41_chunk_ctx = None
+                if final_rng is not None:
+                    restore_rng(final_rng)
 
-            _loss = _res[0]
-            if torch.is_grad_enabled() and isinstance(_res, tuple) and len(_res) > 1 and isinstance(_res[-1], dict):
-                _pass_losses.append(float(_res[-1].get("loss", float("nan"))))
-            return _loss
-
-        cp_group_size = torch.distributed.get_world_size(self.get_context_parallel_group())
-        num_microbatches = tu.get_non_tensor_data(batch, key="num_micro_batch", default=1)
-
-        def backward(loss):
-            (loss * cp_group_size / num_microbatches).backward()
-
-        chunk_step_kwargs = {
-            "run_pass": run_pass,
-            "tape": tape,
-            "chunk_count": chunk_count,
-            "backward": backward,
-        }
-        if os.environ.get("DSV41_MEM_PROFILE") == "1":
-            chunk_step_kwargs["profile_phase"] = log_memory_phase
-        total_loss = run_chunked_step(**chunk_step_kwargs)
-        # Gradients are already accumulated; hand the schedule a zero loss so its own backward
-        # is a no-op and the ordinary finalize_model_grads path still runs unchanged.
-        # Report the real loss (detached: the gradients were already accumulated pass by pass),
-        # so the schedule's own backward is a no-op and logging shows the true value.
-
-        real = total_loss.detach()
-        # A fresh leaf: requires_grad so the schedule's backward actually runs (it drives
-        # grad scaling / aux-loss unscale / grad_norm), value 0 so it adds no gradient -
-        # the real gradients were accumulated pass by pass above.
-        _z = torch.zeros((), device=real.device, dtype=real.dtype, requires_grad=True)
-        seed = real.detach() * _z  # non-leaf: the schedule scales it in place
-        # Read the unscaled mean from each grad pass's postprocess dict. Prefill runs
-        # the same loss under no_grad but is replayed later, so it is not reported twice.
-
-        # Every pass computes its loss against the SAME global loss_mask, and zeroes the
-        # rows it did not compute, so a pass that owns none of the supervised tokens
-        # contributes exactly 0. The passes are therefore disjoint contributions to one
-        # mean and must be SUMMED - averaging them divided the K=2 loss by the pass count
-        # (4.18 -> 1.39, measured) and made a correct step look broken.
-        # The no-grad scan is excluded at collection time, not by its loss magnitude.
-        _logged = {
-            "loss": aggregate_pass_losses(_pass_losses, float(total_loss.detach())),
-            "metrics": {},
-        }
-        return seed, lambda _out: (seed, _logged)
+        # Parameter gradients were accumulated inside the driver. The outer schedule
+        # still finalizes DDP gradients, using the original logical token divisor.
+        seed = torch.zeros_like(full_result[0], requires_grad=not forward_only) * 1.0
+        logged = full_result[-1]
+        if config.calculate_per_token_loss:
+            logical_num_tokens = (
+                full_result[1] if len(full_result) == 3 else torch.zeros((), dtype=torch.int, device=seed.device)
+            )
+            return seed, lambda _out: (seed, logical_num_tokens, logged)
+        return seed, lambda _out: (seed, logged)
 
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
@@ -1618,8 +1761,102 @@ class MegatronEngineWithLMHead(MegatronEngine):
         # single pass and nothing downstream changes.
         _chunk_count = int(os.environ.get("DSV41_SEQ_CHUNKS", "1") or 1)
         if _chunk_count > 1 and not getattr(self, "_dsv41_in_chunk", False):
+            if self.engine_config.dynamic_context_parallel or mpu.get_pipeline_model_parallel_world_size() > 1:
+                raise NotImplementedError("Outer-sequence chunking requires static CP and pipeline parallel size 1")
+            if not self.engine_config.use_remove_padding or self.engine_config.use_fused_kernels:
+                raise NotImplementedError("Outer-sequence chunking requires the non-fused THD forward")
+            if getattr(self.tf_config, "experimental_attention_variant", None) != "dsv4_hybrid":
+                raise NotImplementedError("Outer-sequence chunking requires DSV4 hybrid attention and its chunk tape")
+            if getattr(getattr(model, "ddp_config", None), "overlap_grad_reduce", False):
+                raise NotImplementedError("Outer-sequence chunking requires overlap_grad_reduce=False")
+            if self.enable_routing_replay or tu.get_non_tensor_data(batch, key="enable_routing_replay", default=False):
+                raise NotImplementedError("Outer-sequence chunking does not support router replay")
+            if mpu.get_context_parallel_world_size() < 2:
+                raise NotImplementedError(
+                    "Outer-sequence chunking requires physical context_parallel_size > 1: "
+                    "CSA compression's CP1 path cannot address a later chunk's global token indices"
+                )
+            multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+            if any(
+                value.numel() > 0
+                for key, value in multi_modal_inputs.items()
+                if key in ("pixel_values_videos", "video_grid_thw")
+            ):
+                raise NotImplementedError("Outer-sequence chunking does not support video inputs")
+            if any(
+                value.numel() > 0
+                for key, value in multi_modal_inputs.items()
+                if key in ("pixel_values", "image_grid_hws", "image_grid_thw")
+            ) and not getattr(unwrap_model(model), "supports_cp_chunk_images", False):
+                raise NotImplementedError(
+                    "Outer-sequence chunking with images requires a paired Megatron Core model "
+                    "with supports_cp_chunk_images=True; upgrade Core for chunk-aware image placement"
+                )
+            balancing_types = getattr(self.tf_config, "moe_router_load_balancing_type", "aux_loss")
+            balancing_coeff = getattr(self.tf_config, "moe_aux_loss_coeff", 0)
+            balancing_losses = (
+                [(balancing_types, balancing_coeff)]
+                if isinstance(balancing_types, str)
+                else zip(balancing_types, balancing_coeff, strict=True)
+            )
+            if not postprocess_micro_batch_func.keywords["forward_only"] and any(
+                kind in ("aux_loss", "seq_aux_loss", "global_aux_loss") and coeff is not None and coeff > 0
+                for kind, coeff in balancing_losses
+            ):
+                raise NotImplementedError(
+                    "Outer-sequence chunking does not support MoE balancing auxiliary losses: "
+                    "their expert-frequency products require the complete logical sequence; "
+                    "per-token scaling only supports additive z-loss"
+                )
+            if not self.tf_config.calculate_per_token_loss and getattr(self.tf_config, "moe_z_loss_coeff", None):
+                raise NotImplementedError(
+                    "Outer-sequence chunking with MoE z-loss requires calculate_per_token_loss=True"
+                )
+            from megatron.core.transformer.moe.router import TopKRouter
+
+            # Inspect initialized routers: hash layers bypass balancing algorithms,
+            # and frozen/eval routers do not update QB's per-microbatch quantile.
+            for router in unwrap_model(model).modules():
+                if not isinstance(router, TopKRouter):
+                    continue
+                hash_router = getattr(router, "is_hash_layer", False)
+                if (
+                    router.training
+                    and not hash_router
+                    and router.routing_type == "sinkhorn"
+                    and router.topk < router.num_experts
+                ):
+                    raise NotImplementedError(
+                        "Outer-sequence chunking does not support training-mode Sinkhorn routing: "
+                        "its assignments require the complete token population"
+                    )
+                if (
+                    router.training
+                    and not postprocess_micro_batch_func.keywords["forward_only"]
+                    and not hash_router
+                    and router.routing_type == "quantile_balancing"
+                    and router.config.moe_router_quantile_balancing_ema != 1
+                ):
+                    raise NotImplementedError(
+                        "Outer-sequence chunking does not support quantile-balancing updates: "
+                        "averaging chunk quantiles changes the next step's router bias; use frozen EMA=1 or inference"
+                    )
+                capacity_factor = router.config.moe_expert_capacity_factor
+                # ceil(T*topk/E*factor) >= T for every T at this boundary.
+                # Smaller positive factors can select different surviving tokens
+                # in each chunk; a short batch's ceil may only hide the mismatch.
+                if capacity_factor is not None and 0 < capacity_factor * router.topk < router.num_experts:
+                    raise NotImplementedError(
+                        "Outer-sequence chunking does not support competitive MoE token dropping: "
+                        "disable capacity or set capacity_factor * router_topk >= num_experts"
+                    )
             return self._dsv41_chunked_forward_step(
-                batch, model, logits_processor_func, postprocess_micro_batch_func, _chunk_count
+                batch,
+                model,
+                logits_processor_func,
+                postprocess_micro_batch_func,
+                _chunk_count,
+                forward_only=postprocess_micro_batch_func.keywords["forward_only"],
             )
 
         batch = batch.to(get_device_id())
@@ -1716,6 +1953,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 model=unwrapped_model,
                 data_format=data_format,
                 forced_max_seqlen=forced_max_seqlen,
+                use_fused_kernels=use_fused_kernels,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1764,6 +2002,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 logits_processor_func=logits_processor_func,
                 batch=batch,
                 data_format=data_format,
+                # The distillation losses repack the teacher's top-k payload the way the student's
+                # inputs were packed. Without these two the loss would fall back to the defaults
+                # (zigzag, static CP) while the student packs contiguous / dynamic CP, and the KL
+                # would be computed on misaligned tokens without any assertion firing.
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
 
             response_attention_mask = None
@@ -1836,6 +2080,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
                 data_format=data_format,
+                use_fused_kernels=use_fused_kernels,
             )
 
         # Router replay: switch to backward replay mode for next backward pass

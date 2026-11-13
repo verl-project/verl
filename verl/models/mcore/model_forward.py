@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -23,11 +24,16 @@ from verl.utils.megatron_utils import unwrap_model
 from .util import (
     build_deepseek_v41_image_inputs,
     build_vlm_attn_mask_bshd,
+    get_thd_min_local_rows,
+    get_thd_quant_align_size,
+    language_model_forward_kwargs,
     postprocess_bshd_engine,
     postprocess_thd_engine,
     preprocess_bshd_engine,
     preprocess_thd_engine,
+    preprocess_thd_full_stream,
     preprocess_vlm_thd_engine,
+    takes_full_packed_thd_vlm_inputs,
 )
 
 
@@ -147,8 +153,15 @@ def gptmodel_forward_model_engine(
     pre_process = unwrapped_model.pre_process
     post_process = unwrapped_model.post_process
 
-    fp8 = model_config.fp8
-    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+    # The alignment the recipe needs (32 for mxfp8, 16 for nvfp4 and the other fp8 recipes),
+    # not a boolean: passing only "is this fp8" made mxfp8 pad to a multiple of 16.
+    quant_align_size = get_thd_quant_align_size(model_config)
+    use_fp8_padding = quant_align_size is not None
+    # GLM-5.3-Flash-style wrappers take the whole packed stream and shard it themselves, so the
+    # per-sequence packing below is replaced by a plain offset placement for their label tensors.
+    full_stream_model = takes_full_packed_thd_vlm_inputs(model)
+    if full_stream_model and data_format != "thd":
+        raise ValueError("GLM-5.3-Flash requires data_format='thd'.")
 
     model_kwargs = {}
     if "pixel_values" in multi_modal_inputs and not deepseek_v41_multimodal:
@@ -164,8 +177,9 @@ def gptmodel_forward_model_engine(
     if data_format == "thd":
         attention_mask = None
         thd_kwargs = dict(
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             local_cp_size=local_cp_size,
+            min_local_rows=get_thd_min_local_rows(model_config, local_cp_size),
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             cp_chunk_index=cp_chunk_index,
@@ -177,6 +191,27 @@ def gptmodel_forward_model_engine(
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids, pre_process=True, **thd_kwargs
         )
+        if deepseek_v41_multimodal:
+            # CSA2 uses logical lengths to exclude each sequence's physical padding from
+            # compression, routing and sparse-attention indexing.
+            logical_cu_seqlens = input_ids.offsets().to(
+                device=packed_seq_params.cu_seqlens_q_padded.device,
+                dtype=packed_seq_params.cu_seqlens_q_padded.dtype,
+            )
+            packed_seq_params.cu_seqlens_q = logical_cu_seqlens
+            packed_seq_params.cu_seqlens_kv = logical_cu_seqlens
+            if router_padding_mask is None:
+                # CSA ignores physical alignment rows through the logical lengths;
+                # MoE needs the same information explicitly. Counting padding in
+                # router auxiliary losses makes their gradient depend on K.
+                valid_tokens = torch.nested.nested_tensor_from_jagged(
+                    torch.ones_like(input_ids.values(), dtype=torch.bool), offsets=input_ids.offsets()
+                )
+                valid_rows = preprocess_thd_engine(valid_tokens, pre_process=True, **thd_kwargs)[0]
+                router_padding_mask = ~valid_rows.to(torch.bool)
+            images = build_deepseek_v41_image_inputs(multi_modal_inputs, input_ids_rmpad, batch_size)
+            if images is not None:
+                model_kwargs["images"] = images
         if vision_model:
             input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
                 model, input_ids, input_ids_rmpad, packed_seq_params, position_ids, pad_token_id, **thd_kwargs
@@ -200,18 +235,25 @@ def gptmodel_forward_model_engine(
                 else:
                     v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
-                args[k] = preprocess_thd_engine(
-                    v,
-                    pre_process=True,
-                    need_roll=True,
-                    use_fp8_padding=use_fp8_padding,
-                    local_cp_size=local_cp_size,
-                    pad_to_length_bucket=pad_to_length_bucket,
-                    cp_layout=cp_layout,
-                    cp_chunk_index=cp_chunk_index,
-                    cp_chunk_count=cp_chunk_count,
-                    chunk_tape=chunk_tape,
-                )[0]
+                if full_stream_model:
+                    # `preprocess_thd_full_stream` returns one `[1, total_tokens]` tensor, not a
+                    # tuple, so there is nothing to unpack here; the engine branch below takes
+                    # `[0]` because that helper returns `(ids, packed_seq_params, positions)`.
+                    args[k] = preprocess_thd_full_stream(v, packed_seq_params, need_roll=True)
+                else:
+                    args[k] = preprocess_thd_engine(
+                        v,
+                        pre_process=True,
+                        need_roll=True,
+                        quant_align_size=quant_align_size,
+                        local_cp_size=local_cp_size,
+                        min_local_rows=thd_kwargs["min_local_rows"],
+                        pad_to_length_bucket=pad_to_length_bucket,
+                        cp_layout=cp_layout,
+                        cp_chunk_index=cp_chunk_index,
+                        cp_chunk_count=cp_chunk_count,
+                        chunk_tape=chunk_tape,
+                    )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
@@ -224,13 +266,22 @@ def gptmodel_forward_model_engine(
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
 
-        output_orig = model(
-            input_ids=input_ids_rmpad,
-            attention_mask=attention_mask,
-            position_ids=position_ids_rmpad,
-            packed_seq_params=packed_seq_params,
-            **model_kwargs,
+        model_call = (
+            language_model_forward_kwargs(model, compute_mtp_loss=mtp_enable_train)
+            if full_stream_model
+            else nullcontext()
         )
+        with model_call:
+            output_orig = model(
+                input_ids=input_ids_rmpad,
+                attention_mask=attention_mask,
+                position_ids=position_ids_rmpad,
+                packed_seq_params=packed_seq_params,
+                **model_kwargs,
+            )
+        if full_stream_model and isinstance(output_orig, tuple):
+            # Bridge returns the CP-local loss mask alongside the logits when MTP is enabled.
+            output_orig = output_orig[0]
 
         if post_process and logits_processor is not None:
             # A top-k payload's rows are (id, log q) pairs, so a zero-filled alignment
@@ -244,8 +295,9 @@ def gptmodel_forward_model_engine(
                     v,
                     pre_process=True,
                     need_roll=(k == "label"),
-                    use_fp8_padding=use_fp8_padding,
+                    quant_align_size=quant_align_size,
                     local_cp_size=local_cp_size,
+                    min_local_rows=thd_kwargs["min_local_rows"],
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     cp_chunk_index=cp_chunk_index,

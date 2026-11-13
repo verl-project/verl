@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import logging
-import os
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -23,6 +22,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
 
+from verl.plugin.platform import get_platform
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
@@ -217,12 +217,14 @@ class RolloutReplica(ABC):
             name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
         else:
             name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
+        # These workers share each bundle's device with the rollout engine's own workers. Where a
+        # device cannot be shared between processes (TPU), they must not claim it.
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
             name_prefix=name_prefix,
-            use_gpu=True,
+            use_gpu=get_platform().supports_colocated_worker_groups(),
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers
@@ -332,8 +334,6 @@ def _load_vllm():
 
 
 def _load_sglang():
-    os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
-
     try:
         import vllm  # noqa: F401
     except ImportError:
@@ -371,7 +371,6 @@ def _load_sglang():
 
     from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangReplica
 
-    del os.environ["SGLANG_USE_CPU_ENGINE"]
     return SGLangReplica
 
 

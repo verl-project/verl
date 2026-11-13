@@ -15,7 +15,7 @@ import asyncio
 import functools
 import logging
 import os
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from functools import partial
 from itertools import chain
@@ -39,17 +39,22 @@ from verl.utils.device import get_device_name, get_torch_device, set_expandable_
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
+from verl.utils.megatron.low_precision import bf16_layers_at_start_end
 from verl.utils.megatron.memory_profile import finish_memory_history
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
 from verl.utils.py_functional import append_to_dict
+from verl.utils.qat import dispatch_rollout_weight_quantizer
+from verl.utils.real_nvfp4 import real_nvfp4_enabled
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
     HFModelConfig,
+    McoreEngineConfig,
     MtpConfig,
     RolloutConfig,
     TrainingWorkerConfig,
@@ -59,6 +64,35 @@ from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _plan_liger_flsce_capacity(config: DictConfig, role: str) -> Optional[tuple[int, int]]:
+    """Reserve all colocated consumers before the reference engine initializes Liger."""
+    if not (config.model.get("use_liger", False) and config.model.get("use_fused_kernels", False)):
+        return None
+    tokens = []
+    tp_sizes = []
+    for consumer in ("actor", "ref"):
+        if consumer not in role:
+            continue
+        settings = config[consumer]
+        if settings.strategy != "megatron":
+            continue
+        engine = settings.megatron
+        if engine.get("dtype", "bfloat16") != "bfloat16":
+            continue
+        limits = (
+            (settings.ppo_max_token_len_per_gpu, config.rollout.log_prob_max_token_len_per_gpu)
+            if consumer == "actor"
+            else (settings.log_prob_max_token_len_per_gpu,)
+        )
+        tokens.extend(limit * engine.context_parallel_size for limit in limits if limit is not None)
+        tp_sizes.append(engine.tensor_model_parallel_size)
+    if not tp_sizes:
+        return None
+    if not tokens:
+        raise ValueError("Liger requires existing max-token limits for its colocated Megatron consumers")
+    return max(tokens), min(tp_sizes)
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -76,26 +110,46 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
-def _set_lr_internal(optimizer, lr: float) -> None:
-    """Set learning rate on optimizer param groups (handles ChainedOptimizer)."""
+def _set_lr_internal(optimizer, lr: float, base_lr: float) -> None:
+    """Override the base LR while preserving configured per-group multipliers."""
     if optimizer is None:
         return
-    from megatron.core.optimizer import ChainedOptimizer
-
-    def _set_on_opt(opt):
-        if hasattr(opt, "param_groups"):
-            for pg in opt.param_groups:
-                pg["lr"] = lr
+    pending = [optimizer]
+    seen_optimizers = set()
+    seen_groups = set()
+    while pending:
+        opt = pending.pop()
+        if id(opt) in seen_optimizers:
+            continue
+        seen_optimizers.add(id(opt))
+        chained = getattr(opt, "chained_optimizers", None)
+        if chained is not None:
+            # ChainedOptimizer.optimizer asserts when there is more than one
+            # child; each child owns the concrete optimizer and group config.
+            pending.extend(chained)
+            continue
         inner = getattr(opt, "optimizer", None)
-        if inner is not None and hasattr(inner, "param_groups"):
-            for pg in inner.param_groups:
-                pg["lr"] = lr
-
-    if isinstance(optimizer, ChainedOptimizer):
-        for chained_opt in optimizer.chained_optimizers:
-            _set_on_opt(chained_opt)
-    else:
-        _set_on_opt(optimizer)
+        if inner is not None:
+            pending.append(inner)
+        configured_base_lr = getattr(getattr(opt, "config", None), "lr", base_lr)
+        for group in getattr(opt, "param_groups", ()):
+            # Megatron wrappers expose their inner optimizer's same dictionaries.
+            if id(group) in seen_groups:
+                continue
+            seen_groups.add(id(group))
+            # LoRA+ uses max_lr overrides in Megatron; torch schedulers retain
+            # each group's original LR as initial_lr. Neither changes on step().
+            configured_lr = group.get("max_lr", group.get("initial_lr"))
+            multiplier = (
+                configured_lr / configured_base_lr
+                if configured_lr is not None and configured_base_lr
+                else group.get("lr_mult", 1.0)
+            )
+            group_lr = lr * multiplier
+            if isinstance(group["lr"], torch.Tensor):
+                group["lr"].fill_(group_lr)
+            else:
+                group["lr"] = group_lr
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -451,6 +505,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
         assert not self.engine_config.forward_only, (
             "Can't run `forward_backward_only` when forward_only is in the engine config."
         )
+        if getattr(self, "_train_mode_ctx", None) is not None:
+            raise RuntimeError("Call optim_step_only() before starting another forward_backward_only()")
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
@@ -469,44 +525,46 @@ class TrainingWorker(Worker, DistProfilerExtension):
         import time as _time
 
         _tm_enter_t0 = _time.perf_counter()
-        # Enter train_mode manually — DO NOT use 'with' statement.
-        # optim_step_only will call __exit__ after optimizer step.
-        self._train_mode_ctx = self.engine.train_mode(disable_auto_offload=disable_auto_offload)
-        self._train_mode_ctx.__enter__()
-        _tm_enter_ms = (_time.perf_counter() - _tm_enter_t0) * 1000.0
+        with ExitStack() as step_context:
+            step_context.enter_context(self.engine.train_mode(disable_auto_offload=disable_auto_offload))
+            _tm_enter_ms = (_time.perf_counter() - _tm_enter_t0) * 1000.0
 
-        # Zero gradients before forward (aligns with mint's pre_forward_backward)
-        self.engine.optimizer_zero_grad()
+            # Zero gradients before forward (aligns with mint's pre_forward_backward)
+            self.engine.optimizer_zero_grad()
 
-        # Forward + backward
-        _fb_t0 = _time.perf_counter()
-        try:
-            output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn)
-        except Exception:
-            # An OOM can abort before optimizer_step, so finish the history
-            # here while the allocator still has the failed-step events.
-            finish_memory_history(os.environ.get("DSV41_MEM_HISTORY"))
-            raise
-        _fb_batch_ms = (_time.perf_counter() - _fb_t0) * 1000.0
+            # Forward + backward
+            _fb_t0 = _time.perf_counter()
+            try:
+                output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn)
+            except Exception:
+                # An OOM can abort before optimizer_step, so finish the history
+                # here while the allocator still has the failed-step events.
+                finish_memory_history(os.environ.get("DSV41_MEM_HISTORY"))
+                raise
+            _fb_batch_ms = (_time.perf_counter() - _fb_t0) * 1000.0
 
-        # Store timing for optim_step_only to include in metrics
-        self._fb_timing = {
-            "train_mode_enter_ms:mean": _tm_enter_ms,
-            "forward_backward_batch_ms:mean": _fb_batch_ms,
-        }
+            # Store timing for optim_step_only to include in metrics
+            self._fb_timing = {
+                "train_mode_enter_ms:mean": _tm_enter_ms,
+                "forward_backward_batch_ms:mean": _fb_batch_ms,
+            }
 
-        if self.engine.is_mp_src_rank_with_outputs():
-            if "model_output" in output:
-                output.pop("model_output")
-            final_output = self._postprocess_output(
-                output,
-                global_token_num=global_token_num,
-                delta_time=_fb_batch_ms,
-                forward_only=False,
-                images_seqlens=images_seqlens,
-            ).cpu()
-        else:
-            final_output = None
+            if self.engine.is_mp_src_rank_with_outputs():
+                if "model_output" in output:
+                    output.pop("model_output")
+                final_output = self._postprocess_output(
+                    output,
+                    global_token_num=global_token_num,
+                    delta_time=_fb_batch_ms,
+                    forward_only=False,
+                    images_seqlens=images_seqlens,
+                ).cpu()
+            else:
+                final_output = None
+
+            # Retain the context only after the entire backward/reporting call
+            # succeeds. Any earlier exception clears partial gradients/offloads.
+            self._train_mode_ctx = step_context.pop_all()
 
         return final_output
 
@@ -521,30 +579,33 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         import time as _time
 
-        # Apply client-requested LR before optimizer step
-        if self._client_lr is not None:
-            _set_lr_internal(self.engine.optimizer, self._client_lr)
-
-        _opt_t0 = _time.perf_counter()
-        grad_norm = self.engine.optimizer_step()
-        _optim_batch_ms = (_time.perf_counter() - _opt_t0) * 1000.0
-
-        # LR scheduler step (constant mode = no-op, but keeps step counter)
-        lr = self.engine.lr_scheduler_step()
-
-        # Re-apply client LR after scheduler (constant scheduler resets to init value)
-        if self._client_lr is not None:
-            _set_lr_internal(self.engine.optimizer, self._client_lr)
-            lr = self._client_lr
-
-        # Zero gradients after optimizer step
-        self.engine.optimizer_zero_grad()
-
-        # Exit train_mode (gradients already consumed + zeroed, so __exit__'s zero_grad is harmless)
-        _tm_exit_t0 = _time.perf_counter()
-        if hasattr(self, "_train_mode_ctx") and self._train_mode_ctx is not None:
-            self._train_mode_ctx.__exit__(None, None, None)
+        with ExitStack() as step_context:
+            context = getattr(self, "_train_mode_ctx", None)
             self._train_mode_ctx = None
+            if context is not None:
+                # push() registers its exit without entering train mode again.
+                step_context.push(context)
+
+            # Apply client-requested LR before optimizer step
+            if self._client_lr is not None:
+                _set_lr_internal(self.engine.optimizer, self._client_lr, self.optimizer_config.lr)
+
+            _opt_t0 = _time.perf_counter()
+            grad_norm = self.engine.optimizer_step()
+            _optim_batch_ms = (_time.perf_counter() - _opt_t0) * 1000.0
+
+            # LR scheduler step (constant mode = no-op, but keeps step counter)
+            lr = self.engine.lr_scheduler_step()
+
+            # Re-apply client LR after scheduler (constant scheduler resets to init value)
+            if self._client_lr is not None:
+                _set_lr_internal(self.engine.optimizer, self._client_lr, self.optimizer_config.lr)
+                lr = self._client_lr
+
+            # Zero gradients after optimizer step
+            self.engine.optimizer_zero_grad()
+
+            _tm_exit_t0 = _time.perf_counter()
         _tm_exit_ms = (_time.perf_counter() - _tm_exit_t0) * 1000.0
 
         if self.engine.is_mp_src_rank_with_outputs():
@@ -567,14 +628,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def set_lr(self, lr: float) -> None:
-        """Set learning rate on all optimizer param groups.
+        """Set the base learning rate, preserving per-group LR multipliers.
 
         Directly modifies param_groups["lr"] to apply client-requested LR.
         Handles ChainedOptimizer structure used by Megatron.
         Also caches the LR for re-application after lr_scheduler_step.
         """
         self._client_lr = float(lr)
-        _set_lr_internal(self.engine.optimizer, lr)
+        _set_lr_internal(self.engine.optimizer, self._client_lr, getattr(self.optimizer_config, "lr", 0.0))
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
@@ -724,6 +785,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
+        liger_capacity = _plan_liger_flsce_capacity(self.config, self.role)
 
         # 1. build reference model
         if "ref" in self.role:
@@ -769,6 +831,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+            if isinstance(ref_training_config.engine_config, McoreEngineConfig):
+                ref_training_config.engine_config._liger_flsce_capacity = liger_capacity
 
             self.ref = self.ref_worker_cls(config=ref_training_config)
             self.ref.reset()
@@ -814,6 +878,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.actor.ppo_micro_batch_size_per_gpu
             )
             actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+            if isinstance(actor_training_config.engine_config, McoreEngineConfig):
+                actor_training_config.engine_config._liger_flsce_capacity = liger_capacity
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
@@ -833,8 +899,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
             vllm_engine_kwargs = (self.config.rollout.get("engine_kwargs", {}) or {}).get("vllm", {}) or {}
+            # vLLM accepts hyphenated option names as well.
+            vllm_engine_kwargs = {str(key).replace("-", "_"): value for key, value in vllm_engine_kwargs.items()}
+            self.actor.engine.rollout_name = self.config.rollout.name
             self.actor.engine.vllm_enable_moe_shared_loras = bool(
                 vllm_engine_kwargs.get("enable_moe_shared_loras", False)
+            )
+            self.actor.engine.vllm_enable_mixed_moe_lora_format = bool(
+                vllm_engine_kwargs.get("enable_mixed_moe_lora_format", False)
             )
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
@@ -865,7 +937,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
-            self.lora_resync_base: bool = bool(model_config.lora.get("resync_base", False))
+            # resync_base only applies to an active, unmerged LoRA adapter.
+            lora_active = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
+            self.lora_resync_base: bool = (
+                bool(model_config.lora.get("resync_base", False)) and lora_active and not self.peft_merge
+            )
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -879,6 +955,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.checkpoint_engine = CheckpointEngineRegistry.new(
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
+
+            engine_config = getattr(self.actor.engine, "engine_config", None)
+            overrides = getattr(engine_config, "override_transformer_config", None) or {}
+            weight_quantizer = dispatch_rollout_weight_quantizer(
+                model_config=model_config,
+                rollout_config=self.config.rollout,
+                qat_config=getattr(engine_config, "qat", None),
+                real_nvfp4_bf16_layers=bf16_layers_at_start_end(overrides) if real_nvfp4_enabled(overrides) else None,
+            )
+            if weight_quantizer is not None:
+                self.actor.engine.set_rollout_weight_quantizer(weight_quantizer)
 
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)
@@ -918,6 +1005,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @RLInsightLogger.trace_state_decorator(
+        "update_weight",
+        state_lane_id=lambda self: f"rank_{self.rank}",
+    )
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
@@ -949,6 +1040,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
+            if getattr(self, "lora_resync_base", False):
+                raise ValueError(
+                    f"model.lora.resync_base needs the naive weight sync, got {effective_mode!r}: other modes never "
+                    "re-send the LoRA adapter, so discarding the rollout weights on sleep would lose it."
+                )
             if effective_mode == "delta_sharded":
                 # the delta engine owns the sync state machine (seed vs steady,
                 # snapshot prime), so it drives the training engine itself.
@@ -982,14 +1078,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon, base_sync_done=True
         )
 
-        do_lora_base_sync = False
-        if not self.peft_merge and peft_config is not None:
-            resync_base = self.lora_resync_base
-            self.rollout.sleep_level = 2 if resync_base else 1
-            do_lora_base_sync = resync_base or not self.base_sync_done
+        do_lora_base_sync = (
+            not self.peft_merge and peft_config is not None and (self.lora_resync_base or not self.base_sync_done)
+        )
+        if do_lora_base_sync:
+            # resync_base needs the deeper sleep level; a first sync does not.
+            self.rollout.sleep_level = 2 if self.lora_resync_base else 1
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
+            # The FSDP exporter rejects layered_summon for a base export; Megatron ignores the flag.
             per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=False
             )

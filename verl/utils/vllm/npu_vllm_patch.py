@@ -18,8 +18,11 @@
 import inspect
 import logging
 import os
+from collections.abc import Iterable
 from contextvars import ContextVar
 from functools import wraps
+
+import torch
 
 from verl.utils.device import is_torch_npu_available
 
@@ -29,6 +32,144 @@ _GLM52_PATCH_ENV = "VERL_VLLM_ASCEND_GLM52_PATCH"
 _GLM52_PATCH_TRUTHY_VALUES = {"1", "true", "yes"}
 _GLM52_PATCH_MARKER = "_verl_vllm_ascend_glm52_patched"
 _glm52_original_run_engine_core = None
+
+
+def normalize_deepseek_v4_weight_names(
+    model: torch.nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Translate Transformers DeepSeek V4 names for the Ascend weight loader."""
+    config = getattr(model, "config", None)
+    if getattr(config, "model_type", None) != "deepseek_v4":
+        return weights
+
+    replacements = (
+        (".self_attn.q_a_proj.", ".self_attn.wq_a."),
+        (".self_attn.kv_proj.", ".self_attn.wkv."),
+        (".self_attn.kv_a_proj_with_mqa.", ".self_attn.wkv."),
+        (".self_attn.q_b_proj.", ".self_attn.wq_b."),
+        (".self_attn.o_a_proj.", ".self_attn.wo_a."),
+        (".self_attn.o_b_proj.", ".self_attn.wo_b."),
+        (".self_attn.q_a_norm.", ".self_attn.q_norm."),
+        (".self_attn.sinks", ".self_attn.attn_sink"),
+        (".self_attn.compressor.kv_proj.", ".self_attn.compressor.wkv."),
+        (".self_attn.compressor.gate_proj.", ".self_attn.compressor.wgate."),
+        (".self_attn.compressor.kv_norm.", ".self_attn.compressor.norm."),
+        (".self_attn.compressor.position_bias", ".self_attn.compressor.ape"),
+        (".self_attn.compressor.indexer.position_bias", ".self_attn.indexer.compressor.ape"),
+        (".self_attn.compressor.indexer.kv_proj.", ".self_attn.indexer.compressor.wkv."),
+        (".self_attn.compressor.indexer.gate_proj.", ".self_attn.indexer.compressor.wgate."),
+        (".self_attn.compressor.indexer.q_b_proj.", ".self_attn.indexer.wq_b."),
+        (".self_attn.compressor.indexer.kv_norm.", ".self_attn.indexer.compressor.norm."),
+        (".self_attn.compressor.indexer.", ".self_attn.indexer."),
+        (".self_attn.indexer.scorer.weights_proj.", ".self_attn.indexer.weights_proj."),
+        ("hc_head.hc_fn", "hc_head_fn"),
+        ("hc_head.hc_base", "hc_head_base"),
+        ("hc_head.hc_scale", "hc_head_scale"),
+        (".attn_hc.fn", ".hc_attn_fn"),
+        (".attn_hc.base", ".hc_attn_base"),
+        (".attn_hc.scale", ".hc_attn_scale"),
+        (".ffn_hc.fn", ".hc_ffn_fn"),
+        (".ffn_hc.base", ".hc_ffn_base"),
+        (".ffn_hc.scale", ".hc_ffn_scale"),
+    )
+
+    def normalized_weights():
+        for name, tensor in weights:
+            for source, target in replacements:
+                name = name.replace(source, target)
+            yield name, tensor
+
+    return normalized_weights()
+
+
+def _patch_deepseek_v4_hash_route_init(moe_class) -> bool:
+    original_init = moe_class.__init__
+    if getattr(original_init, "_verl_deepseek_v4_hash_route_patched", False):
+        return False
+
+    @wraps(original_init)
+    def init(self, config, *args, **kwargs):
+        original_init(self, config, *args, **kwargs)
+        if not self.hash:
+            return
+        tid2eid = self.gate.tid2eid
+        token_ids = torch.arange(tid2eid.shape[0], dtype=tid2eid.dtype, device=tid2eid.device).unsqueeze(1)
+        expert_offsets = torch.arange(tid2eid.shape[1], dtype=tid2eid.dtype, device=tid2eid.device).unsqueeze(0)
+        with torch.no_grad():
+            tid2eid.copy_((token_ids + expert_offsets) % config.n_routed_experts)
+
+    init._verl_deepseek_v4_hash_route_patched = True
+    moe_class.__init__ = init
+    return True
+
+
+def _filter_deepseek_v4_layer_weights(
+    model: torch.nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Skip checkpoint layers beyond the constructed DeepSeek V4 model."""
+    config = getattr(model, "config", None)
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if getattr(config, "model_type", None) != "deepseek_v4" or layers is None:
+        yield from weights
+        return
+
+    num_layers = len(layers)
+    for name, tensor in weights:
+        prefixed_name = name if name.startswith("model") else f"model.{name}"
+        if prefixed_name.startswith("model.layers."):
+            layer_field = prefixed_name[len("model.layers.") :].split(".", 1)[0]
+            if layer_field.isdigit() and int(layer_field) >= num_layers:
+                continue
+        yield name, tensor
+
+
+def _restore_deepseek_v4_expert_weight_loaders(model: torch.nn.Module) -> None:
+    """Restore expert loaders lost when Ascend replaces the processed Parameters."""
+    if not isinstance(model, torch.nn.Module):
+        return
+    config = getattr(model, "config", None)
+    if getattr(config, "model_type", None) != "deepseek_v4":
+        return
+
+    for name, param in model.named_parameters():
+        owner_name, _, param_name = name.rpartition(".")
+        if ".mlp.experts." not in name or param_name not in {"w13_weight", "w2_weight"}:
+            continue
+        if getattr(param, "weight_loader", None) is not None:
+            continue
+        owner = model.get_submodule(owner_name)
+        weight_loader = getattr(owner, "weight_loader", None)
+        if not callable(weight_loader):
+            raise AttributeError(
+                f"DeepSeek V4 expert parameter {name!r} has no weight_loader and "
+                f"its owner {type(owner).__name__} provides no callable fallback."
+            )
+        param.weight_loader = weight_loader
+
+
+def _patch_deepseek_v4_weight_loader(model_class) -> bool:
+    original_load_weights = model_class.load_weights
+    if getattr(original_load_weights, "_verl_deepseek_v4_weight_names_patched", False):
+        return False
+
+    @wraps(original_load_weights)
+    def load_weights(self, weights, *args, **kwargs):
+        weights = normalize_deepseek_v4_weight_names(self, weights)
+        weights = _filter_deepseek_v4_layer_weights(self, weights)
+        _restore_deepseek_v4_expert_weight_loaders(self)
+        return original_load_weights(self, weights, *args, **kwargs)
+
+    load_weights._verl_deepseek_v4_weight_names_patched = True
+    model_class.load_weights = load_weights
+    return True
+
+
+def patch_vllm_ascend_deepseek_v4_weight_loader() -> None:
+    """Patch DeepSeek V4 initialization and loading without editing vllm-ascend."""
+    from vllm_ascend.models.deepseek_v4 import AscendDeepseekV4ForCausalLM, DeepseekV4MoE
+
+    _patch_deepseek_v4_hash_route_init(DeepseekV4MoE)
+    _patch_deepseek_v4_weight_loader(AscendDeepseekV4ForCausalLM)
 
 
 def patch_vllm_ascend_v023_sched_yield():
@@ -262,9 +403,13 @@ def patch_vllm_glm52_partial_wake_up() -> None:
 def vllm_v013_weight_loader_method_wrapper(fn):
     @wraps(fn)
     def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
-        if (shard_id in ("w1", "w3") and param.shape[1] == self.hidden_size) or (
-            shard_id == "w2" and param.shape[2] == self.hidden_size
-        ):
+        if shard_id in ("w1", "w3"):
+            hidden_size_axes = (param.shape[1] == self.hidden_size, param.shape[2] == self.hidden_size)
+            should_transpose = hidden_size_axes == (True, False)
+        else:
+            should_transpose = shard_id == "w2" and param.shape[2] == self.hidden_size
+
+        if should_transpose:
             param.data = param.data.transpose(1, 2)
         return fn(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success)
 
@@ -435,6 +580,7 @@ def apply_npu_vllm_patches() -> None:
         # Only genuine single-token decode may skip the causal attention mask; mixed
         # prefill-decode and spec-decode FULL graph capture batches still need it.
         patch_vllm_ascend_v023_fia_decode_mask()
+        patch_vllm_ascend_deepseek_v4_weight_loader()
 
     # Disable flash_attn in RotaryEmbedding (NPU)
     from vllm.model_executor.layers import fused_moe

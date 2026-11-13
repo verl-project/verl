@@ -113,6 +113,8 @@ def _validate_score_centering_config(config: DictConfig) -> None:
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
         raise ValueError("score centering requires actor_rollout_ref.rollout.topk_log_probs > 0.")
+    if config.actor_rollout_ref.rollout.get("temperature", 1.0) <= 0:
+        raise ValueError("score centering requires stochastic training rollouts with temperature > 0.")
     if (config.get("distillation") or {}).get("enabled", False):
         raise ValueError("score centering cannot be combined with distillation.")
 

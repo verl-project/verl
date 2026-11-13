@@ -227,9 +227,20 @@ def get_megatron_optimizer(
     # Megatron-Bridge when ratio != 1.0; else mcore uses standard overrides.
     config_overrides = None
     if lora_plus_ratio and lora_plus_ratio != 1.0:
-        from megatron.bridge.peft.lora import get_lora_plus_config_overrides
+        from megatron.bridge.peft import lora
 
-        config_overrides = get_lora_plus_config_overrides(config, lora_plus_ratio)
+        if hasattr(lora, "get_lora_plus_config_overrides"):
+            config_overrides = lora.get_lora_plus_config_overrides(config, lora_plus_ratio)
+        else:
+            # Bridge 0.6.2 predates its LoRA+ helper. Its paired MCore already supports per-group overrides.
+            from megatron.core.optimizer import ParamGroupOverride, ParamKey, get_standard_config_overrides
+
+            config_overrides = get_standard_config_overrides(config)
+            min_lr = config.min_lr or 0.0
+            for linear, ratio in (("linear_in", 1.0), ("linear_out", lora_plus_ratio)):
+                config_overrides[ParamKey(name=f"*.{linear}.weight")] = ParamGroupOverride(
+                    max_lr=config.lr * ratio, min_lr=min_lr * ratio
+                )
         print_rank_0(
             f"LoRA+ enabled: lora_plus_ratio={lora_plus_ratio} "
             f"(linear_in/A max_lr={config.lr}, linear_out/B max_lr={config.lr * lora_plus_ratio})"

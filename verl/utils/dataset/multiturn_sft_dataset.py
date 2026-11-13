@@ -497,7 +497,9 @@ class MultiTurnSFTDataset(Dataset):
         for k, v in multi_modal_inputs.items():
             multi_modal_inputs[k] = torch.concat(v, dim=0)
 
-        if vision_token_types is not None:
+        if vision_token_types is not None and all(
+            key in multi_modal_inputs for key in ("pixel_values", "image_grid_hws")
+        ):
             multi_modal_inputs["vision_token_types"] = vision_token_types
 
         # 2. handle position_ids for Qwen-VL series models
@@ -521,6 +523,12 @@ class MultiTurnSFTDataset(Dataset):
 
         # 3. handle padding
         sequence_length = input_ids.shape[0]
+        if (
+            sequence_length > self.max_length
+            and "vision_token_types" in multi_modal_inputs
+            and self.truncation != "error"
+        ):
+            raise ValueError("Multimodal sequences require truncation='error'")
         # Handle sequence length
         if self.pad_mode == DatasetPadMode.RIGHT:
             if sequence_length < self.max_length:
@@ -601,20 +609,17 @@ class MultiTurnSFTDataset(Dataset):
             raise ValueError(f"Unknown pad mode {self.pad_mode}")
 
     def _sample_from_token_ids(self, row_dict: dict) -> dict:
-        """Build one sample from pre-tokenized ids, keeping the caller's exact tokens."""
+        """Build a sample from exact token ids, then apply the configured truncation.
+
+        External teacher lookups key the returned tokens, so teacher export and
+        training must use the same max_length and truncation settings.
+        """
         input_ids = torch.tensor(row_dict["input_ids"], dtype=torch.int64)
         length = input_ids.shape[0]
-        if length > self.max_length:
-            if self.truncation == "error":
-                raise ValueError(f"pre-tokenized row has {length} tokens > max_length={self.max_length}")
-            input_ids = input_ids[: self.max_length]
-            length = input_ids.shape[0]
-
         raw_mask = row_dict.get("loss_mask")
         if raw_mask is None:
             # no mask given: supervise everything after the first token
             loss_mask = torch.ones(length, dtype=torch.int64)
-            loss_mask[0] = 0
         else:
             loss_mask = torch.tensor(raw_mask, dtype=torch.int64)
             if loss_mask.shape[0] != length:
@@ -632,9 +637,7 @@ class MultiTurnSFTDataset(Dataset):
             ids_t = torch.tensor(teacher_ids, dtype=torch.int64)
             lp_t = torch.tensor(teacher_logprobs, dtype=torch.float32)
             if ids_t.shape != lp_t.shape or ids_t.shape[0] != length:
-                raise ValueError(
-                    f"teacher rows {tuple(ids_t.shape)} must align with the {length} tokens"
-                )
+                raise ValueError(f"teacher rows {tuple(ids_t.shape)} must align with the {length} tokens")
             # Padded mode can ship these as tensors: a [max_length, topk] row stacks
             # into a batch-aligned tensor that the engine slices per micro-batch along
             # with the logits. No-padding cannot — the rows are ragged and verl's
@@ -645,6 +648,25 @@ class MultiTurnSFTDataset(Dataset):
             # non-tensor) either fails the batch-dimension contract or is flattened on
             # the way in. The trainer hands it to the loss function directly, per datum.
             teacher_tensors = {}
+
+        if length > self.max_length:
+            if self.truncation == "error":
+                raise ValueError(f"pre-tokenized row has {length} tokens > max_length={self.max_length}")
+            if self.truncation == "left":
+                token_slice = slice(-self.max_length, None)
+            elif self.truncation == "right":
+                token_slice = slice(None, self.max_length)
+            else:
+                raise ValueError(f"Unknown truncation mode {self.truncation}")
+            input_ids = input_ids[token_slice]
+            loss_mask = loss_mask[token_slice]
+            length = input_ids.shape[0]
+
+        # Token-level masks cannot supervise the first retained token: there is
+        # no preceding model position for it. This also keeps packed CE's flat
+        # mask shift from supervising the previous sample's phantom last entry.
+        if length:
+            loss_mask[0] = 0
 
         # passthrough ids: the caller keys precomputed data (teacher distributions) by
         # this column, and the collator carries scalars as non-tensor batch entries

@@ -340,12 +340,6 @@ def test_no_flag_means_no_payload_even_when_the_batch_carries_both():
             "teacher_topk_token_ids/teacher_topk_logprobs or teacher_ids/teacher_logprobs",
         ),
         (
-            {"distillation_use_topk": False, "needs_vocab_logits": True},
-            {},
-            "needs_vocab_logits",
-            "sampler_topk_token_ids/sampler_topk_logprobs",
-        ),
-        (
             {"distillation_use_topk": True, "needs_vocab_logits": False},
             {"teacher_topk_token_ids": torch.zeros(1, _ROWS, _TOPK, dtype=torch.int64)},
             "distillation_use_topk",
@@ -363,6 +357,19 @@ def test_an_armed_flag_without_its_payload_fails_loud(flags, in_batch, expected_
     message = str(excinfo.value)
     assert expected_flag in message
     assert expected_keys in message
+
+
+def test_logits_only_consumer_needs_no_incoming_payload():
+    assert _resident_logits_payload({}, distillation_use_topk=False, needs_vocab_logits=True) is None
+
+
+def test_logits_only_consumer_rejects_half_a_sampler_payload():
+    with pytest.raises(RuntimeError, match="without sampler_topk_token_ids"):
+        _resident_logits_payload(
+            {"sampler_topk_logprobs": torch.zeros(1, _ROWS, _TOPK)},
+            distillation_use_topk=False,
+            needs_vocab_logits=True,
+        )
 
 
 def test_a_batch_carrying_both_payloads_is_refused():
@@ -391,8 +398,7 @@ def test_target_ids_is_only_passed_to_a_consumer_that_declares_it():
     after the forward has run, and a `**kwargs` consumer is not a semantic opt-in."""
     from verl.workers.engine.megatron.transformer_impl import _declares_keyword
 
-    def strict(student_logits, data, data_format, teacher_topk_ids=None,
-               teacher_topk_logprobs=None):
+    def strict(student_logits, data, data_format, teacher_topk_ids=None, teacher_topk_logprobs=None):
         return {}
 
     def permissive(**kwargs):

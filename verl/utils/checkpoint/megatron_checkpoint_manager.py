@@ -988,7 +988,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             hf_adapter_ckpt_path = os.path.join(hf_ckpt_path, "adapter")
             adapter_export_kwargs = {}
             if getattr(self.peft_cls, "experts_shared_outer_loras", False):
-                adapter_export_kwargs["allow_serving_layout"] = True
+                # HF checkpoints must load with PEFT. The compact shared-factor layout is
+                # for serving; PEFT expects both factors under each expert's module name.
+                adapter_export_kwargs["expand_shared_outer"] = True
             self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls, **adapter_export_kwargs)
             log_with_rank(
                 f"Saved HF PEFT adapter checkpoint to {hf_adapter_ckpt_path}",

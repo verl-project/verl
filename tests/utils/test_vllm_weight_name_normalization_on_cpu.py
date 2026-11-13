@@ -137,6 +137,7 @@ def _load_vllm_rollout_utils():
 
     fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
+    fake_vllm_quant.configure_fp8_ignored_layers_match_mode = lambda config: None
     fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
     fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
@@ -149,6 +150,9 @@ def _load_vllm_rollout_utils():
 
     fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
     fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
+
+    fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_bucketed_transfer.BucketedWeightReceiver = None
 
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
     # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
@@ -187,6 +191,7 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
         "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
         "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
+        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
@@ -254,6 +259,17 @@ class _FakeMapper:
         return out
 
 
+class AutoWeightsLoader:
+    """Stand-in for vLLM's flat loader that records what the resolver passes it."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def load_weights(self, weights):
+        self.model.loaded = list(weights)
+        return {name for name, _ in self.model.loaded}
+
+
 class _FakeModel:
     """A fake vLLM model exposing only the introspection surface the resolver uses."""
 
@@ -283,8 +299,7 @@ class _FakeModel:
         return iter(())
 
     def load_weights(self, weights):
-        # Record resolved names for assertions.
-        self.loaded = [name for name, _ in weights]
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 class _FakeVllmConfig:
@@ -297,6 +312,7 @@ class _FakeVllmConfig:
 def _make_worker(model):
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.model_runner = types.SimpleNamespace(model=model, vllm_config=_FakeVllmConfig(), drafter=None)
+    worker._is_nvfp4_packed = False
     return worker
 
 
@@ -522,6 +538,8 @@ def test_expert_alias_base_layer_gets_stripped():
 
 
 def test_packed_routed_expert_alias_not_routed_with_lora():
+    """Qwen3.5 routed experts: the packed ``experts.gate_up_proj`` alias matches
+    ``MoERunner.load_weights`` directly, so it must not gain a ``.base_layer.``."""
     """Qwen3.5 routed experts: Bridge exports packed ``experts.gate_up_proj``
     (non-leaf). On vLLM with ``BaseLayerWithLoRA.load_weights`` (``_HAS_LORA_LOAD_WEIGHTS``),
     ``FusedMoEWithLoRA.load_weights`` delegates to ``MoERunner.load_weights`` which
@@ -744,7 +762,7 @@ def test_update_weights_resolves_names_before_load(monkeypatch):
 
     worker._update_weights(weights, peft_config={"r": 1}, base_sync_done=False)
 
-    assert model.loaded == [
+    assert [name for name, _ in model.loaded] == [
         "merger.linear_fc1.weight",
         "language_model.model.layers.0.self_attn.q_proj.weight",
     ]
@@ -768,7 +786,7 @@ def test_base_sync_emits_leaf_keeps_lora_prefix(monkeypatch):
         base_sync_done=False,
     )
 
-    assert model.loaded == ["model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"]
+    assert [name for name, _ in model.loaded] == ["model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"]
     assert routed.lora_base_layer_prefix == "base_layer."
 
 
@@ -811,12 +829,7 @@ class _FakeBucketReceiver:
 
 
 def _install_fake_receiver(monkeypatch, buckets):
-    # ``update_weights_from_ipc`` imports the receiver lazily, so stub the transport
-    # module itself; a full-name hit in ``sys.modules`` also skips the vLLM-backed
-    # package ``__init__``.
-    fake_transport = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
-    fake_transport.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiver(buckets)
-    monkeypatch.setitem(sys.modules, fake_transport.__name__, fake_transport)
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeBucketReceiver(buckets))
 
 
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
@@ -841,8 +854,7 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     worker.remove_lora = lambda lora_id: None
     worker.device = torch.device("cpu")
     worker.local_rank = 0
-    worker._is_qat_model = False
-    worker._is_modelopt_qat = False
+    worker._is_nvfp4_packed = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-lora.sock"
 
     worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
@@ -895,8 +907,7 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     worker = _make_worker(model)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
-    worker._is_qat_model = False
-    worker._is_modelopt_qat = False
+    worker._is_nvfp4_packed = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-std.sock"
 
     # Bypass the post-load process_weights_after_loading (needs real vLLM).
@@ -1050,6 +1061,7 @@ def test_quantized_sync_drops_tied_alias_updates(monkeypatch):
     monkeypatch.setattr(
         _vllm_rollout_utils,
         "load_quanted_weights",
+        lambda weights, runner, **kwargs: loaded.extend(name for name, _ in weights) or [],
         lambda weights, runner, is_drafter=False, peft_config=None: loaded.extend(name for name, _ in weights) or [],
     )
     updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
@@ -1090,6 +1102,7 @@ def _staging_sync_worker(model):
     worker = _make_worker(model)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
+    worker._is_nvfp4_packed = False
     worker._is_qat_model = False
     worker._is_modelopt_qat = False
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-moe-staging.sock"
@@ -1140,6 +1153,9 @@ def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Loader-style-aware ``.base_layer.`` handling: strict inner loaders (DeepseekV2
+# ``params_dict[name]``) keep the suffix; flat loaders (``AutoWeightsLoader``) strip it.
+# ---------------------------------------------------------------------------
 # Loader-style-aware strip: strict inner loaders (DeepseekV2 ``params_dict[name]``
 # lookup) need ``.base_layer.`` KEPT; flat loaders (Llama/Qwen3.5
 # ``AutoWeightsLoader`` recursion) need it STRIPPED. Probed at runtime from the
@@ -1148,51 +1164,19 @@ def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
 
 
 class _FakeStrictInner:
-    """Stand-in for a strict inner transformer (DeepseekV2Model-style).
-
-    Its ``load_weights`` source contains ``params_dict[`` and NOT
-    ``AutoWeightsLoader``, so the probe returns True. At module scope so
-    ``inspect.getsource`` can read it.
-    """
+    """Strict inner transformer: its ``load_weights`` does not use ``AutoWeightsLoader``."""
 
     def load_weights(self, weights):
-        loaded = set()
-        # Strict loaders (DeepseekV2) do ``params_dict[name]`` lookups; the
-        # probe matches the ``params_dict[`` token in this source. The line is
-        # never executed (weights is empty in tests), it just needs to be
-        # visible to ``inspect.getsource``.
-        params_dict = {"": None}  # noqa: F841
-        for name, _ in weights:
-            _probe = params_dict[name]  # noqa: F841
-            loaded.add(name)
-        return loaded
+        params_dict = {}
+        return {name for name, _ in weights if params_dict[name] is not None}
 
 
-class _FakeFlatInner:
-    """Stand-in for a flat inner transformer (LlamaModel/Qwen3_5Model-style).
-
-    Its ``load_weights`` source contains ``AutoWeightsLoader``, so the probe
-    returns False (flat -> strip).
-    """
-
-    def load_weights(self, weights):
-        loader = AutoWeightsLoader(self)  # noqa: F821 - source signature only
-        return loader.load_weights(weights)
-
-
-class _OuterModel:
+class _OuterModel(_FakeModel):
     """Wraps an inner transformer under ``.model`` (the ForCausalLM layout)."""
 
     def __init__(self, inner, params):
+        super().__init__(params)
         self.model = inner
-        self._params = dict(params)
-
-    def named_parameters(self, remove_duplicate: bool = False):
-        del remove_duplicate
-        yield from self._params.items()
-
-    def named_buffers(self):
-        return iter(())
 
 
 def _strict_outer(params):
@@ -1200,268 +1184,335 @@ def _strict_outer(params):
     return _OuterModel(_FakeStrictInner(), params)
 
 
-def _flat_outer(params):
-    _vllm_utils_real._inner_load_weights_is_strict_cache.clear()
-    return _OuterModel(_FakeFlatInner(), params)
-
-
-def test_strict_loader_keeps_base_layer_suffix_on_newer_vllm(monkeypatch):
-    """A *strict* loader (DeepseekV2 params_dict[name] lookup) receives the
-    SUFFIXED name unchanged — the unconditional strip flat loaders need would
-    break strict loaders (KeyError on the stripped name)."""
+def test_strict_child_keeps_base_layer_suffix_only_inside_its_prefix(monkeypatch):
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    key = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    model = _strict_outer({key: torch.empty(0)})
+    inner = "model.layers.0.self_attn.q_proj.base_layer.weight"
+    sibling = "lm_head.base_layer.weight"
+    model = _strict_outer({inner: torch.empty(0), sibling: torch.empty(0)})
     worker = _make_worker(model)
-    assert _resolve(worker, model, key) == key  # KEPT, not stripped
+    assert _resolve(worker, model, inner) == inner
+    assert _resolve(worker, model, sibling) == "lm_head.weight"
 
 
-def test_strict_loader_re_suffixes_plain_name_on_newer_vllm(monkeypatch):
-    """A *strict* loader: an incoming PLAIN name (no .base_layer.) that doesn't
-    match the live suffixed key is re-suffixed so params_dict[name] finds it
-    (mirrors released-vLLM behavior for strict loaders)."""
+def test_vlm_strict_child_uses_the_mapped_language_model_prefix(monkeypatch):
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+
+    class Vlm(_FakeModel):
+        language_model = _strict_outer({})
+
+    key = "model.language_model.layers.0.self_attn.q_proj.base_layer.weight"
     live = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    model = _strict_outer({live: torch.empty(0)})
+    sibling = "language_model.lm_head.base_layer.weight"
+    model = Vlm(
+        {live: torch.empty(0), sibling: torch.empty(0)},
+        mapper=_FakeMapper({"model.language_model.": "language_model.model."}),
+    )
     worker = _make_worker(model)
-    plain = "language_model.model.layers.0.self_attn.q_proj.weight"
-    assert _resolve(worker, model, plain) == live  # re-suffixed
+    assert _resolve(worker, model, key) == key
+    assert _resolve(worker, model, sibling) == "language_model.lm_head.weight"
 
 
-def test_flat_loader_strips_base_layer_suffix_on_newer_vllm(monkeypatch):
-    """A *flat* loader (AutoWeightsLoader recursion into base_layer): the
-    SUFFIXED name is stripped — loader-style-gated, not a blanket newer-vLLM strip."""
+def test_strict_root_keeps_top_level_base_layer_suffix(monkeypatch):
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    key = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    model = _flat_outer({key: torch.empty(0)})
-    worker = _make_worker(model)
-    assert _resolve(worker, model, key) == ("language_model.model.layers.0.self_attn.q_proj.weight")  # STRIPPED
 
+    class StrictRoot(_FakeStrictInner, _FakeModel):
+        pass
 
-def test_strict_loader_per_expert_leaf_kept_verbatim(monkeypatch):
-    """A *strict* loader (DeepseekV2/Moonlight) per-expert leaf-suffix name is
-    KEPT verbatim (``experts.<id>.<proj>.base_layer.<leaf>``) — strict loaders do
-    ``params_dict[name]`` with a suffixed key, so routing it under base_layer
-    (the flat-loader fix) would break them. Guards the 6/8 passing combos."""
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
-    live = "model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"
-    model = _strict_outer(
-        {
-            "model.layers.0.mlp.experts.base_layer.routed_experts.w13_weight": torch.empty(0),
-            live: torch.empty(0),
-        }
-    )
-    worker = _make_worker(model)
-    assert _resolve(worker, model, live) == live  # KEPT verbatim, not routed
-
-
-def test_strict_loader_per_expert_leaf_plain_re_suffixed(monkeypatch):
-    """A *strict* loader: a PLAIN per-expert leaf (no ``.base_layer.``) matching a
-    live suffixed key is re-suffixed so ``params_dict[name]`` finds it."""
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
-    live = "model.layers.0.mlp.experts.0.gate_proj.base_layer.weight"
-    model = _strict_outer(
-        {
-            "model.layers.0.mlp.experts.base_layer.routed_experts.w13_weight": torch.empty(0),
-            live: torch.empty(0),
-        }
-    )
-    worker = _make_worker(model)
-    plain = "model.layers.0.mlp.experts.0.gate_proj.weight"
-    assert _resolve(worker, model, plain) == live  # re-suffixed, not routed
-
-
-@pytest.mark.parametrize("leaf", ["weight", "scale"])
-def test_deepseek_v41_unwrapped_expert_base_sync_gets_lora_suffix(monkeypatch, leaf):
-    """Partial LoRA leaves earlier DSV4 experts unwrapped in Bridge, but vLLM
-    wraps their fused MoE base and expects a leaf-position base_layer suffix.
-    """
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_BASE_LAYER_PREFIX", True)
-    _vllm_utils_real._inner_load_weights_is_strict_cache.clear()
-    model = _FakeModel(
-        {"language_model.model.layers.1.ffn.experts.base_layer.routed_experts.w13_weight": torch.empty(0)},
-        mapper=_FakeMapper({"layers.": "language_model.model.layers."}),
-    )
-    model.language_model = types.SimpleNamespace(model=_FakeStrictInner())
-    worker = _make_worker(model)
-    plain = f"layers.1.ffn.experts.0.w1.{leaf}"
-    suffixed = f"layers.1.ffn.experts.0.w1.base_layer.{leaf}"
-    assert _resolve(worker, model, plain) == suffixed
-    assert _resolve(worker, model, suffixed) == suffixed
-
-
-def test_strict_probe_is_cached_per_class():
-    """The loader-style probe runs once per inner-model class (getsource is
-    slow); a second lookup is a cache hit."""
-    _vllm_utils_real._inner_load_weights_is_strict_cache.clear()
-    model = _strict_outer({"q.base_layer.weight": torch.empty(0)})
-    probe = _vllm_utils_real._inner_load_weights_is_strict
-    # First call introspects and caches.  The probe returns the *prefix* of
-    # the strict loader (``""`` when the inner ``.model`` itself is strict,
-    # as with ``_FakeStrictInner``), or ``None`` when all loaders are flat.
-    first = probe(model)
-    assert first == ""
-    # The cache is populated keyed by the outer-model class.
-    assert type(model) in _vllm_utils_real._inner_load_weights_is_strict_cache
-    # Second call is a cache hit (no re-introspection).
-    second = probe(model)
-    assert second == ""
-
-
-def test_strict_loader_vision_merger_still_strips(monkeypatch):
-    """Even under a strict inner loader, a non-LoRA-wrapped module (e.g. the
-    Qwen3.5-VL vision merger) whose ``.base_layer.`` isn't a real child still
-    gets stripped — the per-name ``parent_has_base_layer`` check is unchanged."""
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    model = _strict_outer(
-        {
-            # Language leaf has a real base_layer child; merger does not.
-            "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
-            "model.visual.merger.linear_fc1.weight": torch.empty(0),
-        }
-    )
-    worker = _make_worker(model)
-    # Merger .base_layer. has no live child -> stripped (per-name, loader-independent).
-    assert _resolve(worker, model, "model.visual.merger.linear_fc1.base_layer.weight") == (
-        "model.visual.merger.linear_fc1.weight"
-    )
-    # Language leaf keeps the suffix (strict loader).
-    assert (
-        _resolve(worker, model, "language_model.model.layers.0.self_attn.q_proj.base_layer.weight")
-        == "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    )
+    name = "lm_head.base_layer.weight"
+    model = StrictRoot({name: torch.empty(0)})
+    assert _resolve(_make_worker(model), model, name) == name
 
 
 def test_strict_loader_non_lora_param_on_wrapped_module_re_suffixed(monkeypatch):
-    """A non-LoRA parameter living on a LoRA-wrapped module (e.g. DSV4 router's
-    ``gate.tid2eid`` / ``gate.e_score_correction_bias``) moves under
-    ``.base_layer.`` when the module is wrapped. The resolver re-adds the
-    suffix for both leaf and non-leaf params (the inner ``load_weights`` no
-    longer re-adds, so the resolver owns re-add for everything whose live key
-    is suffixed), gated by ``_exists(alt)`` so a plain name on an unwrapped
-    module is left alone."""
+    """DSV4 router params (``gate.tid2eid``) move under ``.base_layer.`` once the router is wrapped."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
     live_tid = "model.layers.0.mlp.gate.base_layer.tid2eid"
     live_bias = "model.layers.0.mlp.gate.base_layer.e_score_correction_bias"
     model = _strict_outer({live_tid: torch.empty(0), live_bias: torch.empty(0)})
     worker = _make_worker(model)
-    # tid2eid: non-leaf, but live key is suffixed -> re-suffixed by the resolver.
     assert _resolve(worker, model, "model.layers.0.mlp.gate.tid2eid") == live_tid
-    # e_score_correction_bias: ends in _bias, live key suffixed -> re-suffixed.
     assert _resolve(worker, model, "model.layers.0.mlp.gate.e_score_correction_bias") == live_bias
 
 
-def test_flat_loader_non_lora_param_on_wrapped_module_not_suffixed(monkeypatch):
-    """A flat loader (AutoWeightsLoader recursion) reaches the param through the
-    ``base_layer`` child, so the unwrapped name is left alone -- no suffix
-    re-added (mirrors the leaf branch's loader-style gate)."""
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    live = "model.layers.0.mlp.gate.base_layer.tid2eid"
-    model = _flat_outer({live: torch.empty(0)})
-    worker = _make_worker(model)
-    assert _resolve(worker, model, "model.layers.0.mlp.gate.tid2eid") == ("model.layers.0.mlp.gate.tid2eid")
-
-
 def test_strict_loader_multi_segment_shard_strips_to_unfused_leaf(monkeypatch):
-    """DSV4 ``compressor.fused_wkv_wgate`` is an *unwrappable* MergedColumnParallelLinear
-    (no live ``.base_layer.``). Under merge=False LoRA, if the sender exports the
-    constituent shard names (``compressor.wkv``/``compressor.wgate``) with the
-    LoRA ``.base_layer.`` suffix, the ``shard_to_owner`` strip branch rewrites
-    in-place on the full incoming name (prefix-safe) and returns the shard leaf
-    (``compressor.wkv.weight``); vLLM's ``stacked_params_mapping`` then fuses
-    it to the live ``compressor.fused_wkv_wgate.weight``. Without this branch
-    the general ``_exists(stripped)`` path drops the ``model.layers.N.`` prefix
-    on multi-segment shards and misses, so the suffixed name leaks through and
-    the strict loader KeyErrors."""
+    """DSV4 ``compressor.fused_wkv_wgate`` is not LoRA-wrapped: its multi-segment shards lose the suffix."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    live = "model.layers.0.attn.compressor.fused_wkv_wgate.weight"
-    model = _strict_outer({live: torch.empty(0)})
-    model.packed_modules_mapping = {
-        "compressor.fused_wkv_wgate": ["compressor.wkv", "compressor.wgate"],
-    }
+    model = _strict_outer({"model.layers.0.attn.compressor.fused_wkv_wgate.weight": torch.empty(0)})
+    model.packed_modules_mapping = {"compressor.fused_wkv_wgate": ["compressor.wkv", "compressor.wgate"]}
     worker = _make_worker(model)
-    assert (
-        _resolve(worker, model, "model.layers.0.attn.compressor.wkv.base_layer.weight")
-        == "model.layers.0.attn.compressor.wkv.weight"
-    )
-    assert (
-        _resolve(worker, model, "model.layers.0.attn.compressor.wgate.base_layer.weight")
-        == "model.layers.0.attn.compressor.wgate.weight"
-    )
+    for shard in ("wkv", "wgate"):
+        name = f"model.layers.0.attn.compressor.{shard}.base_layer.weight"
+        assert _resolve(worker, model, name) == f"model.layers.0.attn.compressor.{shard}.weight"
 
 
-def test_strict_loader_unprefixed_shard_against_model_prefixed_live(monkeypatch):
-    """DSV4 crash repro: a shard-form base-sync name in HF checkpoint style
-    WITHOUT a ``model.`` prefix (``layers.0.attn.compressor.wgate.base_layer.weight``),
-    while vLLM's ``ForCausalLM.named_parameters`` reports the live param WITH the
-    ``model.`` prefix (``model.layers.0.attn.compressor.fused_wkv_wgate.weight``).
-    The ``shard_to_owner`` strip branch matches the shard substring on the full
-    incoming name (prefix-agnostic) and strips the suffix, so the unprefixed
-    shard leaf (``layers.0.attn.compressor.wgate.weight``) is returned for
-    vLLM's ``stacked_params_mapping`` to fuse (``compressor.wgate`` ->
-    ``compressor.fused_wkv_wgate``).
+@pytest.fixture(name="vllm_quant_utils")
+def _load_vllm_quant_utils(monkeypatch):
+    """Load ``vllm_quant_utils`` without running the vLLM-backed ``verl.utils.vllm`` package init."""
+    package_name = "verl.utils.vllm"
+    module_name = f"{package_name}.vllm_quant_utils"
+    module_path = _REPO_ROOT / "verl/utils/vllm/vllm_quant_utils.py"
+    fake_package = types.ModuleType(package_name)
+    fake_package.__path__ = [str(module_path.parent)]
+    monkeypatch.setitem(sys.modules, package_name, fake_package)
+    monkeypatch.setitem(sys.modules, f"{package_name}.utils", _vllm_utils_real)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+    return module
 
-    The live fused target is unwrappable (no ``.base_layer.`` child), so the
-    resolver strips the LoRA suffix and keeps the unprefixed shard leaf."""
+
+def test_fp8_weight_is_dequantized_for_live_bf16_projection(monkeypatch, vllm_quant_utils):
+    """LoRA base sync of an FP8 weight + scale into a BF16 live projection loads one BF16 weight."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    live = "model.layers.0.attn.compressor.fused_wkv_wgate.weight"
-    model = _strict_outer({live: torch.empty(0)})
-    # DSV4 ``hf_to_vllm_mapper``: ``layers.`` -> ``model.layers.``.
-    model.hf_to_vllm_mapper = _FakeMapper({"layers.": "model.layers."})
-    model.packed_modules_mapping = {
-        "compressor.fused_wkv_wgate": ["compressor.wkv", "compressor.wgate"],
-    }
-    worker = _make_worker(model)
-    assert (
-        _resolve(worker, model, "layers.0.attn.compressor.wkv.base_layer.weight")
-        == "layers.0.attn.compressor.wkv.weight"
-    )
-    assert (
-        _resolve(worker, model, "layers.0.attn.compressor.wgate.base_layer.weight")
-        == "layers.0.attn.compressor.wgate.weight"
+
+    class Runner:
+        model = _FakeModel({"layers.0.self_attn.q_b_proj.base_layer.weight": torch.empty(2, 2, dtype=torch.bfloat16)})
+
+    vllm_quant_utils.load_quanted_weights(
+        [
+            ("layers.0.self_attn.q_b_proj.weight", torch.ones(2, 2, dtype=torch.float8_e4m3fn)),
+            ("layers.0.self_attn.q_b_proj.weight_scale_inv", torch.ones(1, 1, dtype=torch.float32)),
+        ],
+        Runner(),
+        peft_config={"r": 1},
     )
 
+    assert [name for name, _ in Runner.model.loaded] == ["layers.0.self_attn.q_b_proj.weight"]
+    assert Runner.model.loaded[0][1].dtype == torch.bfloat16
 
-def test_packed_shard_keeps_suffix_when_fused_target_is_wrapped(monkeypatch):
-    """A packed shard whose fused owner is LoRA-wrapped must arrive SUFFIXED.
 
-    vLLM rewrites shard -> fused owner and then indexes ``params_dict``, which
-    holds ``gate_up_proj.base_layer.weight``; stripping is a KeyError. Loaders
-    that re-add the suffix themselves (DSV4) guard on ``not in params_dict``, so
-    the suffixed form is right for them too.
-    """
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("block_shape", [(128, 128), (32, 32), (32, 64)])
+@pytest.mark.parametrize("split_buckets", [False, True])
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_fp8_base_sync_preserves_values_for_live_float_projection(
+    vllm_quant_utils, dtype, block_shape, split_buckets, scale_first
+):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Partial edge blocks exercise cropping as well as 32x32 DSV4.1
+            # scales and rectangular native Fp8Config block sizes.
+            self.proj = torch.nn.Linear(81, 61, bias=False, dtype=dtype)
+
+        @torch.no_grad()
+        def load_weights(self, weights):
+            loaded = set()
+            for name, tensor in weights:
+                assert tensor.dtype == dtype
+                self.get_parameter(name).copy_(tensor)
+                loaded.add(name)
+            return loaded
+
+    model = Model()
+    runner = types.SimpleNamespace(
+        model=model,
+        vllm_config=types.SimpleNamespace(quant_config=types.SimpleNamespace(weight_block_size=block_shape)),
+    )
+    rows, cols = model.proj.weight.shape
+    scale_rows, scale_cols = (
+        (rows + block_shape[0] - 1) // block_shape[0],
+        (cols + block_shape[1] - 1) // block_shape[1],
+    )
+    scales = torch.arange(1, scale_rows * scale_cols + 1).reshape(scale_rows, scale_cols).float()
+    expanded = scales.repeat_interleave(block_shape[0], 0).repeat_interleave(block_shape[1], 1)[:rows, :cols]
+    weight = torch.full((rows, cols), 2.0, dtype=torch.float8_e4m3fn)
+    updates = [("proj.weight", weight), ("proj.weight_scale_inv", scales)]
+    if scale_first:
+        updates.reverse()
+    live_pointer = model.proj.weight.data_ptr()
+    if split_buckets:
+        state = {model: {}}
+        assert not vllm_quant_utils.load_quanted_weights(updates[:1], runner, peft_config={"r": 1}, reload_states=state)
+        # The transport reuses this storage before the second bucket arrives.
+        updates[0][1].fill_(4.0)
+        vllm_quant_utils.load_quanted_weights(updates[1:], runner, peft_config={"r": 1}, reload_states=state)
+        vllm_quant_utils.validate_fp8_weight_pairs(state[model]["pending_fp8"])
+    else:
+        vllm_quant_utils.load_quanted_weights(updates, runner, peft_config={"r": 1})
+    assert model.proj.weight.data_ptr() == live_pointer
+    torch.testing.assert_close(model.proj.weight, (2.0 * expanded).to(dtype), rtol=0, atol=0)
+
+
+def test_weight_scale_is_kept_for_live_int8_weight(monkeypatch, vllm_quant_utils):
+    """Only unquantized live weights drop trainer scales; an int8 live weight keeps its scale."""
     monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
-    live = "model.layers.0.mlp.gate_up_proj.base_layer.weight"
-    model = _strict_outer({live: torch.empty(0)})
-    model.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
-    worker = _make_worker(model)
-    for shard in ("gate_proj", "up_proj"):
-        name = f"model.layers.0.mlp.{shard}.base_layer.weight"
-        assert _resolve(worker, model, name) == name
+
+    class Runner:
+        model = _FakeModel({"layers.0.mlp.down_proj.base_layer.weight": torch.empty(2, 2, dtype=torch.int8)})
+
+    vllm_quant_utils.load_quanted_weights(
+        [
+            ("layers.0.mlp.down_proj.weight", torch.ones(2, 2, dtype=torch.int8)),
+            ("layers.0.mlp.down_proj.weight_scale", torch.ones(2, 1)),
+        ],
+        Runner(),
+        peft_config={"r": 1},
+    )
+
+    assert [name.rsplit(".", 1)[-1] for name, _ in Runner.model.loaded] == ["weight", "weight_scale"]
 
 
-def test_packed_shard_keeps_suffix_on_released_vllm(monkeypatch):
-    """vLLM 0.24 (no ``BaseLayerWithLoRA.load_weights``): a LoRA-wrapped packed
-    shard must keep the suffix so ``AutoWeightsLoader`` recurses into the
-    ``base_layer`` child after the shard -> fused rewrite.
+@pytest.mark.parametrize("scale_first", [False, True])
+def test_dsv41_real_sender_scale_refits_unquantized_projection(vllm_quant_utils, scale_first):
+    from verl.utils.qat.compressed_tensors import Fp8ConfigWeightQuantizer
 
-    Regression for CI ``e2e_ppo_trainer_megatron-deepseek`` (Llama-arch
-    deepseek-coder-1.3b, ``target_modules`` includes ``linear_fc1``), which
-    died with ``KeyError: 'layers.0.mlp.gate_up_proj.weight'``.
-    """
-    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
-    live = {
-        "model.layers.0.mlp.gate_up_proj.base_layer.weight": torch.empty(0),
-        "model.layers.0.self_attn.qkv_proj.base_layer.weight": torch.empty(0),
-    }
-    for outer in (_strict_outer, _flat_outer):
-        model = outer(live)
-        model.packed_modules_mapping = {
-            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            "gate_up_proj": ["gate_proj", "up_proj"],
-        }
-        worker = _make_worker(model)
-        for shard in ("mlp.gate_proj", "mlp.up_proj", "self_attn.q_proj"):
-            name = f"model.layers.0.{shard}.base_layer.weight"
-            assert _resolve(worker, model, name) == name
+    class Model(torch.nn.Module):
+        model_type = "deepseek_v41"
+
+        def __init__(self):
+            super().__init__()
+            layer = torch.nn.Module()
+            layer.attn = torch.nn.Module()
+            layer.attn.wq_a = torch.nn.Linear(96, 64, bias=False, dtype=torch.bfloat16)
+            self.layers = torch.nn.ModuleList([layer])
+
+        @torch.no_grad()
+        def load_weights(self, weights):
+            loaded = set()
+            for name, tensor in weights:
+                self.get_parameter(name).copy_(tensor)
+                loaded.add(name)
+            return loaded
+
+    model = Model()
+    config = {"quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [32, 32]}
+    quantizer = Fp8ConfigWeightQuantizer(config, model_types=[model.model_type])
+    # Distinct powers of two per block quantize exactly to FP8 + E8M0.
+    blocks = torch.tensor([[1, 2, 4], [8, 16, 32]], dtype=torch.bfloat16)
+    source = blocks.repeat_interleave(32, 0).repeat_interleave(32, 1)
+    updates = list(quantizer([("layers.0.attn.wq_a.weight", source)]))
+    assert [name for name, _ in updates] == ["layers.0.attn.wq_a.weight", "layers.0.attn.wq_a.scale"]
+    assert updates[1][1].dtype == torch.float8_e8m0fnu
+    if scale_first:
+        updates.reverse()
+    runner = types.SimpleNamespace(
+        model=model, vllm_config=types.SimpleNamespace(quant_config=types.SimpleNamespace(weight_block_size=[32, 32]))
+    )
+    state = {model: {}}
+    for update in updates:
+        vllm_quant_utils.load_quanted_weights([update], runner, peft_config={"r": 1}, reload_states=state)
+    vllm_quant_utils.validate_fp8_weight_pairs(state[model]["pending_fp8"])
+    torch.testing.assert_close(model.layers[0].attn.wq_a.weight, source, rtol=0, atol=0)
+
+
+def test_dsv_scale_stays_native_for_quantized_live_projection(vllm_quant_utils):
+    name = "layers.0.attn.wq_a"
+    model = _FakeModel({name + ".weight": torch.empty(64, 96, dtype=torch.float8_e4m3fn)})
+    model.model_type = "deepseek_v41"
+    weight = torch.ones(64, 96, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 3).to(torch.float8_e8m0fnu)
+    updates = [(name + ".weight", weight), (name + ".scale", scale)]
+    vllm_quant_utils.load_quanted_weights(updates, types.SimpleNamespace(model=model), peft_config={"r": 1})
+    assert [name for name, _ in model.loaded] == [name for name, _ in updates]
+    assert model.loaded[0][1] is weight
+    assert model.loaded[1][1] is scale
+
+
+@pytest.fixture
+def fp8_sync_worker(monkeypatch, vllm_quant_utils):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.o_proj = torch.nn.Linear(128, 128, bias=False, dtype=torch.bfloat16)
+            self.o_proj.weight.data.zero_()
+            self.register_buffer("sentinel", torch.zeros(1))
+
+        @torch.no_grad()
+        def load_weights(self, weights):
+            loaded = set()
+            for name, tensor in weights:
+                self.get_parameter(name).copy_(tensor)
+                loaded.add(name)
+            return loaded
+
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda config: True)
+    monkeypatch.setattr(_vllm_rollout_utils, "prepare_quanted_weights_for_loading", lambda model: {})
+    monkeypatch.setattr(_vllm_rollout_utils, "load_quanted_weights", vllm_quant_utils.load_quanted_weights)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "process_quanted_weights_after_loading",
+        vllm_quant_utils.process_quanted_weights_after_loading,
+    )
+    worker = _staging_sync_worker(Model())
+    worker.model_runner.drafter = types.SimpleNamespace(model=Model())
+    worker.model_runner.vllm_config.speculative_config = types.SimpleNamespace(method="mtp")
+    return worker
+
+
+@pytest.mark.parametrize("first", ["weight", "weight_scale_inv"])
+def test_fp8_pair_survives_ipc_buffer_reuse(monkeypatch, fp8_sync_worker, first):
+    weight = torch.full((128, 128), 2, dtype=torch.float8_e4m3fn)
+    scale = torch.full((1, 1), 3.0)
+    parts = {"weight": weight, "weight_scale_inv": scale}
+    second = "weight_scale_inv" if first == "weight" else "weight"
+
+    def buckets():
+        yield [("o_proj." + first, parts[first])], False
+        parts[first].view(torch.uint8).zero_()  # Sender overwrites the acknowledged IPC bucket.
+        yield [("o_proj." + second, parts[second])], True
+
+    _install_fake_receiver(monkeypatch, buckets())
+    fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+    for model in fp8_sync_worker._iter_all_models():
+        assert torch.all(model.o_proj.weight == 6)
+
+
+def test_missing_fp8_scale_checked_after_buffer_only_final_bucket(monkeypatch, fp8_sync_worker, vllm_quant_utils):
+    weight = ("o_proj.weight", torch.ones(128, 128, dtype=torch.float8_e4m3fn))
+    with pytest.raises(RuntimeError, match=r"missing weight_scale.*o_proj\.weight"):
+        vllm_quant_utils.load_quanted_weights([weight], fp8_sync_worker.model_runner, peft_config={"r": 1})
+
+    _install_fake_receiver(monkeypatch, [([weight], False), ([("sentinel", torch.ones(1))], True)])
+    with pytest.raises(RuntimeError, match=r"missing weight_scale.*o_proj\.weight"):
+        fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+
+    # The failed round's weight cannot pair with a scale from the next round.
+    _install_fake_receiver(monkeypatch, [([("o_proj.weight_scale_inv", torch.ones(1, 1))], True)])
+    fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+    for model in fp8_sync_worker._iter_all_models():
+        assert model.sentinel.item() == 1
+        assert torch.count_nonzero(model.o_proj.weight) == 0
+
+
+def test_fp8_orphan_restores_live_storage_before_retry(monkeypatch, fp8_sync_worker, vllm_quant_utils):
+    # Exercise the real FP8 stage/fold helpers with a small CPU kernel-layout transform.
+    quant_module = types.ModuleType("vllm.model_executor.layers.quantization")
+    quant_module.fp8 = types.SimpleNamespace(replace_parameter=None)
+    monkeypatch.setitem(sys.modules, quant_module.__name__, quant_module)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "prepare_quanted_weights_for_loading",
+        lambda model: {"fp8_layers": vllm_quant_utils.stage_fp8_params_for_loading(model)},
+    )
+
+    def repack(layer):
+        assert layer.weight.dtype == torch.float32 and layer.weight.shape == (2, 2)
+        layer.weight = torch.nn.Parameter(layer.weight.to(torch.uint8).flatten(), requires_grad=False)
+
+    models = list(fp8_sync_worker._iter_all_models())
+    live = []
+    for model in models:
+        model.packed = torch.nn.Module()
+        model.packed.weight = torch.nn.Parameter(torch.zeros(4, dtype=torch.uint8), requires_grad=False)
+        model.packed._verl_fp8_pristine = {"weight": ((2, 2), torch.float32)}
+        model.packed.quant_method = types.SimpleNamespace(process_weights_after_loading=repack)
+        live.append((model.packed.weight, model.packed.weight.data_ptr()))
+
+    weight = ("o_proj.weight", torch.ones(128, 128, dtype=torch.float8_e4m3fn))
+    for value in (1, 2):
+        parts = [weight, ("packed.weight", torch.full((2, 2), float(value)))]
+        if value == 1:
+            _install_fake_receiver(monkeypatch, [(parts, True)])
+            with pytest.raises(RuntimeError, match=r"missing weight_scale.*o_proj\.weight"):
+                fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+        else:
+            _install_fake_receiver(
+                monkeypatch, [(parts, False), ([("o_proj.weight_scale_inv", torch.ones(1, 1))], True)]
+            )
+            fp8_sync_worker.update_weights_from_ipc(peft_config={"r": 1})
+        for model, (param, ptr) in zip(models, live, strict=True):
+            assert model.packed.weight is param and param.data_ptr() == ptr
+            assert torch.all(param == value)

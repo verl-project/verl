@@ -336,7 +336,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 使用方式（注意需要先安装jemalloc库）：`export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2`
 
-**安装使用教程：**[MindSpeed-RL/docs/install_guide.md · Ascend/MindSpeed-RL - AtomGit | GitCode](https://gitcode.com/Ascend/MindSpeed-RL/blob/master/docs/install_guide.md#高性能内存库-jemalloc-安装)
+**安装使用教程：**[MindSpeed-RL/docs/install_guide.md · Ascend/MindSpeed-RL - AtomGit | GitCode](https://gitcode.com/Ascend/MindSpeed-RL/blob/master/docs/zh/install_guide.md#高性能内存库-jemalloc-安装)
 
 #### 多流复用
 

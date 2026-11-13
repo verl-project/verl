@@ -82,8 +82,9 @@ class RouterReplay:
         for router in RouterReplay.router_instances:
             router.clear_indices()
 
-    def __init__(self):
+    def __init__(self, is_mtp_layer: bool = False):
         """Initializes a RouterReplay instance for a specific layer."""
+        self.is_mtp_layer = is_mtp_layer
         self.target_topk_idx = None  # For replay
         self.target_replay_mask = None
         self.recorded_topk_idx = None  # For recording
@@ -379,11 +380,17 @@ def apply_router_replay_patch():
 
         @wraps(original_modality_init)
         def patched_modality_init(self, *args, **kwargs):
+            """Initialize the modality router and attach replay state when enabled in its configuration."""
             original_modality_init(self, *args, **kwargs)
             self.router_replay = RouterReplay() if _router_replay_enabled(self.config) else None
 
         @wraps(original_modality_routing)
         def patched_modality_routing(self, logits, image_mask=None, padding_mask=None):
+            """Record or replay modality-aware expert choices while recomputing their weights.
+
+            Padding rows keep dispatch routes but contribute neither probability mass
+            nor expert balance counts.
+            """
             if self.router_replay is None:
                 return original_modality_routing(self, logits, image_mask, padding_mask)
 
@@ -400,6 +407,7 @@ def apply_router_replay_patch():
             )
 
             def _compute_topk(values, topk, num_groups=None, group_topk=None):
+                """Select the highest-scoring experts without applying group restrictions."""
                 del num_groups, group_topk
                 return torch.topk(values, k=topk, dim=-1)
 

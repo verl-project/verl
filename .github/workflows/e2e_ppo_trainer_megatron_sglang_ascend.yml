@@ -1,3 +1,5 @@
+# Disabled: this workflow needs Ascend/NPU runners, which this repository does not run.
+# Kept for reference; restore the commented triggers below to re-enable it.
 # DISABLED for the mint self-hosted fork: this workflow needs GPU runners
 # (L20x8 / ascend / rocm) that do not exist on the mint host. Re-enable by
 # restoring the trigger below and pointing the jobs at a GPU runner.
@@ -64,7 +66,9 @@ name: e2e_ppo_trainer_megatron_sglang_ascend (disabled)
 #       - "tests/special_e2e/run_ppo_trainer_megatron.sh"
 #       - "verl/trainer/main_ppo.py"
 #       - "verl/trainer/config/ppo_megatron_trainer.yaml"
-on: workflow_dispatch  # kept callable manually; never runs automatically
+# on: workflow_dispatch  # kept callable manually; never runs automatically
+on:
+  workflow_dispatch:
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

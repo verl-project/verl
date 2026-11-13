@@ -23,6 +23,7 @@ Uses real megatron.core with gloo backend on a single CPU process.
 import os
 import shutil
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -151,6 +152,73 @@ def _make_manager(
         bridge=bridge,
         peft_cls=peft_cls,
     )
+
+
+@pytest.mark.parametrize("shared_outer", [False, True])
+def test_hf_adapter_checkpoint_uses_peft_loadable_layout(shared_outer, tmp_path):
+    peft = SimpleNamespace(experts_shared_outer_loras=shared_outer)
+    manager = _make_manager(peft_cls=peft)
+    manager._save_model_as_hf_via_bridge(str(tmp_path))
+    expected = {"expand_shared_outer": True} if shared_outer else {}
+    manager.bridge.save_hf_adapter.assert_called_once_with(manager.model, str(tmp_path / "adapter"), peft, **expected)
+
+
+def test_shared_outer_hf_checkpoint_roundtrips_through_peft(tmp_path):
+    """Use Bridge's real shared-factor conversion/save and PEFT's real loader."""
+    auto_bridge = pytest.importorskip("megatron.bridge.models.conversion.auto_bridge")
+    peft_bridge = pytest.importorskip("megatron.bridge.models.conversion.peft_bridge")
+    peft = pytest.importorskip("peft")
+    from transformers import PretrainedConfig
+
+    shared_a = torch.arange(8, dtype=torch.float32).reshape(2, 4) / 8
+    expert_b = torch.arange(16, dtype=torch.float32).reshape(2, 4, 2) / 16
+
+    class TinyBridge(peft_bridge.MegatronPeftBridge):
+        hf_pretrained = SimpleNamespace(model_name_or_path="tiny")
+
+        @property
+        def _model_bridge(self):
+            return self
+
+        def _get_base_hf_param_names_for_adapter(self, registry, prefix, adapter_key, suffix):
+            index = int(suffix.removeprefix(".weight"))
+            return [f"model.layers.0.mlp.experts.{index}.up_proj.weight"]
+
+        def export_adapter_weights(self, model, *, expand_shared_outer=False, **kwargs):
+            task = SimpleNamespace(global_base_prefix="decoder.layers.0.mlp.experts.linear_fc1", adapter_key="up_proj")
+            yield from self._stream_shared_outer_adapter_weights(
+                model, None, task, shared_a, expert_b, 2, cpu=True, expand_shared_outer=expand_shared_outer
+            )
+
+        save_hf_adapter = auto_bridge.AutoBridge.save_hf_adapter
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = PretrainedConfig()
+            self.model = torch.nn.Module()
+            self.model.layers = torch.nn.ModuleList([torch.nn.Module()])
+            self.model.layers[0].mlp = torch.nn.Module()
+            self.model.layers[0].mlp.experts = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
+            for expert in self.model.layers[0].mlp.experts:
+                expert.up_proj = torch.nn.Linear(4, 4, bias=False)
+
+        def prepare_inputs_for_generation(self, *args, **kwargs):
+            return kwargs
+
+    manager = _make_manager(
+        bridge=TinyBridge(),
+        peft_cls=SimpleNamespace(experts_shared_outer_loras=True, dim=2, alpha=2, dropout=0.0),
+    )
+    manager._save_model_as_hf_via_bridge(str(tmp_path))
+    loaded = peft.PeftModel.from_pretrained(TinyModel(), str(tmp_path / "adapter"))
+    x = torch.arange(12, dtype=torch.float32).reshape(3, 4) / 12
+    for index, expert in enumerate(loaded.base_model.model.model.layers[0].mlp.experts):
+        layer = expert.up_proj
+        torch.testing.assert_close(layer.lora_A["default"].weight, shared_a)
+        torch.testing.assert_close(layer.lora_B["default"].weight, expert_b[index])
+        expected = layer.base_layer(x) + (x @ shared_a.T) @ expert_b[index].T
+        torch.testing.assert_close(layer(x), expected)
 
 
 # ===========================================================================

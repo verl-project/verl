@@ -27,7 +27,8 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt.gpt_model import GPTModel
 
 try:
-    # HybridModel supports output_processor without inheriting GPTModel.
+    # HybridModel does not inherit GPTModel. Only builds whose forward takes
+    # output_processor can run fused forward: it has no _preprocess for the legacy patch.
     from megatron.core.models.hybrid.hybrid_model import HybridModel
 except ImportError:
     HybridModel = None  # older Megatron builds without the hybrid model
@@ -37,7 +38,15 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import preprocess_thd_engine, preprocess_vlm_thd_engine
+from verl.models.mcore.util import (
+    get_thd_min_local_rows,
+    get_thd_quant_align_size,
+    language_model_forward_kwargs,
+    preprocess_thd_engine,
+    preprocess_thd_full_stream,
+    preprocess_vlm_thd_engine,
+    takes_full_packed_thd_vlm_inputs,
+)
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
@@ -45,8 +54,12 @@ from verl.utils.model import CausalLMOutputForPPO
 from .util import postprocess_thd_engine
 
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
+_FUSED_IMPL_BACKEND_ATTR = "_verl_fused_impl_backend"
 _HOOK_MODE = "hook"
+# The wrapper forwards only Megatron-Core's own arguments; its inner language model takes the hook.
+_LANGUAGE_MODEL_HOOK_MODE = "language_model_hook"
 _LEGACY_MODE = "legacy"
+_FUSED_FORWARD_MODES = (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE, _LEGACY_MODE)
 
 
 def _supports_output_processor_hook(patching_model: torch.nn.Module) -> bool:
@@ -64,7 +77,21 @@ def _supports_output_processor_hook(patching_model: torch.nn.Module) -> bool:
 
 
 def _resolve_fused_forward_mode(patching_model: torch.nn.Module) -> str:
-    return _HOOK_MODE if _supports_output_processor_hook(patching_model) else _LEGACY_MODE
+    if _supports_output_processor_hook(patching_model):
+        return _HOOK_MODE
+    language_model = getattr(patching_model, "language_model", None)
+    if language_model is not None and _supports_output_processor_hook(language_model):
+        return _LANGUAGE_MODEL_HOOK_MODE
+    return _LEGACY_MODE
+
+
+def _get_or_resolve_fused_forward_mode(patching_model: torch.nn.Module) -> str:
+    """Resolve the fused forward mode once and cache it on the patching model."""
+    mode = getattr(patching_model, _FUSED_FORWARD_MODE_ATTR, None)
+    if mode is None:
+        mode = _resolve_fused_forward_mode(patching_model)
+        setattr(patching_model, _FUSED_FORWARD_MODE_ATTR, mode)
+    return mode
 
 
 def _get_fused_forward_mode(model: torch.nn.Module) -> str:
@@ -72,11 +99,28 @@ def _get_fused_forward_mode(model: torch.nn.Module) -> str:
     mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
     if mode is None and hasattr(model, "language_model"):
         mode = getattr(model.language_model, _FUSED_FORWARD_MODE_ATTR, None)
-    return mode if mode in (_HOOK_MODE, _LEGACY_MODE) else _LEGACY_MODE
+    return mode if mode in _FUSED_FORWARD_MODES else _LEGACY_MODE
 
 
-def _use_output_processor_hook(model: torch.nn.Module) -> bool:
-    return _get_fused_forward_mode(model) == _HOOK_MODE
+def get_fused_impl_backend(model: torch.nn.Module) -> str:
+    model = unwrap_model(model)
+    backend = getattr(model, _FUSED_IMPL_BACKEND_ATTR, None)
+    if backend is None and hasattr(model, "language_model"):
+        backend = getattr(model.language_model, _FUSED_IMPL_BACKEND_ATTR, None)
+    return backend if backend is not None else "triton"
+
+
+def _gather_fused_hidden_states(hidden_states: Tensor, sequence_parallel: bool, impl_backend: str) -> Tensor:
+    if not sequence_parallel:
+        return hidden_states
+
+    # Liger TP-FLSCE already reduces dHidden across vocabulary shards. Its
+    # sequence-parallel gather must only split that gradient in backward.
+    tensor_parallel_output_grad = impl_backend.lower() != "liger"
+    return gather_from_sequence_parallel_region(
+        hidden_states,
+        tensor_parallel_output_grad=tensor_parallel_output_grad,
+    )
 
 
 @dataclass
@@ -84,6 +128,7 @@ class FusedOutputProcessorContext:
     """Context passed through Megatron's native output-processor hook."""
 
     temperature: float
+    impl_backend: str = "triton"
 
 
 def fused_output_processor(
@@ -105,14 +150,12 @@ def fused_output_processor(
         attentions=None,
     )
 
-    if config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
 
     temperature = context.temperature
+    hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         weight,
@@ -120,6 +163,7 @@ def fused_output_processor(
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=context.impl_backend,
     )
 
     if has_config_logger_enabled(config):
@@ -147,7 +191,11 @@ def _get_patching_model(model: torch.nn.Module):
 
     inner = getattr(model, "language_model", model)
     if HybridModel is not None and isinstance(inner, HybridModel):
-        # Hybrid VLMs expose the output_processor hook on the wrapper itself.
+        # The hook is on the wrapper itself or on its inner HybridModel. HybridModel
+        # has no _preprocess, so the legacy forward patch cannot drive it.
+        if _get_or_resolve_fused_forward_mode(model) == _LEGACY_MODE:
+            print(f"Model {model.__class__.__name__} needs Megatron's output_processor hook for fused forward")
+            return None
         return model
     if isinstance(inner, GPTModel):
         return inner
@@ -156,18 +204,87 @@ def _get_patching_model(model: torch.nn.Module):
     return None
 
 
-def patch_fused_forward(model: torch.nn.Module):
+def _validate_liger_moe_runtime(model: GPTModel) -> None:
+    config = model.config
+    if not getattr(config, "num_moe_experts", None):
+        return
+    legacy_deepep = getattr(config, "moe_enable_deepep", False) or (
+        getattr(config, "moe_token_dispatcher_type", None) == "flex"
+        and getattr(config, "moe_flex_dispatcher_backend", None) == "deepep"
+    )
+    if not legacy_deepep:
+        return
+
+    from deep_ep import Buffer
+
+    group = parallel_state.get_expert_tensor_and_model_parallel_group()
+    size = torch.distributed.get_world_size(group)
+    # Match the legacy dispatcher's public buffer-size hints without creating
+    # its lazy NVSHMEM-owning buffer after Liger has initialized the runtime.
+    hidden_bytes = config.hidden_size * 2
+    for options in (Buffer.get_dispatch_config(size), Buffer.get_combine_config(size)):
+        if options.get_rdma_buffer_size_hint(hidden_bytes, size) > 0:
+            raise RuntimeError(
+                "Native Liger and DeepEP V1 RDMA cannot share NVSHMEM in one process. "
+                "Use the alltoall dispatcher, a supported DeepEP V2 dispatcher, "
+                "or disable the Liger fused output head."
+            )
+
+
+def _configure_liger_runtime(model: GPTModel, engine_config) -> bool:
+    from verl.utils.kernel.linear_cross_entropy import configure_liger_flsce
+
+    token_limits = [
+        value
+        for value in (engine_config.max_token_len_per_gpu, engine_config.infer_max_token_len_per_gpu)
+        if value is not None
+    ]
+    reservation = getattr(engine_config, "_liger_flsce_capacity", None)
+    if not token_limits and reservation is None:
+        raise RuntimeError("Liger TP-FLSCE requires an existing max-token limit in the Megatron engine config")
+
+    process_group = parallel_state.get_tensor_model_parallel_group()
+    tp_size = torch.distributed.get_world_size(process_group)
+    # GPTModel keeps the padded vocabulary and hidden dimensions on every PP
+    # stage, including virtual chunks without an embedding or output weight.
+    if model.vocab_size % tp_size:
+        raise ValueError("Liger TP-FLSCE requires the model vocabulary to be divisible by TP size")
+    max_tokens = max(token_limits, default=0) * engine_config.context_parallel_size
+    min_tp_size = tp_size
+    if reservation is not None:
+        max_tokens = max(max_tokens, reservation[0])
+        min_tp_size = min(min_tp_size, reservation[1])
+    configured = configure_liger_flsce(
+        max_tokens=max_tokens,
+        hidden_size=model.config.hidden_size,
+        local_vocab_size=(model.vocab_size + min_tp_size - 1) // min_tp_size,
+        process_group=process_group,
+        device=next(model.parameters()).device,
+    )
+    if configured:
+        _validate_liger_moe_runtime(model)
+    return configured
+
+
+def patch_fused_forward(
+    model: torch.nn.Module,
+    model_config=None,
+    *,
+    engine_config=None,
+    impl_backend: str = "triton",
+) -> bool:
+    """Enable fused forward on ``model``. Return False when the model cannot run it."""
     model = _get_patching_model(model)
     if model is None:
-        return
+        return False
+    if model_config is not None:
+        impl_backend = "liger" if model_config.use_liger else "triton"
+    if impl_backend == "liger" and engine_config is not None and model.config.params_dtype == torch.bfloat16:
+        _configure_liger_runtime(model, engine_config)
+    setattr(model, _FUSED_IMPL_BACKEND_ATTR, impl_backend)
 
-    mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
-    if mode is None:
-        mode = _resolve_fused_forward_mode(model)
-        setattr(model, _FUSED_FORWARD_MODE_ATTR, mode)
-
-    if mode == _HOOK_MODE:
-        return
+    if _get_or_resolve_fused_forward_mode(model) in (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE):
+        return True
 
     assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
         "Fused forward patching requires mecore >= 0.13.0"
@@ -175,11 +292,12 @@ def patch_fused_forward(model: torch.nn.Module):
     if not hasattr(model, "forward_backup"):
         model.forward_backup = model.forward
         model.forward = _fused_GPTModel_forward.__get__(model, model.__class__)
+    return True
 
 
 def unpatch_fused_forward(model: torch.nn.Module):
     model = _get_patching_model(model)
-    if model is None or _get_fused_forward_mode(model) == _HOOK_MODE:
+    if model is None or _get_fused_forward_mode(model) in (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE):
         return
     if hasattr(model, "forward_backup"):
         model.forward = model.forward_backup
@@ -204,15 +322,16 @@ def fused_forward_model_engine(vision_model: bool = False):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         config = unwrap_model(model).config
-        min_local_rows = (
-            config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
-        )
+        quant_align_size = get_thd_quant_align_size(config)
+        # The fused path's CSA rows come from `dsv4_hybrid`, which the helper encodes as
+        # `csa_window_size if experimental_attention_variant == "dsv4_hybrid" else None` -- the
+        # same expression mainline writes inline here, so taking this side of the merge does not
+        # drop mainline's THD input preparation.
+        min_local_rows = get_thd_min_local_rows(config, local_cp_size, use_fused_kernels=True)
 
         thd_kwargs = dict(
-            use_fp8_padding=use_fp8_padding,
+            quant_align_size=quant_align_size,
             min_local_rows=min_local_rows,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
@@ -241,16 +360,20 @@ def fused_forward_model_engine(vision_model: bool = False):
         if "video_grid_thw" in multi_modal_inputs:
             model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
-        labels_rmpad, _, _ = preprocess_thd_engine(
-            labels,
-            pre_process=True,
-            need_roll=True,
-            use_fp8_padding=use_fp8_padding,
-            min_local_rows=min_local_rows,
-            pad_to_length_bucket=pad_to_length_bucket,
-            cp_layout=cp_layout,
-            local_cp_size=local_cp_size,
-        )
+        if vision_model and takes_full_packed_thd_vlm_inputs(model):
+            # The model selects its CP shard of the labels together with the token stream.
+            labels_rmpad = preprocess_thd_full_stream(labels, packed_seq_params, need_roll=True)
+        else:
+            labels_rmpad, _, _ = preprocess_thd_engine(
+                labels,
+                pre_process=True,
+                need_roll=True,
+                quant_align_size=quant_align_size,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
         labels_rmpad = labels_rmpad.contiguous()
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
@@ -260,14 +383,33 @@ def fused_forward_model_engine(vision_model: bool = False):
             labels=labels_rmpad,
             **model_kwargs,
         )
-        if _use_output_processor_hook(model):
-            output_orig: CausalLMOutputForPPO = model(
-                **forward_kwargs,
+        # `_get_fused_forward_mode` subsumes mainline's `_use_output_processor_hook` boolean: it
+        # distinguishes the wrapper hook (`_HOOK_MODE`), the inner language-model hook
+        # (`_LANGUAGE_MODEL_HOOK_MODE`, which also suppresses the MTP loss) and the legacy path,
+        # so the three-way branch below covers what mainline's two-way branch did.
+        fused_forward_mode = _get_fused_forward_mode(model)
+        if fused_forward_mode in (_HOOK_MODE, _LANGUAGE_MODEL_HOOK_MODE):
+            impl_backend = get_fused_impl_backend(model)
+            hook_kwargs = dict(
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+                output_processor_context=FusedOutputProcessorContext(
+                    temperature=temperature,
+                    impl_backend=impl_backend,
+                ),
             )
+            if fused_forward_mode == _HOOK_MODE:
+                output_orig: CausalLMOutputForPPO = model(**forward_kwargs, **hook_kwargs)
+            else:
+                # The output processor needs the main head's hidden states; skip the MTP loss.
+                with language_model_forward_kwargs(model, **hook_kwargs, compute_mtp_loss=False):
+                    output_orig = model(**forward_kwargs)
         else:
-            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
+            impl_backend = get_fused_impl_backend(model)
+            output_orig: CausalLMOutputForPPO = model(
+                temperature=temperature,
+                impl_backend=impl_backend,
+                **forward_kwargs,
+            )
 
         if not post_process:
             return output_orig
@@ -322,6 +464,7 @@ def _fused_GPTModel_forward(
     inference_params: Optional[BaseInferenceContext] = None,
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
+    impl_backend: str = "triton",
     padding_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
@@ -384,8 +527,7 @@ def _fused_GPTModel_forward(
         attentions=None,
     )
 
-    if model.config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+    hidden_states = _gather_fused_hidden_states(hidden_states, model.config.sequence_parallel, impl_backend)
 
     # Get the output weight - use embedding weight if output_layer is None or weight is shared
     if hasattr(model, "output_layer") and model.output_layer is not None and model.output_layer.weight is not None:
@@ -401,6 +543,7 @@ def _fused_GPTModel_forward(
         temperature,
         "none",
         parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=impl_backend,
     )
 
     if has_config_logger_enabled(model.config):

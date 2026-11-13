@@ -6,6 +6,7 @@ set -xeuo pipefail
 
 MODEL_PATH=${MODEL_PATH:-moonshotai/Moonlight-16B-A3B-Instruct}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/dataset/dapo-math-17k.parquet}
+TEST_FILE=${TEST_FILE:-$HOME/dataset/aime-2024.parquet}
 TEST_FILE=${TEST_FILE:-/vePFS-Mindverse/user/songlin/aime-2024-first30.parquet}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-32}

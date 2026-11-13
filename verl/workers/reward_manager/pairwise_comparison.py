@@ -594,6 +594,9 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
         
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
+        # Extra-info rows are attached back to the original batch, not group order.
+        reward_extra_info["answer_correct"] = [False] * len(data)
+        reward_extra_info["extracted_answer"] = [""] * len(data)
         
         # Validation 階段：跳過 pairwise comparison，給予簡單獎勵並計算正確率
         if is_validate:
@@ -631,8 +634,8 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
                                 validation_correct += 1
                             
                             # 記錄到 extra_info
-                            reward_extra_info["answer_correct"].append(is_correct)
-                            reward_extra_info["extracted_answer"].append(extracted_answer)
+                            reward_extra_info["answer_correct"][i] = is_correct
+                            reward_extra_info["extracted_answer"][i] = extracted_answer
                     except Exception as e:
                         print(f"⚠️ Validation check error for sample {i}: {e}")
             
@@ -661,6 +664,8 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
         all_win_rates = []
         all_win_counts = []
         all_total_counts = []
+        reward_extra_info["tournament_score"] = [0.0] * len(data)
+        reward_extra_info["reward_value"] = [0.0] * len(data)
         
         # 按照uid分组处理（同一个prompt的多个responses）
         uid_to_indices = defaultdict(list)
@@ -701,6 +706,7 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
                     # 只在最后一个有效token位置赋值（符合PPO标准）
                     if valid_response_length > 0:
                         reward_tensor[idx, valid_response_length - 1] = 1.0
+                        reward_extra_info["reward_value"][idx] = 1.0
             else:
                 # 更新reward tensor（只在最后一个有效token位置赋值）
                 for i, idx in enumerate(indices):
@@ -713,8 +719,8 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
                         reward_tensor[idx, valid_response_length - 1] = rewards[i]
                     
                     # 记录额外信息
-                    reward_extra_info["tournament_score"].append(scores[i])
-                    reward_extra_info["reward_value"].append(rewards[i])
+                    reward_extra_info["tournament_score"][idx] = scores[i]
+                    reward_extra_info["reward_value"][idx] = rewards[i]
                 
                 # 收集胜率信息
                 if win_info: 
@@ -725,13 +731,16 @@ class PairwiseComparisonRewardManager(AbstractRewardManager):
                     # 记录胜率相关信息
                     for i, idx in enumerate(indices):
                         is_win = i in win_info["win_indices"]
-                        reward_extra_info["answer_correct"].append(is_win)
-                        reward_extra_info["extracted_answer"].append(
-                            self._extract_answer_from_response(
-                                self.tokenizer.decode(data[idx].batch["responses"][:data[idx].batch["attention_mask"][data[idx].batch["prompts"].shape[-1]:].sum()], skip_special_tokens=True)
+                        reward_extra_info["answer_correct"][idx] = is_win
+                        reward_extra_info["extracted_answer"][idx] = self._extract_answer_from_response(
+                            self.tokenizer.decode(
+                                data[idx].batch["responses"][
+                                    : data[idx].batch["attention_mask"][data[idx].batch["prompts"].shape[-1] :].sum()
+                                ],
+                                skip_special_tokens=True,
                             )
                         )
-        
+
         # 计算整体胜率统计
         if all_win_rates:
             overall_win_rate = sum(all_win_counts) / sum(all_total_counts) if sum(all_total_counts) > 0 else 0.0

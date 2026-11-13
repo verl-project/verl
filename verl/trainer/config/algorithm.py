@@ -140,7 +140,9 @@ class RolloutCorrectionConfig(BaseConfig):
 
         score_centering (bool): Subtract the expected score under the sampler from every token's
             score, see the score centering reference below. Needs the sampler's top-k log-probs
-            from the rollout (``actor_rollout_ref.rollout.topk_log_probs``). Only with
+            from the rollout (``actor_rollout_ref.rollout.topk_log_probs``). Automatically aligns
+            with the complete sampling support when it is recorded; otherwise uses the recorded
+            head and a trainer-proportional tail approximation. Only with
             ``bypass_mode=True``, ``loss_type="reinforce"`` and ``rollout_is`` None or "token".
             Default: False
 

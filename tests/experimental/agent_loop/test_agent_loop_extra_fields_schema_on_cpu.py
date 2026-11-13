@@ -185,8 +185,69 @@ def test_agent_loop_output_as_dict_promotes_rollout_topk_fields():
     assert fields["rollout_topk_log_probs"].shape == (5, 2) and fields["rollout_topk_log_probs"].dtype == torch.float32
     assert fields["rollout_topk_ids"][2].tolist() == [4, 9] and fields["rollout_topk_ids"][3].tolist() == [5, 8]
     assert fields["rollout_topk_ids"][0].tolist() == [0, 1]
+    assert fields["rollout_support_complete"].tolist() == [True, True, False, False, True]
     assert fields["extra_fields"] == {}
     assert output.extra_fields["response_topk_ids"] == [[4, 9], [5, 8]]
+
+
+@pytest.mark.parametrize(
+    "response_complete",
+    [[True, False], np.array([True, False], dtype=np.bool_), torch.tensor([True, False])],
+    ids=["bool-list", "numpy-bool", "torch-bool"],
+)
+def test_agent_loop_output_aligns_provider_support_evidence_with_prediction_rows(response_complete):
+    output = AgentLoopOutput(
+        prompt_ids=[1, 2, 3],
+        response_ids=[4, 5],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[4, 9], [5, 8]],
+            "response_topk_log_probs": [[0.0, float("-inf")], [-0.2, -1.5]],
+            "response_support_complete": response_complete,
+        },
+    )
+    fields = output.as_dict()
+    assert fields["rollout_support_complete"].dtype == torch.bool
+    assert fields["rollout_support_complete"].tolist() == [True, True, True, False, True]
+    assert fields["extra_fields"] == {}
+
+
+@pytest.mark.parametrize(
+    "response_complete",
+    [[1, 0], np.array([0.25, 0.0], dtype=np.float32), [float("nan"), 0.0], [True, 1], [True, 0.25]],
+    ids=["integers", "floating-array", "nan", "mixed-bool-int", "mixed-bool-float"],
+)
+def test_agent_loop_output_rejects_nonboolean_provider_support_evidence(response_complete):
+    output = _make_agent_loop_output()
+    output.extra_fields.update(
+        {
+            "response_topk_ids": [[11, 13], [12, 14]],
+            "response_topk_log_probs": [[0.0, float("-inf")], [-0.2, -1.5]],
+            "response_support_complete": response_complete,
+        }
+    )
+
+    with pytest.raises(ValueError, match="one bool per response token"):
+        output.as_dict()
+
+
+def test_agent_loop_output_rejects_incomplete_provider_evidence_records():
+    output = AgentLoopOutput(
+        prompt_ids=[1, 2],
+        response_ids=[3, 4],
+        response_mask=[1, 1],
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={
+            "response_topk_ids": [[3, 9], [4, 8]],
+            "response_topk_log_probs": [[-0.1, -2.0], [-0.2, -1.5]],
+            "response_support_complete": [True],
+        },
+    )
+    with pytest.raises(ValueError, match="one bool per response token"):
+        output.as_dict()
 
 
 def test_agent_loop_output_as_dict_rejects_multi_turn_rollout_topk():

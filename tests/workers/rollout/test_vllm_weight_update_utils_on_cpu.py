@@ -180,6 +180,7 @@ def _load_vllm_rollout_utils():
 
     fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
+    fake_vllm_quant.configure_fp8_ignored_layers_match_mode = lambda config: None
     fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda weights, runner, is_drafter=False: weights
     fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
@@ -236,6 +237,7 @@ vLLMColocateWorkerExtension = _vllm_rollout_utils.vLLMColocateWorkerExtension
 
 
 def test_vllm_refreshes_derived_caches_after_all_weight_buckets(monkeypatch):
+    """GLM-5.3 derived weight caches refresh in place, once, after every bucket and post-load step."""
     model = torch.nn.Sequential(Glm5NextLinearAttention(), Glm5NextMLAAttention())
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.model_runner = _FakeModelRunner(model)
@@ -272,11 +274,9 @@ def test_vllm_refreshes_derived_caches_after_all_weight_buckets(monkeypatch):
         assert torch.count_nonzero(cached_conv) == 0
         assert torch.count_nonzero(cached_gate) == 0
 
-    transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
-    transfer.BucketedWeightReceiver = Receiver
     loader = types.ModuleType("vllm.model_executor.model_loader.utils")
     loader.process_weights_after_loading = post_load
-    monkeypatch.setitem(sys.modules, transfer.__name__, transfer)
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", Receiver)
     monkeypatch.setitem(sys.modules, loader.__name__, loader)
 
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=True)

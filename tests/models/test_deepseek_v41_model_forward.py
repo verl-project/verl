@@ -14,9 +14,31 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from verl.models.mcore import model_forward, registry
+from verl.models.mcore import model_forward, registry, util
+
+
+@pytest.mark.parametrize("token_types", [[0, 1, 2], [0, 1, 2, -1]])
+def test_deepseek_v41_rejects_unterminated_image_spans(token_types):
+    inputs = {
+        "vision_token_types": torch.tensor([token_types]),
+        "image_grid_hws": torch.tensor([[1, 1]]),
+        "pixel_values": torch.zeros(1, 3, 2, 2),
+    }
+    with pytest.raises(ValueError, match="Unterminated image span"):
+        util.build_deepseek_v41_image_inputs(inputs, torch.zeros(1, len(token_types), dtype=torch.long))
+
+
+def test_deepseek_v41_rejects_image_span_without_grid():
+    inputs = {
+        "vision_token_types": torch.tensor([[0, 1, 2, 3]]),
+        "image_grid_hws": torch.empty(0, 2, dtype=torch.long),
+        "pixel_values": torch.zeros(1, 3, 2, 2),
+    }
+    with pytest.raises(ValueError, match="Missing image grid"):
+        util.build_deepseek_v41_image_inputs(inputs, torch.zeros(1, 4, dtype=torch.long))
 
 
 def test_deepseek_v41_bshd_uses_padding_mask_instead_of_attention_mask(monkeypatch):
@@ -138,7 +160,7 @@ def test_deepseek_v41_thd_forwards_images_and_reserves_cp_halo(monkeypatch):
         logits_processor=lambda output, **_kwargs: {"loss": output},
         logits_processor_args={"label": input_ids},
     )
-    assert padding_rows == [4, 4]
+    assert padding_rows == [4, 4, 4]
     assert len(captured["images"]) == 2
     assert captured["images"][0] == []
     assert captured["images"][1][0].start == 0

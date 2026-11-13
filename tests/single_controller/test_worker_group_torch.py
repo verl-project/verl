@@ -80,11 +80,13 @@ def test_all_gather_torch():
     )
 
     worker_group.execute_all_sync("init")
-    output = worker_group.execute_all_sync("all_gather")
+    # Each result comes back on its worker's device; those indices only coincide when the runtime masks
+    # every actor down to device 0, so compare on the host.
+    output = [o.cpu() for o in worker_group.execute_all_sync("all_gather")]
     for i in range(1, len(output)):
         assert torch.all(output[i] == output[0])
 
-    output = output[0].cpu()
+    output = output[0]
     print(output)
     assert torch.all(output == torch.tensor([0, 0, 1, 1, 2, 2, 3, 3], dtype=torch.int64))
 
@@ -105,11 +107,11 @@ def test_all_gather_torch_v2():
         resource_pool, class_with_args, name_prefix="worker_group_torch", device_name=get_device_name()
     )
 
-    output = worker_group.execute_all_sync("all_gather")
+    output = [o.cpu() for o in worker_group.execute_all_sync("all_gather")]
     for i in range(1, len(output)):
         assert torch.all(output[i] == output[0])
 
-    output = output[0].cpu()
+    output = output[0]
     print(output)
     assert torch.all(output == torch.tensor([0, 0, 1, 1, 2, 2, 3, 3], dtype=torch.int64))
 

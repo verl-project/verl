@@ -89,9 +89,7 @@ class SFTTrainer:
             self.gradient_accumulation_steps = None
             return
         if isinstance(raw_gas, bool) or not float(raw_gas).is_integer():
-            raise ValueError(
-                f"data.gradient_accumulation_steps must be a positive integer, got {raw_gas!r}"
-            )
+            raise ValueError(f"data.gradient_accumulation_steps must be a positive integer, got {raw_gas!r}")
         gas = int(raw_gas)
         if gas < 1:
             raise ValueError(f"data.gradient_accumulation_steps must be >= 1, got {gas}")
@@ -135,6 +133,7 @@ class SFTTrainer:
         self.rank = torch.distributed.get_rank()
 
         self._build_config()
+        self._validate_logits_features()
         self._build_dataset()
 
         self._build_engine()
@@ -232,6 +231,19 @@ class SFTTrainer:
         if self.start_profile_step < 0:
             assert self.end_profile_step < 0
 
+    def _validate_logits_features(self):
+        """Reject logits consumers before constructing an unsupported engine."""
+        features = []
+        if self.config.get("distillation", None) is not None:
+            features.append("distillation")
+        if self.config.trainer.get("teacher_dump", None) is not None:
+            features.append("trainer.teacher_dump")
+        if features and self.engine_config.strategy != "megatron":
+            raise ValueError(
+                f"SFT {', '.join(features)} requires engine.strategy=megatron; "
+                f"{self.engine_config.strategy!r} does not support its vocabulary-logits contract"
+            )
+
     def _build_engine(self):
         from verl.workers.engine_workers import TrainingWorkerConfig
         from verl.workers.utils.losses import sft_loss
@@ -239,14 +251,13 @@ class SFTTrainer:
         # Distillation replaces CE when a distillation config is present: the engine
         # then asks this object for the per-position divergence (it owns the logits)
         # and reduces it afterwards, exactly like sft_loss does for CE.
-        # Teacher distributions for distillation. They are keyed by the dataset's
-        # `sample` column and attached to each batch here, because they are ragged
-        # [tokens, topk] payloads that the generic collator cannot nest: routing them
-        # through the dataset turned them into empty non-tensor stacks.
+        # External teacher distributions are keyed by each sample's token hash.
+        # The loss resolves every sample after microbatch splitting, then applies
+        # the same sequence padding and CP partition as the model inputs.
         self.teacher_data = None
         if self.config.trainer.get("teacher_data", None) is not None:
-            # Registered process-wide: the engine rebuilds the loss object, so path or
-            # payload state has to live outside the instance to reach it.
+            # Preserve the process-wide default for existing integrations; the loss
+            # also carries the path explicitly for serialized workers.
             from verl.workers.utils.distill_sft_loss import set_teacher_data
 
             set_teacher_data(str(self.config.trainer.teacher_data))
@@ -381,8 +392,9 @@ class SFTTrainer:
             # historical batch size is kept exactly.
             val_batch_size = self.train_batch_size_per_dp
             if self.gradient_accumulation_steps and self.gradient_accumulation_steps > 1:
-                val_batch_size = max(1, min(int(config.data.micro_batch_size_per_gpu or 1),
-                                            self.train_batch_size_per_dp))
+                val_batch_size = max(
+                    1, min(int(config.data.micro_batch_size_per_gpu or 1), self.train_batch_size_per_dp)
+                )
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,
                 batch_size=val_batch_size,
@@ -418,21 +430,8 @@ class SFTTrainer:
         # all_gather_into_tensor hang instead of failing.
         dp_size = torch.distributed.get_world_size(dp_group) if dp_group is not None else 1
 
-
         if dp_size == 1 or dp_group is None:
             return batch_seqlens.tolist()
-
-        # Context parallelism: this gather only feeds the token-count metrics, and the
-        # collective over the data-parallel group did not complete on this stack once CP
-        # was on (consistent group and sizes on every rank, still a PCCP broadcast
-        # timeout). Metrics stay rank-local rather than blocking training.
-        try:
-            import megatron.core.parallel_state as _mpu
-
-            if _mpu.get_context_parallel_world_size() > 1:
-                return batch_seqlens.tolist()
-        except Exception:  # noqa: BLE001 - not a megatron run
-            pass
 
         output_tensor = torch.empty(
             (batch_seqlens.shape[0] * dp_size,),
@@ -496,8 +495,9 @@ class SFTTrainer:
             "pad_token_id": self.model_config.tokenizer.pad_token_id,
         }
         if self.distillation_config is not None:
-            # keys MegatronEngine's forward off its distillation branch
-            meta_info["distillation_use_topk"] = True
+            # The loss can resolve its teacher from an external lookup; requesting
+            # vocab logits does not require a resident teacher payload in the batch.
+            meta_info["needs_vocab_logits"] = True
 
         train_time = 0
         total_tokens = 0
@@ -570,7 +570,12 @@ class SFTTrainer:
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:
-                        val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
+                        val_meta_info = dict(meta_info)
+                        if self.distillation_config is not None:
+                            # Validation is CE, even when the training corpus uses a
+                            # teacher lookup. Training lookup misses remain errors.
+                            val_meta_info.update(needs_vocab_logits=False, sft_distillation_validation=True)
+                        val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=val_meta_info)
                         output = self.training_client.infer_batch(val_data)
 
                         if self.engine.is_mp_src_rank_with_outputs():
@@ -590,7 +595,7 @@ class SFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if self.save_freq > 0 and (is_last_step or is_save_step):
                     aggressive_empty_cache(force_sync=True)
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
@@ -599,7 +604,6 @@ class SFTTrainer:
                         print(f"Total time for train steps: {train_time:.2f}s")
                         print(f"Final validation metrics: {last_valid_metric}")
                     return
-
 
     def dump_teacher_topk(self) -> None:
         """Forward-only pass that exports the model's top-k next-token distribution.
@@ -621,7 +625,12 @@ class SFTTrainer:
         topk = int(cfg.topk)
         max_steps = int(cfg.get("max_steps", 0)) or None
 
-        dump = TeacherTopKDump(topk)
+        tp_group = None
+        if getattr(self.engine_config, "tensor_model_parallel_size", 1) > 1:
+            from megatron.core import parallel_state as mpu
+
+            tp_group = mpu.get_tensor_model_parallel_group()
+        dump = TeacherTopKDump(topk, process_group=tp_group)
         meta_info = {
             "use_remove_padding": self.config.model.use_remove_padding,
             "use_dynamic_bsz": self.config.data.use_dynamic_bsz,
@@ -632,8 +641,8 @@ class SFTTrainer:
             "global_batch_size": self.global_batch_size,
             "pad_mode": self.config.data.pad_mode,
             "pad_token_id": self.model_config.tokenizer.pad_token_id,
-            # The engine keys its distillation branch off this non-tensor flag.
-            "distillation_use_topk": True,
+            # Exporting logits needs no pre-existing teacher distribution.
+            "needs_vocab_logits": True,
         }
 
         save_tensors = bool(cfg.get("save_tensors", False))
@@ -668,7 +677,7 @@ class SFTTrainer:
             if is_src:
                 if DUMP_IDS_KEY not in model_output:
                     raise RuntimeError(
-                        "the engine produced no top-k: the batch lost its distillation_use_topk flag "
+                        "the engine produced no top-k: the batch lost its needs_vocab_logits flag "
                         "or the logits processor was not called"
                     )
                 stats = self._dump_consistency_stats(model_output, data)
@@ -685,7 +694,9 @@ class SFTTrainer:
             if max_steps is not None and step + 1 >= max_steps:
                 break
 
-        if is_src:
+        # is_src selects one output rank per DP replica; only one of those ranks
+        # may write the shared file. Every rank participated in the payload gather.
+        if is_src and self.engine.get_data_parallel_rank() == 0:
             payload = {
                 "records": records,
                 "tensors": payload_tensors,
@@ -703,6 +714,7 @@ class SFTTrainer:
         from verl.workers.utils.teacher_dump import dump_consistency_stats
 
         return dump_consistency_stats(model_output, data["input_ids"])
+
 
 def run_sft(config):
     from verl.utils.distributed import initialize_global_process_group

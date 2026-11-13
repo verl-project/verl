@@ -35,6 +35,9 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
 from verl.models.mcore.util import (
+    get_bshd_padded_seqlen,
+    get_thd_min_local_rows,
+    get_thd_quant_align_size,
     postprocess_packed_seqs,
     postprocess_thd_engine,
     preprocess_packed_seqs,
@@ -241,6 +244,7 @@ def merge_router_topk_indices(
     local_cp_size=None,
     model=None,
     data_format: str = "thd",
+    use_fused_kernels: bool = False,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -258,6 +262,7 @@ def merge_router_topk_indices(
             Megatron parallel state will be used.
         model: The forwarded model chunk. When given, routes are collected from its own routers instead
             of inferring their location in the process-global router registry.
+        use_fused_kernels: Whether the model uses fused forward's THD packing rules.
         data_format: Token layout used by the model. BSHD models record padded sequence-major rows;
             THD models record packed rows.
 
@@ -343,9 +348,18 @@ def merge_router_topk_indices(
                     "BSHD router replay rows cannot be reshaped into a sequence-major batch: "
                     f"rows={layers_topk_idx.shape[1]}, batch={batch_size}"
                 )
-            padded_seqlen = layers_topk_idx.shape[1] // batch_size
-            restored = layers_topk_idx.squeeze(0).contiguous().view(torch.int16)
-            restored = restored.view(padded_seqlen, batch_size, *restored.shape[1:])
+            restored = layers_topk_idx.view(-1, batch_size, *layers_topk_idx.shape[2:])
+            cp_size = mpu.get_context_parallel_world_size()
+            if cp_size > 1:
+                # Each rank holds a front and a mirrored back slice of the padded sequence.
+                if restored.shape[0] % 2:
+                    raise RuntimeError("BSHD router replay expects an even local sequence length for zigzag CP")
+                half = restored.shape[0] // 2
+                shards = [torch.empty_like(restored) for _ in range(cp_size)]
+                torch.distributed.all_gather(shards, restored, group=mpu.get_context_parallel_group())
+                restored = torch.cat([shard[:half] for shard in shards] + [shard[half:] for shard in reversed(shards)])
+            restored = restored.view(torch.int16)
+            padded_seqlen = restored.shape[0]
             lengths = [int(length) for length in input_ids.offsets().diff().tolist()]
             if any(length > padded_seqlen for length in lengths):
                 raise RuntimeError(
@@ -357,21 +371,17 @@ def merge_router_topk_indices(
         if data_format != "thd":
             raise ValueError(f"Unsupported router replay data format: {data_format}")
 
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # RECORD and REPLAY must pack exactly like the model forward
+        quant_align_size = get_thd_quant_align_size(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
-        min_local_rows = (
-            tf_config.csa_window_size
-            if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
-            else None
-        )
+        min_local_rows = get_thd_min_local_rows(tf_config, local_cp_size, use_fused_kernels)
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
             _, packed_seq_params, _ = preprocess_thd_engine(
                 input_ids,
                 pre_process=True,
-                use_fp8_padding=use_fp8_padding,
+                quant_align_size=quant_align_size,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
@@ -393,7 +403,7 @@ def merge_router_topk_indices(
         else:
             batch_size, seq_len = attention_mask.shape[:2]
             _, packed_seq_params = preprocess_packed_seqs(
-                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                input_ids, attention_mask, pre_process=True, quant_align_size=quant_align_size
             )
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
@@ -494,7 +504,7 @@ def _align_r3_multimodal_routes(routes: torch.Tensor, vision_types: list[int]) -
                     text_cursor += 1
                 else:
                     rows.append(zero)
-            elif image_cursor < image_route_count:
+            elif image_cursor < image_route_count and (route_len > compact_len or kind == 0):
                 # Native V4.1 routing owns visual rows; these values are
                 # retained only to preserve the returned row count.
                 if cursor < route_len:
@@ -615,6 +625,7 @@ def set_router_replay_data(
     model=None,
     data_format: str = "thd",
     forced_max_seqlen: int | None = None,
+    use_fused_kernels: bool = False,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -634,6 +645,7 @@ def set_router_replay_data(
             unmasked tokens keep native Megatron routes.
         model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
             routers instead of a positional slice of the global RouterReplay.router_instances list.
+        use_fused_kernels: Whether the model uses fused forward's THD packing rules.
         data_format: Token layout used by the model. BSHD replay restores sequence-major padded rows;
             THD replay uses the existing packed-sequence helpers.
         forced_max_seqlen: Optional BSHD padding length chosen by the engine for this micro-batch.
@@ -646,60 +658,68 @@ def set_router_replay_data(
 
     with torch.no_grad():
         vp_rank = 0 if vp_rank is None else vp_rank
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # RECORD and REPLAY must pack exactly like the model forward
+        quant_align_size = get_thd_quant_align_size(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
-        min_local_rows = (
-            tf_config.csa_window_size
-            if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
-            else None
-        )
+        min_local_rows = get_thd_min_local_rows(tf_config, local_cp_size, use_fused_kernels)
 
         replay_mask_rmpad = None
         if data_format == "bshd":
-            if layers_topk_idx.is_nested:
-                route_parts = list(layers_topk_idx.unbind())
-                lengths = [int(length) for length in layers_topk_idx.offsets().diff().tolist()]
-                if not route_parts:
-                    raise RuntimeError("BSHD router replay requires at least one sequence")
-                max_seqlen = int(forced_max_seqlen) if forced_max_seqlen is not None else max(lengths)
-                if max_seqlen < max(lengths):
-                    raise ValueError(f"forced_max_seqlen={max_seqlen} is smaller than router replay lengths {lengths}")
-                trailing_shape = tuple(route_parts[0].shape[1:])
-                padded = torch.zeros(
-                    (len(route_parts), max_seqlen, *trailing_shape),
-                    dtype=layers_topk_idx.dtype,
-                    device=layers_topk_idx.device,
-                )
-                for sample, (part, length) in enumerate(zip(route_parts, lengths, strict=True)):
-                    padded[sample, :length].copy_(part)
-                layers_topk_idx_rmpad = padded.transpose(0, 1).reshape(1, -1, *trailing_shape)
+            if not layers_topk_idx.is_nested and attention_mask is None:
+                raise RuntimeError("router replay REPLAY requires attention_mask for dense BSHD inputs.")
+            route_parts = list(layers_topk_idx.unbind())
+            lengths = [part.shape[0] for part in route_parts]
+            if not route_parts:
+                raise RuntimeError("BSHD router replay requires at least one sequence")
+            max_seqlen = int(forced_max_seqlen) if forced_max_seqlen is not None else max(lengths)
+            if max_seqlen < max(lengths):
+                raise ValueError(f"forced_max_seqlen={max_seqlen} is smaller than router replay lengths {lengths}")
+            max_seqlen = get_bshd_padded_seqlen(max_seqlen, len(route_parts), quant_align_size is not None)
+            trailing_shape = tuple(route_parts[0].shape[1:])
+            padded = torch.zeros(
+                (len(route_parts), max_seqlen, *trailing_shape),
+                dtype=layers_topk_idx.dtype,
+                device=layers_topk_idx.device,
+            )
+            for sample, (part, length) in enumerate(zip(route_parts, lengths, strict=True)):
+                padded[sample, :length].copy_(part)
 
-                if replay_mask is not None:
-                    mask_parts = list(replay_mask.unbind())
-                    if [part.shape[0] for part in mask_parts] != lengths:
-                        raise RuntimeError("BSHD router replay mask lengths do not match route lengths")
-                    padded_mask = torch.zeros(
-                        (len(mask_parts), max_seqlen),
-                        dtype=torch.bool,
-                        device=replay_mask.device,
+            padded_mask = None
+            if replay_mask is not None:
+                mask_parts = list(replay_mask.unbind())
+                if [part.shape[0] for part in mask_parts] != lengths:
+                    raise RuntimeError("BSHD router replay mask lengths do not match route lengths")
+                padded_mask = torch.zeros((len(mask_parts), max_seqlen), dtype=torch.bool, device=replay_mask.device)
+                for sample, (part, length) in enumerate(zip(mask_parts, lengths, strict=True)):
+                    padded_mask[sample, :length].copy_(part.bool())
+
+            cp_size = mpu.get_context_parallel_world_size()
+            if cp_size > 1:
+                cp_rank = mpu.get_context_parallel_rank()
+                chunk_len = max_seqlen // (2 * cp_size)
+                local_positions = torch.cat(
+                    (
+                        torch.arange(cp_rank * chunk_len, (cp_rank + 1) * chunk_len, device=padded.device),
+                        torch.arange(
+                            (2 * cp_size - cp_rank - 1) * chunk_len,
+                            (2 * cp_size - cp_rank) * chunk_len,
+                            device=padded.device,
+                        ),
                     )
-                    for sample, (part, length) in enumerate(zip(mask_parts, lengths, strict=True)):
-                        padded_mask[sample, :length].copy_(part.bool())
-                    replay_mask_rmpad = padded_mask.transpose(0, 1).reshape(1, -1)
-            else:
-                if attention_mask is None:
-                    raise RuntimeError("router replay REPLAY requires attention_mask for dense BSHD inputs.")
-                layers_topk_idx_rmpad = layers_topk_idx.transpose(0, 1).reshape(1, -1, *layers_topk_idx.shape[2:])
-                if replay_mask is not None:
-                    replay_mask_rmpad = replay_mask.transpose(0, 1).reshape(1, -1)
+                )
+                padded = padded.index_select(1, local_positions)
+                if padded_mask is not None:
+                    padded_mask = padded_mask.index_select(1, local_positions.to(padded_mask.device))
+            layers_topk_idx_rmpad = padded.transpose(0, 1).reshape(1, -1, *trailing_shape)
+            if padded_mask is not None:
+                replay_mask_rmpad = padded_mask.transpose(0, 1).reshape(1, -1)
         elif data_format != "thd":
             raise ValueError(f"Unsupported router replay data format: {data_format}")
         elif layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
                 layers_topk_idx,
                 pre_process=True,
-                use_fp8_padding=use_fp8_padding,
+                quant_align_size=quant_align_size,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
@@ -708,7 +728,7 @@ def set_router_replay_data(
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
                     pre_process=True,
-                    use_fp8_padding=use_fp8_padding,
+                    quant_align_size=quant_align_size,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
                     cp_layout=cp_layout,
@@ -717,7 +737,7 @@ def set_router_replay_data(
             if attention_mask is None:
                 raise RuntimeError("router replay REPLAY requires attention_mask for non-nested BSHD inputs.")
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
-                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                layers_topk_idx, attention_mask, pre_process=True, quant_align_size=quant_align_size
             )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 

@@ -107,6 +107,11 @@ def topk_logprobs_from_logits(
     rank = torch.distributed.get_rank(process_group) if distributed else 0
     local_vocab = logits.shape[-1]
     vocab_start = rank * local_vocab
+    k = min(k, local_vocab * world_size)
+    # Accumulating exp/sum/log in BF16 can shift exported log-probs by ~1e-2.
+    # Match the training loss's FP32 vocabulary normalizer.
+    if logits.dtype in (torch.float16, torch.bfloat16):
+        logits = logits.float()
 
     # 1. Global normaliser over the full vocabulary.
     global_max = logits.max(dim=-1, keepdim=True).values
@@ -129,4 +134,4 @@ def topk_logprobs_from_logits(
     gathered_ids = [torch.empty_like(local_top_ids) for _ in range(world_size)]
     torch.distributed.all_gather(gathered_logps, local_top_logps.contiguous(), group=process_group)
     torch.distributed.all_gather(gathered_ids, local_top_ids.contiguous(), group=process_group)
-    return merge_topk_shards(gathered_logps, gathered_ids, k_local)
+    return merge_topk_shards(gathered_logps, gathered_ids, k)

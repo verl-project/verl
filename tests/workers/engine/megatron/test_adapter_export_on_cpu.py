@@ -48,6 +48,7 @@ def _engine(**lora):
         module=object(),
         bridge=Mock(),
         _qat_enabled=False,
+        _rollout_weight_quantizer=None,
     )
 
 
@@ -83,8 +84,23 @@ def test_adapter_layout_matches_vllm_wrapper(adapter_export, monkeypatch, is_3d,
 
     adapter_export(engine, base_sync_done=True)
 
-    expected = "stack_3d_moe" if is_3d and not mixed else "moe_shared_loras" if shared else "expand_shared_outer"
+    expected = "moe_shared_loras" if shared else "stack_3d_moe" if is_3d and not mixed else "expand_shared_outer"
     engine.bridge.export_adapter_weights.assert_called_once_with(engine.module, **{expected: True})
+
+
+def test_sglang_shared_adapter_export_does_not_import_vllm(adapter_export, monkeypatch):
+    original_import = builtins.__import__
+
+    def reject_vllm(name, *args, **kwargs):
+        if "vllm" in name:
+            pytest.fail(f"SGLang adapter export imported {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_vllm)
+    engine = _engine(experts_shared_outer_loras=True)
+    engine.rollout_name = "sglang"
+    adapter_export(engine, base_sync_done=True)
+    engine.bridge.export_adapter_weights.assert_called_once_with(engine.module)
 
 
 @pytest.mark.parametrize(

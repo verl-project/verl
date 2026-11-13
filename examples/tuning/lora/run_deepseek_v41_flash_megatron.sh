@@ -82,23 +82,31 @@ RECOMPUTE_ARGS=(
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=${RECOMPUTE_GRANULARITY}
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=${RECOMPUTE_NUM_LAYERS}
 )
-
 lora_rank=16
 lora_alpha=32
+lora_plus_ratio=${LORA_PLUS_RATIO:-1.0}
+actor_lr=${ACTOR_LR:-5e-5}
 
-# ``last20_vision`` is the default training scope: the last 20 of 40 HF
-# decoder blocks (20..39, native
-# layers 40..79) plus the vision-to-language aligner head.  The native model
-# interleaves attention (even layers) and MoE (odd layers), so generate
-# only the module patterns that can actually exist at each layer.  The
-# layer-qualified patterns are consumed by Megatron-Bridge; the vLLM PEFT
-# metadata remains the backend-wide ``all-linear`` placeholder.
-lora_scope=${LORA_SCOPE:-last20_vision}
-lora_target_modules='["linear_wkv","linear_wgate","linear_wq_b","linear_weights_proj","linear_wk","linear_kv_proj","linear_q_down_proj","linear_q_up_proj","linear_proj","linear_fc1","linear_fc2","vision.patch_embed.proj","vision.blocks.*.attn.wqkv","vision.blocks.*.attn.wo","vision.blocks.*.mlp.w1","vision.blocks.*.mlp.w2","aligner.w1","aligner.w2"]'
-if [[ "${lora_scope}" == "last20_vision" || "${lora_scope}" == "last20_all_vision" ]]; then
+# ``last20_all_vision`` is the default training scope: the last 20 of 40 HF
+# decoder blocks (native layers 40..79), plus vision tower and aligner LoRA.
+# ``first20_all_vision`` selects the first 20 HF blocks (native layers 0..39)
+# with the same vision tower and aligner LoRA path. The native model
+# interleaves attention (even layers) and MoE (odd layers), so generate only
+# module patterns that can actually exist at each layer.
+lora_scope=${LORA_SCOPE:-last20_all_vision}
+lora_target_modules='["linear_wkv","linear_wgate","linear_kv_proj","linear_q_down_proj","linear_q_up_proj","linear_o_group_proj","linear_proj","linear_fc1","linear_fc2","vision.patch_embed.proj","vision.blocks.*.attn.wqkv","vision.blocks.*.attn.wo","vision.blocks.*.mlp.w1","vision.blocks.*.mlp.w2","aligner.w1","aligner.w2"]'
+if [[ "${lora_scope}" == "first20_all_vision" || "${lora_scope}" == "last20_all_vision" || "${lora_scope}" == "first20_novision" || "${lora_scope}" == "last20_novision" ]]; then
+    _with_vision=1
+    [[ "${lora_scope}" == *novision ]] && _with_vision=0
     decoder_hf_total_layers=40
     decoder_hf_lora_layer_count=20
-    decoder_native_start_layer=$((2 * (decoder_hf_total_layers - decoder_hf_lora_layer_count)))
+    if [[ "${lora_scope}" == first20* ]]; then
+        decoder_native_start_layer=0
+        decoder_native_end_layer=$((2 * decoder_hf_lora_layer_count))
+    else
+        decoder_native_start_layer=$((2 * (decoder_hf_total_layers - decoder_hf_lora_layer_count)))
+        decoder_native_end_layer=$((2 * decoder_hf_total_layers))
+    fi
     decoder_native_total_layers=$((2 * decoder_hf_total_layers))
     if ((decoder_native_start_layer < 0)); then
         echo "Invalid DeepSeek-V4.1 decoder layer range" >&2
@@ -107,20 +115,17 @@ if [[ "${lora_scope}" == "last20_vision" || "${lora_scope}" == "last20_all_visio
 
     lora_target_modules="["
     first_target=1
-    for ((layer=decoder_native_start_layer; layer<decoder_native_total_layers; layer++)); do
+    for ((layer=decoder_native_start_layer; layer<decoder_native_end_layer; layer++)); do
         if ((layer % 2 == 0)); then
             # CSA2 keeps the compressor only on KV-source layers and the
-            # indexer only on index-source layers.  The last 20 HF blocks
-            # (native layers 40..79) contain one KV source (40) and four
-            # later index sources (48, 56, 64, 72); listing only modules that
-            # exist avoids Bridge's unmatched-target warnings and keeps the
-            # adapter set minimal.
-            layer_modules=(linear_kv_proj linear_q_down_proj linear_q_up_proj linear_proj)
-            if ((layer == 40)); then
-                layer_modules+=(linear_wkv linear_wq_b linear_wk linear_weights_proj)
-            elif ((layer == 48 || layer == 56 || layer == 64 || layer == 72)); then
-                # Reindex layers reuse the Full layer's K projection.
-                layer_modules+=(linear_wq_b linear_weights_proj)
+            # indexer only on index-source layers; list only modules that
+            # exist to avoid unmatched-target warnings.
+            layer_modules=(linear_kv_proj linear_q_down_proj linear_q_up_proj linear_o_group_proj linear_proj)
+            if ((layer == 4 || layer == 16 || layer == 28 || layer == 40)); then
+                layer_modules+=(linear_wkv linear_wgate)
+            fi
+            if [[ "${lora_scope}" == last20* ]] && ((layer == 40)); then
+                layer_modules=(linear_q_down_proj linear_q_up_proj linear_o_group_proj linear_proj)
             fi
         else
             layer_modules=(linear_fc1 linear_fc2)
@@ -131,12 +136,15 @@ if [[ "${lora_scope}" == "last20_vision" || "${lora_scope}" == "last20_all_visio
             first_target=0
         done
     done
-    if [[ "${lora_scope}" == "last20_all_vision" ]]; then
+    if ((_with_vision == 1)); then
         lora_target_modules+=',"vision.patch_embed.proj","vision.blocks.*.attn.wqkv","vision.blocks.*.attn.wo","vision.blocks.*.mlp.w1","vision.blocks.*.mlp.w2"'
+        lora_target_modules+=',"aligner.w1","aligner.w2"]'
+    else
+        lora_target_modules+=']'
     fi
-    lora_target_modules+=',"aligner.w1","aligner.w2"]'
+    unset _with_vision
 elif [[ "${lora_scope}" != "all" ]]; then
-    echo "Unsupported LORA_SCOPE=${lora_scope}; use all, last20_vision, or last20_all_vision" >&2
+    echo "Unsupported LORA_SCOPE=${lora_scope}; use all, first20_all_vision, last20_all_vision, first20_novision, or last20_novision" >&2
     exit 1
 fi
 
@@ -148,6 +156,8 @@ ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.30}
 ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-32768}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-4096}
 ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-8}
+VLLM_MOE_BACKEND=${VLLM_MOE_BACKEND:-auto}
+VLLM_LINEAR_BACKEND=${VLLM_LINEAR_BACKEND:-auto}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-400}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-13}
 SAVE_FREQ=${SAVE_FREQ:--1}
@@ -158,7 +168,7 @@ LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-3}
 ENGRAM_CPU_LOOKUP=${ENGRAM_CPU_LOOKUP:-True}
 
 if ((gen_tp < 1 || 24 % gen_tp != 0 || train_ep % gen_tp != 0)); then
-    echo "DeepSeek-V4.1 Engram requires rollout TP/EP to divide 24 (got ${gen_tp})." >&2
+    echo "DeepSeek-V4.1 Engram requires gen_tp to be positive and divide 24, and train_ep to be divisible by gen_tp (got gen_tp=${gen_tp}, train_ep=${train_ep})." >&2
     exit 1
 fi
 train_data_bsz=$((train_prompt_bsz * n_resp_per_prompt))
@@ -178,7 +188,7 @@ run() {
 
 run python3 -m verl.trainer.main_ppo \
     model_engine=megatron \
-    +ray_kwargs.ray_init.runtime_env.env_vars.PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+    +ray_kwargs.ray_init.runtime_env.env_vars.PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF}" \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -212,7 +222,7 @@ run python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.model.lora.experts_shared_outer_loras=True \
-    actor_rollout_ref.model.lora.lora_plus_ratio=16.0 \
+    actor_rollout_ref.model.lora.lora_plus_ratio=${lora_plus_ratio} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.use_fused_kernels=False \
@@ -226,11 +236,11 @@ run python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.lora.resync_base=${ROLLOUT_RESYNC_BASE} \
     actor_rollout_ref.model.lora.dtype=bf16 \
     actor_rollout_ref.model.lora.target_modules="${lora_target_modules}" \
-    actor_rollout_ref.model.lora.enable_tower_connector_lora=True \
+    actor_rollout_ref.model.lora.enable_tower_connector_lora=${ENABLE_TOWER_CONNECTOR_LORA:-True} \
     actor_rollout_ref.model.use_remove_padding=${use_remove_padding} \
     actor_rollout_ref.actor.megatron.use_remove_padding=${use_remove_padding} \
     actor_rollout_ref.ref.megatron.use_remove_padding=${use_remove_padding} \
-    actor_rollout_ref.actor.optim.lr=5e-5 \
+    actor_rollout_ref.actor.optim.lr=${actor_lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS} \
     actor_rollout_ref.actor.optim.weight_decay=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
@@ -285,6 +295,8 @@ run python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.pipeline_model_parallel_size=${gen_pp} \
     actor_rollout_ref.rollout.max_num_seqs=${ROLLOUT_MAX_NUM_SEQS} \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=${VLLM_MOE_BACKEND} \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.linear_backend=${VLLM_LINEAR_BACKEND} \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_moe_shared_loras=True \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_encoder_tp_mode=data \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.num_nextn_predict_layers=0 \

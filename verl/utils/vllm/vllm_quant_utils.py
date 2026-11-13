@@ -16,9 +16,8 @@
 """Entry point for refitting a quantized vLLM engine during RL rollout.
 
 Everything the rollout worker calls lives here: startup patching
-(``apply_vllm_quant_patches``), the BF16 -> FP8 quantization of the outgoing
-weight stream (``quant_weights``), the load itself (``load_quanted_weights``),
-and the prepare/finalize pair that brackets a bucketed transfer
+(``apply_vllm_quant_patches``), the load itself (``load_quanted_weights``), and
+the prepare/finalize pair that brackets a bucketed transfer
 (``prepare_quanted_weights_for_loading`` / ``process_quanted_weights_after_loading``).
 
 The layout surgery each quantization scheme needs is delegated to a sibling
@@ -30,7 +29,8 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
-import re
+import os
+from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,22 +38,13 @@ from typing import Any
 import torch
 from packaging import version
 
-try:
-    from vllm.model_executor.layers.linear import LinearBase
-except ImportError as e:
-    raise ImportError("FP8 quantization not available") from e
-
-try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-except ImportError:
-    FusedMoE = None
-
-from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 from verl.utils.vllm.vllm_fp4_utils import (
+    install_mxfp4_mxfp8_compressed_tensors_patch,
     is_deepseek_v4_model,
-    iter_deepseek_v4_weights,
     process_mxfp4_moe_weights_after_loading,
+    process_nvfp4_moe_weights_after_loading,
     stage_mxfp4_moe_params_for_loading,
+    stage_nvfp4_moe_params_for_loading,
 )
 from verl.utils.vllm.vllm_fp8_utils import (
     build_fp8_method_patchers,
@@ -61,8 +52,70 @@ from verl.utils.vllm.vllm_fp8_utils import (
     process_fp8_weights_after_loading,
     stage_fp8_params_for_loading,
 )
+from verl.utils.vllm.vllm_nvfp4_per_token_utils import install_nvfp4_per_token_compressed_tensors_patch
+from verl.utils.vllm.vllm_unquant_utils import (
+    fold_unquantized_moe_params,
+    stage_unquantized_moe_params,
+    unquantized_moe_modules,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _is_nvfp4_quantization(quantization_config: Mapping[str, Any]) -> bool:
+    """Whether a quantization config contains the NVFP4 format."""
+    values = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list | tuple):
+            for nested in value:
+                collect(nested)
+        elif isinstance(value, str):
+            values.append(value.lower())
+
+    collect(quantization_config)
+    return any("nvfp4" in value for value in values)
+
+
+def _uses_fp32_block_scales(quantization_config: Mapping[str, Any]) -> bool:
+    """Whether FP8 block weights use checkpoint-layout FP32 scales."""
+    for group in quantization_config.get("config_groups", {}).values():
+        weights = group.get("weights", {})
+        if weights.get("strategy") == "block" and weights.get("scale_dtype") in {None, "torch.float32"}:
+            return True
+    block_size = quantization_config.get("weight_block_size")
+    return block_size == [128, 128] and quantization_config.get("scale_fmt") not in {"ue8m0", "e8m0"}
+
+
+def _is_hopper() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_device_capability(90)
+
+
+def set_default_vllm_quantization_backends(
+    quantization_config: Mapping[str, Any] | None,
+    engine_kwargs: dict[str, Any],
+) -> None:
+    """Default non-NVFP4 quantization backends to DeepGEMM."""
+    if hasattr(quantization_config, "to_dict"):
+        quantization_config = quantization_config.to_dict()
+    if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
+        return
+    # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
+    if torch.version.hip is not None:
+        return
+    for option in ("linear_backend", "moe_backend"):
+        engine_kwargs.setdefault(option, "deep_gemm")
+    if (
+        "deep_gemm" in (engine_kwargs["linear_backend"], engine_kwargs["moe_backend"])
+        and _is_hopper()
+        and _uses_fp32_block_scales(quantization_config)
+    ):
+        os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "0"
 
 
 def _get_vllm_version():
@@ -72,10 +125,6 @@ def _get_vllm_version():
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
 @dataclass()
 class FP8State:
-    # A cache of fp8 parameter names, we can check this cache to see if a
-    # param name corresponds to a fp8 weight
-    seen_params: set = field(default_factory=lambda: set())
-    fp8_param_names: set = field(default_factory=lambda: set())
     vllm_patches: list = field(default_factory=lambda: [])
 
 
@@ -88,260 +137,45 @@ def is_quantized_model(vllm_config):
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
-        elif is_vllm_ascend_mx_quant(vllm_config.quant_config):
+        elif is_compressed_tensors_model(vllm_config):
             return True
 
     return False
 
 
-# vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
-# ``nn.Module`` class. ``FusedMoE`` is now a factory *function* that builds a
-# ``MoERunner``, and the fused expert weight tensors (``w13_weight`` /
-# ``w2_weight``) moved onto a ``RoutedExperts`` submodule owned by the runner
-# (i.e. ``experts`` -> ``experts.routed_experts``). vLLM 0.26.1 removed the
-# ``FusedMoE`` name entirely. Resolve the concrete module classes once so
-# ``isinstance`` checks keep working across vLLM versions -- calling
-# ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
-# ``TypeError: isinstance() arg 2 must be a type``, and ``FusedMoE`` may be
-# ``None`` when the name no longer exists.
-if isinstance(FusedMoE, type):
-    # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
-    _MOE_STOP_CLASSES = (FusedMoE,)
-    _EXPERT_WEIGHT_CLASSES = (FusedMoE,)
-else:
-    _stop_classes: list[type] = []
-    _weight_classes: list[type] = []
-    try:
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-
-        _stop_classes.append(RoutedExperts)
-        _weight_classes.append(RoutedExperts)
-    except ImportError:
-        pass
-    try:
-        from vllm.model_executor.layers.fused_moe import MoERunner
-
-        _stop_classes.append(MoERunner)
-    except ImportError:
-        pass
-    _MOE_STOP_CLASSES = tuple(_stop_classes)
-    _EXPERT_WEIGHT_CLASSES = tuple(_weight_classes)
-
-
-def _is_expert_weight_module(module) -> bool:
-    """Return whether ``module`` directly owns fused expert weights.
-
-    True for the pre-0.24 ``FusedMoE`` module and the post-0.24 ``RoutedExperts``
-    module (both expose ``w13_weight`` / ``w2_weight``). Falls back to duck typing
-    so the check keeps working even if the concrete classes cannot be imported.
-    """
-    if _EXPERT_WEIGHT_CLASSES and isinstance(module, _EXPERT_WEIGHT_CLASSES):
-        return True
-    return hasattr(module, "w13_weight") and hasattr(module, "w2_weight")
-
-
-def _is_fused_moe_block(module) -> bool:
-    """Return whether ``module`` is the fused-MoE block reached while walking the
-    module tree, so traversal must stop before descending into per-expert name
-    parts (e.g. the expert index) that are not real submodules."""
-    if _MOE_STOP_CLASSES and isinstance(module, _MOE_STOP_CLASSES):
-        return True
-    # ``MoERunner`` owns a ``routed_experts`` child; the weight holder owns the
-    # expert weight tensors directly.
-    return hasattr(module, "routed_experts") or _is_expert_weight_module(module)
-
-
-def _resolve_expert_weight_module(module):
-    """Return the submodule that actually owns the fused expert weights.
-
-    On vLLM >= 0.24 the walked module is a ``MoERunner`` whose ``routed_experts``
-    child holds the weights; on older vLLM the module already holds them.
-    """
-    routed_experts = getattr(module, "routed_experts", None)
-    if routed_experts is not None:
-        return routed_experts
-    return module
-
-
-def _get_hf_config(model):
-    """Return the HF config on ``model`` (descending ``.config``/``.model``)."""
-    seen: set[int] = set()
-    obj = model
-    while obj is not None and id(obj) not in seen:
-        seen.add(id(obj))
-        cfg = getattr(obj, "config", None)
-        if cfg is not None and hasattr(cfg, "num_hidden_layers"):
-            return cfg
-        obj = getattr(obj, "model", None)
-    return None
-
-
-def _is_mtp_layer_weight(name, model) -> bool:
-    """True when ``name`` belongs to a next-token-prediction (MTP) layer.
-
-    The actor exports MTP layers while the vLLM runtime omits them when MTP is
-    disabled, so such weights must be skipped during FP8 re-quantization.
-    Determined generically from the HF config: any ``layers.{i}.`` whose index
-    is ``>= num_hidden_layers`` is an MTP layer. No model-specific hardcoding.
-    """
-    cfg = _get_hf_config(model)
-    if cfg is None:
-        return False
-    num_hidden_layers = getattr(cfg, "num_hidden_layers", None)
-    if not num_hidden_layers:
-        return False
-    # ``layers.{i}.`` may appear at any depth (e.g. ``model.layers.45.`` /
-    # ``language_model.model.layers.45.``); match the first ``layers.N.`` token.
-    m = re.search(r"\blayers\.(\d+)\.", name)
-    if m is None:
-        return False
-    return int(m.group(1)) >= num_hidden_layers
-
-
-def get_module_from_param_name(model, name: str):
-    # Translate the checkpoint namespace to the live VLM module hierarchy.
-    mapper = getattr(model, "hf_to_vllm_mapper", None)
-    if mapper is not None:
-        mapped = mapper.apply_list([name])
-        if mapped:
-            name = mapped[0]
-    # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
-    # The module path is all but the last part (the parameter's own name)
-    path_parts = name.split(".")
-    module_path = path_parts[:-1]
-    # merge=False LoRA base sync: strip trailing ``.base_layer`` so the shard
-    # name (e.g. ``q_a_proj``) becomes the last path segment for fusion lookup.
-    had_base_layer = False
-    if len(module_path) >= 2 and module_path[-1] == "base_layer":
-        had_base_layer = True
-        module_path = module_path[:-1]
-    # Replace with the fused model name
-    packed_modules_mapping = model.packed_modules_mapping
-    reversed_mapping = {
-        original_name: fused_name
-        for fused_name, original_names_list in packed_modules_mapping.items()
-        for original_name in original_names_list
-    }
-    if module_path[-1] in reversed_mapping.keys():
-        module_path[-1] = reversed_mapping[module_path[-1]]
-    if had_base_layer:
-        # Re-insert base_layer so traversal lands on the FP8 weight, not the LoRA root.
-        module_path.append("base_layer")
-
-    current_module = model
-    try:
-        # Traverse the model hierarchy
-        for part in module_path:
-            if _is_fused_moe_block(current_module):
-                # Reached the fused-MoE block: the remaining name parts (expert
-                # index, per-expert proj name, ...) are handled by vLLM's fused
-                # weight loader, so return the module owning the expert weights.
-                return _resolve_expert_weight_module(current_module)
-            elif isinstance(current_module, torch.nn.ModuleList):
-                current_module = current_module[int(part)]
-            else:
-                current_module = getattr(current_module, part)
-    except (AttributeError, IndexError, ValueError) as e:
-        print(f"Warning: Could not find module for parameter '{name}'. Error: {e}")
-    return _resolve_expert_weight_module(current_module)
-
-
-# Fast-path allowlist: leaf names that can possibly be fp8 weights.
-# Dense linear and per-expert-layout weights end in "weight".
-# Fused-MoE expert params (all experts in one tensor, no per-expert index)
-# use projection names without a ".weight" suffix, e.g. "gate_up_proj" /
-# "down_proj". Any other leaf (bias, embedding, norm, ...) is skipped before
-# the more expensive module resolution.
-_FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_proj"})
-
-
-def is_fp8_weight(name, model):
-    # The actor exports the optional next-token-prediction (MTP) layer, while
-    # the vLLM runtime omits it when MTP is disabled. Skip those weights so
-    # verl does not re-quantize BF16->FP8 for a layer rollout never loads.
-    if _is_mtp_layer_weight(name, model):
-        return False
-    if name not in fp8_state.seen_params:
-        fp8_state.seen_params.add(name)
-        leaf = name.rsplit(".", 1)[-1]
-        if leaf in _FP8_CANDIDATE_LEAVES:
-            module = get_module_from_param_name(model, name)
-            # We currently only quantize linear and fused-MoE expert layers.
-            is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
-            is_fp8_moe = (
-                _is_expert_weight_module(module)
-                and module.w13_weight.dtype == torch.float8_e4m3fn
-                and module.w2_weight.dtype == torch.float8_e4m3fn
-            )
-            if is_fp8_linear or is_fp8_moe:
-                fp8_state.fp8_param_names.add(name)
-    return name in fp8_state.fp8_param_names
-
-
-def is_w4a8_weight(module) -> bool:
-    """Check if a module holds W4A8 (FP4) quantized weights.
-
-    W4A8 stores weights as packed FP4 in uint8 tensors, unlike W8A8 which
-    uses float8_e4m3fn. This function detects those uint8 weight holders so
-    that ``quant_weights`` can select the correct destination dtype for the
-    incoming BF16 weights.
-    """
-    from vllm.model_executor.layers.linear import LinearBase
-
-    is_w4a8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.uint8
-    is_w4a8_moe = (
-        _is_expert_weight_module(module)
-        and module.w13_weight.dtype == torch.uint8
-        and module.w2_weight.dtype == torch.uint8
+def is_compressed_tensors_model(vllm_config) -> bool:
+    """Compressed-tensors rollout, whose refit weights the trainer already quantized."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig,
     )
-    return is_w4a8_linear or is_w4a8_moe
+
+    return isinstance(getattr(vllm_config, "quant_config", None), CompressedTensorsConfig)
 
 
-def is_vllm_ascend_mx_quant(quant_config):
-    try:
-        from vllm_ascend.quantization import AscendModelSlimConfig
-    except ImportError:
-        # vllm_ascend not installed, so this can't be an Ascend MX config
-        return False
-    if not isinstance(quant_config, AscendModelSlimConfig):
-        return False
-    mx_quant_types = ("W8A8_MXFP8", "W4A8_MXFP")
-    return any(quant_type in mx_quant_types for quant_type in quant_config.quant_description.values())
+def configure_fp8_ignored_layers_match_mode(vllm_config) -> None:
+    """Configure FP8 exclusions before vLLM maps them into its model namespace."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
+    from verl.utils.qat.compressed_tensors import (
+        _as_quantization_config,
+        _resolve_quantization_config,
+        get_fp8_ignored_layers,
+    )
 
-def restore_mxfp8_weights_for_loading(model):
-    for name, module in model.named_modules():
-        if (
-            (hasattr(module, "_mxfp8_transformed") or hasattr(module, "_mxfp4_transformed"))
-            and hasattr(module, "quant_method")
-            and hasattr(module.quant_method, "quant_method")
-            and hasattr(module.quant_method.quant_method, "restore_weights_for_rl_loading")
-        ):
-            module.quant_method.quant_method.restore_weights_for_rl_loading(module)
-
-
-def apply_mxfp8_transformation_after_loading(model):
-    """Re-apply MXFP8 transformations after weight loading.
-
-    This function iterates through all linear modules in the model and applies
-    the MXFP8 transformations (transpose, reshape) that are required for NPU
-    inference.
-
-    Must be called AFTER model.load_weights() in RL training loops.
-    """
-    try:
-        from vllm.model_executor.layers.linear import LinearBase
-    except ImportError:
-        logger.warning("Could not import LinearBase, skipping MXFP8 transformation")
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if not isinstance(quant_config, Fp8Config):
         return
-
-    for name, module in model.named_modules():
-        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and (
-            hasattr(module, "_mxfp8_original_shapes") or hasattr(module, "_mxfp4_original_shapes")
-        ):
-            if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
-                logger.debug(f"Applying MXFP8 transformation for module: {name}")
-                module.quant_method.process_weights_after_loading(module)
+    hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
+    serialized = _as_quantization_config(_resolve_quantization_config(hf_config, {})[1])
+    if serialized is None:
+        return
+    match_mode = serialized.get("ignored_layers_match_mode", "exact")
+    if match_mode not in ("exact", "substring", "suffix"):
+        raise ValueError(f"Unsupported ignored_layers_match_mode={match_mode!r}")
+    quant_config.ignored_layers_match_mode = match_mode
+    quant_config.ignored_layers = get_fp8_ignored_layers(
+        serialized, is_multimodal=getattr(hf_config, "text_config", None) is not None
+    )
 
 
 def refresh_rocm_attention_weight_caches(model):
@@ -382,142 +216,6 @@ def refresh_rocm_attention_weight_caches(model):
             module._dsv4_wo_a_bf16 = live
 
 
-def _classify_quant_weight(name, model, is_ascend_mx):
-    """Determine what kind of quantization a weight parameter needs.
-
-    Returns
-        ``"mx_fp8"``   Ascend W8A8_MXFP8 or standard FP8 weight on Ascend NPU,
-        ``"mx_fp4"``   Ascend W4A8_MXFP weight (packed FP4 in uint8),
-        ``"fp8"``      standard blockwise FP8 weight (non-Ascend),
-        ``None``       parameter should pass through unquantized.
-    """
-    if is_fp8_weight(name, model):
-        return "mx_fp8" if is_ascend_mx else "fp8"
-    if is_ascend_mx and name.endswith("weight"):
-        module = get_module_from_param_name(model, name)
-        if is_w4a8_weight(module):
-            return "mx_fp4"
-    return None
-
-
-def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
-    """Quantize weights to FP8 format using a memory-efficient generator.
-
-
-    Args:
-        weights: Generator or iterable of (name, tensor) pairs
-        model: The model to check for FP8 weight names
-        quant_config: Quantization configuration with weight_block_size
-        dtype: Data type for intermediate computation (default: bfloat16)
-
-    Yields:
-        Tuples of (name, tensor) for each weight and its scale
-    """
-
-    if is_deepseek_v4_model(model):
-        block_size = 128
-        wbs = getattr(quant_config, "weight_block_size", None)
-        if wbs is None and isinstance(quant_config, dict):
-            wbs = quant_config.get("weight_block_size")
-        if isinstance(wbs, list | tuple) and len(wbs) == 2 and wbs[0] == wbs[1]:
-            block_size = int(wbs[0])
-        yield from iter_deepseek_v4_weights(weights, block_size=block_size)
-        return
-
-    fp8_state.seen_params.clear()
-    fp8_state.fp8_param_names.clear()
-    is_ascend_mx = is_vllm_ascend_mx_quant(quant_config)
-    if is_ascend_mx:
-        import torch_npu
-    for k, v in weights:
-        quant_type = _classify_quant_weight(k, model, is_ascend_mx)
-        if quant_type is None:
-            yield (k, v)
-            continue
-
-        # Preserve already-FP8 weights (e.g. Megatron-Bridge exports) — requantizing
-        # already-quantized bytes corrupts the scale.
-        if v.dtype == torch.float8_e4m3fn:
-            yield (k, v)
-            continue
-
-        # Cast the weight into quantized format and its scale factor
-        if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to {quant_type} blockwise: {k}")
-        if quant_type in ("mx_fp8", "mx_fp4"):
-            dst_type = torch_npu.float4_e2m1fn_x2 if quant_type == "mx_fp4" else torch_npu.float8_e4m3fn
-            param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
-                v.to(dtype),
-                axis=-1,
-                dst_type=dst_type,
-            )
-            param_scale = param_scale.flatten(-2, -1)
-            if quant_type == "mx_fp4":
-                # W4A8 params are uint8 holding packed FP4 pairs; the mx quant
-                # op returns those bytes as float4_e2m1fn_x2, so reinterpret
-                # them as uint8 to match the parameter dtype.
-                param_lp = param_lp.view(torch.uint8)
-        else:
-            from vllm.model_executor.layers.quantization.utils.quant_utils import (
-                _normalize_quant_group_shape,
-                scaled_quantize,
-            )
-
-            w = v.to(dtype)
-            block = tuple(quant_config.weight_block_size)
-            group = _normalize_quant_group_shape(w, block)
-            # scaled_quantize asserts shape % group == 0; TP-sharded weights may
-            # not be block-aligned. Pad, quantize, then trim back.
-            pad = [0] * (2 * w.ndim)
-            need_pad = False
-            for i in range(w.ndim):
-                if group[i] > 1 and w.shape[i] % group[i] != 0:
-                    pad[2 * (w.ndim - 1 - i) + 1] = group[i] - (w.shape[i] % group[i])
-                    need_pad = True
-            if need_pad:
-                w = torch.nn.functional.pad(w, pad)
-            try:
-                param_lp, param_scale = scaled_quantize(
-                    w,
-                    block,
-                    torch.float8_e4m3fn,
-                    compute_dtype=torch.float32,
-                )
-            except (ImportError, AttributeError):
-                param_lp, param_scale = scaled_fp8_blockwise(
-                    w,
-                    weight_block_size=quant_config.weight_block_size,
-                )
-            if need_pad:
-                w_slices = []
-                for i in range(w.ndim):
-                    if group[i] > 1 and pad[2 * (w.ndim - 1 - i) + 1] > 0:
-                        w_slices.append(slice(0, w.shape[i] - pad[2 * (w.ndim - 1 - i) + 1]))
-                    else:
-                        w_slices.append(slice(None))
-                param_lp = param_lp[tuple(w_slices)]
-                # Scale keeps ceil(orig/block) blocks (vLLM shards scales by ceil);
-                # trim only the fully-padded trailing blocks.
-                s_slices = [slice(None)] * param_scale.ndim
-                for i in range(w.ndim):
-                    if group[i] > 1 and pad[2 * (w.ndim - 1 - i) + 1] > 0 and i < param_scale.ndim:
-                        orig = w.shape[i] - pad[2 * (w.ndim - 1 - i) + 1]
-                        s_slices[i] = slice(0, (orig + group[i] - 1) // group[i])
-                param_scale = param_scale[tuple(s_slices)]
-        param_scale = param_scale.squeeze(-1)
-
-        # Yield the quantized weight
-        yield (k, param_lp)
-
-        if is_ascend_mx:
-            yield (k + "_scale", param_scale)
-        else:
-            yield (k + "_scale_inv", param_scale)
-
-        # Explicitly delete original tensor reference to help GC
-        del v, param_lp, param_scale
-
-
 def prepare_quanted_weights_for_loading(model):
     """Restore quantized params to the layout their ``weight_loader`` expects.
 
@@ -528,29 +226,83 @@ def prepare_quanted_weights_for_loading(model):
     so this is safe to call for any quantization scheme. The returned value is
     opaque reload state for the paired call.
     """
-    restore_mxfp8_weights_for_loading(model)
     reload_state: dict[str, Any] = {
         "fp8_layers": stage_fp8_params_for_loading(model),
         "mxfp4_moe_modules": stage_mxfp4_moe_params_for_loading(model),
+        "nvfp4_moe_modules": stage_nvfp4_moe_params_for_loading(model),
+        # Routed experts a quantized model keeps in BF16 (e.g. its first and last layers).
+        "unquantized_moe_modules": unquantized_moe_modules(model),
+        "staged_unquantized_moe_modules": stage_unquantized_moe_params(model),
     }
     return reload_state
 
 
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
-    apply_mxfp8_transformation_after_loading(model)
     reload_state = reload_state or {}
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
+    process_nvfp4_moe_weights_after_loading(reload_state.get("nvfp4_moe_modules") or [])
+    # Every BF16 expert layer, staged or not: a kernel prep that keeps the shape can still
+    # reorder the weights (FlashInfer CUTLASS swaps gate and up).
+    with fold_unquantized_moe_params(reload_state.get("staged_unquantized_moe_modules") or []):
+        for module in reload_state.get("unquantized_moe_modules") or []:
+            module.quant_method.process_weights_after_loading(module)
+    reset_uncalibrated_kv_cache_scales(model)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)
-    process_model_weights = getattr(model, "process_weights_after_loading", None)
-    if process_model_weights is not None:
-        process_model_weights()
+    # Refresh derived tensors (e.g. broadcast mHC weights) after the base weights are final.
+    with torch.inference_mode():
+        try:
+            from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+        except ImportError:
+            # Older vLLM versions delegate model-specific finalization to the root.
+            process_model_weights = getattr(model, "process_weights_after_loading", None)
+            if process_model_weights is not None:
+                process_model_weights()
+        else:
+            finalize_model_weights(model)
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
+def reset_uncalibrated_kv_cache_scales(model):
+    """Reset the q/k/v/prob attention scales to 1.0 when the quant config has no KV cache scheme.
+
+    With a compressed-tensors config, vLLM attaches a ``CompressedTensorsKVCacheMethod`` to every
+    attention layer even when ``kv_cache_scheme`` is None. ``load_format="dummy"`` fills its
+    q/k/v_scale placeholders with random values, and its ``process_weights_after_loading`` adopts
+    them as the live scales: unlike ``BaseKVCacheMethod``, it has no fallback to 1.0 for scales
+    the checkpoint did not provide. A refit sends no attention scales and re-processes only the
+    linear/MoE layers, so with ``kv_cache_dtype="fp8"`` the rollout keeps quantizing Q/K/V with
+    those random scales and produces garbage.
+
+    Configs that do carry a ``kv_cache_scheme`` are left untouched.
+    """
+    try:
+        from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+        from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    except ImportError:
+        return
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, BaseKVCacheMethod):
+            continue
+        if getattr(quant_method.quant_config, "kv_cache_scheme", None) is not None:
+            continue
+        # Older vLLM keeps the scales as the placeholder Parameters, which require grad.
+        with torch.no_grad():
+            set_default_quant_scales(module, register_buffer=False)
+
+
+def validate_fp8_weight_pairs(pending_fp8):
+    orphaned_weights = [name for name, entry in pending_fp8.items() if "weight" in entry]
+    if orphaned_weights:
+        raise RuntimeError(
+            "FP8 weights missing weight_scale, weight_scale_inv or DeepSeek scale: " + ", ".join(orphaned_weights)
+        )
+
+
+def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None, reload_states=None):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -560,14 +312,6 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
         )
     else:
         model = model_runner.model
-    quant_config = model_runner.vllm_config.quant_config
-    vllm_dtype = model_runner.vllm_config.model_config.dtype
-
-    weights = list(weights)
-    weights, engram_loaded = load_dsv41_engram_rows(weights, model)
-    if engram_loaded and not weights:
-        return engram_loaded
-    weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
     # Reconcile LoRA ``.base_layer.`` names on the FP8/mxfp4 path too, so a
     # merge=False base sync doesn't orphan the suffix on an unwrappable fused
     # target (e.g. DSV4 ``compressor.fused_wkv_wgate``). Scoped to LoRA via
@@ -575,9 +319,135 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
     if peft_config is not None:
         from verl.utils.vllm.utils import resolve_weight_name
 
-        live_names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+        live_parameters = dict(model.named_parameters(remove_duplicate=False))
+        live_names = set(live_parameters)
         live_names.update(n for n, _ in model.named_buffers())
-        weights_quantized = [(resolve_weight_name(model, n, live_names), t) for n, t in weights_quantized]
+        routed_expert_prefixes = {
+            prefix
+            for prefix in ("mlp.experts.", "ffn.experts.")
+            if any(f"{prefix}base_layer." in n for n in live_names)
+        }
+
+        packed_modules_mapping = getattr(model, "packed_modules_mapping", None) or {}
+        weight_mapper = getattr(model, "hf_to_vllm_mapper", None)
+
+        suffix_dtypes: dict[str, set] = {}
+        for live_name, parameter in live_parameters.items():
+            segments = live_name.split(".")
+            for i in range(len(segments)):
+                suffix_dtypes.setdefault(".".join(segments[i:]), set()).add(parameter.dtype)
+
+        def match_dtype(candidate):
+            dtypes = suffix_dtypes.get(candidate, ())
+            return next(iter(dtypes)) if len(dtypes) == 1 else None
+
+        def mapped_candidates(candidate):
+            yield candidate
+            if weight_mapper is not None:
+                mapped = weight_mapper.apply_list([candidate])
+                if mapped and mapped[0] != candidate:
+                    yield mapped[0]
+
+        def live_weight_dtype(name):
+            candidates = [name]
+            if ".base_layer." in name:
+                candidates.append(name.replace(".base_layer.", ".", 1))
+            else:
+                prefix, leaf = name.rsplit(".", 1)
+                candidates.append(f"{prefix}.base_layer.{leaf}")
+
+            for candidate in candidates:
+                for mapped in mapped_candidates(candidate):
+                    dtype = match_dtype(mapped)
+                    if dtype is not None:
+                        return dtype
+
+            # LoRA exports use the checkpoint shard names (q_proj, k_proj, ...),
+            # while the live KDA/MLA module owns one packed parameter. Resolve a
+            # shard to its packed owner before deciding whether its scale is live.
+            for owner, shards in packed_modules_mapping.items():
+                for shard in shards:
+                    for candidate in candidates:
+                        for mapped_candidate in mapped_candidates(candidate):
+                            prefix, leaf = mapped_candidate.rsplit(".", 1)
+                            has_base_suffix = prefix.endswith(".base_layer")
+                            base_prefix = prefix.removesuffix(".base_layer")
+                            if not base_prefix.endswith(f".{shard}"):
+                                continue
+                            packed_prefix = base_prefix[: -len(shard)] + owner
+                            suffixes = [".base_layer"] if has_base_suffix else ["", ".base_layer"]
+                            for suffix in suffixes:
+                                dtype = match_dtype(f"{packed_prefix}{suffix}.{leaf}")
+                                if dtype is not None:
+                                    return dtype
+            return None
+
+        quant_config = getattr(getattr(model_runner, "vllm_config", None), "quant_config", None)
+        block_shape = getattr(quant_config, "weight_block_size", None) or (128, 128)
+
+        def dequant_fp8_block(weight, scale, dtype):
+            rows, cols = weight.shape
+            scale = scale.float().repeat_interleave(block_shape[0], 0).repeat_interleave(block_shape[1], 1)
+            return (weight.float() * scale[:rows, :cols]).to(dtype).contiguous()
+
+        fp8_dtypes = {torch.float8_e4m3fn, torch.float8_e5m2}
+        scale_leaves = ("weight_scale", "weight_scale_inv")
+        if is_deepseek_v4_model(model):
+            scale_leaves += ("scale",)
+        reload_state = None if reload_states is None else reload_states[model]
+        pending_fp8 = {} if reload_state is None else reload_state.setdefault("pending_fp8", {})
+        bucket_parts = set()
+        normalized_weights = []
+        for name, tensor in weights:
+            resolved = resolve_weight_name(model, name, live_names, routed_expert_prefixes=routed_expert_prefixes)
+            leaf = resolved.rsplit(".", 1)[-1]
+            if leaf == "weight" or leaf in scale_leaves:
+                weight_name = resolved.rsplit(".", 1)[0] + ".weight"
+                live_dtype = live_weight_dtype(weight_name)
+                if live_dtype in {torch.bfloat16, torch.float16, torch.float32} and (
+                    leaf == "weight" and tensor.dtype in fp8_dtypes or leaf in scale_leaves
+                ):
+                    pairing_key = weight_name.replace(".base_layer.", ".")
+                    entry = pending_fp8.setdefault(pairing_key, {})
+                    entry[leaf] = tensor
+                    if leaf == "weight":
+                        entry["weight_name"] = resolved
+                    if "weight" in entry and any(scale_leaf in entry for scale_leaf in scale_leaves):
+                        normalized_weights.append(
+                            (
+                                entry["weight_name"],
+                                dequant_fp8_block(
+                                    entry["weight"],
+                                    next(entry[scale_leaf] for scale_leaf in scale_leaves if scale_leaf in entry),
+                                    live_dtype,
+                                ),
+                            )
+                        )
+                        del pending_fp8[pairing_key]
+                    elif reload_state is not None:
+                        bucket_parts.add((pairing_key, leaf))
+                    continue
+                # Drop trainer-only scales only for live weights that are not quantized at all.
+                if leaf in {"weight_scale", "weight_scale_inv"} and live_dtype in {
+                    torch.bfloat16,
+                    torch.float16,
+                    torch.float32,
+                }:
+                    continue
+            normalized_weights.append((resolved, tensor))
+        if reload_state is None:
+            validate_fp8_weight_pairs(pending_fp8)
+        else:
+            # Only unpaired parts survive the callback. IPC reuses its buffer for the next bucket.
+            for name, leaf in bucket_parts:
+                entry = pending_fp8.get(name)
+                if entry is not None and leaf in entry:
+                    entry[leaf] = entry[leaf].clone()
+        weights = normalized_weights
+    weights = list(weights)
+    weights, engram_loaded = load_dsv41_engram_rows(weights, model)
+    if engram_loaded and not weights:
+        return engram_loaded
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader
@@ -598,7 +468,7 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=No
         disable_mtp_completeness_check = nullcontext
     try:
         with disable_mtp_completeness_check():
-            loaded_params = model.load_weights(weights_quantized)
+            loaded_params = model.load_weights(weights)
     finally:
         # Undo the type change above to the original type
         for name, param in model.named_parameters():
@@ -614,10 +484,12 @@ def apply_vllm_quant_patches():
 
     These have to be in place before the engine builds, because recording each
     layer's checkpoint layout happens inside the patched hook during the
-    initial load. The mxfp4 path needs no startup patch -- it derives the
-    checkpoint layout from the quant method and patches ``replace_parameter``
-    only for the duration of its own post-processing call.
+    initial load. The MXFP4 refit path derives the checkpoint layout from the
+    quant method; its startup patch only makes compressed-tensors honor MXFP8
+    activations.
     """
+    install_mxfp4_mxfp8_compressed_tensors_patch()
+    install_nvfp4_per_token_compressed_tensors_patch()
     if fp8_state.vllm_patches:
         logger.debug("vLLM quantization patches already applied")
         return

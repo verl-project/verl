@@ -3,9 +3,6 @@ OpenAI GPT-5 mini Comparator for Pairwise Comparison
 使用OpenAI GPT-5 mini进行两两比较的纯净实现
 """
 
-from typing import Optional, Dict, Any
-import json
-import os
 import time
 import asyncio
 

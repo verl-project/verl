@@ -60,7 +60,7 @@ from verl.workers.engine.automodel.utils import (
 from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from ..utils import detach_tree, enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     build_automodel_model,
     build_distributed_config_from_engine_config,
@@ -109,6 +109,7 @@ class AutomodelEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
+        self._rollout_weight_quantizer = None
 
         self.mode = None
         self.rank = torch.distributed.get_rank()
@@ -507,13 +508,16 @@ class AutomodelEngine(BaseEngine):
 
         if merge_lora:
             _sd_adapter = getattr(self.module, "state_dict_adapter", None)
-            return self._merged_lora_param_generator(
+            per_tensor_param = self._merged_lora_param_generator(
                 params,
                 moe_lora_modules,
                 dense_lora_modules,
                 packed_expert_prefixes,
                 _sd_adapter,
-            ), None
+            )
+            if self._rollout_weight_quantizer is not None:
+                per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
+            return per_tensor_param, None
 
         def param_generator():
             lora_base_sync = self.peft_config is not None and not base_sync_done
@@ -611,7 +615,15 @@ class AutomodelEngine(BaseEngine):
         # strict loaders and strips it for flat loaders, so _remap's suffixed
         # keys reconcile across architectures. Phase 2 short-circuits to add_lora.
         peft_config_dict = to_vllm_peft_dict(self.peft_config) if self.peft_config is not None else None
-        return param_generator(), peft_config_dict
+        per_tensor_param = param_generator()
+        # Phase 2 ships only LoRA adapters, which vLLM add_lora takes in high precision.
+        adapter_only = self.peft_config is not None and base_sync_done
+        if self._rollout_weight_quantizer is not None and not adapter_only:
+            per_tensor_param = self._rollout_weight_quantizer(per_tensor_param)
+        return per_tensor_param, peft_config_dict
+
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        self._rollout_weight_quantizer = quantizer
 
     def _merged_lora_param_generator(
         self, params, moe_lora_modules, dense_lora_modules, packed_expert_prefixes, sd_adapter=None
@@ -944,8 +956,9 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
             loss = torch.tensor(1.0, device=device_name)
             metrics = {}
 
+        # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
         output = {
-            "model_output": model_output,
+            "model_output": detach_tree(model_output),
             "loss": loss.detach().item(),
             "metrics": metrics,
         }
