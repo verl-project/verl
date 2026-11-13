@@ -170,3 +170,45 @@ async def test_config_without_rollout_section_is_tolerated(server):
     output = await _generate(SimpleNamespace(), 136, {"temperature": 1.0})
 
     assert len(output.token_ids) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated", [True, False, None])
+async def test_resume_preserves_final_backend_truncation(monkeypatch, truncated):
+    outputs = iter(
+        [
+            TokenOutput(token_ids=[1], stop_reason="aborted", is_truncated=False),
+            TokenOutput(token_ids=[2], stop_reason="completed", is_truncated=truncated),
+        ]
+    )
+
+    async def generate(*args, **kwargs):
+        return next(outputs)
+
+    async def no_wait(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(llm_server.LLMServerClient, "generate", generate)
+    monkeypatch.setattr(llm_server.asyncio, "sleep", no_wait)
+    output = await _generate(_config(), 136, {"max_tokens": 8})
+    assert output.token_ids == [1, 2]
+    assert output.is_truncated is truncated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason,backend_flag,expected",
+    [
+        ("aborted", False, True),
+        ("completed", False, False),
+        ("completed", True, True),
+        ("completed", None, True),
+    ],
+)
+async def test_cumulative_budget_distinguishes_abort_from_eos(monkeypatch, reason, backend_flag, expected):
+    async def generate(*args, **kwargs):
+        return TokenOutput(token_ids=[1, 2], stop_reason=reason, is_truncated=backend_flag)
+
+    monkeypatch.setattr(llm_server.LLMServerClient, "generate", generate)
+    output = await _generate(_config(), 136, {"max_tokens": 2})
+    assert output.is_truncated is expected
