@@ -16,8 +16,6 @@ boundaries.
   checkpoint conversion. See the
   [model engine guide](../../docs/workers/model_engine.rst) for backend-level
   architecture.
-- `registry.py` and `weight_loader_registry.py` serve Megatron-specific model
-  and checkpoint paths; they are not FSDP model registries.
 
 For model code outside the installed `transformers` package, use the
 `trust_remote_code` or `external_lib` model settings described in the FSDP

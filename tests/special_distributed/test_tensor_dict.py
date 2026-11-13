@@ -65,7 +65,7 @@ def test_all_gather_data_proto():
 def test_vocab_parallel_entropy():
     from megatron.core import parallel_state as mpu
 
-    from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy
+    from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_entropy_with_chunking
     from verl.utils.profiler import log_gpu_memory_usage
     from verl.utils.torch_functional import entropy_from_logits
 
@@ -117,6 +117,16 @@ def test_vocab_parallel_entropy():
     torch.testing.assert_close(
         logits[:, tp_rank * vocab_size_per_tp : (tp_rank + 1) * vocab_size_per_tp], vocab_parallel_logits
     )
+
+    # chunked entropy backpropagates through every chunk and matches the unchunked gradient
+    unchunked_grad = vocab_parallel_logits.grad.clone()
+    vocab_parallel_logits.grad = None
+    chunked_entropy = vocab_parallel_entropy_with_chunking(
+        vocab_parallel_logits.view(batch_size, seqlen, -1), chunk_size=seqlen // 4
+    )
+    torch.testing.assert_close(chunked_entropy.view(-1), target_entropy)
+    chunked_entropy.backward(grad_output.view(batch_size, seqlen))
+    torch.testing.assert_close(vocab_parallel_logits.grad, unchunked_grad)
 
     if mpu.get_tensor_model_parallel_rank() == 0:
         print("test_vocab_parallel_entropy passes")

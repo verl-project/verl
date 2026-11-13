@@ -18,8 +18,10 @@
 import inspect
 import logging
 import os
-from contextvars import ContextVar
+from collections.abc import Iterable
 from functools import wraps
+
+import torch
 
 from verl.utils.device import is_torch_npu_available
 
@@ -28,7 +30,118 @@ logger = logging.getLogger(__name__)
 _GLM52_PATCH_ENV = "VERL_VLLM_ASCEND_GLM52_PATCH"
 _GLM52_PATCH_TRUTHY_VALUES = {"1", "true", "yes"}
 _GLM52_PATCH_MARKER = "_verl_vllm_ascend_glm52_patched"
-_glm52_original_run_engine_core = None
+
+
+def normalize_deepseek_v4_weight_names(
+    model: torch.nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Translate Transformers DeepSeek V4 names for the Ascend weight loader."""
+    config = getattr(model, "config", None)
+    if getattr(config, "model_type", None) != "deepseek_v4":
+        return weights
+
+    replacements = (
+        (".self_attn.q_a_proj.", ".self_attn.wq_a."),
+        (".self_attn.kv_proj.", ".self_attn.wkv."),
+        (".self_attn.kv_a_proj_with_mqa.", ".self_attn.wkv."),
+        (".self_attn.q_b_proj.", ".self_attn.wq_b."),
+        (".self_attn.o_a_proj.", ".self_attn.wo_a."),
+        (".self_attn.o_b_proj.", ".self_attn.wo_b."),
+        (".self_attn.q_a_norm.", ".self_attn.q_norm."),
+        (".self_attn.sinks", ".self_attn.attn_sink"),
+        (".self_attn.compressor.kv_proj.", ".self_attn.compressor.wkv."),
+        (".self_attn.compressor.gate_proj.", ".self_attn.compressor.wgate."),
+        (".self_attn.compressor.kv_norm.", ".self_attn.compressor.norm."),
+        (".self_attn.compressor.position_bias", ".self_attn.compressor.ape"),
+        (".self_attn.compressor.indexer.position_bias", ".self_attn.indexer.compressor.ape"),
+        (".self_attn.compressor.indexer.kv_proj.", ".self_attn.indexer.compressor.wkv."),
+        (".self_attn.compressor.indexer.gate_proj.", ".self_attn.indexer.compressor.wgate."),
+        (".self_attn.compressor.indexer.q_b_proj.", ".self_attn.indexer.wq_b."),
+        (".self_attn.compressor.indexer.kv_norm.", ".self_attn.indexer.compressor.norm."),
+        (".self_attn.compressor.indexer.", ".self_attn.indexer."),
+        (".self_attn.indexer.scorer.weights_proj.", ".self_attn.indexer.weights_proj."),
+        ("hc_head.hc_fn", "hc_head_fn"),
+        ("hc_head.hc_base", "hc_head_base"),
+        ("hc_head.hc_scale", "hc_head_scale"),
+        (".attn_hc.fn", ".hc_attn_fn"),
+        (".attn_hc.base", ".hc_attn_base"),
+        (".attn_hc.scale", ".hc_attn_scale"),
+        (".ffn_hc.fn", ".hc_ffn_fn"),
+        (".ffn_hc.base", ".hc_ffn_base"),
+        (".ffn_hc.scale", ".hc_ffn_scale"),
+    )
+
+    def normalized_weights():
+        for name, tensor in weights:
+            for source, target in replacements:
+                name = name.replace(source, target)
+            yield name, tensor
+
+    return normalized_weights()
+
+
+def _filter_deepseek_v4_layer_weights(
+    model: torch.nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Skip checkpoint layers beyond the constructed DeepSeek V4 model."""
+    config = getattr(model, "config", None)
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if getattr(config, "model_type", None) != "deepseek_v4" or layers is None:
+        yield from weights
+        return
+
+    num_layers = len(layers)
+    for name, tensor in weights:
+        prefixed_name = name if name.startswith("model") else f"model.{name}"
+        if prefixed_name.startswith("model.layers."):
+            layer_field = prefixed_name[len("model.layers.") :].split(".", 1)[0]
+            if layer_field.isdigit() and int(layer_field) >= num_layers:
+                continue
+        yield name, tensor
+
+
+def _patch_deepseek_v4_weight_loader(model_class) -> bool:
+    original_load_weights = model_class.load_weights
+    if getattr(original_load_weights, "_verl_deepseek_v4_weight_names_patched", False):
+        return False
+
+    @wraps(original_load_weights)
+    def load_weights(self, weights, *args, **kwargs):
+        weights = normalize_deepseek_v4_weight_names(self, weights)
+        weights = _filter_deepseek_v4_layer_weights(self, weights)
+        return original_load_weights(self, weights, *args, **kwargs)
+
+    load_weights._verl_deepseek_v4_weight_names_patched = True
+    model_class.load_weights = load_weights
+    return True
+
+
+def patch_vllm_ascend_deepseek_v4_weight_loader() -> None:
+    """Patch DeepSeek V4 initialization and loading without editing vllm-ascend."""
+    from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
+
+    _patch_deepseek_v4_weight_loader(AscendDeepseekV4ForCausalLM)
+
+
+def patch_vllm_ascend_v030_sched_yield():
+    """Disable sched_yield in vllm.distributed.utils on ARM hosts.
+
+    On ARM hosts (e.g. Atlas A2 machines) the scheduler busy-wait with
+    sched_yield degrades badly, so USE_SCHED_YIELD must stay disabled.
+    Drop this patch once the fix is included in the installed vllm-ascend release.
+    """
+    import sys
+
+    import vllm.distributed.utils
+    from vllm.platforms import CpuArchEnum, Platform
+
+    is_arm = Platform.get_cpu_architecture() == CpuArchEnum.ARM
+
+    use_sched_yield = (
+        (sys.version_info[:3] >= (3, 11, 1)) or (sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8)
+    ) and not is_arm
+
+    vllm.distributed.utils.USE_SCHED_YIELD = use_sched_yield
 
 
 def _glm52_patch_enabled() -> bool:
@@ -39,7 +152,7 @@ def _normalized_source(fn) -> str:
     try:
         return "".join(inspect.getsource(fn).split())
     except (OSError, TypeError) as exc:
-        raise RuntimeError(f"{_GLM52_PATCH_ENV} requires inspectable vllm/vllm-ascend 0.23.x Python sources.") from exc
+        raise RuntimeError(f"{_GLM52_PATCH_ENV} requires inspectable vllm/vllm-ascend 0.30.x Python sources.") from exc
 
 
 def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
@@ -51,7 +164,7 @@ def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
     source = _normalized_source(original_forward)
     if "residual=x+residual" in source and "npu_rms_norm(residual,self.weight" in source:
         return False
-    if "npu_add_rms_norm" not in source:
+    if "npu_add_rms_norm" not in source or "npu_add_rms_norm_bias" not in source:
         raise RuntimeError(f"{_GLM52_PATCH_ENV} found an unsupported AscendRMSNorm.forward_oot implementation.")
 
     @wraps(original_forward)
@@ -61,7 +174,6 @@ def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
 
         import torch_npu
 
-        residual = layernorm_module.torch.ops.vllm.maybe_chunk_residual(x, residual)
         residual = x + residual
         x = torch_npu.npu_rms_norm(residual, self.weight, epsilon=self.variance_epsilon)[0]
         return x, residual
@@ -71,265 +183,141 @@ def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
     return True
 
 
-def _patch_glm52_sfa_kv_b_proj_disposal(sfa_module) -> bool:
-    ascend_sfa_impl = sfa_module.AscendSFAImpl
-    original_process_weights = ascend_sfa_impl.process_weights_after_loading
-    if getattr(original_process_weights, _GLM52_PATCH_MARKER, False):
-        return False
-
-    source = _normalized_source(original_process_weights)
-    if "dispose_layer(self.kv_b_proj)" not in source:
-        return False
-
-    original_dispose_layer = sfa_module.dispose_layer
-    no_preserved_layer = object()
-    preserved_layer: ContextVar[object] = ContextVar(
-        "verl_vllm_ascend_glm52_preserved_layer", default=no_preserved_layer
-    )
-
-    @wraps(original_dispose_layer)
-    def selective_dispose_layer(layer):
-        if layer is preserved_layer.get():
-            return None
-        return original_dispose_layer(layer)
-
-    @wraps(original_process_weights)
-    def patched_process_weights(self, act_dtype):
-        token = preserved_layer.set(self.kv_b_proj)
-        try:
-            return original_process_weights(self, act_dtype)
-        finally:
-            preserved_layer.reset(token)
-
-    setattr(patched_process_weights, _GLM52_PATCH_MARKER, True)
-    sfa_module.dispose_layer = selective_dispose_layer
-    ascend_sfa_impl.process_weights_after_loading = patched_process_weights
-    return True
-
-
-def _patch_glm52_sfa_indexer_scale(sfa_module) -> bool:
-    indexer_post_process = sfa_module.AscendSFAImpl.indexer_select_post_process
-    source = _normalized_source(indexer_post_process)
-    scale_expression = "weights=weights*(self.n_head**-0.5)*(self.head_dim**-0.5)"
-    if scale_expression in source:
-        return False
-    if "weights=kw[:,self.head_dim:]" not in source or "DeviceOperator.indexer_select_post_process" not in source:
-        raise RuntimeError(
-            f"{_GLM52_PATCH_ENV} found an unsupported AscendSFAImpl.indexer_select_post_process implementation."
-        )
-
-    device_operator = sfa_module.DeviceOperator
-    original_operator = device_operator.indexer_select_post_process
-    if getattr(original_operator, _GLM52_PATCH_MARKER, False):
-        return False
-
-    parameter_names = tuple(inspect.signature(original_operator).parameters)
-    expected_prefix = ("sfa_impl", "q_li", "q_li_scale", "q_li_shape_ori", "weights")
-    if parameter_names[: len(expected_prefix)] != expected_prefix:
-        raise RuntimeError(
-            f"{_GLM52_PATCH_ENV} found an unsupported DeviceOperator.indexer_select_post_process signature."
-        )
-
-    @wraps(original_operator)
-    def patched_operator(sfa_impl, q_li, q_li_scale, q_li_shape_ori, weights, *args, **kwargs):
-        weights = weights * (sfa_impl.n_head**-0.5) * (sfa_impl.head_dim**-0.5)
-        return original_operator(sfa_impl, q_li, q_li_scale, q_li_shape_ori, weights, *args, **kwargs)
-
-    setattr(patched_operator, _GLM52_PATCH_MARKER, True)
-    device_operator.indexer_select_post_process = staticmethod(patched_operator)
-    return True
-
-
 def patch_vllm_ascend_glm52() -> None:
     """Apply the vllm-ascend GLM-5.2 fixes from commit ca0420391."""
     try:
-        from vllm_ascend.attention import sfa_v1
         from vllm_ascend.ops import layernorm
     except (AttributeError, ImportError) as exc:
-        raise RuntimeError(f"{_GLM52_PATCH_ENV} could not load the required vllm-ascend 0.23.x patch targets.") from exc
+        raise RuntimeError(f"{_GLM52_PATCH_ENV} could not load the required vllm-ascend 0.30.x patch targets.") from exc
 
     patched = [
         _patch_glm52_ascend_rms_norm(layernorm),
-        _patch_glm52_sfa_kv_b_proj_disposal(sfa_v1),
-        _patch_glm52_sfa_indexer_scale(sfa_v1),
     ]
     status = "applied" if any(patched) else "already present"
     logger.info("GLM-5.2 vllm-ascend compatibility patch %s", status)
 
 
-def _glm52_run_engine_core(*args, **kwargs):
-    # Keep this callable at module scope, without @wraps: multiprocessing spawn
-    # must import it by its verl name, then patch the fresh child's vLLM classes.
-    patch_vllm_glm52_partial_wake_up()
-    return _glm52_original_run_engine_core(*args, **kwargs)
+def patch_vllm_ascend_v030_fia_decode_mask():
+    import inspect
+    import textwrap
+
+    # Import vllm_ascend.ops first to break a circular import in vllm-ascend:
+    # attention_v1 -> device_op -> vllm_ascend.ops.* -> fused_moe -> device_op.
+    import vllm_ascend.ops  # noqa: F401
+    from vllm_ascend.attention import attention_v1
+
+    # Each entry is an (old, new) pair applied to the inspect.getsource +
+    # textwrap.dedent'ed source of the method (def line at 0, body at 4),
+    # mirroring the upstream diff exactly.
+    replacements = {
+        "full_graph_fia": [
+            (
+                "    attn_mask = attn_metadata.attn_mask\n"
+                "    sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0\n",
+                "    # attn_state is forced to DecodeOnly during FULL graph capture, including\n"
+                "    # mixed prefill-decode graphs and spec-decode verify batches, which still\n"
+                "    # need the causal mask. Only genuine single-token decode may skip the mask;\n"
+                "    # max_query_len is 1 for pure decode and for uniform-decode capture, but\n"
+                "    # equals num_tokens for mixed-batch capture and 1 + num_spec_tokens for\n"
+                "    # spec-decode capture.\n"
+                "    is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly"
+                " and attn_metadata.max_query_len == 1\n"
+                "    attn_mask, sparse_mode = (\n"
+                "        (None, 0)\n"
+                "        if is_decode and not self.sliding_window\n"
+                "        else (attn_metadata.attn_mask, 4 if self.sliding_window else 3"
+                " if attn_metadata.causal else 0)\n"
+                "    )\n",
+            )
+        ],
+        "forward_fused_infer_attention": [
+            (
+                "            attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(\n"
+                "                query=query,\n"
+                "                key=key,\n"
+                "                value=value,\n"
+                "                atten_mask=attn_metadata.attn_mask,\n",
+                "            is_decode = (\n"
+                "                attn_metadata.attn_state == AscendAttentionState.DecodeOnly"
+                " and attn_metadata.max_query_len == 1\n"
+                "            )\n"
+                "            attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(\n"
+                "                query=query,\n"
+                "                key=key,\n"
+                "                value=value,\n"
+                "                atten_mask=None if is_decode else attn_metadata.attn_mask,\n",
+            ),
+            (
+                "                is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,\n"
+                "                sparse_mode=3,\n",
+                "                is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,\n"
+                "                sparse_mode=0 if is_decode else 3,\n",
+            ),
+        ],
+    }
+
+    module_globals = vars(attention_v1)
+    for method_name, method_replacements in replacements.items():
+        src = textwrap.dedent(inspect.getsource(getattr(attention_v1.AscendAttentionBackendImpl, method_name)))
+        if "is_decode" in src:
+            # The installed vllm-ascend already contains the fix.
+            continue
+        try:
+            for old, new in method_replacements:
+                assert src.count(old) == 1
+                src = src.replace(old, new, 1)
+        except AssertionError:
+            logger.warning(
+                "Skip patching AscendAttentionBackendImpl.%s: the installed vllm-ascend source "
+                "does not match the expected releases/v0.30.0 code.",
+                method_name,
+            )
+            continue
+        assert method_name not in module_globals
+        exec(src, module_globals)
+        patched_method = module_globals.pop(method_name)
+        setattr(attention_v1.AscendAttentionBackendImpl, method_name, patched_method)
 
 
-def patch_vllm_glm52_partial_wake_up() -> None:
-    """Port vLLM 6f1ada0f91 + 11d60545e2: no forwards during partial wake-up."""
-    global _glm52_original_run_engine_core
-
-    from vllm.v1.engine import core
-
-    engine_core = core.EngineCore
-    dp_engine_core = core.DPEngineCoreProc
-    original_wake_up = engine_core.wake_up
-    original_dummy_batch = dp_engine_core.execute_dummy_batch
-    wake_up_patched = getattr(original_wake_up, _GLM52_PATCH_MARKER, False)
-    dummy_batch_patched = getattr(original_dummy_batch, _GLM52_PATCH_MARKER, False)
-
-    # Validate both targets before changing either. Already-fixed installations
-    # retain their upstream methods; unknown implementations fail explicitly.
-    if not wake_up_patched:
-        source = _normalized_source(original_wake_up)
-        wake_up_patched = "ifnotself.model_executor.is_sleeping:self.resume_scheduler()" in source
-        if not wake_up_patched and (
-            tuple(inspect.signature(original_wake_up).parameters) != ("self", "tags")
-            or 'tags=[tfortintagsift!="scheduling"]' not in source
-            or "iftagsisNoneortags:self.model_executor.wake_up(tags)" not in source
-            or not source.endswith("self.resume_scheduler()")
-        ):
-            raise RuntimeError(f"{_GLM52_PATCH_ENV} found an unsupported EngineCore.wake_up implementation.")
-
-    if not dummy_batch_patched:
-        loop_source = _normalized_source(dp_engine_core.run_busy_loop)
-        dummy_batch_patched = (
-            "elifnotself.model_executor.is_sleeping:withself.log_iteration_details(None):self.execute_dummy_batch()"
-        ) in loop_source
-        if not dummy_batch_patched and (
-            "withself.log_iteration_details(None):self.execute_dummy_batch()" not in loop_source
-            or _normalized_source(original_dummy_batch)
-            != "defexecute_dummy_batch(self):self.model_executor.execute_dummy_batch()"
-        ):
-            raise RuntimeError(f"{_GLM52_PATCH_ENV} found an unsupported DPEngineCoreProc dummy-batch implementation.")
-
-    if not wake_up_patched:
-
-        @wraps(original_wake_up)
-        def patched_wake_up(self, tags=None):
-            if tags is not None and "scheduling" in tags:
-                tags = [t for t in tags if t != "scheduling"]
-            if tags is None or tags:
-                self.model_executor.wake_up(tags)
-            if not self.model_executor.is_sleeping:
-                self.resume_scheduler()
-
-        setattr(patched_wake_up, _GLM52_PATCH_MARKER, True)
-        engine_core.wake_up = patched_wake_up
-
-    if not dummy_batch_patched:
-
-        @wraps(original_dummy_batch)
-        def patched_dummy_batch(self):
-            # Leave the busy loop and its DP collectives intact. Its logging
-            # context still runs, but no dummy forward touches sleeping memory.
-            if not self.model_executor.is_sleeping:
-                return original_dummy_batch(self)
-
-        setattr(patched_dummy_batch, _GLM52_PATCH_MARKER, True)
-        dp_engine_core.execute_dummy_batch = patched_dummy_batch
-
-    entrypoint = core.EngineCoreProc.run_engine_core
-    if entrypoint is not _glm52_run_engine_core:
-        _glm52_original_run_engine_core = entrypoint
-        if not (wake_up_patched and dummy_batch_patched):
-            core.EngineCoreProc.run_engine_core = staticmethod(_glm52_run_engine_core)
-
-    status = "already present" if wake_up_patched and dummy_batch_patched else "applied"
-    logger.info("GLM-5.2 vLLM partial wake-up patch %s", status)
-
-
-def vllm_v013_weight_loader_method_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
-        if (shard_id in ("w1", "w3") and param.shape[1] == self.hidden_size) or (
-            shard_id == "w2" and param.shape[2] == self.hidden_size
-        ):
-            param.data = param.data.transpose(1, 2)
-        return fn(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success)
-
-    return wrapper
-
-
-def _patch_legacy_fused_moe_weight_loader(fused_moe) -> bool:
-    """Install the NPU transpose wrapper on vLLM's legacy FusedMoE class.
-
-    Legacy vLLM releases expose ``FusedMoE`` as a class whose
-    ``weight_loader`` can be wrapped at class level. Modular vLLM releases
-    expose ``FusedMoE`` as a factory function, so this class-level patch is
-    not applicable. Loader and layout handling for constructed modules is
-    owned by their runtime and backend-specific weight-loading paths.
-    """
-    weight_loader = getattr(fused_moe, "weight_loader", None)
-    if not isinstance(fused_moe, type) or not callable(weight_loader):
-        return False
-
-    if getattr(weight_loader, "_verl_npu_weight_loader_patched", False):
-        return True
-
-    wrapped_weight_loader = vllm_v013_weight_loader_method_wrapper(weight_loader)
-    wrapped_weight_loader._verl_npu_weight_loader_patched = True
-    fused_moe.weight_loader = wrapped_weight_loader
-    return True
-
-
-def patch_vllm013_rotary_emb():
+def patch_vllm030_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
-    def vllm013_npu_rotary_embedding_init_impl(
+    def vllm030_npu_rotary_embedding_init_impl(
         self,
         enforce_enable: bool = False,
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super(ApplyRotaryEmb, self).__init__()
+        super(ApplyRotaryEmb, self).__init__(enforce_enable=enforce_enable)
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
         self.apply_rotary_emb_flash_attn = None
 
-    ApplyRotaryEmb.__init__ = vllm013_npu_rotary_embedding_init_impl
-
-
-def patch_camem_sleep() -> None:
-    """Synchronize pending NPU work before CaMem sleep unmaps tensor memory."""
-    try:
-        import vllm_ascend.device_allocator.camem as camem
-    except ModuleNotFoundError as exc:
-        if exc.name in ("vllm_ascend", "vllm_ascend.device_allocator", "vllm_ascend.device_allocator.camem"):
-            return
-        raise
-
-    original_sleep = camem.CaMemAllocator.sleep
-    if getattr(original_sleep, "_verl_camem_sleep_patched", False):
-        return
-
-    @wraps(original_sleep)
-    def patched_sleep(self, *args, **kwargs):
-        # Graph replay and normal NPU launches are asynchronous. All users of
-        # the virtual mappings must finish before sleep calls unmap_and_release;
-        # synchronizing via empty_cache() after the unmap loop is too late.
-        camem.torch.npu.synchronize()
-        return original_sleep(self, *args, **kwargs)
-
-    patched_sleep._verl_camem_sleep_patched = True
-    camem.CaMemAllocator.sleep = patched_sleep
+    ApplyRotaryEmb.__init__ = vllm030_npu_rotary_embedding_init_impl
 
 
 def apply_npu_vllm_patches() -> None:
-    """Apply NPU-specific vLLM patches for weight loading, rotary embedding, and sleep.
+    """Apply NPU-specific vLLM patches for weight loading, rotary embedding, etc.
 
     Must be called before the vLLM engine is created.
     """
     if not is_torch_npu_available(check_device=False):
         return
 
+    import vllm
+    from packaging import version
+
+    _VLLM_VERSION = version.parse(getattr(vllm, "__version__", "0.0.0"))
+    if version.parse("0.30.0") <= _VLLM_VERSION < version.parse("0.31.0"):
+        # On ARM hosts (e.g. Atlas A2) the scheduler busy-wait with sched_yield degrades badly.
+        patch_vllm_ascend_v030_sched_yield()
+        # Only genuine single-token decode may skip the causal attention mask; mixed
+        # prefill-decode and spec-decode FULL graph capture batches still need it.
+        patch_vllm_ascend_v030_fia_decode_mask()
+        patch_vllm_ascend_deepseek_v4_weight_loader()
+
     # Disable flash_attn in RotaryEmbedding (NPU)
-    from vllm.model_executor.layers import fused_moe
 
-    patch_vllm013_rotary_emb()
-    _patch_legacy_fused_moe_weight_loader(getattr(fused_moe, "FusedMoE", None))
+    patch_vllm030_rotary_emb()
     if _glm52_patch_enabled():
-        import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa: F401
-
-        patch_camem_sleep()
         patch_vllm_ascend_glm52()
-        patch_vllm_glm52_partial_wake_up()

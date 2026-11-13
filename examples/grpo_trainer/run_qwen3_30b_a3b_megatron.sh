@@ -4,7 +4,7 @@
 #
 # Knobs:
 #   INFER_BACKEND          rollout backend: vllm | sglang | trtllm   (default: vllm)
-#   ROLLOUT_QUANTIZATION   fp8 to enable TRT-LLM FP8 rollout         (default: unset)
+#   ROLLOUT_QUANTIZATION   compressed-tensors preset for a vLLM low-precision rollout, e.g. FP8_BLOCK (default: unset)
 #
 # Ascend NPU users: see examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh.
 
@@ -81,8 +81,8 @@ experiment_name=${EXPERIMENT_NAME:-qwen3_30b_a3b_${INFER_BACKEND}_megatron${ROLL
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
-if [ -n "${ROLLOUT_QUANTIZATION}" ] && [ "${INFER_BACKEND}" != trtllm ]; then
-    echo "ROLLOUT_QUANTIZATION is only supported with INFER_BACKEND=trtllm, got: ${INFER_BACKEND}" >&2
+if [ -n "${ROLLOUT_QUANTIZATION}" ] && [ "${INFER_BACKEND}" != vllm ]; then
+    echo "ROLLOUT_QUANTIZATION is only supported with INFER_BACKEND=vllm, got: ${INFER_BACKEND}" >&2
     exit 1
 fi
 
@@ -234,13 +234,11 @@ if [ "${INFER_BACKEND}" = trtllm ]; then
     )
 fi
 
-if [ "${ROLLOUT_QUANTIZATION}" = fp8 ]; then
-    # Avoid stray launcher env leaking into Ray workers under FP8 TRT-LLM.
-    for v in $(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print $1}'); do
-        unset "$v"
-    done
-    export RAY_DEDUP_LOGS=0
-    EXTRA+=(+actor_rollout_ref.rollout.quantization=fp8)
+if [ -n "${ROLLOUT_QUANTIZATION}" ]; then
+    EXTRA+=(
+        actor_rollout_ref.rollout.quantization.linear=${ROLLOUT_QUANTIZATION}
+        actor_rollout_ref.rollout.quantization.moe=${ROLLOUT_QUANTIZATION}
+    )
 fi
 
 if [ -n "$MCORE_MODEL_PATH" ]; then

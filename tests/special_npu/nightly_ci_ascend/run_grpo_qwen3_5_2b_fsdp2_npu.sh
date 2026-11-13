@@ -7,7 +7,7 @@ set -xeuo pipefail
 
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3.5-2B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 
@@ -33,7 +33,7 @@ export HCCL_CONNECT_TIMEOUT=1500
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-n_devices_per_node=4
+n_devices_per_node=16
 fsdp_size=4
 
 ########################### parameter arrays ###########################

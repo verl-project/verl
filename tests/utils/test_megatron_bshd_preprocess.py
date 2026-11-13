@@ -64,6 +64,8 @@ def _nested_tensor(rows: list[torch.Tensor]) -> torch.Tensor:
 
 def _check_topk_preprocess(monkeypatch, device: torch.device):
     mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch)
+    # Exercise the real NPU mask layout as well as device-side padding.
+    monkeypatch.setattr(mcore_util, "is_npu_available", device.type == "npu")
     topk = 64
 
     logprob_rows = [
@@ -82,10 +84,32 @@ def _check_topk_preprocess(monkeypatch, device: torch.device):
     torch.testing.assert_close(logprobs_bshd[1, :2], logprob_rows[1])
     torch.testing.assert_close(logprobs_bshd[0, 3], torch.zeros(topk, dtype=torch.float32, device=device))
     torch.testing.assert_close(logprobs_bshd[1, 2:], torch.zeros(2, topk, dtype=torch.float32, device=device))
-    torch.testing.assert_close(
-        attention_mask,
-        torch.tensor([[True, True, True, False], [True, True, False, False]], device=device),
-    )
+    if device.type == "npu":
+        # True masks padding and future tokens in the NPU B1SS layout.
+        expected_mask = torch.tensor(
+            [
+                [
+                    [
+                        [False, True, True, True],
+                        [False, False, True, True],
+                        [False, False, False, True],
+                        [True, True, True, True],
+                    ]
+                ],
+                [
+                    [
+                        [False, True, True, True],
+                        [False, False, True, True],
+                        [True, True, True, True],
+                        [True, True, True, True],
+                    ]
+                ],
+            ],
+            device=device,
+        )
+    else:
+        expected_mask = torch.tensor([[True, True, True, False], [True, True, False, False]], device=device)
+    torch.testing.assert_close(attention_mask, expected_mask)
     torch.testing.assert_close(
         position_ids,
         torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long, device=device),
@@ -134,14 +158,47 @@ def test_preprocess_thd_engine_rounds_packed_length_to_bucket_without_cp(monkeyp
     assert packed.shape == (1, 1024)
 
 
+def test_vlm_thd_repacking_preserves_bucketed_lengths(monkeypatch):
+    """Qwen VLM repacking must agree with the outer THD metadata."""
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4, cp_size=1)
+    rows = [torch.arange(7) + 1, torch.arange(2212) + 20]
+    input_ids = _nested_tensor(rows)
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, pad_to_length_bucket=512)
+
+    dense_ids, attention_mask = mcore_util.build_vlm_attn_mask_thd(
+        input_ids,
+        pad_token_id=0,
+        packed_seq_params=packed_seq_params,
+    )
+    repacked_ids, repacked_params = mcore_util.preprocess_packed_seqs(dense_ids, attention_mask)
+
+    assert dense_ids.shape == (2, 2552)
+    assert attention_mask.sum(dim=-1).tolist() == [8, 2552]
+    assert repacked_ids.shape == (1, 2560)
+    torch.testing.assert_close(repacked_params.cu_seqlens_q_padded, packed_seq_params.cu_seqlens_q_padded)
+    restored = mcore_util.postprocess_thd_engine(repacked_ids, packed_seq_params, input_ids, batch_size=2)
+    for actual, expected in zip(restored.unbind(), rows, strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+def test_vlm_thd_mask_without_packed_metadata_keeps_original_lengths(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    input_ids = _nested_tensor([torch.tensor([1, 2, 3]), torch.tensor([4, 5])])
+
+    dense_ids, attention_mask = mcore_util.build_vlm_attn_mask_thd(input_ids, pad_token_id=0)
+
+    assert dense_ids.tolist() == [[1, 2, 3], [4, 5, 0]]
+    assert attention_mask.tolist() == [[True, True, True], [True, True, False]]
+
+
 def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_cpu(monkeypatch):
     _check_topk_preprocess(monkeypatch, torch.device("cpu"))
 
 
-def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu(monkeypatch):
-    if not torch.cuda.is_available():
-        pytest.skip("Requires CUDA")
-    _check_topk_preprocess(monkeypatch, torch.device("cuda"))
+def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_accelerator(monkeypatch):
+    if not device_module.is_device_available():
+        pytest.skip("Requires an accelerator")
+    _check_topk_preprocess(monkeypatch, torch.device(device_module.get_device_name()))
 
 
 def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
@@ -290,12 +347,15 @@ def test_postprocess_thd_engine_contiguous_inverts_global_intervals(monkeypatch)
     )
     _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids, cp_layout="contiguous")
     rank_outputs = [
-        torch.tensor([[100, 101, 102, 103, 104]], dtype=torch.float32),
-        torch.tensor([[105, 106, 107, 108, 109]], dtype=torch.float32),
+        torch.tensor([[[100, 0], [101, 0], [102, 0], [103, 0], [104, 0]]], dtype=torch.float32)[..., 0],
+        torch.tensor([[[105, 0], [106, 0], [107, 0], [108, 0], [109, 0]]], dtype=torch.float32)[..., 0],
     ]
+    assert not rank_outputs[0].is_contiguous()
 
     def fake_all_gather(outputs, local_output, group):
-        del local_output, group
+        del group
+        assert local_output.is_contiguous()
+        assert all(output.is_contiguous() for output in outputs)
         for destination, source in zip(outputs, rank_outputs, strict=True):
             destination.copy_(source)
 
