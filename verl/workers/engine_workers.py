@@ -396,6 +396,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if key not in data.keys():
                 tu.assign_non_tensor(data, **{key: val})
 
+        from verl.utils.async_mfu import actor_end, actor_start, enabled
+
+        mfu_ticket = actor_start() if enabled() and torch.distributed.get_rank() == 0 else None
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None) as timer,
@@ -404,6 +407,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # containing loss, model_output and metrics
             # for training, we only care about loss and metrics
         delta_time = timer.last
+        if mfu_ticket is not None:
+            if global_token_num is None or self.flops_counter is None:
+                raise ValueError("Async MFU requires global sequence lengths and a FLOPs counter")
+            estimated, _ = self.flops_counter.estimate_flops(global_token_num, 1.0)
+            actor_end(mfu_ticket, estimated * 1e12, sum(global_token_num),
+                      get_torch_device().get_device_name())
 
         update_lr_scheduler = tu.get(data, key="update_lr_scheduler", default=False)
         # update lr scheduler
@@ -751,7 +760,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        from verl.utils.async_mfu import enabled, reference_end, reference_start
+
+        mfu_ticket = None
+        sequence_lengths = None
+        if enabled():
+            # The dispatched input contains this DP rank's unpadded sequences.
+            # Gather lengths across DP only, then emit the global work once.
+            local_lengths = data["input_ids"].offsets().diff().tolist()
+            group = self.ref.engine.get_data_parallel_group()
+            gathered = [None] * torch.distributed.get_world_size(group)
+            torch.distributed.all_gather_object(gathered, local_lengths, group=group)
+            sequence_lengths = [length for lengths in gathered for length in lengths]
+            if torch.distributed.get_rank() == 0:
+                mfu_ticket = reference_start()
         output = self.ref.infer_batch(data=data)
+        if mfu_ticket is not None:
+            reference_end(mfu_ticket, self.ref.flops_counter, sequence_lengths,
+                          get_torch_device().get_device_name())
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

@@ -44,9 +44,51 @@ class FullyAsyncTaskRunner:
         self.shutdown_event = threading.Event()
 
     def run(self, config):
-        print("[ASYNC MAIN] Starting fully async PPO training...")
-        self._initialize_components(config)
-        self._run_training_loop()
+        import os
+        import sys
+        import time
+        import traceback
+
+        debug_path = "/root/work/tiankuan/zqc/logs/fully_async_actor_traceback.log"
+        os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+
+        def debug_write(message):
+            with open(debug_path, "a", buffering=1) as f:
+                f.write(
+                    f"\\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"PID={os.getpid()} {message}\\n"
+                )
+                f.flush()
+                os.fsync(f.fileno())
+
+        debug_write("TASK RUNNER ENTER")
+        print("[ASYNC MAIN] Starting fully async PPO training...", flush=True)
+
+        try:
+            debug_write("BEFORE _initialize_components")
+            self._initialize_components(config)
+            debug_write("AFTER _initialize_components")
+
+            debug_write("BEFORE _run_training_loop")
+            self._run_training_loop()
+            debug_write("TASK RUNNER FINISHED SUCCESSFULLY")
+
+        except BaseException as exc:
+            debug_write(
+                f"TASK RUNNER FAILED: {type(exc).__name__}: {exc!r}"
+            )
+
+            with open(debug_path, "a", buffering=1) as f:
+                traceback.print_exc(file=f)
+                f.flush()
+                os.fsync(f.fileno())
+
+            print(
+                f"[ASYNC MAIN] Full traceback saved to {debug_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
 
     def _initialize_components(self, config) -> None:
         print(f"[ASYNC MAIN] TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
@@ -74,14 +116,7 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Creating FullyAsyncTrainer first (needed for hybrid worker group injection)...")
-        self._create_trainer(config)
-
-        print("[ASYNC MAIN] Injecting trainer's worker group into rollouter for hybrid replicas...")
-        self._setup_hybrid_worker_group(config)
-
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
-        self._create_rollouter(config)
+        self._initialize_model_components(config)
 
         print("[ASYNC MAIN] Setting up rollouter reference on trainer")
         ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
@@ -114,7 +149,28 @@ class FullyAsyncTaskRunner:
 
         print("[ASYNC MAIN] All components initialized successfully")
 
-    def _create_rollouter(self, config) -> None:
+    def _initialize_model_components(self, config) -> None:
+        needs_hybrid = config.async_training.get("use_trainer_do_validate", False) or config.async_training.get(
+            "use_dynamic_resource_scheduling", False
+        )
+        if config.async_training.get("parallel_initialization", False) and not needs_hybrid:
+            print("[ASYNC MAIN] Initializing Trainer and Rollouter in parallel...")
+            trainer_init = self._create_trainer(config, wait_for_init=False)
+            rollouter_init = self._create_rollouter(config, wait_for_init=False)
+            # Both init RPCs must be submitted before waiting. Weight synchronization
+            # and fit still happen only after both components have initialized.
+            ray.get([trainer_init, rollouter_init])
+            ray.get(self.components["rollouter"].set_max_required_samples.remote())
+            print("[ASYNC MAIN] Trainer and Rollouter initialized successfully")
+        else:
+            # Hybrid rollout needs the trainer's initialized worker group.
+            if needs_hybrid and config.async_training.get("parallel_initialization", False):
+                print("[ASYNC MAIN] Hybrid rollout requires sequential initialization")
+            self._create_trainer(config)
+            self._setup_hybrid_worker_group(config)
+            self._create_rollouter(config)
+
+    def _create_rollouter(self, config, wait_for_init=True):
         print("[ASYNC MAIN] Starting create rollouter...")
         rollouter = FullyAsyncRollouter.remote(
             config=config,
@@ -129,13 +185,15 @@ class FullyAsyncTaskRunner:
             ray.get(rollouter.set_hybrid_worker_group.remote(self.components["hybrid_worker_group"]))
             print("[ASYNC MAIN] Hybrid worker group injected into rollouter")
 
-        ray.get(rollouter.init_workers.remote())
-        ray.get(rollouter.set_max_required_samples.remote())
-
         self.components["rollouter"] = rollouter
-        print("[ASYNC MAIN] Rollouter created and initialized successfully")
+        init_future = rollouter.init_workers.remote()
+        if wait_for_init:
+            ray.get(init_future)
+            ray.get(rollouter.set_max_required_samples.remote())
+            print("[ASYNC MAIN] Rollouter created and initialized successfully")
+        return init_future
 
-    def _create_trainer(self, config) -> None:
+    def _create_trainer(self, config, wait_for_init=True):
         print("[ASYNC MAIN] Starting create trainer...")
         trainer_role_mapping = {
             role: worker_cls
@@ -152,9 +210,12 @@ class FullyAsyncTaskRunner:
             device_name=config.trainer.device,
         )
 
-        ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
-        print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
+        init_future = trainer.init_workers.remote()
+        if wait_for_init:
+            ray.get(init_future)
+            print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
+        return init_future
 
     def _setup_hybrid_worker_group(self, config) -> None:
         """Extract the trainer's actor_rollout_wg for hybrid rollout replicas.

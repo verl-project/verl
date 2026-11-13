@@ -178,4 +178,9 @@ def get_ppo_ray_runtime_env(config=None):
         val = os.environ.get(key)
         if val is not None:
             runtime_env["env_vars"][key] = val
+    # MFU must survive the inherited-environment filter on remote nodes.
+    for name in ("ASYNC_MFU_ENABLED", "ASYNC_MFU_DIR", "ASYNC_MFU_CLOCK_URL", "TENSORBOARD_DIR",
+                 "ZQC_TRAIN_RESOURCE", "ZQC_ROLLOUT_RESOURCE"):
+        if name in os.environ:
+            runtime_env["env_vars"][name] = os.environ[name]
     return runtime_env

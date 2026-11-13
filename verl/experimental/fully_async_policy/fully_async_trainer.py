@@ -545,6 +545,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         Args:
             batch_dict: Raw data dictionary
         """
+        from verl.utils.async_mfu import window_end, window_start
+
+        mfu_step = self.global_steps
+        mfu_start = window_start(mfu_step)
         self.metrics = {"training/global_step": self.global_steps, "training/epoch": self.epoch}
         self.timing_raw = {}
         # reward message
@@ -602,6 +606,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if rollout_reset_timing_raw is not None:
             self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
         self._fit_postprocess_step()
+        window_end(mfu_step, mfu_start)
 
     # Timing-raw keys that represent actual training-GPU compute, from
     # _fit_compute_reward() through _fit_update_actor(). Some keys may be

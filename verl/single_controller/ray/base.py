@@ -223,6 +223,11 @@ class ResourcePoolManager:
                 use_gpu=True,
                 max_colocate_count=self.max_colocate_count,
                 name_prefix=resource_pool_name,
+                accelerator_type=(os.environ.get("ZQC_TRAIN_RESOURCE") if resource_pool_name == "trainer_pool"
+                                  else os.environ.get("ZQC_ROLLOUT_RESOURCE")
+                                  if resource_pool_name.startswith("rollout_pool_")
+                                  and not resource_pool_name.startswith(("rollout_pool_reward_", "rollout_pool_teacher_"))
+                                  else None),
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
