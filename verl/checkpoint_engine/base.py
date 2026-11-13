@@ -141,6 +141,11 @@ class CheckpointEngine(ABC):
     #                       while steady updates carry sparse patches.
     wire_format = "named_tensors"
 
+    # True when send_weights takes the trainer's training engine (a BaseEngine) instead of a generator of full
+    # tensors, e.g. to send each rank's own shards (BaseEngine.get_per_tensor_param_shard) without an all-gather.
+    # The trainer worker then hands its training engine to send_weights.
+    consumes_training_engine = False
+
     @abstractmethod
     def prepare(self) -> dict[str, Any]:
         """Prepare checkpoint engine before each step send_weights/receive_weights.
