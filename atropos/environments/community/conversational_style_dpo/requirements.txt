@@ -1,0 +1,10 @@
+pip install trl
+pip install datasets
+pip install accelerate
+pip install pydantic
+pip install bitsandbytes
+pip install datasets
+pip install transformers
+pip install pydantic
+pip install torch
+pip install -e .[all]           # for everything

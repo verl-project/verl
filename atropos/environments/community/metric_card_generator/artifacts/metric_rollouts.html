@@ -1,0 +1,2517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rendered Messages - metric_rollouts.jsonl</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 20px; }
+        details { border: 1px solid #ccc; border-radius: 4px; margin-bottom: 15px; }
+        summary {
+            font-weight: bold;
+            padding: 10px;
+            background-color: #f0f0f0;
+            cursor: pointer;
+            border-radius: 4px 4px 0 0;
+            border-bottom: 1px solid #ccc;
+            outline: none; /* Remove default focus outline if needed */
+        }
+        details[open] summary { border-bottom: 1px solid #ccc; }
+        .group-content { padding: 15px; }
+        .item {
+            border: 1px solid #eee;
+            border-radius: 3px;
+            margin-bottom: 10px;
+            padding: 10px;
+            transition: background-color 0.3s ease, box-shadow 0.2s ease; /* Smooth transitions */
+            scroll-margin-top: 10px; /* Space when scrolling into view */
+        }
+        .item h4 { margin-top: 0; margin-bottom: 5px; font-size: 1.1em; }
+        .content-block { background-color: #fff; padding: 8px; border-radius: 3px; margin-bottom: 5px; overflow-x: auto; }
+        /* Use :focus-within for better accessibility on container focus */
+        .item:focus, .item.active {
+             box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.5); /* Highlight active/focused item */
+             outline: none; /* Remove default outline */
+        }
+
+        /* Score Backgrounds (Faint) */
+        .reward-positive { background-color: rgba(144, 238, 144, 0.3); } /* Faint light green */
+        .reward-zero { background-color: rgba(255, 215, 0, 0.3); }    /* Faint gold/orange */
+        .reward-negative { background-color: rgba(255, 182, 193, 0.4); } /* Faint light pink/red */
+
+        /* Markdown specific styles */
+        .content-block pre {
+            background-color: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            padding: 10px;
+            overflow-x: auto; /* Allow horizontal scrolling for long code lines */
+            white-space: pre-wrap; /* Wrap long lines within pre */
+            word-wrap: break-word; /* Break long words if necessary */
+        }
+        .content-block code {
+             background-color: #f0f0f0; /* Slightly different for inline code */
+             padding: 0.2em 0.4em;
+             border-radius: 3px;
+             font-size: 0.9em;
+        }
+        .content-block pre code {
+            background-color: transparent; /* Don't double-background code in pre blocks */
+            padding: 0;
+            border-radius: 0;
+            font-size: inherit; /* Inherit pre font size */
+        }
+        .content-block blockquote {
+            border-left: 4px solid #ccc;
+            padding-left: 10px;
+            margin-left: 0;
+            color: #555;
+        }
+        .content-block table {
+            border-collapse: collapse;
+            width: auto; /* Don't force full width */
+            margin-bottom: 1em;
+        }
+        .content-block th, .content-block td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        .content-block th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Rendered Messages - metric_rollouts.jsonl</h1>
+    <div id="groups-container">
+                <details>
+            <summary>Group 0</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-0-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a real estate dashboard showing conversion rate during December.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Conversion Rate",<br />
+    "value": "4.8%",<br />
+    "description": "Property listings converted in December",<br />
+    "trend": {<br />
+      "value": 0.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trend-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.4748499460255664</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 1</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-1-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing customer support tickets statistics for our e-commerce business for Q3 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Support Tickets (Q3 2023)",<br />
+    "value": "1,543",<br />
+    "description": "Number of support tickets received in Q3 2023",<br />
+    "trend": {<br />
+      "value": -8.2,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "support-agent"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.405631675815071</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 2</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-2-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing operational costs statistics for our energy business for Q2 2024.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Operational Costs Q2 2024",<br />
+    "value": "$2,750,000",<br />
+    "description": "Total operational costs for Q2 2024",<br />
+    "trend": {<br />
+      "value": -4.2,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "expenses"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.3620791333015202</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 3</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-3-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays session duration for our hospitality platform for last 24 hours.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Session Duration",<br />
+    "value": "4m 30s",<br />
+    "description": "Average session duration in the last 24 hours",<br />
+    "trend": {<br />
+      "value": 3.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "clock"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.39935352224338083</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 4</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-4-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a real estate dashboard showing churn rate during September.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Churn Rate",<br />
+    "value": "3.2%",<br />
+    "description": "Customer churn rate in September",<br />
+    "trend": {<br />
+      "value": -0.1,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "rate-review"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.07894963398959742</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 5</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-5-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays bounce rate for our healthcare platform for Q1 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Bounce Rate",<br />
+    "value": "45.2%",<br />
+    "description": "Q1 2023 average bounce rate for healthcare platform",<br />
+    "trend": {<br />
+      "value": -1.8,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "user-times"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.20752631490555828</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 6</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-6-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a healthcare dashboard showing customer satisfaction during Q4 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Satisfaction",<br />
+    "value": "87%",<br />
+    "description": "Satisfaction score for Q4 2023",<br />
+    "trend": {<br />
+      "value": 2.3,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "smile"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.31400664924676536</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 7</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-7-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Create a metric card for subscription renewals in energy for December.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Subscription Renewals",<br />
+    "value": "1,250",<br />
+    "description": "Renewals in December for energy subscriptions",<br />
+    "trend": {<br />
+      "value": 3.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "refresh",<br />
+    "className": "energy-metrics"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.07241826732423406</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 8</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-8-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a technology dashboard showing conversion rate during August.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Conversion Rate",<br />
+    "value": "4.8%",<br />
+    "description": "Conversion rate during August",<br />
+    "trend": {<br />
+      "value": 0.5,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "conversion"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.4559905452332905</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 9</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-9-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays customer acquisition cost for our telecommunications platform for June.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Acquisition Cost",<br />
+    "value": "$1,250",<br />
+    "description": "Cost per new customer in June",<br />
+    "trend": {<br />
+      "value": -5.0,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "money-bill"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.4834071507715847</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 10</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-10-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays net promoter score for our education platform for this month.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Net Promoter Score",<br />
+    "value": "72",<br />
+    "description": "Customer satisfaction score for this month",<br />
+    "trend": {<br />
+      "value": 1.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "smile"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.07869236198762963</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 11</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-11-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a social media dashboard showing website traffic during Q1 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Website Traffic",<br />
+    "value": "1,200,000",<br />
+    "description": "Total visits during Q1 2023",<br />
+    "trend": {<br />
+      "value": 8.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "users",<br />
+    "className": "traffic-metric"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.12299530067410314</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 12</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-12-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a hospitality dashboard showing customer satisfaction during September.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Satisfaction",<br />
+    "value": "4.8 / 5.0",<br />
+    "description": "Average guest rating for September",<br />
+    "trend": {<br />
+      "value": 3.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "smile"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.1959242847045214</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 13</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-13-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing return on investment statistics for our energy business for November.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Return on Investment (ROI)",<br />
+    "value": "8.75%",<br />
+    "description": "ROI for energy business in November",<br />
+    "trend": {<br />
+      "value": 1.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "chart-growth"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.3364373095139561</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 14</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-14-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for operational costs in our education analytics for this quarter.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Operational Costs",<br />
+    "value": "$1,250,000",<br />
+    "description": "Operational expenses this quarter",<br />
+    "trend": {<br />
+      "value": -3.8,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "expenses"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.42733213443752394</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 15</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-15-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays uptime percentage for our entertainment platform for November.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Uptime",<br />
+    "value": "99.97%",<br />
+    "description": "Platform uptime for November",<br />
+    "trend": {<br />
+      "value": 0.05,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "clock"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.293578294239742</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 16</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-16-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a real estate dashboard showing sales growth during this month.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Sales Growth",<br />
+    "value": "15.2%",<br />
+    "description": "Increase in property sales this month",<br />
+    "trend": {<br />
+      "value": 15.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trending-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.24048988330506094</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 17</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-17-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for customer satisfaction in our finance analytics for Q3 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Satisfaction",<br />
+    "value": "87%",<br />
+    "description": "Customer satisfaction score for Q3 2023",<br />
+    "trend": {<br />
+      "value": 2.3,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "smile"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.3296546912574163</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 18</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-18-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays session duration for our social media platform for November.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Average Session Duration",<br />
+    "value": "00:05:30",<br />
+    "description": "Average session length in November",<br />
+    "trend": {<br />
+      "value": 3.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "clock",<br />
+    "className": "session-duration-metric"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.0589005617549484</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 19</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-19-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a entertainment dashboard showing delivery time during July.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Average Delivery Time",<br />
+    "value": "25 mins",<br />
+    "description": "Average delivery time during July",<br />
+    "trend": {<br />
+      "value": -5.0,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "clock"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.4651782290772536</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 20</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-20-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a transportation dashboard showing net promoter score during August.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Net Promoter Score",<br />
+    "value": "45",<br />
+    "description": "Customer satisfaction score for August",<br />
+    "trend": {<br />
+      "value": 2.0,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "smile"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.3720511593039225</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 21</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-21-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Create a metric card for customer acquisition cost in retail for Q2 2024.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Acquisition Cost",<br />
+    "value": "$45.67",<br />
+    "description": "Average cost per new customer in Q2 2024",<br />
+    "trend": {<br />
+      "value": -3.2,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "money-bill",<br />
+    "className": "acquisition-cost-card"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.32599422711427994</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 22</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-22-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays conversion rate for our transportation platform for October.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Conversion Rate",<br />
+    "value": "15.3%",<br />
+    "description": "Transportation platform for October",<br />
+    "trend": {<br />
+      "value": 1.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trending-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.1430960132443445</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 23</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-23-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing customer acquisition cost statistics for our telecommunications business for Q4 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Acquisition Cost",<br />
+    "value": "$1,250",<br />
+    "description": "CAC for Q4 2023",<br />
+    "trend": {<br />
+      "value": -8.2,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "users"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.23753207619410743</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 24</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-24-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays profit margin for our retail platform for last 7 days.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Profit Margin (Last 7 Days)",<br />
+    "value": "15.8%",<br />
+    "description": "Profit margin over the past week",<br />
+    "trend": {<br />
+      "value": 2.3,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trending-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.4778784792888896</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 25</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-25-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Create a metric card for net promoter score in energy for May.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Net Promoter Score (Energy) - May",<br />
+    "value": "45",<br />
+    "description": "Customer satisfaction score for energy services in May",<br />
+    "trend": {<br />
+      "value": 2.0,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "smile"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.2514780575519915</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 26</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-26-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for customer acquisition cost in our healthcare analytics for August.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Acquisition Cost",<br />
+    "value": "$4,200",<br />
+    "description": "Average cost per new patient in August",<br />
+    "trend": {<br />
+      "value": 3.1,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "money-bill"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.1715994815677513</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 27</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-27-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Create a metric card for session duration in transportation for this year.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Session Duration",<br />
+    "value": "45 mins",<br />
+    "description": "Average session duration in transportation for this year",<br />
+    "trend": {<br />
+      "value": 5.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "clock"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.3040878787193926</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 28</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-28-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing revenue statistics for our manufacturing business for September.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Revenue - September",<br />
+    "value": "$98,750",<br />
+    "description": "Manufacturing revenue for September",<br />
+    "trend": {<br />
+      "value": 5.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "dollar"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.010133150945482061</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 29</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-29-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays inventory turnover for our energy platform for June.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Inventory Turnover",<br />
+    "value": "4.75",<br />
+    "description": "June Inventory Turnover Rate",<br />
+    "trend": {<br />
+      "value": 0.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "refresh"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.021480095667105736</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 30</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-30-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing customer lifetime value statistics for our marketing business for Q4 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Lifetime Value (Q4 2023)",<br />
+    "value": "$8,750",<br />
+    "description": "Average CLV for customers acquired in Q4 2023",<br />
+    "trend": {<br />
+      "value": 4.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "dollar"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.25055810299995196</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 31</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-31-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a e-commerce dashboard showing profit margin during April.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Profit Margin",<br />
+    "value": "15.2%",<br />
+    "description": "Profit margin for April",<br />
+    "trend": {<br />
+      "value": 2.4,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trending-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.16980515717334577</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 32</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-32-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Design a metric component that displays profit margin for our agriculture platform for Q3 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Profit Margin (Q3 2023)",<br />
+    "value": "25.4%",<br />
+    "description": "Profit margin for Agriculture Platform in Q3 2023",<br />
+    "trend": {<br />
+      "value": 2.1,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trending-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.44800972530267735</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 33</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-33-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for average order value in our healthcare analytics for last 24 hours.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Average Order Value",<br />
+    "value": "$85",<br />
+    "description": "Average value of orders in the last 24 hours",<br />
+    "trend": {<br />
+      "value": 3.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "money"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.17461519203769327</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 34</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-34-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Create a metric card for customer acquisition cost in entertainment for last 7 days.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Customer Acquisition Cost (Entertainment)",<br />
+    "value": "$1,250",<br />
+    "description": "Last 7 days",<br />
+    "trend": {<br />
+      "value": -8.2,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "cart"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.3694634168340276</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 35</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-35-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for active users in our retail analytics for Q1 2024.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Active Users",<br />
+    "value": "15,230",<br />
+    "description": "Active retail app users in Q1 2024",<br />
+    "trend": {<br />
+      "value": 8.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "users"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.4791037170215062</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 36</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-36-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Generate a JSON output for a real estate dashboard showing churn rate during Q3 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Churn Rate Q3 2023",<br />
+    "value": "5.2%",<br />
+    "description": "Customer churn rate during Q3 2023",<br />
+    "trend": {<br />
+      "value": -0.3,<br />
+      "isPositive": false<br />
+    },<br />
+    "icon": "sign-out-alt",<br />
+    "className": "real-estate-metric"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.32026108445170476</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 37</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-37-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>I need a metric card showing return on investment statistics for our retail business for Q2 2024.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Return on Investment (ROI) Q2 2024",<br />
+    "value": "8.75%",<br />
+    "description": "ROI for retail business in Q2 2024",<br />
+    "trend": {<br />
+      "value": 1.2,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "money"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.21361088034302322</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 38</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-38-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for market share in our real estate analytics for last 7 days.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Market Share (Last 7 Days)",<br />
+    "value": "15.2%",<br />
+    "description": "Our market share in the last week",<br />
+    "trend": {<br />
+      "value": 0.8,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "trending-up"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.36300063126002946</p>
+            </div>
+
+            </div>
+        </details>
+
+        <details>
+            <summary>Group 39</summary>
+            <div class="group-content">
+                            <div class="item reward-positive" id="group-39-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are an AI specialized in generating JSON data for a MetricCard React component.</p>
+<p>Your task is to create a JSON object following this structure:</p>
+<pre><code class="language-json">{
+  &quot;componentType&quot;: &quot;metricCard&quot;,
+  &quot;props&quot;: {
+    &quot;title&quot;: &quot;Revenue&quot;,
+    &quot;value&quot;: &quot;$12,345&quot;,
+    &quot;description&quot;: &quot;Total revenue this month&quot;,
+    &quot;trend&quot;: {
+      &quot;value&quot;: 12.5,
+      &quot;isPositive&quot;: true
+    },
+    &quot;icon&quot;: &quot;dollar&quot;
+  }
+}
+</code></pre>
+<p>Required properties:<br />
+- componentType: Must be exactly "metricCard"<br />
+- props.title: The metric name/label<br />
+- props.value: The metric value (formatted appropriately)</p>
+<p>Optional properties:<br />
+- props.description: Additional context about the metric<br />
+- props.trend: An object with 'value' (percentage) and 'isPositive' (boolean)<br />
+- props.icon: Name of the icon (e.g., "dollar", "users", "trending-up")<br />
+- props.className: CSS class name for custom styling</p>
+<p>IMPORTANT: <br />
+1. Ensure the generated JSON is valid<br />
+2. Format numeric values appropriately (add commas, currency symbols, or percentage signs as needed)<br />
+3. Use appropriate icons based on the metric type<br />
+4. Make sure trend values and descriptions are realistic</p>
+<p>You will receive a query describing what kind of metric is needed. Generate the appropriate JSON response.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Provide a metric card JSON for click-through rate in our education analytics for Q3 2023.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p>{<br />
+  "componentType": "metricCard",<br />
+  "props": {<br />
+    "title": "Click-Through Rate",<br />
+    "value": "5.2%",<br />
+    "description": "Q3 2023 educational platform engagement",<br />
+    "trend": {<br />
+      "value": 0.8,<br />
+      "isPositive": true<br />
+    },<br />
+    "icon": "click"<br />
+  }<br />
+}&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> 0.47301498609952</p>
+            </div>
+
+            </div>
+        </details>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const items = document.querySelectorAll('.item');
+            let activeIndex = -1; // No item active initially
+
+            // Function to set active item
+            function setActiveItem(index) {
+                if (activeIndex >= 0 && activeIndex < items.length) {
+                    items[activeIndex].classList.remove('active');
+                    items[activeIndex].removeAttribute('tabindex'); // Remove from tab order when not active
+                }
+                if (index >= 0 && index < items.length) {
+                    items[index].classList.add('active');
+                    items[index].setAttribute('tabindex', '0'); // Make active item focusable
+                    items[index].focus(); // Focus the element
+                    // Ensure the parent <details> is open
+                    const detailsParent = items[index].closest('details');
+                    if (detailsParent && !detailsParent.open) {
+                        detailsParent.open = true;
+                    }
+                    // Scroll into view with options if needed (focus should handle this mostly)
+                    // items[index].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    activeIndex = index;
+                } else {
+                    activeIndex = -1; // Deactivate if index is out of bounds
+                }
+            }
+
+            // Add click listener to activate items
+            items.forEach((item, index) => {
+                item.addEventListener('click', () => {
+                    setActiveItem(index);
+                });
+                // Make items focusable initially only if we want tab navigation
+                // item.setAttribute('tabindex', '0');
+            });
+
+            // Add keydown listener for arrow navigation
+            document.addEventListener('keydown', (event) => {
+                let targetIndex = -1;
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault(); // Prevent default page scroll
+                    targetIndex = (activeIndex === -1) ? 0 : Math.min(activeIndex + 1, items.length - 1);
+                } else if (event.key === 'ArrowUp') {
+                    event.preventDefault(); // Prevent default page scroll
+                    targetIndex = (activeIndex === -1) ? items.length - 1 : Math.max(activeIndex - 1, 0);
+                }
+
+                if (targetIndex !== -1) {
+                    setActiveItem(targetIndex);
+                }
+            });
+
+            // Make first item focusable initially if you want immediate keyboard nav
+             if (items.length > 0) {
+                 // items[0].setAttribute('tabindex', '0');
+                 // Optionally activate the first item on load:
+                 // setActiveItem(0);
+             }
+        });
+    </script>
+</body>
+</html>
