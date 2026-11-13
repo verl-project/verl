@@ -924,8 +924,9 @@ def compute_optimal_token_baseline_advantage(
         returns = (token_level_rewards * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
 
         # Step 1: Compute w_per_timestep = 1 - 2π_t + Σπ²)
+        # Exact weight is ||e_y - pi_t||^2 >= 0; clamp float32 rounding noise when pi_t ~ 1
         pi_t = torch.exp(old_log_probs)
-        w_per_timestep = 1 - 2 * pi_t + sum_pi_squared
+        w_per_timestep = (1 - 2 * pi_t + sum_pi_squared).clamp_min(0)
 
         # Step 2: Apply rollout importance sampling correction (if enabled)
         if rollout_is_weights is not None:
@@ -1040,8 +1041,9 @@ def compute_multi_turn_optimal_token_baseline_advantage(
         token_returns = (token_level_rewards * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
 
         # Step 1: Compute w_per_timestep = 1 - 2π_t + Σπ²)
+        # Exact weight is ||e_y - pi_t||^2 >= 0; clamp float32 rounding noise when pi_t ~ 1
         pi_t = torch.exp(old_log_probs)
-        w_per_timestep = 1 - 2 * pi_t + sum_pi_squared
+        w_per_timestep = (1 - 2 * pi_t + sum_pi_squared).clamp_min(0)
 
         # Step 2: Apply rollout importance sampling correction (if enabled)
         if rollout_is_weights is not None:
