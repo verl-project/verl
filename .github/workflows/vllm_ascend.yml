@@ -52,8 +52,11 @@ on:
       - "!**/*sglang*"
       # Entrypoints
       - ".github/workflows/vllm_ascend.yml"
+      - "tests/experimental/agent_loop/**"
       - "tests/special_e2e/generation"
-      - "tests/workers/rollout"
+      - "tests/workers/rollout/**"
+      - "tests/checkpoint_engine/test_special_server_adapter.py"
+      - "tests/checkpoint_engine/test_utils.py"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
 
@@ -76,7 +79,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-16
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 120g
     env:
@@ -121,6 +124,11 @@ jobs:
           }' /proc/meminfo
       - name: Test the latest vLLM Rollout async with deterministic agent loop
         env:
+          # Match the single-node 16-NPU runner instead of the 8-GPU test defaults.
+          VERL_TEST_N_GPUS_PER_NODE: "16"
+          VERL_TEST_NNODES: "1"
+          # At least 32 trajectories for the eight TP=2 rollout replicas.
+          VERL_TEST_ROLLOUT_N: "16"
           PYTHONHASHSEED: "0"
           AGENT_LOOP_TOOL_AGENT_ROLLOUT_CONFIG: |
             temperature: 0.0
@@ -140,3 +148,11 @@ jobs:
       - name: Test bucketed weight transfer
         run: |
           pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+      - name: Test vLLM ServerAdapter with Checkpoint Engine (HCCL)
+        env:
+          HCCL_HOST_SOCKET_PORT_RANGE: auto
+          HCCL_NPU_SOCKET_PORT_RANGE: auto
+          RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
+          ROLLOUT_NAME: vllm
+        run: |
+          pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py

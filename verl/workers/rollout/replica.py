@@ -39,7 +39,7 @@ class TokenOutput(BaseModel):
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
     stop_reason: Optional[str] = None
-    """stop reason: 'completed', 'aborted', or None for unknown"""
+    """stop reason: 'completed', 'length', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
     extra_fields: dict[str, Any] = {}

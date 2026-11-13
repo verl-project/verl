@@ -1,7 +1,11 @@
 Ascend Installation Guide
 ==========================
 
-Last updated: 11/03/2026.
+Last updated: 11/11/2026.
+
+.. contents:: Table of Contents
+   :local:
+   :depth: 2
 
 Key Updates
 -----------
@@ -32,36 +36,23 @@ Key Updates
    not present in the environment, you still need to explicitly specify
    ``trainer.device=npu``.
 
-Table of Contents
-------------------
-
-- `Hardware Support <#hardware-support>`_
-- `Framework Backend Support <#framework-backend-support>`_
-- `Deployment Guide <#deployment-guide>`_
-   - `Docker Image Acquisition, Build, and Usage <#1-docker-image-acquisition-build-and-usage>`_
-   - `Custom Installation - vLLM + FSDP/Megatron <#2-custom-installation---vllm--fsdpmegatron>`_
-   - `Custom Installation - SGLang + FSDP/Megatron <#3-custom-installation---sglang--fsdpmegatron>`_
-- `Appendix <#appendix>`_
-
 Hardware Support
 -----------------
 
-Atlas 200T A2 Box16
+Atlas A2 training products
 
-Atlas 900 A2 PoD
-
-Atlas 800T A3
+Atlas A3 training products
 
 ..
 
    [Note] For software installation on Ascend 950PR&950DT products,
-   refer to `Installation Guide (Ascend 950PR&950DT products) <install_guidance_950.rst>`_.
+   refer to `Installation Guide (Ascend 950PR&950DT products) <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance_950.html>`_.
 
 
 Framework Backend Support
 --------------------------
 
-Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our `Ascend Image Guide <dockerfile_build_guidance.rst>`__ or perform a custom installation according to the instructions below.
+Currently, the following common training and inference backends are supported for deployment on NPU. You can directly obtain published images from our `Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_ or perform a custom installation according to the instructions below.
 
 .. list-table::
    :header-rows: 1
@@ -79,8 +70,10 @@ Deployment Guide
 1. Docker Image Acquisition, Build, and Usage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can obtain the relevant images from `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, or build them yourself from the Dockerfile. For details, refer to the
-`Ascend Image Guide <dockerfile_build_guidance.rst>`__.
+We recommend using the prebuilt images available from
+`quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ to reduce environment setup and dependency installation work.
+If you need a custom environment, you can build an image from the Dockerfile. For details on obtaining, building, and using images, refer to the
+`Ascend Image Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/dockerfile_build_guidance.html>`_.
 
 
 2. Custom Installation - vLLM + FSDP/Megatron
@@ -93,23 +86,28 @@ Key Version Support and Dependencies
 ============== ======================================== ===================
 Dependency     Version                                  Description
 ============== ======================================== ===================
-HDK            ``26.0.rc1``                             NPU hardware driver and firmware
-CANN           ``9.1.0``                                CANN software that helps developers build and run AI services on the Ascend software and hardware platform
+HDK            ``26.2.rc1``                             NPU hardware driver and firmware
+CANN           ``9.2.1``                                CANN software that helps developers build and run AI services on the Ascend software and hardware platform
 Python         ``>=3.10, <3.13``, recommended ``3.12``                     
 torch          ``2.10.0``                               PyTorch deep learning framework base package
 torch_npu      ``2.10.0.post7``                         NPU PyTorch adaptation plugin
 torchvision    ``0.25.0``                               PyTorch image processing library
 torchaudio     ``2.10.0``                               PyTorch audio processing library
-triton-ascend  ``3.6.0.post2``                          NPU Triton adaptation; for the installation command, refer to the script `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend  ``3.6.0.post2``                          NPU Triton adaptation; for the installation command, refer to the script `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_
 transformers   ``5.14.1``                               Hugging Face large model library, providing model architecture and pretrained weights
 xgrammar       ``>=0.2.1,<1.0.0``                        vLLM structured output dependency
 vLLM           ``0.30.0``                               High-performance LLM inference and serving engine
 vLLM-Ascend    ``0.30.0``                               NPU vLLM backend adaptation
-Megatron-LM    ``core_v0.18.0``                         Large-scale distributed training framework
-MindSpeed      ``core_r0.18.0``                         Megatron-LM adaptation and optimization component for Ascend NPU
+Megatron-LM    ``core_v0.18.2``                         Large-scale distributed training framework
+MindSpeed      ``26.2.0_core_r0.18.0``                  Megatron-LM adaptation and optimization component for Ascend NPU
 ============== ======================================== ===================
 
 .. note::
+
+   MegatronAdaptor uses ``26.2.0_core_r0.18.0``.
+   MindSpeed-Bridge uses ``26.2.0_v0.5.0``.
+   TransformerEngineNPU uses ``26.2.0_release_v2.17``.
+   MindSpeed-Ops uses ``26.2.0``.
 
    torch, torch_npu, torchvision, torchaudio, triton-ascend, and transformers follow the
    `vLLM-Ascend 0.30.0 requirements <https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/requirements.txt>`_.
@@ -124,7 +122,7 @@ MindSpeed      ``core_r0.18.0``                         Megatron-LM adaptation a
 Pre-installation Preparation (HDK & CANN)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN is the heterogeneous computing architecture on NPU. Below are the A3 installation instructions for the arm platform. Follow these commands to download and install HDK and CANN, or download and install from the `CANN Community <https://www.hiascend.com/en/cann/download?versionId=723&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ based on your system hardware model.
+CANN is the heterogeneous computing architecture on NPU. Below are the A3 installation instructions for the arm platform. Follow these commands to download and install HDK and CANN, or download and install from the `CANN Community <https://www.hiascend.com/en/cann/download>`_ based on your system hardware model.
 
 .. code:: bash
 
@@ -136,10 +134,10 @@ CANN is the heterogeneous computing architecture on NPU. Below are the A3 instal
    sudo yum install -y gcc python3 python3-pip kernel-headers-$(uname -r) kernel-devel-$(uname -r)
    sudo curl https://repo.oepkgs.net/ascend/cann/ascend.repo -o /etc/yum.repos.d/ascend.repo && yum makecache
    # Install NPU driver
-   sudo yum install -y Atlas-A3-hdk-npu-driver-26.0.rc1
+   sudo yum install -y Atlas-A3-hdk-npu-driver-26.2.rc1
    # Install Toolkit; use --install-path to customize the installation path
-   sudo yum install -y Ascend-cann-toolkit-9.1.0
-   sudo yum install -y Ascend-cann-A3-ops-9.1.0
+   sudo yum install -y Ascend-cann-toolkit-9.2.1
+   sudo yum install -y Ascend-cann-A3-ops-9.2.1
    # Post-install verification
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
@@ -147,7 +145,18 @@ CANN is the heterogeneous computing architecture on NPU. Below are the A3 instal
 Source Installation
 ^^^^^^^^^^^^^^^^^^^^
 
-We provide a conda-based one-stop `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
+We provide a conda-based one-stop `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
+
+.. note::
+
+   When the Megatron backend is enabled, the script automatically applies
+   `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_
+   to Megatron-Bridge ``v0.5.0``. With the Transformers ``5.14.1`` environment
+   used here, the patch preserves any native Qwen3-ASR registration and skips
+   the vendored AutoConfig, AutoModel, and AutoProcessor registrations when the
+   configuration is already registered. This prevents duplicate ``qwen3_asr``
+   registration errors when importing Megatron-Bridge. Keep the patch file in
+   the cloned verl repository when running the installation script.
 
 .. code:: bash
 
@@ -183,18 +192,18 @@ Dependency     Version                                  Description
 ============== ======================================== ===================
 HDK            ``25.5.0``                               NPU hardware driver and firmware
 CANN           ``>=8.5.0``                              CANN software that helps developers build and run AI services on the Ascend software and hardware platform
-Python         ``>=3.10, <3.12``, recommended ``3.11``                     
+Python         ``>=3.12``, recommended ``3.12``
 torch          ``2.8.0``                                PyTorch deep learning framework base package
 torch_npu      ``2.8.0.post2``                          NPU PyTorch adaptation plugin
 SGLang         ``v0.5.10``                              High-performance LLM inference engine
 triton         ``3.5.0``                                Triton, used for writing custom operators
-triton-ascend  ``3.2.2``                                NPU Triton adaptation; for the installation command, refer to the script `Installation Script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend  ``3.2.2``                                NPU Triton adaptation; for the installation command, refer to the script `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_vllm_mcore_npu.sh>`_
 transformers   ``5.10.4``                               Hugging Face large model library, providing model architecture and pretrained weights
 Megatron-LM    ``core_r0.18.0``                         Large-scale distributed training framework
 MindSpeed      ``core_r0.18.0``                         Megatron-LM adaptation and optimization component for Ascend NPU
 ============== ======================================== ===================
 
-The Ascend Megatron dependency combination is based on ``install_vllm_mcore_npu.sh``:
+The Ascend Megatron dependency combination is based on ``install_sglang_mcore_npu.sh``:
 Megatron-LM, MindSpeed, and MegatronAdaptor use ``core_r0.18.0``,
 Megatron-Bridge uses ``v0.5.0``; MindSpeed-Bridge uses the repository default branch,
 with no pinned tag or commit currently. The SGLang installation script and the current CI image build file use the same combination.
@@ -226,7 +235,7 @@ CANN is the heterogeneous computing architecture on NPU. Below are the A3 instal
 Source Installation
 ^^^^^^^^^^^^^^^^^^^^
 
-We provide a conda-based one-stop `Installation Script <../../../../scripts/install_sglang_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
+We provide a conda-based one-stop `Installation Script <https://github.com/verl-project/verl/blob/main/scripts/install_sglang_mcore_npu.sh>`_ that installs the environment step by step. If you encounter an installation error midway, check the error message of the current step for the cause, or leave us a message by opening an issue, and we will resolve it as soon as possible.
 
 .. code:: bash
 
@@ -235,7 +244,7 @@ We provide a conda-based one-stop `Installation Script <../../../../scripts/inst
    # Enable the CANN environment. If you customized the CANN path, modify the following enable commands accordingly.
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    source /usr/local/Ascend/nnal/atb/set_env.sh
-   conda create -n verl-sgl-npu python=3.11 -y
+   conda create -n verl-sgl-npu python=3.12 -y
    conda activate verl-sgl-npu
    git clone --recursive https://github.com/verl-project/verl.git
    bash verl/scripts/install_sglang_mcore_npu.sh

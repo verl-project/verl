@@ -33,19 +33,19 @@ en/
 ## Model Support
 
 - [NPU Model and Algorithm Support](./model_support/model_and_algorithm_support.md) - List of supported models/algorithms
-- [Best Practice Examples](./model_support/examples) - Best practices and model deployment examples
+- [Best Practice Examples](https://github.com/verl-project/verl/tree/main/docs/ascend_tutorial/en/model_support/examples) - Best practices and model deployment examples
 
 
 ## Developer Guide
 
-- [Model Development](./dev_guide/model_dev) 
+- [Model Development](https://github.com/verl-project/verl/tree/main/docs/ascend_tutorial/en/dev_guide/model_dev)
     - [Model Migration to NPU Guide](./dev_guide/model_dev/transfer_to_npu_guide.md) - Model migration guide
     - [Training Configuration Parameters and Metrics](./dev_guide/model_dev/parameter_and_metrics.md) - Training parameters and metrics
     - [Model Evaluation](./dev_guide/model_dev/evaluation.md) - Model evaluation guide
-- [Precision Debugging](./dev_guide/precision_analysis) 
+- [Precision Debugging](https://github.com/verl-project/verl/tree/main/docs/ascend_tutorial/en/dev_guide/precision_analysis)
     - [Precision Alignment Guide](./dev_guide/precision_analysis/precision_alignment.md) - Precision alignment guide
     - [Precision Debugger](../en/dev_guide/precision_analysis/precision_debugger.md) - Precision issue troubleshooting tool
-- [Performance Tuning](./dev_guide/performance) 
+- [Performance Tuning](https://github.com/verl-project/verl/tree/main/docs/ascend_tutorial/en/dev_guide/performance)
     - [Ascend Performance Analysis Guide](./dev_guide/performance/ascend_performance_analysis_guide.md) - Performance analysis guide
     - [Ascend Performance Tuning Guide](./dev_guide/performance/perf_tuning_on_ascend.rst) - Performance tuning guide
     - [Profiling Data Collection Guide](./dev_guide/performance/ascend_profiling.rst) - Profiling tool usage guide
@@ -60,7 +60,7 @@ If you encounter issues during use, you can get help through the following chann
 3. Contact Ascend technical support
 
 ## Contributing
-- [verl Community Contribution](../../contributing) - verl community contribution guide
+- [verl Community Contribution](https://github.com/verl-project/verl/blob/main/CONTRIBUTING.md) - verl community contribution guide
 - [NPU-CI Setup Guide](./contribution_guide/ascend_ci_guide.rst) - Ascend environment CI configuration and testing
 
 ## Related Resources

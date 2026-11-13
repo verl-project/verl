@@ -41,6 +41,24 @@ def get_max_position_embeddings(hf_config) -> int:
     return int(max_len)
 
 
+def get_node_visible_devices(worker_accelerator_ids: list[list[str]]) -> str:
+    """Join the accelerator ids of one node's rollout workers into a visible-devices string.
+
+    Each worker contributes its first accelerator id. Workers that hold no accelerator (e.g. on
+    platforms where the inference engine opens the devices itself) contribute nothing; if none of the
+    node's workers holds one, the result is an empty string.
+    """
+    num_with_ids = sum(1 for ids in worker_accelerator_ids if ids)
+    if num_with_ids == 0:
+        return ""
+    if num_with_ids != len(worker_accelerator_ids):
+        raise ValueError(
+            "Either all or none of a node's rollout workers must hold an accelerator, got accelerator ids "
+            f"{worker_accelerator_ids}"
+        )
+    return ",".join(str(ids[0]) for ids in worker_accelerator_ids)
+
+
 class _UvicornServerAutoPort(uvicorn.Server):
     """Uvicorn Server that reports the system-assigned port when port=0."""
 

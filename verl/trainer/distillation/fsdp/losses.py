@@ -115,12 +115,13 @@ def tail_aware_kl_divergence(
 
 
 def compute_forward_kl_topk(
-    student_logits: torch.Tensor,
+    student_logits: torch.Tensor | None,
     teacher_topk_log_probs: torch.Tensor,
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
     *,
+    student_topk_log_probs: torch.Tensor | None = None,
     include_tail: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Compute truncated or tail-aware teacher-top-k KL with the FSDP backend.
@@ -150,7 +151,10 @@ def compute_forward_kl_topk(
     if get_ulysses_sequence_parallel_world_size() > 1:
         teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
         teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
-    assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
+    student_values = student_logits if student_logits is not None else student_topk_log_probs
+    if student_values is None:
+        raise ValueError("Either student_logits or student_topk_log_probs must be provided")
+    assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_values.shape[:2]
 
     # 2. compute token-wise KL divergence across sp groups
     # ``use_chunked_topk`` (opt-in, default off) trades latency for memory:
@@ -159,19 +163,25 @@ def compute_forward_kl_topk(
     # F.log_softmax path OOMs. See ``DistillationLossConfig.use_chunked_topk``
     # for trade-offs and benchmark numbers.
     loss_config: DistillationLossConfig = config.distillation_loss
-    use_chunked_topk = getattr(loss_config, "use_chunked_topk", False)
-    if use_chunked_topk:
-        # log_softmax is monotonic, so topk(logits) == topk(log_softmax(logits)).
-        student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
-        student_topk_log_probs = _chunked_topk_log_probs(
-            student_logits,
-            teacher_topk_ids,
-            chunk_size=getattr(loss_config, "chunked_topk_chunk_size", 4096),
-        )
-    else:
-        student_log_probs = F.log_softmax(student_logits, dim=-1)
-        student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
-        student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+    student_topk_ids = None
+    if student_topk_log_probs is None:
+        use_chunked_topk = getattr(loss_config, "use_chunked_topk", False)
+        if use_chunked_topk:
+            # log_softmax is monotonic, so topk(logits) == topk(log_softmax(logits)).
+            student_topk_ids = torch.topk(student_logits, k=teacher_topk_ids.shape[-1], dim=-1).indices
+            student_topk_log_probs = _chunked_topk_log_probs(
+                student_logits,
+                teacher_topk_ids,
+                chunk_size=getattr(loss_config, "chunked_topk_chunk_size", 4096),
+            )
+        else:
+            student_log_probs = F.log_softmax(student_logits, dim=-1)
+            student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
+            student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+    elif student_logits is not None:
+        raise ValueError("Provide either student_logits or student_topk_log_probs, not both")
+    if student_topk_log_probs.shape != teacher_topk_log_probs.shape:
+        raise ValueError("student_topk_log_probs must match the aligned teacher top-k shape")
 
     tail_loss = None
     if include_tail:
@@ -188,24 +198,26 @@ def compute_forward_kl_topk(
             teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
         distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
 
-    # Diagnostics for tracking teacher/student top-k overlap in OPD, following
-    # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016).
-    overlap_mask = (teacher_topk_ids.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
-    overlap_count = overlap_mask.sum(dim=-1)
-    token_kl = teacher_topk_log_probs.float().exp() * (teacher_topk_log_probs.float() - student_topk_log_probs.float())
-    overlap_token_advantage_sum = (-token_kl * overlap_mask).sum(dim=-1)
-    overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
-    overlap_token_advantage = torch.where(
-        overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
-    )
-
     outputs = {
         "distillation_losses": distillation_losses,
         "student_mass": student_mass,
         "teacher_mass": teacher_mass,
-        "overlap_count": overlap_count,
-        "overlap_token_advantage": overlap_token_advantage,
     }
+    if student_topk_ids is not None:
+        # Diagnostics require the student's own top-k ids, which are unavailable
+        # when a fused head only returns probabilities at teacher-selected ids.
+        overlap_mask = (teacher_topk_ids.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
+        overlap_count = overlap_mask.sum(dim=-1)
+        token_kl = teacher_topk_log_probs.float().exp() * (
+            teacher_topk_log_probs.float() - student_topk_log_probs.float()
+        )
+        overlap_token_advantage_sum = (-token_kl * overlap_mask).sum(dim=-1)
+        overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
+        overlap_token_advantage = torch.where(
+            overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
+        )
+        outputs["overlap_count"] = overlap_count
+        outputs["overlap_token_advantage"] = overlap_token_advantage
     if tail_loss is not None:
         outputs["tail_loss"] = tail_loss
     return outputs

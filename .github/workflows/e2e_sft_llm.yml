@@ -60,7 +60,7 @@ on:
       # Entrypoints
       - ".github/workflows/e2e_sft_llm.yml"
       - "examples/data_preprocess/gsm8k.py"
-      - "tests/special_e2e/sft"
+      - "tests/special_e2e/sft/**"
       - "verl/trainer/fsdp_sft_trainer.py"
       - "verl/trainer/config/sft_trainer.yaml"
 
@@ -95,7 +95,7 @@ jobs:
   e2e_sft_llm:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 30 # Increase this timeout value as needed
+    timeout-minutes: 45 # TileLang JIT compilation adds startup time to the cross-engine matrix.
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -145,7 +145,7 @@ jobs:
           $UV_RUN ray stop --force
           LORA_RANK=32 RESUME_MODE=auto TOTAL_TRAIN_STEP=2 $UV_RUN bash tests/special_e2e/sft/run_sft.sh
       # TODO: multiturn
-      - name: Running GSM8K E2E training tests with multiturn and various configs and compare results
+      - name: Running GSM8K cross-engine E2E tests including TileLang TP/SP/CP coverage
         run: |
           $UV_RUN bash tests/special_e2e/sft/test_sft_engine_all.sh
 
