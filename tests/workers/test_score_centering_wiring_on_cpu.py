@@ -102,6 +102,7 @@ def test_megatron_logits_processor_runs_score_centering_hook_and_log_probs(score
     assert "log_probs" in ret
     expected_packing = {
         "quant_align_size": None,
+        "min_local_rows": None,
         "pad_to_length_bucket": 512,
         "cp_layout": "zigzag",
         "local_cp_size": None,

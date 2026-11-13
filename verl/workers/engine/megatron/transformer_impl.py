@@ -1238,7 +1238,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
         if distillation_use_topk or score_centering:
-            from verl.models.mcore.util import get_thd_quant_align_size
+            from verl.models.mcore.util import get_thd_min_local_rows, get_thd_quant_align_size
 
             # the top-k tensors are packed like the student inputs: the same padding, CP layout and CP group
             ret.update(
@@ -1247,6 +1247,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     data=batch,
                     data_format=data_format,
                     quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    min_local_rows=get_thd_min_local_rows(self.tf_config, local_cp_size),
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                     local_cp_size=local_cp_size,

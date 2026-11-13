@@ -57,6 +57,7 @@ def _make_logits_processor(keys, packings=None):
         data,
         data_format,
         quant_align_size=None,
+        min_local_rows=None,
         pad_to_length_bucket=None,
         cp_layout="zigzag",
         local_cp_size=None,
@@ -65,6 +66,7 @@ def _make_logits_processor(keys, packings=None):
             packings.append(
                 {
                     "quant_align_size": quant_align_size,
+                    "min_local_rows": min_local_rows,
                     "pad_to_length_bucket": pad_to_length_bucket,
                     "cp_layout": cp_layout,
                     "local_cp_size": local_cp_size,
@@ -167,11 +169,40 @@ def test_megatron_logits_processor_passes_the_student_packing_to_topk_loss(
     assert packings == [
         {
             "quant_align_size": expected,
+            "min_local_rows": None,
             "pad_to_length_bucket": None,
             "cp_layout": cp_layout,
             "local_cp_size": local_cp_size,
         }
     ]
+
+
+_DSV41 = dict(fp8=None, dsv4_version="v4.1", csa_window_size=128)
+
+
+@pytest.mark.parametrize(
+    "tf_config, packing, expected",
+    [
+        (SimpleNamespace(**_DSV41, context_parallel_size=2), {}, 128),
+        (SimpleNamespace(**_DSV41, context_parallel_size=1), {"local_cp_size": 2}, 128),
+        (SimpleNamespace(**_DSV41, context_parallel_size=2), {"local_cp_size": 1}, None),
+        (SimpleNamespace(**_DSV41, context_parallel_size=1), {}, None),
+        (SimpleNamespace(fp8=None, dsv4_version="v4", csa_window_size=128, context_parallel_size=2), {}, None),
+    ],
+    ids=["v4.1-cp2", "v4.1-dynamic-cp2", "v4.1-dynamic-cp1", "v4.1-cp1", "v4-cp2"],
+)
+def test_megatron_logits_processor_pads_topk_rows_like_the_unfused_student(tf_config, packing, expected):
+    """The unfused DeepSeek V4.1 forward pads every CP shard to the CSA window, so the top-k rows need that minimum."""
+    eng = _make_engine_stub(tf_config)
+    packings = []
+    _run_logits_processor(
+        eng,
+        distillation_use_topk=True,
+        distillation_only=True,
+        logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS, packings),
+        **packing,
+    )
+    assert [p["min_local_rows"] for p in packings] == [expected]
 
 
 def test_megatron_forward_step_gives_the_topk_loss_the_student_cp_split():
