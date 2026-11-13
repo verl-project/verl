@@ -161,16 +161,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    qat:
-      enable: false
-      mode: w4a16
-      group_size: 16
-      ignore_patterns:
-      - lm_head
-      - embed_tokens
-      - re:.*mlp.gate$
-      activation_observer: static_minmax
-      quantization_config_path: null
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
     pad_to_length: false
   ref:
@@ -413,6 +403,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.RolloutQuantizationConfig
       linear: null
       moe: null
+      moe_activation: null
       ignore: []
       config_file: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
@@ -521,6 +512,7 @@ data:
   custom_cls:
     path: null
     name: null
+  custom_dataloader: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
   mm_processor_kwargs: {}
@@ -763,6 +755,7 @@ sandbox_fusion:
 reward:
   _target_: verl.workers.config.RewardConfig
   num_workers: 8
+  preset: null
   custom_reward_function:
     path: null
     name: compute_score
@@ -820,6 +813,7 @@ reward:
         _target_: verl.workers.config.RolloutQuantizationConfig
         linear: null
         moe: null
+        moe_activation: null
         ignore: []
         config_file: null
       mtp: null

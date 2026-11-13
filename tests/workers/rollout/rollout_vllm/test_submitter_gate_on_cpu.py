@@ -356,21 +356,23 @@ def _make_generating_server(monkeypatch, cls, outputs):
     return server
 
 
-def _request_output(token_ids, rows=None):
+def _request_output(token_ids, rows=None, *, finish_reason="stop"):
     completion = SimpleNamespace(
-        token_ids=token_ids, logprobs=rows, finish_reason="stop", routed_experts=None, num_preempted=0
+        token_ids=token_ids, logprobs=rows, finish_reason=finish_reason, routed_experts=None, num_preempted=0
     )
     return SimpleNamespace(outputs=[completion], num_cached_tokens=0, prompt_logprobs=None)
 
 
-def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch):
+@pytest.mark.parametrize(("finish_reason", "stop_reason"), [("stop", "completed"), ("length", "length")])
+def test_default_request_hooks_leave_generate_output_unchanged(monkeypatch, finish_reason, stop_reason):
     async def main():
-        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [_request_output([5, 9])])
+        request_output = _request_output([5, 9], finish_reason=finish_reason)
+        server = _make_generating_server(monkeypatch, vllm_async_server.vLLMHttpServer, [request_output])
 
-        output = await server.generate([1, 2, 3], {"temperature": 1.0}, "r")
+        output = await server.generate([1, 2, 3], {"temperature": 1.0, "max_tokens": 2}, "r")
 
         assert server.engine.sampling_params[0].logprob_token_ids is None
-        assert output.token_ids == [5, 9] and output.stop_reason == "completed"
+        assert output.token_ids == [5, 9] and output.stop_reason == stop_reason
         assert output.extra_fields == {"global_steps": 7, "num_cached_tokens": 0}
         assert server.engine.closed == 1
         assert server._admitting == 0

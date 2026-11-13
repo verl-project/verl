@@ -158,7 +158,7 @@ megatron = [
     "torchaudio==2.11.0",
     "nvidia-mathdx",
     "apex",
-    "transformer-engine",
+    "transformer-engine==2.20.2",
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
@@ -175,8 +175,8 @@ megatron = [
     # and bridge is installed deps-free, so it has to be listed here.
     "megatron-energon==7.4.1",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
-    # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
-    "nvidia-modelopt==0.44.0",
+    # megatron needs it explicitly. 0.47.0 supports Transformer Engine 2.20 grouped linear.
+    "nvidia-modelopt==0.47.0",
     # transformers NOT pinned here (see fsdp note): settled via override-deps below.
 ]
 
@@ -228,7 +228,7 @@ ci = [
 # requires-dist in [[tool.uv.dependency-metadata]] below): its real metadata pins
 # datasets<=2.21.0, which would downgrade the shared datasets dependency.
 # This pinned VeOmni revision uses the project-wide transformers==5.16.1.
-veomni-sft = ["veomni==0.1.12"]
+veomni-sft = ["veomni==0.1.12", "tilelang"]
 
 # TorchTitan engine add-on, layered on a cu130 backend (fsdp / megatron) like
 # veomni-sft. torchtitan is installed deps-free (empty requires-dist in
@@ -421,6 +421,7 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
+    "tilelang==0.1.15",
     "transformers==5.16.1",
     "tokenizers==0.23.2",
     "numpy>=2.0.0",

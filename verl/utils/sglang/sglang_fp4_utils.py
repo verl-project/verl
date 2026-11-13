@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""SGLang MXFP4/NVFP4 MoE staging and in-place post-load refit utilities."""
+"""SGLang MXFP4 MoE staging and in-place post-load refit utilities."""
 
 from __future__ import annotations
 
@@ -32,15 +32,6 @@ _MXFP4_PARAMS = (
     "w2_weight_bias",
 )
 _MXFP4_DERIVED_PARAMS = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
-_NVFP4_PARAMS = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
-_NVFP4_DERIVED_PARAMS = (
-    "w13_weight_scale_2",
-    "w2_weight_scale_2",
-    "g1_alphas",
-    "g2_alphas",
-    "w13_input_scale_quant",
-    "w2_input_scale_quant",
-)
 
 
 def _is_mxfp4_moe(module: torch.nn.Module) -> bool:
@@ -160,99 +151,6 @@ def reprocess_mxfp4_moe_layers(staged) -> int:
             rebuilt = getattr(module, pname, None)
             if not isinstance(rebuilt, torch.Tensor) or rebuilt.shape != live.shape or rebuilt.dtype != live.dtype:
                 raise RuntimeError(f"{name}.{pname}: MXFP4 post-load processing changed a captured derived tensor")
-            if rebuilt.data_ptr() != live.data_ptr():
-                live.data.copy_(rebuilt.data)
-            setattr(module, pname, live)
-        count += 1
-    return count
-
-
-# ---------------------------------------------------------------------------
-# NVFP4 experts
-# ---------------------------------------------------------------------------
-
-
-def _is_nvfp4_moe(module: torch.nn.Module) -> bool:
-    scheme = getattr(module, "scheme", None)
-    return scheme is not None and (
-        type(scheme).__name__ == "CompressedTensorsW4A4Nvfp4MoE" or getattr(scheme, "_verl_nvfp4_moe_scheme", False)
-    )
-
-
-def stage_nvfp4_moe_params(model: torch.nn.Module):
-    """Expose compressed-tensors NVFP4 checkpoint tensors during one refit."""
-    pending = []
-    for name, module in model.named_modules():
-        if not _is_nvfp4_moe(module):
-            continue
-        scheme = module.scheme
-        if getattr(scheme, "use_flashinfer_trtllm", False):
-            raise NotImplementedError(f"{name}: SGLang NVFP4 refit supports only the flashinfer_cutlass backend")
-
-        params = {}
-        for pname in _NVFP4_PARAMS:
-            param = getattr(module, pname, None)
-            if not isinstance(param, torch.nn.Parameter):
-                raise RuntimeError(f"{name}.{pname}: SGLang NVFP4 expert parameter is missing")
-            weight_loader = getattr(module, "weight_loader", None)
-            if weight_loader is None:
-                weight_loader = getattr(param, "weight_loader", None)
-            if weight_loader is None:
-                raise RuntimeError(f"{name}.{pname}: SGLang NVFP4 expert weight loader is missing")
-            param.weight_loader = weight_loader
-            if pname.endswith("_weight_scale"):
-                param.quant_method = "group"
-            # CUTLASS keeps weights byte-compatible and only swizzles block
-            # scales. Reusing the live allocation provides the canonical
-            # checkpoint buffer without doubling expert memory.
-            staging = _mxfp4_staging_data(param.data, tuple(param.shape), param.dtype, zero=False)
-            params[pname] = (param, param.data, staging)
-        derived = {
-            pname: getattr(module, pname)
-            for pname in _NVFP4_DERIVED_PARAMS
-            if isinstance(getattr(module, pname, None), torch.Tensor)
-        }
-        pending.append((name, module, params, derived))
-
-    for _, module, params, _ in pending:
-        for pname, (param, _, staging) in params.items():
-            param.data = staging
-            setattr(module, pname, param)
-            if pname in ("w13_weight", "w2_weight"):
-                setattr(module, f"{pname}_packed", param)
-    return pending
-
-
-def restore_nvfp4_live(staged) -> None:
-    for _, module, params, derived in staged:
-        for pname, (param, live, _) in params.items():
-            if pname in ("w13_weight", "w2_weight") and hasattr(module, f"{pname}_packed"):
-                delattr(module, f"{pname}_packed")
-            param.data = live
-            setattr(module, pname, param)
-        for pname, live in derived.items():
-            setattr(module, pname, live)
-
-
-def reprocess_nvfp4_moe_layers(staged) -> int:
-    """Rebuild NVFP4 CUTLASS scales inside CUDA-graph-captured storage."""
-    count = 0
-    for name, module, params, derived in staged:
-        module.quant_method.process_weights_after_loading(module)
-        for pname, (param, live, _) in params.items():
-            rebuilt = getattr(module, pname, None)
-            if not isinstance(rebuilt, torch.Tensor) or rebuilt.shape != live.shape or rebuilt.dtype != live.dtype:
-                raise RuntimeError(f"{name}.{pname}: NVFP4 post-load processing changed a captured expert tensor")
-            if rebuilt.data_ptr() != live.data_ptr():
-                live.copy_(rebuilt)
-            if pname in ("w13_weight", "w2_weight") and hasattr(module, f"{pname}_packed"):
-                delattr(module, f"{pname}_packed")
-            param.data = live
-            setattr(module, pname, param)
-        for pname, live in derived.items():
-            rebuilt = getattr(module, pname, None)
-            if not isinstance(rebuilt, torch.Tensor) or rebuilt.shape != live.shape or rebuilt.dtype != live.dtype:
-                raise RuntimeError(f"{name}.{pname}: NVFP4 post-load processing changed a captured derived tensor")
             if rebuilt.data_ptr() != live.data_ptr():
                 live.data.copy_(rebuilt.data)
             setattr(module, pname, live)

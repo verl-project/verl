@@ -64,7 +64,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -95,6 +95,11 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running rmpad model tests on 8 NPUs
         run: |
           pytest -s tests/models/test_transformer.py
@@ -107,6 +112,13 @@ jobs:
       - name: Run distributed test
         run: |
           bash tests/special_distributed/run_all.sh
+      - name: Run shared fused-forward contract tests
+        env:
+          VERL_USE_EXTERNAL_MODULES: megatron_adaptor
+        run: |
+          # Initialize Ascend patches before test modules import Megatron.
+          # Keep pytest arguments away from MegatronAdaptor's argument parser.
+          python -c 'import verl; import pytest; raise SystemExit(pytest.main(["-s", "-x", "tests/models/test_model_forward_fused.py"]))'
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # TODO: Move test_engine.py's check_dtype=False, when npu's vllm0.23.0 is ok, run pytest -s -x tests/models/test_engine.py::test_actor_engine[fsdp] check it
@@ -116,7 +128,7 @@ jobs:
     runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -145,6 +157,11 @@ jobs:
       - name: Prepare weights
         run: |
           ln -s /root/.cache/modelscope/hub/models ~/models
+      - name: Print system memory before tests
+        run: |
+          awk '/^(MemTotal|MemFree|MemAvailable|Cached|Buffers|AnonPages|Shmem|Slab):/ {
+              printf "%-16s %10.3f GiB\n", $1, $2/1048576
+          }' /proc/meminfo
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
@@ -154,4 +171,4 @@ jobs:
           PYTEST_DEBUG_TEMPROOT: /root/.cache/temp
         run: |
           ray stop --force
-          pytest tests/models/test_engine.py
+          pytest tests/models/test_engine.py --override-ini tmp_path_retention_policy=none

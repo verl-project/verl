@@ -96,6 +96,15 @@ def test_get_thd_quant_align_size(monkeypatch):
     config.fp8_recipe = "blockwise"
     assert mcore_util.get_thd_quant_align_size(config) == 16
 
+    # NVFP4 training (fp4 set, fp8 off) pads to its 16-element scale blocks.
+    config = FakeConfig()
+    config.fp4, config.fp4_recipe = "e2m1", "nvfp4"
+    assert mcore_util.get_thd_quant_align_size(config) == 16
+    # Other FP4 recipes must define their own padding.
+    config.fp4_recipe = "custom"
+    with pytest.raises(ValueError, match="fp4_recipe='custom'"):
+        mcore_util.get_thd_quant_align_size(config)
+
 
 def _padded_seqlens(packed_seq_params) -> torch.Tensor:
     return packed_seq_params.cu_seqlens_q_padded.diff()
@@ -257,10 +266,18 @@ def test_compute_topk_loss_passes_the_student_packing_to_the_megatron_loss_only(
         torch.zeros(1, 8, 4),
         "thd",
         quant_align_size=32,
+        min_local_rows=64,
+        pad_to_length_bucket=512,
         cp_layout="contiguous",
         local_cp_size=2,
     )
-    packing = {"quant_align_size": 32, "cp_layout": "contiguous", "local_cp_size": 2}
+    packing = {
+        "quant_align_size": 32,
+        "min_local_rows": 64,
+        "pad_to_length_bucket": 512,
+        "cp_layout": "contiguous",
+        "local_cp_size": 2,
+    }
     assert received == [packing if strategy == "megatron" else {}]
 
 
@@ -335,6 +352,22 @@ def test_distillation_topk_thd_teacher_split_zigzag_against_a_contiguous_student
     assert teacher_tokens.shape == student_tokens.shape == (1, 256)
     assert int(valid.sum()) == 136
     assert int((teacher_tokens[valid] != student_tokens[valid]).sum()) == 128
+
+
+@pytest.mark.parametrize("cp_rank", [0, 1])
+@pytest.mark.parametrize("cp_layout", ["zigzag", "contiguous"])
+def test_distillation_topk_thd_teacher_rows_follow_static_bucket_padding(monkeypatch, cp_layout, cp_rank):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=2, cp_rank=cp_rank)
+    student_tokens, seen = _pack_student_and_teacher(
+        monkeypatch,
+        mcore_util,
+        [17] * 3,
+        pad_to_length_bucket=64,
+        cp_layout=cp_layout,
+    )
+    assert student_tokens.shape == (1, 32)
+    assert torch.equal(seen["ids"][..., 0], student_tokens)
+    assert torch.equal(seen["log_probs"][..., 0], student_tokens.to(torch.float32))
 
 
 @pytest.mark.parametrize("group_rank", [0, 1])

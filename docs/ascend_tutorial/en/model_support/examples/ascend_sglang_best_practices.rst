@@ -19,15 +19,15 @@ The example model script and its required hardware conditions are as follows:
 
 - Note: verl recently performed script cleanup and naming changes. It is recommended to build based on the documentation and scripts corresponding to commit id c98cb8cc `doclink`_ to avoid broken links.
 
-+----------------------+---------------------+--------+------------------------------+
-| Model                | NPU Model           | Nodes  | Training/Inference Backend   |
-+======================+=====================+========+==============================+
-| `Qwen3-30B`_         | Atlas 800T A3       | 1      | SGLang + Megatron            |
-+----------------------+---------------------+--------+------------------------------+
++----------------------+----------------------------+--------+------------------------------+
+| Model                | NPU Model                  | Nodes  | Training/Inference Backend   |
++======================+============================+========+==============================+
+| `Qwen3-30B`_         | Atlas A3 training products | 1      | SGLang + Megatron            |
++----------------------+----------------------------+--------+------------------------------+
 
 Environment Setup
 -----------------------------------
-We provide two methods for building the environment in the `Ascend Installation Guide <../../get_start/install_guidance.rst>`_: 1. Build from a Dockerfile image file 2. Build from a custom Conda environment.
+We provide two methods for building the environment in the `Ascend Installation Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/get_start/install_guidance.html>`_: 1. Build from a Dockerfile image file 2. Build from a custom Conda environment.
 
 In this practice, we additionally specify the verl commit id to avoid introducing other issues.
 
@@ -270,7 +270,7 @@ After training, the model's score on Math-500 improved significantly.
 
 Performance Collection
 -----------------------------------
-For detailed documentation on NPU profiling, refer to the `Profiling Collection Guide <../../dev_guide/performance/ascend_profiling.rst>`_.
+For detailed documentation on NPU profiling, refer to the `Profiling Collection Guide <https://verl.readthedocs.io/en/latest/ascend_tutorial/en/dev_guide/performance/ascend_profiling.html>`_.
 
 The script for `Qwen3-30B`_ provides a basic performance collection option PROF_CONFIG. By default, global_profiler.steps=null disables collection. Developers can modify the parameters according to their actual needs.
 

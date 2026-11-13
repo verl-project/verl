@@ -58,6 +58,13 @@ def get_thd_quant_align_size(config) -> int | None:
         from megatron.core.fp8_utils import get_fp8_align_size
 
         return get_fp8_align_size(getattr(config, "fp8_recipe", None))
+    if getattr(config, "fp4", None):
+        # Megatron-Core defaults fp4_recipe to "nvfp4".
+        fp4_recipe = getattr(config, "fp4_recipe", "nvfp4")
+        if getattr(fp4_recipe, "value", fp4_recipe) != "nvfp4":
+            raise ValueError(f"No THD padding is defined for fp4_recipe={fp4_recipe!r}")
+        # NVFP4 uses 16-element scale blocks
+        return 16
     return None
 
 
@@ -524,8 +531,9 @@ def postprocess_thd_engine(
     if cp_size > 1:
         # output shape: [1, packed_len, hidden_dim]
         # need to gather across cp group and concatenate in sequence dimension
-        output_list = [torch.empty_like(output) for _ in range(cp_size)]
-        torch.distributed.all_gather(output_list, output.detach(), group=cp_group)
+        gather_input = output.detach().contiguous()
+        output_list = [torch.empty_like(gather_input) for _ in range(cp_size)]
+        torch.distributed.all_gather(output_list, gather_input, group=cp_group)
         output_list[cp_rank] = output
     else:
         output_list = [output]
