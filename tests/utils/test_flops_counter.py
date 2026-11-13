@@ -16,7 +16,7 @@ import math
 
 import pytest
 
-from verl.utils.flops_counter import FlopsCounter
+from verl.utils.flops_counter import FlopsCounter, get_device_flops
 
 VALID_CONFIG_TYPE = {
     "llama",
@@ -570,3 +570,37 @@ def test_flops_counter(config_type: str):
             assert math.isclose(counted_flops, expected_flops), (
                 f"Expect flops for {test_config['config']} is {expected_flops}, but get {counted_flops}"
             )
+
+
+@pytest.mark.parametrize(
+    ("device_name", "expected_tflops"),
+    [
+        ("TPU v7", 1153.5),
+        ("TPU v7x", 1153.5),
+        ("TPU v6e", 918.0),
+        ("TPU v5p", 459.0),
+        ("TPU v5e", 197.0),
+    ],
+)
+def test_tpu_device_flops(device_name: str, expected_tflops: float):
+    assert math.isclose(get_device_flops(unit="T", device_name=device_name), expected_tflops)
+
+
+@pytest.mark.parametrize(
+    ("vl_key", "text_model_type"),
+    [
+        ("qwen3_5", "qwen3_5_text"),
+        ("qwen3_5_moe", "qwen3_5_moe_text"),
+    ],
+)
+def test_qwen3_5_text_only_flops_counter(vl_key: str, text_model_type: str):
+    vl_cfg = dict(CONFIG[vl_key]["config"])
+    text_cfg = dict(vl_cfg["text_config"])
+    text_cfg["model_type"] = text_model_type
+    text_cfg["text_config"] = None
+
+    seqlens = [512, 1024, 2048]
+    vl_flops, _ = FlopsCounter(Config(vl_cfg)).estimate_flops(seqlens, 1.0)
+    text_flops, _ = FlopsCounter(Config(text_cfg)).estimate_flops(seqlens, 1.0)
+    assert text_flops > 0
+    assert math.isclose(text_flops, vl_flops)

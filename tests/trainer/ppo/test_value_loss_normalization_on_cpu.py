@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from verl.trainer.ppo.core_algos import compute_value_loss
+from verl.utils.device import get_device_name, is_device_available
 from verl.utils.metric import AggregationType, Metric, reduce_metrics
 from verl.utils.py_functional import append_to_dict
 
@@ -215,7 +216,7 @@ def test_value_loss_without_global_info_is_microbatch_dependent(num_micro_batche
     assert not torch.allclose(accum, whole)
 
 
-@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+@pytest.mark.parametrize("device", ["cpu"] + ([get_device_name()] if is_device_available() else []))
 def test_value_loss_gradient_invariant_to_microbatch_split(device):
     """Real-autograd check on the actual gradient (not just the loss scalar): backpropagating the
     per-micro-batch value losses accumulates into ``vpreds.grad`` exactly the whole-mini-batch

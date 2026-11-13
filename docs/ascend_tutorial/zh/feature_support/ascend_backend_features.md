@@ -37,7 +37,7 @@ Last updated: 03/03/2026.
 | `max_num_batched_tokens`| `actor_rollout_ref.rollout.max_num_batched_tokens` |在一次批处理（batch）中可以处理的最大总Token数|
 | `skip_tokenizer_init`| `actor_rollout_ref.rollout.skip_tokenizer_init` |跳过初始化分词器并将 input_ids 传递到推理请求中|
 | `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching` |用于启用自动前缀缓存 |
-| `quantization`| `actor_rollout_ref.rollout.quantization`，默认为None|`量化方法`|
+| `quantization`| `actor_rollout_ref.rollout.engine_kwargs.vllm.quantization`，默认不设置|`量化方法`|
 
 ### 2. sglang:
 
@@ -74,7 +74,7 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | log_level| 无，默认设置为error |日志记录器的日志级别|
 | skip_tokenizer_init| actor_rollout_ref.rollout.skip_tokenizer_init |跳过初始化分词器并将 input_ids 传递到推理请求中|
 | skip_server_warmup| 无，默认设置为True |跳过预热|
-| quantization| actor_rollout_ref.rollout.quantization，默认为None|量化方法|
+| quantization| actor_rollout_ref.rollout.engine_kwargs.sglang.quantization，默认不设置|量化方法|
 | attention_backend|actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend|attention内核,NPU应该设置为ascend|
 
 ---
@@ -93,7 +93,6 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | `actor_rollout_ref.actor.fsdp_config.optimizer_offload` |是否卸载优化器状态到CPU，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.reshard_after_forward` |控制前向计算后的参数行为，平衡内存与通信。默认值为True：前向后重新分片参数，反向时重新全收集|
 | `actor_rollout_ref.actor.fsdp_config.fsdp_size` | 每个FSDP分片组中的NPU数量；默认值-1表示自动。|
-
 | `actor_rollout_ref.actor.fsdp_config.forward_prefetch`  |在前向计算完成前预取下一次前向传播的 all-gather，仅用于FSDP1，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.use_orig_params` | FSDP是否会使用module的原始参数来初始化，仅用于FSDP1，默认值为False|
 | `actor_rollout_ref.actor.ulysses_sequence_parallel_size`|Ulysses序列并行大小|
@@ -250,7 +249,7 @@ class MindSpeedFeature:
 | verl参数 | 简介|
 | --- | --- |
 | `actor_rollout_ref.actor.megatron.optimizer_offload` |是否卸载模型优化器到CPU，默认值为False|
-| `actor_rollout_ref.actor.megatron.use_mbridge` |是否启用 mbridge：为 True（默认）时 engine 会构造 `bridge` 并交给 checkpoint manager，从而可读写 `model/huggingface/`；`save_contents` / `load_contents` 含 `hf_model` 时 manager 要求 `bridge` 非空（通常即此项为 True）。可与 `use_dist_checkpointing` 同时开启，在同一 checkpoint 中同时写入 HF 树与 `model/dist_ckpt/` 分片。为 False 时一般无 `hf_model`；仅 `model` 槽位走 `dist_checkpointing` 时需配合 `use_dist_checkpointing=True`|
+| `actor_rollout_ref.actor.megatron.use_mbridge` |引擎使用 Megatron-Bridge 构造模型并转换 HuggingFace 权重，昇腾适配由 MindSpeed 和 MindSpeed-Bridge 提供。可与 `use_dist_checkpointing` 同时开启。|
 | `actor_rollout_ref.actor.megatron.param_offload` |是否卸载模型权重到CPU，默认值为False|
 | `actor_rollout_ref.actor.megatron.tensor_model_parallel_size` | 张量并行大小；默认值为1。|
 | `actor_rollout_ref.actor.megatron.pipeline_model_parallel_size`  |流水并行大小，默认值为1|
@@ -273,8 +272,6 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu` |是否使用融合swiglu，默认值为False|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` |第一个pipeline stage 的层数，默认值为none|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage` |最后一个pipeline stage 的层数，默认值为none|
-
-注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge，使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。
 
 ### 3. VeOmni
 
@@ -373,7 +370,7 @@ Checkpoint Engine 是 verl 用于在训练侧与推理侧之间同步权重的�
 
 昇腾 NPU 上同样支持配置 `actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake`，基于 Mooncake Transfer Engine 以 p2p 方式同步权重。NPU 上需通过 engine_kwargs 将 device 指定为 npu，此时 Transfer Engine 使用 `ascend_direct` 传输协议。
 
-注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)。
+注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/transport/ascend_direct_transport.md)。
 
 #### 参数特性支持
 

@@ -94,6 +94,8 @@ def _copy_param_subclass_attrs(dst_param, src_param):
 
 _FP8_PRISTINE_ATTR = "_verl_fp8_pristine"
 _FP8_LIVE_ATTR = "_verl_fp8_live_params"
+# Names of the params a kernel handed back as a rewritten copy with the checkpoint's shape and dtype.
+_FP8_REPACKED_ATTR = "_verl_fp8_repacked"
 
 # ``Fp8LinearMethod`` owns the first group, ``Fp8MoEMethod`` the second. The MoE
 # scale is named ``w13_weight_scale_inv`` under block quant and
@@ -155,6 +157,23 @@ def replace_parameter_preserve_subclass(
         new_data = new_data.data
 
     old_param = getattr(layer, param_name, None)
+    # Some kernel preps return tensors with the checkpoint's shape and dtype -- FlashInfer CUTLASS swaps
+    # the gate/up halves of w13 (weights and block scales), FlashInfer TRT-LLM's MXFP8 path interleaves
+    # and tile-shuffles them -- so the comparison in _layer_needs_fp8_staging cannot tell the live buffer
+    # left checkpoint layout. This call is the one place the rewrite is visible: a same-shaped,
+    # same-typed tensor that is not the old storage.
+    if (
+        param_name in _FP8_REFIT_PARAM_NAMES
+        and isinstance(old_param, torch.nn.Parameter)
+        and tuple(old_param.shape) == tuple(new_data.shape)
+        and old_param.dtype == new_data.dtype
+        and old_param.data_ptr() != new_data.data_ptr()
+    ):
+        repacked = getattr(layer, _FP8_REPACKED_ATTR, None)
+        if repacked is None:
+            repacked = set()
+            setattr(layer, _FP8_REPACKED_ATTR, repacked)
+        repacked.add(param_name)
     param = torch.nn.Parameter(new_data, requires_grad=False)
     _copy_param_subclass_attrs(param, old_param)
     setattr(layer, param_name, param)
@@ -195,19 +214,40 @@ def _record_pristine_fp8_layout(layer, params):
         setattr(layer, _FP8_PRISTINE_ATTR, pristine)
 
 
+def _record_same_layout_repacks(layer, old_params):
+    """Record direct parameter replacements that shape/dtype checks cannot see."""
+    for name in _FP8_REFIT_PARAM_NAMES:
+        old_param = old_params.get(name)
+        new_param = getattr(layer, name, None)
+        if (
+            isinstance(old_param, torch.nn.Parameter)
+            and isinstance(new_param, torch.nn.Parameter)
+            and tuple(old_param.shape) == tuple(new_param.shape)
+            and old_param.dtype == new_param.dtype
+            and old_param.data_ptr() != new_param.data_ptr()
+        ):
+            repacked = getattr(layer, _FP8_REPACKED_ATTR, None)
+            if repacked is None:
+                repacked = set()
+                setattr(layer, _FP8_REPACKED_ATTR, repacked)
+            repacked.add(name)
+
+
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
+    repacked = getattr(layer, _FP8_REPACKED_ATTR, None) or ()
     for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
         if not isinstance(param, torch.nn.Parameter):
             continue
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
-        # ROCm's AITER MoE backend permutes the expert weights into its MFMA
-        # layout while leaving shape and dtype untouched, so the comparison
-        # above cannot see it. ``is_shuffled``, which that backend sets on the
-        # repacked parameter, is the only signal that the live buffer is no
-        # longer in checkpoint layout.
-        if getattr(param, "is_shuffled", False):
+        # Some backends permute the expert weights while leaving shape and
+        # dtype untouched, so the comparison above cannot see it. ROCm's AITER
+        # MoE sets ``is_shuffled`` on the repacked parameter; the FlashInfer
+        # preps set nothing, so the patched ``replace_parameter`` records the
+        # rewrite itself (``_FP8_REPACKED_ATTR``). Either is the only signal
+        # that the live buffer is no longer in checkpoint layout.
+        if getattr(param, "is_shuffled", False) or name in repacked:
             return True
     return False
 
@@ -292,14 +332,17 @@ def process_fp8_weights_after_loading(layers):
             delattr(layer, _FP8_LIVE_ATTR)
 
 
-def _make_process_weights_after_loading_for_vllm20(original_fn):
+def _make_process_weights_after_loading_for_vllm20(
+    original_fn, replace_parameter_path="vllm.model_executor.layers.quantization.fp8.replace_parameter"
+):
     def _patched_process_weights_after_loading(self, layer) -> None:
         old_params = dict(layer.named_parameters(recurse=False))
         _record_pristine_fp8_layout(layer, old_params)
-        with patch(
-            "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
-        ):
+        with patch(replace_parameter_path, replace_parameter_preserve_subclass):
             original_fn(self, layer)
+        # Some kernels assign ``Parameter`` objects directly rather than calling
+        # replace_parameter (for example the MXFP8 linear kernels).
+        _record_same_layout_repacks(layer, old_params)
         _restore_layer_param_subclass_attrs(layer, old_params)
 
     return _patched_process_weights_after_loading
@@ -425,6 +468,53 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
             )
 
 
+def _build_compressed_tensors_fp8_patchers():
+    """Same refit treatment for compressed-tensors FP8/MXFP8 linear and MoE methods."""
+    ct = "vllm.model_executor.layers.quantization.compressed_tensors"
+    ct_moe = f"{ct}.compressed_tensors_moe"
+    fp8_moe = f"{ct_moe}.compressed_tensors_moe_w8a8_fp8"
+    mxfp8_moe = f"{ct_moe}.compressed_tensors_moe_w8a8_mxfp8"
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+            CompressedTensorsW8A8Fp8MoEMethod,
+        )
+    except ImportError:
+        logger.warning("compressed-tensors FP8 methods not found in this vLLM; skipping their refit patches")
+        return []
+
+    wrap = _make_process_weights_after_loading_for_vllm20
+    patchers = [
+        patch(
+            f"{ct}.compressed_tensors.CompressedTensorsLinearMethod.process_weights_after_loading",
+            wrap(CompressedTensorsLinearMethod.process_weights_after_loading),
+        ),
+        patch(
+            f"{fp8_moe}.CompressedTensorsW8A8Fp8MoEMethod.process_weights_after_loading",
+            wrap(CompressedTensorsW8A8Fp8MoEMethod.process_weights_after_loading, f"{fp8_moe}.replace_parameter"),
+        ),
+    ]
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
+            CompressedTensorsW8A8Mxfp8MoEMethod,
+        )
+    except ImportError:
+        logger.info("compressed-tensors MXFP8 MoE method not found in this vLLM; skipping its refit patch")
+    else:
+        patchers.append(
+            patch(
+                f"{mxfp8_moe}.CompressedTensorsW8A8Mxfp8MoEMethod.process_weights_after_loading",
+                wrap(
+                    CompressedTensorsW8A8Mxfp8MoEMethod.process_weights_after_loading,
+                    f"{mxfp8_moe}.replace_parameter",
+                ),
+            )
+        )
+    return patchers
+
+
 def build_fp8_method_patchers(vllm_version):
     """Patchers that make the FP8 quant methods survive a refit, not yet started.
 
@@ -447,6 +537,7 @@ def build_fp8_method_patchers(vllm_version):
         return [
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
+            *_build_compressed_tensors_fp8_patchers(),
         ]
 
     return [

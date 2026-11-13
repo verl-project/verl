@@ -1,7 +1,7 @@
 Performance Tuning Guide
 ==============================
 
-Last updated: 07/17/2025.
+Last updated: 10/22/2026.
 
 Author: `Guangming Sheng <https://github.com/PeterSH6>`_, `Jiali Zheng <https://github.com/CurryRice233>`_
 
@@ -25,10 +25,12 @@ In this section, we will discuss how to tune the performance of all the stages i
 
 9. Memory optimization for entropy calculation from logits
 
+10. Node-local low-precision gradient communication with VeOmni
+
 Rollout Generation Tuning
 --------------------------
 
-verl currently supports two rollout backends: vLLM and TGI (with SGLang support coming soon). 
+verl supports rollout backends including vLLM, SGLang, and TensorRT-LLM.
 
 Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend setting ``actor_rollout_ref.rollout.disable_log_stats=False`` so that rollout statistics are logged.
 
@@ -67,21 +69,23 @@ For optimal performance, we recommend using vLLM v0.8.3 or later. See https://gi
 Enable remove padding (sequence packing)
 -----------------------------------------
 
-Currently, for llama, mistral, gemma1 and qwen based models, users can enable `use_remove_padding=True` to utilize the 
-sequence packing implementation provided by transformers library.
+For FSDP training, set ``actor_rollout_ref.model.use_remove_padding=True`` to
+remove padding tokens before the model forward pass. If the run uses a critic,
+set ``critic.model.use_remove_padding=True`` as well. The benefit depends on
+how much padding is present in the training batches.
 
-For other models, transformers library may also support it but we haven't tested it yet.
-Users can add the desired model config to the  `test_transformer.py <https://github.com/verl-project/verl/blob/main/tests/models/test_transformer.py#L24>`_ file.
-And test its functionality by running the following command:
+For an architecture not covered by
+`tests/models/test_transformer.py <https://github.com/verl-project/verl/blob/main/tests/models/test_transformer.py>`_,
+add a small configuration to its ``test_configs`` list and run the padded versus
+unpadded forward-output comparison on a CUDA or NPU device:
 
 .. code-block:: bash
 
-  pytest -s tests/models/test_transformer.py
+   pytest -s tests/models/test_transformer.py
 
-If the test passes, you can add your desired model into the model `registry.py <https://github.com/verl-project/verl/blob/main/verl/models/registry.py#L24>`_ file.
-Then, you can enjoy the performance boost of sequence packing
-and welcome to PR your tested model to verl!
-
+This test provides an initial numerical comparison. Before adopting the
+setting, run a short training job with the intended configuration and compare
+throughput and peak memory against the padded path.
 
 Batch Size Tuning
 -----------------
@@ -184,7 +188,7 @@ LigerKernel for training performance
 
 LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can improve training throughput. It works with both SFT and RL (PPO/GRPO) training, including vision-language models.
 
-1. Install Liger Kernel 0.8.2 or newer via ``pip3 install "liger-kernel>=0.8.2"``. Set ``use_liger`` in your configuration:
+1. Install Liger Kernel 0.8.4 via ``uv pip install "liger-kernel==0.8.4"``. Set ``use_liger`` in your configuration:
 
    .. code-block:: yaml
 
@@ -194,6 +198,90 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
 2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The model-level ``fused_linear_cross_entropy`` patch remains disabled because verl computes log-probabilities through its output-head path.
 
 3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head. Set ``fused_kernel_options.impl_backend`` to ``liger`` to use Liger's fused scaled cross entropy, or keep the default ``torch`` backend to use verl's native chunked ``FusedLinearForPPOFunction``. The ``liger`` backend falls back to the native implementation when Liger is not installed.
+
+   For Megatron, enable both ``use_fused_kernels`` and ``use_liger`` to select
+   Liger's public tensor-parallel output-head operator instead of Verl's Triton
+   implementation. Verl passes the full token tensor to the public API without
+   exposing chunking or padding controls. Verl delegates native setup to
+   ``liger_kernel.ops.configure.configure`` using the existing actor/reference
+   maximum-token limits. Every pipeline stage participates, including stages
+   without output weights. The runtime bootstraps on WORLD and registers the
+   tensor-parallel partition separately; Verl does not initialize NVSHMEM or
+   own native workspace/context caches.
+
+   Before the reference engine initializes, colocated Megatron actor/reference
+   workers reserve the maximum across the actor training, actor log-probability,
+   and reference limits, accounting for each engine's context parallelism.
+   They also reserve the local vocabulary required by the smallest configured
+   TP size. This does not change either engine's batching settings or add a
+   user-facing capacity knob. Standalone engines reserve
+   ``max(max_token_len_per_gpu, infer_max_token_len_per_gpu) * context_parallel_size``
+   tokens. Capacity cannot grow after initialization. Repeated setup and additional TP
+   partitions within the original capacity are managed by Liger. Execution
+   across native contexts must remain serialized per process.
+   With fixed-size microbatches these
+   token settings do not limit the batch itself: choose them to cover the
+   largest packed output-head input, including Megatron's alignment padding.
+   Verl does not resize the workspace from observed microbatch shapes.
+
+   .. code-block:: bash
+
+      uv sync --extra megatron --extra vllm  # replace vllm with the selected rollout backend
+      uv pip install /path/to/liger_kernel-0.8.4-py3-none-any.whl
+      uv pip install /path/to/liger_cute_kernels-<version>-<platform>.whl
+
+   .. code-block:: yaml
+
+      actor_rollout_ref:
+        model:
+          use_fused_kernels: true
+          use_liger: true
+
+   The optional ``liger-cute-kernels`` wheel enables Liger's native
+   CUTLASS/CuTe tensor-parallel implementation when the installed wheel
+   supports the current GPU and CUDA runtime. Backend selection remains inside
+   Liger; Verl calls the same public API whether Liger selects the native
+   implementation or its fallback.
+
+   The Megatron integration requires the public configuration API merged in
+   Liger mainline commit ``0043f43309144bb3054518d28efed25fc314edaf``,
+   plus the configuration fallback change in
+   `Liger-Kernel PR #1502 <https://github.com/linkedin/Liger-Kernel/pull/1502>`_
+   (merged mainline commit ``8866e4ee7945bc3cac0e40062e7bde26ecc09f65``).
+   Liger Kernel is pinned to the published ``0.8.4`` release containing both
+   changes. For native execution, install matching ``liger-kernel==0.8.4``
+   and ``liger-cute-kernels==0.8.4`` wheels, or build those sources locally.
+   Missing optional LCK or
+   unsupported native hardware causes Liger
+   to warn and skip native setup; genuine native configuration errors are
+   not suppressed.
+
+   Requirements, legacy GPU dependencies, and FSDP/Megatron extras use the
+   same ``liger-kernel==0.8.4`` pin.
+   VeRL does not inspect GPU capabilities or select a hardware fallback.
+   Liger owns both native eligibility and operator dispatch.
+   LCK remains CUDA-only and raises ``UnsupportedDeviceError`` on unsupported
+   devices. Liger-Kernel's public ``configure`` catches that specific error,
+   warns, and returns ``False`` without native setup.
+
+   **DeepEP and memory lifetime:** Native Liger must not share a process with
+   DeepEP V1 RDMA (cross-node EP). Liger rejects an external NVSHMEM runtime
+   initialized first. VeRL also checks the legacy DeepEP dispatch/combine RDMA
+   buffer-size hints before its lazy buffer can initialize after Liger, and
+   rejects that combination. Use ``alltoall``, a Megatron-supported DeepEP V2
+   dispatcher without NVSHMEM, or disable the Liger fused output head.
+   Intra-node DeepEP V1 buffers with zero RDMA allocation are not rejected.
+   The safety gate has unit coverage; cross-node DeepEP training is unsupported
+   and is not part of the dense training smoke.
+
+   NVSHMEM environment settings must be established before initialization.
+   Its symmetric heap and native workspaces remain resident through parameter
+   and optimizer offload and colocated inference-engine sleep/wake; budget
+   this memory separately from model weights and KV cache. Do not initialize
+   or finalize another NVSHMEM owner while Liger is active. Finalization is
+   only safe after every native operation, backward pass and captured graph
+   has finished, and the loaded NVSHMEM host runtime must be compatible with
+   the device library used to build the native wheel.
 
 Forward prefetch in FSDP training backend
 ----------------------
@@ -245,6 +333,27 @@ FSDP2 offers notable improvements over FSDP1. According to `PyTorch TorchTitan b
 
 .. note:: 
    FSDP2 requires PyTorch 2.1+ and is recommended for models with transformer architecture.
+
+Node-local low-precision gradient communication with VeOmni
+---------------------------------------------------------
+
+VeOmni supports BF16 gradient communication with FP32 accumulation and output.
+This defaults to ``false`` and requires CUDA FSDP2, mixed precision, and the
+VeOmni version pinned by verl. To enable it for the actor:
+
+.. code-block:: bash
+
+   model_engine=veomni \
+   actor_rollout_ref.actor.veomni.mixed_precision=true \
+   actor_rollout_ref.actor.veomni.low_precision_reduce_scatter_comm=true
+
+Only eligible multi-rank shard groups confirmed to be on the same node use this
+path; other groups retain native communication. The option only affects backward
+gradient communication; forward-only inference does not execute it.
+
+The option uses additional temporary buffers and may slow small communication
+buckets. Compare actor-update time and peak memory with it on and off, and keep
+it disabled unless the measured workload benefits.
 
 Memory optimization for entropy calculation from logits
 ----------------------

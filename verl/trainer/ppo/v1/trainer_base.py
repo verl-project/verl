@@ -29,7 +29,6 @@ import ray
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
-from packaging.version import InvalidVersion, Version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -77,6 +76,13 @@ from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_m
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataset.dataloader import (
+    DataLoaderExhausted,
+    close_dataloaders,
+    create_custom_dataloaders,
+    resolve_gen_batch_size,
+    validate_custom_batch,
+)
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -94,6 +100,7 @@ from verl.workers.utils.padding import response_from_nested, response_to_nested
 
 
 def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
+    params.pop("topk_log_probs", None)
     params["top_p"] = 1.0
     params["top_k"] = -1
     params["temperature"] = 0
@@ -101,19 +108,6 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _tq_supports_checkpoint() -> bool:
-    """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
-    try:
-        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
-    except InvalidVersion:
-        return False
-    return (
-        version_supported
-        and callable(getattr(tq, "save_checkpoint", None))
-        and callable(getattr(tq, "load_checkpoint", None))
-    )
 
 
 def _count_tq_prompt_groups(partition_id: str = "train") -> int:
@@ -234,8 +228,14 @@ class PPOTrainer(ABC):
         4. RewardLoopManager: reward workers for rule-based reward, optional LLM server for model-based reward.
         5. [Optional] MultiTeacherModelManager: LLM teacher servers for on-policy distillation.
         """
-        self._setup()
-        self.on_init_end()
+        initialized = False
+        try:
+            self._setup()
+            self.on_init_end()
+            initialized = True
+        finally:
+            if not initialized:
+                self.close_dataloaders()
 
     def _setup(self):
         self._init_tokenizer()
@@ -245,8 +245,18 @@ class PPOTrainer(ABC):
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
+        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
         # 1. define actor and rollout class
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        if Role.Actor in self.role_worker_mapping:
+            actor_role = Role.Actor
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        else:
+            actor_role = Role.ActorRollout
         actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
@@ -255,6 +265,15 @@ class PPOTrainer(ABC):
             role=str(actor_role),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
+
+        if actor_role == Role.Actor and self.use_reference_policy and not self.ref_in_actor:
+            ref_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            ref_policy_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.RefPolicy],
+                config=self.config.actor_rollout_ref,
+                role=str(Role.RefPolicy),
+            )
+            self.resource_pool_to_cls[ref_resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         # 2. define critic class
         if self.use_critic:
@@ -324,13 +343,12 @@ class PPOTrainer(ABC):
         self.actor_rollout_wg.init_model()
         logger.info("actor and ref model engine initialized")
 
-        # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         if self.use_reference_policy and not self.ref_in_actor:
-            self.ref_policy_wg = all_wg[str(actor_role)]
+            if actor_role == Role.Actor:
+                self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
+                self.ref_policy_wg.init_model()
+            else:
+                self.ref_policy_wg = all_wg[str(actor_role)]
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
@@ -359,9 +377,19 @@ class PPOTrainer(ABC):
             self.distillation_config = None
 
         # 9. initialize agent loop manager
-        self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
-        )
+        # Trainers that opt out of colocated rollout replicas on the training
+        # GPUs (v1 separate_async with actor_rollout_ref.hybrid_engine=False)
+        # set ``self._enable_hybrid_replicas = False`` before super()._setup();
+        # they get an empty manager here and serve rollout from their
+        # standalone replicas only.
+        if getattr(self, "_enable_hybrid_replicas", True):
+            self.llm_server_manager: LLMServerManager = LLMServerManager.create(
+                config=self.config,
+                worker_group=self.actor_rollout_wg,
+                rollout_resource_pool=actor_rollout_resource_pool,
+            )
+        else:
+            self.llm_server_manager = LLMServerManager.create_empty(config=self.config)
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -401,6 +429,13 @@ class PPOTrainer(ABC):
         Args:
             agent_loop_manager: The agent loop manager to generate sequences.
         """
+        try:
+            self._fit(agent_loop_manager)
+        finally:
+            self.close_dataloaders()
+
+    def _fit(self, agent_loop_manager: AgentLoopManager):
+        """Run the training loop; fit owns custom reader cleanup."""
         self.agent_loop_manager = agent_loop_manager
 
         # initialize SkipManager for V1 rollout skip support
@@ -433,7 +468,7 @@ class PPOTrainer(ABC):
                 self._shutdown_dump_executor()
                 return
 
-        current_epoch = self.global_steps // self.steps_per_epoch
+        current_epoch = self.global_steps // self.steps_per_epoch if self.steps_per_epoch is not None else None
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
@@ -450,7 +485,11 @@ class PPOTrainer(ABC):
 
         self.on_train_begin()
         last_val_metrics = None
-        while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
+        last_completed_step = None
+        source_exhausted = False
+        while (
+            current_epoch is None or current_epoch < self.config.trainer.total_epochs
+        ) and self.global_steps <= self.total_training_steps:
             is_last_step = self.global_steps >= self.total_training_steps
             metrics = {}
             self.timing_raw = {}
@@ -460,8 +499,15 @@ class PPOTrainer(ABC):
                 self.on_step_begin()
 
                 self._start_profiling()
-                batch = self.step(metrics, self.timing_raw)
-                self._stop_profiling()
+                try:
+                    batch = self.step(metrics, self.timing_raw)
+                except DataLoaderExhausted:
+                    logger.info("Custom training source exhausted at step %s; ending training.", self.global_steps)
+                    source_exhausted = True
+                    break
+                finally:
+                    self._stop_profiling()
+                last_completed_step = self.global_steps
 
                 # 2. save checkpoint
                 if self.config.trainer.save_freq > 0 and (
@@ -505,16 +551,35 @@ class PPOTrainer(ABC):
             progress_bar.update(1)
             self.global_steps += 1
             SkipManager.set_step(self.global_steps)
-            current_epoch = (self.global_steps - 1) // self.steps_per_epoch
+            current_epoch = (
+                (self.global_steps - 1) // self.steps_per_epoch if self.steps_per_epoch is not None else None
+            )
             if is_last_step:
-                self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
-                return
+                break
 
+        progress_bar.close()
+        if source_exhausted and last_completed_step is not None:
+            # EOF is discovered on the next fetch, after the last completed step's normal finalization.
+            next_step, self.global_steps = self.global_steps, last_completed_step
+            try:
+                SkipManager.set_step(self.global_steps)
+                if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq != 0:
+                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                        self._save_checkpoint()
+                if self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq != 0:
+                    with marked_timer("testing", self.timing_raw, color="green"):
+                        self.on_validate_begin()
+                        last_val_metrics = self._validate()
+                        self.on_validate_end()
+                    self.logger.log(data=last_val_metrics, step=self.global_steps)
+            finally:
+                self.global_steps = next_step
+                SkipManager.set_step(self.global_steps)
         self.on_train_end()
-        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
+        self._shutdown_train_dataloader()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         train_batch_size = self.config.data.train_batch_size
@@ -535,7 +600,13 @@ class PPOTrainer(ABC):
         for trigger_idx in range(self.parameter_sync_step):
             self.local_trigger_step = trigger_idx
             iter_metrics: dict = {}
-            batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
+            try:
+                batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
+            except DataLoaderExhausted as error:
+                if trigger_idx == 0:
+                    raise
+                # Earlier local updates may already have changed the weights.
+                raise RuntimeError("Custom training source exhausted during PPO update/refill.") from error
             sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
             metrics_aggregator.add_step_metrics(iter_metrics, sample_count=sample_count)
             combined_keys.extend(batch.keys)
@@ -607,13 +678,21 @@ class PPOTrainer(ABC):
         """Called before the training loop starts."""
         return
 
-    def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
-        """Fill the async prefetch window without duplicating checkpointed prompt groups."""
+    def _add_async_warmup_batches(self, num_warmup_batches: int | float) -> None:
+        """Fill the async prefetch window without duplicating checkpointed prompt groups.
+
+        Fractional values are supported: e.g. 1.5 with train_batch_size=64 adds
+        one full batch (64 prompts) plus half a batch (32 prompts); the fractional
+        part is rounded down to a whole number of gen_batch_size chunks (prompts
+        are fetched per gen_batch_size).
+        """
         if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
             return
 
         restored_prompts = self._restored_tq_prompt_count
-        target_prompts = num_warmup_batches * self.config.data.train_batch_size
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        target_chunks = math.floor(num_warmup_batches * self.config.data.train_batch_size / gen_batch_size)
+        target_prompts = target_chunks * gen_batch_size
         missing_prompts = max(0, target_prompts - restored_prompts)
         if missing_prompts == 0:
             logger.info(
@@ -622,9 +701,9 @@ class PPOTrainer(ABC):
             )
             return
 
-        self._add_prompts_to_generate(missing_prompts)
+        submitted_prompts = self._add_prompts_to_generate(missing_prompts)
         logger.info(
-            f"Added {missing_prompts} warmup prompts after restoring {restored_prompts} of "
+            f"Added {submitted_prompts} warmup prompts after restoring {restored_prompts} of "
             f"{target_prompts} target prompt groups"
         )
 
@@ -684,7 +763,56 @@ class PPOTrainer(ABC):
         self.processor = model_config.processor
 
     def _init_dataloader(self):
-        """Initialize train and validate dataloader."""
+        """Select the input path and initialize the optimizer scheduling horizon."""
+        if self.config.data.get("custom_dataloader") is not None:
+            if self.trainer_mode != "sync" and not isinstance(self.replay_buffer, ReplayBufferAsync):
+                raise ValueError("Async custom dataloaders require a ReplayBufferAsync sampler for source draining.")
+            self.replay_buffer.input_exhausted = False
+            (
+                self.train_dataloader,
+                self.val_dataloader,
+                self.steps_per_epoch,
+                self._custom_val_batch_size,
+            ) = create_custom_dataloaders(
+                self.config,
+                trainer_mode=self.trainer_mode,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                collate_fn=collate_fn,
+            )
+        else:
+            self._init_builtin_dataloaders()
+        self.train_dataloader_it = None
+
+        total_training_steps = self.config.trainer.total_training_steps
+        if total_training_steps is None:
+            total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
+        self.total_training_steps = total_training_steps
+        logger.info(f"Total training steps: {self.total_training_steps}")
+
+        # Each global step performs parameter_sync_step local optimizer updates.
+        optim_total_training_steps = total_training_steps * self.parameter_sync_step
+        try:
+            OmegaConf.set_struct(self.config, True)
+            with open_dict(self.config):
+                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
+                if OmegaConf.select(self.config, "critic.optim"):
+                    self.config.critic.optim.total_training_steps = optim_total_training_steps
+        except Exception as e:
+            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    def close_dataloaders(self):
+        """Release custom readers, including after partial trainer initialization."""
+        if self.config.data.get("custom_dataloader") is not None:
+            train = getattr(self, "train_dataloader", None)
+            val = getattr(self, "val_dataloader", None)
+            self.train_dataloader = self.val_dataloader = None
+            self.train_dataloader_it = None
+            close_dataloaders(train, val)
+
+    def _init_builtin_dataloaders(self):
+        """Preserve the existing custom-dataset and StatefulDataLoader path."""
         self.train_dataset = create_rl_dataset(
             self.config.data.train_files,
             self.config.data,
@@ -702,22 +830,7 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        # Exact refill counts require single-prompt dataloader fetches.
-        filter_groups = self.config.algorithm.get("filter_groups", None)
-        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
-        sync_refill_failed_groups = bool(self.config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
-        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
-        if requires_exact_refill:
-            user_gen_batch_size = self.config.data.get("gen_batch_size", None)
-            if user_gen_batch_size not in (None, 1):
-                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
-            elif user_gen_batch_size is None:
-                logger.info("data.gen_batch_size defaulted to 1.")
-            with open_dict(self.config):
-                self.config.data.gen_batch_size = 1
-
-        # use gen_batch_size as the batch size for the dataloader if set, otherwise use train_batch_size
-        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        gen_batch_size = resolve_gen_batch_size(self.config, self.trainer_mode)
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=gen_batch_size,
@@ -742,27 +855,6 @@ class PPOTrainer(ABC):
 
         self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
 
-        # adjust total_training_steps
-        total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
-        self.total_training_steps = total_training_steps
-        logger.info(f"Total training steps: {self.total_training_steps}")
-
-        # The LR scheduler steps once per local update, and each global step performs
-        # ``parameter_sync_step`` local updates (see ``PPOTrainer.step``). The optimizer's
-        # schedule horizon must therefore count optimizer updates.
-        optim_total_training_steps = total_training_steps * self.parameter_sync_step
-        try:
-            OmegaConf.set_struct(self.config, True)
-            with open_dict(self.config):
-                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
-                    self.config.actor_rollout_ref.actor.optim.total_training_steps = optim_total_training_steps
-                if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = optim_total_training_steps
-        except Exception as e:
-            logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
-
     def _init_resource_pool_mgr(self):
         config = self.config
         # role => worker class
@@ -776,9 +868,15 @@ class PPOTrainer(ABC):
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
+        if not getattr(self, "_enable_hybrid_replicas", True):
+            role = Role.Actor
+        else:
+            role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
         self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
         self.mapping[role] = "global_pool"
+        if role == Role.Actor and need_reference_policy(config) and not ref_in_actor:
+            self.role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            self.mapping[Role.RefPolicy] = "global_pool"
 
         # Add critic worker to mapping.
         if need_critic(config):
@@ -844,6 +942,14 @@ class PPOTrainer(ABC):
         else:
             logger.exception(f"Unknown resume mode {self.config.trainer.resume_mode}")
 
+        if self.config.data.get("custom_dataloader") is not None and not callable(
+            getattr(self.train_dataloader, "load_state_dict", None)
+        ):
+            raise ValueError(
+                "Cannot resume training: the custom dataloader does not support checkpoint restoration. "
+                "Start a new run with trainer.resume_mode=disable; saved model weights remain usable."
+            )
+
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
         logger.info(f"Resuming from {global_step_folder}, setting global step to {self.global_steps}")
@@ -865,13 +971,17 @@ class PPOTrainer(ABC):
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            if self.config.data.get("custom_dataloader") is not None and not isinstance(dataloader_state_dict, dict):
+                raise TypeError("Custom dataloader checkpoint must contain a state dictionary.")
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
+            if self.config.data.get("custom_dataloader") is not None:
+                raise FileNotFoundError(f"Cannot resume custom dataloader: missing {dataloader_local_path}")
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync":
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
@@ -881,7 +991,7 @@ class PPOTrainer(ABC):
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
-        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
+        if self.trainer_mode == "sync":
             return 0
         data = tq.kv_list(partition_id)
         if not data:
@@ -968,13 +1078,22 @@ class PPOTrainer(ABC):
         # save dataloader state
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
+        if self.config.data.get("custom_dataloader") is None or callable(
+            getattr(self.train_dataloader, "state_dict", None)
+        ):
+            dataloader_state = self.train_dataloader.state_dict()
+            if self.config.data.get("custom_dataloader") is not None and not isinstance(dataloader_state, dict):
+                raise TypeError("Custom dataloader state_dict() must return a dictionary.")
+            torch.save(dataloader_state, dataloader_local_path)
+        else:
+            if os.path.exists(dataloader_local_path):
+                os.remove(dataloader_local_path)
+            logger.info("Saving model checkpoint without dataloader state; full training resume is unsupported.")
 
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
-        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint).
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync":
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
@@ -1019,6 +1138,8 @@ class PPOTrainer(ABC):
         expected_acc_counts: dict[tuple[str, str], int] = {}
 
         for batch_dict in self.val_dataloader:
+            if self.config.data.get("custom_dataloader") is not None:
+                validate_custom_batch(batch_dict, split="val", batch_size=self._custom_val_batch_size)
             # 1. put batch to agent loop manager
             batch_dict["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object
@@ -1267,6 +1388,17 @@ class PPOTrainer(ABC):
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
 
+    def _shutdown_train_dataloader(self):
+        """Stop the train dataloader's worker processes.
+
+        StatefulDataLoader keeps its last iterator, so the workers would outlive fit(). At process exit Ray kills them
+        with the actor, and the trainer then reports "DataLoader worker (pid ...) is killed by signal: Killed".
+        """
+        iterator, self.train_dataloader_it = self.train_dataloader_it, None
+        shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+        if shutdown_workers is not None:
+            shutdown_workers()
+
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
@@ -1438,14 +1570,24 @@ class PPOTrainer(ABC):
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""
+        custom_loader = self.config.data.get("custom_dataloader") is not None
+        if custom_loader and self.replay_buffer.input_exhausted:
+            raise DataLoaderExhausted
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
         except StopIteration:
+            if custom_loader:
+                self.replay_buffer.input_exhausted = True
+                logger.info("Custom training source exhausted; the loader owns repetition.")
+                raise DataLoaderExhausted from None
             self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
 
+        if self.config.data.get("custom_dataloader") is not None:
+            fetch_size = self.config.data.get("gen_batch_size") or self.config.data.train_batch_size
+            validate_custom_batch(batch_dict, split="train", batch_size=fetch_size)
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         return tu.get_tensordict(batch_dict)
 
@@ -1461,7 +1603,22 @@ class PPOTrainer(ABC):
                 f"({gen_batch_size}); it is submitted in whole gen_batch_size dataloader fetches."
             )
 
-        chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
+        chunks = []
+        for _ in range(num_prompts // gen_batch_size):
+            try:
+                chunks.append(self._fetch_one_gen_batch())
+            except DataLoaderExhausted:
+                if self.trainer_mode == "sync":
+                    if chunks:
+                        logger.info(
+                            "Discarding %s prompts from an incomplete synchronous training batch.",
+                            len(chunks) * gen_batch_size,
+                        )
+                    raise
+                if not chunks:
+                    raise
+                # Async warmup/refill may consume the source tail; submit it before draining.
+                break
         batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         return batch
@@ -1485,18 +1642,28 @@ class PPOTrainer(ABC):
         return len(batch)
 
     def _add_prompts_to_generate(self, num_prompts: int) -> int:
-        """Add an exact number of prompts to the AgentLoopManager."""
-        batch = self._next_train_batch(num_prompts)
+        """Submit requested prompts, or the remaining custom-source tail in async mode."""
+        try:
+            batch = self._next_train_batch(num_prompts)
+        except DataLoaderExhausted:
+            if self.trainer_mode == "sync":
+                raise
+            return 0
         return self._submit_batch_to_rollout(batch)
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
         """Add one training batch to the AgentLoopManager."""
-        batch = self._next_train_batch()
-        self._submit_batch_to_rollout(batch)
+        self._add_prompts_to_generate(self.config.data.train_batch_size)
 
     def prepare_step(self) -> dict:
         self._add_batch_to_generate()
+        if self.config.data.get("custom_dataloader") is not None and self.trainer_mode != "sync":
+            # Ensure EOF/refill cannot interrupt a parameter-sync cycle after weights have changed.
+            _, metrics = self.replay_buffer.wait_for_sampleable(
+                self.global_steps, "train", self.config.data.train_batch_size
+            )
+            return metrics
         return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
@@ -1715,7 +1882,9 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]
+        if self.use_critic:
+            fields.append("values")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
@@ -1817,10 +1986,14 @@ class PPOTrainer(ABC):
                 and not distillation_loss_cfg.use_task_rewards
                 and not distillation_loss_cfg.use_policy_gradient
             )
+        score_centering = bool(
+            self.config.actor_rollout_ref.actor.policy_loss.get("rollout_correction", {}).get("score_centering", False)
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
             "distillation_only": distillation_only,
+            "score_centering": score_centering,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
@@ -1845,13 +2018,14 @@ class PPOTrainer(ABC):
             "prompts",
             "responses",
             "response_mask",
-            "values",
             "advantages",
             "returns",
             "rm_scores",
             "token_level_rewards",
             "num_turns",
         ]
+        if self.use_critic:
+            fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
@@ -1897,9 +2071,17 @@ class PPOTrainer(ABC):
         data["response_length"] = response_length.float()
         batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
         metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
+        # Expose per-row turn counts under the V0 schema (agent_loop writes
+        # ``__num_turns__`` into the non-tensor batch) so compute_data_metrics
+        # emits the V0-compatible ``num_turns/{mean,max,min}`` tags in addition
+        # to the ``training/num_turns/*`` names computed below.
+        num_turns_for_metrics = num_turns[non_padding_mask] if non_padding_mask.any() else num_turns
+        metrics_batch.non_tensor_batch["__num_turns__"] = np.asarray(num_turns_for_metrics, dtype=np.int32)
 
         # 2. compute metrics
-        metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+        metrics["training/global_step"] = global_steps
+        if epoch is not None:
+            metrics["training/epoch"] = epoch
         metrics.update(
             compute_moe_lb_metrics(
                 metrics_batch=metrics_batch,

@@ -21,6 +21,12 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 
+from verl.utils.device import is_npu_available
+
+if is_npu_available:
+    # Apply Ascend patches before importing Megatron-Core.
+    import megatron_adaptor  # noqa: F401
+
 pytest.importorskip("megatron.core")
 
 from megatron.core import parallel_state  # noqa: E402

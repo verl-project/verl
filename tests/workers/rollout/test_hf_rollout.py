@@ -22,6 +22,7 @@ from torch.distributed.fsdp.api import ShardedStateDictConfig, ShardingStrategy,
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from verl import DataProto
+from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
@@ -75,7 +76,7 @@ def prepare_input_dataproto(tokenizer, config, validate):
 def prepare_fsdp_model(model, world_size):
     from torch.distributed.device_mesh import init_device_mesh
 
-    device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
+    device_mesh = init_device_mesh(get_device_name(), mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
 
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
 
@@ -83,7 +84,7 @@ def prepare_fsdp_model(model, world_size):
         model,
         use_orig_params=True,
         auto_wrap_policy=None,
-        device_id=torch.cuda.current_device(),
+        device_id=get_device_id(),
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision=mixed_precision,
         cpu_offload=CPUOffload(offload_params=False),
@@ -101,7 +102,7 @@ def test_hf_rollout(n: int = 1, do_sample: bool = True, validate: bool = False):
     config = OmegaConf.create(BASE_HF_ROLLOUT_CONFIG)
     config.update({"n": n, "do_sample": do_sample})
 
-    assert torch.cuda.device_count() >= 2, "At least 2 GPUs is required to run tp+dp tests."
+    assert get_torch_device().device_count() >= 2, "At least 2 GPUs is required to run tp+dp tests."
     local_rank, rank, world_size = initialize_global_process_group()
 
     # Initialize model and tokenizer
@@ -119,7 +120,7 @@ def test_hf_rollout(n: int = 1, do_sample: bool = True, validate: bool = False):
 
     # Initialize HFRollout and start generate
     hf_rollout = HFRollout(fsdp_model, OmegaConf.create(config))
-    input = prepare_input_dataproto(tokenizer, config, validate).to(torch.cuda.current_device())
+    input = prepare_input_dataproto(tokenizer, config, validate).to(torch.device(get_device_name(), get_device_id()))
     outputs = hf_rollout.generate_sequences(input)
 
     # check generated batch size is expected

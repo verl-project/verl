@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# The project lock covers CUDA; Ascend uses its image's Python/NPU packages.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    # Standalone first-class `veomni` training backend (cu130 / torch 2.13), the
+    # named form of the old `fsdp + veomni-sft` composition: it already bundles the
+    # fsdp stack plus the deps-free veomni package, so no fsdp / veomni-sft extras.
+    UV_EXTRAS=(--extra vllm --extra veomni --extra math)
+    UV_OVERLAY=(--with transformers==5.16.1)
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" "${UV_OVERLAY[@]}" python3)
+    # Quote the Hydra value so the Transformers requirement's == stays literal.
+    RAY=("ray_kwargs.ray_init.runtime_env.py_executable=\"uv -v run --frozen --all-packages ${UV_EXTRAS[*]} ${UV_OVERLAY[*]}\"")
+fi
+
 
 SAVE_PATH=tests/utils/ci/profiler_data
 rm -rf "$SAVE_PATH"
@@ -38,13 +53,14 @@ MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-128}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
 NUM_GPUS=${NUM_GPUS:-8}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-8}
 FSDP_SIZE=${FSDP_SIZE:-4}
 SP_SIZE=${SP_SIZE:-2}
 EP_SIZE=${EP_SIZE:-1}
 MODEL_NAME_ONLY=${MODEL_ID##*/}
 VERL_EXP_NAME=${VERL_EXP_NAME:-${MODEL_NAME_ONLY}-function-reward-minimal-fsdp-size${FSDP_SIZE}}
 
-device_name=$(python3 - <<'EOF'
+device_name=$("${LAUNCH[@]}" - <<'EOF'
 from verl.utils.device import get_device_name
 print(get_device_name())
 EOF
@@ -66,7 +82,7 @@ common_params=(
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.veomni.param_offload=True \
     actor_rollout_ref.actor.veomni.optimizer_offload=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size="${MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
@@ -113,27 +129,29 @@ common_params=(
 
 if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
     CONTENTS=['cuda']
-    python3 -m verl.trainer.main_ppo \
+    "${LAUNCH[@]}" -m verl.trainer.main_ppo \
+        "${RAY[@]}" \
         "${common_params[@]}" \
         actor_rollout_ref.actor.profiler.tool_config.torch.discrete=$DISCRETE \
         actor_rollout_ref.actor.profiler.tool_config.torch.contents=$CONTENTS \
         actor_rollout_ref.ref.profiler.tool_config.torch.discrete=$DISCRETE \
         actor_rollout_ref.ref.profiler.tool_config.torch.contents=$CONTENTS \
-        global_profiler.tool=torch $@
+        global_profiler.tool=torch "$@"
 
     assert_finish_hook_ran
-    python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu" \
+    "${LAUNCH[@]}" "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu" \
         --stage actor-update 'rollout?replica*' ref-compute-log-prob
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
     CONTENTS=['npu','cpu']
-    python3 -m verl.trainer.main_ppo \
+    "${LAUNCH[@]}" -m verl.trainer.main_ppo \
+        "${RAY[@]}" \
         "${common_params[@]}" \
         actor_rollout_ref.actor.profiler.tool_config.npu.discrete=$DISCRETE \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=$CONTENTS \
         actor_rollout_ref.ref.profiler.tool_config.npu.discrete=$DISCRETE \
         actor_rollout_ref.ref.profiler.tool_config.npu.contents=$CONTENTS \
-        global_profiler.tool=npu $@
+        global_profiler.tool=npu "$@"
 
     assert_finish_hook_ran
     python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"

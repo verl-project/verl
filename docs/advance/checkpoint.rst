@@ -17,17 +17,17 @@ The ``checkpoint.save_contents`` / ``checkpoint.load_contents`` field accepts an
 Megatron:
 
 - ``model`` -- the framework-native model state. For **FSDP** this is the per-rank sharded state;
-  for **Megatron** this follows whether the engine provides a mbridge ``bridge`` and
+  for **Megatron** this follows whether the engine provides a megatron-bridge ``bridge`` and
   ``use_dist_checkpointing``: HF weights under ``model/huggingface/`` when the HF path is active,
   Megatron shards under ``model/dist_ckpt/`` when ``use_dist_checkpointing=True``, or **both**
   when a ``bridge`` is present and dist shards are also enabled for the ``model`` slot.
 - ``optimizer`` -- the optimizer state (sharded for both FSDP and Megatron).
 - ``extra`` -- LR scheduler state, RNG states, and (for Megatron) the serialised
   ``TransformerConfig``.
-- ``hf_model`` -- the full model in HuggingFace format. **Megatron requires a non-``None`` mbridge
+- ``hf_model`` -- the full model in HuggingFace format. **Megatron requires a non-``None`` megatron-bridge
   ``bridge``** (the checkpoint manager checks ``bridge``, not a separate flag) whenever ``hf_model``
   appears in ``save_contents`` or ``load_contents``. In practice the engine supplies the bridge when
-  mbridge is enabled (``use_mbridge=True`` in YAML). If the checkpoint also uses
+  megatron-bridge is enabled (``use_mbridge=True`` in YAML). If the checkpoint also uses
   ``use_dist_checkpointing=True`` for the ``model`` slot, HF export (``model/huggingface/``) is
   written **in addition to** Megatron shards under ``model/dist_ckpt/``. When only the HF ``model``
   path is used (no dist shards for weights), ``model`` and ``hf_model`` refer to the same HF tree
@@ -138,8 +138,8 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
     │   │   ├── ckpt_contents.json       # manifest mapping each saved content (model, optimizer, …) to its on-disk path; see "Locating saved contents" below
     │   │   ├── transformer_config.json  # serialised Megatron TransformerConfig (written when ``extra`` is in save_contents)
     │   │   ├── model
-    │   │   │   ├── huggingface          # HF weights + config + tokenizer (mbridge ``bridge`` + ``model`` / ``hf_model`` in save_contents)
-    │   │   │   └── dist_ckpt            # Megatron model shards when ``use_dist_checkpointing``; PEFT adapter shards may live here with mbridge
+    │   │   │   ├── huggingface          # HF weights + config + tokenizer (megatron-bridge ``bridge`` + ``model`` / ``hf_model`` in save_contents)
+    │   │   │   └── dist_ckpt            # Megatron model shards when ``use_dist_checkpointing``; PEFT adapter shards may live here with megatron-bridge
     │   │   ├── optimizer
     │   │   │   └── dist_ckpt            # optimizer + lr_scheduler shards (written when ``optimizer`` is in save_contents)
     │   │   └── extra
@@ -188,7 +188,7 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
           "backend": {"has_bridge": true, "use_dist_checkpointing": false, "peft": false},
           "save_contents": ["model", "optimizer", "extra"],
           "contents": {
-            "model":              {"path": "model/huggingface",    "format": "huggingface", "backend": "mbridge"},
+            "model":              {"path": "model/huggingface",    "format": "huggingface", "backend": "megatron-bridge"},
             "optimizer":          {"path": "optimizer/dist_ckpt",  "format": "megatron_dist_checkpoint"},
             "lr_scheduler":       {"path": "optimizer/dist_ckpt",  "format": "megatron_dist_checkpoint", "key": "lr_scheduler"},
             "rng_state":          {"path": "extra/dist_ckpt",      "format": "megatron_dist_checkpoint", "key": "rng_state"},
@@ -197,7 +197,7 @@ While **Megatron** current checkpoint structure (layout schema v2) is:
             "tokenizer":          {"path": "model/huggingface",    "format": "huggingface"}
           },
           "directories": {
-            "model/huggingface":   "HuggingFace-format artifacts written via mbridge: model weights, config.json, …",
+            "model/huggingface":   "HuggingFace-format artifacts written via megatron-bridge: model weights, config.json, …",
             "optimizer/dist_ckpt": "Megatron dist_checkpointing shards for the optimizer state …",
             "extra/dist_ckpt":     "Megatron dist_checkpointing shards for extra state (rng_state)."
           },
@@ -210,8 +210,8 @@ Megatron Checkpoint Manager Backends
 Megatron model weights are controlled by two booleans on
 ``actor_rollout_ref.actor.megatron`` (and the symmetric ``critic`` / ``ref`` keys):
 
-- **``use_mbridge`` (default ``True``)** -- when enabled, the Megatron engine builds the mbridge /
-  Megatron-Bridge instance passed into ``MegatronCheckpointManager`` as ``bridge``, which is
+- **``use_mbridge`` (default ``True``)** -- when enabled, the Megatron engine builds the Megatron-Bridge
+  instance passed into ``MegatronCheckpointManager`` as ``bridge``, which is
   **required** for HuggingFace-format model weights under
   ``global_step_${i}/${role}/model/huggingface/``. The manager itself only checks ``bridge is not
   None`` for ``hf_model`` (and other HF model paths).
@@ -220,7 +220,7 @@ Megatron model weights are controlled by two booleans on
   ``model`` slot are written/read under ``global_step_${i}/${role}/model/dist_ckpt/``.
 
 The two flags are **independent**: both may be ``True`` to persist resume-friendly shards **and**
-an HF tree in the same step. Setting ``use_mbridge=False`` disables HF export/load via mbridge;
+an HF tree in the same step. Setting ``use_mbridge=False`` disables HF export/load via megatron-bridge;
 ``use_dist_checkpointing=False`` disables Megatron model shards for the ``model`` slot (unless
 PEFT still needs adapter shards under ``model/dist_ckpt/``).
 
@@ -242,40 +242,40 @@ and ``save_contents`` entry is resolved:
 
 In tabular form:
 
-+-----------------------------+----------------+----------------------------------------------------------+
-| Flags (mbridge / dist_ckpt) | save_contents  | Behaviour                                                |
-+=============================+================+==========================================================+
-| mbridge only                | ``model``      | HF weights under ``model/huggingface/``.                 |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge only                | ``hf_model``   | Same (HF tree); ``model`` / ``hf_model`` deduplicated.   |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge only                | both           | Same HF checkpoint saved **once** (deduplicated).        |
-+-----------------------------+----------------+----------------------------------------------------------+
-| dist_ckpt only              | ``model``      | Sharded weights under ``model/dist_ckpt/``.              |
-+-----------------------------+----------------+----------------------------------------------------------+
-| dist_ckpt only              | ``hf_model``   | **Error** -- ``hf_model`` needs a ``bridge``             |
-|                             |                | (enable mbridge in engine).                              |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge + dist_ckpt         | ``model``      | Sharded weights under ``model/dist_ckpt/`` only (no HF   |
-|                             |                | weight export unless ``hf_model`` is also listed).       |
-+-----------------------------+----------------+----------------------------------------------------------+
-| mbridge + dist_ckpt         | ``model`` +    | Megatron shards **and** HF export (two on-disk trees).   |
-|                             | ``hf_model``   |                                                          |
-+-----------------------------+----------------+----------------------------------------------------------+
++-------------------------------------+---------------+--------------------------------------------------------+
+| Flags (megatron-bridge / dist_ckpt) | save_contents | Behaviour                                              |
++=====================================+===============+========================================================+
+| megatron-bridge only                | ``model``     | HF weights under ``model/huggingface/``.               |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge only                | ``hf_model``  | Same (HF tree); ``model`` / ``hf_model`` deduplicated. |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge only                | both          | Same HF checkpoint saved **once** (deduplicated).      |
++-------------------------------------+---------------+--------------------------------------------------------+
+| dist_ckpt only                      | ``model``     | Sharded weights under ``model/dist_ckpt/``.            |
++-------------------------------------+---------------+--------------------------------------------------------+
+| dist_ckpt only                      | ``hf_model``  | **Error** -- ``hf_model`` needs a ``bridge``           |
+|                                     |               | (enable megatron-bridge in engine).                    |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge + dist_ckpt         | ``model``     | Sharded weights under ``model/dist_ckpt/`` only (no HF |
+|                                     |               | weight export unless ``hf_model`` is also listed).     |
++-------------------------------------+---------------+--------------------------------------------------------+
+| megatron-bridge + dist_ckpt         | ``model`` +   | Megatron shards **and** HF export (two on-disk trees). |
+|                                     | ``hf_model``  |                                                        |
++-------------------------------------+---------------+--------------------------------------------------------+
 
 In all rows above, ``optimizer`` and ``extra`` (when listed in ``save_contents``) are saved through
 ``dist_checkpointing`` into their own directories -- ``optimizer/dist_ckpt/`` and
 ``extra/dist_ckpt/``.  PEFT/LoRA adapter shards are written into ``model/dist_ckpt/`` even with
-the mbridge backend (because mbridge handles only base-model weights), sitting next to the
-mbridge-produced ``model/huggingface/`` tree.
+the megatron-bridge backend (because megatron-bridge handles only base-model weights), sitting next to the
+megatron-bridge-produced ``model/huggingface/`` tree.
 
 Recommended Configurations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **Default / production**: keep ``use_mbridge=True`` and use ``save_contents=['model',
-  'optimizer', 'extra']``. The ``model/huggingface/`` folder produced by mbridge can be loaded
+  'optimizer', 'extra']``. The ``model/huggingface/`` folder produced by megatron-bridge can be loaded
   directly by HuggingFace Transformers without any further conversion step.
-- **HuggingFace-only export**: ``save_contents=['hf_model']`` (mbridge required). Useful when
+- **HuggingFace-only export**: ``save_contents=['hf_model']`` (megatron-bridge required). Useful when
   you only need a deployable HF checkpoint and not a resumable training state.
 - **Pure Megatron sharded model**: ``use_mbridge=False`` and ``use_dist_checkpointing=True``
   with ``save_contents=['model', 'optimizer', 'extra']``. The model goes into ``model/dist_ckpt/``.
@@ -297,15 +297,17 @@ The arguments for the `merge` sub-command are as follows:
 
 .. code:: bash
 
-    usage: python -m verl.model_merger merge [-h] --backend {fsdp,megatron} [--local_dir LOCAL_DIR] [--tie-word-embedding] [--is-value-model] [--use_cpu_initialization] [--target_dir TARGET_DIR]
-                         [--hf_upload_path HF_UPLOAD_PATH] [--private]
+    usage: python -m verl.model_merger merge [-h] --backend {fsdp,megatron,veomni} [--local_dir LOCAL_DIR] [--base_model_path BASE_MODEL_PATH] [--tie-word-embedding] [--is-value-model]
+                         [--use_cpu_initialization] [--target_dir TARGET_DIR] [--hf_upload_path HF_UPLOAD_PATH] [--private]
 
     options:
     -h, --help            show this help message and exit
-    --backend {fsdp,megatron}
+    --backend {fsdp,megatron,veomni}
                             The backend of the model
     --local_dir LOCAL_DIR
                             Path to the saved model checkpoints
+    --base_model_path BASE_MODEL_PATH
+                            Path to the HuggingFace model the training started from. Required by the veomni backend for models exported in their original quantized layout (DeepSeek-V4).
     --tie-word-embedding  Whether to tie word embedding weights (currently only Megatron supported)
     --is-value-model      Whether the model is a value model (currently only Megatron supported)
     --use_cpu_initialization
@@ -345,27 +347,97 @@ Example usage for merging FSDP checkpoints:
         --local_dir checkpoints/verl_fsdp_gsm8k_examples/qwen2_5_0b5_fsdp_saveload/global_step_1/actor \
         --target_dir /path/to/merged_hf_model
 
+Example usage for merging VeOmni checkpoints:
+
+.. code:: bash
+
+    python -m verl.model_merger merge \
+        --backend veomni \
+        --local_dir checkpoints/${project_name}/${exp_name}/global_step_10/actor \
+        --base_model_path /path/to/DeepSeek-V4-Flash \
+        --target_dir /path/to/merged_hf_model
+
+The VeOmni merger also reassembles expert-parallel shards (routed experts on the ``ep_fsdp`` mesh). It streams
+tensors from memory-mapped rank files, so host memory does not need to hold the whole checkpoint. Weights are
+exported through the model's VeOmni checkpoint tensor converter, the same path used for rollout weight sync, so the
+merger has no model-specific logic. Models whose converter defines ``export_weights`` (e.g. DeepSeek-V4, re-quantized
+into the FP8/FP4 layout of ``--base_model_path``) require ``--base_model_path``; tensors that are not trained (e.g.
+MTP layers) and non-weight files are then copied from the base model, so the output can be served by vLLM like the
+base model. DeepSeek-V4 export needs an SM90+ GPU for quantization. Other models are exported in bf16 HuggingFace
+format.
+
 
 Megatron Merger details
 -----------------------
 
-Current implement of decoder layers uses ``nn.ModuleList`` to store the layers, 
-and thus the model layers on every PP rank and VPP rank starts their index from 0.
+The Megatron merger constructs models and maps their weights with Megatron-Bridge.
+Install the same Megatron-Core/Bridge environment used for training, with a Bridge
+version that supports the model architecture. This includes vision-language models
+when their Bridge implementation supports full HF export.
 
-There are 3 ways to correct this behavior:
+The merger reads v2 checkpoints with weights in ``model/dist_ckpt`` and
+HF artifacts in ``model/huggingface``. Both training checkpoints and
+``scripts/converter_hf_to_mcore.py`` use this layout.
+The merger accepts only the v2 layout. Before merging a legacy Megatron training
+checkpoint, migrate it to v2:
 
-1. Modify the decoder layer's state_dict, add ``offset`` to each layer's index, thus rewrite ``nn.ModuleList`` implementation.
-2. Modify the layer index when saving checkpoint and recover them when loading checkpoint.
-3. The Checkpoint merger do this work, calculate the actual ``offset`` from ``state_dict`` only, a little complex.
+.. code:: bash
 
-Current implementation use solution 2.
+    python scripts/migrate_megatron_checkpoint_layout.py \
+        --checkpoint /path/to/legacy_checkpoint
+
+All ranks participate in conversion. Under ``torchrun``, the merger uses pipeline
+parallelism to distribute the model; MCore loads and reshards the stored weights.
+Bridge owns the parameter mappings, including QKV, MoE experts, and vision weights.
+The output includes HF weights, config, tokenizer, and processor artifacts.
+
+To compare a checkpoint against a reference HF model, including sharded safetensors:
+
+.. code:: bash
+
+    torchrun --standalone --nproc_per_node=4 -m verl.model_merger test \
+        --backend megatron \
+        --local_dir /path/to/mcore_checkpoint \
+        --test_hf_dir /path/to/reference_hf_model
 
 
 HuggingFace to Megatron DistCheckpoint details
 ----------------------------------------------
 
-Through ``mbridge``, we can directly save the mcore model to huggingface format during training.
-No need to convert the model to Megatron dist-checkpoint format.
+The training engine can load HF weights directly through Megatron-Bridge, so an
+initial conversion is optional. For workflows requiring MCore distributed weights,
+the converter uses Bridge to load HF weights and saves a model-only checkpoint
+in verl's v2 directory layout.
+
+The converter accepts ``--tp_size``, ``--pp_size``, ``--ep_size``, and
+``--etp_size``. All four default to 1. When PP is 1, it is inferred as
+``WORLD_SIZE // lcm(TP, ETP * EP)``. The world size must be
+divisible by both ``TP * PP`` and ``ETP * EP * PP``. Virtual pipeline
+parallelism is disabled during conversion.
+
+For example, to convert a MoE model with TP2/PP2/EP4/ETP1 on 8 GPUs:
+
+.. code:: bash
+
+    torchrun --standalone --nproc_per_node=8 scripts/converter_hf_to_mcore.py \
+        --hf_model_path Qwen/Qwen3-30B-A3B \
+        --output_path /path/to/mcore_checkpoint \
+        --tp_size 2 --pp_size 2 --ep_size 4 --etp_size 1 \
+        --test
+
+The converter uses BF16. ``--test`` reloads the saved
+checkpoint and compares every parameter with the HF-loaded Bridge model. It can
+also verify an existing converter output without overwriting it.
+
+The output contains ``model/dist_ckpt`` for the distributed model state and
+``model/huggingface`` for config, tokenizer, and processor artifacts.
+Pass the output root to the merger's ``--local_dir``. For engine initialization,
+set ``actor_rollout_ref.actor.megatron.dist_checkpointing_path`` to
+``/path/to/mcore_checkpoint/model/dist_ckpt`` and enable ``use_dist_checkpointing``.
+The converted checkpoint contains model weights, not optimizer state or training progress.
+
+Both tools retain ``--use_cpu_initialization`` to reduce model allocation on GPU;
+a distributed accelerator environment is still required for conversion collectives.
 
 .. note::
 

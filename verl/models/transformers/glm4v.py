@@ -30,6 +30,7 @@ from transformers.models.glm4v.modeling_glm4v import (
 from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
 from verl.utils.device import is_npu_available
+from verl.utils.transformers_compat import unpack_visual_output
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
     gather_seq_scatter_heads,
@@ -344,7 +345,7 @@ def _get_input_embeds(
     inputs_embeds = model.get_input_embeddings()(input_ids)
     if pixel_values is not None:
         pixel_values = pixel_values.type(model.visual.dtype)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
+        image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
         n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
@@ -362,7 +363,7 @@ def _get_input_embeds(
 
     if pixel_values_videos is not None:
         pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
-        video_embeds = model.visual(pixel_values_videos, grid_thw=video_grid_thw)
+        video_embeds, _ = unpack_visual_output(model.visual(pixel_values_videos, grid_thw=video_grid_thw))
         n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
         n_video_features = video_embeds.shape[0]
         if n_video_tokens != n_video_features:
@@ -381,7 +382,7 @@ def _get_input_embeds(
     if pixel_values is None and pixel_values_videos is None:  # handle mixed text-image data
         pixel_values = torch.zeros((16, 1176), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
         image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
+        image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
         inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if attention_mask is not None:
@@ -402,6 +403,7 @@ def process_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
 @dataclass
 class Glm4vCausalLMOutputForPPO(Glm4vCausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
+    topk_log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None
 
 
@@ -471,6 +473,7 @@ def forward_with_torch_backend(
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
+    topk_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Glm4vCausalLMOutputForPPO:
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
@@ -488,6 +491,27 @@ def forward_with_torch_backend(
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
+
+    if topk_labels is not None:
+        from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+
+        if topk_labels.shape[:-1] != rolled_labels.shape:
+            raise ValueError("topk_labels must have rolled_labels.shape as its leading dimensions")
+        kernel_labels = torch.cat((rolled_labels.unsqueeze(-1), topk_labels), dim=-1)
+        all_log_probs, entropy = linear_cross_entropy(
+            hidden_states,
+            self.lm_head.weight,
+            kernel_labels,
+            temperature,
+            "none",
+            impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"),
+        )
+        return Glm4vCausalLMOutputForPPO(
+            log_probs=all_log_probs[..., 0],
+            topk_log_probs=all_log_probs[..., 1:],
+            entropy=entropy,
+            hidden_states=outputs.hidden_states,
+        )
 
     fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
     log_probs, entropy = fused_linear_for_ppo.forward(
@@ -509,6 +533,7 @@ def forward_with_triton_backend(
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
     shift_labels: Optional[torch.LongTensor] = None,
+    topk_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Glm4vCausalLMOutputForPPO:
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
@@ -527,15 +552,24 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    log_probs, entropy = linear_cross_entropy(
+    kernel_labels = rolled_labels
+    if topk_labels is not None:
+        if topk_labels.shape[:-1] != rolled_labels.shape:
+            raise ValueError("topk_labels must have rolled_labels.shape as its leading dimensions")
+        kernel_labels = torch.cat((rolled_labels.unsqueeze(-1), topk_labels), dim=-1)
+    all_log_probs, entropy = linear_cross_entropy(
         hidden_states,
         self.lm_head.weight,
-        rolled_labels,
+        kernel_labels,
         temperature,
         "none",
+        impl_backend=getattr(self, "_verl_fused_kernels_backend", "triton"),
     )
+    log_probs = all_log_probs[..., 0] if topk_labels is not None else all_log_probs
+    topk_log_probs = all_log_probs[..., 1:] if topk_labels is not None else None
     return Glm4vCausalLMOutputForPPO(
         log_probs=log_probs,
+        topk_log_probs=topk_log_probs,
         entropy=entropy,
         hidden_states=outputs.hidden_states,
     )

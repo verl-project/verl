@@ -4,6 +4,11 @@ _target_: verl.workers.config.RewardConfig
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
+# Fallback built-in preset reward function when `data_source` is not matched in
+# `default_compute_score`. Options: math_dapo, math_reward, math_verify, gsm8k,
+# prime_math, prime_code, geo3k, search_r1_like_qa_em, search_r1_like_qa_subem.
+preset: null
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.
@@ -72,8 +77,13 @@ reward_model:
     prompt_length: 2048
     response_length: 2048
 
-    quantization: null
-    quantization_config_file: null
+    quantization:
+      _target_: verl.workers.config.RolloutQuantizationConfig
+      linear: null
+      moe: null
+      moe_activation: null
+      ignore: []
+      config_file: null
     mtp: null
     disaggregation:
       enabled: false
