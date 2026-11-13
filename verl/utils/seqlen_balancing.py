@@ -14,8 +14,10 @@
 
 import copy
 import heapq
+from collections.abc import Sequence
 from itertools import chain
 
+import numpy as np
 import torch
 from torch import distributed as dist
 
@@ -660,3 +662,104 @@ def get_group_balanced_partitions(
         sample_partitions.append(sorted(sample_indices))
 
     return sample_partitions
+
+
+def build_balancing_units(
+    sample_groups: Sequence[Sequence[int]],
+    unit_size: int,
+    shuffle_seed: int | Sequence[int] | None = None,
+) -> list[list[int]]:
+    """Pack indivisible sample groups into sequential balancing units.
+
+    Args:
+        sample_groups: Non-empty sequence of indivisible index groups (single-trajectory
+            groups for fixed-trajectory mode or per-UID groups for fixed-sample mode).
+        unit_size: Target number of groups per balancing unit; the final unit may contain
+            fewer groups when ``len(sample_groups)`` is not divisible by ``unit_size``.
+        shuffle_seed: Optional deterministic seed used to permute ``sample_groups`` before
+            packing them into units.
+
+    Returns:
+        List of balancing units, where each unit is the flattened sample index list of its
+        member groups.
+    """
+    if not sample_groups:
+        raise ValueError("sample_groups must be non-empty")
+    if unit_size <= 0:
+        raise ValueError(f"unit_size must be positive, got {unit_size}")
+    groups = list(sample_groups)
+    if shuffle_seed is not None:
+        order = np.random.default_rng(shuffle_seed).permutation(len(groups)).tolist()
+        groups = [groups[i] for i in order]
+    return [
+        [index for group in groups[start : start + unit_size] for index in group]
+        for start in range(0, len(groups), unit_size)
+    ]
+
+
+def get_unit_balanced_partitions(
+    workload_list: Sequence[int] | torch.Tensor,
+    units: Sequence[Sequence[int]],
+    k_partitions: int,
+) -> list[list[int]]:
+    """Balance each unit independently across DP partitions and order each rank's share.
+
+    Each unit is partitioned equally across ``k_partitions`` using Karmarkar-Karp so that
+    sequential slicing on every DP rank reconstructs the exact unit boundaries. Within each
+    rank's share of a unit, indices are ordered with smaller workloads at both ends to
+    reduce pipeline bubbles and avoid clustering long sequences in static micro-batches.
+
+    Args:
+        workload_list: Per-sample workload estimates indexed by global sample index.
+        units: Sequential balancing units of global sample indices; every unit length must
+            be divisible by ``k_partitions``.
+        k_partitions: Number of data-parallel partitions.
+
+    Returns:
+        ``k_partitions`` index lists laid out unit by unit.
+    """
+    workloads = workload_list.tolist() if isinstance(workload_list, torch.Tensor) else list(workload_list)
+    partitions: list[list[int]] = [[] for _ in range(k_partitions)]
+    for unit in units:
+        if len(unit) % k_partitions != 0:
+            raise ValueError(f"Each unit size must be divisible by k_partitions={k_partitions}, got {len(unit)}")
+        unit_partitions = get_seqlen_balanced_partitions(
+            [workloads[index] for index in unit], k_partitions=k_partitions, equal_size=True
+        )
+        for rank, partition in enumerate(unit_partitions):
+            share = [unit[index] for index in partition]
+            share.sort(key=lambda index: (workloads[index], index))
+            partitions[rank].extend(share[::2] + share[1::2][::-1])
+    return partitions
+
+
+def coalesce_unit_layout(
+    unit_count: int,
+    unit_global_sizes: Sequence[int],
+    unit_padding_counts: Sequence[int],
+    mini_batch_size: int,
+) -> dict[str, list[int]]:
+    """Coalesce GCD-sized balancing units into model-specific global mini-batch boundaries.
+
+    Args:
+        unit_count: Shared balancing-unit size in the active mode's unit (trajectories or samples).
+        unit_global_sizes: Padded global row count of each balancing unit.
+        unit_padding_counts: Synthetic padding row count inside each balancing unit.
+        mini_batch_size: Target model mini-batch size in the same unit as ``unit_count``.
+
+    Returns:
+        Dictionary with ``global_mini_batch_sizes`` and ``global_mini_batch_padding_counts``.
+    """
+    if mini_batch_size % unit_count != 0:
+        raise ValueError(f"mini_batch_size={mini_batch_size} must be divisible by balancing unit_count={unit_count}")
+    units_per_mini_batch = mini_batch_size // unit_count
+
+    def coalesce(values: Sequence[int]) -> list[int]:
+        return [
+            sum(values[start : start + units_per_mini_batch]) for start in range(0, len(values), units_per_mini_batch)
+        ]
+
+    return {
+        "global_mini_batch_sizes": coalesce(unit_global_sizes),
+        "global_mini_batch_padding_counts": coalesce(unit_padding_counts),
+    }

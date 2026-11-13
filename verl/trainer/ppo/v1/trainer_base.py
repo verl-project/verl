@@ -85,7 +85,14 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.seqlen_balancing import (
+    build_balancing_units,
+    calculate_workload,
+    coalesce_unit_layout,
+    get_seqlen_balanced_partitions,
+    get_unit_balanced_partitions,
+    log_seqlen_unbalance,
+)
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
@@ -1673,23 +1680,12 @@ class PPOTrainer(ABC):
     def _get_global_mini_batch_layout(batch: KVBatchMeta, mini_batch_size: int) -> dict[str, list[int]]:
         """Coalesce balancing units into full or final partial optimizer mini-batches."""
         layout = batch.extra_info[_MINIBATCH_LAYOUT_KEY]
-        unit_count = layout["unit_count"]
-        if mini_batch_size % unit_count != 0:
-            raise ValueError(
-                f"mini_batch_size={mini_batch_size} must be divisible by balancing unit_count={unit_count}"
-            )
-        units_per_mini_batch = mini_batch_size // unit_count
-
-        def coalesce(unit_sizes: list[int]) -> list[int]:
-            return [
-                sum(unit_sizes[start : start + units_per_mini_batch])
-                for start in range(0, len(unit_sizes), units_per_mini_batch)
-            ]
-
-        return {
-            "global_mini_batch_sizes": coalesce(layout["unit_global_sizes"]),
-            "global_mini_batch_padding_counts": coalesce(layout["unit_padding_counts"]),
-        }
+        return coalesce_unit_layout(
+            unit_count=layout["unit_count"],
+            unit_global_sizes=layout["unit_global_sizes"],
+            unit_padding_counts=layout["unit_padding_counts"],
+            mini_batch_size=mini_batch_size,
+        )
 
     def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen"):
         """Construct configured optimizer mini-batches and balance their workloads across DP ranks."""
@@ -1736,12 +1732,7 @@ class PPOTrainer(ABC):
                 raise ValueError(
                     f"fixed_trajectory balancing unit size {unit_count} must be divisible by actor dp_size={dp_size}"
                 )
-            order = (
-                np.random.default_rng(shuffle_seed).permutation(len(batch)).tolist()
-                if shuffle_seed is not None
-                else list(range(len(batch)))
-            )
-            units = [order[start : start + unit_count] for start in range(0, len(order), unit_count)]
+            units = build_balancing_units([[i] for i in range(len(batch))], unit_count, shuffle_seed=shuffle_seed)
             pad_sizes = [sum(bool(batch.tags[index].get("is_padding", False)) for index in unit) for unit in units]
         else:
             uid_to_indices = defaultdict(list)
@@ -1751,18 +1742,10 @@ class PPOTrainer(ABC):
                     raise ValueError(f"Unexpected trajectory key format: {key}")
                 uid_to_indices[fields[0]].append(index)
 
-            uids = list(uid_to_indices)
-            if not uids:
+            if not uid_to_indices:
                 raise ValueError("The sampled train batch contains no materialized UID groups")
-            unit_count = unit_count or len(uids)
-            if shuffle_seed is not None:
-                order = np.random.default_rng(shuffle_seed).permutation(len(uids))
-                uids = [uids[index] for index in order]
-
-            units = []
-            for start in range(0, len(uids), unit_count):
-                unit_uids = uids[start : start + unit_count]
-                units.append([index for uid in unit_uids for index in uid_to_indices[uid]])
+            unit_count = unit_count or len(uid_to_indices)
+            units = build_balancing_units(list(uid_to_indices.values()), unit_count, shuffle_seed=shuffle_seed)
 
             batch_multiple = self._get_minibatch_padding_multiple(dp_size)
             pad_sizes = [(-len(unit)) % batch_multiple for unit in units]
@@ -1775,16 +1758,7 @@ class PPOTrainer(ABC):
 
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
-
-        global_partition_lst = [[] for _ in range(dp_size)]
-        for unit in units:
-            unit_partitions = get_seqlen_balanced_partitions(
-                [workload_lst[index] for index in unit], k_partitions=dp_size, equal_size=True
-            )
-            for rank, partition in enumerate(unit_partitions):
-                share = [unit[index] for index in partition]
-                share.sort(key=lambda index: (workload_lst[index], index))
-                global_partition_lst[rank].extend(share[::2] + share[1::2][::-1])
+        global_partition_lst = get_unit_balanced_partitions(workload_lst, units, k_partitions=dp_size)
 
         batch.extra_info[_MINIBATCH_LAYOUT_KEY] = {
             "unit_count": unit_count,

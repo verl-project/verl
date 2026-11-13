@@ -33,7 +33,6 @@ from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
-from verl.trainer.ppo.padding_utils import PADDING_MASK_KEY
 from verl.trainer.ppo.score_centering import score_centering_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
@@ -242,101 +241,66 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
 
-    def _build_controller_layout_batches(
-        self,
-        data: TensorDict,
-        *,
-        controller_layout_sizes: list[int],
-        controller_padding_counts: list[int] | None,
-        epochs: int,
-    ) -> tuple[Iterator[TensorDict], int]:
-        """Build batches from controller-owned global boundaries."""
-        if controller_padding_counts is None:
-            raise ValueError("global_mini_batch_padding_counts is required with global_mini_batch_sizes")
-        if len(controller_padding_counts) != len(controller_layout_sizes):
-            raise ValueError(
-                "global_mini_batch_padding_counts must have the same length as global_mini_batch_sizes, "
-                f"got {controller_padding_counts} and {controller_layout_sizes}"
-            )
-        if any(
-            padding_count < 0 or padding_count > size
-            for padding_count, size in zip(controller_padding_counts, controller_layout_sizes, strict=True)
-        ):
-            raise ValueError(
-                "Each mini-batch padding count must be between zero and its padded size, "
-                f"got padding={controller_padding_counts}, padded={controller_layout_sizes}"
-            )
-
+    def _make_mini_batches(self, data: TensorDict) -> tuple[Iterator[TensorDict], int]:
+        """Build the mini-batch iterator and total optimizer update count for one local shard."""
+        mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
+        global_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
+        padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
+        padding_mask = tu.pop(data, key=tu.PADDING_MASK_KEY, default=None)
+        epochs = tu.pop(data, key="epochs", default=1)
+        seed = tu.pop(data, key="seed", default=42)
+        dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
         dp_size = self.engine.get_data_parallel_size()
-        if any(size % dp_size != 0 for size in controller_layout_sizes):
-            raise ValueError(
-                f"Every global mini-batch size must be divisible by dp_size={dp_size}, got {controller_layout_sizes}"
+
+        if global_sizes is not None:
+            assert mini_batch_size is None and padding_mask is None
+            assert padding_counts is not None and len(padding_counts) == len(global_sizes)
+            assert all(size % dp_size == 0 for size in global_sizes), (
+                f"Every global mini-batch size must be divisible by dp_size={dp_size}, got {global_sizes}"
+            )
+            local_sizes = [size // dp_size for size in global_sizes]
+            real_global_sizes = [max(1, size - pad) for size, pad in zip(global_sizes, padding_counts, strict=True)]
+            return (
+                tu.make_variable_batch_iterator(
+                    data,
+                    mini_batch_sizes=local_sizes,
+                    epochs=epochs,
+                    global_batch_sizes=real_global_sizes,
+                ),
+                len(global_sizes) * epochs,
             )
 
-        local_layout_sizes = [size // dp_size for size in controller_layout_sizes]
-        mini_batches = tu.make_variable_batch_iterator(data, mini_batch_sizes=local_layout_sizes, epochs=epochs)
-        real_global_sizes = [
-            max(1, size - padding_count)
-            for size, padding_count in zip(controller_layout_sizes, controller_padding_counts, strict=True)
-        ]
-
-        def batches_with_global_sizes() -> Iterator[TensorDict]:
-            for update_index, mini_batch in enumerate(mini_batches):
-                tu.assign_non_tensor_data(
-                    mini_batch,
-                    "global_batch_size",
-                    real_global_sizes[update_index % len(real_global_sizes)],
-                )
-                yield mini_batch
-
-        return batches_with_global_sizes(), len(controller_layout_sizes) * epochs
-
-    def _build_worker_layout_batches(
-        self,
-        data: TensorDict,
-        *,
-        worker_mini_batch_size: int | None,
-        worker_padding_mask: list[bool] | None,
-        epochs: int,
-        seed: int,
-        dataloader_kwargs: dict,
-    ) -> tuple[Iterator[TensorDict], int]:
-        """Build batches whose boundaries and optional shuffle are worker-owned."""
-        assert worker_mini_batch_size is not None
-        dp_size = self.engine.get_data_parallel_size()
-        assert worker_mini_batch_size % dp_size == 0, (
-            f"mini_batch_size={worker_mini_batch_size} must be divisible by dp_size={dp_size}"
+        assert mini_batch_size is not None and mini_batch_size % dp_size == 0, (
+            f"mini_batch_size={mini_batch_size} must be divisible by dp_size={dp_size}"
         )
-        local_mini_batch_size = worker_mini_batch_size // dp_size
-
-        if worker_padding_mask is not None:
+        local_mini_batch_size = mini_batch_size // dp_size
+        dp_rank = self.engine.get_data_parallel_rank()
+        if padding_mask is not None:
             local_batch_size = data.shape[0]
-            if len(worker_padding_mask) != local_batch_size * dp_size:
+            if len(padding_mask) != local_batch_size * dp_size:
                 raise ValueError(
-                    f"{PADDING_MASK_KEY} must describe the global batch, got "
-                    f"{len(worker_padding_mask)} rows for local_batch_size={local_batch_size} and dp_size={dp_size}"
+                    f"{tu.PADDING_MASK_KEY} must describe the global batch, got "
+                    f"{len(padding_mask)} rows for local_batch_size={local_batch_size} and dp_size={dp_size}"
                 )
-            dp_rank = self.engine.get_data_parallel_rank()
             start = dp_rank * local_batch_size
-            data[PADDING_MASK_KEY] = torch.as_tensor(
-                worker_padding_mask[start : start + local_batch_size], dtype=torch.bool
+            data[tu.PADDING_MASK_KEY] = torch.as_tensor(
+                padding_mask[start : start + local_batch_size], dtype=torch.bool
             )
 
         mini_batches = tu.make_iterator(
             data,
             mini_batch_size=local_mini_batch_size,
             epochs=epochs,
-            seed=seed + self.engine.get_data_parallel_rank(),
+            seed=seed + dp_rank,
             dataloader_kwargs=dataloader_kwargs,
         )
         num_optimizer_updates = data.shape[0] // local_mini_batch_size * epochs
-        if worker_padding_mask is None:
+        if padding_mask is None:
             return mini_batches, num_optimizer_updates
 
-        def batches_with_global_sizes() -> Iterator[TensorDict]:
+        def with_valid_global_sizes() -> Iterator[TensorDict]:
             for mini_batch in mini_batches:
-                local_padding_mask = mini_batch.pop(PADDING_MASK_KEY)
-                local_valid_rows = int((~local_padding_mask).sum().item())
+                local_valid_rows = int((~mini_batch.pop(tu.PADDING_MASK_KEY)).sum().item())
                 if dp_size > 1:
                     dp_group = self.engine.get_data_parallel_group()
                     valid_row_counts = [0] * torch.distributed.get_world_size(dp_group)
@@ -347,7 +311,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 tu.assign_non_tensor_data(mini_batch, "global_batch_size", max(1, global_valid_rows))
                 yield mini_batch
 
-        return batches_with_global_sizes(), num_optimizer_updates
+        return with_valid_global_sizes(), num_optimizer_updates
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
@@ -358,34 +322,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         maybe_fix_3d_position_ids(data)
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
-        worker_mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
-        controller_layout_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
-        controller_padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
-        worker_padding_mask = tu.pop(data, key=PADDING_MASK_KEY, default=None)
-        epochs = tu.pop(data, key="epochs", default=1)
-        seed = tu.pop(data, key="seed", default=42)
-        dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
-
-        if controller_layout_sizes is not None:
-            if worker_mini_batch_size is not None:
-                raise ValueError("global_mini_batch_sizes cannot be combined with mini_batch_size")
-            if worker_padding_mask is not None:
-                raise ValueError(f"{PADDING_MASK_KEY} cannot be combined with global_mini_batch_sizes")
-            mini_batches, num_optimizer_updates = self._build_controller_layout_batches(
-                data,
-                controller_layout_sizes=controller_layout_sizes,
-                controller_padding_counts=controller_padding_counts,
-                epochs=epochs,
-            )
-        else:
-            mini_batches, num_optimizer_updates = self._build_worker_layout_batches(
-                data,
-                worker_mini_batch_size=worker_mini_batch_size,
-                worker_padding_mask=worker_padding_mask,
-                epochs=epochs,
-                seed=seed,
-                dataloader_kwargs=dataloader_kwargs,
-            )
+        mini_batches, num_optimizer_updates = self._make_mini_batches(data)
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),

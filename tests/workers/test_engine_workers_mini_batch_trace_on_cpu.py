@@ -26,6 +26,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -121,7 +122,8 @@ def test_controller_layout_excludes_padding_from_loss_normalization():
     ]
 
 
-def test_worker_layout_counts_shuffled_non_padding_rows_across_dp(monkeypatch):
+@pytest.mark.parametrize("dp_group", [object(), None])
+def test_worker_layout_counts_shuffled_non_padding_rows_across_dp(monkeypatch, dp_group):
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda group: 2)
 
     def all_gather_object(output, local_valid_rows, group):
@@ -131,7 +133,7 @@ def test_worker_layout_counts_shuffled_non_padding_rows_across_dp(monkeypatch):
     worker = _worker(
         _engine(
             get_data_parallel_size=lambda: 2,
-            get_data_parallel_group=lambda: object(),
+            get_data_parallel_group=lambda: dp_group,
         )
     )
     seen_batches = []

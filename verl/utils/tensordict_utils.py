@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from collections.abc import Iterator, Sequence
 from typing import Any, Iterable
 
 import numpy as np
@@ -21,6 +22,8 @@ import torch
 from packaging.version import parse as parse_version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
+
+PADDING_MASK_KEY = "_verl_is_padding"
 
 
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
@@ -612,11 +615,18 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
     return iter(get_data())
 
 
-def make_variable_batch_iterator(tensordict: TensorDict, mini_batch_sizes: list[int], epochs: int):
+def make_variable_batch_iterator(
+    tensordict: TensorDict,
+    mini_batch_sizes: Sequence[int],
+    epochs: int,
+    global_batch_sizes: Sequence[int] | None = None,
+) -> Iterator[TensorDict]:
     """Yield consecutive mini-batches whose row counts may differ.
 
     The boundaries are established by the controller and must be preserved by
     the worker so UID groups and per-mini-batch DP balancing remain intact.
+    When ``global_batch_sizes`` is provided, each yielded mini-batch carries
+    its corresponding unpadded ``global_batch_size`` non-tensor metadata.
     """
     if not mini_batch_sizes or any(size <= 0 for size in mini_batch_sizes):
         raise ValueError(f"mini_batch_sizes must contain positive sizes, got {mini_batch_sizes}")
@@ -625,6 +635,11 @@ def make_variable_batch_iterator(tensordict: TensorDict, mini_batch_sizes: list[
             f"sum(mini_batch_sizes) must equal the local batch size, got "
             f"{sum(mini_batch_sizes)} and {tensordict.batch_size[0]}"
         )
+    if global_batch_sizes is not None and len(global_batch_sizes) != len(mini_batch_sizes):
+        raise ValueError(
+            f"global_batch_sizes must match mini_batch_sizes in length, got "
+            f"{len(global_batch_sizes)} and {len(mini_batch_sizes)}"
+        )
 
     boundaries = []
     start = 0
@@ -632,10 +647,13 @@ def make_variable_batch_iterator(tensordict: TensorDict, mini_batch_sizes: list[
         boundaries.append((start, start + size))
         start += size
 
-    def get_data():
+    def get_data() -> Iterator[TensorDict]:
         for _ in range(epochs):
-            for start, end in boundaries:
-                yield index_select_tensor_dict(tensordict, list(range(start, end)))
+            for step_idx, (start, end) in enumerate(boundaries):
+                mini_batch = index_select_tensor_dict(tensordict, list(range(start, end)))
+                if global_batch_sizes is not None:
+                    assign_non_tensor_data(mini_batch, "global_batch_size", global_batch_sizes[step_idx])
+                yield mini_batch
 
     return iter(get_data())
 

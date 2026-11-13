@@ -24,6 +24,11 @@ from verl.trainer.ppo.utils import (
     validate_minibatching_config,
 )
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.utils.seqlen_balancing import (
+    build_balancing_units,
+    coalesce_unit_layout,
+    get_unit_balanced_partitions,
+)
 
 
 class _StubTrainer(PPOTrainer):
@@ -274,3 +279,39 @@ def test_step_restores_minibatch_layout_after_metadata_rebuild():
     result = trainer._step_once(metrics={}, timing_raw={}, sample_batch_size=2)
 
     assert result.extra_info["_minibatch_layout"] == layout
+
+
+def test_seqlen_balancing_unit_helpers_preserve_boundaries_and_order_ends():
+    groups = [[0, 1], [2], [3, 4, 5], [6], [7, 8]]
+    units = build_balancing_units(groups, unit_size=2, shuffle_seed=[7, 1])
+    assert len(units) == 3
+    assert sorted(idx for unit in units for idx in unit) == list(range(9))
+    for group in groups:
+        assert sum(set(group).issubset(unit) for unit in units) == 1
+
+    padded_units = [[0, 1, 2, 3], [4, 5]]
+    workloads = [10, 40, 20, 30, 100, 50]
+    partitions = get_unit_balanced_partitions(workloads, padded_units, k_partitions=2)
+
+    assert len(partitions) == 2
+    assert [len(p) for p in partitions] == [3, 3]
+    # Unit 0 occupies the first 2 slots per rank; unit 1 occupies the final slot per rank.
+    assert set(partitions[0][:2]) | set(partitions[1][:2]) == {0, 1, 2, 3}
+    assert set(partitions[0][2:]) | set(partitions[1][2:]) == {4, 5}
+    # Karmarkar-Karp pairs (10, 40) vs (20, 30) in unit 0, each ordered ascending for length 2.
+    assert sum(workloads[i] for i in partitions[0][:2]) == 50
+    assert sum(workloads[i] for i in partitions[1][:2]) == 50
+
+    # Within a single 4-item share on 1 rank, smaller workloads sit at both ends: [w0, w2, w3, w1].
+    single_rank = get_unit_balanced_partitions([10, 40, 20, 30], [[0, 1, 2, 3]], k_partitions=1)
+    assert [workloads[i] for i in single_rank[0]] == [10, 30, 40, 20]
+
+    assert coalesce_unit_layout(
+        unit_count=2,
+        unit_global_sizes=[4, 6, 2],
+        unit_padding_counts=[1, 1, 1],
+        mini_batch_size=4,
+    ) == {
+        "global_mini_batch_sizes": [10, 2],
+        "global_mini_batch_padding_counts": [2, 1],
+    }
