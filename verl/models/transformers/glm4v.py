@@ -474,7 +474,7 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Glm4vCausalLMOutputForPPO:
-    from verl.utils.experimental.torch_functional import FusedLinearForPPO
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     outputs = glm4v_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
@@ -490,12 +490,12 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
-        temperature=temperature,
+    log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
+        hidden_states,
+        rolled_labels,
+        temperature,
+        getattr(self, "_verl_fused_kernels_backend", "torch"),
     )
     return Glm4vCausalLMOutputForPPO(
         log_probs=log_probs,
@@ -512,7 +512,7 @@ def forward_with_triton_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     **kwargs,
 ) -> tuple | Glm4vCausalLMOutputForPPO:
-    from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+    from verl.models.transformers.fused_lm_head import fused_lm_head_forward
 
     outputs = glm4v_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
@@ -528,12 +528,12 @@ def forward_with_triton_backend(
     else:
         raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    log_probs, entropy = linear_cross_entropy(
+    log_probs, entropy = fused_lm_head_forward(
+        self.lm_head,
         hidden_states,
-        self.lm_head.weight,
         rolled_labels,
         temperature,
-        "none",
+        "triton",
     )
     return Glm4vCausalLMOutputForPPO(
         log_probs=log_probs,
