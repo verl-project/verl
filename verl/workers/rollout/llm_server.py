@@ -147,7 +147,7 @@ class LLMServerClient:
             priority_kwargs = (
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
-            output: TokenOutput = await server.generate.remote(
+            generation_ref = server.generate.remote(
                 request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
@@ -158,6 +158,17 @@ class LLMServerClient:
                 session_id=request_id,
                 **kwargs,
             )
+            try:
+                output: TokenOutput = await generation_ref
+            except asyncio.CancelledError:
+                ray.cancel(generation_ref)
+                try:
+                    # Awaiting an ObjectRef only cancels the local future. Wait
+                    # for the remote async actor to acknowledge cancellation.
+                    await asyncio.to_thread(ray.get, generation_ref, timeout=5)
+                except ray.exceptions.TaskCancelledError:
+                    pass
+                raise
             global_steps = output.extra_fields.get("global_steps")
             output.extra_fields.setdefault("min_global_steps", global_steps)
             output.extra_fields.setdefault("max_global_steps", global_steps)

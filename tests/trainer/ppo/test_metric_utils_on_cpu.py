@@ -19,6 +19,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 from verl.trainer.ppo.metric_utils import (
@@ -588,7 +589,8 @@ class TestProcessValidationMetrics(unittest.TestCase):
 
         self.assertAlmostEqual(result["source1"]["acc"]["mean@4"], 0.25)
         self.assertAlmostEqual(result["source1"]["acc_success_only"]["mean@2"], 1.0)
-        self.assertAlmostEqual(result["source1"]["reward"]["mean@2"], 0.5)
+        self.assertAlmostEqual(result["source1"]["reward"]["mean@4"], 0.125)
+        self.assertAlmostEqual(result["source1"]["reward_success_only"]["mean@2"], 0.5)
 
     def test_process_validation_metrics_does_not_add_acc_to_reward_only_source(self):
         result = process_validation_metrics(
@@ -609,3 +611,63 @@ class TestProcessValidationMetrics(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_real_run_partial_failure_scores_use_original_five_prompts():
+    # The native run returned two genuine scores, 0 and 1, and three failures.
+    result = process_validation_metrics(
+        ["swe", "swe"],
+        ["case-2", "case-4"],
+        {"reward": [0.0, 1.0], "acc": [0.0, 1.0], "score": [0.0, 1.0]},
+        expected_acc_counts={("swe", f"case-{index}"): 1 for index in range(5)},
+    )["swe"]
+    for variable in ("reward", "acc", "score"):
+        assert result[variable]["mean@1"] == pytest.approx(0.2)
+        assert result[variable + "_success_only"]["mean@1"] == pytest.approx(0.5)
+
+
+def test_reward_only_source_does_not_acquire_accuracy_or_extra_score():
+    result = process_validation_metrics(
+        ["continuous"],
+        ["one"],
+        {"reward": [2.0]},
+        expected_acc_counts={("continuous", key): 1 for key in ("one", "two", "three")},
+    )["continuous"]
+    assert result["reward"]["mean@1"] == pytest.approx(2.0 / 3)
+    assert "acc" not in result
+    assert "score" not in result
+
+
+def test_extra_score_is_padded_only_for_sources_that_define_it():
+    result = process_validation_metrics(
+        ["scored", "reward_only"],
+        ["one", "other"],
+        {"reward": [1.0, 2.0], "score": [1.0, None]},
+        expected_acc_counts={
+            ("scored", "one"): 1,
+            ("scored", "missing"): 1,
+            ("reward_only", "other"): 1,
+            ("reward_only", "missing"): 1,
+        },
+    )
+    assert result["scored"]["score"]["mean@1"] == pytest.approx(0.5)
+    assert result["scored"]["score_success_only"]["mean@1"] == pytest.approx(1.0)
+    assert "score" not in result["reward_only"]
+
+
+def test_all_failed_validation_still_has_zero_canonical_reward():
+    result = process_validation_metrics(
+        [],
+        [],
+        {"reward": []},
+        expected_acc_counts={("swe", str(index)): 1 for index in range(5)},
+    )
+    # The helper returns nested defaultdicts: indexing an absent key would
+    # manufacture a zero and hide a missing metric.
+    assert "swe" in result
+    assert "reward" in result["swe"]
+    result = result["swe"]
+    assert "mean@1" in result["reward"]
+    assert result["reward"]["mean@1"] == pytest.approx(0.0)
+    assert "acc" not in result
+    assert "score" not in result
