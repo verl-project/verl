@@ -1,0 +1,462 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2026 NVIDIA CORPORATION & AFFILIATES
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Runtime for examples/grpo_trainer/run_deepseek_v41_lora_bitwise_megatron_lite.sh:
+# DeepSeek-V4.1-Flash LoRA RL with training/inference bitwise-identical log-probs, aarch64 GB200 (SM100).
+# Every input is pinned. VERL and Megatron-LM (Megatron Lite) are not in the image; they are mounted
+# at run time at the commits listed in the example script.
+#   vLLM     = official fe8f2140e nightly wheel natives + ISEEKYAN/vllm (v62365/lora-overlap) Python tree
+#              + its batch-invariant extension rebuilt for sm_100
+#   DeepGEMM = ISEEKYAN/DeepGEMM (r1/mega-moe-lora) built from source over the wheel's vendored copy
+# Build:  docker build --platform linux/arm64 -f docker/Dockerfile.ds41_lora_bitwise -t verl-ds41-lora .
+FROM nvcr.io/nvidia/pytorch:26.09-py3@sha256:6e8ccc607fc2a51e3741667b86316a0889418ba8b78ed0ba96e8d282b648a7a6
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+
+ARG VLLM_SHA=4d69bb528888017c7998b97972405c70076533f4
+ARG DEEPGEMM_SHA=9f9f78ff7e638c6c365b82c0549d0dfd1e41ff28
+ARG FHT_SHA=f134af63deb2df17e1171a9ec1ea4a7d8604d5ca
+ARG TRANSFER_QUEUE_SHA=ec084519f52ae12807faf5b099edb9a02f6efb76
+ARG VLLM_WHEEL=https://wheels.vllm.ai/fe8f2140eeb6103e2ac01fbe2ce40dcc9dba19de/vllm-0.32.1rc1.dev9%2Bgfe8f2140e-cp38-abi3-manylinux_2_28_aarch64.whl
+ARG VLLM_WHEEL_SHA256=afc2d388ff0d21c49e8d0ff89c589bff56d15374a1a980121d298e4f4260ed69
+ARG FLASHINFER_WHEEL_SHA256=770550a0aa92b2f10e6c9a1f048dd43713f0f3bb6a12710186fcf8e4e9c99bd8
+
+WORKDIR /opt/build
+COPY <<'EOF' requirements-runtime.txt
+Jinja2==3.1.6
+Markdown==3.11.1
+MarkupSafe==3.0.3
+PyJWT==2.15.1
+PyYAML==6.0.3
+Pygments==2.21.0
+Werkzeug==3.1.9
+absl-py==2.5.1
+accelerate==1.15.0
+agent-detector==2.0.0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.5
+aiohttp-cors==0.8.1
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.14.0
+antlr4-python3-runtime==4.9.3
+anyio==4.15.1
+apache-tvm-ffi==0.1.11
+astor==0.8.1
+attrs==26.1.0
+black==24.4.2
+blake3==1.0.11
+cachetools==7.2.1
+cbor2==6.1.5
+certifi==2026.7.22
+cffi==2.1.1
+cfgv==3.5.0
+charset-normalizer==3.5.2
+click==8.5.0
+cloudpickle==3.1.2
+cmake==4.4.4
+codetiming==1.4.0
+colorful==0.5.8
+compressed-tensors==0.17.0
+cryptography==50.0.2
+cuda-bindings==13.3.1
+cuda-core==1.0.1
+cuda-pathfinder==1.6.0
+cuda-python==13.3.1
+cuda-tile==1.6.0
+cuda-toolkit==13.0.3.0
+datasets==5.1.0
+depyf==0.20.0
+detect-installer==0.2.1
+dill==0.4.1
+distlib==0.4.3
+dnspython==2.9.0
+docstring_parser==0.18.0
+einops==0.8.2
+email-validator==2.3.0
+fastapi==0.136.3
+fastapi-cli==0.0.32
+fastapi-cloud-cli==0.26.0
+fastar==0.12.0
+fastsafetensors==0.4.0
+filelock==3.32.3
+flashinfer-python==0.7.0.post1
+frozenlist==1.8.0
+fsspec==2026.7.0
+google-api-core==2.42.0
+google-auth==2.62.0
+googleapis-common-protos==1.75.5
+grpcio==1.84.0
+h11==0.16.0
+hf-xet==1.7.0
+httpcore==1.0.9
+httpcore2==2.13.1
+httptools==0.9.0
+httpx==0.28.1
+httpx2==2.13.1
+huggingface_hub==1.33.0
+humming-kernels==0.1.16
+hydra-core==1.3.7
+identify==2.6.20
+idna==3.20
+ijson==3.6.0
+importlib_metadata==9.0.1
+iniconfig==2.3.1
+instanttensor==0.2.2
+interegular==0.3.3
+isort==5.13.2
+jiter==0.17.0
+jmespath==1.1.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+lark==1.2.2
+latex2sympy2_extended==1.11.0
+llguidance==1.7.6
+llvmlite==0.47.0
+lm-format-enforcer==0.11.3
+loguru==0.7.3
+markdown-it-py==4.2.0
+math-verify==0.9.0
+mcp==2.3.0
+mcp-types==2.3.0
+mdurl==0.1.2
+mistral_common==1.12.0
+ml_dtypes==0.6.0
+model-hosting-container-standards==0.1.16
+mpmath==1.3.0
+msgpack==1.2.3
+msgspec==0.22.0
+multidict==7.1.0
+multiprocess==0.70.19
+mypy_extensions==1.1.0
+nccl-extensions==0.1.0
+nccl4py==0.6.0
+networkx==3.6.1
+ninja==1.13.2
+nodeenv==1.11.0
+numba==0.65.0
+numpy==2.3.5
+nvdlfw_inspect==0.2.2
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cccl==13.3.4.3.1
+nvidia-cuda-crt==13.4.92
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvcc==13.4.92
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
+nvidia-cudnn-cu13==9.24.0.43
+nvidia-cudnn-frontend==1.31.0
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-cusparselt-cu13==0.8.1
+nvidia-cutlass-dsl==4.8.0
+nvidia-cutlass-dsl-libs-base==4.8.0
+nvidia-cutlass-dsl-libs-core==4.8.0
+nvidia-cutlass-dsl-libs-cu12==4.8.0
+nvidia-cutlass-dsl-libs-cu13==4.8.0
+nvidia-ml-py==13.615.71
+nvidia-nccl-cu13==2.30.7
+nvidia-nvjitlink==13.3.33
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+nvidia-nvvm==13.4.92
+nvtx==0.2.15
+omegaconf==2.3.1
+onnx==1.23.2
+onnx-ir==1.0.0
+onnxscript==0.7.2
+openai==3.31.0
+opencensus==0.11.4
+opencensus-context==0.1.3
+opencv-python-headless==5.0.0.93
+opentelemetry-api==1.45.1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-exporter-otlp==1.45.1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-exporter-prometheus==0.66b1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+opentelemetry-semantic-conventions-ai==0.5.1
+orjson==3.13.0
+oss-harmony==0.0.11
+outlines_core==0.2.14
+packaging==25.0
+pandas==3.0.6
+partial-json-parser==0.2.1.1.post7
+pathspec==1.1.1
+peft==0.21.2
+pillow==12.3.0
+platformdirs==4.13.0
+pluggy==1.6.0
+pre_commit==4.7.0
+prometheus-fastapi-instrumentator==8.1.0
+prometheus_client==0.26.0
+propcache==0.5.4
+proto-plus==1.29.0
+protobuf==7.36.2
+psutil==7.2.2
+py-cpuinfo==9.0.0
+py-spy==0.4.2
+pyarrow==26.0.0
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pybase64==1.5.1
+pybind11==3.1.0
+pycountry==26.2.16
+pycparser==3.11
+pydantic==2.14.1
+pydantic-extra-types==2.11.1
+pydantic-settings==2.16.0
+pydantic_core==2.50.1
+pylatexenc==2.11
+pynvvideocodec==2.0.4
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-discovery==1.6.2
+python-dotenv==1.2.4
+python-json-logger==4.2.0
+python-multipart==0.0.32
+pyvers==0.1.0
+pyzmq==27.2.0
+quack-kernels==0.6.5
+ray==2.59.0
+referencing==0.37.0
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
+rich-toolkit==0.20.6
+rignore==0.8.1
+rpds-py==2026.9.1
+safetensors==0.8.0
+scipy==1.18.1
+sentencepiece==0.2.2
+sentry-sdk==2.72.0
+setproctitle==1.3.8
+setuptools==80.10.2
+setuptools-scm==8.3.1
+shellingham==1.5.4
+six==1.17.0
+smart_open==8.0.3
+sniffio==1.3.1
+sse-starlette==3.5.0
+starlette==1.8.0
+supervisor==4.3.0
+sympy==1.14.0
+tabulate==0.10.0
+tblib==3.2.2
+tensorboard==2.21.0
+tensorboard-data-server==0.7.2
+tensordict==0.10.0
+tiktoken==0.14.0
+tilelang==0.1.12
+tokenizers==0.23.3
+tokenspeed-mla==2.0.2
+tokenspeed-triton==3.9.10.post20261008
+torch==2.14.0+cu130
+torch_c_dlpack_ext==0.1.5
+torchaudio==2.11.0
+torchcodec==0.17.0
+torchdata==0.11.0
+torchvision==0.29.0+cu130
+tqdm==4.70.1
+transformers==5.19.0
+triton==3.8.0
+truststore==0.10.5
+typer==0.27.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0
+uvloop==0.23.0
+virtualenv==21.14.5
+wandb==0.30.0
+watchfiles==1.3.0
+websockets==17.2
+wheel==0.48.0
+wrapt==2.5.1
+xgrammar==0.2.8
+xxhash==4.0.1
+yarl==1.25.1
+z3-solver==4.15.4.0
+zipp==4.1.1
+EOF
+COPY <<'EOF' copy-te.py
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+"""Preserve the public base's exact TE binary; never compile or fake its version."""
+
+import importlib.metadata as md
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+source = md.distribution('transformer_engine')
+assert source.version == '2.19.0+5e52befd', source.version
+site = Path(
+    subprocess.check_output(
+        [
+            '/opt/runtime/.venv/bin/python',
+            '-c',
+            'import sysconfig;print(sysconfig.get_path("purelib"))',
+        ],
+        text=True,
+    ).strip()
+)
+base = Path(source.locate_file(''))
+entries = list(base.glob('transformer_engine*'))
+assert any(x.name == 'transformer_engine' for x in entries)
+assert any(x.name == source._path.name for x in entries)
+for original in entries:
+    target = site / original.name
+    if original.is_dir():
+        shutil.copytree(original, target, dirs_exist_ok=True, symlinks=False)
+    else:
+        shutil.copy2(original, target, follow_symlinks=True)
+EOF
+COPY <<'EOF' fix-cusparselt-tag.py
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+"""Reproduce the reference runtime's cuSPARSELt wheel-tag correction (aarch64 only).
+
+PyPI's nvidia_cusparselt_cu13-0.8.1-py3-none-manylinux2014_aarch64.whl declares
+`Tag: py3-none-manylinux2014_sbsa` inside its WHEEL file, which `pip check`
+rejects. The reference runtime carries the same library and METADATA bytes with
+the tag rewritten to manylinux2014_aarch64; this applies that one-line change,
+updates RECORD, and requires the result to equal the reference WHEEL digest.
+"""
+
+import base64
+import hashlib
+import importlib.metadata as md
+import json
+import sys
+from pathlib import Path
+
+EXPECTED = {  # urlsafe-b64 sha256 from the reference RECORD
+    "WHEEL_before": "9EEww1DEpSYdq-rReTwY88G51UoHWvABWuRF6Sy_8Bs",
+    "WHEEL_after": "ABAV42k93WKqnYKLN0BIVQbWApIm1M5UwJVvVB4zSLM",
+}
+OLD, NEW = "Tag: py3-none-manylinux2014_sbsa", "Tag: py3-none-manylinux2014_aarch64"
+
+
+def digest(data: bytes) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+dist = md.distribution("nvidia-cusparselt-cu13")
+assert dist.version == "0.8.1", dist.version
+info = Path(dist._path)  # the installed .dist-info directory
+wheel, record = info / "WHEEL", info / "RECORD"
+before = wheel.read_bytes()
+assert digest(before) == EXPECTED["WHEEL_before"], "unexpected cuSPARSELt WHEEL"
+after = before.decode().replace(OLD, NEW).encode()
+assert digest(after) == EXPECTED["WHEEL_after"], "rewrite does not match the reference"
+wheel.write_bytes(after)
+name = f"{info.name}/WHEEL"
+lines = record.read_text().splitlines()
+updated = [
+    f"{name},sha256={EXPECTED['WHEEL_after']},{len(after)}" if l.startswith(name + ",") else l
+    for l in lines
+]
+assert sum(l.startswith(name + ",") for l in lines) == 1
+record.write_text("\n".join(updated) + "\n")
+json.dump(
+    {
+        "dist_info": str(info),
+        "old_tag": OLD,
+        "new_tag": NEW,
+        "wheel_sha256_before": EXPECTED["WHEEL_before"],
+        "wheel_sha256_after": EXPECTED["WHEEL_after"],
+    },
+    open(sys.argv[1], "w"),
+    indent=2,
+)
+print("cuSPARSELt WHEEL tag set to manylinux2014_aarch64 (reference digest)")
+EOF
+
+# Runtime venv: every package pinned; Transformer Engine is the base image's binary, copied unchanged.
+RUN apt-get update && apt-get install -y --no-install-recommends libdw-dev libelf-dev && rm -rf /var/lib/apt/lists/*
+RUN python -m venv --without-pip /opt/runtime/.venv \
+ && python copy-te.py \
+ && grep -F '+cu130' requirements-runtime.txt > req-cu130.txt \
+ && grep -vF '+cu130' requirements-runtime.txt > req-pypi.txt \
+ && python -m pip --python /opt/runtime/.venv/bin/python install --no-deps --index-url https://pypi.org/simple -r req-pypi.txt \
+ && python -m pip --python /opt/runtime/.venv/bin/python install --no-deps --index-url https://pypi.org/simple \
+      --extra-index-url https://download.pytorch.org/whl/cu130 -r req-cu130.txt \
+ && /opt/runtime/.venv/bin/python fix-cusparselt-tag.py /opt/runtime/cusparselt-tag.json \
+ && python -m pip --python /opt/runtime/.venv/bin/python install --no-deps \
+      "git+https://github.com/Ascend/TransferQueue.git@${TRANSFER_QUEUE_SHA}"
+
+# vLLM: wheel natives + branch Python tree + batch-invariant extension rebuilt for sm_100 from the same tree.
+WORKDIR /opt/ds41/vllm
+RUN mkdir -p pkg site obj \
+ && curl -fL -o vllm.whl "${VLLM_WHEEL}" \
+ && python -m pip download --no-deps --only-binary :all: --index-url https://pypi.org/simple flashinfer-python==0.7.2 -d . \
+ && printf '%s  vllm.whl\n%s  flashinfer_python-0.7.2-py3-none-any.whl\n' "${VLLM_WHEEL_SHA256}" "${FLASHINFER_WHEEL_SHA256}" | sha256sum -c - \
+ && python -c 'import zipfile; zipfile.ZipFile("vllm.whl").extractall("pkg"); zipfile.ZipFile("flashinfer_python-0.7.2-py3-none-any.whl").extractall("site")' \
+ && rm vllm.whl flashinfer_python-0.7.2-py3-none-any.whl \
+ && git clone https://github.com/ISEEKYAN/vllm.git src && git -C src checkout "${VLLM_SHA}" \
+ && cp -a src/vllm/. pkg/vllm/
+RUN export PATH=/usr/local/cuda/bin:$PATH \
+ && PY=/opt/runtime/.venv/bin/python \
+ && eval "$($PY -c 'import shlex, torch, torch.utils.cpp_extension as c; drop = {"-D__CUDA_NO_HALF_OPERATORS__", "-D__CUDA_NO_HALF_CONVERSIONS__", "-D__CUDA_NO_BFLOAT16_CONVERSIONS__", "-D__CUDA_NO_HALF2_OPERATORS__"}; print("TINC=" + shlex.quote(" ".join("-I" + p for p in c.include_paths(device_type="cuda")))); print("NVF=" + shlex.quote(" ".join(f for f in c.COMMON_NVCC_FLAGS if f not in drop))); print("ABI=%d" % int(torch._C._GLIBCXX_USE_CXX11_ABI)); print("TLIB=" + shlex.quote(c.library_paths(device_type="cuda")[0]))')" \
+ && COMMON="-O3 -DNDEBUG -DENABLE_FP8 -D_GLIBCXX_USE_CXX11_ABI=$ABI -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_vllm_batch_invariant_C $TINC -Isrc/csrc -I/usr/include/python3.12" \
+ && pids=() \
+ && for f in $(cd src/csrc/batch_invariant && ls *.cu | sed 's/\.cu$//'); do \
+      nvcc -c src/csrc/batch_invariant/$f.cu -o obj/$f.o $COMMON $NVF -gencode arch=compute_100,code=sm_100 -std=c++20 \
+           -U__CUDA_NO_HALF_CONVERSIONS__ -U__CUDA_NO_BFLOAT16_CONVERSIONS__ --compress-mode=size -Xcompiler -fPIC & pids+=($!); \
+    done \
+ && g++ -c src/csrc/batch_invariant/torch_bindings.cpp -o obj/torch_bindings.o $COMMON -std=c++20 -fPIC -I/usr/local/cuda/include \
+ && for p in "${pids[@]}"; do wait "$p"; done \
+ && g++ -shared -o pkg/vllm/_vllm_batch_invariant_C.so obj/*.o -L$TLIB -lc10 -lc10_cuda -ltorch -ltorch_cpu -ltorch_cuda \
+      -L/usr/local/cuda/lib64 -lcudart -Wl,-rpath,$TLIB \
+ && test "$(cuobjdump --list-elf pkg/vllm/_vllm_batch_invariant_C.so | grep -c sm_100)" -gt 0 \
+ && rm -rf obj && find pkg -name __pycache__ -prune -exec rm -rf {} +
+
+# DeepGEMM with the MegaMoE LoRA hooks (the commit pinned by the branch's cmake/external_projects/deepgemm.cmake),
+# built like vLLM's tools/build_deepgemm_C.py and installed over the wheel's vendored copy (whose envs.py is kept).
+WORKDIR /opt/ds41/deepgemm
+RUN git clone https://github.com/ISEEKYAN/DeepGEMM.git src && git -C src checkout "${DEEPGEMM_SHA}" \
+ && git -C src submodule update --init --recursive \
+ && cd src && touch scripts/__init__.py \
+ && PATH=/usr/local/cuda/bin:$PATH DG_USE_LOCAL_VERSION=0 MAX_JOBS=16 /opt/runtime/.venv/bin/python setup.py build_ext --inplace --force \
+ && D=/opt/ds41/vllm/pkg/vllm/third_party/deep_gemm \
+ && cp deep_gemm/_C_extension.abi3.so deep_gemm/_C.py "$D"/ \
+ && for f in deep_gemm/*.py deep_gemm/mega/*.py deep_gemm/utils/*.py deep_gemm/testing/*.py deep_gemm/legacy/*.py; do \
+      [ "$(basename "$f")" = envs.py ] || { mkdir -p "$D/$(dirname "${f#deep_gemm/}")"; cp "$f" "$D/${f#deep_gemm/}"; }; \
+    done \
+ && rm -rf "$D/include/deep_gemm" && cp -a deep_gemm/include/deep_gemm "$D/include/deep_gemm" \
+ && find "$D" -name __pycache__ -prune -exec rm -rf {} +
+
+# fast-hadamard-transform.
+RUN git clone https://github.com/Dao-AILab/fast-hadamard-transform.git /opt/ds41/fht-src \
+ && git -C /opt/ds41/fht-src checkout "${FHT_SHA}" \
+ && cd /opt/ds41/fht-src && TORCH_CUDA_ARCH_LIST=10.0a MAX_JOBS=16 python -m pip --python /opt/runtime/.venv/bin/python install \
+      --no-build-isolation --no-deps --target /opt/ds41/fht/site .
+
+WORKDIR /workspace
+ENV PATH=/opt/runtime/.venv/bin:/usr/local/cuda/bin:$PATH \
+    PYTHONPATH=/opt/ds41/vllm/site:/opt/ds41/vllm/pkg:/opt/ds41/vllm/pkg/vllm/third_party:/opt/ds41/fht/site \
+    VLLM_BATCH_INVARIANT=1 VLLM_BI_BF16_GEMM=tensor_core VLLM_BI_MXFP8_GEMM=tensor_core VLLM_BI_MXFP8_PREQUANT=1 \
+    VLLM_BI_MHC_OVERLAP=1 VLLM_BI_REPLAY_STAGE_LAYERS=2 \
+    VLLM_BATCH_INVARIANT_KERNEL_LIB=/opt/ds41/vllm/pkg/vllm/_vllm_batch_invariant_C.so \
+    VLLM_MEGAMOE_LORA_FUSED=1 VLLM_LORA_OVERLAP_SHRINK=1 \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8
