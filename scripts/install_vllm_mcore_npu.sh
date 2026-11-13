@@ -63,8 +63,8 @@ fi
 
 echo "4. install verl"
 cd verl
+pip install -v -e .
 pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
-pip install -v -e . --no-deps
 # （可选）提示：为了更佳的使用体验，最好将 recipe 子模块更新至最新 commit
 cd recipe
 git checkout main

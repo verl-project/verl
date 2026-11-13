@@ -207,8 +207,8 @@ verl Dependency Installation
             "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
     fi
     cd verl
+    pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
-    pip install -v -e . --no-deps
     # Restore the Triton version required by vLLM
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     # Install the FLA NPU backend for Ascend 950 (required for both FSDP and Megatron).
