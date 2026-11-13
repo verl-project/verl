@@ -84,8 +84,17 @@ def test_adapter_layout_matches_vllm_wrapper(adapter_export, monkeypatch, is_3d,
 
     adapter_export(engine, base_sync_done=True)
 
-    expected = "moe_shared_loras" if shared else "stack_3d_moe" if is_3d and not mixed else "expand_shared_outer"
-    engine.bridge.export_adapter_weights.assert_called_once_with(engine.module, **{expected: True})
+    # Two layouts, no third: the shared 2D form when the serving wrapper asks for shared MoE
+    # LoRAs, the stacked 3D form when the model is 3D and the wrapper is not mixing formats, and
+    # otherwise no layout argument at all -- the export's default compact form. Replicating the
+    # shared factor per expert is not offered on the serving path any more.
+    if shared:
+        expected = {"moe_shared_loras": True}
+    elif is_3d and not mixed:
+        expected = {"stack_3d_moe": True}
+    else:
+        expected = {}
+    engine.bridge.export_adapter_weights.assert_called_once_with(engine.module, **expected)
 
 
 def test_sglang_shared_adapter_export_does_not_import_vllm(adapter_export, monkeypatch):

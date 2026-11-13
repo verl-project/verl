@@ -1199,8 +1199,11 @@ class MegatronEngine(BaseEngine):
                     export_kwargs["moe_shared_loras"] = True
                 elif is_3d_moe:
                     export_kwargs["stack_3d_moe"] = True
-                else:
-                    export_kwargs["expand_shared_outer"] = True
+                # No third branch: the serving export has no way to replicate a shared-outer
+                # factor across experts (megatron-bridge removed the knob), so an adapter that
+                # is neither in the 2D shared layout nor stacked 3D exports in the default
+                # compact form. A consumer that cannot read that form fails at load time rather
+                # than being handed an expanded copy that silently differs from what was trained.
             per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
         else:
             conversion_tasks = self._mbridge_export_tasks()
