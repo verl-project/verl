@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl.models.mcore.patch import apply_patch_megatron_v012_with_torch_v28_v29, neutralize_broken_flash_attn_cute
+from verl.models.mcore.compat import apply_bootstrap_patches
 
 # Must precede the `.registry` import below: it reaches megatron's GPT layer specs,
 # whose optional FA4 probe crashes on a broken `flash_attn.cute`.
-neutralize_broken_flash_attn_cute()
+apply_bootstrap_patches()
 
 from .registry import (  # noqa: E402
     get_mcore_engine_forward_fn,
@@ -28,5 +28,3 @@ __all__ = [
     "get_mcore_engine_forward_fn",
     "get_mcore_forward_fused_model_engine_fn",
 ]
-
-apply_patch_megatron_v012_with_torch_v28_v29()
