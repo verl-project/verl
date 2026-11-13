@@ -1,10 +1,6 @@
 # NPU Model and Algorithm Support
 
-Last updated: 11/12/2026.
-
-For more model and algorithm training examples on Ascend, see the [verl-ascend-recipe repository](https://github.com/verl-project/verl-ascend-recipe).
-
-Choose an example for your target model and algorithm, and follow its documentation for version requirements, environment setup, and execution steps.
+Last updated: 09/21/2026.
 
 ## Table 1 RL Algorithms
 
