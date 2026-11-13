@@ -48,6 +48,7 @@ from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
+    iter_model_routers,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -227,6 +228,7 @@ class MegatronEngine(BaseEngine):
 
         # Router replay configuration for MoE models
         self.enable_routing_replay = self.engine_config.router_replay.mode != "disabled"
+        self._replay_routers_cache = {}
         logger.info(f"enable_routing_replay in MegatronEngine: {self.enable_routing_replay}")
         if self.enable_routing_replay:
             apply_router_replay_patch()
@@ -439,11 +441,24 @@ class MegatronEngine(BaseEngine):
             override_ddp_config.setdefault("use_layer_wise_param_layout", True)
         return override_ddp_config
 
+    def _get_replay_routers(self, model):
+        """Return the cached ``(layer_number, RouterReplay)`` list for a forwarded model chunk."""
+        key = tuple(id(chunk) for chunk in model) if isinstance(model, list | tuple) else id(model)
+        entry = self._replay_routers_cache.get(key)
+        if entry is None:
+            # Keep a strong reference to the chunk(s) so their id() cannot be reused
+            # while this cache entry is alive.
+            entry = (model, list(iter_model_routers(model)))
+            self._replay_routers_cache[key] = entry
+        return entry[1]
+
     def _build_megatron_module(self):
+        """Build the Megatron module(s) and load the HF weights for this engine."""
         from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
+        self._replay_routers_cache.clear()
         if self.engine_config.forward_only:
             wrap_with_ddp = False
         else:
@@ -545,6 +560,7 @@ class MegatronEngine(BaseEngine):
         )
 
     def initialize(self):
+        """Build/load the model and set up the optimizer, scheduler and checkpointer."""
         self._hf_export_tasks = None
         self._build_tf_config()
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
@@ -567,6 +583,7 @@ class MegatronEngine(BaseEngine):
             from verl.utils.qat.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
+            self._replay_routers_cache.clear()
 
         self._maybe_enable_fused_kernels()
 
@@ -1251,6 +1268,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
     def forward_step(
         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
     ):
+        """Run one micro-batch forward step and install replay targets when needed."""
         batch: TensorDict = next(batch_iter)
 
         batch = batch.to(get_device_id())
@@ -1312,13 +1330,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         else:
             vp_rank = 0
 
+        replay_routers = self._get_replay_routers(unwrapped_model) if self.enable_routing_replay else None
         if self.enable_routing_replay and RouterReplayHelper.is_replay_backward_action(
-            self.tf_config, vp_rank, model=unwrapped_model
+            self.tf_config, vp_rank, model=unwrapped_model, routers=replay_routers
         ):
-            set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_FORWARD)
+            set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_FORWARD, routers=replay_routers)
 
         if self.enable_routing_replay and RouterReplayHelper.is_replay_forward_action(
-            self.tf_config, vp_rank, model=unwrapped_model
+            self.tf_config, vp_rank, model=unwrapped_model, routers=replay_routers
         ):
             layers_topk_idx = model_inputs["routed_experts"]
             if layers_topk_idx is None:
@@ -1338,6 +1357,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 replay_mask=replay_mask,
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
+                routers=replay_routers,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1442,13 +1462,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vp_rank,
                 local_cp_size=local_cp_size,
                 model=unwrapped_model,
+                routers=replay_routers,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
         if self.enable_routing_replay and RouterReplayHelper.is_replay_forward_action(
-            self.tf_config, vp_rank, model=unwrapped_model
+            self.tf_config, vp_rank, model=unwrapped_model, routers=replay_routers
         ):
-            set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_BACKWARD)
+            set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_BACKWARD, routers=replay_routers)
 
         return output, partial(postprocess_micro_batch_func, data=batch, local_cp_size=local_cp_size)
 
