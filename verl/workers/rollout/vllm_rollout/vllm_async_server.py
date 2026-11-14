@@ -58,6 +58,7 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
     extract_response_topk_logprobs_with_coverage,
+    extract_sampled_logprobs,
     get_max_position_embeddings,
     get_node_visible_devices,
     get_vision_placeholder_token_ids,
@@ -660,8 +661,8 @@ class vLLMHttpServer:
         )
         topk_log_probs = sampling_params.pop("topk_log_probs", 0)
         sampling_params["logprobs"] = (topk_log_probs or 0) if sampling_params.pop("logprobs", False) else None
-        if sampling_params["logprobs"]:
-            # the top-k head is read from flat lists, see extract_response_topk_logprobs
+        if sampling_params["logprobs"] is not None:
+            # log-probs are read from flat lists, see extract_sampled_logprobs and extract_response_topk_logprobs
             sampling_params["flat_logprobs"] = True
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
@@ -792,7 +793,7 @@ class vLLMHttpServer:
                     warned.add(signature)
                     self._topk_coverage_warnings = warned
         elif sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            log_probs = extract_sampled_logprobs(final_res.outputs[0].logprobs)
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
