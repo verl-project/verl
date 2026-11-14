@@ -36,6 +36,7 @@ except ImportError:
 
 from verl.trainer.ppo.score_centering import dummy_rollout_topk
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.tensordict_utils import PADDING_MASK_KEY as PADDING_MASK_KEY
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
@@ -150,30 +151,18 @@ def construct_minimal_padding_template(
     return template_sample, template_tag
 
 
-def upsample_batch_to_divisible_size(
+def append_padding_samples(
     batch: KVBatchMeta,
-    batch_multiple: int,
+    pad_size: int,
     eos_token_id: int,
 ) -> KVBatchMeta:
-    """Append synthetic no-op samples so the batch size becomes divisible by *batch_multiple*.
-
-    The synthetic samples reuse the first real sample as a metadata template,
-    but manually construct an aligned ``prompt_len=SYNTHETIC_PADDING_SEQ_LEN - 1 / response_len=1``
-    sequence and zero out reward-related fields so they do not contribute to PPO,
-    entropy, or KL losses.  An ``is_padding`` flag is added in the tag for
-    downstream metrics filtering.
-
-    Args:
-        batch: The current KVBatchMeta from TransferQueue.
-        batch_multiple: The required divisor (e.g. lcm of dp_size and mini-batch sizes).
-        eos_token_id: The EOS token id from the tokenizer.
-
-    Returns:
-        The (possibly enlarged) KVBatchMeta.
-    """
-    remainder = len(batch) % batch_multiple
-    if remainder == 0:
+    """Append exactly ``pad_size`` synthetic no-op rows to ``batch``."""
+    if pad_size == 0:
         return batch
+    if pad_size < 0:
+        raise ValueError(f"pad_size must be non-negative, got {pad_size}")
+    if len(batch) == 0:
+        raise ValueError("Cannot construct padding samples from an empty batch")
 
     # Take the first trajectory as the metadata template for padding data.
     source_idx = 0
@@ -192,7 +181,6 @@ def upsample_batch_to_divisible_size(
     pad_keys = []
     pad_tags = []
     pad_fields = []
-    pad_size = batch_multiple - remainder
     for local_idx in range(pad_size):
         sample = copy.deepcopy(template_sample)
         # Use incremental local_idx as different session_ids
@@ -209,11 +197,10 @@ def upsample_batch_to_divisible_size(
         tags=pad_tags,
     )
     logger.info(
-        "Upsampled batch from %d to %d with %d synthetic padding samples for required_multiple=%d",
+        "Upsampled batch from %d to %d with %d synthetic padding samples",
         len(batch),
         len(batch) + pad_size,
         pad_size,
-        batch_multiple,
     )
     return KVBatchMeta(
         keys=batch.keys + pad_keys,

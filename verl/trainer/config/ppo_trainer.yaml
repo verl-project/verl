@@ -234,6 +234,11 @@ trainer:
   # V1 trainer mode configs
   v1:
 
+    # V1 PPO optimizer mini-batch split mode: "fixed_trajectory" or "fixed_sample"
+    # fixed_trajectory targets ppo_mini_batch_size * rollout.n trajectories.
+    # fixed_sample uses ppo_mini_batch_size source-prompt/UID samples.
+    mini_batch_mode: fixed_trajectory
+
     # Trainer mode: "sync", "colocate_async", "separate_async"
     trainer_mode: sync
 

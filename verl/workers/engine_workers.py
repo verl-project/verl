@@ -15,6 +15,7 @@ import asyncio
 import functools
 import logging
 import os
+from collections.abc import Iterator
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -274,99 +275,133 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
 
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
-    def train_mini_batch(self, data: TensorDict) -> TensorDict:
-        """Split a batch into N mini-batches run for multiple epochs
-
-        Args:
-            data:
-
-        Returns:
-
-        """
-        maybe_fix_3d_position_ids(data)
-        batch_size_per_dp = data.shape[0]
-        disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
+    def _make_mini_batches(self, data: TensorDict) -> tuple[Iterator[TensorDict], int]:
+        """Build the mini-batch iterator and total optimizer update count for one local shard."""
         mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
-        num_mini_batch = tu.pop(data, key="num_mini_batch", default=None)
+        global_sizes = tu.pop(data, key="global_mini_batch_sizes", default=None)
+        padding_counts = tu.pop(data, key="global_mini_batch_padding_counts", default=None)
+        padding_mask = tu.pop(data, key=tu.PADDING_MASK_KEY, default=None)
         epochs = tu.pop(data, key="epochs", default=1)
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
+        dp_size = self.engine.get_data_parallel_size()
 
-        assert mini_batch_size is not None or num_mini_batch is not None
-
-        if mini_batch_size is None:
-            assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
-            mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
-        else:
-            assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
-                f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+        if global_sizes is not None:
+            assert mini_batch_size is None and padding_mask is None
+            assert padding_counts is not None and len(padding_counts) == len(global_sizes)
+            assert all(size % dp_size == 0 for size in global_sizes), (
+                f"Every global mini-batch size must be divisible by dp_size={dp_size}, got {global_sizes}"
             )
-            mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
+            local_sizes = [size // dp_size for size in global_sizes]
+            real_global_sizes = [max(1, size - pad) for size, pad in zip(global_sizes, padding_counts, strict=True)]
+            return (
+                tu.make_variable_batch_iterator(
+                    data,
+                    mini_batch_sizes=local_sizes,
+                    epochs=epochs,
+                    global_batch_sizes=real_global_sizes,
+                ),
+                len(global_sizes) * epochs,
+            )
 
-        # make iterator
-        dataloader = tu.make_iterator(
+        assert mini_batch_size is not None and mini_batch_size % dp_size == 0, (
+            f"mini_batch_size={mini_batch_size} must be divisible by dp_size={dp_size}"
+        )
+        local_mini_batch_size = mini_batch_size // dp_size
+        dp_rank = self.engine.get_data_parallel_rank()
+        if padding_mask is not None:
+            local_batch_size = data.shape[0]
+            if len(padding_mask) != local_batch_size * dp_size:
+                raise ValueError(
+                    f"{tu.PADDING_MASK_KEY} must describe the global batch, got "
+                    f"{len(padding_mask)} rows for local_batch_size={local_batch_size} and dp_size={dp_size}"
+                )
+            start = dp_rank * local_batch_size
+            data[tu.PADDING_MASK_KEY] = torch.as_tensor(
+                padding_mask[start : start + local_batch_size], dtype=torch.bool
+            )
+
+        mini_batches = tu.make_iterator(
             data,
-            mini_batch_size=mini_batch_size_per_gpu,
+            mini_batch_size=local_mini_batch_size,
             epochs=epochs,
-            seed=seed + self.engine.get_data_parallel_rank(),
+            seed=seed + dp_rank,
             dataloader_kwargs=dataloader_kwargs,
         )
+        num_optimizer_updates = data.shape[0] // local_mini_batch_size * epochs
+        if padding_mask is None:
+            return mini_batches, num_optimizer_updates
+
+        def with_valid_global_sizes() -> Iterator[TensorDict]:
+            for mini_batch in mini_batches:
+                local_valid_rows = int((~mini_batch.pop(tu.PADDING_MASK_KEY)).sum().item())
+                if dp_size > 1:
+                    dp_group = self.engine.get_data_parallel_group()
+                    valid_row_counts = [0] * torch.distributed.get_world_size(dp_group)
+                    torch.distributed.all_gather_object(valid_row_counts, local_valid_rows, dp_group)
+                    global_valid_rows = sum(valid_row_counts)
+                else:
+                    global_valid_rows = local_valid_rows
+                tu.assign_non_tensor_data(mini_batch, "global_batch_size", max(1, global_valid_rows))
+                yield mini_batch
+
+        return with_valid_global_sizes(), num_optimizer_updates
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    def train_mini_batch(self, data: TensorDict) -> TensorDict:
+        """Run all optimizer mini-batches and PPO epochs for one local train-batch shard.
+
+        Controller-owned layouts preserve explicit global boundaries. Worker-owned
+        layouts derive boundaries from ``mini_batch_size`` and may shuffle rows.
+        """
+        maybe_fix_3d_position_ids(data)
+        disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
+        mini_batches, num_optimizer_updates = self._make_mini_batches(data)
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
-            # update
-            output_lst = []
-            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
+            update_outputs = []
 
-            for batch_idx, mini_batch_td in enumerate(dataloader):
-                maybe_fix_3d_position_ids(mini_batch_td)
-                # add global token num
-                if "input_ids" in mini_batch_td:
-                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
-                    # allgather from dp rank
-                    global_token_num_output = [None] * torch.distributed.get_world_size(
+            for update_index, mini_batch in enumerate(mini_batches):
+                maybe_fix_3d_position_ids(mini_batch)
+                if "input_ids" in mini_batch:
+                    local_token_counts = mini_batch["input_ids"].offsets().diff().tolist()
+                    token_counts_by_rank = [None] * torch.distributed.get_world_size(
                         self.engine.get_data_parallel_group()
                     )
                     torch.distributed.all_gather_object(
-                        global_token_num_output, global_token_num, self.engine.get_data_parallel_group()
+                        token_counts_by_rank, local_token_counts, self.engine.get_data_parallel_group()
                     )
-                    global_token_num = [x for xs in global_token_num_output for x in xs]
+                    global_token_num = [count for rank_counts in token_counts_by_rank for count in rank_counts]
                 else:
                     global_token_num = None
 
                 tu.assign_non_tensor(
-                    mini_batch_td,
+                    mini_batch,
                     global_token_num=NonTensorData(global_token_num),
-                    update_lr_scheduler=batch_idx == total_num_iterations - 1,
+                    update_lr_scheduler=update_index == num_optimizer_updates - 1,
                     disable_auto_offload=True,
                 )
-                # Name the mini-batch in the trace so each iteration of this otherwise identical
-                # loop is distinguishable when the whole step is recorded (continuous mode).
-                with torch.profiler.record_function(f"mini_batch{batch_idx}"):
-                    actor_output = self.train_batch(mini_batch_td)
-                # Advance the profiler once per mini-batch. This drives any
-                # torch.profiler.schedule (the schedule's unit is one update mini-batch) and,
-                # with no schedule, only labels torch's ProfilerStep#<n> boundary. start()/stop()
-                # happen on the outer worker, but the profiler is process-global so this reaches it.
+                with torch.profiler.record_function(f"mini_batch{update_index}"):
+                    update_output = self.train_batch(mini_batch)
+                # Keep profiler scheduling aligned with optimizer mini-batches.
                 self.profiler.step()
-                output_lst.append(actor_output)
+                update_outputs.append(update_output)
 
             if self.engine.is_mp_src_rank_with_outputs():
-                actor_output = [tu.get(output, "metrics") for output in output_lst]
+                update_metrics = [tu.get(output, "metrics") for output in update_outputs]
                 metrics = {}
-                for output in actor_output:
-                    for key, val in output.items():
-                        # flattn dp and micro batch
-                        if isinstance(val, list):
-                            output[key] = (
-                                Metric.aggregate_dp(val)
-                                if isinstance(val[0], Metric)
-                                else list(chain.from_iterable(val))
+                for output_metrics in update_metrics:
+                    for key, value in output_metrics.items():
+                        if isinstance(value, list):
+                            output_metrics[key] = (
+                                Metric.aggregate_dp(value)
+                                if isinstance(value[0], Metric)
+                                else list(chain.from_iterable(value))
                             )
-                    append_to_dict(metrics, output)
+                    append_to_dict(metrics, output_metrics)
 
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:

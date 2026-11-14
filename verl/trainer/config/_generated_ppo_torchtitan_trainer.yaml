@@ -920,6 +920,7 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    mini_batch_mode: fixed_trajectory
     trainer_mode: sync
     sync: {}
     colocate_async:
