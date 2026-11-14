@@ -149,6 +149,7 @@ class McoreEngineConfig(EngineConfig):
     Args:
         param_offload (bool): Whether to offload parameters to CPU and release gradient buffers while inactive.
         optimizer_offload (bool): Whether to offload optimizer states to CPU.
+        deduplicate_param_offload (bool): Keep one host copy per dense/expert replica group.
         tensor_model_parallel_size (int): Tensor model parallel size.
         expert_model_parallel_size (int): Expert model parallel size for MoE models.
         expert_tensor_parallel_size (Optional[int]): Expert tensor parallel size for MoE models.
@@ -179,6 +180,7 @@ class McoreEngineConfig(EngineConfig):
     # Runtime-only reservation shared by colocated engines, not a user-facing knob.
     _liger_flsce_capacity: Optional[tuple[int, int]] = field(default=None, init=False, repr=False)
     # mcore parallelism
+    deduplicate_param_offload: bool = False
     tensor_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: Optional[int] = None
@@ -212,6 +214,10 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.deduplicate_param_offload and not self.param_offload:
+            raise ValueError("deduplicate_param_offload requires param_offload=True")
+        if self.deduplicate_param_offload and self.use_megatron_fsdp:
+            raise ValueError("deduplicate_param_offload is not supported with use_megatron_fsdp=True")
         from verl.utils.real_nvfp4 import real_nvfp4_enabled
 
         if real_nvfp4_enabled(self.override_transformer_config):

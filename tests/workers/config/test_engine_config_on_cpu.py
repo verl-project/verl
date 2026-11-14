@@ -44,6 +44,17 @@ class TestMcoreEngineConfig:
         config = McoreEngineConfig(**{offload_field: True})
         assert getattr(config, offload_field) is True
 
+    def test_deduplicate_param_offload_requires_param_offload(self):
+        with pytest.raises(ValueError, match="requires param_offload"):
+            McoreEngineConfig(deduplicate_param_offload=True)
+
+        config = McoreEngineConfig(param_offload=True, deduplicate_param_offload=True)
+        assert config.deduplicate_param_offload is True
+
+    def test_deduplicate_param_offload_rejects_megatron_fsdp(self):
+        with pytest.raises(ValueError, match="not supported with use_megatron_fsdp"):
+            McoreEngineConfig(param_offload=True, deduplicate_param_offload=True, use_megatron_fsdp=True)
+
 
 class TestFSDPEngineConfigCPU:
     def test_default_values(self):

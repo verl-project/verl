@@ -42,6 +42,111 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+@dataclass(frozen=True)
+class MegatronParamOffloadGroup:
+    """Ranks that hold identical parameter shards and share one CPU copy."""
+
+    process_group: Any
+    source_rank: int
+    is_owner: bool
+
+
+@dataclass(frozen=True)
+class MegatronParamOffloadGroups:
+    """Replica groups used by dense and expert parameter buffers."""
+
+    dense: MegatronParamOffloadGroup | None
+    expert: MegatronParamOffloadGroup | None
+
+
+def _make_param_offload_group(process_group) -> MegatronParamOffloadGroup | None:
+    if torch.distributed.get_world_size(process_group) <= 1:
+        return None
+    source_rank = torch.distributed.get_global_rank(process_group, 0)
+    return MegatronParamOffloadGroup(
+        process_group=process_group,
+        source_rank=source_rank,
+        is_owner=torch.distributed.get_rank(process_group) == 0,
+    )
+
+
+def _get_megatron_param_replica_process_groups():
+    """Return dense and expert groups whose ranks hold identical parameters."""
+    dense_kwargs = {"with_context_parallel": True}
+    if "with_gtp_remat" in inspect.signature(parallel_state.get_data_parallel_group).parameters:
+        dense_kwargs["with_gtp_remat"] = False
+
+    expert_kwargs = {}
+    if "with_gtp_remat" in inspect.signature(parallel_state.get_expert_data_parallel_group).parameters:
+        expert_kwargs["with_gtp_remat"] = False
+
+    return (
+        parallel_state.get_data_parallel_group(**dense_kwargs),
+        parallel_state.get_expert_data_parallel_group(**expert_kwargs),
+    )
+
+
+def build_megatron_param_offload_groups(enabled: bool) -> MegatronParamOffloadGroups | None:
+    """Build groups of ranks that own identical dense or expert shards."""
+    if not enabled:
+        return None
+    dense_process_group, expert_process_group = _get_megatron_param_replica_process_groups()
+    groups = MegatronParamOffloadGroups(
+        dense=_make_param_offload_group(dense_process_group),
+        expert=_make_param_offload_group(expert_process_group),
+    )
+    return groups if groups.dense is not None or groups.expert is not None else None
+
+
+def _parameter_offload_group(
+    param: torch.nn.Parameter,
+    groups: MegatronParamOffloadGroups | None,
+) -> MegatronParamOffloadGroup | None:
+    if groups is None:
+        return None
+    return groups.dense if getattr(param, "allreduce", True) else groups.expert
+
+
+def _ddp_param_buffer_groups(model_chunk, groups: MegatronParamOffloadGroups | None):
+    return (
+        (model_chunk.buffers, groups.dense if groups else None),
+        (model_chunk.expert_parallel_buffers, groups.expert if groups else None),
+    )
+
+
+def _broadcast_offloaded_parameter(tensor: torch.Tensor, group: MegatronParamOffloadGroup) -> None:
+    # NCCL requires contiguous tensors; preserve the original parameter layout.
+    contiguous_tensor = tensor.contiguous()
+    torch.distributed.broadcast(contiguous_tensor, src=group.source_rank, group=group.process_group)
+    if not tensor.is_contiguous():
+        tensor.copy_(contiguous_tensor)
+
+
+def _offload_replicated_parameter(param: torch.nn.Parameter, group: MegatronParamOffloadGroup) -> None:
+    if getattr(param, "_param_offloaded", False):
+        return
+    param._offload_shape = tuple(param.shape)
+    param._offload_stride = tuple(param.stride())
+    param._param_offloaded = True
+    old_data = param.data
+    if group.is_owner:
+        param.data = old_data.to("cpu")
+        if _can_safely_resize_storage(old_data):
+            old_data.storage().resize_(0)
+    else:
+        param.data = torch.empty(0, dtype=param.dtype, device="cpu")
+        if _can_safely_resize_storage(old_data):
+            old_data.storage().resize_(0)
+
+
+def _load_replicated_parameter(param: torch.nn.Parameter, group: MegatronParamOffloadGroup, device) -> None:
+    if group.is_owner:
+        param.data = param.data.to(device, non_blocking=True)
+    else:
+        param.data = torch.empty_strided(param._offload_shape, param._offload_stride, dtype=param.dtype, device=device)
+    _broadcast_offloaded_parameter(param.data, group)
+
+
 def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
@@ -457,62 +562,71 @@ def _clear_te_fp8_weight_workspaces(model_chunk):
 
 
 @torch.no_grad()
-def offload_megatron_model_to_cpu(models):
+def offload_megatron_model_to_cpu(models, param_offload_groups: MegatronParamOffloadGroups | None = None):
     """
     In megatron, the model and optimizer storage are:
     - bf16 parameter data chunked in model parallel group
     - fp32 grad chunked in model parallel group
     - fp32 main_parameter chunked in model and dp group
     - fp32 optimizer state chunked in model and dp group
+
+    ``param_offload_groups`` enables one host parameter copy per replica group.
     """
+    if param_offload_groups is not None:
+        get_torch_device().synchronize()
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
+            for buffers, offload_group in _ddp_param_buffer_groups(model_chunk, param_offload_groups):
                 for buffer in buffers:
                     # offload parameters
+                    owns_cpu_copy = offload_group is None or offload_group.is_owner
                     if buffer.param_data.storage().size() > 0:
-                        # Reuse a single pinned cpu_data buffer per DDP buffer.
-                        # The previous implementation reallocated cpu_data via
-                        # `.cpu().pin_memory()` on every offload. Python evaluates
-                        # the RHS before the assignment, so the new pinned block is
-                        # allocated while the old cpu_data is still referenced --
-                        # peak host memory at the moment of allocation is 2x
-                        # param_data size. On large Megatron models this transient
-                        # peak exceeds the cgroup limit and OOMKills the pod even
-                        # though steady-state usage would be 1x. Reallocating here
-                        # would re-trigger the same 2x peak, so we allocate at most
-                        # once per buffer and assert shape/dtype invariance on
-                        # subsequent calls -- a mismatch means a caller rebuilt
-                        # param_data under us, which is a bug we want surfaced
-                        # rather than silently worked around.
-                        existing = getattr(buffer.param_data, "cpu_data", None)
-                        if existing is None:
-                            buffer.param_data.cpu_data = torch.empty(
-                                buffer.param_data.size(),
-                                dtype=buffer.param_data.dtype,
-                                device="cpu",
-                                pin_memory=True,
-                            )
-                            buffer.param_data_size = buffer.param_data.storage().size()
+                        if owns_cpu_copy:
+                            # Reuse a single pinned cpu_data buffer per DDP buffer.
+                            # The previous implementation reallocated cpu_data via
+                            # `.cpu().pin_memory()` on every offload. Python evaluates
+                            # the RHS before the assignment, so the new pinned block is
+                            # allocated while the old cpu_data is still referenced --
+                            # peak host memory at the moment of allocation is 2x
+                            # param_data size. On large Megatron models this transient
+                            # peak exceeds the cgroup limit and OOMKills the pod even
+                            # though steady-state usage would be 1x. Reallocating here
+                            # would re-trigger the same 2x peak, so we allocate at most
+                            # once per buffer and assert shape/dtype invariance on
+                            # subsequent calls -- a mismatch means a caller rebuilt
+                            # param_data under us, which is a bug we want surfaced
+                            # rather than silently worked around.
+                            existing = getattr(buffer.param_data, "cpu_data", None)
+                            if existing is None:
+                                buffer.param_data.cpu_data = torch.empty(
+                                    buffer.param_data.size(),
+                                    dtype=buffer.param_data.dtype,
+                                    device="cpu",
+                                    pin_memory=True,
+                                )
+                                buffer.param_data_size = buffer.param_data.storage().size()
+                            else:
+                                assert existing.shape == buffer.param_data.shape, (
+                                    f"cpu_data shape {tuple(existing.shape)} != "
+                                    f"param_data shape {tuple(buffer.param_data.shape)}; "
+                                    "reallocating would reintroduce the 2x peak."
+                                )
+                                assert existing.dtype == buffer.param_data.dtype, (
+                                    f"cpu_data dtype {existing.dtype} != "
+                                    f"param_data dtype {buffer.param_data.dtype}; "
+                                    "reallocating would reintroduce the 2x peak."
+                                )
+                            # Synchronous D2H copy into the preexisting pinned
+                            # buffer; must complete before resize_(0) frees the
+                            # GPU storage.
+                            buffer.param_data.cpu_data.copy_(buffer.param_data.data, non_blocking=False)
                         else:
-                            assert existing.shape == buffer.param_data.shape, (
-                                f"cpu_data shape {tuple(existing.shape)} != "
-                                f"param_data shape {tuple(buffer.param_data.shape)}; "
-                                "reallocating would reintroduce the 2x peak."
-                            )
-                            assert existing.dtype == buffer.param_data.dtype, (
-                                f"cpu_data dtype {existing.dtype} != "
-                                f"param_data dtype {buffer.param_data.dtype}; "
-                                "reallocating would reintroduce the 2x peak."
-                            )
-                        # Synchronous D2H copy into the preexisting pinned
-                        # buffer; must complete before resize_(0) frees the
-                        # GPU storage.
-                        buffer.param_data.cpu_data.copy_(buffer.param_data.data, non_blocking=False)
+                            buffer.param_data_size = buffer.param_data.storage().size()
+                            buffer.param_data.cpu_data = None
                         buffer.param_data.storage().resize_(0)
 
-                    assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
+                    if owns_cpu_copy:
+                        assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
 
                     if buffer.grad_data.storage().size() > 0:
                         # if the grad_data size is already zero, we assume that it is already offloaded
@@ -522,14 +636,22 @@ def offload_megatron_model_to_cpu(models):
             # DDP buffers only contain requires_grad=True params, so frozen params must be offloaded separately.
             for param in model_chunk.module.parameters():
                 if not param.requires_grad and param.device.type != "cpu":
-                    param.data = param.data.to("cpu", non_blocking=True)
+                    offload_group = _parameter_offload_group(param, param_offload_groups)
+                    if offload_group is not None:
+                        _offload_replicated_parameter(param, offload_group)
+                    else:
+                        param.data = param.data.to("cpu", non_blocking=True)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
-                old_data = param.data
-                param.data = param.data.to("cpu")
-                if _can_safely_resize_storage(old_data):
-                    old_data.storage().resize_(0)
+                offload_group = _parameter_offload_group(param, param_offload_groups)
+                if offload_group is None:
+                    old_data = param.data
+                    param.data = param.data.to("cpu")
+                    if _can_safely_resize_storage(old_data):
+                        old_data.storage().resize_(0)
+                else:
+                    _offload_replicated_parameter(param, offload_group)
                 if param.grad is not None:
                     old_grad = param.grad
                     param.grad = param.grad.to("cpu")
@@ -546,18 +668,23 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
+def load_megatron_model_to_gpu(
+    models,
+    load_grad=True,
+    load_frozen_params=True,
+    param_offload_groups: MegatronParamOffloadGroups | None = None,
+):
     """
     Load megatron model to GPU.
     Args:
         models: The model to load.
         load_grad: Whether to load gradients.
         load_frozen_params: Whether to load frozen parameters.
+        param_offload_groups: Optional replica groups used to rebuild deduplicated parameters.
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
+            for buffers, offload_group in _ddp_param_buffer_groups(model_chunk, param_offload_groups):
                 for buffer in buffers:
                     # sometimes, we don't want to load grad for pure inference
                     if load_grad and hasattr(buffer, "grad_data_size"):
@@ -572,23 +699,44 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
                             buffer.grad_data.zero_()
 
                     if buffer.param_data.storage().size() == 0:
+                        if offload_group is None and getattr(buffer.param_data, "cpu_data", None) is None:
+                            raise RuntimeError("missing parameter offload group for a deduplicated buffer")
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
-                        buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+                        if offload_group is None or offload_group.is_owner:
+                            buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+                        if offload_group is not None:
+                            _broadcast_offloaded_parameter(buffer.param_data, offload_group)
 
             # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
             if load_frozen_params:
                 device_id = get_device_id()
                 for param in model_chunk.module.parameters():
                     if not param.requires_grad and param.device.type == "cpu":
-                        param.data = param.data.to(device_id, non_blocking=True)
+                        offload_group = _parameter_offload_group(param, param_offload_groups)
+                        if offload_group is not None:
+                            _load_replicated_parameter(param, offload_group, device_id)
+                            param._param_offloaded = False
+                        elif getattr(param, "_param_offloaded", False):
+                            raise RuntimeError("missing parameter offload group for a deduplicated parameter")
+                        else:
+                            param.data = param.data.to(device_id, non_blocking=True)
         else:
             # we need this for ref module
             device_id = get_device_id()
             for _, param in model_chunk.named_parameters():
-                param.data = param.data.to(device_id, non_blocking=True)
-                if param.grad is not None:
-                    param.grad = param.grad.to(device_id, non_blocking=True)
+                offload_group = _parameter_offload_group(param, param_offload_groups)
+                if offload_group is None:
+                    if getattr(param, "_param_offloaded", False):
+                        raise RuntimeError("missing parameter offload group for a deduplicated parameter")
+                    param.data = param.data.to(device_id, non_blocking=True)
+                    if param.grad is not None:
+                        param.grad = param.grad.to(device_id, non_blocking=True)
+                elif getattr(param, "_param_offloaded", False):
+                    _load_replicated_parameter(param, offload_group, device_id)
+                    if param.grad is not None:
+                        param.grad = param.grad.to(device_id, non_blocking=True)
+                    param._param_offloaded = False
     get_torch_device().empty_cache()
 
 
@@ -1245,7 +1393,7 @@ def patch_engine_mtp(module, model_config):
 
 
 @torch.no_grad()
-def copy_megatron_model_to_cpu(models):
+def copy_megatron_model_to_cpu(models, param_offload_groups: MegatronParamOffloadGroups | None = None):
     """
     Copy Megatron model parameters to CPU memory (non-destructive copy).
     Unlike offload_megatron_model_to_cpu which moves data, this function creates
@@ -1253,25 +1401,30 @@ def copy_megatron_model_to_cpu(models):
 
     Args:
         models: List of model chunks (DDP-wrapped or unwrapped)
+        param_offload_groups: Optional replica groups used to deduplicate the snapshot
 
     Returns:
         dict: CPU state containing copied parameters and buffers
     """
     cpu_state = {}
+    if param_offload_groups is not None:
+        cpu_state["deduplicated"] = True
 
     for model_idx, model_chunk in enumerate(models):
         if isinstance(model_chunk, DDP):
             # Handle DDP-wrapped models
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             buffer_states = []
 
-            for buffers in model_chunk_all_buffers:
+            for buffers, offload_group in _ddp_param_buffer_groups(model_chunk, param_offload_groups):
                 buffer_list = []
                 for buffer in buffers:
                     buffer_state = {}
+                    owns_cpu_copy = offload_group is None or offload_group.is_owner
 
                     # Copy parameter data to CPU
-                    if buffer.param_data.storage().size() > 0:
+                    if not owns_cpu_copy:
+                        buffer_state["param_data"] = None
+                    elif buffer.param_data.storage().size() > 0:
                         buffer_state["param_data"] = buffer.param_data.data.cpu().clone().pin_memory()
                     else:
                         buffer_state["param_data"] = buffer.param_data.cpu_data.clone().pin_memory()
@@ -1284,7 +1437,9 @@ def copy_megatron_model_to_cpu(models):
             # Handle non-DDP models (ref module)
             model_state = {}
             for name, param in model_chunk.named_parameters():
-                param_state = {"data": param.data.cpu().clone().pin_memory()}
+                offload_group = _parameter_offload_group(param, param_offload_groups)
+                owns_cpu_copy = offload_group is None or offload_group.is_owner
+                param_state = {"data": param.data.cpu().clone().pin_memory() if owns_cpu_copy else None}
                 model_state[name] = param_state
 
             cpu_state[f"model_chunk_{model_idx}"] = {"model_state": model_state, "is_ddp": False}
@@ -1293,14 +1448,18 @@ def copy_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def restore_megatron_model_from_cpu(models, cpu_state):
+def restore_megatron_model_from_cpu(models, cpu_state, param_offload_groups: MegatronParamOffloadGroups | None = None):
     """
     Restore Megatron model parameters from CPU memory back to GPU.
 
     Args:
         models: List of model chunks to restore to
         cpu_state: CPU state dict returned from copy_megatron_model_to_cpu
+        param_offload_groups: Optional replica groups used to broadcast restored parameters
     """
+    if cpu_state.get("deduplicated", False) != (param_offload_groups is not None):
+        raise ValueError("param_offload_groups must match the saved Megatron CPU state")
+
     for model_idx, model_chunk in enumerate(models):
         chunk_key = f"model_chunk_{model_idx}"
         if chunk_key not in cpu_state:
@@ -1310,16 +1469,20 @@ def restore_megatron_model_from_cpu(models, cpu_state):
 
         if chunk_state["is_ddp"] and isinstance(model_chunk, DDP):
             # Restore DDP buffers
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             buffer_states = chunk_state["buffer_states"]
 
-            for buffers, buffer_list in zip(model_chunk_all_buffers, buffer_states, strict=False):
+            buffer_groups = _ddp_param_buffer_groups(model_chunk, param_offload_groups)
+            for (buffers, offload_group), buffer_list in zip(buffer_groups, buffer_states, strict=False):
                 for buffer, buffer_state in zip(buffers, buffer_list, strict=False):
                     # Restore parameter data
                     if "param_data" in buffer_state:
+                        owns_cpu_copy = offload_group is None or offload_group.is_owner
                         if buffer.param_data.storage().size() > 0:
-                            buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
-                        else:
+                            if owns_cpu_copy:
+                                buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
+                            if offload_group is not None:
+                                _broadcast_offloaded_parameter(buffer.param_data, offload_group)
+                        elif owns_cpu_copy:
                             buffer.param_data.cpu_data.copy_(buffer_state["param_data"])
 
         elif not chunk_state["is_ddp"] and not isinstance(model_chunk, DDP):
@@ -1328,4 +1491,13 @@ def restore_megatron_model_from_cpu(models, cpu_state):
             for name, param in model_chunk.named_parameters():
                 if name in model_state:
                     param_state = model_state[name]
-                    param.data.copy_(param_state["data"].to(param.device))
+                    offload_group = _parameter_offload_group(param, param_offload_groups)
+                    owns_cpu_copy = offload_group is None or offload_group.is_owner
+                    if getattr(param, "_param_offloaded", False):
+                        if owns_cpu_copy:
+                            param.data.copy_(param_state["data"])
+                    else:
+                        if owns_cpu_copy:
+                            param.data.copy_(param_state["data"].to(param.device))
+                        if offload_group is not None:
+                            _broadcast_offloaded_parameter(param.data, offload_group)
