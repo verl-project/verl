@@ -1,0 +1,5 @@
+# Agent loop config for `actor_rollout_ref.rollout.agent.agent_loop_config_path`.
+# Select it with `actor_rollout_ref.rollout.agent.default_agent_loop=runta_tool_agent`
+# or per sample through the dataset's `agent_name` field.
+- name: runta_tool_agent
+  _target_: examples.runta_sandbox.runta_agent_loop.RuntaToolAgentLoop

@@ -155,6 +155,7 @@ verl is fast with:
    advance/placement
    advance/dpo_extension
    examples/sandbox_fusion_example
+   sglang_multiturn/runta.rst
    advance/rollout_trace.rst
    advance/rl_insight.md
    advance/skip_manager.rst
