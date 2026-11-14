@@ -1,0 +1,152 @@
+# Megatron-LM patch 05/13 on ISEEKYAN/Megatron-LM ds4_vllm_align_preview @ 327a23823 (apply in order with git apply).
+#
+# impl=lite: DSA kernel-fusion config and post-optimizer hook. Not on the
+# impl=vllm path the recipe uses; kept so the tree equals the validated one.
+#
+# Upstream: not proposed.
+#
+# Source commits:
+#   [mLite][DSv4] impl=lite: DSA kernel-fusion config and post-optimizer hook (C1, C2)
+#
+diff --git a/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py b/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py
+index ba7fe2398..442d2c263 100644
+--- a/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py
++++ b/experimental/lite/megatron/lite/model/deepseek_v4/lite/protocol.py
+@@ -12,6 +12,7 @@ from megatron.lite.model.deepseek_v4.lite.checkpoint import (
+     EXPERT_CLASSIFIER,
+     PLACEMENT_FN,
+     export_hf_weights as _export_hf_weights_impl,
++    invalidate_bound_source_scales,
+     load_hf_weights as _load_hf_weights_impl,
+     save_hf_weights as _save_hf_weights_impl,
+ )
+@@ -70,6 +71,9 @@ class ImplConfig:
+     num_nextn_predict_layers: int | None = None
+     mtp_loss_scaling_factor: float = 0.1
+     qat: QATSpec | dict | None = None
++    # Fused DSA kernels for CSA (CUDA-only).  None: use them where they exist
++    # (CUDA builds), else the unfused differentiable PyTorch path (ROCm).
++    dsa_kernel_fusion: bool | None = None
+ 
+ 
+ MODULE_MAP = {
+@@ -348,6 +352,40 @@ def _configure_attention_backend(chunks: list[nn.Module], *, backend: str | None
+                 module.attention_backend = backend_name
+ 
+ 
++def _resolve_dsa_kernel_fusion(requested: bool | None) -> bool:
++    available = torch.version.hip is None
++    if requested is None:
++        return available
++    if requested and not available:
++        raise NotImplementedError(
++            "DeepSeek V4 fused DSA kernels are CUDA-only; set dsa_kernel_fusion=False "
++            "(or leave it unset) on ROCm."
++        )
++    return bool(requested)
++
++
++def _configure_dsa_kernel_fusion(chunks: list[nn.Module], *, enabled: bool) -> None:
++    for chunk in chunks:
++        for module in chunk.modules():
++            if hasattr(module, "apply_dsa_kernel_fusion"):
++                module.apply_dsa_kernel_fusion = enabled
++
++
++def post_optimizer_step(chunks: list[nn.Module]) -> None:
++    """After an update the masters no longer sit on the checkpoint's FP8 grid:
++    drop the bound source scales (the export then re-quantizes from the master)
++    and any cached deployment weights."""
++    from megatron.lite.primitive.ckpt.hf_weights import unwrap_model
++
++    for chunk in chunks:
++        chunk = unwrap_model(chunk)
++        invalidate_bound_source_scales(chunk)
++        for module in chunk.modules():
++            clear_cache = getattr(module, "clear_deployment_weight_cache", None)
++            if clear_cache is not None:
++                clear_cache()
++
++
+ def _iter_transformer_units(chunk: nn.Module) -> list[nn.Module]:
+     # Native DS4 chunks are DeepseekV4Model instances themselves. Keep support
+     # for wrapper-style chunks, but do not require a `.model` indirection or
+@@ -512,6 +550,9 @@ def build_model(model_cfg: DeepseekV4Config, *, impl_cfg: ImplConfig) -> ModelBu
+ 
+     chunks = [_chunk(i) for i in range(vpp)] if vpp is not None else [_chunk()]
+     _configure_attention_backend(chunks, backend=impl_cfg.attention_backend_override)
++    _configure_dsa_kernel_fusion(
++        chunks, enabled=_resolve_dsa_kernel_fusion(impl_cfg.dsa_kernel_fusion)
++    )
+ 
+     recompute_spec = parse_recompute_spec(impl_cfg.recompute)
+     if recompute_spec:
+@@ -552,6 +593,7 @@ def build_model(model_cfg: DeepseekV4Config, *, impl_cfg: ImplConfig) -> ModelBu
+             "optimizer_backend": optimizer_backend,
+             "post_model_load_hook": post_model_load_hook,
+             "pre_forward_hook": _make_aux_loss_hook(),
++            "post_optimizer_step_hook": lambda: post_optimizer_step(chunks),
+         },
+     )
+ 
+diff --git a/experimental/lite/tests/unit/model/deepseek_v4/lite/test_lite_protocol_hooks_unit.py b/experimental/lite/tests/unit/model/deepseek_v4/lite/test_lite_protocol_hooks_unit.py
+new file mode 100644
+index 000000000..20ab6d04a
+--- /dev/null
++++ b/experimental/lite/tests/unit/model/deepseek_v4/lite/test_lite_protocol_hooks_unit.py
+@@ -0,0 +1,55 @@
++# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++"""DS4 impl=lite protocol: DSA kernel-fusion selection and the post-optimizer-step hook."""
++import pytest
++import torch
++import torch.nn as nn
++
++from megatron.lite.model.deepseek_v4.lite import protocol
++
++
++class _Attention(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.apply_dsa_kernel_fusion = True
++        self.weight = nn.Parameter(torch.zeros(2, 2))
++        self.cleared = 0
++
++    def clear_deployment_weight_cache(self):
++        self.cleared += 1
++
++
++class _Wrapper(nn.Module):  # DDP-style wrapper: the model is .module
++    def __init__(self, module):
++        super().__init__()
++        self.module = module
++
++
++def test_dsa_kernel_fusion_default_follows_platform(monkeypatch):
++    monkeypatch.setattr(torch.version, "hip", "7.2")
++    assert protocol._resolve_dsa_kernel_fusion(None) is False
++    with pytest.raises(NotImplementedError):
++        protocol._resolve_dsa_kernel_fusion(True)
++    monkeypatch.setattr(torch.version, "hip", None)
++    assert protocol._resolve_dsa_kernel_fusion(None) is True
++    assert protocol._resolve_dsa_kernel_fusion(False) is False
++
++
++def test_configure_dsa_kernel_fusion_reaches_every_csa_module():
++    model = nn.Sequential(_Attention(), nn.Sequential(_Attention()))
++    protocol._configure_dsa_kernel_fusion([model], enabled=False)
++    assert [m.apply_dsa_kernel_fusion for m in model.modules() if isinstance(m, _Attention)] == [
++        False,
++        False,
++    ]
++
++
++def test_post_optimizer_step_invalidates_source_scales_through_wrappers():
++    inner = nn.Sequential(_Attention())
++    inner._fp8_source_scales_valid = True
++    inner._fp8_source_scales_by_name = {"x": torch.ones(1)}
++    inner[0].weight._fp8_source_scales = torch.ones(1)
++    protocol.post_optimizer_step([_Wrapper(inner)])
++    assert inner._fp8_source_scales_valid is False
++    assert inner._fp8_source_scales_by_name == {}
++    assert not hasattr(inner[0].weight, "_fp8_source_scales")
++    assert inner[0].cleared == 1

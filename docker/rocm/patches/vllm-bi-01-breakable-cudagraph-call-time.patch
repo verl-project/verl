@@ -1,0 +1,37 @@
+# vLLM v0.26.0 patch 01/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Install the breakable-CUDA-graph eager breaks regardless of import order.
+#
+# eager_break_during_capture() returned the op unwrapped when
+# VLLM_USE_BREAKABLE_CUDAGRAPH was unset at decoration time. VllmConfig turns the
+# flag on for DeepSeek-V4 only after the model modules are imported, so no break
+# was installed and a PIECEWISE capture recorded the attention ops' dummy-run
+# early exit: every replayed decode step skipped attention.
+#
+# Why BI needs it: decode logprobs differed from the prompt logprobs of the same
+# tokens at 123 of 128 positions on a 4-layer DeepSeek-V4 cut; bitwise equal
+# with the fix.
+#
+# Upstream: fixed on main by vllm-project/vllm#59941 (after v0.26.0).
+#
+# Source commits:
+#   [Bugfix] Breakable cudagraph: install eager breaks regardless of import order
+#
+diff --git a/vllm/compilation/breakable_cudagraph.py b/vllm/compilation/breakable_cudagraph.py
+index 6da3ec7178..01004f3d80 100644
+--- a/vllm/compilation/breakable_cudagraph.py
++++ b/vllm/compilation/breakable_cudagraph.py
+@@ -87,8 +87,11 @@ def eager_break_during_capture(fn: F) -> F:
+         def unified_attention_with_output(...):
+             ...
+     """
+-    if not is_breakable_cudagraph_enabled():
+-        return fn
++    # Always wrap: VllmConfig auto-enables VLLM_USE_BREAKABLE_CUDAGRAPH (e.g.
++    # for DeepSeek-V4) after the model modules are imported, so checking the
++    # flag here dropped every break and PIECEWISE graphs captured the
++    # attention ops' dummy-run early exit. With no active capture the wrapper
++    # is a passthrough.
+ 
+     @functools.wraps(fn)
+     def wrapper(*args: Any, **kwargs: Any) -> Any:

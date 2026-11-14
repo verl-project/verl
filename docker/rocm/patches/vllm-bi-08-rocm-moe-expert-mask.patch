@@ -1,0 +1,100 @@
+# vLLM v0.26.0 patch 08/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Give the AITER expert mask only to AITER MoE kernels.
+#
+# With VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 (the ROCm image
+# default), RoutedExperts.expert_map returned AITER's 0/1 local-expert mask
+# whichever experts kernel was selected. Under expert parallelism a non-AITER
+# kernel (TritonExperts, which batch-invariant mode selects) read the mask as an
+# id map. Routed-expert output rel. error 0.60 under TP2 + EP.
+#
+# Why BI needs it: BI selects TritonExperts, so every EP run hits this.
+#
+# Upstream: fixed on main by vllm-project/vllm#49758 (after v0.26.0).
+#
+# Source commits:
+#   [Bugfix][ROCm][MoE] Give the AITER expert mask only to AITER MoE kernels
+#
+diff --git a/vllm/model_executor/layers/fused_moe/experts/aiter_mxfp8_moe.py b/vllm/model_executor/layers/fused_moe/experts/aiter_mxfp8_moe.py
+index c5330f3b43..8bde4dc9db 100644
+--- a/vllm/model_executor/layers/fused_moe/experts/aiter_mxfp8_moe.py
++++ b/vllm/model_executor/layers/fused_moe/experts/aiter_mxfp8_moe.py
+@@ -76,6 +76,11 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
+         # distinctly from an unsupported device.
+         return current_platform.is_rocm() and current_platform.supports_mx()
+ 
++    @staticmethod
++    def uses_rocm_aiter_expert_mask() -> bool:
++        # apply() accepts the AITER mask (or derives it from the expert map).
++        return True
++
+     @staticmethod
+     def _supports_parallel_config(moe_parallel_config) -> bool:
+         return True
+diff --git a/vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py b/vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py
+index 4f191334bb..272700bdb7 100644
+--- a/vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py
++++ b/vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py
+@@ -437,6 +437,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
+     def _supports_current_device() -> bool:
+         return rocm_aiter_ops.is_fused_moe_enabled()
+ 
++    @staticmethod
++    def uses_rocm_aiter_expert_mask() -> bool:
++        return True
++
+     @staticmethod
+     def _supports_no_act_and_mul() -> bool:
+         return False
+diff --git a/vllm/model_executor/layers/fused_moe/modular_kernel.py b/vllm/model_executor/layers/fused_moe/modular_kernel.py
+index 5c188e5660..d891143b1c 100644
+--- a/vllm/model_executor/layers/fused_moe/modular_kernel.py
++++ b/vllm/model_executor/layers/fused_moe/modular_kernel.py
+@@ -670,6 +670,16 @@ class FusedMoEExperts(ABC):
+         """
+         return False
+ 
++    @staticmethod
++    def uses_rocm_aiter_expert_mask() -> bool:
++        """
++        Whether the ``expert_map`` argument of apply() is AITER's 0/1
++        local-expert mask (shape ``[global_num_experts + 1]``) rather than
++        vLLM's global -> local expert id map. Only AITER fused-MoE kernels
++        take the mask.
++        """
++        return False
++
+     #
+     # Various helpers for accessing quantization parameters from the
+     # quant_config.
+diff --git a/vllm/model_executor/layers/fused_moe/routed_experts.py b/vllm/model_executor/layers/fused_moe/routed_experts.py
+index 80e4064ea6..b3a34806ab 100644
+--- a/vllm/model_executor/layers/fused_moe/routed_experts.py
++++ b/vllm/model_executor/layers/fused_moe/routed_experts.py
+@@ -224,9 +224,23 @@ class RoutedExperts(PluggableLayer):
+ 
+     @property
+     def expert_map(self) -> torch.Tensor | None:
+-        return (
+-            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
+-        )
++        # With AITER MoE enabled the layer keeps AITER's 0/1 local-expert mask
++        # next to the global -> local expert map. Only AITER kernels take the
++        # mask: a non-AITER kernel selected while AITER MoE is enabled (e.g.
++        # Triton, the one batch-invariant mode selects) would read it as an id
++        # map and send every local expert to local id 1 and every remote one
++        # to local id 0 under expert parallelism.
++        if self.rocm_aiter_fmoe_enabled and self._experts_use_rocm_aiter_mask():
++            return self.expert_mask
++        return self._expert_map
++
++    def _experts_use_rocm_aiter_mask(self) -> bool:
++        quant_method = getattr(self, "quant_method", None)
++        moe_kernel = getattr(quant_method, "moe_kernel", None)
++        if moe_kernel is None:
++            # No modular kernel (yet): keep the AITER mask.
++            return True
++        return moe_kernel.fused_experts.uses_rocm_aiter_expert_mask()
+ 
+     def update_expert_map_info(self):
+         # Update local attributes from ExpertMapManager

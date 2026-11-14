@@ -1,0 +1,64 @@
+# vLLM v0.26.0 patch 11/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Give each data-parallel engine its own global RNG streams.
+#
+# Backport of vllm-project/vllm#59788 (merged on main after v0.26.0). Only the
+# code change; the upstream test is not part of the installed package.
+#
+# Why it is here: the BI=0 arm runs with rollout.full_determinism off; without
+# this, DP engines that share the engine seed sample unseeded requests
+# identically.
+#
+# Upstream: merged (#59788).
+#
+# Source commits:
+#   [Bugfix] Give each data-parallel engine its own global RNG streams (#59788)
+#
+diff --git a/vllm/utils/torch_utils.py b/vllm/utils/torch_utils.py
+index 1472024c2b..91a6d519cc 100644
+--- a/vllm/utils/torch_utils.py
++++ b/vllm/utils/torch_utils.py
+@@ -401,8 +401,12 @@ def kv_cache_dtype_str_to_dtype(
+     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+ 
+ 
+-def set_random_seed(seed: int | None) -> None:
++def set_random_seed(seed: int | None, data_parallel_index: int = 0) -> None:
+     if seed is not None:
++        if data_parallel_index:
++            # DP engines share the seed but must not sample unseeded requests alike.
++            ss = np.random.SeedSequence((seed, data_parallel_index))
++            seed = int(ss.generate_state(1)[0])
+         random.seed(seed)
+         np.random.seed(seed)
+         torch.manual_seed(seed)
+diff --git a/vllm/v1/worker/cpu_worker.py b/vllm/v1/worker/cpu_worker.py
+index 0a52ceaa3a..07099fb9a7 100644
+--- a/vllm/v1/worker/cpu_worker.py
++++ b/vllm/v1/worker/cpu_worker.py
+@@ -256,7 +256,9 @@ class CPUWorker(Worker):
+             self.model_runner.warming_up_model()
+         # Reset the seed to ensure that the random state is not affected by
+         # the model initialization and profiling.
+-        set_random_seed(self.model_config.seed)
++        set_random_seed(
++            self.model_config.seed, self.parallel_config.data_parallel_index
++        )
+         return CompilationTimes(
+             language_model=self.compilation_config.compilation_time,
+             encoder=self.compilation_config.encoder_compilation_time,
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 9c20df0d18..7d6654ed0c 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -885,7 +885,9 @@ class Worker(WorkerBase):
+ 
+         # Reset the seed to ensure that the random state is not affected by
+         # the model initialization and profiling.
+-        set_random_seed(self.model_config.seed)
++        set_random_seed(
++            self.model_config.seed, self.parallel_config.data_parallel_index
++        )
+ 
+         # Eagerly trigger inductor's once-per-process lazy inits during
+         # warmup (rather than on a later compile cache-miss at runtime).

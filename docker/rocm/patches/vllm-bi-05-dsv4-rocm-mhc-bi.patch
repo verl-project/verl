@@ -1,0 +1,150 @@
+# vLLM v0.26.0 patch 05/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# DeepSeek-V4 on ROCm: mHC on TileLang with one pre-norm GEMM kernel under BI.
+#
+# Under VLLM_BATCH_INVARIANT=1, MHCPreOp / MHCPostOp do not use AITER's
+# mhc_pre / mhc_post (which split their reductions by token count), and
+# _tilelang_hc_prenorm_gemm always uses one kernel instead of choosing one of
+# three by token count. Raises instead of silently falling back if TileLang mHC
+# is unavailable.
+#
+# Why BI needs it: the same row got different post/comb mixes (~3e-7) in
+# different batches, and a decode token differed from the same token in a
+# prefill.
+#
+# Upstream: not yet proposed. Main replaced the TileLang mHC kernels and added
+# AITER fused/delayed mHC; part of the DeepSeek-V4 ROCm RFC.
+#
+# Source commits:
+#   [ROCm][DSv4][BI] mHC on TileLang with one pre-norm GEMM kernel under BI
+#
+diff --git a/vllm/model_executor/kernels/mhc/tilelang.py b/vllm/model_executor/kernels/mhc/tilelang.py
+index c3c773d07f..9f3275b95c 100644
+--- a/vllm/model_executor/kernels/mhc/tilelang.py
++++ b/vllm/model_executor/kernels/mhc/tilelang.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import torch
+ 
++import vllm.envs as envs
+ from vllm.utils.torch_utils import direct_register_custom_op
+ 
+ 
+@@ -39,8 +40,18 @@ def _tilelang_hc_prenorm_gemm(
+     assert x.shape[1] == hc_mult * hidden_size
+     assert x.shape[1] % n_splits == 0
+     assert (x.shape[1] // n_splits) % n_thr == 0
+-    use_default_config = tile_n == 12 and n_thr == 512
+-    if n_splits == 1 and use_default_config and x.shape[0] >= 1024:
++    # The block-M (>= 1024 tokens) and 1024-thread (< 128 tokens) kernels
++    # reduce K in a different order than the default one. Choosing among them
++    # by token count makes a token's mixes depend on its batch (and decode
++    # differ from prefill), so batch-invariant mode always takes the default
++    # one-program-per-token kernel below.
++    token_count_dispatch = (
++        n_splits == 1
++        and tile_n == 12
++        and n_thr == 512
++        and not envs.VLLM_BATCH_INVARIANT
++    )
++    if token_count_dispatch and x.shape[0] >= 1024:
+         hc_prenorm_gemm_block_m_tilelang(
+             x,
+             fn,
+@@ -54,12 +65,7 @@ def _tilelang_hc_prenorm_gemm(
+             2,
+         )
+         return
+-    if (
+-        n_splits == 1
+-        and use_default_config
+-        and x.shape[0] < 128
+-        and x.shape[1] % 1024 == 0
+-    ):
++    if token_count_dispatch and x.shape[0] < 128 and x.shape[1] % 1024 == 0:
+         hc_prenorm_gemm_tilelang(
+             x,
+             fn,
+diff --git a/vllm/model_executor/layers/mhc.py b/vllm/model_executor/layers/mhc.py
+index 23733f7693..65e1eb1b23 100644
+--- a/vllm/model_executor/layers/mhc.py
++++ b/vllm/model_executor/layers/mhc.py
+@@ -4,6 +4,7 @@ import torch
+ 
+ # this import will also register the custom ops
+ # import vllm.model_executor.kernels.mhc  # noqa: F401
++import vllm.envs as envs
+ import vllm.model_executor.kernels.mhc as mhc_kernels
+ from vllm._aiter_ops import is_aiter_found_and_supported
+ from vllm.model_executor.custom_op import CustomOp
+@@ -29,6 +30,25 @@ HAS_TILELANG_MHC = _has_tilelang_mhc()
+ HAS_AITER_MHC = is_aiter_found_and_supported()
+ 
+ 
++def rocm_use_aiter_mhc(hidden_size: int) -> bool:
++    """Whether mHC pre/post run on AITER on ROCm.
++
++    Not in batch-invariant mode: AITER's ``mhc_pre`` splits its reductions by
++    the token count, so the same row gives different post/comb mixes in
++    different batches. Batch-invariant mode uses the TileLang kernels (one
++    split, see ``_tilelang_hc_prenorm_gemm``) and requires them.
++    """
++    if envs.VLLM_BATCH_INVARIANT:
++        if not HAS_TILELANG_MHC:
++            raise RuntimeError(
++                "VLLM_BATCH_INVARIANT=1 on ROCm needs the TileLang mHC kernels "
++                "(tilelang installed, not gfx942): AITER mhc_pre is not batch "
++                "invariant."
++            )
++        return False
++    return HAS_AITER_MHC and hidden_size % 256 == 0
++
++
+ # --8<-- [start:mhc_pre]
+ @CustomOp.register("mhc_pre")
+ class MHCPreOp(CustomOp):
+@@ -90,7 +110,7 @@ class MHCPreOp(CustomOp):
+         norm_eps: float = 0.0,
+     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+         hidden_size = residual.shape[-1]
+-        if HAS_AITER_MHC and hidden_size % 256 == 0:
++        if rocm_use_aiter_mhc(hidden_size):
+             return torch.ops.vllm.mhc_pre_aiter(
+                 residual,
+                 fn,
+@@ -225,7 +245,7 @@ class MHCPostOp(CustomOp):
+         comb_res_mix: torch.Tensor,
+     ) -> torch.Tensor:
+         hidden_size = residual.shape[-1]
+-        if HAS_AITER_MHC and hidden_size % 256 == 0:
++        if rocm_use_aiter_mhc(hidden_size):
+             return torch.ops.vllm.mhc_post_aiter(
+                 x,
+                 residual,
+diff --git a/vllm/models/deepseek_v4/amd/model.py b/vllm/models/deepseek_v4/amd/model.py
+index 9093bd4128..99253c6a85 100644
+--- a/vllm/models/deepseek_v4/amd/model.py
++++ b/vllm/models/deepseek_v4/amd/model.py
+@@ -8,6 +8,7 @@ import regex as re
+ import torch
+ import torch.nn as nn
+ 
++import vllm.envs as envs
+ from vllm.config import VllmConfig
+ from vllm.distributed import (
+     get_pp_group,
+@@ -308,8 +309,12 @@ class DeepseekV4DecoderLayer(nn.Module):
+         self.mhc_pre = MHCPreOp()
+         self.mhc_post = MHCPostOp()
+         self.mhc_fused_post_pre = MHCFusedPostPreOp()
+-        self.use_fused_mhc = HAS_TILELANG_MHC and not (
+-            HAS_AITER_MHC and self.hidden_size % 256 == 0
++        # Batch-invariant mode: separate pre/post on TileLang. The fused
++        # post+pre kernel picks its tile and split count by token count.
++        self.use_fused_mhc = (
++            HAS_TILELANG_MHC
++            and not (HAS_AITER_MHC and self.hidden_size % 256 == 0)
++            and not envs.VLLM_BATCH_INVARIANT
+         )
+ 
+     def hc_pre(

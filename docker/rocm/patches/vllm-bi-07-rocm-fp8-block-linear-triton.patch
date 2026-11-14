@@ -1,0 +1,71 @@
+# vLLM v0.26.0 patch 07/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Block-FP8 linear on the fixed-config Triton GEMM under BI on ROCm.
+#
+# With VLLM_BATCH_INVARIANT=1 on ROCm, init_fp8_linear_kernel selects
+# TritonFp8BlockScaledMMKernel for block-FP8 linears (and raises if it cannot),
+# and w8a8_triton_block_scaled_mm skips the per-M tuned-config lookup, so every
+# M runs the same K loop.
+#
+# Why BI needs it: AITER gemm_a8w8_blockscale picks its kernel by M; on the full
+# DeepSeek-V4-Flash model shared_experts.down_proj gave a different row in
+# decode and prefill, and 9/32 sampled sequences diverged under DP4/EP4.
+#
+# Upstream: covered on main by vllm-project/vllm#52231.
+#
+# Source commits:
+#   [ROCm][BI] Block-FP8 linear on the fixed-config Triton GEMM under BI
+#
+diff --git a/vllm/model_executor/kernels/linear/__init__.py b/vllm/model_executor/kernels/linear/__init__.py
+index fcc50ffcb0..9b6ecc9e6f 100644
+--- a/vllm/model_executor/kernels/linear/__init__.py
++++ b/vllm/model_executor/kernels/linear/__init__.py
+@@ -595,6 +595,29 @@ def init_fp8_linear_kernel(
+     )
+ 
+     if activation_quant_key.scale.group_shape.is_per_group():
++        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
++            # AITER gemm_a8w8_blockscale (CK, or AITER's Triton variant for
++            # tuned shapes) picks its kernel by M, so a row's result depends
++            # on how many rows share the call (decode differs from prefill).
++            # vLLM's Triton block-scaled GEMM runs one fixed config for every
++            # M in batch-invariant mode (see w8a8_triton_block_scaled_mm).
++            bi_kernel = TritonFp8BlockScaledMMKernel
++            ok, reason = is_supported_and_can_implement_kernel(
++                bi_kernel, scaled_mm_linear_kernel_config, None
++            )
++            if not ok:
++                raise ValueError(
++                    "VLLM_BATCH_INVARIANT=1 on ROCm needs "
++                    f"{bi_kernel.__name__} for block-FP8 linear layers: {reason}"
++                )
++            if force_kernel is not None and force_kernel is not bi_kernel:
++                logger.warning_once(
++                    "VLLM_BATCH_INVARIANT overrides %s with %s for block-FP8 "
++                    "linear layers.",
++                    force_kernel.__name__,
++                    bi_kernel.__name__,
++                )
++            force_kernel = bi_kernel  # type: ignore[assignment]
+         kernel_type = choose_scaled_mm_linear_kernel(
+             config=scaled_mm_linear_kernel_config,
+             possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+diff --git a/vllm/model_executor/layers/quantization/utils/fp8_utils.py b/vllm/model_executor/layers/quantization/utils/fp8_utils.py
+index 83e56a4567..108b867fcc 100644
+--- a/vllm/model_executor/layers/quantization/utils/fp8_utils.py
++++ b/vllm/model_executor/layers/quantization/utils/fp8_utils.py
+@@ -938,7 +938,13 @@ def w8a8_triton_block_scaled_mm(
+     C_shape = A.shape[:-1] + (N,)
+     C = A.new_empty(C_shape, dtype=output_dtype)
+ 
+-    configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
++    # Tuned configs are chosen by M, which makes a row's result depend on the
++    # number of rows in the call; batch-invariant mode uses the default one.
++    configs = (
++        None
++        if envs.VLLM_BATCH_INVARIANT
++        else get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
++    )
+     if configs:
+         # Get the optimal config if there is one
+         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]

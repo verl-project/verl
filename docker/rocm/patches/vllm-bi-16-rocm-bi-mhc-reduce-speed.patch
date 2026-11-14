@@ -1,0 +1,532 @@
+# vLLM v0.26.0 patch 16/18 (apply after the four DeepSeek-V4 patches above it).
+#
+# Faster batch-invariant mHC and rank-order reduce, bitwise unchanged.
+#
+# - The FP32 rank-order sum of patch 10 runs as one Triton kernel with the same
+#   left-to-right FP32 adds and one rounding (~28 us -> ~2.4 us per call at 8
+#   ranks).
+# - TileLang mHC pre-norm GEMM uses the block-M kernel with the same K order and
+#   reductions.
+#
+# Upstream: the reduce matches #52231's fixed-order sum kernel except for the
+# sign of an all-(-0) sum and NaN payloads; the mHC part belongs to the
+# DeepSeek-V4 ROCm RFC.
+#
+# Source commits:
+#   [ROCm][BI] Faster batch-invariant mHC and rank-order reduce, bitwise unchanged
+#
+diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
+index a292aca083..ef89ae6d84 100644
+--- a/vllm/distributed/parallel_state.py
++++ b/vllm/distributed/parallel_state.py
+@@ -51,6 +51,7 @@ from vllm.distributed.utils import (
+     get_cached_tcp_store_client,
+ )
+ from vllm.logger import init_logger
++from vllm.triton_utils import tl, triton
+ from vllm.utils.import_utils import resolve_obj_by_qualname
+ from vllm.utils.network_utils import get_distributed_init_method
+ from vllm.utils.system_utils import suppress_stdout
+@@ -355,6 +356,73 @@ direct_register_custom_op(
+ )
+ 
+ 
++@triton.jit
++def _rank_order_sum_kernel(
++    parts_ptr,
++    self_ptr,
++    out_ptr,
++    numel,
++    WORLD: tl.constexpr,
++    SELF_RANK: tl.constexpr,
++    OUT_BF16: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
++    mask = offs < numel
++    if SELF_RANK == 0:
++        acc = tl.load(self_ptr + offs, mask=mask).to(tl.float32)
++    else:
++        acc = tl.load(parts_ptr + offs, mask=mask).to(tl.float32)
++    for r in tl.static_range(1, WORLD):
++        if r == SELF_RANK:
++            v = tl.load(self_ptr + offs, mask=mask)
++        else:
++            v = tl.load(parts_ptr + r * numel + offs, mask=mask)
++        acc = acc + v.to(tl.float32)
++    out = acc.to(out_ptr.dtype.element_ty)
++    if OUT_BF16:
++        # torch rounds every NaN to the canonical bf16 NaN 0x7FC0.
++        nan = tl.full([BLOCK], 0x7FC0, tl.int16).to(tl.bfloat16, bitcast=True)
++        out = tl.where(acc != acc, nan, out)
++    tl.store(out_ptr + offs, out, mask=mask)
++
++
++def _rank_order_sum(
++    parts: torch.Tensor,
++    out_dtype: torch.dtype,
++    self_part: torch.Tensor | None = None,
++    self_rank: int = -1,
++) -> torch.Tensor:
++    """``(parts[0].float() + parts[1].float() + ...).to(out_dtype)`` (FP32,
++    left to right, one rounding) in one kernel. ``parts`` is
++    ``(world, *shape)``; with ``self_part``, slot ``self_rank`` is read from
++    it instead of ``parts``."""
++    assert parts.is_contiguous()
++    out = torch.empty(parts.shape[1:], dtype=out_dtype, device=parts.device)
++    numel = out.numel()
++    if self_part is None:
++        self_rank = -1
++        self_part = parts
++    else:
++        assert self_part.is_contiguous() and self_part.shape == out.shape
++        assert self_part.dtype == parts.dtype
++    if numel == 0:
++        return out
++    block = 2048
++    _rank_order_sum_kernel[(triton.cdiv(numel, block),)](
++        parts,
++        self_part,
++        out,
++        numel,
++        WORLD=parts.shape[0],
++        SELF_RANK=self_rank,
++        OUT_BF16=out_dtype == torch.bfloat16,
++        BLOCK=block,
++        num_warps=8,
++    )
++    return out
++
++
+ class GroupCoordinator:
+     """
+     PyTorch ProcessGroup wrapper for a group of processes.
+@@ -680,12 +748,16 @@ class GroupCoordinator:
+             return self._batch_invariant_all_reduce(input_)
+         return self.device_communicator.all_reduce(input_)
+ 
+-    def _rank_order_sum(self, parts: list[torch.Tensor] | torch.Tensor):
+-        """FP32 sum of ``parts[0] + parts[1] + ...`` in rank order."""
+-        acc = parts[0].float()
+-        for r in range(1, self.world_size):
+-            acc = acc + parts[r].float()
+-        return acc
++    def _rank_order_sum(
++        self,
++        parts: torch.Tensor,
++        out_dtype: torch.dtype,
++        self_part: torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        """FP32 sum of ``parts[0] + parts[1] + ...`` in rank order, rounded
++        once to ``out_dtype`` (one fused kernel). With ``self_part``, this
++        rank's slot is read from it instead of ``parts``."""
++        return _rank_order_sum(parts, out_dtype, self_part, self.rank_in_group)
+ 
+     def _batch_invariant_all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+         """All-reduce whose result does not depend on the message size: an
+@@ -695,7 +767,7 @@ class GroupCoordinator:
+         gathered = self.device_communicator.all_gather(
+             input_.unsqueeze(0).contiguous(), 0
+         )
+-        return self._rank_order_sum(gathered).to(input_.dtype)
++        return self._rank_order_sum(gathered, input_.dtype)
+ 
+     def _batch_invariant_reduce_scatter(
+         self, input_: torch.Tensor, dim: int, sizes: list[int] | None
+@@ -721,21 +793,22 @@ class GroupCoordinator:
+             else torch.split(input_, list(sizes), dim=0)
+         )
+         send = [c.contiguous() for c in chunks]
+-        recv = [torch.empty_like(send[rank]) for _ in range(world_size)]
++        recv_buf = send[rank].new_empty((world_size, *send[rank].shape))
++        recv = list(recv_buf.unbind(0))
+         assert self.device_communicator is not None
+         pynccl_comm = getattr(self.device_communicator, "pynccl_comm", None)
+         if pynccl_comm is not None and not pynccl_comm.disabled:
+             # Grouped send/recv on the current stream (graph capturable).
+-            recv[rank].copy_(send[rank])
++            # This rank's own chunk is summed straight from send[rank].
+             pynccl_comm.group_start()
+             for peer in range(world_size):
+                 if peer != rank:
+                     pynccl_comm.send(send[peer], peer)
+                     pynccl_comm.recv(recv[peer], peer)
+             pynccl_comm.group_end()
+-        else:
+-            torch.distributed.all_to_all(recv, send, group=self.device_group)
+-        return self._rank_order_sum(recv).to(input_.dtype)
++            return self._rank_order_sum(recv_buf, input_.dtype, send[rank])
++        torch.distributed.all_to_all(recv, send, group=self.device_group)
++        return self._rank_order_sum(recv_buf, input_.dtype)
+ 
+     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+         world_size = self.world_size
+diff --git a/vllm/model_executor/kernels/mhc/tilelang.py b/vllm/model_executor/kernels/mhc/tilelang.py
+index 9f3275b95c..159cc6a200 100644
+--- a/vllm/model_executor/kernels/mhc/tilelang.py
++++ b/vllm/model_executor/kernels/mhc/tilelang.py
+@@ -79,6 +79,25 @@ def _tilelang_hc_prenorm_gemm(
+             n_splits,
+         )
+         return
++    if n_splits == 1 and n_thr == 512 and tile_n == 12:
++        # Same per-output arithmetic as the default kernel below (each of the
++        # 512 threads sums its K slice serially, then the same warp/block
++        # reduction); only the output tile and the tokens per block change,
++        # chosen by token count for speed. Bitwise equal for every row.
++        bi_tile_n, block_m = _prenorm_gemm_tiles(x.shape[0])
++        hc_prenorm_gemm_block_m_tilelang(
++            x,
++            fn,
++            out,
++            sqrsum,
++            hidden_size,
++            hc_mult,
++            fn.shape[0],
++            n_thr,
++            bi_tile_n,
++            block_m,
++        )
++        return
+     hc_prenorm_gemm_tilelang(
+         x,
+         fn,
+@@ -93,6 +112,47 @@ def _tilelang_hc_prenorm_gemm(
+     )
+ 
+ 
++def _prenorm_gemm_tiles(num_tokens: int) -> tuple[int, int]:
++    """(tile_n, block_m) for the 512-thread prenorm GEMM, tuned on MI355X;
++    the numerics do not depend on either."""
++    if num_tokens <= 32:
++        return 1, 1
++    if num_tokens <= 64:
++        return 2, 1
++    if num_tokens <= 128:
++        return 4, 1
++    if num_tokens <= 256:
++        return 3, 2
++    if num_tokens <= 512:
++        return 6, 2
++    return 12, 2
++
++
++def _pre_big_fuse_h_split(num_tokens: int) -> int:
++    """Hidden-dim blocks per token for the big_fuse kernel, tuned on MI355X;
++    the numerics do not depend on it. (16 splits leave each thread too few
++    elements and are not bitwise equal; do not use.)"""
++    if num_tokens <= 512:
++        return 8
++    if num_tokens <= 2048:
++        return 4
++    return 2
++
++
++def _post_hsplit_cfg(num_tokens: int) -> tuple[int, int] | None:
++    """(threads, hidden chunk) per block for mhc_post, tuned on MI355X, or
++    None for the one-block-per-token kernel. The numerics do not depend on
++    it as long as each thread holds >= 16 elements (fewer is not bitwise
++    equal on ROCm)."""
++    if num_tokens <= 64:
++        return 64, 256
++    if num_tokens <= 256:
++        return 128, 512
++    if num_tokens <= 2048:
++        return 64, 256
++    return None
++
++
+ def mhc_pre_tilelang(
+     residual: torch.Tensor,
+     fn: torch.Tensor,
+@@ -134,6 +194,7 @@ def mhc_pre_tilelang(
+     """
+     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+         compute_num_split,
++        mhc_pre_big_fuse_hsplit_tilelang,
+         mhc_pre_big_fuse_tilelang,
+         mhc_pre_big_fuse_with_norm_tilelang,
+     )
+@@ -215,7 +276,27 @@ def mhc_pre_tilelang(
+             hc_mult,
+         )
+ 
+-    if norm_weight is None:
++    if norm_weight is None and not use_deep_gemm:
++        mhc_pre_big_fuse_hsplit_tilelang(
++            gemm_out_mul,
++            gemm_out_sqrsum,
++            hc_scale,
++            hc_base,
++            residual_flat,
++            post_mix,
++            comb_mix,
++            layer_input,
++            hidden_size,
++            rms_eps,
++            hc_pre_eps,
++            hc_sinkhorn_eps,
++            hc_post_mult_value,
++            sinkhorn_repeat,
++            n_splits,
++            hc_mult,
++            _pre_big_fuse_h_split(num_tokens),
++        )
++    elif norm_weight is None:
+         mhc_pre_big_fuse_tilelang(
+             gemm_out_mul,
+             gemm_out_sqrsum,
+@@ -419,20 +500,30 @@ def mhc_post_tilelang(
+     post_layer_mix: torch.Tensor,
+     comb_res_mix: torch.Tensor,
+ ) -> torch.Tensor:
++    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
++        mhc_post_hsplit_tilelang,
++    )
+     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+         mhc_post_tilelang as _mhc_post_kernel,
+     )
+ 
+     out = torch.empty_like(residual)
+-    _mhc_post_kernel(
++    hc_mult, hidden_size = residual.shape[-2:]
++    args = (
+         comb_res_mix,
+         residual,
+         post_layer_mix.squeeze(-1),
+         x,
+         out,
+-        residual.shape[-2],
+-        residual.shape[-1],
++        hc_mult,
++        hidden_size,
+     )
++    # Same per-element arithmetic either way (bitwise equal).
++    cfg = _post_hsplit_cfg(residual.numel() // (hc_mult * hidden_size))
++    if cfg is None:
++        _mhc_post_kernel(*args)
++    else:
++        mhc_post_hsplit_tilelang(*args, *cfg)
+     return out
+ 
+ 
+diff --git a/vllm/model_executor/kernels/mhc/tilelang_kernels.py b/vllm/model_executor/kernels/mhc/tilelang_kernels.py
+index 50abac3e01..5a4efdb231 100644
+--- a/vllm/model_executor/kernels/mhc/tilelang_kernels.py
++++ b/vllm/model_executor/kernels/mhc/tilelang_kernels.py
+@@ -188,6 +188,152 @@ def mhc_pre_big_fuse_tilelang(
+             T.pdl_trigger()
+ 
+ 
++@tilelang.jit(
++    pass_configs=pass_configs,
++)
++def mhc_pre_big_fuse_hsplit_tilelang(
++    gemm_out_mul,
++    gemm_out_sqrsum,
++    hc_scale,
++    hc_base,
++    residual,
++    post_mix,
++    comb_mix,
++    layer_input,
++    hidden_size: int,
++    rms_eps: float,
++    hc_pre_eps: float,
++    hc_sinkhorn_eps: float,
++    hc_post_mult_value: float,
++    sinkhorn_repeat: int,
++    n_splits: int = 16,
++    hc_mult: int = 4,
++    h_split: int = 1,
++):
++    """``mhc_pre_big_fuse_tilelang`` with the hidden dim spread over ``h_split``
++    blocks per token. Every block recomputes the mixes; block 0 also runs
++    Sinkhorn. Each output element takes the same arithmetic as in
++    ``mhc_pre_big_fuse_tilelang``, so the results are bitwise equal."""
++    num_tokens = T.dynamic("num_tokens")
++    hc_mult3 = hc_mult * (2 + hc_mult)
++    assert hidden_size % h_split == 0
++    h_chunk = hidden_size // h_split
++    hidden_block = math.gcd(512, h_chunk)
++
++    gemm_out_mul: T.Tensor[[n_splits, num_tokens, hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
++    gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
++    hc_scale: T.Tensor[[3], T.float32]  # type: ignore[no-redef, valid-type]
++    hc_base: T.Tensor[[hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
++    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
++    # outputs
++    post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
++    comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
++    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
++
++    with T.Kernel(num_tokens, h_split, threads=96) as (i, i_hs):
++        if ENABLE_PDL:
++            T.pdl_sync()
++        ##################################################################
++        # _pre_norm_fn_fwd_norm
++        rms = T.alloc_fragment(1, T.float32)
++        mixes = T.alloc_fragment(hc_mult3, T.float32)
++        T.clear(mixes)
++        rms[0] = 0
++        for i_split in T.serial(n_splits):
++            rms[0] += gemm_out_sqrsum[i_split, i]
++        rms[0] = T.rsqrt(rms[0] / (hc_mult * hidden_size) + rms_eps)
++        for j in T.Parallel(hc_mult3):
++            mixes[j] = 0
++            for i_split in T.serial(n_splits):
++                mixes[j] += gemm_out_mul[i_split, i, j]
++            mixes[j] *= rms[0]
++        mixes_shared = T.alloc_shared(hc_mult3, T.float32)
++        T.copy(mixes, mixes_shared)
++
++        if T.get_thread_binding() < 32:
++            if i_hs == 0:
++                ##################################################################
++                # _pre_split_mixes_fwd (post & comb)
++                cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
++                for j in T.Parallel(hc_mult):
++                    post_mix[i, j] = (
++                        T.sigmoid(
++                            mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
++                        )
++                        * hc_post_mult_value
++                    )
++                for j, k in T.Parallel(hc_mult, hc_mult):
++                    cm[j, k] = (
++                        mixes_shared[j * hc_mult + k + hc_mult * 2] * hc_scale[2]
++                        + hc_base[j * hc_mult + k + hc_mult * 2]
++                    )
++
++                ##################################################################
++                # _sinkhorn_fwd
++                row_sum = T.alloc_fragment(hc_mult, T.float32)
++                col_sum = T.alloc_fragment(hc_mult, T.float32)
++
++                # comb = comb.softmax(-1) + eps
++                row_max = T.alloc_fragment(hc_mult, T.float32)
++                T.reduce_max(cm, row_max, dim=1)
++                for j, k in T.Parallel(hc_mult, hc_mult):
++                    cm[j, k] = T.exp(cm[j, k] - row_max[j])
++                T.reduce_sum(cm, row_sum, dim=1)
++                for j, k in T.Parallel(hc_mult, hc_mult):
++                    cm[j, k] = cm[j, k] / row_sum[j] + hc_sinkhorn_eps
++
++                # comb = comb / (comb.sum(-2) + eps)
++                T.reduce_sum(cm, col_sum, dim=0)
++                for j, k in T.Parallel(hc_mult, hc_mult):
++                    cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
++
++                for _ in T.serial(sinkhorn_repeat - 1):
++                    # comb = comb / (comb.sum(-1) + eps)
++                    T.reduce_sum(cm, row_sum, dim=1)
++                    for j, k in T.Parallel(hc_mult, hc_mult):
++                        cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
++
++                    # comb = comb / (comb.sum(-2) + eps)
++                    T.reduce_sum(cm, col_sum, dim=0)
++                    for j, k in T.Parallel(hc_mult, hc_mult):
++                        cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
++
++                # save comb_mix to global memory
++                for j, k in T.Parallel(hc_mult, hc_mult):
++                    comb_mix[i, j * hc_mult + k] = cm[j, k]
++        else:
++            ##################################################################
++            # _pre_split_mixes_fwd (pre)
++            pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
++            for j in T.Parallel(hc_mult):
++                pre_mix_shared[j] = (
++                    T.sigmoid(
++                        mixes_shared[j] * hc_scale[0] + hc_base[j],
++                    )
++                    + hc_pre_eps
++                )
++            ###################################################################
++            # _pre_apply_mix_fwd
++            for i0_h in T.Pipelined(h_chunk // hidden_block, num_stages=2):
++                xs = T.alloc_shared((hc_mult, hidden_block), T.float32)
++                xl = T.alloc_fragment((hc_mult, hidden_block), T.float32)
++                T.copy(residual[i, 0, i_hs * h_chunk + i0_h * hidden_block], xs)
++                T.copy(xs, xl)
++
++                ol = T.alloc_fragment(hidden_block, T.float32)
++                T.clear(ol)
++
++                for i_hc in T.serial(hc_mult):
++                    pre = pre_mix_shared[i_hc]
++                    for i1_h in T.Parallel(hidden_block):
++                        ol[i1_h] += pre * xl[i_hc, i1_h]
++
++                T.copy(ol, layer_input[i, i_hs * h_chunk + i0_h * hidden_block])
++
++        if ENABLE_PDL:
++            T.pdl_trigger()
++
++
+ # Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
+ 
+ 
+@@ -695,6 +841,62 @@ def mhc_post_tilelang(
+             T.pdl_trigger()
+ 
+ 
++@tilelang.jit(
++    pass_configs=pass_configs,
++)
++def mhc_post_hsplit_tilelang(
++    a,
++    b,
++    c,
++    d,
++    x,
++    hc: int,
++    hidden: int,
++    n_thr: int = 128,
++    h_blk: int = 1024,
++) -> tilelang.JITKernel:
++    """``mhc_post_tilelang`` with one block per (token, ``h_blk`` chunk);
++    the per-element arithmetic is unchanged (bitwise equal)."""
++    # rename for shorter code
++    n = T.dynamic("num_tokens")
++    h = hidden
++
++    h_blk = math.gcd(hidden, h_blk)
++    a: T.Tensor((n, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
++    b: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
++    c: T.Tensor((n, hc), T.float32)  # type: ignore[no-redef, valid-type]
++    d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
++    x: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
++    with T.Kernel(n, h // h_blk, threads=n_thr) as (i_n, i0_h):
++        b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
++        d_shared = T.alloc_shared(h_blk, T.bfloat16)
++
++        x_local = T.alloc_fragment((hc, h_blk), T.float32)
++        b_local = T.alloc_fragment((hc, h_blk), T.float32)
++        d_local = T.alloc_fragment(h_blk, T.float32)
++
++        a_local = T.alloc_fragment((hc, hc), T.float32)
++        c_local = T.alloc_fragment(hc, T.float32)
++        if ENABLE_PDL:
++            T.pdl_sync()
++        T.copy(a[i_n, 0, 0], a_local)
++        T.copy(c[i_n, 0], c_local)
++
++        T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
++        T.copy(d[i_n, i0_h * h_blk], d_shared)
++
++        T.copy(b_shared, b_local)
++        T.copy(d_shared, d_local)
++        for i_hco, i1_h in T.Parallel(hc, h_blk):
++            x_local[i_hco, i1_h] = c_local[i_hco] * d_local[i1_h]
++            for i_hci in T.vectorized(hc):
++                x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
++
++        T.copy(x_local, x[i_n, 0, i0_h * h_blk])
++        if ENABLE_PDL:
++            T.pdl_trigger()
++
++
+ @tilelang.jit(
+     pass_configs=pass_configs,
+ )
