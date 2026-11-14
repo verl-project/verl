@@ -56,6 +56,7 @@ from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
+    rl_insight_trace_identity,
     rollout_trace_attr,
 )
 from verl.utils.skip import SkipManager
@@ -755,13 +756,20 @@ class AgentLoopWorker:
         trace: bool = True,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
-        with rollout_trace_attr(
-            step=trajectory["step"],
-            sample_index=trajectory["sample_index"],
-            rollout_n=trajectory["rollout_n"],
-            validate=trajectory["validate"],
-            name="agent_loop",
-            trace=trace,
+        with (
+            rollout_trace_attr(
+                step=trajectory["step"],
+                sample_index=trajectory["sample_index"],
+                rollout_n=trajectory["rollout_n"],
+                validate=trajectory["validate"],
+                name="agent_loop",
+                trace=trace,
+            ),
+            rl_insight_trace_identity(
+                global_steps=trajectory["step"],
+                sample=trajectory["sample_index"],
+                traj=trajectory["rollout_n"],
+            ),
         ):
             assert agent_name in _agent_loop_registry, (
                 f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"

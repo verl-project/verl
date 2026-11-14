@@ -469,3 +469,21 @@ def rollout_trace_op(func):
             return func(self, *args, **kwargs)
 
     return async_wrapper if inspect.iscoroutinefunction(func) else wrapper
+
+
+_rl_insight_trace_identity: ContextVar[dict | None] = ContextVar("_rl_insight_trace_identity", default=None)
+
+
+@contextlib.contextmanager
+def rl_insight_trace_identity(**identity):
+    """Attach per-trajectory identity to RL-Insight engine request spans."""
+    token = _rl_insight_trace_identity.set({key: value for key, value in identity.items() if value is not None})
+    try:
+        yield
+    finally:
+        _rl_insight_trace_identity.reset(token)
+
+
+def current_rl_insight_trace_identity() -> dict:
+    """Return the identity set by :func:`rl_insight_trace_identity`."""
+    return dict(_rl_insight_trace_identity.get() or {})

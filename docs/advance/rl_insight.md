@@ -108,7 +108,25 @@ python3 -m verl.trainer.main_ppo \
 
 When rollout replicas or TransferQueue metrics endpoints start, verl registers them with RL-Insight. The generation path is also wrapped with RL-Insight state traces for vLLM and SGLang rollout workers.
 
-## Step 4: Add Hardware Metrics (Optional)
+## Step 4: Export vLLM Request Traces
+
+Step 3 registers rollout Prometheus metrics. This step exports each vLLM inference request as a span:
+
+```bash
+python3 -m verl.trainer.main_ppo \
+    trainer.logger='["console","rl_insight"]' \
+    actor_rollout_ref.rollout.disable_log_stats=False \
+    actor_rollout_ref.rollout.trace.enable_otel=True \
+    ...
+```
+
+Each replica reads `otlp_port` from the RL-Insight server status (`GET /api/v1/services`, with the SDK version header) and sends spans to `http://<server-host>:<otlp_port>/v1/traces`. It also sets `OTEL_RESOURCE_ATTRIBUTES` (`project`, `experiment_name`, `replica`) and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`, because vLLM's exporter defaults to gRPC. If `actor_rollout_ref.rollout.engine_kwargs.vllm.otlp_traces_endpoint` is set, verl keeps that user-provided endpoint and skips RL-Insight discovery; the resource attributes still apply, and the protocol is only set when the URL path indicates OTLP/HTTP.
+
+`project` and `experiment_name` come from the job's RL-Insight Run, so they match the names the Hub stamps on training telemetry, including its execution suffix; they fall back to `actor_rollout_ref.rollout.trace` (which defaults to `trainer.project_name` and `trainer.experiment_name`) when the Run is unavailable. Automatic endpoint discovery requires `rl_insight` in `trainer.logger`; otherwise the export stays off. An explicit `actor_rollout_ref.rollout.engine_kwargs.vllm.otlp_traces_endpoint` works without it. These spans do not include prompt or response text. In Grafana, open `verl_trainer_v1_with_vllm_engine` and the **vLLM request traces** row.
+
+While tracing is enabled, the agent loop also forwards `global_steps`, `sample`, `session`, `traj`, `turn`, and `state_lane_id` as `rl-insight-*` trace headers. With RL-Insight's vLLM tracing instrumentation, these headers become request-span attributes, so a span can be linked to its training step and trajectory.
+
+## Step 5: Add Hardware Metrics (Optional)
 
 To monitor CPU, memory, network, or Ascend NPU metrics, follow the [RL-Insight Hardware Monitoring guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/hardware/index.md). The guide explains how to install or reuse the exporters and register their monitoring endpoints with RL-Insight.
 
@@ -151,6 +169,7 @@ The dashboards should include training metrics, rollout metrics, TransferQueue m
 - If trainer metrics do not appear, check that `trainer.logger` contains `rl_insight` and `RL_INSIGHT_SERVER_URL` points to the machine that runs `rl-insight server start`.
 - If rollout metrics do not appear, check that `actor_rollout_ref.rollout.disable_log_stats=False` is set.
 - If TransferQueue metrics do not appear, check that `transfer_queue.metrics.enabled=True` is set.
+- If engine request traces do not appear, check Step 4: `actor_rollout_ref.rollout.trace.enable_otel=True`, `rl_insight` in `trainer.logger`, and `otlp_port` in the RL-Insight server status.
 - If `server install` fails to download packages, use the offline `--local-archive` path above.
 
 For more RL-Insight server installation details, see the [RL-Insight server installation guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/server_installation.md) and [quick start](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/quick_start.md).

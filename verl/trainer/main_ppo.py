@@ -85,6 +85,20 @@ def run_ppo(config, task_runner_class) -> None:
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
+    if os.environ.get("VERL_RL_INSIGHT_ENABLE") == "1" and OmegaConf.select(
+        config, "actor_rollout_ref.rollout.trace.enable_otel", default=False
+    ):
+        # Establish the Run identity before rollout engines start: the Hub that
+        # owns it is created during fit(), but vLLM stamps the Hub's Run name on
+        # the OTLP spans it exports from launch time.
+        import rl_insight
+
+        rl_insight.init(
+            project=config.trainer.project_name,
+            experiment_name=config.trainer.experiment_name,
+            config=config.get("trainer", {}).get("rl_insight", {}) or {},
+        )
+
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     if (

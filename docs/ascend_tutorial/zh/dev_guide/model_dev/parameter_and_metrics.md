@@ -177,6 +177,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 | `actor_rollout_ref.rollout.trace.backend` | `null` | 追踪后端 |
 | `actor_rollout_ref.rollout.trace.token2text` | `false` | 是否将 token 转为文本 |
 | `actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker` | `null` | 每步每 worker 最大样本数 |
+| `actor_rollout_ref.rollout.trace.enable_otel` | `false` | 是否将 vLLM 请求 span 导出到 RL-Insight OTLP 端点（需启用 `rl_insight` logger） |
 
 #### 1.1.10 Prometheus 配置
 
