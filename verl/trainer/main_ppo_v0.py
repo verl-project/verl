@@ -85,6 +85,7 @@ class BaseTaskRunner:
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
         distillation_config = config.get("distillation")
+        max_colocate_count = 3
         if is_distillation_enabled(distillation_config):
             if distillation_config.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
@@ -94,9 +95,21 @@ class BaseTaskRunner:
             teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
             resource_pool_spec["teacher_pool"] = teacher_pool
 
+            if distillation_config.get("share_gpu_group", False):
+                # All teachers' worker actors share the same placement-group bundles.
+                # Each bundle reserves max_colocate_count CPUs and actors request 1 CPU
+                # each (plus 1/max_colocate_count GPU), so the per-bundle actor count
+                # (= number of teachers) must not exceed max_colocate_count.
+                from verl.utils.config import omega_conf_to_dataclass
+
+                num_teachers = len(omega_conf_to_dataclass(distillation_config).teacher_models)
+                max_colocate_count = max(3, num_teachers)
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec, mapping=self.mapping, max_colocate_count=max_colocate_count
+        )
         return resource_pool_manager
 
     def add_reward_model_resource_pool(self, config):

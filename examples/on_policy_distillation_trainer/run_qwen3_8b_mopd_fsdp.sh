@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 # On-policy distillation | multi-teacher (gsm8k text + geo3k VL) | vLLM rollout | FSDP training | NVIDIA GPUs
+#
+# By default this script enables the multi-teacher shared GPU group
+# (TEACHER_SHARE_GPU_GROUP=True): BOTH teachers are placed on the SAME GPUs instead of
+# disjoint sub-pools, so the teacher pool only needs to fit ONE teacher
+# (TEACHER_WORLD_SIZE = teacher_tp * num_replicas). Teacher engines sleep when idle
+# (vLLM sleep level 1: weights offloaded to CPU, KV cache freed) and are woken on
+# demand by the TeacherSleepController. With both teachers at
+# gpu_memory_utilization=0.4 both can stay awake simultaneously, so
+# distillation.max_awake_teachers is left unset (null = unlimited).
+# Set TEACHER_SHARE_GPU_GROUP=False to fall back to disjoint per-teacher pools
+# (teacher pool = sum of both teachers' world sizes).
 
 set -xeuo pipefail
 
@@ -11,12 +22,27 @@ GEO3K_TEACHER_MODEL=${GEO3K_TEACHER_MODEL:-Qwen/Qwen3-VL-32B-Instruct}
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
-# Per-teacher replicas; total teacher GPUs = sum(num_replicas) * teacher_tp
+# Per-teacher replicas; total teacher GPUs depend on TEACHER_SHARE_GPU_GROUP (see header).
 TEACHER_NNODES=${TEACHER_NNODES:-1}
 TEACHER_NUM_REPLICAS_GSM8K=${TEACHER_NUM_REPLICAS_GSM8K:-1}
 TEACHER_NUM_REPLICAS_GEO3K=${TEACHER_NUM_REPLICAS_GEO3K:-1}
 teacher_tp=${TEACHER_TP:-2}
-TEACHER_WORLD_SIZE=$(( (TEACHER_NUM_REPLICAS_GSM8K + TEACHER_NUM_REPLICAS_GEO3K) * teacher_tp ))
+
+TEACHER_SHARE_GPU_GROUP=${TEACHER_SHARE_GPU_GROUP:-True}
+if [ "$TEACHER_SHARE_GPU_GROUP" = "True" ]; then
+    # Shared mode places both teachers on the same GPUs, so per-teacher world sizes
+    # must be equal; the teacher pool only needs to fit one teacher.
+    if [ "$TEACHER_NUM_REPLICAS_GSM8K" != "$TEACHER_NUM_REPLICAS_GEO3K" ]; then
+        echo "ERROR: TEACHER_SHARE_GPU_GROUP=True requires equal per-teacher world sizes, but " >&2
+        echo "TEACHER_NUM_REPLICAS_GSM8K ($TEACHER_NUM_REPLICAS_GSM8K) != TEACHER_NUM_REPLICAS_GEO3K ($TEACHER_NUM_REPLICAS_GEO3K)." >&2
+        echo "Set them equal, or set TEACHER_SHARE_GPU_GROUP=False to use disjoint teacher pools." >&2
+        exit 1
+    fi
+    TEACHER_WORLD_SIZE=$(( teacher_tp * TEACHER_NUM_REPLICAS_GSM8K ))
+else
+    # Disjoint pools: total teacher GPUs = sum(num_replicas) * teacher_tp
+    TEACHER_WORLD_SIZE=$(( (TEACHER_NUM_REPLICAS_GSM8K + TEACHER_NUM_REPLICAS_GEO3K) * teacher_tp ))
+fi
 
 distillation_loss_mode=${DISTILLATION_LOSS_MODE:-k1}
 use_policy_gradient=${USE_POLICY_GRADIENT:-True}
@@ -138,6 +164,10 @@ EXTRA=(
     distillation.distillation_loss.loss_max_clamp=10.0
     distillation.distillation_loss.log_prob_min_clamp=-10.0
 )
+
+if [ "$TEACHER_SHARE_GPU_GROUP" = "True" ]; then
+    EXTRA+=(distillation.share_gpu_group=True)
+fi
 
 ########################### launch ###########################
 # uv (set VERL_USE_UV=0 for system python): on GPU, the driver and every Ray worker
