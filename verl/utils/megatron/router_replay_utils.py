@@ -355,6 +355,7 @@ def merge_router_topk_indices(
                 local_cp_size=local_cp_size,
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
+                need_position_ids=False,
             )
             layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx,
@@ -494,6 +495,7 @@ def set_router_replay_data(
                 local_cp_size=local_cp_size,
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
+                need_position_ids=False,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
@@ -504,6 +506,7 @@ def set_router_replay_data(
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
+                    need_position_ids=False,
                 )
         else:
             if attention_mask is None:

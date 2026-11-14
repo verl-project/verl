@@ -387,3 +387,25 @@ def test_distillation_topk_thd_teacher_rows_follow_the_dynamic_cp_group(monkeypa
         monkeypatch, mcore_util, seqlens, quant_align_size=32, cp_layout=cp_layout
     )
     assert not torch.equal(seen_static["ids"][..., 0], student_tokens)
+
+
+def test_preprocess_thd_engine_can_skip_position_ids(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+
+    rows = [
+        torch.arange(4, dtype=torch.long),
+        torch.arange(7, dtype=torch.long),
+    ]
+    input_ids = torch.nested.as_nested_tensor(rows, layout=torch.jagged)
+
+    packed, _, position_ids = mcore_util.preprocess_thd_engine(input_ids, pre_process=True)
+    packed_skip, _, position_ids_skip = mcore_util.preprocess_thd_engine(
+        input_ids, pre_process=True, need_position_ids=False
+    )
+
+    assert position_ids is not None
+    assert position_ids_skip is None
+    torch.testing.assert_close(packed, packed_skip)
+
+    with pytest.raises(ValueError, match="need_roll requires need_position_ids"):
+        mcore_util.preprocess_thd_engine(input_ids, pre_process=True, need_roll=True, need_position_ids=False)
