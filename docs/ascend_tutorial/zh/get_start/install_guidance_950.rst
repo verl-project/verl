@@ -1,7 +1,7 @@
 昇腾安装指南(Ascend 950PR&950DT系列产品)
 =================
 
-Last updated: 11/11/2026.
+Last updated: 11/13/2026.
 
 
 .. contents:: 目录
@@ -129,7 +129,9 @@ vLLM推理后端支持
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     git checkout releases/v0.30.0
-    pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    git submodule update --init --recursive
+    pip install -r requirements.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    COMPILE_CUSTOM_KERNELS=1 pip install --no-build-isolation --no-deps -v -e .
     cd ..
 
 
@@ -142,8 +144,8 @@ Megatron 训练后端支持
    `megatron_bridge_qwen3_asr.patch <https://github.com/verl-project/verl/blob/main/docker/ascend/patches/megatron_bridge_qwen3_asr.patch>`_。
    当 Transformers 已提供原生 Qwen3-ASR 配置时，补丁会跳过内置的 AutoConfig、
    AutoModel 和 AutoProcessor 注册，避免导入时出现 ``qwen3_asr`` 重复注册错误。
-   下方的 verl 依赖安装命令会在克隆 verl 后应用该补丁；
-   请将 Megatron-Bridge 与 verl 源码目录放在同一父目录下。
+   下方的 verl 依赖安装命令会在克隆 verl 后，仅向已存在的 Megatron-Bridge 目录应用该补丁。
+   仅使用 FSDP 时会跳过此步骤；使用 Megatron 时，请将 Megatron-Bridge 与 verl 源码目录放在同一父目录下。
 
 .. code:: bash
     
@@ -175,15 +177,20 @@ verl 依赖安装
 
 .. code:: bash
 
-    git clone https://github.com/verl-project/verl.git
-    # 向 Megatron-Bridge 源码应用兼容性补丁
-    git -C Megatron-Bridge apply --unidiff-zero \
-        "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
+    git clone --recursive https://github.com/verl-project/verl.git
+    # 仅在已克隆 Megatron-Bridge 时应用兼容性补丁
+    if [ -d Megatron-Bridge ]; then
+        git -C Megatron-Bridge apply --unidiff-zero \
+            "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
+    fi
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     # 恢复 vLLM 所需的 Triton 版本
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # 安装 Ascend 950 对应的 FLA NPU 后端（FSDP 和 Megatron 均需要）
+    pip install --no-deps "flash-linear-attention-npu-a5==26.9.1" \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 
 日志过滤

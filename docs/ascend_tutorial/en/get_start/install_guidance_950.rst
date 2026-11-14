@@ -1,7 +1,7 @@
 Ascend Installation Guide (Ascend 950PR&950DT products)
 ===============================================================
 
-Last updated: 11/11/2026.
+Last updated: 11/13/2026.
 
 
 .. contents:: Table of Contents
@@ -132,7 +132,9 @@ vLLM Inference Backend Support
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     git checkout releases/v0.30.0
-    pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    git submodule update --init --recursive
+    pip install -r requirements.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    COMPILE_CUSTOM_KERNELS=1 pip install --no-build-isolation --no-deps -v -e .
     cd ..
 
 
@@ -148,8 +150,9 @@ Megatron Training Backend Support
    patch skips the vendored AutoConfig, AutoModel, and AutoProcessor
    registrations to avoid duplicate ``qwen3_asr`` registration errors during
    import. The verl dependency installation commands below apply the patch
-   after cloning verl; keep the Megatron-Bridge checkout in the same parent
-   directory as the verl checkout.
+   after cloning verl, if the Megatron-Bridge checkout exists. FSDP-only
+   installations skip this step. For Megatron, keep both checkouts in the same
+   parent directory.
 
 .. code:: bash
 
@@ -197,15 +200,20 @@ verl Dependency Installation
 
 .. code:: bash
 
-    git clone https://github.com/verl-project/verl.git
-    # Apply the compatibility patch to the Megatron-Bridge checkout
-    git -C Megatron-Bridge apply --unidiff-zero \
-        "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
+    git clone --recursive https://github.com/verl-project/verl.git
+    # Apply the compatibility patch only if Megatron-Bridge was cloned
+    if [ -d Megatron-Bridge ]; then
+        git -C Megatron-Bridge apply --unidiff-zero \
+            "$(pwd)/verl/docker/ascend/patches/megatron_bridge_qwen3_asr.patch"
+    fi
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     # Restore the Triton version required by vLLM
     pip install triton-ascend==3.6.0.post2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+    # Install the FLA NPU backend for Ascend 950 (required for both FSDP and Megatron).
+    pip install --no-deps "flash-linear-attention-npu-a5==26.9.1" \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 
 Log Filtering
