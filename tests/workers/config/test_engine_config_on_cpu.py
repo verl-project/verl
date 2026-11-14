@@ -44,6 +44,25 @@ class TestMcoreEngineConfig:
         config = McoreEngineConfig(**{offload_field: True})
         assert getattr(config, offload_field) is True
 
+    def test_deduplicate_param_offload_requires_param_offload(self):
+        with pytest.raises(ValueError, match="requires param_offload"):
+            McoreEngineConfig(deduplicate_param_offload=True)
+
+        config = McoreEngineConfig(param_offload=True, deduplicate_param_offload=True)
+        assert config.deduplicate_param_offload is True
+
+    @pytest.mark.parametrize(
+        "overrides, error",
+        [
+            ({"use_megatron_fsdp": True}, "use_megatron_fsdp"),
+            ({"override_ddp_config": {"overlap_param_gather": True}}, "overlap_param_gather"),
+        ],
+    )
+    def test_deduplicate_param_offload_rejects_incompatible_configs(self, overrides, error):
+        with pytest.raises(ValueError, match=f"not supported with {error}=True"):
+            McoreEngineConfig(param_offload=True, deduplicate_param_offload=True, **overrides)
+        McoreEngineConfig(param_offload=True, **overrides)
+
 
 class TestFSDPEngineConfigCPU:
     def test_default_values(self):
