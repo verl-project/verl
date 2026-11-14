@@ -286,6 +286,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # must carry it forward explicitly or the consumer sees 0. Take the first
         # (initial-prompt) prefill's hit count, matching single-prefill semantics.
         num_cached_tokens = None
+        kv_recomputed_after_sync = False
 
         while True:
             # 1. generate tokens
@@ -309,6 +310,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 final_output.routed_experts = output.routed_experts
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
+            kv_recomputed_after_sync |= bool(output.extra_fields.get("kv_recomputed_after_sync"))
             # sampler top-k heads for score centering, one row per newly generated token
             for key in ("response_topk_ids", "response_topk_log_probs"):
                 if key in output.extra_fields:
@@ -361,6 +363,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
         final_output.extra_fields["num_cached_tokens"] = num_cached_tokens
+        final_output.extra_fields["kv_recomputed_after_sync"] = kv_recomputed_after_sync
         return final_output
 
 

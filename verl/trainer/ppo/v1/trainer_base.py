@@ -2064,6 +2064,21 @@ class PPOTrainer(ABC):
                 spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
                 spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
+        # Requests kept across a weight sync are supposed to be unpreemptable; count the ones
+        # vLLM recomputed anyway, since those carry KV, and R3 routing, from mixed weights.
+        kv_recomputed_num = None
+        if self.config.actor_rollout_ref.rollout.get("partial_rollout_recompute", True) is False:
+            kv_data = tq.kv_batch_get(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                select_fields=["extra_fields"],
+            )
+            kv_recomputed_num = sum(
+                bool(extra_field.get("kv_recomputed_after_sync"))
+                for extra_field in kv_data.pop("extra_fields").tolist()
+                if isinstance(extra_field, dict)
+            )
+
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
         if "token_level_rewards" not in data:
@@ -2141,6 +2156,8 @@ class PPOTrainer(ABC):
                 "training/off_policy/trajectory_staleness_worst/min": trajectory_staleness_worst.min(),
             }
         )
+        if kv_recomputed_num is not None:
+            metrics["training/off_policy/kv_recomputed_num"] = kv_recomputed_num
 
 
 TRAINER_REGISTRY: dict[str, type[PPOTrainer]] = {}

@@ -355,6 +355,7 @@ moe_load_balance_metrics_interval: 0
 
 # Partial rollout on weight sync. True: abort requests, drop the KV cache and re-prefill on resume.
 # False: keep requests and their KV cache, and continue decoding (vLLM standalone replicas only).
+# False caps in-flight requests per DP engine at what the KV cache holds, so none can be preempted.
 partial_rollout_recompute: True
 
 

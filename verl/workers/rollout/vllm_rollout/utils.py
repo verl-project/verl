@@ -267,6 +267,17 @@ class vLLMColocateWorkerExtension:
             attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
             clear_kv_cache(model)
 
+    def get_max_kv_concurrency(self) -> int:
+        """Return how many requests at ``max_model_len`` this engine's KV cache holds at once."""
+        from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
+
+        vllm_config = self.model_runner.vllm_config
+        concurrency = get_max_concurrency_for_kv_cache_config(vllm_config, self.model_runner.kv_cache_config)
+        max_model_len = vllm_config.model_config.max_model_len
+        # The scheduler also reserves slots for speculative lookahead tokens.
+        lookahead = getattr(vllm_config, "num_lookahead_tokens", 0) or 0
+        return int(concurrency * max_model_len / (max_model_len + lookahead))
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         if self.device is None:

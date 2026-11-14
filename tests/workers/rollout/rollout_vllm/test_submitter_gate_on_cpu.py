@@ -115,6 +115,7 @@ def _make_server(node_rank: int = 0, cls=vllm_async_server.vLLMHttpServer):
     server._rejecting = False
     server._disaggregation_role = "null"
     server.rollout_mode = vllm_async_server.RolloutMode.STANDALONE
+    server._kv_slots = None
     return server
 
 
@@ -588,6 +589,68 @@ def test_keeping_kv_cache_salts_prefix_cache_per_weight_version(monkeypatch):
 
         assert server.engine.prompts[0]["cache_salt"] == "verl-weights-v7"
         assert output.extra_fields["start_global_steps"] == 7
+
+    asyncio.run(main())
+
+
+def test_kv_slots_cap_in_flight_requests_per_engine():
+    # Admission past the cap could let vLLM preempt a kept request and recompute its KV with new weights.
+    async def main():
+        slots = vllm_async_server._KVSlots(slots_per_engine=1, num_engines=2)
+        assert {await slots.acquire(), await slots.acquire()} == {0, 1}
+
+        waiter = asyncio.create_task(slots.acquire(0))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        slots.release(1)
+        await asyncio.sleep(0)
+        assert not waiter.done(), "a pinned request must wait for its own engine"
+
+        slots.release(0)
+        assert await waiter == 0
+
+    asyncio.run(main())
+
+
+def test_keeping_kv_cache_holds_a_slot_only_while_the_request_is_in_the_engine(monkeypatch):
+    async def main():
+        server = _make_keeping_server(monkeypatch, [_request_output([5])])
+        server._kv_slots = vllm_async_server._KVSlots(slots_per_engine=1, num_engines=1)
+
+        await server.generate([1, 2, 3], {}, "r")
+
+        assert server._kv_slots.free == [1]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("on_completion", [True, False])
+@pytest.mark.parametrize("weights_updated", [True, False])
+def test_keeping_kv_cache_flags_preemption_across_weight_sync(monkeypatch, on_completion, weights_updated):
+    # A preempted request is re-prefilled with the current weights, breaking R3 routing consistency.
+    async def main():
+        output = _request_output([5])
+        if not on_completion:
+            # vLLM releases without CompletionOutput.num_preempted report it in the request stats.
+            del output.outputs[0].num_preempted
+            output.metrics = SimpleNamespace(num_preemptions=1)
+        else:
+            output.outputs[0].num_preempted = 1
+        server = _make_keeping_server(monkeypatch, [output])
+        add_request = server.engine.add_request
+
+        async def add_request_across_sync(*args, **kwargs):
+            if weights_updated:
+                server.global_steps += 1
+            return await add_request(*args, **kwargs)
+
+        server.engine.add_request = add_request_across_sync
+
+        result = await server.generate([1, 2, 3], {}, "r")
+
+        assert result.num_preempted == 1
+        assert result.extra_fields["kv_recomputed_after_sync"] is weights_updated
 
     asyncio.run(main())
 

@@ -99,6 +99,33 @@ def _keeps_kv_cache(config, rollout_mode) -> bool:
     return not getattr(config, "partial_rollout_recompute", True) and rollout_mode == RolloutMode.STANDALONE
 
 
+class _KVSlots:
+    """Per-DP-engine cap on in-flight requests, sized so all of them fit in KV cache at max_model_len.
+
+    vLLM preempts a running request when the KV cache runs out and recomputes its blocks with the
+    current weights, which would leave a request kept across a weight sync decoding on KV, and
+    routing, it was not generated with. Under the cap no request can be preempted.
+    """
+
+    def __init__(self, slots_per_engine: int, num_engines: int):
+        self.free = [slots_per_engine] * num_engines
+        self._released = asyncio.Event()
+
+    async def acquire(self, engine: Optional[int] = None) -> int:
+        """Take a slot on ``engine``, or on the least loaded engine if None, and return its index."""
+        while True:
+            target = engine if engine is not None else max(range(len(self.free)), key=self.free.__getitem__)
+            if self.free[target] > 0:
+                self.free[target] -= 1
+                return target
+            self._released.clear()
+            await self._released.wait()
+
+    def release(self, engine: int) -> None:
+        self.free[engine] += 1
+        self._released.set()
+
+
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
 
@@ -149,6 +176,8 @@ class vLLMHttpServer:
             )
         self._disaggregation_role = disaggregation_role
         self._disaggregation_kv_transfer_config = disaggregation_kv_transfer_config
+        # Set in init_engine() when in-flight requests keep their KV cache across weight syncs.
+        self._kv_slots: Optional[_KVSlots] = None
         # Filled by vLLMPDReplica.set_pd_peer for prefill-side routing.
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_prefill_side_channel_port: Optional[int] = None
@@ -369,7 +398,8 @@ class vLLMHttpServer:
             "logprobs_mode": self.config.logprobs_mode,
             "enforce_eager": self.config.enforce_eager,
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
-            "disable_log_stats": self.config.disable_log_stats,
+            # Per-request preemption counts are only tracked with stats on.
+            "disable_log_stats": self.config.disable_log_stats and not _keeps_kv_cache(self.config, self.rollout_mode),
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
@@ -571,6 +601,14 @@ class vLLMHttpServer:
         if self.replica_rank == 0 and self.node_rank == 0:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
+        if _keeps_kv_cache(self.config, self.rollout_mode):
+            # Reaches one DP engine's workers; DP engines are assumed to have identical KV caches.
+            slots = min(await engine_client.collective_rpc("get_max_kv_concurrency"))
+            if slots < 1:
+                raise ValueError(f"KV cache cannot hold one request of max_model_len={self.config.max_model_len}.")
+            self._kv_slots = _KVSlots(slots, self.config.data_parallel_size)
+            logger.info(f"partial_rollout_recompute=False: capping in-flight requests at {slots} per DP engine")
+
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
@@ -722,29 +760,39 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        rejected = await self._park_until_admitted(request_id)
-        if rejected is not None:
-            return rejected
-
+        dp_rank = self._dp_rank_for_session(session_id)
         keeps_kv_cache = _keeps_kv_cache(self.config, self.rollout_mode)
-        start_global_steps = self.global_steps
-        if keeps_kv_cache:
-            # The prefix cache is never reset in this mode; salt it so new requests skip old weights' blocks.
-            prompt["cache_salt"] = f"verl-weights-v{start_global_steps}"
+        if self._kv_slots is not None:
+            slot_engine = await self._kv_slots.acquire(dp_rank)
+            if self.config.data_parallel_size > 1:
+                dp_rank = slot_engine
+        try:
+            rejected = await self._park_until_admitted(request_id)
+            if rejected is not None:
+                return rejected
 
-        with RLInsightLogger.trace_state(
-            "vllm_generate",
-            state_lane_id=ray.get_runtime_context().get_actor_name(),
-        ):
-            final_res = await self._generate_admitted(
-                prompt=prompt,
-                sampling_params=sampling_params,
-                request_id=request_id,
-                lora_request=lora_request,
-                priority=priority,
-                data_parallel_rank=self._dp_rank_for_session(session_id),
-            )
-            assert final_res is not None
+            # Read after parking: a weight sync may have landed while this request waited.
+            start_global_steps = self.global_steps
+            if keeps_kv_cache:
+                # The prefix cache is never reset in this mode; salt it so new requests skip old weights' blocks.
+                prompt["cache_salt"] = f"verl-weights-v{start_global_steps}"
+
+            with RLInsightLogger.trace_state(
+                "vllm_generate",
+                state_lane_id=ray.get_runtime_context().get_actor_name(),
+            ):
+                final_res = await self._generate_admitted(
+                    prompt=prompt,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    priority=priority,
+                    data_parallel_rank=dp_rank,
+                )
+                assert final_res is not None
+        finally:
+            if self._kv_slots is not None:
+                self._kv_slots.release(slot_engine)
 
         extra_fields = {"global_steps": self.global_steps}
         if keeps_kv_cache:
@@ -825,6 +873,20 @@ class vLLMHttpServer:
 
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
+        elif getattr(final_res, "metrics", None) is not None:
+            num_preempted = getattr(final_res.metrics, "num_preemptions", None)
+        if keeps_kv_cache:
+            # A preemption recomputes the KV cache with the current weights, so a preempted request that
+            # also spans a sync lost the KV its routing was recorded with. The preemption may predate the
+            # sync, so this over-reports rather than miss a violation.
+            extra_fields["kv_recomputed_after_sync"] = bool(num_preempted) and start_global_steps != self.global_steps
+            if extra_fields["kv_recomputed_after_sync"]:
+                logger.warning(
+                    "request %s was preempted while spanning weight versions %s..%s; its R3 routing is inconsistent",
+                    request_id,
+                    start_global_steps,
+                    self.global_steps,
+                )
 
         response_kv_transfer_params = getattr(final_res, "kv_transfer_params", None)
         if response_kv_transfer_params is not None:

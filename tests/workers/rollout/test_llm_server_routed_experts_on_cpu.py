@@ -193,3 +193,17 @@ async def test_request_kept_across_weight_sync_reports_its_start_version(monkeyp
     output = await _client().generate(request_id="req-0", prompt_ids=[], sampling_params={})
 
     assert output.extra_fields["min_global_steps"] == 4
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_routing_flag_survives_later_attempts(monkeypatch):
+    """Any attempt that re-prefilled a kept request with newer weights taints the whole trajectory."""
+    segments = [
+        TokenOutput(token_ids=[1], stop_reason="aborted", extra_fields={"kv_recomputed_after_sync": True}),
+        TokenOutput(token_ids=[2], stop_reason="completed", extra_fields={"kv_recomputed_after_sync": False}),
+    ]
+    _install_segments(monkeypatch, segments)
+
+    output = await _client().generate(request_id="req-0", prompt_ids=[], sampling_params={})
+
+    assert output.extra_fields["kv_recomputed_after_sync"] is True
