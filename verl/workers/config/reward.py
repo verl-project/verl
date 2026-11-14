@@ -80,6 +80,8 @@ class SandboxFusionConfig(BaseConfig):
 
 @dataclass
 class RewardModelConfig(BaseConfig):
+    """Reward model deployment and per-attempt HTTP request timeout in seconds."""
+
     _mutable_fields = BaseConfig._mutable_fields
 
     enable: bool = False
@@ -88,6 +90,7 @@ class RewardModelConfig(BaseConfig):
     nnodes: int = 0
     model_path: Optional[str] = None
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    request_timeout: float = 300.0
 
 
 @dataclass
