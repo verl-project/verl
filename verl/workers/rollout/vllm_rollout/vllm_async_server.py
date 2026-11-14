@@ -1520,11 +1520,54 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
+    def _has_separate_draft_model(self) -> bool:
+        """Return whether engine_kwargs configures speculative decoding with draft weights."""
+        engine_kwargs = getattr(self.config, "engine_kwargs", None)
+        key = self._get_engine_kwargs_key()
+        if isinstance(engine_kwargs, Mapping):
+            vllm_kwargs = engine_kwargs.get(key)
+        else:
+            vllm_kwargs = getattr(engine_kwargs, key, None)
+        if isinstance(vllm_kwargs, Mapping):
+            spec_config = vllm_kwargs.get("speculative_config")
+        else:
+            spec_config = getattr(vllm_kwargs, "speculative_config", None)
+        if spec_config is None:
+            return False
+        if isinstance(spec_config, str):
+            try:
+                spec_config = json.loads(spec_config)
+            except json.JSONDecodeError:
+                # Not JSON: treat the string as a bare method name, so weightless
+                # names such as "ngram" keep level 2 and anything else stays on the
+                # weight-preserving level 1.
+                spec_config = {"method": spec_config}
+        if isinstance(spec_config, Mapping):
+            model = spec_config.get("model") or spec_config.get("draft_model") or spec_config.get("draft_model_config")
+            method = spec_config.get("method")
+        else:
+            model = (
+                getattr(spec_config, "model", None)
+                or getattr(spec_config, "draft_model", None)
+                or getattr(spec_config, "draft_model_config", None)
+            )
+            method = getattr(spec_config, "method", None)
+        weightless_methods = {"ngram", "[ngram]", "ngram_gpu", "suffix", "prompt_lookup"}
+        if isinstance(method, str) and method.strip().lower() in weightless_methods:
+            return False
+        if isinstance(model, str) and model.strip().lower() in weightless_methods:
+            return False
+        if model is not None and (not isinstance(model, str) or bool(model.strip())):
+            return True
+        if isinstance(method, str) and bool(method.strip()):
+            return True
+        return False
+
     def _resolve_sleep_level(self) -> int:
         """Deepest sleep level whose discarded state a subsequent weight sync can restore.
 
-        MTP drafter-only weights are initialized by vLLM and are not guaranteed
-        to be restored by actor weight sync after level 2 sleep discards them.
+        MTP drafter-only weights and separately configured draft-model weights are not
+        restored by actor weight sync after level 2 sleep discards them.
         lora only update adapter weights, so set sleep level to 1.
         vllm-ascend < 0.30.0 requires sleep level 1 to avoid EP precision issues.
         """
@@ -1534,7 +1577,7 @@ class vLLMHttpServer:
             and getattr(mtp_config, "enable", False)
             and getattr(mtp_config, "enable_rollout", False)
         )
-        if mtp_rollout_enabled or self.lora_as_adapter:
+        if mtp_rollout_enabled or self._has_separate_draft_model() or self.lora_as_adapter:
             return 1
         if _VLLM_VERSION < version.parse("0.30.0") and is_torch_npu_available(check_device=False):
             return 1
