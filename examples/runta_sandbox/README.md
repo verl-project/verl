@@ -57,7 +57,8 @@ too, but never deletes the runtimes (see below).
 cannot own a sandbox that has to outlive a single call. Instead:
 
 1. The first `code_interpreter` call of a trajectory creates a runtime, keyed by
-   `agent_data.request_id`. A trajectory that never calls the tool never creates one.
+   `agent_data.request_id`. A trajectory that never calls the tool never creates one. At most
+   `max_concurrent_creates` runtimes are being created at a time; the others wait their turn.
 2. Later calls of the same trajectory reuse it. Every call starts a new interpreter process:
    files and installed packages persist, variables do not.
 3. If a call fails and Runta reports the runtime as shut down, crashed or deleted (for example
@@ -66,13 +67,27 @@ cannot own a sandbox that has to outlive a single call. Instead:
 4. `RuntaToolAgentLoop.run()` deletes the runtime the trajectory ends with in a `finally` block,
    whether the trajectory finished, failed or was cancelled.
 
-If the trainer process is killed, step 4 cannot run. Every runtime is therefore created with
-`auto_shutdown_after_secs` / `auto_delete_after_secs`, so Runta reclaims it on its own. Leftovers
-are easy to spot by their name prefix:
+If the trainer process is killed, step 4 cannot run, so every runtime holds a lease that only
+a live trainer renews:
+
+- A runtime is created to shut down after `lease_secs` (10 minutes by default).
+- While the trajectory holds the runtime, a background task restarts that clock about every
+  `lease_secs / 3`. It stops when the runtime is released or replaced.
+- `auto_shutdown_after_secs` stays the hard cap, counted from the runtime's creation: the lease
+  is renewed up to it and never past it.
+- A renewal that fails is logged at `WARNING` and tried again on the next beat. It never fails
+  a tool call.
+
+Once the trainer is gone nothing renews the leases: Runta shuts its runtimes down within
+`lease_secs` and deletes them `auto_delete_after_secs` later. Until then leftovers are easy to
+spot by their name prefix:
 
 ```bash
 runta ps -a | grep verl-sandbox
 ```
+
+The lease needs the worker's event loop to keep running. Code that blocks the loop for longer
+than `lease_secs` lets the runtimes expire; the trajectories then continue in fresh ones (step 3).
 
 ## Configuration
 
@@ -88,19 +103,27 @@ Keys under `config:` in `config/runta_tool_config.yaml`:
 | `vcpus` / `memory_mib` | `1` / `1024` | size of a runtime created from the base runtime; ignored (with a warning) when `checkpoint_id` is set |
 | `checkpoint_id` | `null` | start from a Runta checkpoint instead of the base runtime; the runtime keeps the checkpoint's size |
 | `create_timeout` | `240` | seconds to wait for a new runtime to become ready |
-| `auto_shutdown_after_secs` | `3600` | server-side limit on a runtime's running time, counted from its start, not from its last use |
+| `max_concurrent_creates` | `8` | runtimes one tool instance creates at the same time; executions are not limited |
+| `lease_secs` | `600` | shutdown limit a runtime is created with, renewed about every `lease_secs / 3` while its trajectory runs; `0` turns the lease off |
+| `auto_shutdown_after_secs` | `3600` | hard cap on a runtime's running time, counted from its creation, not from its last use; `0` means no cap |
 | `auto_delete_after_secs` | `300` | delete this long after shutdown |
 
 Things to size before a real run:
 
 - **Concurrency.** One runtime is alive for every in-flight trajectory that has called the tool,
   up to `train_batch_size * rollout.n` at once. Check this against your Runta quota.
+  `max_concurrent_creates` only spreads out their creation, per tool instance: every agent loop
+  worker (`rollout.agent.num_workers`) has its own instance, so up to
+  `num_workers * max_concurrent_creates` runtimes start at the same time. A runtime takes
+  10-20 s to create, so the first tool calls of a large batch wait for a slot.
 - **Dependencies.** The base runtime is Ubuntu with Python 3 and pip. Runta runtimes are not
   created from container images, so to preinstall packages, set one runtime up by hand, take a
   checkpoint and pass its id as `checkpoint_id`. Size that runtime as the trajectories need it:
   `vcpus` / `memory_mib` do not apply to runtimes created from a checkpoint.
 - **`auto_shutdown_after_secs`** must exceed the longest trajectory you expect. A trajectory
   that outlives it continues in a fresh runtime, without its earlier files.
+- **`lease_secs`** is how long the runtimes of a killed trainer keep running. Keep it well
+  above a few seconds: a renewal is one API call per runtime every `lease_secs / 3`.
 
 ## What the model sees
 
@@ -129,7 +152,17 @@ call of the run fails this way, and the policy is trained on those trajectories.
 
 Watch the logs of the agent loop workers. Authentication and quota failures are logged at
 `ERROR` with the cause, e.g. `Runta authentication failed: the token is invalid or expired`;
-other sandbox failures and replaced runtimes are logged at `WARNING`.
+other sandbox failures, replaced runtimes and failed lease renewals are logged at `WARNING`.
+
+## Logging
+
+By default (`VERL_LOGGING_LEVEL=WARN`) a run without failures logs nothing. To see the sandboxes
+at work, set the level in the environment of the agent loop workers:
+
+| `VERL_LOGGING_LEVEL` | Adds |
+| --- | --- |
+| `INFO` | one line when a trajectory's runtime is created (runtime id, creation time, time spent waiting for a creation slot) and one when it is deleted |
+| `DEBUG` | one line per execution: exit code, duration and output size, never the code or its output |
 
 ## Tests
 

@@ -22,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -31,6 +33,7 @@ import hydra
 import pytest
 from omegaconf import OmegaConf
 
+from examples.runta_sandbox import runta_tool
 from examples.runta_sandbox.runta_agent_loop import RuntaToolAgentLoop
 from examples.runta_sandbox.runta_tool import RuntaSandboxTool
 from verl.experimental.agent_loop.agent_loop import _agent_loop_registry
@@ -60,9 +63,12 @@ class FakeApiError(Exception):
 class FakeRuntime:
     def __init__(self, sdk: FakeSdk, name: str, create_kwargs: dict):
         self.sdk = sdk
+        self.id = f"rt-{len(sdk.runtimes) + 1}"
         self.name = name
         self.create_kwargs = create_kwargs
         self.exec_calls: list[dict] = []
+        self.timeout_updates: list[dict] = []  # policies saved by `update_timeout_policies`
+        self.update_attempts = 0
         self.deleted = False
         self.status = "running"
 
@@ -77,16 +83,38 @@ class FakeRuntime:
         return SimpleNamespace(status=self.status)
 
     async def wait_until_ready(self, timeout: float):
-        await asyncio.sleep(0)
-        if self.sdk.fail_ready:
-            raise TimeoutError("runtime did not become ready")
+        try:
+            await asyncio.sleep(self.sdk.create_secs)
+            if self.sdk.fail_ready:
+                raise TimeoutError("runtime did not become ready")
+        finally:
+            self.sdk.creating -= 1
 
     async def exec(self, command, timeout=None, stdin=None, cwd=None, max_output_bytes=None):
         self.exec_calls.append({"command": command, "timeout": timeout, "stdin": stdin, "cwd": cwd})
-        await asyncio.sleep(self.sdk.exec_secs)
+        self.sdk.executing += 1
+        self.sdk.max_executing = max(self.sdk.max_executing, self.sdk.executing)
+        try:
+            await asyncio.sleep(self.sdk.exec_secs)
+        finally:
+            self.sdk.executing -= 1
         if self.status != "running":
             raise FakeApiError(f"runtime is {self.status}")
         return self.sdk.on_exec(stdin)
+
+    async def update_timeout_policies(self, *, auto_shutdown_after_secs=None, auto_delete_after_secs=None):
+        """As in the SDK, None leaves a policy unchanged and saving one restarts its clock."""
+        self.update_attempts += 1
+        await asyncio.sleep(self.sdk.update_secs)
+        if self.sdk.fail_update is not None:
+            raise self.sdk.fail_update
+        if self.deleted or self.status == "deleted":
+            raise FakeApiError("runtime not found", status_code=404, code="not_found")
+        policies = {
+            "auto_shutdown_after_secs": auto_shutdown_after_secs,
+            "auto_delete_after_secs": auto_delete_after_secs,
+        }
+        self.timeout_updates.append({key: secs for key, secs in policies.items() if secs is not None})
 
     async def delete(self):
         self.deleted = True
@@ -100,7 +128,13 @@ class FakeSdk:
         self.runtimes: list[FakeRuntime] = []
         self.fail_ready = False
         self.fail_create: Exception | None = None
+        self.fail_update: Exception | None = None
+        self.create_secs = 0.0  # wall-clock time a runtime takes to become ready
         self.exec_secs = 0.0  # wall-clock time every `exec` takes
+        self.update_secs = 0.0  # wall-clock time every `update_timeout_policies` takes
+        # Runtimes between `create` and ready, and commands running, right now and at most.
+        self.creating = self.max_creating = 0
+        self.executing = self.max_executing = 0
         self.on_exec = lambda code: FakeCommandResult(stdout_text=f"ran:{code}")
         self.on_create = lambda runtime: None
 
@@ -111,6 +145,8 @@ class FakeSdk:
                 await asyncio.sleep(0)
                 if sdk.fail_create is not None:
                     raise sdk.fail_create
+                sdk.creating += 1
+                sdk.max_creating = max(sdk.max_creating, sdk.creating)
                 runtime = FakeRuntime(sdk, name, kwargs)
                 sdk.on_create(runtime)
                 sdk.runtimes.append(runtime)
@@ -153,6 +189,22 @@ async def _call(tool: RuntaSandboxTool, code, agent_data=None):
         await tool.release(instance_id)
 
 
+async def _until(condition, timeout: float = 5.0):
+    """Wait for something a background task does, without sleeping for a fixed time."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition was not reached in time"
+        await asyncio.sleep(0.002)
+
+
+def _tool_logs(caplog, level: int) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == runta_tool.logger.name and record.levelno == level
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Optional dependency + shipped configs
 # ---------------------------------------------------------------------------
@@ -182,6 +234,7 @@ def test_shipped_tool_config_loads_without_touching_runta(sdk):
     assert [type(tool) for tool in tools] == [RuntaSandboxTool]
     assert tools[0].name == "code_interpreter"
     assert tools[0].default_timeout == 30
+    assert (tools[0].max_concurrent_creates, tools[0].lease_secs, tools[0].auto_shutdown_after_secs) == (8, 600, 3600)
     assert sdk.clients == []
 
 
@@ -196,6 +249,14 @@ def test_shipped_agent_loop_config_targets_registered_loop():
 def test_unsupported_language_is_rejected():
     with pytest.raises(ValueError, match="Unsupported language"):
         _make_tool(language="ruby")
+
+
+@pytest.mark.parametrize(
+    "config", [{"max_concurrent_creates": 0}, {"lease_secs": -1}, {"auto_shutdown_after_secs": -1}], ids=str
+)
+def test_invalid_limits_are_rejected(config):
+    with pytest.raises(ValueError, match="must"):
+        _make_tool(**config)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +475,312 @@ def test_close_deletes_all_runtimes_and_closes_client(sdk):
 
 
 # ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_lifecycle_is_logged_at_info_and_executions_at_debug(sdk, caplog):
+    sdk.on_exec = lambda code: FakeCommandResult(3, "secret output\n", "", duration=0.25)
+    tool = _make_tool()
+
+    async def scenario():
+        await _call(tool, "print('secret code')", _agent_data("trajectory-a"))
+        await tool.release_trajectory("trajectory-a")
+
+    with caplog.at_level(logging.DEBUG, logger=runta_tool.logger.name):
+        asyncio.run(scenario())
+
+    created, deleted = _tool_logs(caplog, logging.INFO)
+    assert re.fullmatch(
+        r"Created Runta runtime rt-1 for trajectory trajectory-a in \d+\.\ds "
+        r"\(waited \d+\.\ds for a creation slot\)",
+        created,
+    )
+    assert deleted == "Deleted Runta runtime rt-1 of trajectory trajectory-a"
+    assert _tool_logs(caplog, logging.DEBUG) == [
+        "Runta exec for trajectory trajectory-a on runtime rt-1: exit code 3, 0.00s, 14 output chars"
+    ]
+    # Neither the code nor what it printed belongs in a log.
+    assert "secret" not in caplog.text
+
+
+def test_success_logs_nothing_at_warning(sdk, caplog):
+    tool = _make_tool()
+
+    async def scenario():
+        await _call(tool, "print(1)", _agent_data("trajectory-a"))
+        await tool.release_trajectory("trajectory-a")
+
+    with caplog.at_level(logging.WARNING, logger=runta_tool.logger.name):
+        asyncio.run(scenario())
+
+    assert [record for record in caplog.records if record.name == runta_tool.logger.name] == []
+
+
+# ---------------------------------------------------------------------------
+# Creation cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("config", "cap"), [({}, 8), ({"max_concurrent_creates": 2}, 2)], ids=["default", "set"])
+def test_runtime_creation_is_capped_but_executions_are_not(sdk, config, cap):
+    sdk.create_secs = 0.01
+    sdk.exec_secs = 0.05
+    tool = _make_tool(**config)
+
+    async def scenario():
+        for _ in range(2):  # the first round creates the runtimes, the second one only executes
+            await asyncio.gather(*(_call(tool, "x", _agent_data(f"trajectory-{i}")) for i in range(12)))
+
+    asyncio.run(scenario())
+
+    assert len(sdk.runtimes) == 12
+    assert sdk.max_creating == cap
+    assert sdk.max_executing == 12
+
+
+def test_creation_cap_works_on_every_event_loop_the_tool_is_used_on(sdk):
+    """Like the SDK client, an ``asyncio.Semaphore`` that had to wait cannot move to another loop."""
+    tool = _make_tool(max_concurrent_creates=1)
+
+    async def scenario(batch: str):
+        await asyncio.gather(*(_call(tool, "x", _agent_data(f"{batch}-{i}")) for i in range(3)))
+
+    asyncio.run(scenario("first"))
+    asyncio.run(scenario("second"))
+
+    assert len(sdk.clients) == 2
+    assert len(sdk.runtimes) == 6
+    assert sdk.max_creating == 1
+
+
+def test_failed_creation_frees_its_slot_and_starts_no_lease(sdk):
+    tool = _make_tool(max_concurrent_creates=1)
+
+    async def scenario():
+        sdk.fail_ready = True
+        failed = await asyncio.gather(
+            *(_call(tool, "x", _agent_data(f"trajectory-{i}")) for i in range(3)), return_exceptions=True
+        )
+        leases = dict(tool._leases)
+        sdk.fail_ready = False
+        response, _, _ = await asyncio.wait_for(_call(tool, "x", _agent_data("trajectory-0")), timeout=5)
+        return failed, leases, response
+
+    failed, leases, response = asyncio.run(scenario())
+
+    assert [type(error) for error in failed] == [TimeoutError] * 3
+    assert leases == {}
+    assert response.text == "ran:x"
+    assert [runtime.deleted for runtime in sdk.runtimes] == [True, True, True, False]
+
+
+# ---------------------------------------------------------------------------
+# Lease
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("config", "created_with", "renews"),
+    [
+        ({}, 600, True),
+        ({"lease_secs": 60, "auto_shutdown_after_secs": 7200}, 60, True),
+        ({"auto_shutdown_after_secs": 120}, 120, False),  # the cap is within one lease
+        ({"auto_shutdown_after_secs": 0}, 600, True),  # no cap: 0 must not disable the lease
+        ({"lease_secs": 0}, 3600, False),  # no lease: the cap alone, as before
+        ({"lease_secs": 0, "auto_shutdown_after_secs": 0}, 0, False),
+    ],
+    ids=["default", "set", "cap-below-lease", "no-cap", "no-lease", "neither"],
+)
+def test_runtime_is_created_with_the_lease_as_its_shutdown_limit(sdk, config, created_with, renews):
+    tool = _make_tool(**config)
+
+    async def scenario():
+        await _call(tool, "x", _agent_data("trajectory-a"))
+        return list(tool._leases)
+
+    leased = asyncio.run(scenario())
+
+    assert sdk.runtimes[0].create_kwargs["auto_shutdown_after_secs"] == created_with
+    assert leased == ([sdk.runtimes[0]] if renews else [])
+
+
+@pytest.mark.parametrize(
+    ("config", "age", "renewed_with", "goes_on"),
+    [
+        ({}, 200, 600, True),
+        ({}, 3000, 600, True),
+        ({}, 3300, 300, False),  # the cap leaves less than a lease: renew up to it, then stop
+        ({}, 3599.5, None, False),  # less than a second left; 0 would switch the limit off
+        ({}, 5000, None, False),
+        ({"auto_shutdown_after_secs": 0}, 10**6, 600, True),
+    ],
+    ids=["young", "one-lease-left", "capped", "cap-reached", "past-cap", "no-cap"],
+)
+def test_renewal_never_extends_a_runtime_past_the_hard_cap(sdk, config, age, renewed_with, goes_on):
+    """Drives one beat directly, for a runtime that was created ``age`` seconds ago."""
+    tool = _make_tool(**config)
+
+    async def scenario():
+        await _call(tool, "x", _agent_data("trajectory-a"))
+        return await tool._renew_lease(sdk.runtimes[0], "trajectory-a", age)
+
+    assert asyncio.run(scenario()) is goes_on
+    expected = [] if renewed_with is None else [{"auto_shutdown_after_secs": renewed_with}]
+    assert sdk.runtimes[0].timeout_updates == expected
+
+
+def test_lease_is_renewed_until_the_trajectory_is_released(sdk):
+    tool = _make_tool()
+    tool._lease_interval = 0.005  # instead of lease_secs / 3
+
+    async def scenario():
+        await _call(tool, "x", _agent_data("trajectory-a"))
+        runtime = sdk.runtimes[0]
+        lease = tool._leases[runtime]
+        await _until(lambda: len(runtime.timeout_updates) >= 3)
+        released = await tool.release_trajectory("trajectory-a")
+        await _until(lease.done)
+        renewals = len(runtime.timeout_updates)
+        await asyncio.sleep(0.05)  # ten more beats, had the task survived
+        return released, lease, renewals
+
+    released, lease, renewals = asyncio.run(scenario())
+
+    assert released and lease.done() and tool._leases == {}
+    assert len(sdk.runtimes[0].timeout_updates) == renewals
+    assert sdk.runtimes[0].timeout_updates[0] == {"auto_shutdown_after_secs": 600}
+
+
+def test_lease_task_ends_by_itself_at_the_hard_cap(sdk, monkeypatch):
+    tool = _make_tool()
+    tool._lease_interval = 0.005
+    clock = SimpleNamespace(offset=0.0)  # moves the tool's clock, and only the tool's
+    monkeypatch.setattr(runta_tool, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + clock.offset))
+
+    async def scenario():
+        await _call(tool, "x", _agent_data("trajectory-a"))
+        runtime = sdk.runtimes[0]
+        lease = tool._leases[runtime]
+        clock.offset = 3300  # 300 s of the 3600 s cap are left
+        await _until(lease.done)
+        renewals = len(runtime.timeout_updates)
+        await asyncio.sleep(0.05)
+        return lease, renewals
+
+    lease, renewals = asyncio.run(scenario())
+
+    *before, last = (update["auto_shutdown_after_secs"] for update in sdk.runtimes[0].timeout_updates)
+    assert set(before) <= {600} and 290 <= last <= 300
+    assert lease.done() and tool._leases == {}
+    assert len(sdk.runtimes[0].timeout_updates) == renewals
+    assert not sdk.runtimes[0].deleted
+
+
+def test_failed_renewal_is_logged_and_retried_without_failing_tool_calls(sdk, caplog):
+    """E.g. the ``ApiError`` the SDK raises when another writer changed the runtime under it."""
+    tool = _make_tool()
+    tool._lease_interval = 0.005
+    agent_data = _agent_data("trajectory-a")
+
+    async def scenario():
+        sdk.fail_update = FakeApiError(
+            "runtime revision conflict: expected 3, found 4", status_code=409, code="failed_precondition"
+        )
+        first, _, _ = await _call(tool, "first", agent_data)
+        runtime = sdk.runtimes[0]
+        await _until(lambda: runtime.update_attempts >= 2)
+        second, _, metrics = await _call(tool, "second", agent_data)
+        sdk.fail_update = None
+        await _until(lambda: runtime.timeout_updates)
+        alive = not tool._leases[runtime].done()
+        return first.text, second.text, metrics, alive
+
+    with caplog.at_level(logging.WARNING, logger=runta_tool.logger.name):
+        result = asyncio.run(scenario())
+
+    assert result == ("ran:first", "ran:second", {"exit_code": 0, "timed_out": False}, True)
+    assert len(sdk.runtimes) == 1 and not sdk.runtimes[0].deleted
+    warnings = _tool_logs(caplog, logging.WARNING)
+    assert len(warnings) >= 2
+    assert all(
+        warning.startswith("Failed to renew the lease of Runta runtime rt-1 of trajectory trajectory-a, retrying")
+        and "revision conflict" in warning
+        for warning in warnings
+    )
+    assert _tool_logs(caplog, logging.ERROR) == []
+
+
+def test_stuck_renewal_is_abandoned_before_it_uses_up_the_lease(sdk, caplog):
+    sdk.update_secs = 3600
+    tool = _make_tool(lease_secs=1)  # a renewal may take a sixth of this
+
+    async def scenario():
+        await _call(tool, "x", _agent_data("trajectory-a"))
+        return await asyncio.wait_for(tool._renew_lease(sdk.runtimes[0], "trajectory-a", 0), timeout=5)
+
+    with caplog.at_level(logging.WARNING, logger=runta_tool.logger.name):
+        assert asyncio.run(scenario()) is True
+
+    assert len(_tool_logs(caplog, logging.WARNING)) == 1
+
+
+def test_lease_task_stops_even_if_its_cancellation_is_swallowed(sdk, monkeypatch):
+    """``asyncio.wait_for`` does that before Python 3.12 when the call ends as the cancellation arrives."""
+    tool = _make_tool()
+    tool._lease_interval = 0.005
+    beats = []
+
+    async def renew_and_swallow_cancellation(runtime, trajectory_id, age):
+        beats.append(age)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+        return True
+
+    monkeypatch.setattr(tool, "_renew_lease", renew_and_swallow_cancellation)
+
+    async def scenario():
+        await _call(tool, "x", _agent_data("trajectory-a"))
+        lease = tool._leases[sdk.runtimes[0]]
+        await _until(lambda: beats)
+        await tool.release_trajectory("trajectory-a")
+        await _until(lease.done)
+
+    asyncio.run(scenario())
+
+    assert len(beats) == 1 and tool._leases == {}
+
+
+def test_lease_is_stopped_for_a_replaced_runtime_and_on_close(sdk):
+    tool = _make_tool()
+    tool._lease_interval = 0.005
+    agent_data = _agent_data("trajectory-a")
+
+    async def scenario():
+        await _call(tool, "first", agent_data)
+        dead = sdk.runtimes[0]
+        dead_lease = tool._leases[dead]
+        dead.kill()
+        await _call(tool, "second", agent_data)
+        fresh = sdk.runtimes[1]
+        await _until(dead_lease.done)
+        leased = list(tool._leases)
+        fresh_lease = tool._leases[fresh]
+        await _until(lambda: fresh.timeout_updates)
+        await tool.close()
+        await _until(fresh_lease.done)
+        return dead_lease, fresh_lease, leased
+
+    dead_lease, fresh_lease, leased = asyncio.run(scenario())
+
+    assert dead_lease.done() and fresh_lease.done()
+    assert leased == [sdk.runtimes[1]]
+    assert tool._leases == {}
+
+
+# ---------------------------------------------------------------------------
 # What the model sees
 # ---------------------------------------------------------------------------
 
@@ -605,7 +972,7 @@ def test_agent_loop_deletes_runtime_when_trajectory_ends(sdk, monkeypatch, fails
     assert seen == [("ran:print(1)", False), ("ran:print(1)", False)]
     assert len(sdk.runtimes) == 1
     assert sdk.runtimes[0].deleted
-    assert tool._runtimes == {}
+    assert tool._runtimes == {} and tool._leases == {}
 
 
 def test_agent_loop_deletes_the_replacement_of_a_dead_runtime(sdk, monkeypatch):
@@ -649,3 +1016,35 @@ def test_agent_loop_cleanup_failure_does_not_mask_result(sdk, monkeypatch):
     monkeypatch.setattr(tool, "release_trajectory", broken_release)
 
     assert asyncio.run(agent_loop.run({})) == "output"
+
+
+def test_agent_loop_stops_the_lease_of_a_cancelled_trajectory(sdk, monkeypatch):
+    tool = _make_tool()
+    tool._lease_interval = 0.005
+    agent_loop = _make_agent_loop(tool)
+    tool_call = SimpleNamespace(name="code_interpreter", arguments='{"code": "print(1)"}')
+
+    async def fake_run(self, sampling_params, **kwargs):
+        agent_data = _agent_data("trajectory-a")
+        await self._call_tool(tool_call, agent_data.tools_kwargs, agent_data)
+        await asyncio.sleep(3600)  # a generation that is still running when the trajectory is cancelled
+
+    monkeypatch.setattr(ToolAgentLoop, "run", fake_run)
+
+    async def scenario():
+        run = asyncio.ensure_future(agent_loop.run({}))
+        await _until(lambda: sdk.runtimes and sdk.runtimes[0].timeout_updates)
+        lease = tool._leases[sdk.runtimes[0]]
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        await _until(lease.done)
+        renewals = len(sdk.runtimes[0].timeout_updates)
+        await asyncio.sleep(0.05)
+        return lease, renewals
+
+    lease, renewals = asyncio.run(scenario())
+
+    assert lease.done() and tool._leases == {}
+    assert sdk.runtimes[0].deleted
+    assert len(sdk.runtimes[0].timeout_updates) == renewals

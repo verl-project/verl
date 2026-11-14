@@ -2,7 +2,7 @@
 Runta Sandbox Tool Integration
 ==============================
 
-Last updated: 11/11/2026.
+Last updated: 11/13/2026.
 
 `Runta <https://pypi.org/project/runta-sdk/>`_ provides managed sandbox runtimes. The example in
 ``examples/runta_sandbox`` lets the policy execute the code it writes inside such a runtime
@@ -28,7 +28,8 @@ Non-Goals
 - Reward computation in a sandbox. The tool returns a step reward of ``0.0``.
 - Running task-specific container images. A Runta runtime is a base machine, not a container;
   use a checkpoint to preinstall dependencies.
-- A global limit on the number of concurrent runtimes.
+- A global limit on the number of concurrent runtimes. ``max_concurrent_creates`` bounds how many
+  are being created at a time, per agent loop worker, not how many are alive.
 
 Design Details
 ==============
@@ -75,6 +76,11 @@ Tool: ``RuntaSandboxTool``
   to render tool schemas, needs neither the SDK nor credentials.
 - The SDK client is bound to the event loop that created it. The tool creates it on first use
   inside the ``AgentLoopWorker`` loop and reuses it for all trajectories of that worker.
+- Creating a runtime takes 10-20 seconds, and a batch asks for all of its runtimes at about the
+  same time. A semaphore of ``max_concurrent_creates`` slots, created together with the client
+  and so bound to the same event loop, is held from the create call until the runtime is ready.
+  Executions never take a slot. Each ``AgentLoopWorker`` has its own tool instance, so the bound
+  applies per worker.
 - Without ``agent_data`` the tool falls back to ``instance_id`` as the key, and ``release``
   deletes that runtime. Used directly, it behaves like a regular ``BaseTool``.
 - A runtime can die before its trajectory ends: it crashes, or it reaches
@@ -113,15 +119,52 @@ the trajectory.
 Orphan protection
 -----------------
 
-``finally`` does not run if the process is killed. Runta has no labels to find such runtimes by,
-so every runtime is created with
+``finally`` does not run if the process is killed, and a fixed ``auto_shutdown_after_secs`` has
+to be as long as the longest trajectory, so on its own it keeps the runtimes of a killed trainer
+running for up to an hour. The tool therefore holds a renewable lease on every runtime:
 
-- a name ``<name_prefix>-<8 hex chars>`` (``runta ps -a | grep verl-sandbox`` lists leftovers), and
-- ``auto_shutdown_after_secs`` / ``auto_delete_after_secs``, so Runta shuts it down and deletes it
-  on its own.
+.. code-block:: python
 
-A runtime that does not become ready within ``create_timeout`` is deleted immediately, and the
-next tool call of that trajectory starts over with a new one.
+   runtime = await client.runtimes.create(
+       name,
+       auto_shutdown_after_secs=min(lease_secs, auto_shutdown_after_secs),
+       auto_delete_after_secs=auto_delete_after_secs,
+       ...
+   )
+
+   # one asyncio task per runtime, every lease_secs / 3
+   remaining = auto_shutdown_after_secs - seconds_since_creation
+   await runtime.update_timeout_policies(auto_shutdown_after_secs=min(lease_secs, remaining))
+
+- Saving the shutdown policy restarts its clock on the server, so a runtime whose trainer is
+  alive never runs into the lease, and one whose trainer is gone is shut down within
+  ``lease_secs`` and deleted ``auto_delete_after_secs`` later.
+- ``auto_shutdown_after_secs`` remains the hard cap, counted from the creation of the runtime.
+  The last renewal is cut to what is left of it, and then the task ends.
+- A failed renewal, including the ``ApiError`` the SDK raises on a revision conflict, is logged
+  at ``WARNING`` and tried again on the next beat. Each attempt is abandoned after
+  ``lease_secs / 6``, which leaves time for another one before the lease runs out. It never
+  fails a tool call.
+- The task is cancelled when the tool deletes the runtime: at the end of the trajectory, when a
+  dead runtime is replaced, and in ``close``. It does not outlive the trajectory.
+- ``lease_secs: 0`` turns the lease off and ``auto_shutdown_after_secs: 0`` removes the cap.
+
+Runta has no labels to find leftovers by, so runtimes are named ``<name_prefix>-<8 hex chars>``
+(``runta ps -a | grep verl-sandbox``). A runtime that does not become ready within
+``create_timeout`` is deleted immediately, and the next tool call of that trajectory starts over
+with a new one.
+
+Logging
+-------
+
+The tool uses the usual ``VERL_LOGGING_LEVEL`` (default ``WARN``), which must be set in the
+environment of the agent loop workers:
+
+- ``INFO``: one line when a trajectory's runtime is created, with the runtime id, the creation
+  time and the time spent waiting for a creation slot, and one line when it is deleted.
+- ``DEBUG``: one line per execution with exit code, duration and output size. The code and its
+  output are never logged.
+- ``WARNING`` / ``ERROR``: failures, see the note under `Tool Response`_.
 
 Tool Schema
 -----------
@@ -181,7 +224,8 @@ the text to ``multi_turn.max_tool_response_length``.
    trajectory: ``ToolAgentLoop`` passes the text to the model with a step reward of ``0.0`` and
    training continues. With an expired token, an exhausted quota or an outage this affects every
    tool call. The tool logs authentication and quota failures at ``ERROR`` with the cause and
-   other sandbox failures at ``WARNING``; watch the agent loop worker logs.
+   other sandbox failures, including failed lease renewals, at ``WARNING``; watch the agent loop
+   worker logs.
 
 Configuration Parameters
 ------------------------
@@ -209,8 +253,15 @@ Keys under ``config`` in ``examples/runta_sandbox/config/runta_tool_config.yaml`
 +------------------------------+----------------------------------------------------------------+
 | ``create_timeout``           | Seconds to wait for a new runtime. Default: 240                |
 +------------------------------+----------------------------------------------------------------+
-| ``auto_shutdown_after_secs`` | Server-side limit on running time, counted from the start of   |
-|                              | the runtime. Default: 3600                                     |
+| ``max_concurrent_creates``   | Runtimes one tool instance creates at the same time.           |
+|                              | Executions are not limited. Default: 8                         |
++------------------------------+----------------------------------------------------------------+
+| ``lease_secs``               | Shutdown limit a runtime is created with, renewed about every  |
+|                              | ``lease_secs / 3`` while its trajectory runs. 0 turns the      |
+|                              | lease off. Default: 600                                        |
++------------------------------+----------------------------------------------------------------+
+| ``auto_shutdown_after_secs`` | Hard cap on running time, counted from the creation of the     |
+|                              | runtime. 0 means no cap. Default: 3600                         |
 +------------------------------+----------------------------------------------------------------+
 | ``auto_delete_after_secs``   | Delete this long after shutdown. Default: 300                  |
 +------------------------------+----------------------------------------------------------------+
@@ -238,7 +289,9 @@ run from the repository root:
    actor_rollout_ref.rollout.agent.default_agent_loop=runta_tool_agent
 
 One runtime is alive for every in-flight trajectory that has called the tool, so check
-``train_batch_size * rollout.n`` against your Runta quota. On a multi-node Ray cluster the SDK
+``train_batch_size * rollout.n`` against your Runta quota. Up to
+``rollout.agent.num_workers * max_concurrent_creates`` of them are being created at the same
+time. On a multi-node Ray cluster the SDK
 and the credentials must be available on every node that runs agent loop workers. See
 ``examples/runta_sandbox/README.md`` for the full walkthrough.
 
@@ -272,9 +325,22 @@ runs in the CPU test workflow without the SDK or an account:
 - **test_fence_is_stripped_only_when_it_wraps_the_whole_input**: code containing a fence runs
   unchanged.
 - **test_auth_and_quota_failures_are_logged_as_errors**: the cause is named at ``ERROR``.
+- **test_runtime_lifecycle_is_logged_at_info_and_executions_at_debug**: creation and deletion are
+  logged at ``INFO`` with the runtime id, executions at ``DEBUG`` without code or output.
+- **test_runtime_creation_is_capped_but_executions_are_not** and the tests next to it: at most
+  ``max_concurrent_creates`` creations at a time, on every event loop the tool is used on, and a
+  failed creation frees its slot.
+- **test_runtime_is_created_with_the_lease_as_its_shutdown_limit** /
+  **test_renewal_never_extends_a_runtime_past_the_hard_cap**: the shutdown limit sent at creation
+  and at each renewal.
+- **test_lease_is_renewed_until_the_trajectory_is_released** and the tests next to it: the
+  renewal task stops on release, replacement, ``close`` and at the hard cap, and a failed or
+  stuck renewal is logged and retried without failing a tool call. They shorten the interval
+  between renewals or drive one directly, so none of them waits for a real lease.
 - **test_agent_loop_deletes_runtime_when_trajectory_ends** /
-  **test_agent_loop_deletes_the_replacement_of_a_dead_runtime**: the runtime the trajectory ends
-  with is deleted when ``run`` returns and when it raises.
+  **test_agent_loop_deletes_the_replacement_of_a_dead_runtime** /
+  **test_agent_loop_stops_the_lease_of_a_cancelled_trajectory**: the runtime the trajectory ends
+  with is deleted, and its lease no longer renewed, when ``run`` returns, raises or is cancelled.
 
 Live Test
 ---------

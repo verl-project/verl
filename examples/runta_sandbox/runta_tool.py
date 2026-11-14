@@ -24,6 +24,9 @@ The Runta SDK is an optional dependency and is imported on first use::
     pip install "runta-sdk>=0.2.6,<0.3"
 
 Credentials are read by the SDK from ``RUNTA_TOKEN`` or ``~/.config/runta/config.toml``.
+
+Set ``VERL_LOGGING_LEVEL=INFO`` to see one line per created and per deleted runtime, and ``DEBUG``
+for one line per execution.
 """
 
 import asyncio
@@ -132,9 +135,14 @@ class RuntaSandboxTool(BaseTool):
       dependencies preinstalled. Such a runtime keeps the size stored in the checkpoint.
       Default: the base runtime.
     - ``create_timeout``: seconds to wait for a new runtime to become ready. Default 240.
-    - ``auto_shutdown_after_secs`` / ``auto_delete_after_secs``: server-side lifetime limits that
-      reclaim a runtime if the process dies before deleting it. Default 3600 / 300.
-      ``auto_shutdown_after_secs`` counts from the start of the runtime, not from its last use.
+    - ``max_concurrent_creates``: runtimes this tool instance creates at the same time; further
+      trajectories wait for a slot. Executions are not limited. Default 8.
+    - ``lease_secs``: a runtime is created with this shutdown limit and the tool renews it about
+      every ``lease_secs / 3`` while the trajectory holds the runtime, so Runta shuts down the
+      runtimes of a killed trainer after at most ``lease_secs``. 0 disables the lease. Default 600.
+    - ``auto_shutdown_after_secs``: hard cap on a runtime's running time, counted from its
+      creation, that no renewal extends. 0 means no cap. Default 3600.
+    - ``auto_delete_after_secs``: Runta deletes a runtime this long after it shut down. Default 300.
 
     A runtime that crashed or was shut down is replaced by a fresh one on the next call, so the
     files of the trajectory are lost at that point.
@@ -153,19 +161,37 @@ class RuntaSandboxTool(BaseTool):
         self.memory_mib = int(config.get("memory_mib", 1024))
         self.checkpoint_id = config.get("checkpoint_id")
         self.create_timeout = float(config.get("create_timeout", 240))
+        self.max_concurrent_creates = int(config.get("max_concurrent_creates", 8))
+        if self.max_concurrent_creates < 1:
+            raise ValueError(f"`max_concurrent_creates` must be at least 1, got {self.max_concurrent_creates}")
+        self.lease_secs = int(config.get("lease_secs", 600))
         self.auto_shutdown_after_secs = int(config.get("auto_shutdown_after_secs", 3600))
         self.auto_delete_after_secs = int(config.get("auto_delete_after_secs", 300))
+        if self.lease_secs < 0 or self.auto_shutdown_after_secs < 0:
+            raise ValueError("`lease_secs` and `auto_shutdown_after_secs` must not be negative (0 disables them)")
         if self.checkpoint_id is not None and ("vcpus" in config or "memory_mib" in config):
             logger.warning(
                 "`vcpus` / `memory_mib` are ignored because `checkpoint_id` is set: a runtime created "
                 "from a checkpoint keeps the checkpoint's resources."
             )
 
+        # Runta treats a shutdown limit of 0 as "none", so 0 must not win the `min` below.
+        limits = [secs for secs in (self.lease_secs, self.auto_shutdown_after_secs) if secs > 0]
+        self._initial_shutdown_secs = min(limits, default=0)
+        # A lease that spans the whole hard cap has nothing to renew.
+        self._renews_lease = 0 < self.lease_secs and not 0 < self.auto_shutdown_after_secs <= self.lease_secs
+        # Seconds between two renewals of one runtime.
+        self._lease_interval = self.lease_secs / 3
+
         self._client = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
+        # Bounds concurrent runtime creations. Like the client it belongs to one event loop.
+        self._create_slots: asyncio.Semaphore | None = None
         # trajectory id -> task that creates the runtime. Storing the task instead of the runtime
         # makes parallel tool calls of one trajectory share a single creation.
         self._runtimes: dict[str, asyncio.Task] = {}
+        # runtime -> task that keeps renewing its lease, from creation until the tool deletes it.
+        self._leases: dict[Any, asyncio.Task] = {}
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         """Schema used when the tool config does not provide ``tool_schema``."""
@@ -262,6 +288,15 @@ class RuntaSandboxTool(BaseTool):
         ran_for = min(elapsed, duration) if isinstance(duration, int | float) else elapsed
         timed_out = result.exit_code == _TIMEOUT_EXIT_CODE and ran_for >= timeout * _TIMEOUT_MIN_FRACTION
         metrics = {"exit_code": result.exit_code, "timed_out": timed_out}
+        # Sizes only: the code and its output can be large and are not ours to copy into logs.
+        logger.debug(
+            "Runta exec for trajectory %s on runtime %s: exit code %s, %.2fs, %d output chars",
+            trajectory_id,
+            runtime.id,
+            result.exit_code,
+            ran_for,
+            len(result.stdout_text) + len(result.stderr_text),
+        )
         if timed_out:
             # Keep everything the program printed; only the runtime's own notice is replaced.
             text = result.stdout_text + _RUNTA_TIMEOUT_NOTICE.sub("", result.stderr_text)
@@ -298,12 +333,7 @@ class RuntaSandboxTool(BaseTool):
         except Exception:
             # Creation failed, and `_create_runtime` already cleaned up after itself.
             return False
-        try:
-            await runtime.delete()
-        except Exception as e:
-            logger.warning(f"Failed to delete Runta runtime of trajectory {trajectory_id}: {e}")
-            return False
-        return True
+        return await self._delete_runtime(runtime, trajectory_id)
 
     async def close(self) -> None:
         """Delete every runtime still held and close the SDK client.
@@ -320,7 +350,7 @@ class RuntaSandboxTool(BaseTool):
     async def _get_runtime(self, trajectory_id: str):
         task = self._runtimes.get(trajectory_id)
         if task is None:
-            task = asyncio.ensure_future(self._create_runtime())
+            task = asyncio.ensure_future(self._create_runtime(trajectory_id))
             self._runtimes[trajectory_id] = task
         try:
             # Shielded so that a cancelled tool call does not abort a creation that
@@ -354,10 +384,19 @@ class RuntaSandboxTool(BaseTool):
             f"Runta runtime of trajectory {trajectory_id} is {dead_status}; replacing it with a fresh one. "
             "Files written earlier in the trajectory are lost."
         )
+        await self._delete_runtime(runtime, trajectory_id, kind="dead Runta runtime")
+
+    async def _delete_runtime(self, runtime, trajectory_id: str, kind: str = "Runta runtime") -> bool:
+        """Stop renewing the lease of ``runtime`` and delete it. Returns whether the deletion succeeded."""
+        # Stopped first: if the deletion fails, the runtime expires with its lease.
+        self._stop_lease(runtime)
         try:
             await runtime.delete()
         except Exception as e:
-            logger.warning(f"Failed to delete dead Runta runtime of trajectory {trajectory_id}: {e}")
+            logger.warning(f"Failed to delete {kind} of trajectory {trajectory_id}: {e}")
+            return False
+        logger.info(f"Deleted {kind} {runtime.id} of trajectory {trajectory_id}")
+        return True
 
     def _log_failure(self, what: str, trajectory_id: str, error: Exception, otherwise: int | None) -> None:
         """Log authentication / quota failures at ERROR, anything else at level ``otherwise``."""
@@ -371,34 +410,103 @@ class RuntaSandboxTool(BaseTool):
         elif otherwise is not None:
             logger.log(otherwise, f"Runta {what} for trajectory {trajectory_id}: {detail}")
 
-    async def _create_runtime(self):
+    async def _create_runtime(self, trajectory_id: str):
         client = self._get_client()
-        runtime = await client.runtimes.create(
-            f"{self.name_prefix}-{uuid4().hex[:8]}",
-            checkpoint_id=self.checkpoint_id,
-            vcpus=self.vcpus,
-            memory_mib=self.memory_mib,
-            auto_shutdown_after_secs=self.auto_shutdown_after_secs,
-            auto_delete_after_secs=self.auto_delete_after_secs,
-            wait=False,
-        )
-        # Waiting separately keeps a handle on the runtime, so one that never becomes ready can
-        # be deleted right away instead of lingering until the server-side limits reclaim it.
+        slots = self._create_slots
+        queued = time.monotonic()
+        runtime = None
         try:
-            await runtime.wait_until_ready(timeout=self.create_timeout)
+            # Only the creation holds a slot. Executions and the cleanup below never do.
+            async with slots:
+                started = time.monotonic()
+                runtime = await client.runtimes.create(
+                    f"{self.name_prefix}-{uuid4().hex[:8]}",
+                    checkpoint_id=self.checkpoint_id,
+                    vcpus=self.vcpus,
+                    memory_mib=self.memory_mib,
+                    auto_shutdown_after_secs=self._initial_shutdown_secs,
+                    auto_delete_after_secs=self.auto_delete_after_secs,
+                    wait=False,
+                )
+                # The hard cap counts from here. Runta starts its own clock no earlier, when the
+                # runtime runs, so the renewals below can never extend a session past the cap.
+                born = time.monotonic()
+                # Waiting separately keeps a handle on the runtime, so one that never becomes
+                # ready can be deleted right away instead of lingering until Runta reclaims it.
+                await runtime.wait_until_ready(timeout=self.create_timeout)
         except BaseException:
-            try:
-                await runtime.delete()
-            except Exception as e:
-                logger.warning(f"Failed to delete Runta runtime that did not become ready: {e}")
+            if runtime is not None:
+                try:
+                    await runtime.delete()
+                except Exception as e:
+                    logger.warning(f"Failed to delete Runta runtime that did not become ready: {e}")
             raise
+        logger.info(
+            f"Created Runta runtime {runtime.id} for trajectory {trajectory_id} in "
+            f"{time.monotonic() - started:.1f}s (waited {started - queued:.1f}s for a creation slot)"
+        )
+        if self._renews_lease:
+            self._leases[runtime] = asyncio.ensure_future(self._keep_lease(runtime, trajectory_id, born))
         return runtime
+
+    async def _keep_lease(self, runtime, trajectory_id: str, born: float) -> None:
+        """Renew the lease of ``runtime`` until the task is cancelled or the hard cap is reached."""
+        this_task = asyncio.current_task()
+        try:
+            while True:
+                await asyncio.sleep(self._lease_interval)
+                if not await self._renew_lease(runtime, trajectory_id, time.monotonic() - born):
+                    return
+                # Before Python 3.12 `asyncio.wait_for` swallows a cancellation that arrives just
+                # as the call finishes, so being cancelled is not the only way to be told to stop.
+                if self._leases.get(runtime) is not this_task:
+                    return
+        finally:
+            if self._leases.get(runtime) is this_task:
+                del self._leases[runtime]
+
+    async def _renew_lease(self, runtime, trajectory_id: str, age: float) -> bool:
+        """Restart the shutdown clock of ``runtime``, which was created ``age`` seconds ago.
+
+        Returns:
+            False once ``auto_shutdown_after_secs`` leaves nothing more to renew. A failed
+            renewal returns True, so that the next beat tries again.
+        """
+        secs = self.lease_secs
+        if self.auto_shutdown_after_secs > 0:
+            remaining = int(self.auto_shutdown_after_secs - age)
+            if remaining < 1:  # 0 would switch the shutdown limit off
+                return False
+            secs = min(secs, remaining)
+        try:
+            # Saving the policy restarts its clock even when the seconds do not change. Bounded,
+            # so that a stuck request leaves time for another beat before the lease runs out.
+            await asyncio.wait_for(
+                runtime.update_timeout_policies(auto_shutdown_after_secs=secs), timeout=self.lease_secs / 6
+            )
+        except Exception as e:
+            # Includes the `ApiError` the SDK raises on a revision conflict.
+            logger.warning(
+                f"Failed to renew the lease of Runta runtime {runtime.id} of trajectory {trajectory_id}, "
+                f"retrying in {self._lease_interval:g}s: {type(e).__name__}: {e}"
+            )
+            return True
+        # A renewal shortened by the cap put the deadline on the cap, where it stays.
+        return secs == self.lease_secs
+
+    def _stop_lease(self, runtime) -> None:
+        task = self._leases.pop(runtime, None)
+        # A task of an event loop that was closed in the meantime is gone already.
+        if task is not None and not task.get_loop().is_closed():
+            task.cancel()
 
     def _get_client(self):
         # AsyncRunta is bound to the event loop it was created on. A worker has a single loop,
-        # but a new one (e.g. consecutive `asyncio.run` calls) needs a new client.
+        # but a new one (e.g. consecutive `asyncio.run` calls) needs a new client, and a new
+        # semaphore for the same reason.
         loop = asyncio.get_running_loop()
         if self._client is None or self._client_loop is not loop:
             self._client = _load_async_runta()()
             self._client_loop = loop
+            self._create_slots = asyncio.Semaphore(self.max_concurrent_creates)
         return self._client

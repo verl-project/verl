@@ -31,9 +31,21 @@ tools:
       # Seconds to wait for a new runtime to become ready.
       create_timeout: 240
 
-      # Server-side backstop for runtimes the trainer could not delete (e.g. it was killed):
-      # shut down this many seconds after the runtime started (not after its last use), then
-      # delete this many seconds after shutdown. Must exceed the longest trajectory.
+      # Runtimes one tool instance (one per agent loop worker) creates at the same time. Further
+      # trajectories wait for a slot; executions are not limited. Creating a runtime takes
+      # 10-20 s, so this spreads the start of a large batch; it does not limit how many
+      # runtimes are alive.
+      max_concurrent_creates: 8
+
+      # Server-side backstop for runtimes the trainer could not delete (e.g. it was killed).
+      # A runtime is created to shut down after `lease_secs`, and the tool restarts that clock
+      # about every `lease_secs / 3` for as long as the trajectory holds the runtime. Once the
+      # trainer is gone, its runtimes shut down within `lease_secs`. 0 turns the lease off.
+      lease_secs: 600
+
+      # Hard cap on a runtime's running time, counted from its creation (not from its last
+      # use); the lease is never renewed past it. Must exceed the longest trajectory. 0 means
+      # no cap. Runta deletes a runtime `auto_delete_after_secs` after it shut down.
       auto_shutdown_after_secs: 3600
       auto_delete_after_secs: 300
 
