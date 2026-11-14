@@ -163,8 +163,25 @@ def compute_advantage_for_multi_trajectories(
     in advantage computation, and the result is broadcast to the other outputs in
     the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
     in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
-    original ``compute_advantage()`` unchanged.
+    original ``compute_advantage()`` unchanged. CoDaPO requires exactly one output
+    per session and rejects multi-output agent loops before advantage computation.
     """
+    if adv_estimator == core_algos.AdvantageEstimator.CODAPO:
+        session_keys = set()
+        for key in batch_keys:
+            fields = key.rsplit("_", 2)
+            if len(fields) != 3:
+                raise ValueError(f"Unexpected CoDaPO rollout key format: {key}")
+            session_key = (fields[0], fields[1])
+            # Output indices start at zero; a later index also detects a
+            # multi-output session whose earlier rows were filtered out.
+            if int(fields[2]) != 0 or session_key in session_keys:
+                raise ValueError(
+                    "CoDaPO does not support multi-output agent loops; "
+                    "return exactly one AgentLoopOutput per rollout session."
+                )
+            session_keys.add(session_key)
+
     if adv_estimator != core_algos.AdvantageEstimator.GRPO:
         return compute_advantage(
             data,

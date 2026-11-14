@@ -484,6 +484,9 @@ def trainer_instance(trainer_class, cfg=None):
     trainer.trainer_mode = trainer.config.trainer.v1.trainer_mode
     trainer.parameter_sync_step = 2
     trainer.tokenizer = trainer.processor = None
+    trainer._codapo_enabled = False
+    trainer._codapo_original_batch = None
+    trainer._codapo_resampled_batch = None
     trainer.replay_buffer = namespace["ReplayBufferAsync"](
         trainer_mode=trainer.trainer_mode,
         trainer_config={},
