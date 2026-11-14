@@ -59,6 +59,7 @@ from verl.workers.config import (
     TrainingWorkerConfig,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
+from verl.workers.utils.clip_cov import prepare_clip_cov_batch
 from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
@@ -190,6 +191,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = None
 
         self.loss_fn = None
+        self.prepare_batch_fn = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -202,8 +204,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def set_loss_fn(self, loss_fn):
+    def set_loss_fn(self, loss_fn, prepare_batch_fn=None):
         self.loss_fn = loss_fn
+        self.prepare_batch_fn = prepare_batch_fn
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset(self):
@@ -400,6 +403,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None) as timer,
         ):
+            if self.prepare_batch_fn is not None:
+                self.prepare_batch_fn(self.engine, data)
             output = self.engine.train_batch(data, loss_function=self.loss_fn)
             # containing loss, model_output and metrics
             # for training, we only care about loss and metrics
@@ -484,6 +489,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
 
+_KEEP_PREPARE_BATCH_FN = object()
+
+
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """Hybrid worker that includes actor model, rollout and optional ref model.
     For standalone actor or rollout, use ActorWorker or BaseRollout respectively.
@@ -566,8 +574,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def set_loss_fn(self, loss_fn):
-        self.actor.set_loss_fn(loss_fn=loss_fn)
+    def set_loss_fn(self, loss_fn, prepare_batch_fn=_KEEP_PREPARE_BATCH_FN):
+        # Keep the registered batch-preparation callback (e.g. the Clip-Cov
+        # minibatch-selection prepass) when only the loss is replaced, so the
+        # selection does not silently revert to per-microbatch statistics.
+        # Pass a callable to replace it or None to clear it explicitly.
+        if prepare_batch_fn is _KEEP_PREPARE_BATCH_FN:
+            prepare_batch_fn = self.actor.prepare_batch_fn
+        self.actor.set_loss_fn(loss_fn=loss_fn, prepare_batch_fn=prepare_batch_fn)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -689,7 +703,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
-            self.actor.set_loss_fn(self.loss_fn)
+            prepare_batch_fn = None
+            loss_mode = actor_config.policy_loss.get("loss_mode", "vanilla")
+            if loss_mode == "clip_cov" and actor_config.strategy in ("fsdp", "fsdp2"):
+                prepare_batch_fn = partial(prepare_clip_cov_batch, config=actor_config)
+            self.actor.set_loss_fn(self.loss_fn, prepare_batch_fn=prepare_batch_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine

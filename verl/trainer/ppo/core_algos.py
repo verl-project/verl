@@ -1749,6 +1749,7 @@ def compute_policy_loss_clip_cov(
     loss_agg_mode: str = "token-mean",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
+    clip_cov_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
@@ -1780,6 +1781,10 @@ def compute_policy_loss_clip_cov(
             Lower bound for clipping covariance. Defaults to 1.0.
         clip_cov_ub (float, optional):
             Upper bound for clipping covariance. Defaults to 5.0.
+        clip_cov_mask (torch.Tensor, optional):
+            This microbatch's slice of the optimizer-minibatch selection. If
+            omitted, selection is computed locally for compatibility with
+            other callers.
     """
     assert config is not None
     assert not isinstance(config, AlgoConfig), "passing AlgoConfig not supported yet"
@@ -1807,25 +1812,22 @@ def compute_policy_loss_clip_cov(
 
     corr = torch.ones_like(advantages)
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
-    clip_by_origin = (pg_losses2 > pg_losses1) & (response_mask > 0)
 
-    cov_all = (advantages - verl_F.masked_mean(advantages, response_mask)) * (
-        log_prob - verl_F.masked_mean(log_prob.detach(), response_mask)
-    )
-    cov_all[response_mask == 0] = -torch.inf
-    cov_all[clip_by_origin] = -torch.inf
-
-    clip_num = max(int(clip_cov_ratio * response_mask.sum().item()), 1)
-    top_k_idx = (cov_all < clip_cov_ub) & (cov_all > clip_cov_lb) & (response_mask > 0)
-    top_k_idx = torch.nonzero(top_k_idx)
-
-    if len(top_k_idx) > 0:
-        perm = torch.randperm(len(top_k_idx))
-        top_k_idx = top_k_idx[perm[: min(clip_num, len(top_k_idx))]]
-    else:
-        top_k_idx = torch.empty((0, 2), device=cov_all.device, dtype=torch.long)
-
-    corr[top_k_idx[:, 0], top_k_idx[:, 1]] = 0
+    if clip_cov_mask is None:
+        clip_cov_mask = compute_clip_cov_mask(
+            old_log_prob,
+            log_prob,
+            advantages,
+            response_mask,
+            clip_cov_ratio,
+            clip_cov_lb,
+            clip_cov_ub,
+            cliprange_low,
+            cliprange_high,
+        )
+    elif clip_cov_mask.shape != response_mask.shape:
+        raise ValueError("clip_cov_mask must have the same shape as response_mask.")
+    corr[clip_cov_mask.to(bool) & (response_mask > 0)] = 0
 
     pg_clipfrac = verl_F.masked_mean((corr == 0).float(), response_mask)
 
@@ -1843,6 +1845,71 @@ def compute_policy_loss_clip_cov(
         "actor/ppo_kl": ppo_kl.detach().item(),
     }
     return pg_loss, pg_metrics
+
+
+def compute_clip_cov_mask(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    clip_cov_ratio: float,
+    clip_cov_lb: float,
+    clip_cov_ub: float,
+    cliprange_low: float,
+    cliprange_high: float,
+) -> torch.Tensor:
+    """Select Clip-Cov tokens over the supplied batch, excluding padding.
+
+    The selection statistics (advantage/log-prob covariance means and the clip
+    quota) are computed over all valid tokens of the given batch, so callers
+    should pass the optimizer minibatch rather than a single microbatch.
+    The same mask can then be sliced per microbatch and handed to
+    ``compute_policy_loss_clip_cov`` via ``clip_cov_mask``.
+
+    Args:
+        old_log_prob: Log-probabilities under the rollout-time policy,
+            shape (batch_size, response_length).
+        log_prob: Log-probabilities under the current policy.
+        advantages: Advantage estimates per token.
+        response_mask: Mask indicating valid response tokens.
+        clip_cov_ratio: Fraction of valid tokens to drop.
+        clip_cov_lb: Lower covariance bound for eligibility.
+        clip_cov_ub: Upper covariance bound for eligibility.
+        cliprange_low: Lower PPO clip range; tokens already clipped by the
+            vanilla PPO term are not eligible for covariance clipping.
+        cliprange_high: Upper PPO clip range.
+
+    Returns:
+        Boolean mask of the same shape as ``response_mask``; ``True`` marks
+        tokens whose policy-gradient term is dropped (``corr = 0``).
+    """
+    if not 0 < clip_cov_ratio <= 1:
+        raise ValueError("clip_cov_ratio must be in (0, 1].")
+    valid = response_mask.to(bool)
+    selected = torch.zeros_like(valid)
+    flat_old = old_log_prob[valid].detach().cpu()
+    flat_lp = log_prob[valid].detach().cpu()
+    flat_adv = advantages[valid].detach().cpu()
+    if flat_adv.numel() == 0:
+        return selected
+    negative_approx_kl = flat_lp - flat_old
+    ratio = torch.exp(negative_approx_kl)
+    pg_losses1 = -flat_adv * ratio
+    pg_losses2 = -flat_adv * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+    clip_by_origin = pg_losses2 > pg_losses1
+    covariance = (flat_adv - flat_adv.mean()) * (flat_lp - flat_lp.mean())
+    covariance[clip_by_origin] = -torch.inf
+    quota = max(1, int(flat_adv.numel() * clip_cov_ratio))
+    eligible_idx = torch.nonzero((covariance < clip_cov_ub) & (covariance > clip_cov_lb), as_tuple=True)[0]
+    if eligible_idx.numel() > 0:
+        # A fixed-seed permutation keeps the pick deterministic so every
+        # data-parallel rank selects the same subset of the gathered batch.
+        perm = torch.randperm(eligible_idx.numel(), generator=torch.Generator().manual_seed(0))
+        chosen = eligible_idx[perm[: min(quota, eligible_idx.numel())]]
+        selected_valid = torch.zeros_like(flat_adv, dtype=torch.bool)
+        selected_valid[chosen] = True
+        selected[valid] = selected_valid.to(selected.device)
+    return selected
 
 
 @register_policy_loss("kl_cov")
