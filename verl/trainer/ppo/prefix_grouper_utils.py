@@ -138,7 +138,10 @@ def pg_forward(
 
     suffix_out /= temperature
 
-    log_probs = logprobs_from_logits(suffix_out, completion_ids_right)
+    # entropy_fn below reads suffix_out again, so the kernel must not overwrite it
+    log_probs = logprobs_from_logits(
+        suffix_out, completion_ids_right, inplace_backward=not (calculate_entropy and entropy_fn is not None)
+    )
 
     entropy = None
     if calculate_entropy and entropy_fn is not None:

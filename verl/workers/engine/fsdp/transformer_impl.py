@@ -1387,8 +1387,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 if not distillation_only:
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                    # entropy and the score centering hook reuse the logits in their backward
-                    inplace_backward = not (calculate_entropy or score_centering)
+                    # entropy and the score centering hook reuse the logits in their backward; so does
+                    # top-k distillation for fp32 logits, where its `.float()` does not copy
+                    distillation_keeps_logits = distillation_use_topk and logits_rmpad.dtype == torch.float32
+                    inplace_backward = not (calculate_entropy or score_centering or distillation_keeps_logits)
                     log_probs = logprobs_from_logits(
                         logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                         labels=input_ids_rmpad_rolled,
@@ -1510,10 +1512,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                     log_probs = None
                     if not distillation_only:
+                        # top-k distillation keeps fp32 logits for its backward (`.float()` does not copy)
+                        distillation_keeps_logits = distillation_use_topk and logits_rmpad.dtype == torch.float32
                         log_probs = logprobs_from_logits(
                             logits=unscaled_logits_rmpad if batch_invariant else logits_rmpad,
                             labels=input_ids_rmpad_rolled,
-                            inplace_backward=not score_centering,
+                            inplace_backward=not (score_centering or distillation_keeps_logits),
                             batch_invariant=batch_invariant,
                             temperature=None
                             if temperature_is_one
