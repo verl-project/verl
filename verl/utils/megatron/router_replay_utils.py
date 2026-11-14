@@ -436,6 +436,14 @@ def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.
     return torch.nested.as_nested_tensor(aligned_parts, layout=torch.jagged)
 
 
+def _replay_index_dtype(tf_config):
+    """Keep replay targets in int16 when expert ids fit, cutting the cache 4x."""
+    num_experts = getattr(tf_config, "num_moe_experts", None)
+    if num_experts is not None and num_experts <= torch.iinfo(torch.int16).max:
+        return torch.int16
+    return torch.int64
+
+
 def set_router_replay_data(
     layers_topk_idx,
     attention_mask,
@@ -545,7 +553,7 @@ def set_router_replay_data(
                     missing_layer_numbers.append(layer_number)
                     continue
                 router.set_target_indices(
-                    layers_topk_idx_reshape[idx].to(torch.int64),
+                    layers_topk_idx_reshape[idx].to(_replay_index_dtype(tf_config)),
                     replay_mask=replay_mask_rmpad_split,
                 )
             if missing_layer_numbers:
@@ -570,7 +578,7 @@ def set_router_replay_data(
             router = router_instances_list[router_offset]
             idx = layer_idx if index_by_layer else moe_idx
             router.set_target_indices(
-                layers_topk_idx_reshape[idx].to(torch.int64),
+                layers_topk_idx_reshape[idx].to(_replay_index_dtype(tf_config)),
                 replay_mask=replay_mask_rmpad_split,
             )
             router_offset += 1
@@ -605,6 +613,18 @@ def set_model_router_replay_action(model, router_replay_action):
     """
     for _, router in iter_model_routers(model):
         router.set_router_replay_action(router_replay_action)
+
+
+def clear_model_router_replay_action(model):
+    """Clear the router replay action on the forwarded model's own routers only."""
+    for _, router in iter_model_routers(model):
+        router.clear_router_replay_action()
+
+
+def clear_model_router_replay_indices(model):
+    """Clear recorded/target indices on the forwarded model's own routers only."""
+    for _, router in iter_model_routers(model):
+        router.clear_indices()
 
 
 def reorder_and_merge_vpp_layers(

@@ -48,6 +48,8 @@ from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
+    clear_model_router_replay_action,
+    clear_model_router_replay_indices,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -135,6 +137,54 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             raise NotImplementedError("Dynamic CP does not support distillation")
         if tu.get_non_tensor_data(batch, key="score_centering", default=False):
             raise NotImplementedError("Dynamic CP does not support score centering")
+
+
+def _validate_router_replay_setup(engine_config, tf_config) -> None:
+    """Fail fast when a router-replay configuration hits an unverified Megatron path.
+
+    Router replay silently degrades (or corrupts routes) when the configured MoE
+    dispatcher/fusion options are not the ones exercised by the replay patch.
+    These checks turn those implicit preconditions into explicit failures.
+    """
+    if engine_config.router_replay.mode == "disabled":
+        return
+
+    permute_fusion = bool(getattr(tf_config, "moe_permute_fusion", False))
+    router_fusion = bool(getattr(tf_config, "moe_router_fusion", False))
+    dispatcher = getattr(tf_config, "moe_token_dispatcher_type", "alltoall")
+    topk = getattr(tf_config, "moe_router_topk", None)
+
+    if permute_fusion:
+        raise ValueError(
+            "router_replay requires moe_permute_fusion=False, got True. "
+            "Disable moe_permute_fusion or turn off router_replay."
+        )
+    if router_fusion:
+        raise ValueError(
+            "router_replay requires moe_router_fusion=False, got True. "
+            "Disable moe_router_fusion or turn off router_replay."
+        )
+    if topk == 1:
+        raise ValueError(
+            "router_replay requires moe_router_topk > 1, got 1. "
+            "With a single expert slot duplicate replayed routes cannot be represented."
+        )
+    if dispatcher != "alltoall":
+        logger.warning(
+            "router_replay is only verified with moe_token_dispatcher_type='alltoall', got %r. "
+            "Other dispatchers have not been validated for duplicate replayed routes.",
+            dispatcher,
+        )
+
+    logger.info(
+        "router replay setup: mode=%s dispatcher=%s topk=%s permute_fusion=%s router_fusion=%s layers=%s",
+        engine_config.router_replay.mode,
+        dispatcher,
+        topk,
+        permute_fusion,
+        router_fusion,
+        getattr(tf_config, "num_layers", "?"),
+    )
 
 
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
@@ -440,6 +490,7 @@ class MegatronEngine(BaseEngine):
         return override_ddp_config
 
     def _build_megatron_module(self):
+        """Build the Megatron module(s) and load the HF weights for this engine."""
         from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
@@ -470,6 +521,7 @@ class MegatronEngine(BaseEngine):
             peft_config=self.model_config.get("lora", None),
         )
         self.tf_config = updated_tf_config
+        _validate_router_replay_setup(self.engine_config, updated_tf_config)
         print(f"module: {len(module)}")
 
         if self.engine_config.use_dist_checkpointing:
@@ -825,6 +877,11 @@ class MegatronEngine(BaseEngine):
         return torch.tensor(input_ids.numel(), device=input_ids.device)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        """Run the Megatron forward/backward schedule over the prepared micro-batches.
+
+        Router replay actions are armed before the schedule and cleared on both
+        the success and failure paths.
+        """
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
@@ -944,76 +1001,100 @@ class MegatronEngine(BaseEngine):
         )
 
         if enable_routing_replay:
+            # Drop any routes left over by a previous failed step before starting a new one.
+            self.mini_layer_topk_idx_list = []
             # Set to REPLAY mode: for R3 mode or actor update phase in R2 mode
-            RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            set_model_router_replay_action(self.module, RouterReplayAction.REPLAY_FORWARD)
             if record_r2_routes:
                 # In R2 mode, forward_only calls (e.g., compute_log_probs) need to record routing information
-                RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
+                set_model_router_replay_action(self.module, RouterReplayAction.RECORD)
 
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
 
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
-        losses_reduced = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.module,
-            num_microbatches=n_micro_batch,
-            seq_length=1,  # the communication shape is obtained via p2p comm
-            micro_batch_size=1,  # the communication shape is obtained via p2p comm
-            forward_only=forward_only,
-        )
+        try:
+            losses_reduced = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.module,
+                num_microbatches=n_micro_batch,
+                seq_length=1,  # the communication shape is obtained via p2p comm
+                micro_batch_size=1,  # the communication shape is obtained via p2p comm
+                forward_only=forward_only,
+            )
 
-        if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
-            # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
-            # because save_loss_to_tracker uses avg_group=DP+CP group.
-            # Only collect metrics on the src rank afterward.
-            metrics = get_megatron_mtp_loss(n_micro_batch)
-            if self.is_mp_src_rank_with_outputs():
-                if "metrics" not in losses_reduced[0]:
-                    losses_reduced[0]["metrics"] = {}
-                losses_reduced[0]["metrics"].update(metrics)
+            if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+                # because save_loss_to_tracker uses avg_group=DP+CP group.
+                # Only collect metrics on the src rank afterward.
+                metrics = get_megatron_mtp_loss(n_micro_batch)
+                if self.is_mp_src_rank_with_outputs():
+                    if "metrics" not in losses_reduced[0]:
+                        losses_reduced[0]["metrics"] = {}
+                    losses_reduced[0]["metrics"].update(metrics)
 
-        if record_r2_routes:
-            if not self.mini_layer_topk_idx_list:
-                raise RuntimeError("R2 RECORD completed without capturing any router routes.")
-            if self.tf_config.virtual_pipeline_model_parallel_size is not None:
-                # config = self.actor_module[0].module.module.config
-                vp_size = len(self.module)
-                microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
-                bs = n_micro_batch
-                topk_idx_td = reorder_and_merge_vpp_layers(
-                    self.mini_layer_topk_idx_list, bs, vp_size, microbatch_group_size_per_vp_stage
-                )
-            else:
-                topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
-            self.mini_layer_topk_idx_list = []
+            if record_r2_routes:
+                if not self.mini_layer_topk_idx_list:
+                    raise RuntimeError("R2 RECORD completed without capturing any router routes.")
+                if self.tf_config.virtual_pipeline_model_parallel_size is not None:
+                    # config = self.actor_module[0].module.module.config
+                    vp_size = len(self.module)
+                    microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
+                    bs = n_micro_batch
+                    topk_idx_td = reorder_and_merge_vpp_layers(
+                        self.mini_layer_topk_idx_list, bs, vp_size, microbatch_group_size_per_vp_stage
+                    )
+                else:
+                    topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
+                self.mini_layer_topk_idx_list = []
 
-            layers_topk_idx = pp_gather(topk_idx_td, self.tf_config)
-            use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
-            if use_dynamic_bsz and indices is not None:
-                layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
-            if dcp_group is not None and mpu.is_pipeline_last_stage(ignore_virtual=True):
-                # This rank only recorded routes for its scheduled samples, in
-                # micro-batch order. Hand them per micro-batch to the leader
-                # collection below, which restores the original sample order.
-                _attach_dcp_recorded_routes(losses_reduced, layers_topk_idx)
+                layers_topk_idx = pp_gather(topk_idx_td, self.tf_config)
+                use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
+                if use_dynamic_bsz and indices is not None:
+                    layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
+                if dcp_group is not None and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                    # This rank only recorded routes for its scheduled samples, in
+                    # micro-batch order. Hand them per micro-batch to the leader
+                    # collection below, which restores the original sample order.
+                    _attach_dcp_recorded_routes(losses_reduced, layers_topk_idx)
 
-        output = {}
-        if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            if dcp_group is not None:
-                output = postprocess_dynamic_cp_batch(
-                    losses_reduced, len(data), dcp_group, include_model_output=self.is_mp_src_rank_with_outputs()
-                )
-            else:
-                output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
-            if record_r2_routes and dcp_group is None:
-                output["model_output"]["routed_experts"] = layers_topk_idx
-        if enable_routing_replay:
-            RouterReplay.clear_global_indices()
-            RouterReplay.clear_global_router_replay_action()
-        return output
+            output = {}
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                if dcp_group is not None:
+                    output = postprocess_dynamic_cp_batch(
+                        losses_reduced, len(data), dcp_group, include_model_output=self.is_mp_src_rank_with_outputs()
+                    )
+                else:
+                    output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+                if record_r2_routes and dcp_group is None:
+                    output["model_output"]["routed_experts"] = layers_topk_idx
+            if enable_routing_replay:
+                clear_model_router_replay_indices(self.module)
+                clear_model_router_replay_action(self.module)
+            return output
+        except Exception:
+            # Keep router replay state from leaking into the next step after an error.
+            if enable_routing_replay:
+                self._clear_replay_state_after_error()
+            raise
+
+    def _clear_replay_state_after_error(self) -> None:
+        """Best-effort clear of router replay state after a failed schedule.
+
+        Cleanup failures are logged instead of replacing the original schedule error,
+        and the action clear still runs if the index clear fails.
+        """
+        self.mini_layer_topk_idx_list = []
+        try:
+            clear_model_router_replay_indices(self.module)
+        except Exception:
+            logger.exception("Failed to clear router replay indices after a step error")
+        try:
+            clear_model_router_replay_action(self.module)
+        except Exception:
+            logger.exception("Failed to clear router replay actions after a step error")
 
     def _mbridge_export_tasks(self):
         """Cache static export tasks while preserving Bridge's specialized FP8 task planning."""
