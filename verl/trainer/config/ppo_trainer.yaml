@@ -305,6 +305,10 @@ trainer:
       # Whether sync trainers replace failed groups that have no trajectories
       sync_refill_failed_groups: False
 
+      # Seconds between two checks of the rollout progress while a training step waits for its batch.
+      # A batch that completes between two checks waits for the next one. Applies to the built-in replay buffers.
+      poll_interval: 2.0
+
       # Custom sampler config
       custom_sampler:
 
