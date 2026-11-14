@@ -70,7 +70,7 @@ cd recipe
 git checkout main
 cd ..
 
-echo "5. May need to check other neccessary packages"
+echo "5. May need to check other necessary packages"
 # Restore the inference requirements after installing the training dependencies.
 pip install torch_npu==2.10.0.post7 transformers==5.14.1 "xgrammar>=0.2.1,<1.0.0"
 # Restore the vLLM Triton version after requirements-npu.txt installs its shared pin.
