@@ -31,6 +31,7 @@ import verl.trainer.ppo.v1.trainer_separate_async as trainer_module
 from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.v1.trainer_separate_async import HybridEngineMode, PPOTrainerSeparateAsync
 from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.rollout.llm_server import LLMServerManager
 
 
 class _RecordingCheckpointManager:
@@ -601,7 +602,7 @@ def _memory_budget_setup(monkeypatch, hybrid_enabled, standalone_memory, *, inte
         return object()
 
     monkeypatch.setattr(trainer_module.PPOTrainer, "_setup", base_setup)
-    monkeypatch.setattr(trainer_module.LLMServerManager, "create", create_standalone)
+    monkeypatch.setattr(LLMServerManager, "create", create_standalone)
     monkeypatch.setattr(trainer_module, "CheckpointEngineManager", create_checkpoint_manager)
     trainer.add_replicas_to_balancer = lambda: None
     return trainer, created_configs, checkpoint_calls
