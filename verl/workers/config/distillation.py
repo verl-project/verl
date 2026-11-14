@@ -247,7 +247,14 @@ class DistillationConfig(BaseConfig):
         Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in
         the data proto, e.g., data_source.
     distillation_loss (DistillationLossConfig):
-    Configuration for distillation loss settings.
+        Configuration for distillation loss settings.
+    teacher_serving (str):
+        ``resident`` (default, one engine per teacher) or ``on_demand`` (shared
+        replica fleet that swaps weights from a cache).
+    teacher_cache_backend (str):
+        On-demand weight cache: ``disk`` or ``shm``.
+    teacher_cache_dir (str, optional):
+        Base directory for the disk cache; ignored by ``shm``.
 
     NOTE: The `teacher_model` entry is in the `teacher_models` dict by default.
     Since it is popped when other teacher entries are added, using `teacher_model` as
@@ -278,18 +285,32 @@ class DistillationConfig(BaseConfig):
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
+    teacher_serving: str = "resident"
+    teacher_cache_backend: str = "disk"
+    teacher_cache_dir: Optional[str] = None
 
     def __post_init__(self):
         if not self.enabled:
             return
 
+        if self.teacher_serving not in ("resident", "on_demand"):
+            raise ValueError(
+                f"teacher_serving must be 'resident' or 'on_demand', but got {self.teacher_serving!r}."
+            )
+
         self.teacher_models = self._resolve_teacher_models()
-        teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
             )
+
+        # on_demand fleet size is pool / tp, not sum(num_replicas * world_size).
+        if self.teacher_serving == "on_demand":
+            return
+
+        teacher_world_size_sum = 0
+        for teacher_model in self.teacher_models.values():
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes
         if teacher_world_size_sum != total_pool_size:
@@ -302,21 +323,22 @@ class DistillationConfig(BaseConfig):
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
         assert "teacher_model" in self.teacher_models
         if len(self.teacher_models) == 1:
-            # Single teacher occupies the entire teacher resource pool.
             teacher_model = self.teacher_models["teacher_model"]
-            inference = teacher_model.inference
-            per_replica = (
-                inference.tensor_model_parallel_size
-                * inference.data_parallel_size
-                * inference.pipeline_model_parallel_size
-            )
-            pool_size = self.n_gpus_per_node * self.nnodes
-            if pool_size % per_replica != 0:
-                raise ValueError(
-                    f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
-                    f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+            if self.teacher_serving != "on_demand":
+                # Single teacher occupies the entire teacher resource pool.
+                inference = teacher_model.inference
+                per_replica = (
+                    inference.tensor_model_parallel_size
+                    * inference.data_parallel_size
+                    * inference.pipeline_model_parallel_size
                 )
-            teacher_model.num_replicas = pool_size // per_replica
+                pool_size = self.n_gpus_per_node * self.nnodes
+                if pool_size % per_replica != 0:
+                    raise ValueError(
+                        f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
+                        f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+                    )
+                teacher_model.num_replicas = pool_size // per_replica
             teacher_model.key = "default"
         else:
             # Multiple teachers: remove default single teacher config
