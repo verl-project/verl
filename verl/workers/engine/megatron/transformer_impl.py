@@ -137,6 +137,21 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
             raise NotImplementedError("Dynamic CP does not support score centering")
 
 
+def _validate_router_replay_batch_flag(engine_enabled: bool, batch_enabled: bool) -> None:
+    """Fail fast when replay is enabled on the engine but missing from the batch.
+
+    The worker wrapper sets ``enable_routing_replay`` on the dispatched
+    TensorDict. If a data path drops it, the engine silently falls back to
+    native routing instead of replaying the captured routes.
+    """
+    if engine_enabled and not batch_enabled:
+        raise RuntimeError(
+            "Router replay is enabled on the Megatron engine, but this batch is missing the "
+            "'enable_routing_replay' flag. The worker wrapper must set it before dispatch; "
+            "without it replay silently falls back to native routing."
+        )
+
+
 def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
     """Attach recorded routes to DCP micro-batches without dropping or inventing samples."""
     recorded_routes = list(layers_topk_idx.unbind())
@@ -825,6 +840,11 @@ class MegatronEngine(BaseEngine):
         return torch.tensor(input_ids.numel(), device=input_ids.device)
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+        """Run the Megatron forward/backward schedule over the prepared micro-batches.
+
+        Validates the router-replay batch flag before scheduling so replay cannot
+        silently fall back to native routing.
+        """
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
@@ -914,6 +934,7 @@ class MegatronEngine(BaseEngine):
         n_micro_batch = len(micro_batches)
 
         enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
+        _validate_router_replay_batch_flag(self.enable_routing_replay, enable_routing_replay)
         record_r2_routes = (
             enable_routing_replay
             and forward_only
