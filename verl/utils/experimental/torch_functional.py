@@ -39,9 +39,11 @@ def _fused_linear_for_ppo_fwd(
     input_ids: torch.LongTensor,
     temperature: float = 1.0,
 ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-    logits = (hidden_states @ vocab_weights.t()) / temperature
+    logits = hidden_states @ vocab_weights.t()
     orig_dtype = logits.dtype
-    logits = logits.to(torch.float32)
+    # Upcast before dividing by the temperature, as the rollout sampler does (logits.float() / T);
+    # dividing the bf16 logits first adds a second bf16 rounding.
+    logits = logits.to(torch.float32) / temperature
 
     probs = logits.softmax(dim=-1)
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
@@ -66,9 +68,9 @@ def _fused_linear_for_ppo_bwd(
     input_ids: torch.LongTensor,
     temperature: float = 1.0,
 ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-    logits = (hidden_states @ vocab_weights.t()) / temperature
+    logits = hidden_states @ vocab_weights.t()
     orig_dtype = logits.dtype
-    logits = logits.to(torch.float32)
+    logits = logits.to(torch.float32) / temperature
 
     probs = logits.softmax(dim=-1)
 
@@ -85,7 +87,7 @@ def _fused_linear_for_ppo_bwd(
         entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
         dlogits += probs * (log_probs + entropy.unsqueeze(-1)) * (-dentropy.unsqueeze(-1))
 
-    dlogits = dlogits.to(orig_dtype) / temperature
+    dlogits = (dlogits / temperature).to(orig_dtype)
 
     dhidden_states = dlogits @ vocab_weights
     dvocab_weights = dlogits.t() @ hidden_states
