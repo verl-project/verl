@@ -51,3 +51,12 @@ warmup_style: null
 # override_optimizer_config:
 #   bf16_stochastic_round: true
 override_optimizer_config: null
+
+# Optional native FSDP2 Muon. Requires requirements-fsdp2-muon.txt only when selected.
+# FP32 stored weights/states; orthogonalization uses BF16 in the pinned Dion implementation.
+muon_momentum: 0.95
+muon_nesterov: false
+muon_adjust_lr: spectral_norm
+muon_epsilon: 1.0e-8
+# false selects Dion's fixed five-step Newton-Schulz coefficient schedule.
+muon_use_polar_express: false

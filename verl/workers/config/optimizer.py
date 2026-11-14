@@ -114,6 +114,12 @@ class FSDPOptimizerConfig(OptimizerConfig):
     num_cycles: float = 0.5
     override_optimizer_config: Optional[dict] = None
     zero_indexed_step: bool = True
+    # Optional native FSDP2 Muon (Microsoft Dion); ignored by the default AdamW path.
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = False
+    muon_adjust_lr: Optional[str] = "spectral_norm"
+    muon_epsilon: float = 1e-8
+    muon_use_polar_express: bool = False
 
     def __post_init__(self):
         if self.warmup_style is not None:
@@ -297,7 +303,7 @@ class AutomodelOptimizerConfig(OptimizerConfig):
         return super().__post_init__()
 
 
-def build_optimizer(parameters, config: FSDPOptimizerConfig):
+def build_optimizer(parameters, config: FSDPOptimizerConfig, *, model=None, engine_config=None, model_config=None):
     """Build an optimizer based on the configuration.
 
     Dynamically imports and instantiates an optimizer class from the specified module.
@@ -305,6 +311,9 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig):
     Args:
         parameters: Model parameters to optimize
         config: FSDPOptimizerConfig with optimizer settings
+        model: Owning module, required for Muon's semantic parameter grouping
+        engine_config: Backend and sharding settings used to validate Muon support
+        model_config: Optional model settings used to reject unsupported Muon combinations
 
     Returns:
         Optimizer instance
@@ -324,6 +333,16 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig):
         config.optimizer = "AdamW8bit"
     """
     import importlib
+
+    if config.optimizer.lower() == "muon":
+        from verl.utils.fsdp2_muon import build_fsdp2_muon
+
+        if model is None:
+            raise ValueError("Muon requires model module metadata for semantic parameter grouping.")
+        supplied = list(parameters)
+        if {id(p) for p in supplied if p.requires_grad} != {id(p) for p in model.parameters() if p.requires_grad}:
+            raise ValueError("Muon parameters must cover exactly the model's trainable parameters.")
+        return build_fsdp2_muon(model, config, engine_config, model_config)
 
     optimizer_args = {
         "lr": config.lr,

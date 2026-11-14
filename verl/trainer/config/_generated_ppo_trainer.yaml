@@ -24,6 +24,11 @@ actor_rollout_ref:
       zero_indexed_step: true
       warmup_style: null
       override_optimizer_config: null
+      muon_momentum: 0.95
+      muon_nesterov: false
+      muon_adjust_lr: spectral_norm
+      muon_epsilon: 1.0e-08
+      muon_use_polar_express: false
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
@@ -529,6 +534,11 @@ critic:
     zero_indexed_step: true
     warmup_style: null
     override_optimizer_config: null
+    muon_momentum: 0.95
+    muon_nesterov: false
+    muon_adjust_lr: spectral_norm
+    muon_epsilon: 1.0e-08
+    muon_use_polar_express: false
   fsdp:
     _target_: verl.workers.config.FSDPEngineConfig
     wrap_policy:

@@ -1,0 +1,2 @@
+# Optional native FSDP2 Muon; MIT licensed. Do not install for ordinary AdamW.
+dion @ git+https://github.com/microsoft/dion.git@7692479288f928a3d61d1cc58137b4dbe4f71000
