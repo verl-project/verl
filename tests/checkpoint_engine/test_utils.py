@@ -123,7 +123,10 @@ class CheckpointEngineWorkerTest(CheckpointEngineWorker):
 
 
 def create_trainer_worker_group(
-    resource_pool: RayResourcePool, model_config: HFModelConfig, checkpoint_engine_config: CheckpointEngineConfig
+    resource_pool: RayResourcePool,
+    model_config: HFModelConfig,
+    checkpoint_engine_config: CheckpointEngineConfig,
+    worker_cls=TrainingWorkerTest,
 ) -> RayWorkerGroup:
     engine_config = FSDPEngineConfig(forward_only=True, fsdp_size=resource_pool.world_size, strategy="fsdp")
     trainer_config = TrainingWorkerConfig(
@@ -133,7 +136,7 @@ def create_trainer_worker_group(
     )
 
     ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(TrainingWorkerTest),
+        cls=ray.remote(worker_cls),
         config=trainer_config,
         checkpoint_engine_config=checkpoint_engine_config,
     )
@@ -155,10 +158,11 @@ async def create_rollout_worker_group(
     model_config: HFModelConfig,
     rollout_config: RolloutConfig,
     check_allclose: bool = True,
+    worker_cls=CheckpointEngineWorkerTest,
 ) -> tuple[RayWorkerGroup, list[MockReplica]]:
     # create rollout worker group
     ray_cls_with_init = RayClassWithInitArgs(
-        cls=ray.remote(CheckpointEngineWorkerTest),
+        cls=ray.remote(worker_cls),
         model_config=model_config,
         rollout_config=rollout_config,
         check_allclose=check_allclose,

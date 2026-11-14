@@ -82,3 +82,15 @@ try:
 except ImportError as e:
     CheckpointEngineRegistry.record_import_error("delta_checkpoint_engine", e)
     DeltaShardedCheckpointEngine = None
+
+# The HCCL delta engine registers the same "delta_sharded" backend name (the
+# delta counterpart of the nccl/hccl pair above): on NPU hosts the NCCL delta
+# module fails to import (cupy), so the HCCL variant owns the name; on CUDA
+# hosts this module raises at import and the NCCL variant keeps it.
+try:
+    from .delta_hccl_checkpoint_engine import DeltaHCCLCheckpointEngine
+
+    __all__ += ["DeltaHCCLCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("delta_hccl_checkpoint_engine", e)
+    DeltaHCCLCheckpointEngine = None
