@@ -124,6 +124,57 @@ def test_prime_code():
         assert float(score) == score_
 
 
+_ADD_CALL_BASED_GT = json.dumps({"fn_name": "add", "inputs": ["1\n2", "-1\n1", "10\n5"], "outputs": ["3", "0", "15"]})
+
+
+@pytest.mark.parametrize(
+    "solution, expected",
+    [
+        ("def add(a, b):\n    return a + b\n", 1.0),
+        ("def add(a, b):\n    return a - b\n", 0.0),
+        # Subclasses of builtin types whose __eq__ always returns True must not pass (#8656).
+        (
+            "class _Any(int):\n    def __eq__(self, other):\n        return True\n    __hash__ = int.__hash__\n"
+            "def add(a, b):\n    return _Any(0)\n",
+            0.0,
+        ),
+        (
+            "class _Any(list):\n    def __eq__(self, other):\n        return True\ndef add(a, b):\n    return _Any()\n",
+            0.0,
+        ),
+    ],
+    ids=["correct", "wrong", "always_equal_int", "always_equal_list"],
+)
+def test_prime_code_call_based_rejects_always_equal(solution, expected):
+    score = default_compute_score("codecontests", f"```python\n{solution}```", _ADD_CALL_BASED_GT)
+    assert float(score) == expected
+
+
+@pytest.mark.parametrize(
+    "ground_truth, solution",
+    [
+        # An int subclass that reports __class__ as bool would be rebuilt as True, which equals 1.
+        (
+            json.dumps({"fn_name": "f", "inputs": ["0"], "outputs": ["1"]}),
+            "class _Wrong(int):\n    @property\n    def __class__(self):\n        return bool\n"
+            "    def __bool__(self):\n        return True\n"
+            "def f(x):\n    return _Wrong(0)\n",
+        ),
+        # A list subclass whose __iter__ hides its items from json.dumps, holding an always-equal object.
+        (
+            json.dumps({"fn_name": "f", "inputs": ["0"], "outputs": ["[123]"]}),
+            "class _Any:\n    def __eq__(self, other):\n        return True\n"
+            "class _Hidden(list):\n    def __iter__(self):\n        return iter(())\n"
+            "def f(x):\n    return _Hidden([_Any()])\n",
+        ),
+    ],
+    ids=["class_spoofed_as_bool", "hidden_always_equal_item"],
+)
+def test_prime_code_call_based_rejects_disguised_outputs(ground_truth, solution):
+    score = default_compute_score("codecontests", f"```python\n{solution}```", ground_truth)
+    assert float(score) == 0.0
+
+
 # Use the pytest.mark.skipif decorator to skip the test
 @pytest.mark.skipif(not os.environ.get("SANDBOX_FUSION_URL"), reason="SANDBOX_FUSION_URL environment variable not set")
 def test_prime_code_sandbox_fusion():
