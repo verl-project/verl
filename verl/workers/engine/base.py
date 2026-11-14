@@ -160,6 +160,10 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def get_weight_transfer_metadata(self) -> list[tuple[str, torch.dtype, tuple[int, ...]]]:
+        """Describe get_per_tensor_param() in export order without gathering full weights."""
+        raise NotImplementedError(f"{type(self).__name__} does not expose full-weight transfer metadata")
+
     def set_rollout_weight_quantizer(self, quantizer) -> None:
         """Make :meth:`get_per_tensor_param` emit weights quantized by ``quantizer`` for a low-precision rollout.
 

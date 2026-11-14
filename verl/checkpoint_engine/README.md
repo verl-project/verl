@@ -17,9 +17,36 @@ Checkpoint Engine is an unified abstract layer to synchronize weights between va
 |naive|torch.distributed|all_gather|NVIDIA/AMD/Ascend|Very High|NA|On-policy training<br>- Actor/rollout colocated
 |nccl|NCCL|all_gather+broadcast|NVIDIA GPU & NCCL|Very High|Low: rebuild nccl group|Off-policy training<br>- Actor/rollout disaggregated<br>- Fixed clusters
 |hccl|HCCL|all_gather+broadcast|Ascend NPU & HCCL| High|Low: rebuild hccl group|Off-policy training<br>- Actor/rollout disaggregated<br>- Fixed clusters
+|vllm_native_hccl|vLLM-Ascend HCCL weight transfer|FSDP2 all-gather + broadcast to model workers|Ascend NPU & HCCL|Unmeasured|Rebuild on membership change|Disaggregated FSDP2 training with standalone vLLM-Ascend rollout
 |nixl|NIXL|all_gather+ring p2p|Various transport backends (D2D, H2H, H2D, etc)<br>- UCX<br>- UCCL<br>- Mooncacke|Medium/High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Elastic rollout<br>- Rollout fault tolerance<br>- Heterogeneous hardware rollout
 |kimi_ckpt_engine|MOONCAKE+NCCL/HCCL|p2p+broadcast|NVIDIA/Ascend|High|Low: rebuild communication group|Off-policy training<br>- Actor/rollout disaggregated<br>- Save checkpoint each time
 |mooncake|Mooncake Transfer Engine|all_gather+ring p2p|NVIDIA/Ascend|High|High: dynamic adjust ring topology|Off-policy training<br>- Actor/rollout disaggregated<br>- Fixed clusters
+
+#### Direct full-weight updates with vLLM-Ascend
+
+Both Ascend paths use the same `CheckpointEngine` base class and registry. Select the receiving process with `actor_rollout_ref.rollout.checkpoint_engine.backend`:
+
+| Backend on Ascend | Weight path |
+| --- | --- |
+| `nccl` (registered by `HCCLCheckpointEngine`) | Training worker → HCCL → rollout checkpoint worker → local IPC → vLLM model worker |
+| `vllm_native_hccl` | Training worker → native HCCL → vLLM model worker |
+
+All training ranks export each full parameter in the same order. Training rank 0 broadcasts it directly to the rollout model workers. Ray carries control messages to the head server of each replica. Each head dispatches them to its model workers, which receive and load the weights through vLLM-Ascend. For example, four training ranks and two TP=2 replicas use five HCCL transfer ranks: one sender and four receivers. The other three trainers participate in FSDP2 gathers.
+
+Install compatible vLLM and vLLM-Ascend builds on **both** worker pools. The trainer requires the native `WeightSource`, `WeightTransferTrainerFactory` and `HCCLTrainerInitInfo` APIs. The trainer's rendezvous address and HCCL network must be reachable from every rollout worker.
+
+To try two consecutive updates on Ascend, supply the model and datasets expected by the existing one-step-off example, then run:
+
+```bash
+bash verl/experimental/one_step_off_policy/shell/grpo_qwen3_8b_gsm8k_fsdp2_8_8_npu.sh \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=vllm_native_hccl \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=64 \
+    trainer.total_training_steps=2
+```
+
+The backend requires FSDP2 full weights, standalone vLLM replicas and internal data-parallel load balancing. LoRA, quantized rollout and speculative decoding with a separate drafter require different loading semantics. The native packer uses `checkpoint_engine.update_weights_bucket_megabytes` for its buffer size. To broadcast individual tensors, add `+actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.vllm_native_hccl.packed=false`.
+
+The manager waits for every replica to complete the update, clears caches, records the step and resumes generation. If a transfer fails partway through, recover the affected workers and restart the manager before issuing a full update.
 
 ##### kimi_ckpt_engine detail:
 

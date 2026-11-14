@@ -36,6 +36,14 @@ __all__ = [
 # backend whose module did not import reports the missing dependency instead of
 # just "not registered".
 try:
+    from .ascend_native_checkpoint_engine import AscendNativeCheckpointEngine
+
+    __all__ += ["AscendNativeCheckpointEngine"]
+except ImportError as e:
+    CheckpointEngineRegistry.record_import_error("ascend_native_checkpoint_engine", e)
+    AscendNativeCheckpointEngine = None
+
+try:
     from .nccl_checkpoint_engine import NCCLCheckpointEngine
 
     __all__ += ["NCCLCheckpointEngine"]

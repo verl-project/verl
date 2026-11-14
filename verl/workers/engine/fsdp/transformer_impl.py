@@ -927,6 +927,18 @@ class FSDPEngine(BaseEngine):
         gen, _ = self.get_per_tensor_param_shard()
         return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
+    def get_weight_transfer_metadata(self) -> list[tuple[str, torch.dtype, tuple[int, ...]]]:
+        """Apply the full-weight export's key conversion and MoE expansion using shape-only tensors."""
+        model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if self.engine_config.strategy != "fsdp2" or hasattr(model, "peft_config"):
+            raise NotImplementedError("Native full-weight transfer requires an FSDP2 model without PEFT adapters")
+        params = convert_weight_keys(self.module.state_dict(), model)
+        # DTensor.shape is global. The meta tensors let us reuse unfuse_moe_params
+        # even for packed experts without allocating weights or entering an all-gather.
+        shapes = ((name, torch.empty(param.shape, dtype=param.dtype, device="meta")) for name, param in params.items())
+        entries = unfuse_moe_params(shapes, self.model_config.hf_config.model_type)
+        return [(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in entries]
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
