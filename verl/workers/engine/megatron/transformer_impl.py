@@ -276,6 +276,9 @@ class MegatronEngine(BaseEngine):
             _validate_dcp_world_size(dpcp_size)
             extra_args["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
 
+        if self.engine_config.distributed_timeout_minutes is not None:
+            extra_args["distributed_timeout_minutes"] = self.engine_config.distributed_timeout_minutes
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.engine_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.engine_config.pipeline_model_parallel_size,
