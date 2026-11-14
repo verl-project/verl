@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+from dataclasses import replace
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -76,7 +77,12 @@ class TeacherModelManager:
 
         gpus_per_node = self.distillation_config.n_gpus_per_node
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
-        rollout_config = teacher_model_config.inference
+        # Derive a private config: teachers may share the original inference
+        # config across trainers, while each resource pool owns one instance.
+        rollout_config = replace(
+            teacher_model_config.inference,
+            instance_id=self.resource_pool.instance_name_builder.instance_id,
+        )
         # Keep the model path unresolved until the rollout server actor is
         # placed. Each server backend converts this DictConfig to HFModelConfig
         # in its own process, so HDFS models are copied into that node's local

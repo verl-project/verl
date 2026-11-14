@@ -27,6 +27,7 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
+from verl.single_controller.ray.instance_naming import build_weight_transfer_socket
 from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
@@ -437,7 +438,12 @@ class vLLMColocateWorkerExtension:
         local_rank = _resolve_vllm_weight_sync_local_rank(self.local_rank, parallel_config)
         trainer_rank_base = os.environ.get("VERL_ZMQ_BASE_TRAINER_RANK")
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
+        return build_weight_transfer_socket(
+            job_id,
+            os.environ.get("VERL_INSTANCE_ID"),
+            replica_rank,
+            trainer_rank,
+        )
 
     def update_verl_delta_weights(self, update_info: dict) -> None:
         """Add this worker's IPC endpoint and forward the delta update to vLLM."""

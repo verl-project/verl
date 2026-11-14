@@ -24,6 +24,7 @@ from ray.actor import ActorHandle
 
 from verl.plugin.platform import get_platform
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
+from verl.single_controller.ray.instance_naming import InstanceNameBuilder, get_instance_id
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_name
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -97,6 +98,8 @@ class RolloutReplica(ABC):
     ) -> None:
         self.replica_rank = replica_rank
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
+        self.instance_id = get_instance_id(self.config)
+        self.instance_name_builder = InstanceNameBuilder(self.instance_id)
         self.model_config: HFModelConfig = model_config
 
         self.world_size = (
@@ -164,11 +167,12 @@ class RolloutReplica(ABC):
         use_gpu = self.rollout_worker_use_gpu()
 
         if self.is_reward_model:
-            name_prefix = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
+            logical_name = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_colocate_{self.replica_rank}{self.name_suffix}"
+            logical_name = f"rollout_teacher_colocate_{self.replica_rank}{self.name_suffix}"
         else:
-            name_prefix = f"rollout_colocate_{self.replica_rank}{self.name_suffix}"
+            logical_name = f"rollout_colocate_{self.replica_rank}{self.name_suffix}"
+        name_prefix = self.instance_name_builder.actor(logical_name)
 
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
@@ -205,6 +209,7 @@ class RolloutReplica(ABC):
                 resource_pool_spec=resource_pool_spec,
                 mapping=None,
                 max_colocate_count=2,
+                instance_name_builder=self.instance_name_builder,
             )
             resource_pool_manager.create_resource_pool()
             resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]
@@ -212,11 +217,12 @@ class RolloutReplica(ABC):
 
         # create worker group for this rollout
         if self.is_reward_model:
-            name_prefix = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
+            logical_name = f"rollout_reward_standalone_{self.replica_rank}{self.name_suffix}"
         elif self.is_teacher_model:
-            name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
+            logical_name = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
         else:
-            name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
+            logical_name = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
+        name_prefix = self.instance_name_builder.actor(logical_name)
         # These workers share each bundle's device with the rollout engine's own workers. Where a
         # device cannot be shared between processes (TPU), they must not claim it.
         worker_group = RayWorkerGroup(

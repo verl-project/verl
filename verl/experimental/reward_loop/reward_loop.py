@@ -25,6 +25,7 @@ from tensordict import TensorDict
 
 from verl.protocol import DataProto, pad_dataproto_to_divisor
 from verl.single_controller.ray.base import RayResourcePool
+from verl.single_controller.ray.instance_naming import InstanceNameBuilder, get_instance_id
 from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
@@ -278,6 +279,7 @@ class RewardLoopManager:
 
     def __init__(self, config: DictConfig, rm_resource_pool: RayResourcePool = None):
         self.config = config
+        self.instance_name_builder = InstanceNameBuilder(get_instance_id(config))
         if self.config.reward.reward_model.enable:
             rm_rollout = self.config.reward.reward_model.rollout
             # The discriminative /classify (pooling) path is not covered by
@@ -332,7 +334,7 @@ class RewardLoopManager:
 
             self.reward_loop_workers.append(
                 self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
+                    name=self.instance_name_builder.actor(f"reward_loop_worker_{i}"),
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id,
                         soft=True,
